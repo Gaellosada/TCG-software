@@ -1,0 +1,33 @@
+.container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 400px;
+}
+
+.chartWrapper {
+  flex: 1;
+  position: relative;
+  min-height: 400px;
+}
+
+.loading,
+.error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 400px;
+  color: #8b8fa3;
+  font-size: 0.95rem;
+}
+
+.error {
+  color: #dc2626;
+  padding: 24px;
+  text-align: center;
+}
