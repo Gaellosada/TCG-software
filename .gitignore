@@ -1,0 +1,35 @@
+# Python
+node_modules/
+__pycache__/
+*.pyc
+.env
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+.venv/
+*.egg-info/
+.coverage
+
+# VScode
+.vscode/
+
+# Windows
+[Dd]esktop.ini
+
+# macOS
+.DS_Store
+
+# Playwright
+test-results/
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/screenshots/
+
+# Claude Code
+CLAUDE.md
+.claude/
+workspace/
+context/
+reviews/
