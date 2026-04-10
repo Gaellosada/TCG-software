@@ -1,0 +1,26 @@
+.page {
+  max-width: 800px;
+}
+
+.title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--heading-color);
+  margin-bottom: 8px;
+}
+
+.description {
+  color: #5a5f72;
+  margin-bottom: 24px;
+  line-height: 1.5;
+}
+
+.comingSoon {
+  padding: 48px 32px;
+  background: #ffffff;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: #8b8fa3;
+  text-align: center;
+  font-size: 1.1rem;
+}
