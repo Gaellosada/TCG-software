@@ -16,5 +16,7 @@ class MetricsSuite:
     calmar_ratio: float              # annualized_return / abs(max_drawdown)
     cvar_5: float                    # Conditional VaR at 5% (expected shortfall)
     time_underwater_days: int        # Number of bars in drawdown
+    annualized_volatility: float     # Annualized std dev of daily returns
+    sortino_ratio: float             # Like Sharpe but only penalizes downside deviation
     num_trades: int
     win_rate: float | None = None    # Fraction of profitable trades (0.0-1.0)

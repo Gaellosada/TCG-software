@@ -18,7 +18,8 @@ function useAsync(asyncFn, deps = []) {
       .then((data) => {
         if (!cancelled) setState({ data, loading: false, error: null });
       })
-      .catch((error) => {
+      .catch((err) => {
+        const error = err instanceof Error ? err : new Error(String(err || 'Unknown error'));
         if (!cancelled) setState({ data: null, loading: false, error });
       });
 

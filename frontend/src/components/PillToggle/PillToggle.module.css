@@ -1,0 +1,27 @@
+.pillToggle {
+  display: flex;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.pillBtn {
+  padding: 3px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.pillBtn:hover {
+  color: var(--text-primary);
+}
+
+.pillActive {
+  background: var(--accent);
+  color: white;
+}

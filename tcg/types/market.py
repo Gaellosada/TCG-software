@@ -96,6 +96,18 @@ class ContinuousRollConfig:
 
 
 @dataclass(frozen=True)
+class ContinuousLegSpec:
+    """A continuous futures leg for multi-instrument alignment.
+
+    Pairs a ``ContinuousRollConfig`` with the collection it applies to,
+    since ``ContinuousRollConfig`` is a pure configuration object that
+    does not carry storage location.
+    """
+    collection: str
+    roll_config: ContinuousRollConfig
+
+
+@dataclass(frozen=True)
 class ContinuousSeries:
     """Stitched price series from rolling multiple contracts."""
     collection: str

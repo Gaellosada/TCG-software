@@ -9,4 +9,8 @@ export default defineConfig({
       '/api': 'http://localhost:8000',
     },
   },
+  test: {
+    include: ['src/**/*.test.{js,jsx,ts,tsx}'],
+    exclude: ['e2e/**', 'node_modules/**'],
+  },
 });

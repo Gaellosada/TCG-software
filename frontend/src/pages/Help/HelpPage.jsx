@@ -151,6 +151,211 @@ function HelpPage() {
       </section>
 
       <section className={styles.section}>
+        <h2 className={styles.sectionHeading}>Weighted Portfolios</h2>
+        <p className={styles.conceptText}>
+          A weighted portfolio allocates capital across multiple instruments
+          according to specified weights. Instead of treating each position
+          equally, each instrument receives a fraction of total capital
+          proportional to its weight.
+        </p>
+        <p className={styles.conceptText}>
+          Weights are normalized internally, so only the ratios matter: a 60/40
+          split, 0.6/0.4, and 3/2 all produce the same allocation. Negative
+          weights represent short positions — the portfolio borrows and sells the
+          instrument, profiting from price declines.
+        </p>
+        <p className={styles.conceptText}>
+          Common use cases include diversification (spreading risk across
+          uncorrelated assets), hedging (pairing long positions with negatively
+          correlated shorts), and benchmark construction (replicating an index
+          or reference portfolio).
+        </p>
+
+        <h3 className={styles.conceptTitle}>Chart Display Modes</h3>
+        <p className={styles.conceptText}>
+          The equity chart has three display modes, selectable via the pill
+          toggle above the chart. Each mode answers a different question.
+        </p>
+        <div className={styles.card}>
+          <h3>Portfolio Only</h3>
+          <p>
+            Shows only the combined portfolio equity line, normalized to start
+            at 100. Use this for a clean view of overall performance without
+            visual clutter from individual holdings.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Normalized ($100)</h3>
+          <p>
+            Shows the portfolio line alongside each individual holding, all
+            normalized to start at $100. This answers &ldquo;if I had invested
+            $100 in each holding separately, how would they compare?&rdquo;
+            Because every line starts at the same value, you get a fair
+            comparison of relative performance regardless of weight differences.
+            This is the default mode.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Weighted</h3>
+          <p>
+            Shows each holding&apos;s actual weighted equity contribution to the
+            portfolio. A holding with a 60% weight will appear larger than one
+            with a 10% weight, reflecting their real impact on the portfolio.
+            Use this to see how much each position contributed in absolute terms.
+          </p>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionHeading}>Rebalancing</h2>
+        <p className={styles.conceptText}>
+          Rebalancing periodically resets allocations back to their target
+          weights. Without rebalancing, price movements cause positions to drift:
+          winning instruments grow as a share of the portfolio, losers shrink.
+          Over time, the actual allocation can diverge significantly from the
+          intended one.
+        </p>
+        <p className={styles.conceptText}>
+          Rebalancing enforces allocation discipline and can capture
+          mean-reversion: it systematically trims outperforming positions and
+          adds to underperforming ones. Rebalanced portfolios typically exhibit
+          lower volatility than a buy-and-hold equivalent.
+        </p>
+
+        <h3 className={styles.conceptTitle}>Available Frequencies</h3>
+        <div className={styles.card}>
+          <h3>None (Buy-and-Hold)</h3>
+          <p>
+            No rebalancing. Initial weights are set once and never adjusted.
+            Positions drift freely with market movements.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Daily / Weekly / Monthly / Quarterly / Annually</h3>
+          <p>
+            At the end of each period, holdings are adjusted back to target
+            weights. Monthly rebalancing is a common default — frequent enough
+            to control drift, infrequent enough to limit transaction costs.
+          </p>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionHeading}>Performance Metrics</h2>
+        <p className={styles.conceptText}>
+          Simulation results include a set of standard risk and return metrics.
+          Each is computed from the portfolio's daily return series.
+        </p>
+
+        <div className={styles.card}>
+          <h3>Total Return</h3>
+          <p>
+            Overall gain or loss over the full simulation period, expressed as
+            a percentage. A total return of 0.50 means the portfolio grew by 50%.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>CAGR (Annualized Return)</h3>
+          <p>
+            Compound Annual Growth Rate — the constant annual return that would
+            produce the same total return over the same period. Useful for
+            comparing strategies of different lengths.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Sharpe Ratio</h3>
+          <p>
+            Excess return per unit of total risk, annualized. Measures how much
+            return you earn for each unit of volatility taken on. Higher is
+            better. A Sharpe above 1 is generally considered good; above 2 is
+            excellent.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Sortino Ratio</h3>
+          <p>
+            Like the Sharpe Ratio, but only penalizes downside volatility — days
+            where returns fall below the target. Better suited to strategies with
+            asymmetric return distributions (e.g., option-selling strategies that
+            earn small gains frequently but suffer rare large losses).
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Max Drawdown</h3>
+          <p>
+            The largest peak-to-trough decline over the simulation period.
+            Displayed as a negative number: -0.35 means the portfolio fell 35%
+            from its highest point before recovering. A key measure of downside
+            risk and stress tolerance.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Calmar Ratio</h3>
+          <p>
+            CAGR divided by the absolute value of max drawdown. A higher Calmar
+            ratio means better return relative to the worst loss experienced.
+            Useful for comparing strategies where drawdown tolerance matters.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Volatility</h3>
+          <p>
+            Annualized standard deviation of daily returns. The most common
+            measure of risk — higher volatility means wider swings in portfolio
+            value. Annualized by multiplying daily standard deviation by the
+            square root of 252 (trading days per year).
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>CVaR 5% (Expected Shortfall)</h3>
+          <p>
+            Conditional Value at Risk at the 5% level — the average return on the
+            worst 5% of days. Unlike VaR, which only marks the threshold, CVaR
+            tells you how bad bad days actually are on average. A tail risk
+            measure.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Time Underwater</h3>
+          <p>
+            The total number of days the portfolio value was below its previous
+            all-time high. Long periods underwater indicate sustained drawdowns
+            that require patience (or force liquidation) before recovery.
+          </p>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionHeading}>Return Types</h2>
+        <p className={styles.conceptText}>
+          Returns can be expressed in two mathematically equivalent ways. The
+          choice affects how returns aggregate over time.
+        </p>
+
+        <div className={styles.card}>
+          <h3>Normal Returns</h3>
+          <p>
+            Standard percentage returns: (price_today - price_yesterday) /
+            price_yesterday. Intuitive and directly interpretable — a normal
+            return of +0.10 means your $100 became $110. However, normal
+            returns are not additive over time: two consecutive +10% days
+            do not compound to +20%.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Log Returns</h3>
+          <p>
+            Natural logarithm of the price ratio: ln(price_today /
+            price_yesterday). Log returns are additive over time, which makes
+            them mathematically convenient for multi-period analysis and
+            statistical modeling. For small return magnitudes, log returns and
+            normal returns are nearly identical. Log returns are the standard
+            in quantitative finance.
+          </p>
+        </div>
+      </section>
+
+      <section className={styles.section}>
         <h2 className={styles.sectionHeading}>Tips</h2>
         <ul className={styles.tips}>
           <li>All market data is currently sourced from the legacy Java platform and tagged as Legacy provenance.</li>

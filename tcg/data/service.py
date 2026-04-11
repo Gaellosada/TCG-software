@@ -13,9 +13,10 @@ import numpy.typing as npt
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from tcg.types.common import PaginatedResult
-from tcg.types.errors import DataNotFoundError
+from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.market import (
     AssetClass,
+    ContinuousLegSpec,
     ContinuousRollConfig,
     ContinuousSeries,
     InstrumentId,
@@ -188,12 +189,90 @@ class DefaultMarketDataService:
 
     async def get_aligned_prices(
         self,
-        legs: dict[str, InstrumentId | ContinuousRollConfig],
+        legs: dict[str, InstrumentId | ContinuousLegSpec],
         *,
         start: date | None = None,
         end: date | None = None,
     ) -> tuple[npt.NDArray[np.int64], dict[str, PriceSeries]]:
-        raise NotImplementedError("Aligned prices is Phase 3")
+        """Fetch multiple instruments and align them on common dates (inner join).
+
+        Parameters
+        ----------
+        legs:
+            Mapping of user-chosen labels to either an ``InstrumentId``
+            (for spot/index data) or a ``ContinuousLegSpec`` (for
+            rolled futures).
+        start, end:
+            Optional date bounds applied to every leg before alignment.
+
+        Returns
+        -------
+        (common_dates, aligned_series)
+            ``common_dates`` is a sorted int64 array of YYYYMMDD dates
+            present in **all** legs.  ``aligned_series`` maps each label
+            to its ``PriceSeries`` filtered to those common dates.
+
+        Raises
+        ------
+        ValidationError
+            If ``legs`` is empty or the date intersection is empty.
+        DataNotFoundError
+            If any leg cannot be fetched.
+        """
+        if not legs:
+            raise ValidationError("No legs provided for alignment")
+
+        # --- 1. Fetch each leg ---
+        fetched: dict[str, PriceSeries] = {}
+        for label, spec in legs.items():
+            if isinstance(spec, InstrumentId):
+                series = await self.get_prices(
+                    spec.collection, spec.symbol, start=start, end=end,
+                )
+            elif isinstance(spec, ContinuousLegSpec):
+                result = await self.get_continuous(
+                    spec.collection, spec.roll_config, start=start, end=end,
+                )
+                series = result.prices if result is not None else None
+            else:
+                raise ValidationError(
+                    f"Leg '{label}': expected InstrumentId or "
+                    f"ContinuousLegSpec, got {type(spec).__name__}"
+                )
+
+            if series is None:
+                raise DataNotFoundError(
+                    f"No price data found for leg '{label}'"
+                )
+            fetched[label] = series
+
+        # --- 2. Compute date intersection (inner join) ---
+        date_sets = [set(ps.dates.tolist()) for ps in fetched.values()]
+        common: set[int] = date_sets[0]
+        for ds in date_sets[1:]:
+            common &= ds
+
+        if not common:
+            raise ValidationError(
+                "No overlapping dates across instruments"
+            )
+
+        common_dates = np.array(sorted(common), dtype=np.int64)
+
+        # --- 3. Filter each series to common dates ---
+        aligned: dict[str, PriceSeries] = {}
+        for label, ps in fetched.items():
+            mask = np.isin(ps.dates, common_dates)
+            aligned[label] = PriceSeries(
+                dates=ps.dates[mask],
+                open=ps.open[mask],
+                high=ps.high[mask],
+                low=ps.low[mask],
+                close=ps.close[mask],
+                volume=ps.volume[mask],
+            )
+
+        return common_dates, aligned
 
     # --- Internal ---
 
