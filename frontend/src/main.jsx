@@ -4,14 +4,16 @@ import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import './index.css';
 
-// Apply persisted theme before first render to avoid flash
+// Apply persisted preferences before first render to avoid flash
 try {
-  const stored = localStorage.getItem('tcg-theme');
-  if (stored === 'light') {
+  const storedTheme = localStorage.getItem('tcg-theme');
+  if (storedTheme === 'light') {
     document.documentElement.dataset.theme = 'light';
   }
+  document.documentElement.dataset.chartType =
+    localStorage.getItem('tcg-default-chart-type') || 'candlestick';
 } catch {
-  // localStorage unavailable — dark default
+  // localStorage unavailable — defaults apply
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(

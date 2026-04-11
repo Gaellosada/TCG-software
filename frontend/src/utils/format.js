@@ -9,6 +9,18 @@ export function formatDate(date) {
 }
 
 /**
+ * Format a YYYYMMDD integer as YYYY-MM-DD string.
+ * @param {number} dateInt
+ * @returns {string}
+ */
+export function formatDateInt(dateInt) {
+  if (dateInt == null) return '--';
+  const s = String(dateInt);
+  if (s.length !== 8) return s;
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
+/**
  * Format a number with fixed decimal places and optional thousands separator.
  * @param {number} value
  * @param {number} decimals - Number of decimal places (default 2)

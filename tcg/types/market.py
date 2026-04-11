@@ -60,6 +60,26 @@ class PriceSeries:
     def __len__(self) -> int:
         return len(self.dates)
 
+    @staticmethod
+    def empty() -> PriceSeries:
+        """Return a PriceSeries with zero-length arrays."""
+        return PriceSeries(
+            dates=np.array([], dtype=np.int64),
+            open=np.array([], dtype=np.float64),
+            high=np.array([], dtype=np.float64),
+            low=np.array([], dtype=np.float64),
+            close=np.array([], dtype=np.float64),
+            volume=np.array([], dtype=np.float64),
+        )
+
+
+@dataclass(frozen=True)
+class ContractPriceData:
+    """Price data for a single futures contract, used for rolling."""
+    contract_id: str
+    expiration: int  # YYYYMMDD integer (consistent with PriceSeries.dates)
+    prices: PriceSeries
+
 
 @dataclass(frozen=True)
 class ContinuousRollConfig:

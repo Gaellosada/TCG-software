@@ -20,3 +20,19 @@ export async function getInstrumentPrices(collection, instrumentId, { start, end
   const res = await fetchApi(`/data/${collection}/${instrumentId}${query}`);
   return res; // { dates, open, high, low, close, volume }
 }
+
+export async function getContinuousSeries(collection, { strategy = 'front_month', adjustment = 'none', cycle, start, end } = {}) {
+  const params = new URLSearchParams();
+  params.set('strategy', strategy);
+  params.set('adjustment', adjustment);
+  if (cycle) params.set('cycle', cycle);
+  if (start) params.set('start', start);
+  if (end) params.set('end', end);
+  const res = await fetchApi(`/data/continuous/${collection}?${params}`);
+  return res;
+}
+
+export async function getAvailableCycles(collection) {
+  const res = await fetchApi(`/data/continuous/${collection}/cycles`);
+  return res.cycles;
+}

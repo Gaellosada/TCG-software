@@ -1,4 +1,4 @@
-"""Data router -- three endpoints wrapping MarketDataService."""
+"""Data router -- endpoints wrapping MarketDataService."""
 
 from __future__ import annotations
 
@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from tcg.data.protocols import MarketDataService
 from tcg.types.errors import DataNotFoundError, ValidationError
-from tcg.types.market import AssetClass
+from tcg.types.market import (
+    AssetClass,
+    AdjustmentMethod,
+    ContinuousRollConfig,
+    RollStrategy,
+)
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 
@@ -32,6 +37,81 @@ async def list_collections(
         )
     collections = await svc.list_collections(ac)
     return {"collections": collections}
+
+
+# --- Continuous futures series (must precede /{collection} catch-all) ---
+
+
+@router.get("/continuous/{collection}")
+async def get_continuous_series(
+    collection: str,
+    strategy: str = Query("front_month", description="Roll strategy"),
+    adjustment: str = Query("none", description="Adjustment method: none, proportional, difference"),
+    cycle: str | None = Query(None, description="Expiration cycle filter (e.g. HMUZ)"),
+    start: str | None = Query(None, description="Start date YYYY-MM-DD"),
+    end: str | None = Query(None, description="End date YYYY-MM-DD"),
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict:
+    """Build a continuous futures series from rolled contracts."""
+    try:
+        roll_strategy = RollStrategy(strategy)
+    except ValueError:
+        raise ValidationError(
+            f"Invalid strategy '{strategy}'. Must be one of: {', '.join(e.value for e in RollStrategy)}"
+        )
+
+    try:
+        adj_method = AdjustmentMethod(adjustment)
+    except ValueError:
+        raise ValidationError(
+            f"Invalid adjustment '{adjustment}'. Must be one of: {', '.join(e.value for e in AdjustmentMethod)}"
+        )
+
+    try:
+        start_date = date.fromisoformat(start) if start else None
+        end_date = date.fromisoformat(end) if end else None
+    except ValueError as exc:
+        raise ValidationError(f"Invalid date format: {exc}") from exc
+
+    roll_config = ContinuousRollConfig(
+        strategy=roll_strategy,
+        adjustment=adj_method,
+        cycle=cycle,
+    )
+
+    series = await svc.get_continuous(collection, roll_config, start=start_date, end=end_date)
+    if series is None:
+        raise DataNotFoundError(
+            f"No continuous series found for collection '{collection}'"
+        )
+
+    return {
+        "collection": series.collection,
+        "strategy": roll_config.strategy.value,
+        "adjustment": roll_config.adjustment.value,
+        "cycle": roll_config.cycle,
+        "roll_dates": list(series.roll_dates),
+        "contracts": list(series.contracts),
+        "dates": series.prices.dates.tolist(),
+        "open": series.prices.open.tolist(),
+        "high": series.prices.high.tolist(),
+        "low": series.prices.low.tolist(),
+        "close": series.prices.close.tolist(),
+        "volume": series.prices.volume.tolist(),
+    }
+
+
+@router.get("/continuous/{collection}/cycles")
+async def get_available_cycles(
+    collection: str,
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict:
+    """Return available expiration cycles for a futures collection."""
+    cycles = await svc.get_available_cycles(collection)
+    return {"cycles": cycles}
+
+
+# --- Generic collection/instrument endpoints ---
 
 
 @router.get("/{collection}")

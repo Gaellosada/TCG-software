@@ -1,18 +1,21 @@
-import { useState, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import Plot from 'react-plotly.js';
 import useAsync from '../../hooks/useAsync';
 import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
-import { getInstrumentPrices } from '../../api/data';
+import { getContinuousSeries, getAvailableCycles } from '../../api/data';
 import { buildBaseLayout, CHART_CONFIG, TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
 import styles from './ChartBase.module.css';
 
-function PriceChart({ collection, instrument }) {
+function ContinuousChart({ collection }) {
   const theme = useTheme();
   const colors = getChartColors(theme);
   const preference = useChartPreference();
+
+  const [adjustment, setAdjustment] = useState('none');
+  const [cycle, setCycle] = useState('');
   const [chartType, setChartType] = useState(preference);
 
   // Sync local state when global preference changes
@@ -20,15 +23,26 @@ function PriceChart({ collection, instrument }) {
     setChartType(preference);
   }, [preference]);
 
-  const { data, loading, error } = useAsync(
-    () => getInstrumentPrices(collection, instrument),
-    [collection, instrument]
+  const { data: cyclesData } = useAsync(
+    () => getAvailableCycles(collection),
+    [collection]
   );
+
+  const fetchSeries = useCallback(
+    () => getContinuousSeries(collection, {
+      strategy: 'front_month',
+      adjustment,
+      cycle: cycle || undefined,
+    }),
+    [collection, adjustment, cycle]
+  );
+
+  const { data, loading, error } = useAsync(fetchSeries, [collection, adjustment, cycle]);
 
   if (loading) {
     return (
       <div className={styles.container}>
-        <div className={styles.status}>Loading price data...</div>
+        <div className={styles.status}>Loading continuous series...</div>
       </div>
     );
   }
@@ -36,7 +50,7 @@ function PriceChart({ collection, instrument }) {
   if (error) {
     return (
       <div className={styles.container}>
-        <div className={styles.error}>Failed to load prices: {error.message}</div>
+        <div className={styles.error}>Failed to load series: {error.message}</div>
       </div>
     );
   }
@@ -44,12 +58,13 @@ function PriceChart({ collection, instrument }) {
   if (!data || !data.dates || data.dates.length === 0) {
     return (
       <div className={styles.container}>
-        <div className={styles.status}>No price data available.</div>
+        <div className={styles.status}>No continuous series data available.</div>
       </div>
     );
   }
 
   const dates = data.dates.map(formatDateInt);
+  const rollDates = data.roll_dates || [];
   const { hasOHLC, hasVolume, open, high, low, close } = prepareChartData(data);
 
   const effectiveType = hasOHLC ? chartType : 'line';
@@ -104,6 +119,30 @@ function PriceChart({ collection, instrument }) {
     });
   }
 
+  // Legend-only trace so "Roll" appears in the legend
+  if (rollDates.length > 0) {
+    traces.push({
+      x: [null],
+      y: [null],
+      type: 'scatter',
+      mode: 'lines',
+      name: 'Roll',
+      line: { color: 'rgba(160, 160, 160, 0.6)', width: 1, dash: 'dot' },
+      showlegend: true,
+      hoverinfo: 'skip',
+    });
+  }
+
+  const rollShapes = rollDates.map((d) => ({
+    type: 'line',
+    x0: formatDateInt(d),
+    x1: formatDateInt(d),
+    y0: 0,
+    y1: 1,
+    yref: 'paper',
+    line: { color: 'rgba(160, 160, 160, 0.35)', width: 1, dash: 'dot' },
+  }));
+
   const layout = buildBaseLayout({
     xaxis: {
       type: 'date',
@@ -126,6 +165,7 @@ function PriceChart({ collection, instrument }) {
           },
         }
       : {}),
+    shapes: rollShapes,
     legend: {
       orientation: 'v',
       x: 0.99,
@@ -140,19 +180,33 @@ function PriceChart({ collection, instrument }) {
     margin: { l: 60, r: 24, t: 12, b: hasVolume ? 40 : 50 },
   }, theme);
 
+  const adjustmentLabels = { none: 'None', proportional: 'Proportional', difference: 'Difference' };
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <h2 className={styles.title}>{instrument}</h2>
+        <h2 className={styles.title}>{collection} — Continuous</h2>
         <span className={styles.meta}>
           {data.dates.length.toLocaleString()} bars
           &nbsp;&middot;&nbsp;
           {formatDateInt(data.dates[0])} to {formatDateInt(data.dates[data.dates.length - 1])}
+          {rollDates.length > 0 && (
+            <>
+              &nbsp;&middot;&nbsp;
+              {rollDates.length} roll{rollDates.length !== 1 ? 's' : ''}
+            </>
+          )}
+          {data.contracts?.length > 0 && (
+            <>
+              &nbsp;&middot;&nbsp;
+              {data.contracts.length} contract{data.contracts.length !== 1 ? 's' : ''}
+            </>
+          )}
         </span>
       </div>
 
-      {hasOHLC && (
-        <div className={styles.controls}>
+      <div className={styles.controls}>
+        {hasOHLC && (
           <label className={styles.controlLabel}>
             Chart
             <select
@@ -164,8 +218,35 @@ function PriceChart({ collection, instrument }) {
               <option value="line">Line</option>
             </select>
           </label>
-        </div>
-      )}
+        )}
+
+        <label className={styles.controlLabel}>
+          Adjustment
+          <select
+            className={styles.select}
+            value={adjustment}
+            onChange={(e) => setAdjustment(e.target.value)}
+          >
+            {Object.entries(adjustmentLabels).map(([val, label]) => (
+              <option key={val} value={val}>{label}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className={styles.controlLabel}>
+          Cycle
+          <select
+            className={styles.select}
+            value={cycle}
+            onChange={(e) => setCycle(e.target.value)}
+          >
+            <option value="">All</option>
+            {cyclesData && cyclesData.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+      </div>
 
       <div className={styles.chartWrapper}>
         <Plot
@@ -180,4 +261,4 @@ function PriceChart({ collection, instrument }) {
   );
 }
 
-export default PriceChart;
+export default ContinuousChart;

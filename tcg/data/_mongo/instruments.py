@@ -5,21 +5,27 @@ Handles the idiosyncrasies of legacy ``_id`` types and ``eodDatas`` format.
 
 from __future__ import annotations
 
-from datetime import date
+import logging
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ASCENDING
 from pymongo.errors import PyMongoError
 
 from tcg.types.errors import DataAccessError
-from tcg.types.market import InstrumentId, PriceSeries
+from tcg.types.market import ContractPriceData, InstrumentId, PriceSeries
+from tcg.data._utils import date_to_int, filter_date_range
 
 from tcg.data._mongo.helpers import (
     deserialize_doc_id,
     extract_price_data,
     parse_instrument_id,
+    serialize_doc_id,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Heavy fields to exclude from listing queries.
@@ -99,14 +105,88 @@ class MongoInstrumentReader:
 
             # Apply date range filter
             if start is not None or end is not None:
-                series = _filter_date_range(series, start, end)
-                if series is None or len(series) == 0:
+                series = filter_date_range(series, start, end)
+                if series is None:
                     return None
 
             return series
         except PyMongoError as exc:
             raise DataAccessError(
                 f"MongoDB error reading '{instrument_id}' from '{collection}': {exc}"
+            ) from exc
+
+    async def fetch_futures_contracts(
+        self,
+        collection: str,
+        *,
+        cycle: str | None = None,
+    ) -> list[ContractPriceData]:
+        """Fetch all futures contracts in a collection, ordered by expiration.
+
+        Queries MongoDB for documents with non-null expiration.
+        If cycle is provided, filters by expirationCycle field.
+        Returns contracts ordered by expiration date (ascending).
+
+        Each contract's price data uses the first available provider
+        (consistent with get_prices behavior).
+
+        Performance: benefits from indexes on ``expiration`` (sort key)
+        and ``expirationCycle`` (filter). Without these, MongoDB performs
+        a collection scan.
+        """
+        try:
+            coll = self._db[collection]
+
+            query: dict[str, Any] = {"expiration": {"$ne": None}}
+            if cycle is not None:
+                query["expirationCycle"] = cycle
+
+            projection = {"_id": 1, "eodDatas": 1, "expiration": 1}
+            cursor = coll.find(query, projection).sort("expiration", ASCENDING)
+
+            contracts: list[ContractPriceData] = []
+            async for doc in cursor:
+                prices = extract_price_data(doc)
+                if prices is None:
+                    continue
+
+                contract_id = serialize_doc_id(doc["_id"])
+                expiration = _parse_expiration(doc["expiration"])
+                if expiration is None:
+                    logger.warning(
+                        "Skipping contract with unparseable expiration: "
+                        "collection=%s contract_id=%s expiration=%r",
+                        collection,
+                        contract_id,
+                        doc["expiration"],
+                    )
+                    continue
+
+                contracts.append(
+                    ContractPriceData(
+                        contract_id=contract_id,
+                        expiration=expiration,
+                        prices=prices,
+                    )
+                )
+
+            return contracts
+        except PyMongoError as exc:
+            raise DataAccessError(
+                f"MongoDB error fetching futures contracts from '{collection}': {exc}"
+            ) from exc
+
+    async def fetch_available_cycles(
+        self,
+        collection: str,
+    ) -> list[str]:
+        """Return distinct expirationCycle values for a futures collection."""
+        try:
+            values = await self._db[collection].distinct("expirationCycle")
+            return sorted(v for v in values if isinstance(v, str) and v)
+        except PyMongoError as exc:
+            raise DataAccessError(
+                f"MongoDB error fetching cycles from '{collection}': {exc}"
             ) from exc
 
     async def _find_document(
@@ -123,33 +203,27 @@ class MongoInstrumentReader:
         return None
 
 
-def _filter_date_range(
-    series: PriceSeries,
-    start: date | None,
-    end: date | None,
-) -> PriceSeries | None:
-    """Slice a ``PriceSeries`` to the given date range.
 
-    Dates in the series are YYYYMMDD integers.
+def _parse_expiration(value: Any) -> int | None:
+    """Convert a MongoDB expiration field to a YYYYMMDD integer.
+
+    Handles datetime objects, ISO strings, and raw integers.
+    Returns None if the value cannot be parsed.
     """
-    mask = np.ones(len(series), dtype=bool)
-
-    if start is not None:
-        start_int = start.year * 10000 + start.month * 100 + start.day
-        mask &= series.dates >= start_int
-
-    if end is not None:
-        end_int = end.year * 10000 + end.month * 100 + end.day
-        mask &= series.dates <= end_int
-
-    if not mask.any():
+    if isinstance(value, datetime):
+        return date_to_int(value)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return date_to_int(value)
+    if isinstance(value, int):
+        # Assume already YYYYMMDD — basic sanity check
+        if 19000101 <= value <= 21001231:
+            return value
         return None
-
-    return PriceSeries(
-        dates=series.dates[mask],
-        open=series.open[mask],
-        high=series.high[mask],
-        low=series.low[mask],
-        close=series.close[mask],
-        volume=series.volume[mask],
-    )
+    if isinstance(value, str):
+        # Try ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS...)
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return date_to_int(dt)
+        except (ValueError, TypeError):
+            pass
+    return None

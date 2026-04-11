@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
+import ContinuousChart from './ContinuousChart';
 import styles from './DataPage.module.css';
 
 function DataPage() {
@@ -16,10 +17,14 @@ function DataPage() {
       </div>
       <div className={styles.rightPanel}>
         {selected ? (
-          <PriceChart
-            collection={selected.collection}
-            instrument={selected.symbol}
-          />
+          selected.type === 'continuous' ? (
+            <ContinuousChart collection={selected.collection} />
+          ) : (
+            <PriceChart
+              collection={selected.collection}
+              instrument={selected.symbol}
+            />
+          )
         ) : (
           <div className={styles.welcome}>
             <div className={styles.welcomeInner}>
