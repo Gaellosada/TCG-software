@@ -14,6 +14,14 @@ def date_to_int(d: date) -> int:
     return d.year * 10000 + d.month * 100 + d.day
 
 
+def int_to_iso(d: int) -> str:
+    """Convert a YYYYMMDD integer to ISO 8601 date string (YYYY-MM-DD)."""
+    year = d // 10000
+    month = (d // 100) % 100
+    day = d % 100
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
 def filter_date_range(
     series: PriceSeries,
     start: date | None,

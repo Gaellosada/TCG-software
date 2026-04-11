@@ -15,6 +15,7 @@ import numpy.typing as npt
 from tcg.types.common import PaginatedResult
 from tcg.types.market import (
     AssetClass,
+    ContinuousLegSpec,
     ContinuousRollConfig,
     ContinuousSeries,
     InstrumentId,
@@ -79,7 +80,7 @@ class MarketDataService(Protocol):
 
     async def get_aligned_prices(
         self,
-        legs: dict[str, InstrumentId | ContinuousRollConfig],
+        legs: dict[str, InstrumentId | ContinuousLegSpec],
         *,
         start: date | None = None,
         end: date | None = None,

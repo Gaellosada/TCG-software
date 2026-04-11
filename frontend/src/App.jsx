@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/layout/Sidebar';
 import PageContainer from './components/layout/PageContainer';
+import ErrorBoundary from './components/ErrorBoundary';
 import HelpPage from './pages/Help/HelpPage';
 import DataPage from './pages/Data/DataPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
@@ -29,49 +30,55 @@ function App() {
         className="app-content"
         style={{ marginLeft: sidebarCollapsed ? 'var(--sidebar-width-collapsed)' : undefined }}
       >
-        <Routes>
-          <Route path="/" element={<Navigate to="/data" replace />} />
-          <Route
-            path="/help"
-            element={
-              <PageContainer>
-                <HelpPage />
-              </PageContainer>
-            }
-          />
-          <Route
-            path="/data"
-            element={
-              <PageContainer>
-                <DataPage />
-              </PageContainer>
-            }
-          />
-          <Route
-            path="/portfolio"
-            element={
-              <PageContainer>
-                <PortfolioPage />
-              </PageContainer>
-            }
-          />
-          <Route
-            path="/research"
-            element={
-              <PageContainer>
-                <ResearchPage />
-              </PageContainer>
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <PageContainer>
-                <SettingsPage />
-              </PageContainer>
-            }
-          />
-        </Routes>
+        <ErrorBoundary>
+          <Routes>
+            <Route path="/" element={<Navigate to="/data" replace />} />
+            <Route
+              path="/help"
+              element={
+                <PageContainer>
+                  <HelpPage />
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/data"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <DataPage />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/portfolio"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <PortfolioPage />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/research"
+              element={
+                <PageContainer>
+                  <ResearchPage />
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <PageContainer>
+                  <SettingsPage />
+                </PageContainer>
+              }
+            />
+          </Routes>
+        </ErrorBoundary>
       </main>
     </div>
   );

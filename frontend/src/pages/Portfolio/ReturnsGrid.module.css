@@ -1,0 +1,106 @@
+.container {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  padding: 16px 20px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0;
+}
+
+.headerControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.viewSelect {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  font-family: inherit;
+}
+
+.viewSelect:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.tableWrapper {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.table thead th {
+  padding: 6px 8px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  text-align: center;
+  border-bottom: 1px solid var(--border-primary);
+  white-space: nowrap;
+}
+
+.yearCol {
+  text-align: left !important;
+  width: 50px;
+}
+
+.totalCol {
+  border-left: 1px solid var(--border-primary);
+}
+
+.table tbody td {
+  padding: 5px 6px;
+  text-align: center;
+  border-bottom: 1px solid var(--border-secondary);
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.yearCell {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.cell {
+  color: var(--text-primary);
+  transition: background-color 0.1s;
+}
+
+.totalCell {
+  border-left: 1px solid var(--border-primary);
+  font-weight: 500;
+}
+
+.dim {
+  color: var(--text-dim);
+}

@@ -13,8 +13,10 @@ from tcg.types.provenance import Provenance
 class RebalanceFreq(StrEnum):
     NONE = "none"              # Buy-and-hold (drift with prices)
     DAILY = "daily"
+    WEEKLY = "weekly"
     MONTHLY = "monthly"
     QUARTERLY = "quarterly"
+    ANNUALLY = "annually"
 
 
 @dataclass(frozen=True)

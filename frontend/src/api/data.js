@@ -3,7 +3,7 @@ import { fetchApi } from './client';
 export async function listCollections(assetClass = null) {
   const params = assetClass ? `?asset_class=${assetClass}` : '';
   const res = await fetchApi(`/data/collections${params}`);
-  return res.collections;
+  return res.collections || [];
 }
 
 export async function listInstruments(collection, { skip = 0, limit = 50 } = {}) {
@@ -34,5 +34,5 @@ export async function getContinuousSeries(collection, { strategy = 'front_month'
 
 export async function getAvailableCycles(collection) {
   const res = await fetchApi(`/data/continuous/${collection}/cycles`);
-  return res.cycles;
+  return res.cycles || [];
 }

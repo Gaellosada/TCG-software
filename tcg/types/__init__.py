@@ -18,6 +18,7 @@ from tcg.types.errors import (
 from tcg.types.market import (
     AdjustmentMethod,
     AssetClass,
+    ContinuousLegSpec,
     ContinuousRollConfig,
     ContinuousSeries,
     ContractPriceData,
@@ -61,6 +62,7 @@ __all__ = [
     # market
     "AdjustmentMethod",
     "AssetClass",
+    "ContinuousLegSpec",
     "ContinuousRollConfig",
     "ContinuousSeries",
     "ContractPriceData",

@@ -66,6 +66,14 @@ export function buildBaseLayout(overrides = {}, theme = 'dark') {
     zeroline: false,
   };
 
+  const spikeDefaults = {
+    showspikes: true,
+    spikemode: 'across',
+    spikethickness: 1,
+    spikecolor: 'rgba(155,163,184,0.4)',
+    spikedash: 'dot',
+  };
+
   const base = {
     autosize: true,
     paper_bgcolor: c.paper_bgcolor,
@@ -75,22 +83,25 @@ export function buildBaseLayout(overrides = {}, theme = 'dark') {
       size: 12,
       color: c.fontColor,
     },
-    xaxis: { ...axisDefaults },
-    yaxis: { ...axisDefaults },
+    xaxis: { ...axisDefaults, ...spikeDefaults, type: 'date', rangeslider: { visible: false } },
+    yaxis: { ...axisDefaults, ...spikeDefaults },
     legend: {
       orientation: 'h',
-      yanchor: 'bottom',
-      y: 1.02,
-      xanchor: 'left',
-      x: 0,
+      yanchor: 'top',
+      y: -0.12,
+      xanchor: 'center',
+      x: 0.5,
       font: { size: 11 },
+      bgcolor: 'rgba(0,0,0,0)',
     },
     hovermode: 'x unified',
+    spikedistance: -1,
     hoverlabel: {
       bgcolor: c.hoverBg,
       bordercolor: c.hoverBorder,
       font: { color: c.hoverFont, size: 11 },
     },
+    margin: { l: 60, r: 24, t: 40, b: 60 },
     dragmode: 'zoom',
   };
 

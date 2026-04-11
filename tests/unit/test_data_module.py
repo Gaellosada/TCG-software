@@ -490,7 +490,8 @@ class TestDefaultMarketDataServiceGetPrices:
                 ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH),
             )
 
-    async def test_get_aligned_prices_raises(self):
+    async def test_get_aligned_prices_empty_legs_raises(self):
         service, _ = _make_service()
-        with pytest.raises(NotImplementedError, match="Phase 3"):
+        from tcg.types.errors import ValidationError as VE
+        with pytest.raises(VE, match="No legs provided"):
             await service.get_aligned_prices({})

@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from tcg.core.api.data import router as data_router
 from tcg.core.api.errors import tcg_error_handler
+from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.config import load_config
 from tcg.data import create_services
 from tcg.types.errors import TCGError
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
     )
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.include_router(data_router)
+    app.include_router(portfolio_router)
     return app
 
 

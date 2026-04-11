@@ -87,7 +87,7 @@ function CategoryBrowser({ selected, onSelect }) {
                 const res = await listInstruments(collName);
                 return {
                   collection: collName,
-                  instruments: res.items.map((item) => ({
+                  instruments: (res.items || []).map((item) => ({
                     symbol: item.symbol,
                     collection: item.collection || collName,
                   })),
@@ -141,7 +141,7 @@ function CategoryBrowser({ selected, onSelect }) {
     if (!wasExpanded && !contractsData[collName]) {
       try {
         const res = await listInstruments(collName, { skip: 0, limit: 500 });
-        setContractsData((prev) => ({ ...prev, [collName]: res.items }));
+        setContractsData((prev) => ({ ...prev, [collName]: res.items || [] }));
       } catch {
         setContractsData((prev) => ({ ...prev, [collName]: [] }));
       }

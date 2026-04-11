@@ -113,9 +113,11 @@ class TestEnums:
     def test_rebalance_freq_values(self):
         assert RebalanceFreq.NONE == "none"
         assert RebalanceFreq.DAILY == "daily"
+        assert RebalanceFreq.WEEKLY == "weekly"
         assert RebalanceFreq.MONTHLY == "monthly"
         assert RebalanceFreq.QUARTERLY == "quarterly"
-        assert len(RebalanceFreq) == 4
+        assert RebalanceFreq.ANNUALLY == "annually"
+        assert len(RebalanceFreq) == 6
 
     def test_result_source_values(self):
         assert ResultSource.LEGACY == "legacy"
@@ -276,9 +278,13 @@ class TestMetrics:
             calmar_ratio=1.5,
             cvar_5=-0.02,
             time_underwater_days=30,
+            annualized_volatility=0.18,
+            sortino_ratio=2.0,
             num_trades=50,
         )
         assert m.total_return == 0.2
+        assert m.annualized_volatility == 0.18
+        assert m.sortino_ratio == 2.0
         assert m.win_rate is None
 
     def test_metrics_suite_with_win_rate(self):
@@ -290,6 +296,8 @@ class TestMetrics:
             calmar_ratio=1.5,
             cvar_5=-0.02,
             time_underwater_days=30,
+            annualized_volatility=0.18,
+            sortino_ratio=2.0,
             num_trades=50,
             win_rate=0.55,
         )
@@ -500,6 +508,8 @@ class TestFrozenImmutability:
             calmar_ratio=1.5,
             cvar_5=-0.02,
             time_underwater_days=30,
+            annualized_volatility=0.18,
+            sortino_ratio=2.0,
             num_trades=50,
         )
         with pytest.raises(AttributeError):
