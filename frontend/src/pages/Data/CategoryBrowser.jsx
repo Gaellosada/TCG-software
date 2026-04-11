@@ -36,6 +36,33 @@ function CategoryBrowser({ selected, onSelect }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Auto-collapse futures groups that don't own the current selection
+  useEffect(() => {
+    if (!selected) {
+      setExpandedFutGroups({});
+      setContractsExpanded({});
+      return;
+    }
+    const selCollection = selected.collection;
+    setExpandedFutGroups((prev) => {
+      const next = {};
+      for (const key of Object.keys(prev)) {
+        next[key] = key === selCollection;
+      }
+      // Ensure the selected collection's group is open
+      if (selCollection) next[selCollection] = true;
+      return next;
+    });
+    setContractsExpanded((prev) => {
+      // Only keep "Individual Contracts" open if an individual contract is selected in that group
+      const next = {};
+      for (const key of Object.keys(prev)) {
+        next[key] = selected.type === 'instrument' && key === selCollection;
+      }
+      return next;
+    });
+  }, [selected]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -94,9 +121,15 @@ function CategoryBrowser({ selected, onSelect }) {
 
   function handleFutGroupClick(collName) {
     const wasExpanded = expandedFutGroups[collName];
-    setExpandedFutGroups((prev) => ({ ...prev, [collName]: !wasExpanded }));
-    // Auto-select continuous series when expanding
-    if (!wasExpanded) {
+    if (wasExpanded) {
+      // Clicking an already-expanded group collapses it and deselects
+      setExpandedFutGroups((prev) => ({ ...prev, [collName]: false }));
+      setContractsExpanded((prev) => ({ ...prev, [collName]: false }));
+      if (selected?.collection === collName) {
+        onSelect(null);
+      }
+    } else {
+      // Expanding a group auto-selects its continuous series
       onSelect({ type: 'continuous', collection: collName });
     }
   }
