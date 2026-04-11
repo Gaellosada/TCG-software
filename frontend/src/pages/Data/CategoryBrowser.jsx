@@ -29,7 +29,7 @@ const CATEGORY_CONFIG = [
 
 function CategoryBrowser({ selected, onSelect }) {
   const [categories, setCategories] = useState([]);
-  const [expanded, setExpanded] = useState({ indexes: true, assets: true, futures: false });
+  const [expanded, setExpanded] = useState({ indexes: false, assets: false, futures: false });
   const [expandedFutGroups, setExpandedFutGroups] = useState({});
   const [contractsExpanded, setContractsExpanded] = useState({});
   const [contractsData, setContractsData] = useState({});

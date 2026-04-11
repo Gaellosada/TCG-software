@@ -43,6 +43,15 @@ class ContinuousSeriesBuilder:
         # Filter out contracts with no data
         contracts = [c for c in contracts if len(c.prices) > 0]
 
+        # Contracts must be sorted by expiration for correct roll sequencing
+        for i in range(len(contracts) - 1):
+            if contracts[i].expiration > contracts[i + 1].expiration:
+                raise ValueError(
+                    f"Contracts not sorted by expiration: "
+                    f"{contracts[i].contract_id} ({contracts[i].expiration}) > "
+                    f"{contracts[i + 1].contract_id} ({contracts[i + 1].expiration})"
+                )
+
         if not contracts:
             return ContinuousSeries(
                 collection=collection,

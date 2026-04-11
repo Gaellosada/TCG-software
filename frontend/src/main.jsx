@@ -10,10 +10,8 @@ try {
   if (storedTheme === 'light') {
     document.documentElement.dataset.theme = 'light';
   }
-  const storedChart = localStorage.getItem('tcg-default-chart-type');
-  if (storedChart) {
-    document.documentElement.dataset.chartType = storedChart;
-  }
+  document.documentElement.dataset.chartType =
+    localStorage.getItem('tcg-default-chart-type') || 'candlestick';
 } catch {
   // localStorage unavailable — defaults apply
 }

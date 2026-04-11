@@ -14,7 +14,9 @@ export function formatDate(date) {
  * @returns {string}
  */
 export function formatDateInt(dateInt) {
+  if (dateInt == null) return '--';
   const s = String(dateInt);
+  if (s.length !== 8) return s;
   return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
 }
 

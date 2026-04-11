@@ -5,6 +5,7 @@ import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
 import { buildBaseLayout, CHART_CONFIG, TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
+import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
 import styles from './ChartBase.module.css';
 
@@ -63,20 +64,32 @@ function ContinuousChart({ collection }) {
   }
 
   const dates = data.dates.map(formatDateInt);
-  const hasVolume = data.volume && data.volume.some((v) => v > 0);
-  const hasOHLC = data.open && data.high && data.low && data.close;
-  const effectiveType = hasOHLC ? chartType : 'line';
   const rollDates = data.roll_dates || [];
+  const { hasOHLC, hasVolume, open, high, low, close } = prepareChartData(data);
+
+  const effectiveType = hasOHLC ? chartType : 'line';
 
   const traces = [];
 
   if (effectiveType === 'candlestick') {
+    // Thin close-price line underneath candles fills gaps where bars were
+    // nulled out due to invalid OHLC, keeping visual continuity when zoomed in.
     traces.push({
       x: dates,
-      open: data.open,
-      high: data.high,
-      low: data.low,
-      close: data.close,
+      y: data.close,
+      type: 'scatter',
+      mode: 'lines',
+      name: 'Close',
+      line: { color: TRACE_COLORS[0], width: 1 },
+      hoverinfo: 'skip',
+      showlegend: false,
+    });
+    traces.push({
+      x: dates,
+      open,
+      high,
+      low,
+      close,
       type: 'candlestick',
       name: 'OHLC',
       increasing: { line: { color: '#10b981' } },
@@ -106,6 +119,20 @@ function ContinuousChart({ collection }) {
     });
   }
 
+  // Legend-only trace so "Roll" appears in the legend
+  if (rollDates.length > 0) {
+    traces.push({
+      x: [null],
+      y: [null],
+      type: 'scatter',
+      mode: 'lines',
+      name: 'Roll',
+      line: { color: 'rgba(160, 160, 160, 0.6)', width: 1, dash: 'dot' },
+      showlegend: true,
+      hoverinfo: 'skip',
+    });
+  }
+
   const rollShapes = rollDates.map((d) => ({
     type: 'line',
     x0: formatDateInt(d),
@@ -113,7 +140,7 @@ function ContinuousChart({ collection }) {
     y0: 0,
     y1: 1,
     yref: 'paper',
-    line: { color: TRACE_COLORS[2], width: 1, dash: 'dash' },
+    line: { color: 'rgba(160, 160, 160, 0.35)', width: 1, dash: 'dot' },
   }));
 
   const layout = buildBaseLayout({
@@ -126,7 +153,6 @@ function ContinuousChart({ collection }) {
     yaxis: {
       title: { text: 'Price', font: { size: 11, color: colors.secondaryFont } },
       domain: hasVolume ? [0.28, 1.0] : [0, 1.0],
-      tickformat: ',.0f',
     },
     ...(hasVolume
       ? {

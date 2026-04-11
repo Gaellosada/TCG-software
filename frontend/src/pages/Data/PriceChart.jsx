@@ -5,6 +5,7 @@ import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import { getInstrumentPrices } from '../../api/data';
 import { buildBaseLayout, CHART_CONFIG, TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
+import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
 import styles from './ChartBase.module.css';
 
@@ -49,19 +50,31 @@ function PriceChart({ collection, instrument }) {
   }
 
   const dates = data.dates.map(formatDateInt);
-  const hasVolume = data.volume && data.volume.some((v) => v > 0);
-  const hasOHLC = data.open && data.high && data.low && data.close;
+  const { hasOHLC, hasVolume, open, high, low, close } = prepareChartData(data);
+
   const effectiveType = hasOHLC ? chartType : 'line';
 
   const traces = [];
 
   if (effectiveType === 'candlestick') {
+    // Thin close-price line underneath candles fills gaps where bars were
+    // nulled out due to invalid OHLC, keeping visual continuity when zoomed in.
     traces.push({
       x: dates,
-      open: data.open,
-      high: data.high,
-      low: data.low,
-      close: data.close,
+      y: data.close,
+      type: 'scatter',
+      mode: 'lines',
+      name: 'Close',
+      line: { color: TRACE_COLORS[0], width: 1 },
+      hoverinfo: 'skip',
+      showlegend: false,
+    });
+    traces.push({
+      x: dates,
+      open,
+      high,
+      low,
+      close,
       type: 'candlestick',
       name: 'OHLC',
       increasing: { line: { color: '#10b981' } },
@@ -101,7 +114,6 @@ function PriceChart({ collection, instrument }) {
     yaxis: {
       title: { text: 'Price', font: { size: 11, color: colors.secondaryFont } },
       domain: hasVolume ? [0.28, 1.0] : [0, 1.0],
-      tickformat: ',.0f',
     },
     ...(hasVolume
       ? {

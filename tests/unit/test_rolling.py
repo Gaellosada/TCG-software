@@ -766,3 +766,158 @@ class TestNewCloseZero:
         # Difference: diff = 0 - 110 = -110, applied to dates < 20240110
         result = adjust_difference(prices, [20240110], [c1, c2])
         np.testing.assert_allclose(result.close[0], 100.0 - 110.0)  # -10.0
+
+
+# ── Additional coverage tests ─────────────────────────────────────
+
+
+class TestUnsortedContractsRejected:
+    """Contracts not sorted by expiration must raise ValueError."""
+
+    def test_reverse_order_raises(self):
+        c1 = _make_contract("A", 20240215, [20240201], [100.0])
+        c2 = _make_contract("B", 20240115, [20240101], [90.0])
+        builder = ContinuousSeriesBuilder()
+        config = ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH)
+        with pytest.raises(ValueError, match="not sorted by expiration"):
+            builder.build([c1, c2], config)
+
+    def test_duplicate_expiration_ok(self):
+        """Two contracts with same expiration should not raise."""
+        c1 = _make_contract("A", 20240115, [20240101], [100.0])
+        c2 = _make_contract("B", 20240115, [20240110], [105.0])
+        builder = ContinuousSeriesBuilder()
+        config = ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH)
+        # Should not raise — equal expirations are fine
+        builder.build([c1, c2], config)
+
+
+class TestDifferenceCascadingThreeRolls:
+    """Mirror of test_proportional_cascading_three_rolls for difference adjustment."""
+
+    def test_cascading_three_rolls(self):
+        c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 50.0])
+        c2 = _make_contract("B", 20240120, [20240110, 20240115, 20240120], [60.0, 62.0, 60.0])
+        c3 = _make_contract("C", 20240130, [20240120, 20240125, 20240130], [72.0, 75.0, 78.0])
+
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.DIFFERENCE,
+        )
+        builder = ContinuousSeriesBuilder()
+        result = builder.build([c1, c2, c3], config)
+
+        # After dedup: c1=[20240105,20240108], c2=[20240110,20240115], c3=[20240120,20240125,20240130]
+        # Roll dates: [20240110, 20240120]
+        # Roll 2 (at 20240120): diff = c3_close(72) - c2_close(60) = +12
+        #   dates < 20240120 shifted by +12
+        # Roll 1 (at 20240110): diff = c2_close(60) - c1_close(50) = +10
+        #   dates < 20240110 shifted by +10
+        #
+        # Final:
+        #   20240105: 50 + 12 + 10 = 72
+        #   20240108: 52 + 12 + 10 = 74
+        #   20240110: 60 + 12 = 72
+        #   20240115: 62 + 12 = 74
+        #   20240120: 72 (unchanged)
+        #   20240125: 75
+        #   20240130: 78
+
+        expected = [72.0, 74.0, 72.0, 74.0, 72.0, 75.0, 78.0]
+        np.testing.assert_allclose(result.prices.close, expected, rtol=1e-10)
+
+        # Dollar differences within each segment should be preserved
+        closes = result.prices.close
+        assert np.isclose(closes[1] - closes[0], 2.0)  # c1: 52-50
+        assert np.isclose(closes[3] - closes[2], 2.0)  # c2: 62-60
+        assert np.isclose(closes[5] - closes[4], 3.0)  # c3: 75-72
+
+
+class TestDateGapBetweenContracts:
+    """When contracts have a calendar gap (no overlap), stitching still works."""
+
+    def test_gap_between_contracts(self):
+        # c1 ends 20240110, c2 starts 20240120 — 10-day gap
+        c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0])
+        c2 = _make_contract("B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0])
+
+        builder = ContinuousSeriesBuilder()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+        )
+        result = builder.build([c1, c2], config)
+
+        # Both contracts contribute all their data, gap preserved
+        assert len(result.prices) == 6
+        assert result.roll_dates == (20240120,)
+        np.testing.assert_array_equal(
+            result.prices.close, [50.0, 52.0, 55.0, 60.0, 62.0, 65.0]
+        )
+
+    def test_gap_proportional_adjustment(self):
+        """Proportional adjustment across a date gap uses closest-date matching."""
+        c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0])
+        c2 = _make_contract("B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0])
+
+        builder = ContinuousSeriesBuilder()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.PROPORTIONAL,
+        )
+        result = builder.build([c1, c2], config)
+
+        # Roll date = 20240120 (first date of c2 segment)
+        # _get_close_at_roll(c1, 20240120) → closest date in c1 = 20240110 → close=55
+        # _get_close_at_roll(c2, 20240120) → exact match → close=60
+        # Ratio = 60/55 = 12/11
+        ratio = 60.0 / 55.0
+        np.testing.assert_allclose(result.prices.close[:3], [50.0 * ratio, 52.0 * ratio, 55.0 * ratio])
+        np.testing.assert_allclose(result.prices.close[3:], [60.0, 62.0, 65.0])
+
+
+class TestManyRolls:
+    """Test with 10+ rolls to verify accumulation and performance."""
+
+    def test_ten_rolls_proportional(self):
+        """10 contracts with proportional adjustment: no NaN, finite results."""
+        contracts = []
+        for i in range(10):
+            base_date = 20240101 + i * 100  # Spread contracts across months
+            exp_date = base_date + 50
+            dates = [base_date + d for d in range(0, 40, 5)]
+            base_price = 100.0 + i * 5
+            closes = [base_price + j * 0.5 for j in range(len(dates))]
+            contracts.append(_make_contract(f"C{i}", exp_date, dates, closes))
+
+        builder = ContinuousSeriesBuilder()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.PROPORTIONAL,
+        )
+        result = builder.build(contracts, config)
+
+        assert len(result.roll_dates) > 0
+        assert np.all(np.isfinite(result.prices.close))
+        assert np.all(result.prices.close > 0)  # No negative prices from proportional
+
+    def test_ten_rolls_difference(self):
+        """10 contracts with difference adjustment: no NaN, finite results."""
+        contracts = []
+        for i in range(10):
+            base_date = 20240101 + i * 100
+            exp_date = base_date + 50
+            dates = [base_date + d for d in range(0, 40, 5)]
+            base_price = 100.0 + i * 5
+            closes = [base_price + j * 0.5 for j in range(len(dates))]
+            contracts.append(_make_contract(f"C{i}", exp_date, dates, closes))
+
+        builder = ContinuousSeriesBuilder()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.DIFFERENCE,
+        )
+        result = builder.build(contracts, config)
+
+        assert len(result.roll_dates) > 0
+        assert np.all(np.isfinite(result.prices.close))

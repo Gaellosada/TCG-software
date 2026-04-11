@@ -7,13 +7,23 @@ subsequent adjustment factors.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from tcg.types.market import ContractPriceData, PriceSeries
 
+logger = logging.getLogger(__name__)
+
 
 def _find_closest_date_idx(dates: np.ndarray, target: int) -> int:
-    """Find the index of the date closest to `target` in sorted `dates`."""
+    """Find the index of the date closest to `target` in sorted `dates`.
+
+    NOTE: distance is computed on YYYYMMDD integers, which is non-uniform
+    across month boundaries (e.g., 20240131→20240201 = 70 vs 20240201→20240202 = 1).
+    In practice this only matters when the exact date is missing and two candidates
+    straddle a month boundary — the resulting price difference is negligible.
+    """
     idx = np.searchsorted(dates, target)
     if idx == len(dates):
         return len(dates) - 1
@@ -81,7 +91,13 @@ def adjust_proportional(
         new_close = _get_close_at_roll(new_contract, rd)
 
         if old_close == 0.0 or new_close == 0.0:
-            continue  # Cannot compute meaningful ratio with zero prices
+            logger.warning(
+                "Proportional roll skipped at %d: old_close=%.4f, new_close=%.4f "
+                "(contracts %s → %s). Unadjusted gap remains.",
+                rd, old_close, new_close,
+                old_contract.contract_id, new_contract.contract_id,
+            )
+            continue
 
         ratio = new_close / old_close
 

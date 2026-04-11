@@ -118,10 +118,36 @@ function HelpPage() {
 
         <h3 className={styles.conceptTitle}>Roll Dates</h3>
         <p className={styles.conceptText}>
-          Vertical dashed lines on the chart mark where one contract ends and
-          the next begins. These are recorded for transparency — you can
+          Gray dotted vertical lines on the chart mark where one contract ends
+          and the next begins. These are recorded for transparency — you can
           always see exactly where rolls occurred.
         </p>
+
+        <h3 className={styles.conceptTitle}>Chart Types &amp; Data Availability</h3>
+        <p className={styles.conceptText}>
+          When OHLC data (Open, High, Low, Close) is available, the chart can
+          display as <strong>candlestick</strong> (filled bodies showing the
+          open-close range with high-low wicks). You can set your default chart
+          type in <strong>Settings</strong>.
+        </p>
+        <p className={styles.conceptText}>
+          However, many legacy futures contracts only store a{' '}
+          <strong>close/settle price</strong> — the open, high, and low fields
+          are missing. When less than half the bars have real OHLC values, the
+          chart automatically falls back to a <strong>line chart</strong> and
+          the chart-type selector is hidden.
+        </p>
+        <div className={styles.card}>
+          <h3>Which futures have candlestick?</h3>
+          <p>
+            Crypto futures (BTC, ETH) and VIX have full OHLC from their data
+            sources. Most other legacy futures (SP500, Gold, bonds, FX) were
+            ingested from a source that only provided settlement prices. If
+            these contracts are re-ingested from a source that includes OHLC
+            (e.g., IQFeed, Interactive Brokers), candlestick will become
+            available automatically.
+          </p>
+        </div>
       </section>
 
       <section className={styles.section}>
