@@ -16,7 +16,7 @@ from pymongo.errors import PyMongoError
 
 from tcg.types.errors import DataAccessError
 from tcg.types.market import ContractPriceData, InstrumentId, PriceSeries
-from tcg.data._utils import filter_date_range
+from tcg.data._utils import date_to_int, filter_date_range
 
 from tcg.data._mongo.helpers import (
     deserialize_doc_id,
@@ -106,7 +106,7 @@ class MongoInstrumentReader:
             # Apply date range filter
             if start is not None or end is not None:
                 series = filter_date_range(series, start, end)
-                if series is None or len(series) == 0:
+                if series is None:
                     return None
 
             return series
@@ -207,9 +207,9 @@ def _parse_expiration(value: Any) -> int | None:
     Returns None if the value cannot be parsed.
     """
     if isinstance(value, datetime):
-        return value.year * 10000 + value.month * 100 + value.day
+        return date_to_int(value)
     if isinstance(value, date) and not isinstance(value, datetime):
-        return value.year * 10000 + value.month * 100 + value.day
+        return date_to_int(value)
     if isinstance(value, int):
         # Assume already YYYYMMDD — basic sanity check
         if 19000101 <= value <= 21001231:
@@ -219,7 +219,7 @@ def _parse_expiration(value: Any) -> int | None:
         # Try ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS...)
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return dt.year * 10000 + dt.month * 100 + dt.day
+            return date_to_int(dt)
         except (ValueError, TypeError):
             pass
     return None

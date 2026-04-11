@@ -157,7 +157,7 @@ class DefaultMarketDataService:
         # Apply date range filter
         if start is not None or end is not None:
             filtered_prices = filter_date_range(result.prices, start, end)
-            if filtered_prices is None or len(filtered_prices) == 0:
+            if filtered_prices is None:
                 return None
 
             start_int = date_to_int(start) if start is not None else 0
