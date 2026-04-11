@@ -1,42 +1,18 @@
 .page {
   display: flex;
-  flex-direction: column;
-  height: calc(100vh - 64px);
-  max-width: none;
-}
-
-.header {
-  margin-bottom: 16px;
-  flex-shrink: 0;
-}
-
-.title {
-  font-size: 1.75rem;
-  font-weight: 700;
-  color: var(--heading-color);
-  margin-bottom: 4px;
-}
-
-.description {
-  color: #5a5f72;
-  line-height: 1.5;
-  font-size: 0.9rem;
-}
-
-.layout {
-  display: flex;
   flex: 1;
-  gap: 16px;
   min-height: 0;
+  gap: 0;
+  overflow: hidden;
 }
 
 .leftPanel {
-  width: 280px;
+  width: 240px;
   flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
   overflow-y: auto;
+  border-right: 1px solid var(--border-primary);
+  padding: 12px 0;
+  background: var(--bg-secondary);
 }
 
 .rightPanel {
@@ -51,22 +27,20 @@
   align-items: center;
   justify-content: center;
   flex: 1;
-  background: #ffffff;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  color: #8b8fa3;
+  color: var(--text-muted);
   text-align: center;
   padding: 40px;
 }
 
 .welcomeInner h2 {
-  font-size: 1.25rem;
-  color: var(--heading-color);
+  font-size: 1.1rem;
+  color: var(--text-secondary);
   margin-bottom: 8px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .welcomeInner p {
-  color: #5a5f72;
+  color: var(--text-muted);
   line-height: 1.5;
+  font-size: 0.85rem;
 }

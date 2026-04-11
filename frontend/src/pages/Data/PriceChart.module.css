@@ -2,32 +2,48 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: #ffffff;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
   overflow: hidden;
-  min-height: 400px;
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 16px 24px 8px;
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.meta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .chartWrapper {
   flex: 1;
-  position: relative;
-  min-height: 400px;
+  min-height: 0;
+  padding: 0 8px 8px;
 }
 
-.loading,
+.status,
 .error {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 1;
-  min-height: 400px;
-  color: #8b8fa3;
-  font-size: 0.95rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
 }
 
 .error {
-  color: #dc2626;
+  color: var(--error);
   padding: 24px;
   text-align: center;
 }

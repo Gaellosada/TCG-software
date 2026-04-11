@@ -10,7 +10,9 @@ from typing import Any
 
 import numpy as np
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import PyMongoError
 
+from tcg.types.errors import DataAccessError
 from tcg.types.market import InstrumentId, PriceSeries
 
 from tcg.data._mongo.helpers import (
@@ -48,19 +50,24 @@ class MongoInstrumentReader:
 
         Returns ``(instruments, total_count)``.
         """
-        coll = self._db[collection]
-        total = await coll.count_documents({})
+        try:
+            coll = self._db[collection]
+            total = await coll.count_documents({})
 
-        cursor = (
-            coll.find({}, projection=_LISTING_EXCLUSION)
-            .skip(skip)
-            .limit(limit)
-        )
-        instruments: list[InstrumentId] = []
-        async for doc in cursor:
-            instruments.append(parse_instrument_id(doc, collection))
+            cursor = (
+                coll.find({}, projection=_LISTING_EXCLUSION)
+                .skip(skip)
+                .limit(limit)
+            )
+            instruments: list[InstrumentId] = []
+            async for doc in cursor:
+                instruments.append(parse_instrument_id(doc, collection))
 
-        return instruments, total
+            return instruments, total
+        except PyMongoError as exc:
+            raise DataAccessError(
+                f"MongoDB error listing instruments in '{collection}': {exc}"
+            ) from exc
 
     async def read_prices(
         self,
@@ -79,23 +86,28 @@ class MongoInstrumentReader:
         Date range filtering is applied *after* extraction since
         eodDatas is stored as an embedded array, not separate documents.
         """
-        coll = self._db[collection]
+        try:
+            coll = self._db[collection]
 
-        doc = await self._find_document(coll, instrument_id)
-        if doc is None:
-            return None
-
-        series = extract_price_data(doc, provider=provider)
-        if series is None:
-            return None
-
-        # Apply date range filter
-        if start is not None or end is not None:
-            series = _filter_date_range(series, start, end)
-            if series is None or len(series) == 0:
+            doc = await self._find_document(coll, instrument_id)
+            if doc is None:
                 return None
 
-        return series
+            series = extract_price_data(doc, provider=provider)
+            if series is None:
+                return None
+
+            # Apply date range filter
+            if start is not None or end is not None:
+                series = _filter_date_range(series, start, end)
+                if series is None or len(series) == 0:
+                    return None
+
+            return series
+        except PyMongoError as exc:
+            raise DataAccessError(
+                f"MongoDB error reading '{instrument_id}' from '{collection}': {exc}"
+            ) from exc
 
     async def _find_document(
         self,

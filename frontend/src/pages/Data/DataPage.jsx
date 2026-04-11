@@ -1,64 +1,33 @@
 import { useState } from 'react';
-import CollectionList from './CollectionList';
-import InstrumentList from './InstrumentList';
+import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
 import styles from './DataPage.module.css';
 
 function DataPage() {
-  const [selectedCollection, setSelectedCollection] = useState(null);
-  const [selectedInstrument, setSelectedInstrument] = useState(null);
-
-  function handleCollectionSelect(collection) {
-    setSelectedCollection(collection);
-    setSelectedInstrument(null);
-  }
-
-  function handleInstrumentSelect(instrument) {
-    setSelectedInstrument(instrument);
-  }
+  const [selected, setSelected] = useState(null);
 
   return (
     <div className={styles.page}>
-      <div className={styles.header}>
-        <h1 className={styles.title}>Data</h1>
-        <p className={styles.description}>
-          Browse market data collections and view instrument price histories.
-        </p>
+      <div className={styles.leftPanel}>
+        <CategoryBrowser
+          selected={selected}
+          onSelect={setSelected}
+        />
       </div>
-      <div className={styles.layout}>
-        <div className={styles.leftPanel}>
-          <CollectionList
-            selected={selectedCollection}
-            onSelect={handleCollectionSelect}
+      <div className={styles.rightPanel}>
+        {selected ? (
+          <PriceChart
+            collection={selected.collection}
+            instrument={selected.symbol}
           />
-          {selectedCollection && (
-            <InstrumentList
-              key={selectedCollection}
-              collection={selectedCollection}
-              selected={selectedInstrument}
-              onSelect={handleInstrumentSelect}
-            />
-          )}
-        </div>
-        <div className={styles.rightPanel}>
-          {selectedInstrument ? (
-            <PriceChart
-              collection={selectedCollection}
-              instrument={selectedInstrument}
-            />
-          ) : (
-            <div className={styles.welcome}>
-              <div className={styles.welcomeInner}>
-                <h2>Select an instrument to view its price history</h2>
-                <p>
-                  {selectedCollection
-                    ? 'Pick an instrument from the list on the left.'
-                    : 'Start by selecting a collection, then choose an instrument.'}
-                </p>
-              </div>
+        ) : (
+          <div className={styles.welcome}>
+            <div className={styles.welcomeInner}>
+              <h2>Select an instrument</h2>
+              <p>Pick an instrument from the categories on the left to view its price history.</p>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

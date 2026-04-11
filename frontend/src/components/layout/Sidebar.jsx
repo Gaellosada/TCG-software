@@ -1,31 +1,66 @@
 import { NavLink } from 'react-router-dom';
+import Icon from '../Icon';
 import styles from './Sidebar.module.css';
 
-const NAV_ITEMS = [
-  { to: '/help', label: 'Help' },
-  { to: '/data', label: 'Data' },
-  { to: '/portfolio', label: 'Portfolio' },
-  { to: '/research', label: 'Research' },
-  { to: '/saved-strategies', label: 'Saved Strategies' },
+const MAIN_NAV = [
+  { to: '/data', label: 'Data', icon: 'data' },
+  { to: '/portfolio', label: 'Portfolio', icon: 'portfolio' },
+  { to: '/research', label: 'Research', icon: 'research' },
 ];
 
-function Sidebar() {
+const BOTTOM_NAV = [
+  { to: '/help', label: 'Help', icon: 'help' },
+  { to: '/settings', label: 'Settings', icon: 'settings' },
+];
+
+function Sidebar({ collapsed, onToggle }) {
   return (
-    <aside className={styles.sidebar}>
+    <aside className={`${styles.sidebar} ${collapsed ? styles.collapsed : ''}`}>
       <div className={styles.logo}>
-        <span className={styles.logoText}>TCG</span>
+        {!collapsed && <span className={styles.logoText}>TCG</span>}
+        <button
+          className={styles.toggle}
+          onClick={onToggle}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          <Icon name={collapsed ? 'chevron-right' : 'chevron-left'} size={16} />
+        </button>
       </div>
-      <nav className={styles.nav}>
+      <nav className={styles.topNav}>
         <ul className={styles.navList}>
-          {NAV_ITEMS.map(({ to, label }) => (
+          {MAIN_NAV.map(({ to, label, icon }) => (
             <li key={to} className={styles.navItem}>
               <NavLink
                 to={to}
                 className={({ isActive }) =>
                   `${styles.navLink} ${isActive ? styles.active : ''}`
                 }
+                title={collapsed ? label : undefined}
               >
-                {label}
+                <span className={styles.navIcon}><Icon name={icon} size={18} /></span>
+                {!collapsed && <span className={styles.navLabel}>{label}</span>}
+              </NavLink>
+            </li>
+          ))}
+        </ul>
+      </nav>
+      <div className={styles.spacer} />
+      <div className={styles.divider} />
+      <nav className={styles.bottomNav}>
+        <ul className={styles.navList}>
+          {BOTTOM_NAV.map(({ to, label, icon }) => (
+            <li key={to} className={styles.navItem}>
+              <NavLink
+                to={to}
+                className={({ isActive }) =>
+                  `${styles.navLink} ${isActive ? styles.active : ''}`
+                }
+                title={collapsed ? label : undefined}
+              >
+                <span className={styles.navIcon}><Icon name={icon} size={18} /></span>
+                {!collapsed && <span className={styles.navLabel}>{label}</span>}
               </NavLink>
             </li>
           ))}

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/layout/Sidebar';
 import PageContainer from './components/layout/PageContainer';
@@ -5,16 +6,31 @@ import HelpPage from './pages/Help/HelpPage';
 import DataPage from './pages/Data/DataPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
 import ResearchPage from './pages/Research/ResearchPage';
-import SavedStrategiesPage from './pages/SavedStrategies/SavedStrategiesPage';
+import SettingsPage from './pages/Settings/SettingsPage';
 import './App.css';
 
 function App() {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem('tcg-sidebar-collapsed') === 'true'
+  );
+
+  function toggleSidebar() {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    localStorage.setItem('tcg-sidebar-collapsed', String(next));
+    // Trigger resize for Plotly charts after CSS transition
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 260);
+  }
+
   return (
     <div className="app-layout">
-      <Sidebar />
-      <main className="app-content">
+      <Sidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+      <main
+        className="app-content"
+        style={{ marginLeft: sidebarCollapsed ? 'var(--sidebar-width-collapsed)' : undefined }}
+      >
         <Routes>
-          <Route path="/" element={<Navigate to="/help" replace />} />
+          <Route path="/" element={<Navigate to="/data" replace />} />
           <Route
             path="/help"
             element={
@@ -48,10 +64,10 @@ function App() {
             }
           />
           <Route
-            path="/saved-strategies"
+            path="/settings"
             element={
               <PageContainer>
-                <SavedStrategiesPage />
+                <SettingsPage />
               </PageContainer>
             }
           />

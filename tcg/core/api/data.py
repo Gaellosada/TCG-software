@@ -7,7 +7,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query, Request
 
 from tcg.data.protocols import MarketDataService
-from tcg.types.errors import DataNotFoundError
+from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.market import AssetClass
 
 router = APIRouter(prefix="/api/data", tags=["data"])
@@ -24,7 +24,12 @@ async def list_collections(
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
     """List available data collections, optionally filtered by asset class."""
-    ac = AssetClass(asset_class) if asset_class is not None else None
+    try:
+        ac = AssetClass(asset_class) if asset_class is not None else None
+    except ValueError:
+        raise ValidationError(
+            f"Invalid asset_class '{asset_class}'. Must be one of: {', '.join(e.value for e in AssetClass)}"
+        )
     collections = await svc.list_collections(ac)
     return {"collections": collections}
 
@@ -64,8 +69,11 @@ async def get_prices(
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
     """Fetch OHLCV price data for an instrument."""
-    start_date = date.fromisoformat(start) if start else None
-    end_date = date.fromisoformat(end) if end else None
+    try:
+        start_date = date.fromisoformat(start) if start else None
+        end_date = date.fromisoformat(end) if end else None
+    except ValueError as exc:
+        raise ValidationError(f"Invalid date format: {exc}") from exc
 
     series = await svc.get_prices(
         collection,
