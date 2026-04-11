@@ -25,6 +25,7 @@ from tcg.types.market import (
 from tcg.data._cache import LRUCache
 from tcg.data._mongo.instruments import MongoInstrumentReader
 from tcg.data._mongo.registry import CollectionRegistry
+from tcg.data._rolling import ContinuousSeriesBuilder
 
 
 class DefaultMarketDataService:
@@ -42,6 +43,7 @@ class DefaultMarketDataService:
         self._mongo = MongoInstrumentReader(mongo_db)
         self._registry = registry
         self._cache = LRUCache(cache_size)
+        self._roller = ContinuousSeriesBuilder()
 
     # --- Discovery ---
 
@@ -119,7 +121,80 @@ class DefaultMarketDataService:
         start: date | None = None,
         end: date | None = None,
     ) -> ContinuousSeries | None:
-        raise NotImplementedError("Continuous rolling is Phase 2")
+        """Build a continuous futures series from individual contracts.
+
+        Validates that the collection is a futures collection (``FUT_`` prefix),
+        fetches contracts from MongoDB, builds the continuous series via the
+        rolling engine, and optionally filters by date range.
+        """
+        if collection not in self._registry:
+            raise DataNotFoundError(
+                f"Collection '{collection}' not found in registry"
+            )
+        if not collection.startswith("FUT_"):
+            raise DataNotFoundError(
+                f"Collection '{collection}' is not a futures collection"
+            )
+
+        cache_key = self._make_continuous_key(collection, roll_config, start, end)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        contracts = await self._mongo.fetch_futures_contracts(
+            collection, cycle=roll_config.cycle
+        )
+        if not contracts:
+            return None
+
+        result = self._roller.build(contracts, roll_config, collection=collection)
+
+        # Empty series means no usable data
+        if len(result.prices) == 0:
+            return None
+
+        # Apply date range filter
+        if start is not None or end is not None:
+            from tcg.data._mongo.instruments import _filter_date_range
+
+            filtered_prices = _filter_date_range(result.prices, start, end)
+            if filtered_prices is None or len(filtered_prices) == 0:
+                return None
+
+            # Rebuild with filtered prices and adjusted roll_dates/contracts
+            start_int = (
+                start.year * 10000 + start.month * 100 + start.day
+                if start is not None
+                else 0
+            )
+            end_int = (
+                end.year * 10000 + end.month * 100 + end.day
+                if end is not None
+                else 99999999
+            )
+            filtered_roll_dates = tuple(
+                rd for rd in result.roll_dates
+                if start_int <= rd <= end_int
+            )
+
+            result = ContinuousSeries(
+                collection=result.collection,
+                roll_config=result.roll_config,
+                prices=filtered_prices,
+                roll_dates=filtered_roll_dates,
+                contracts=result.contracts,
+            )
+
+        self._cache.put(cache_key, result)
+        return result
+
+    async def get_available_cycles(self, collection: str) -> list[str]:
+        """Return available expiration cycles for a futures collection."""
+        if collection not in self._registry:
+            raise DataNotFoundError(
+                f"Collection '{collection}' not found in registry"
+            )
+        return await self._mongo.fetch_available_cycles(collection)
 
     async def get_aligned_prices(
         self,
@@ -142,3 +217,17 @@ class DefaultMarketDataService:
     ) -> str:
         """Build a deterministic cache key."""
         return f"{collection}:{instrument_id}:{provider}:{start}:{end}"
+
+    @staticmethod
+    def _make_continuous_key(
+        collection: str,
+        roll_config: ContinuousRollConfig,
+        start: date | None,
+        end: date | None,
+    ) -> str:
+        """Build a deterministic cache key for continuous series."""
+        return (
+            f"continuous:{collection}:{roll_config.strategy}"
+            f":{roll_config.adjustment}:{roll_config.cycle}"
+            f":{start}:{end}"
+        )

@@ -62,6 +62,14 @@ class PriceSeries:
 
 
 @dataclass(frozen=True)
+class ContractPriceData:
+    """Price data for a single futures contract, used for rolling."""
+    contract_id: str
+    expiration: int  # YYYYMMDD integer (consistent with PriceSeries.dates)
+    prices: PriceSeries
+
+
+@dataclass(frozen=True)
 class ContinuousRollConfig:
     """How to build a continuous futures series.
 

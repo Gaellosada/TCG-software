@@ -468,13 +468,25 @@ class TestDefaultMarketDataServiceGetPrices:
             assert result.skip == 0
             assert result.limit == 50
 
-    async def test_get_continuous_raises(self):
+    async def test_get_continuous_rejects_non_futures_collection(self):
+        from tcg.types.errors import DataNotFoundError
         from tcg.types.market import ContinuousRollConfig, RollStrategy
 
         service, _ = _make_service()
-        with pytest.raises(NotImplementedError, match="Phase 2"):
+        with pytest.raises(DataNotFoundError, match="not a futures collection"):
             await service.get_continuous(
-                "FUT_VIX",
+                "INDEX",
+                ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH),
+            )
+
+    async def test_get_continuous_rejects_unknown_collection(self):
+        from tcg.types.errors import DataNotFoundError
+        from tcg.types.market import ContinuousRollConfig, RollStrategy
+
+        service, _ = _make_service()
+        with pytest.raises(DataNotFoundError, match="not found"):
+            await service.get_continuous(
+                "FUT_NONEXISTENT",
                 ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH),
             )
 

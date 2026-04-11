@@ -23,14 +23,14 @@ const CATEGORY_CONFIG = [
     key: 'futures',
     label: 'Futures',
     color: 'var(--cat-futures)',
-    collections: [],
-    placeholder: 'Continuous rolling coming in Phase 2',
+    dynamicFutures: true,
   },
 ];
 
 function CategoryBrowser({ selected, onSelect }) {
   const [categories, setCategories] = useState([]);
   const [expanded, setExpanded] = useState({ indexes: true, assets: true, futures: false });
+  const [expandedFutGroups, setExpandedFutGroups] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -44,11 +44,24 @@ function CategoryBrowser({ selected, onSelect }) {
 
         const collections = await listCollections();
 
-        // Build category data by fetching instruments for non-futures collections
         const result = await Promise.all(
           CATEGORY_CONFIG.map(async (cat) => {
-            if (cat.placeholder) {
-              return { ...cat, groups: [], isFutures: true };
+            if (cat.dynamicFutures) {
+              // Fetch FUT_* collections dynamically
+              const futCollections = collections.filter((c) => c.startsWith('FUT_'));
+              const groups = await Promise.all(
+                futCollections.map(async (collName) => {
+                  const res = await listInstruments(collName);
+                  return {
+                    collection: collName,
+                    instruments: res.items.map((item) => ({
+                      symbol: item.symbol,
+                      collection: item.collection || collName,
+                    })),
+                  };
+                })
+              );
+              return { ...cat, groups, isFutures: true };
             }
 
             // Filter available collections for this category
@@ -90,6 +103,18 @@ function CategoryBrowser({ selected, onSelect }) {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
+  function toggleFutGroup(collName) {
+    setExpandedFutGroups((prev) => ({ ...prev, [collName]: !prev[collName] }));
+  }
+
+  function isSelected(sel, type, symbol, collection) {
+    if (!sel) return false;
+    if (type === 'continuous') {
+      return sel.type === 'continuous' && sel.collection === collection;
+    }
+    return sel.symbol === symbol && sel.collection === collection;
+  }
+
   if (loading) {
     return <div className={styles.loading}>Loading instruments...</div>;
   }
@@ -116,7 +141,58 @@ function CategoryBrowser({ selected, onSelect }) {
           {expanded[cat.key] && (
             <div className={styles.categoryBody}>
               {cat.isFutures ? (
-                <div className={styles.placeholder}>{cat.placeholder}</div>
+                cat.groups.length === 0 ? (
+                  <div className={styles.placeholder}>No futures collections available</div>
+                ) : (
+                  cat.groups.map((group) => (
+                    <div key={group.collection} className={styles.group}>
+                      <button
+                        className={styles.futGroupHeader}
+                        onClick={() => toggleFutGroup(group.collection)}
+                      >
+                        <span className={styles.futGroupChevron}>
+                          {expandedFutGroups[group.collection] ? '\u25BE' : '\u25B8'}
+                        </span>
+                        <span className={styles.groupLabel} style={{ padding: 0 }}>
+                          {group.collection}
+                        </span>
+                      </button>
+
+                      {expandedFutGroups[group.collection] && (
+                        <div>
+                          {/* Continuous Series entry */}
+                          <button
+                            className={`${styles.instrument} ${styles.continuousEntry} ${
+                              isSelected(selected, 'continuous', null, group.collection)
+                                ? styles.instrumentActive
+                                : ''
+                            }`}
+                            onClick={() => onSelect({ type: 'continuous', collection: group.collection })}
+                          >
+                            <span className={styles.instrumentSymbol}>
+                              Continuous Series
+                            </span>
+                          </button>
+
+                          {/* Individual contracts */}
+                          {group.instruments.map((inst) => (
+                            <button
+                              key={inst.symbol}
+                              className={`${styles.instrument} ${
+                                isSelected(selected, 'instrument', inst.symbol, group.collection)
+                                  ? styles.instrumentActive
+                                  : ''
+                              }`}
+                              onClick={() => onSelect({ type: 'instrument', symbol: inst.symbol, collection: group.collection })}
+                            >
+                              <span className={styles.instrumentSymbol}>{inst.symbol}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )
               ) : (
                 cat.groups.map((group) => (
                   <div key={group.collection} className={styles.group}>
