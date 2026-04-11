@@ -158,3 +158,38 @@
   font-style: italic;
   font-family: 'Outfit', system-ui, sans-serif;
 }
+
+.futGroupActive .groupLabel {
+  color: var(--accent);
+}
+
+.contractsToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 12px 5px 32px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.contractsToggle:hover {
+  background: var(--bg-hover);
+}
+
+.contractsLabel {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.contractsList {
+  max-height: 300px;
+  overflow-y: auto;
+}

@@ -5,8 +5,7 @@ import useTheme from '../../hooks/useTheme';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
 import { buildBaseLayout, CHART_CONFIG, TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
 import { formatDateInt } from '../../utils/format';
-import baseStyles from './ChartBase.module.css';
-import ownStyles from './ContinuousChart.module.css';
+import styles from './ChartBase.module.css';
 
 function ContinuousChart({ collection }) {
   const theme = useTheme();
@@ -14,6 +13,7 @@ function ContinuousChart({ collection }) {
 
   const [adjustment, setAdjustment] = useState('none');
   const [cycle, setCycle] = useState('');
+  const [chartType, setChartType] = useState('candlestick');
 
   const { data: cyclesData } = useAsync(
     () => getAvailableCycles(collection),
@@ -33,34 +33,49 @@ function ContinuousChart({ collection }) {
 
   if (loading) {
     return (
-      <div className={baseStyles.container}>
-        <div className={baseStyles.status}>Loading continuous series...</div>
+      <div className={styles.container}>
+        <div className={styles.status}>Loading continuous series...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className={baseStyles.container}>
-        <div className={baseStyles.error}>Failed to load series: {error.message}</div>
+      <div className={styles.container}>
+        <div className={styles.error}>Failed to load series: {error.message}</div>
       </div>
     );
   }
 
   if (!data || !data.dates || data.dates.length === 0) {
     return (
-      <div className={baseStyles.container}>
-        <div className={baseStyles.status}>No continuous series data available.</div>
+      <div className={styles.container}>
+        <div className={styles.status}>No continuous series data available.</div>
       </div>
     );
   }
 
   const dates = data.dates.map(formatDateInt);
   const hasVolume = data.volume && data.volume.some((v) => v > 0);
+  const hasOHLC = data.open && data.high && data.low && data.close;
   const rollDates = data.roll_dates || [];
 
-  const traces = [
-    {
+  const traces = [];
+
+  if (chartType === 'candlestick' && hasOHLC) {
+    traces.push({
+      x: dates,
+      open: data.open,
+      high: data.high,
+      low: data.low,
+      close: data.close,
+      type: 'candlestick',
+      name: 'OHLC',
+      increasing: { line: { color: '#10b981' } },
+      decreasing: { line: { color: '#ef4444' } },
+    });
+  } else {
+    traces.push({
       x: dates,
       y: data.close,
       type: 'scatter',
@@ -68,8 +83,8 @@ function ContinuousChart({ collection }) {
       name: 'Close',
       line: { color: TRACE_COLORS[0], width: 1.5 },
       hovertemplate: '%{x}<br>Close: %{y:,.2f}<extra></extra>',
-    },
-  ];
+    });
+  }
 
   if (hasVolume) {
     traces.push({
@@ -97,6 +112,7 @@ function ContinuousChart({ collection }) {
     xaxis: {
       type: 'date',
       showticklabels: true,
+      rangeslider: { visible: false },
       ...(hasVolume ? { anchor: 'y2' } : {}),
     },
     yaxis: {
@@ -133,10 +149,10 @@ function ContinuousChart({ collection }) {
   const adjustmentLabels = { none: 'None', proportional: 'Proportional', difference: 'Difference' };
 
   return (
-    <div className={baseStyles.container}>
-      <div className={baseStyles.header}>
-        <h2 className={baseStyles.title}>{collection} — Continuous</h2>
-        <span className={baseStyles.meta}>
+    <div className={styles.container}>
+      <div className={styles.header}>
+        <h2 className={styles.title}>{collection} — Continuous</h2>
+        <span className={styles.meta}>
           {data.dates.length.toLocaleString()} bars
           &nbsp;&middot;&nbsp;
           {formatDateInt(data.dates[0])} to {formatDateInt(data.dates[data.dates.length - 1])}
@@ -155,11 +171,23 @@ function ContinuousChart({ collection }) {
         </span>
       </div>
 
-      <div className={ownStyles.controls}>
-        <label className={ownStyles.controlLabel}>
+      <div className={styles.controls}>
+        <label className={styles.controlLabel}>
+          Chart
+          <select
+            className={styles.select}
+            value={chartType}
+            onChange={(e) => setChartType(e.target.value)}
+          >
+            <option value="candlestick">Candlestick</option>
+            <option value="line">Line</option>
+          </select>
+        </label>
+
+        <label className={styles.controlLabel}>
           Adjustment
           <select
-            className={ownStyles.select}
+            className={styles.select}
             value={adjustment}
             onChange={(e) => setAdjustment(e.target.value)}
           >
@@ -169,10 +197,10 @@ function ContinuousChart({ collection }) {
           </select>
         </label>
 
-        <label className={ownStyles.controlLabel}>
+        <label className={styles.controlLabel}>
           Cycle
           <select
-            className={ownStyles.select}
+            className={styles.select}
             value={cycle}
             onChange={(e) => setCycle(e.target.value)}
           >
@@ -184,7 +212,7 @@ function ContinuousChart({ collection }) {
         </label>
       </div>
 
-      <div className={baseStyles.chartWrapper}>
+      <div className={styles.chartWrapper}>
         <Plot
           data={traces}
           layout={layout}

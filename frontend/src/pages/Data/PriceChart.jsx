@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import Plot from 'react-plotly.js';
 import useAsync from '../../hooks/useAsync';
 import useTheme from '../../hooks/useTheme';
@@ -9,6 +10,7 @@ import styles from './ChartBase.module.css';
 function PriceChart({ collection, instrument }) {
   const theme = useTheme();
   const colors = getChartColors(theme);
+  const [chartType, setChartType] = useState('candlestick');
 
   const { data, loading, error } = useAsync(
     () => getInstrumentPrices(collection, instrument),
@@ -41,9 +43,24 @@ function PriceChart({ collection, instrument }) {
 
   const dates = data.dates.map(formatDateInt);
   const hasVolume = data.volume && data.volume.some((v) => v > 0);
+  const hasOHLC = data.open && data.high && data.low && data.close;
 
-  const traces = [
-    {
+  const traces = [];
+
+  if (chartType === 'candlestick' && hasOHLC) {
+    traces.push({
+      x: dates,
+      open: data.open,
+      high: data.high,
+      low: data.low,
+      close: data.close,
+      type: 'candlestick',
+      name: 'OHLC',
+      increasing: { line: { color: '#10b981' } },
+      decreasing: { line: { color: '#ef4444' } },
+    });
+  } else {
+    traces.push({
       x: dates,
       y: data.close,
       type: 'scatter',
@@ -51,8 +68,8 @@ function PriceChart({ collection, instrument }) {
       name: 'Close',
       line: { color: TRACE_COLORS[0], width: 1.5 },
       hovertemplate: '%{x}<br>Close: %{y:,.2f}<extra></extra>',
-    },
-  ];
+    });
+  }
 
   if (hasVolume) {
     traces.push({
@@ -70,6 +87,7 @@ function PriceChart({ collection, instrument }) {
     xaxis: {
       type: 'date',
       showticklabels: true,
+      rangeslider: { visible: false },
       ...(hasVolume ? { anchor: 'y2' } : {}),
     },
     yaxis: {
@@ -112,6 +130,23 @@ function PriceChart({ collection, instrument }) {
           {formatDateInt(data.dates[0])} to {formatDateInt(data.dates[data.dates.length - 1])}
         </span>
       </div>
+
+      {hasOHLC && (
+        <div className={styles.controls}>
+          <label className={styles.controlLabel}>
+            Chart
+            <select
+              className={styles.select}
+              value={chartType}
+              onChange={(e) => setChartType(e.target.value)}
+            >
+              <option value="candlestick">Candlestick</option>
+              <option value="line">Line</option>
+            </select>
+          </label>
+        </div>
+      )}
+
       <div className={styles.chartWrapper}>
         <Plot
           data={traces}

@@ -31,6 +31,8 @@ function CategoryBrowser({ selected, onSelect }) {
   const [categories, setCategories] = useState([]);
   const [expanded, setExpanded] = useState({ indexes: true, assets: true, futures: false });
   const [expandedFutGroups, setExpandedFutGroups] = useState({});
+  const [contractsExpanded, setContractsExpanded] = useState({});
+  const [contractsData, setContractsData] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -47,21 +49,8 @@ function CategoryBrowser({ selected, onSelect }) {
         const result = await Promise.all(
           CATEGORY_CONFIG.map(async (cat) => {
             if (cat.dynamicFutures) {
-              // Fetch FUT_* collections dynamically
               const futCollections = collections.filter((c) => c.startsWith('FUT_'));
-              const groups = await Promise.all(
-                futCollections.map(async (collName) => {
-                  const res = await listInstruments(collName);
-                  return {
-                    collection: collName,
-                    instruments: res.items.map((item) => ({
-                      symbol: item.symbol,
-                      collection: item.collection || collName,
-                    })),
-                  };
-                })
-              );
-              return { ...cat, groups, isFutures: true };
+              return { ...cat, futCollections, isFutures: true };
             }
 
             // Filter available collections for this category
@@ -103,8 +92,27 @@ function CategoryBrowser({ selected, onSelect }) {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
-  function toggleFutGroup(collName) {
-    setExpandedFutGroups((prev) => ({ ...prev, [collName]: !prev[collName] }));
+  function handleFutGroupClick(collName) {
+    const wasExpanded = expandedFutGroups[collName];
+    setExpandedFutGroups((prev) => ({ ...prev, [collName]: !wasExpanded }));
+    // Auto-select continuous series when expanding
+    if (!wasExpanded) {
+      onSelect({ type: 'continuous', collection: collName });
+    }
+  }
+
+  async function toggleContracts(collName) {
+    const wasExpanded = contractsExpanded[collName];
+    setContractsExpanded((prev) => ({ ...prev, [collName]: !wasExpanded }));
+    // Lazy-load individual contracts on first expand
+    if (!wasExpanded && !contractsData[collName]) {
+      try {
+        const res = await listInstruments(collName, { skip: 0, limit: 500 });
+        setContractsData((prev) => ({ ...prev, [collName]: res.items }));
+      } catch {
+        setContractsData((prev) => ({ ...prev, [collName]: [] }));
+      }
+    }
   }
 
   function isSelected(sel, type, symbol, collection) {
@@ -141,53 +149,79 @@ function CategoryBrowser({ selected, onSelect }) {
           {expanded[cat.key] && (
             <div className={styles.categoryBody}>
               {cat.isFutures ? (
-                cat.groups.length === 0 ? (
+                !cat.futCollections || cat.futCollections.length === 0 ? (
                   <div className={styles.placeholder}>No futures collections available</div>
                 ) : (
-                  cat.groups.map((group) => (
-                    <div key={group.collection} className={styles.group}>
+                  cat.futCollections.map((collName) => (
+                    <div key={collName} className={styles.group}>
                       <button
-                        className={styles.futGroupHeader}
-                        onClick={() => toggleFutGroup(group.collection)}
+                        className={`${styles.futGroupHeader} ${
+                          isSelected(selected, 'continuous', null, collName)
+                            ? styles.futGroupActive
+                            : ''
+                        }`}
+                        onClick={() => handleFutGroupClick(collName)}
                       >
                         <span className={styles.futGroupChevron}>
-                          {expandedFutGroups[group.collection] ? '\u25BE' : '\u25B8'}
+                          {expandedFutGroups[collName] ? '\u25BE' : '\u25B8'}
                         </span>
                         <span className={styles.groupLabel} style={{ padding: 0 }}>
-                          {group.collection}
+                          {collName}
                         </span>
                       </button>
 
-                      {expandedFutGroups[group.collection] && (
+                      {expandedFutGroups[collName] && (
                         <div>
                           {/* Continuous Series entry */}
                           <button
                             className={`${styles.instrument} ${styles.continuousEntry} ${
-                              isSelected(selected, 'continuous', null, group.collection)
+                              isSelected(selected, 'continuous', null, collName)
                                 ? styles.instrumentActive
                                 : ''
                             }`}
-                            onClick={() => onSelect({ type: 'continuous', collection: group.collection })}
+                            onClick={() => onSelect({ type: 'continuous', collection: collName })}
                           >
                             <span className={styles.instrumentSymbol}>
                               Continuous Series
                             </span>
                           </button>
 
-                          {/* Individual contracts */}
-                          {group.instruments.map((inst) => (
-                            <button
-                              key={inst.symbol}
-                              className={`${styles.instrument} ${
-                                isSelected(selected, 'instrument', inst.symbol, group.collection)
-                                  ? styles.instrumentActive
-                                  : ''
-                              }`}
-                              onClick={() => onSelect({ type: 'instrument', symbol: inst.symbol, collection: group.collection })}
-                            >
-                              <span className={styles.instrumentSymbol}>{inst.symbol}</span>
-                            </button>
-                          ))}
+                          {/* Individual Contracts sub-section (lazy-loaded) */}
+                          <button
+                            className={styles.contractsToggle}
+                            onClick={() => toggleContracts(collName)}
+                          >
+                            <span className={styles.futGroupChevron}>
+                              {contractsExpanded[collName] ? '\u25BE' : '\u25B8'}
+                            </span>
+                            <span className={styles.contractsLabel}>
+                              Individual Contracts
+                            </span>
+                          </button>
+
+                          {contractsExpanded[collName] && (
+                            <div className={styles.contractsList}>
+                              {!contractsData[collName] ? (
+                                <div className={styles.placeholder}>Loading contracts...</div>
+                              ) : contractsData[collName].length === 0 ? (
+                                <div className={styles.placeholder}>No contracts found</div>
+                              ) : (
+                                contractsData[collName].map((inst) => (
+                                  <button
+                                    key={inst.symbol}
+                                    className={`${styles.instrument} ${
+                                      isSelected(selected, 'instrument', inst.symbol, collName)
+                                        ? styles.instrumentActive
+                                        : ''
+                                    }`}
+                                    onClick={() => onSelect({ type: 'instrument', symbol: inst.symbol, collection: collName })}
+                                  >
+                                    <span className={styles.instrumentSymbol}>{inst.symbol}</span>
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
