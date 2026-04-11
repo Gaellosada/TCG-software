@@ -129,6 +129,10 @@ class MongoInstrumentReader:
 
         Each contract's price data uses the first available provider
         (consistent with get_prices behavior).
+
+        Performance: benefits from indexes on ``expiration`` (sort key)
+        and ``expirationCycle`` (filter). Without these, MongoDB performs
+        a collection scan.
         """
         try:
             coll = self._db[collection]
