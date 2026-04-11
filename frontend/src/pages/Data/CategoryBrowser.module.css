@@ -1,0 +1,123 @@
+.browser {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.loading,
+.error {
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.error {
+  color: var(--error);
+}
+
+.category {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.categoryHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.categoryHeader:hover {
+  background: var(--bg-hover);
+}
+
+.categoryBar {
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.categoryLabel {
+  flex: 1;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chevron {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.categoryBody {
+  padding: 2px 0 6px 0;
+}
+
+.group {
+  margin-bottom: 4px;
+}
+
+.groupLabel {
+  padding: 6px 12px 2px 25px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.instrument {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 12px 6px 25px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background 0.15s ease, color 0.15s ease, border-left-color 0.15s ease;
+  border-left: 2px solid transparent;
+}
+
+.instrument:hover {
+  background: var(--bg-hover);
+}
+
+.instrumentActive {
+  background: var(--accent-subtle);
+  border-left-color: var(--accent);
+}
+
+.instrumentSymbol {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--badge-legacy-text);
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.instrumentActive .instrumentSymbol {
+  color: var(--accent);
+}
+
+.placeholder {
+  padding: 10px 12px 10px 25px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
