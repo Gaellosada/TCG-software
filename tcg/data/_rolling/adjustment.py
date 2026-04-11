@@ -30,6 +30,8 @@ def _get_close_at_roll(
     roll_date: int,
 ) -> float:
     """Get the close price of a contract on or nearest to the roll date."""
+    if len(contract.prices) == 0:
+        return 0.0
     idx = _find_closest_date_idx(contract.prices.dates, roll_date)
     return float(contract.prices.close[idx])
 
@@ -78,8 +80,8 @@ def adjust_proportional(
         old_close = _get_close_at_roll(old_contract, rd)
         new_close = _get_close_at_roll(new_contract, rd)
 
-        if old_close == 0.0:
-            continue  # Cannot compute ratio with zero denominator
+        if old_close == 0.0 or new_close == 0.0:
+            continue  # Cannot compute meaningful ratio with zero prices
 
         ratio = new_close / old_close
 

@@ -76,18 +76,21 @@ class ContinuousSeriesBuilder:
                 contracts=(),
             )
 
-        # 3. Concatenate
-        raw_series, actual_roll_dates = self._concatenate(trimmed)
+        # 3. Concatenate (dedup may subsume some contracts entirely)
+        raw_series, actual_roll_dates, surviving_idx = self._concatenate(trimmed)
 
-        # 4. Apply adjustment (use trimmed contracts — aligned with actual_roll_dates)
+        # Only contracts that survived dedup are relevant for adjustment
+        surviving = [trimmed[i] for i in surviving_idx]
+
+        # 4. Apply adjustment (surviving contracts aligned with actual_roll_dates)
         match config.adjustment:
             case AdjustmentMethod.PROPORTIONAL:
                 adjusted = adjust_proportional(
-                    raw_series, actual_roll_dates, trimmed
+                    raw_series, actual_roll_dates, surviving
                 )
             case AdjustmentMethod.DIFFERENCE:
                 adjusted = adjust_difference(
-                    raw_series, actual_roll_dates, trimmed
+                    raw_series, actual_roll_dates, surviving
                 )
             case _:
                 adjusted = raw_series
@@ -98,25 +101,28 @@ class ContinuousSeriesBuilder:
             roll_config=config,
             prices=adjusted,
             roll_dates=tuple(actual_roll_dates),
-            contracts=tuple(c.contract_id for c in trimmed),
+            contracts=tuple(c.contract_id for c in surviving),
         )
 
     def _concatenate(
         self,
         trimmed: list[ContractPriceData],
-    ) -> tuple[PriceSeries, list[int]]:
+    ) -> tuple[PriceSeries, list[int], list[int]]:
         """Concatenate trimmed contracts into a single PriceSeries.
 
         Deduplicates dates: if two contracts have data on the same date,
-        the later contract's data is kept.
+        the later contract's data is kept. This means some contracts may be
+        entirely subsumed by a later contract and contribute no rows.
 
         Returns
         -------
-        (concatenated_series, roll_dates) where roll_dates are the first
-        date of each new contract segment (len = len(trimmed) - 1).
+        (concatenated_series, roll_dates, surviving_indices) where:
+        - roll_dates are the first date of each new contract segment
+        - surviving_indices are the original indices into `trimmed` of
+          contracts that actually contribute data (len(roll_dates) == len(surviving) - 1)
         """
         if len(trimmed) == 1:
-            return trimmed[0].prices, []
+            return trimmed[0].prices, [], [0]
 
         all_dates: list[np.ndarray] = []
         all_open: list[np.ndarray] = []
@@ -173,11 +179,13 @@ class ContinuousSeriesBuilder:
         final_volume = cat_volume[keep]
         final_idx = cat_idx[keep]
 
-        # Compute roll dates: first date where contract index changes
+        # Compute roll dates and surviving contract indices
         roll_dates: list[int] = []
+        surviving: list[int] = [int(final_idx[0])]
         for j in range(1, len(final_idx)):
             if final_idx[j] != final_idx[j - 1]:
                 roll_dates.append(int(final_dates[j]))
+                surviving.append(int(final_idx[j]))
 
         series = PriceSeries(
             dates=final_dates,
@@ -188,4 +196,4 @@ class ContinuousSeriesBuilder:
             volume=final_volume,
         )
 
-        return series, roll_dates
+        return series, roll_dates, surviving

@@ -13,7 +13,12 @@ from tcg.types.market import (
     RollStrategy,
 )
 from tcg.data._rolling.calendar import compute_roll_dates, trim_overlaps
-from tcg.data._rolling.adjustment import adjust_proportional, adjust_difference
+from tcg.data._rolling.adjustment import (
+    adjust_proportional,
+    adjust_difference,
+    _find_closest_date_idx,
+    _get_close_at_roll,
+)
 from tcg.data._rolling.stitcher import ContinuousSeriesBuilder
 
 
@@ -628,3 +633,136 @@ class TestContinuousSeriesBuilder:
         )
         result = self.builder.build([c1], config)
         assert result.roll_config == config
+
+    def test_dedup_subsumes_entire_contract(self):
+        """When dedup eliminates all rows from a contract, adjustment still works.
+
+        Contract A: dates [10, 15], expires 15
+        Contract B: dates [10, 15, 20], expires 20
+        After trim: A keeps [10, 15], B keeps all.
+        After dedup (later contract wins): B's data for [10, 15, 20].
+        Contract A is fully subsumed — 0 roll transitions for that boundary.
+        """
+        c1 = _make_contract("VXF24", 20240115, [20240110, 20240115], [20.0, 21.0])
+        c2 = _make_contract("VXG24", 20240120, [20240110, 20240115, 20240120], [22.0, 23.0, 24.0])
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.PROPORTIONAL,
+        )
+        result = self.builder.build([c1, c2], config)
+
+        # c1 is entirely subsumed by c2 in dedup — only c2 survives
+        assert result.contracts == ("VXG24",)
+        assert len(result.roll_dates) == 0
+        assert len(result.prices) == 3
+        # Should be c2's raw prices (no adjustment needed, no rolls)
+        np.testing.assert_array_equal(result.prices.close, [22.0, 23.0, 24.0])
+
+    def test_dedup_subsumes_middle_contract(self):
+        """Middle contract subsumed, only first and last survive."""
+        c1 = _make_contract("VXF24", 20240110, [20240101, 20240105], [10.0, 11.0])
+        # c2's dates are all within c3's range, and c3 is later → c2 subsumed
+        c2 = _make_contract("VXG24", 20240115, [20240110, 20240115], [20.0, 21.0])
+        c3 = _make_contract("VXH24", 20240120, [20240110, 20240115, 20240120], [30.0, 31.0, 32.0])
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.PROPORTIONAL,
+        )
+        result = self.builder.build([c1, c2, c3], config)
+
+        # c2 subsumed by c3 → surviving are c1 and c3
+        assert result.contracts == ("VXF24", "VXH24")
+        assert len(result.roll_dates) == 1
+        # Prices should be finite (no assertion crash)
+        assert np.all(np.isfinite(result.prices.close))
+
+
+class TestFindClosestDateIdx:
+    """Edge case tests for _find_closest_date_idx."""
+
+    def test_single_element(self):
+        dates = np.array([20240101], dtype=np.int64)
+        assert _find_closest_date_idx(dates, 20240101) == 0
+        assert _find_closest_date_idx(dates, 20231201) == 0
+        assert _find_closest_date_idx(dates, 20240201) == 0
+
+    def test_target_before_all(self):
+        dates = np.array([20240110, 20240120, 20240130], dtype=np.int64)
+        assert _find_closest_date_idx(dates, 20240101) == 0
+
+    def test_target_after_all(self):
+        dates = np.array([20240110, 20240120, 20240130], dtype=np.int64)
+        assert _find_closest_date_idx(dates, 20240201) == 2
+
+    def test_exact_match(self):
+        dates = np.array([20240110, 20240120, 20240130], dtype=np.int64)
+        assert _find_closest_date_idx(dates, 20240120) == 1
+
+    def test_equidistant_favors_later(self):
+        """When equidistant, <= in the comparison favors the later date."""
+        dates = np.array([20240110, 20240120], dtype=np.int64)
+        # 20240115 is equidistant between 10 and 20
+        assert _find_closest_date_idx(dates, 20240115) == 1
+
+    def test_closer_to_earlier(self):
+        dates = np.array([20240110, 20240120], dtype=np.int64)
+        assert _find_closest_date_idx(dates, 20240112) == 0
+
+    def test_closer_to_later(self):
+        dates = np.array([20240110, 20240120], dtype=np.int64)
+        assert _find_closest_date_idx(dates, 20240118) == 1
+
+
+class TestGetCloseAtRoll:
+    """Edge case tests for _get_close_at_roll."""
+
+    def test_empty_contract_returns_zero(self):
+        """Empty contract should return 0.0, not crash."""
+        contract = ContractPriceData(
+            contract_id="VXF24",
+            expiration=20240115,
+            prices=PriceSeries.empty(),
+        )
+        assert _get_close_at_roll(contract, 20240115) == 0.0
+
+
+class TestNewCloseZero:
+    """Verify adjustment handles new_close == 0 gracefully."""
+
+    def test_proportional_new_close_zero_skips_roll(self):
+        """Proportional adjustment skips roll when new_close == 0."""
+        # Contract A: closes [100, 110]
+        # Contract B: close on roll date is 0 (shouldn't zero out history)
+        c1 = _make_contract("A", 20240110, [20240101, 20240110], [100.0, 110.0])
+        c2 = _make_contract("B", 20240120, [20240110, 20240120], [0.0, 50.0])
+
+        # Use stitcher to get raw series, then test adjustment directly
+        prices = PriceSeries(
+            dates=np.array([20240101, 20240110, 20240120], dtype=np.int64),
+            open=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            high=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            low=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            close=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            volume=np.array([1000.0, 1000.0, 1000.0], dtype=np.float64),
+        )
+        result = adjust_proportional(prices, [20240110], [c1, c2])
+
+        # Roll should be skipped (new_close=0), so prices unchanged
+        np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])
+
+    def test_difference_new_close_zero_still_adjusts(self):
+        """Difference adjustment works with new_close == 0 (diff is just -old_close)."""
+        c1 = _make_contract("A", 20240110, [20240101, 20240110], [100.0, 110.0])
+        c2 = _make_contract("B", 20240120, [20240110, 20240120], [0.0, 50.0])
+
+        prices = PriceSeries(
+            dates=np.array([20240101, 20240110, 20240120], dtype=np.int64),
+            open=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            high=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            low=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            close=np.array([100.0, 110.0, 50.0], dtype=np.float64),
+            volume=np.array([1000.0, 1000.0, 1000.0], dtype=np.float64),
+        )
+        # Difference: diff = 0 - 110 = -110, applied to dates < 20240110
+        result = adjust_difference(prices, [20240110], [c1, c2])
+        np.testing.assert_allclose(result.close[0], 100.0 - 110.0)  # -10.0
