@@ -10,6 +10,18 @@ function getStoredTheme() {
   }
 }
 
+function getStoredChartType() {
+  try {
+    return localStorage.getItem('tcg-default-chart-type') || 'candlestick';
+  } catch {
+    return 'candlestick';
+  }
+}
+
+function applyChartType(type) {
+  document.documentElement.dataset.chartType = type;
+}
+
 function applyTheme(theme) {
   if (theme === 'light') {
     document.documentElement.dataset.theme = 'light';
@@ -20,15 +32,29 @@ function applyTheme(theme) {
 
 function SettingsPage() {
   const [theme, setTheme] = useState(getStoredTheme);
+  const [chartType, setChartType] = useState(getStoredChartType);
 
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
 
+  useEffect(() => {
+    applyChartType(chartType);
+  }, [chartType]);
+
   function handleThemeChange(newTheme) {
     setTheme(newTheme);
     try {
       localStorage.setItem('tcg-theme', newTheme);
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }
+
+  function handleChartTypeChange(newType) {
+    setChartType(newType);
+    try {
+      localStorage.setItem('tcg-default-chart-type', newType);
     } catch {
       // localStorage unavailable — ignore
     }
@@ -60,6 +86,27 @@ function SettingsPage() {
               <Icon name="sun" size={14} />
               Light
             </span>
+          </button>
+        </div>
+      </div>
+
+      <div className={styles.card}>
+        <h2 className={styles.cardTitle}>Charts</h2>
+        <p className={styles.cardDescription}>
+          Default chart style for price data. Instruments without OHLC data always use line charts.
+        </p>
+        <div className={styles.themeButtons}>
+          <button
+            className={`${styles.themeBtn} ${chartType === 'candlestick' ? styles.themeBtnActive : ''}`}
+            onClick={() => handleChartTypeChange('candlestick')}
+          >
+            Candlestick
+          </button>
+          <button
+            className={`${styles.themeBtn} ${chartType === 'line' ? styles.themeBtnActive : ''}`}
+            onClick={() => handleChartTypeChange('line')}
+          >
+            Line
           </button>
         </div>
       </div>

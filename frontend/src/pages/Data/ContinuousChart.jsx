@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import Plot from 'react-plotly.js';
 import useAsync from '../../hooks/useAsync';
 import useTheme from '../../hooks/useTheme';
+import useChartPreference from '../../hooks/useChartPreference';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
 import { buildBaseLayout, CHART_CONFIG, TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
 import { formatDateInt } from '../../utils/format';
@@ -10,10 +11,16 @@ import styles from './ChartBase.module.css';
 function ContinuousChart({ collection }) {
   const theme = useTheme();
   const colors = getChartColors(theme);
+  const preference = useChartPreference();
 
   const [adjustment, setAdjustment] = useState('none');
   const [cycle, setCycle] = useState('');
-  const [chartType, setChartType] = useState('candlestick');
+  const [chartType, setChartType] = useState(preference);
+
+  // Sync local state when global preference changes
+  useEffect(() => {
+    setChartType(preference);
+  }, [preference]);
 
   const { data: cyclesData } = useAsync(
     () => getAvailableCycles(collection),
@@ -58,11 +65,12 @@ function ContinuousChart({ collection }) {
   const dates = data.dates.map(formatDateInt);
   const hasVolume = data.volume && data.volume.some((v) => v > 0);
   const hasOHLC = data.open && data.high && data.low && data.close;
+  const effectiveType = hasOHLC ? chartType : 'line';
   const rollDates = data.roll_dates || [];
 
   const traces = [];
 
-  if (chartType === 'candlestick' && hasOHLC) {
+  if (effectiveType === 'candlestick') {
     traces.push({
       x: dates,
       open: data.open,
@@ -172,17 +180,19 @@ function ContinuousChart({ collection }) {
       </div>
 
       <div className={styles.controls}>
-        <label className={styles.controlLabel}>
-          Chart
-          <select
-            className={styles.select}
-            value={chartType}
-            onChange={(e) => setChartType(e.target.value)}
-          >
-            <option value="candlestick">Candlestick</option>
-            <option value="line">Line</option>
-          </select>
-        </label>
+        {hasOHLC && (
+          <label className={styles.controlLabel}>
+            Chart
+            <select
+              className={styles.select}
+              value={chartType}
+              onChange={(e) => setChartType(e.target.value)}
+            >
+              <option value="candlestick">Candlestick</option>
+              <option value="line">Line</option>
+            </select>
+          </label>
+        )}
 
         <label className={styles.controlLabel}>
           Adjustment
