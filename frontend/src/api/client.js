@@ -10,10 +10,18 @@ class ApiError extends Error {
 }
 
 async function fetchApi(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...options.headers },
+      ...options,
+    });
+  } catch (err) {
+    throw new ApiError(
+      'network_error',
+      `Backend unreachable — is the server running on ${API_BASE}? (${err.message})`,
+    );
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({
