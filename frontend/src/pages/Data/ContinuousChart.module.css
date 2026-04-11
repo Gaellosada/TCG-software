@@ -1,30 +1,4 @@
-.container {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.header {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 16px 24px 8px;
-  flex-shrink: 0;
-}
-
-.title {
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0;
-}
-
-.meta {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
+/* ContinuousChart-specific styles (base styles in ChartBase.module.css) */
 
 .controls {
   display: flex;
@@ -51,26 +25,4 @@
   color: var(--text-primary);
   font-size: 0.8rem;
   font-family: inherit;
-}
-
-.chartWrapper {
-  flex: 1;
-  min-height: 0;
-  padding: 0 8px 8px;
-}
-
-.status,
-.error {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 1;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-}
-
-.error {
-  color: var(--error);
-  padding: 24px;
-  text-align: center;
 }

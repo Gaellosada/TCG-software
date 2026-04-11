@@ -53,12 +53,16 @@ def adjust_proportional(
     roll_dates : list[int]
         YYYYMMDD roll dates (one per roll boundary).
     contracts : list[ContractPriceData]
-        Original (pre-trim) contracts, sorted by expiration.
+        Trimmed contracts aligned with roll_dates (len = len(roll_dates) + 1).
         contracts[i] is the outgoing contract at roll_dates[i],
         contracts[i+1] is the incoming contract.
     """
     if not roll_dates:
         return prices
+
+    assert len(contracts) == len(roll_dates) + 1, (
+        f"contracts ({len(contracts)}) must be len(roll_dates) + 1 ({len(roll_dates) + 1})"
+    )
 
     adj_open = prices.open.copy()
     adj_high = prices.high.copy()
@@ -113,10 +117,14 @@ def adjust_difference(
     roll_dates : list[int]
         YYYYMMDD roll dates (one per roll boundary).
     contracts : list[ContractPriceData]
-        Original (pre-trim) contracts, sorted by expiration.
+        Trimmed contracts aligned with roll_dates (len = len(roll_dates) + 1).
     """
     if not roll_dates:
         return prices
+
+    assert len(contracts) == len(roll_dates) + 1, (
+        f"contracts ({len(contracts)}) must be len(roll_dates) + 1 ({len(roll_dates) + 1})"
+    )
 
     adj_open = prices.open.copy()
     adj_high = prices.high.copy()

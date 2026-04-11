@@ -68,6 +68,13 @@ class MarketDataService(Protocol):
         end: date | None = None,
     ) -> ContinuousSeries | None: ...
 
+    # --- Futures metadata ---
+
+    async def get_available_cycles(
+        self,
+        collection: str,
+    ) -> list[str]: ...
+
     # --- Multi-instrument (date alignment) ---
 
     async def get_aligned_prices(

@@ -4,12 +4,9 @@ import useAsync from '../../hooks/useAsync';
 import useTheme from '../../hooks/useTheme';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
 import { buildBaseLayout, CHART_CONFIG, TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
-import styles from './ContinuousChart.module.css';
-
-function formatDateInt(dateInt) {
-  const s = String(dateInt);
-  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
-}
+import { formatDateInt } from '../../utils/format';
+import baseStyles from './ChartBase.module.css';
+import ownStyles from './ContinuousChart.module.css';
 
 function ContinuousChart({ collection }) {
   const theme = useTheme();
@@ -36,24 +33,24 @@ function ContinuousChart({ collection }) {
 
   if (loading) {
     return (
-      <div className={styles.container}>
-        <div className={styles.status}>Loading continuous series...</div>
+      <div className={baseStyles.container}>
+        <div className={baseStyles.status}>Loading continuous series...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className={styles.container}>
-        <div className={styles.error}>Failed to load series: {error.message}</div>
+      <div className={baseStyles.container}>
+        <div className={baseStyles.error}>Failed to load series: {error.message}</div>
       </div>
     );
   }
 
   if (!data || !data.dates || data.dates.length === 0) {
     return (
-      <div className={styles.container}>
-        <div className={styles.status}>No continuous series data available.</div>
+      <div className={baseStyles.container}>
+        <div className={baseStyles.status}>No continuous series data available.</div>
       </div>
     );
   }
@@ -136,10 +133,10 @@ function ContinuousChart({ collection }) {
   const adjustmentLabels = { none: 'None', proportional: 'Proportional', difference: 'Difference' };
 
   return (
-    <div className={styles.container}>
-      <div className={styles.header}>
-        <h2 className={styles.title}>{collection} — Continuous</h2>
-        <span className={styles.meta}>
+    <div className={baseStyles.container}>
+      <div className={baseStyles.header}>
+        <h2 className={baseStyles.title}>{collection} — Continuous</h2>
+        <span className={baseStyles.meta}>
           {data.dates.length.toLocaleString()} bars
           &nbsp;&middot;&nbsp;
           {formatDateInt(data.dates[0])} to {formatDateInt(data.dates[data.dates.length - 1])}
@@ -158,11 +155,11 @@ function ContinuousChart({ collection }) {
         </span>
       </div>
 
-      <div className={styles.controls}>
-        <label className={styles.controlLabel}>
+      <div className={ownStyles.controls}>
+        <label className={ownStyles.controlLabel}>
           Adjustment
           <select
-            className={styles.select}
+            className={ownStyles.select}
             value={adjustment}
             onChange={(e) => setAdjustment(e.target.value)}
           >
@@ -172,10 +169,10 @@ function ContinuousChart({ collection }) {
           </select>
         </label>
 
-        <label className={styles.controlLabel}>
+        <label className={ownStyles.controlLabel}>
           Cycle
           <select
-            className={styles.select}
+            className={ownStyles.select}
             value={cycle}
             onChange={(e) => setCycle(e.target.value)}
           >
@@ -187,7 +184,7 @@ function ContinuousChart({ collection }) {
         </label>
       </div>
 
-      <div className={styles.chartWrapper}>
+      <div className={baseStyles.chartWrapper}>
         <Plot
           data={traces}
           layout={layout}

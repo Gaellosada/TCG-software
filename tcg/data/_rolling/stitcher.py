@@ -44,18 +44,10 @@ class ContinuousSeriesBuilder:
         contracts = [c for c in contracts if len(c.prices) > 0]
 
         if not contracts:
-            empty_ps = PriceSeries(
-                dates=np.array([], dtype=np.int64),
-                open=np.array([], dtype=np.float64),
-                high=np.array([], dtype=np.float64),
-                low=np.array([], dtype=np.float64),
-                close=np.array([], dtype=np.float64),
-                volume=np.array([], dtype=np.float64),
-            )
             return ContinuousSeries(
                 collection=collection,
                 roll_config=config,
-                prices=empty_ps,
+                prices=PriceSeries.empty(),
                 roll_dates=(),
                 contracts=(),
             )
@@ -76,18 +68,10 @@ class ContinuousSeriesBuilder:
         trimmed = trim_overlaps(contracts, roll_schedule)
 
         if not trimmed:
-            empty_ps = PriceSeries(
-                dates=np.array([], dtype=np.int64),
-                open=np.array([], dtype=np.float64),
-                high=np.array([], dtype=np.float64),
-                low=np.array([], dtype=np.float64),
-                close=np.array([], dtype=np.float64),
-                volume=np.array([], dtype=np.float64),
-            )
             return ContinuousSeries(
                 collection=collection,
                 roll_config=config,
-                prices=empty_ps,
+                prices=PriceSeries.empty(),
                 roll_dates=(),
                 contracts=(),
             )

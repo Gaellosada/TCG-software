@@ -16,6 +16,7 @@ from pymongo.errors import PyMongoError
 
 from tcg.types.errors import DataAccessError
 from tcg.types.market import ContractPriceData, InstrumentId, PriceSeries
+from tcg.data._utils import filter_date_range
 
 from tcg.data._mongo.helpers import (
     deserialize_doc_id,
@@ -104,7 +105,7 @@ class MongoInstrumentReader:
 
             # Apply date range filter
             if start is not None or end is not None:
-                series = _filter_date_range(series, start, end)
+                series = filter_date_range(series, start, end)
                 if series is None or len(series) == 0:
                     return None
 
@@ -197,37 +198,6 @@ class MongoInstrumentReader:
                 return doc
         return None
 
-
-def _filter_date_range(
-    series: PriceSeries,
-    start: date | None,
-    end: date | None,
-) -> PriceSeries | None:
-    """Slice a ``PriceSeries`` to the given date range.
-
-    Dates in the series are YYYYMMDD integers.
-    """
-    mask = np.ones(len(series), dtype=bool)
-
-    if start is not None:
-        start_int = start.year * 10000 + start.month * 100 + start.day
-        mask &= series.dates >= start_int
-
-    if end is not None:
-        end_int = end.year * 10000 + end.month * 100 + end.day
-        mask &= series.dates <= end_int
-
-    if not mask.any():
-        return None
-
-    return PriceSeries(
-        dates=series.dates[mask],
-        open=series.open[mask],
-        high=series.high[mask],
-        low=series.low[mask],
-        close=series.close[mask],
-        volume=series.volume[mask],
-    )
 
 
 def _parse_expiration(value: Any) -> int | None:

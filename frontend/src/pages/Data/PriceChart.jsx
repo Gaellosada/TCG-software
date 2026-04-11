@@ -3,12 +3,8 @@ import useAsync from '../../hooks/useAsync';
 import useTheme from '../../hooks/useTheme';
 import { getInstrumentPrices } from '../../api/data';
 import { buildBaseLayout, CHART_CONFIG, TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
-import styles from './PriceChart.module.css';
-
-function formatDateInt(dateInt) {
-  const s = String(dateInt);
-  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
-}
+import { formatDateInt } from '../../utils/format';
+import styles from './ChartBase.module.css';
 
 function PriceChart({ collection, instrument }) {
   const theme = useTheme();

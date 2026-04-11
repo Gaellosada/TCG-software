@@ -26,6 +26,7 @@ from tcg.data._cache import LRUCache
 from tcg.data._mongo.instruments import MongoInstrumentReader
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data._rolling import ContinuousSeriesBuilder
+from tcg.data._utils import date_to_int, filter_date_range
 
 
 class DefaultMarketDataService:
@@ -155,23 +156,12 @@ class DefaultMarketDataService:
 
         # Apply date range filter
         if start is not None or end is not None:
-            from tcg.data._mongo.instruments import _filter_date_range
-
-            filtered_prices = _filter_date_range(result.prices, start, end)
+            filtered_prices = filter_date_range(result.prices, start, end)
             if filtered_prices is None or len(filtered_prices) == 0:
                 return None
 
-            # Rebuild with filtered prices and adjusted roll_dates/contracts
-            start_int = (
-                start.year * 10000 + start.month * 100 + start.day
-                if start is not None
-                else 0
-            )
-            end_int = (
-                end.year * 10000 + end.month * 100 + end.day
-                if end is not None
-                else 99999999
-            )
+            start_int = date_to_int(start) if start is not None else 0
+            end_int = date_to_int(end) if end is not None else 99999999
             filtered_roll_dates = tuple(
                 rd for rd in result.roll_dates
                 if start_int <= rd <= end_int
