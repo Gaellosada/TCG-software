@@ -63,14 +63,12 @@ function SettingsPage() {
   return (
     <div className={styles.page}>
       <h1 className={styles.title}>Settings</h1>
-      <p className={styles.description}>Configure your workspace preferences.</p>
 
-      <div className={styles.card}>
-        <h2 className={styles.cardTitle}>Appearance</h2>
-        <p className={styles.cardDescription}>Choose your preferred color theme.</p>
-        <div className={styles.themeButtons}>
+      <div className={styles.settingRow}>
+        <span className={styles.settingLabel}>Theme</span>
+        <div className={styles.buttonGroup}>
           <button
-            className={`${styles.themeBtn} ${theme === 'dark' ? styles.themeBtnActive : ''}`}
+            className={`${styles.optionBtn} ${theme === 'dark' ? styles.optionBtnActive : ''}`}
             onClick={() => handleThemeChange('dark')}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -79,7 +77,7 @@ function SettingsPage() {
             </span>
           </button>
           <button
-            className={`${styles.themeBtn} ${theme === 'light' ? styles.themeBtnActive : ''}`}
+            className={`${styles.optionBtn} ${theme === 'light' ? styles.optionBtnActive : ''}`}
             onClick={() => handleThemeChange('light')}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -90,20 +88,17 @@ function SettingsPage() {
         </div>
       </div>
 
-      <div className={styles.card}>
-        <h2 className={styles.cardTitle}>Charts</h2>
-        <p className={styles.cardDescription}>
-          Default chart style for price data. Instruments without OHLC data always use line charts.
-        </p>
-        <div className={styles.themeButtons}>
+      <div className={styles.settingRow}>
+        <span className={styles.settingLabel}>Default chart</span>
+        <div className={styles.buttonGroup}>
           <button
-            className={`${styles.themeBtn} ${chartType === 'candlestick' ? styles.themeBtnActive : ''}`}
+            className={`${styles.optionBtn} ${chartType === 'candlestick' ? styles.optionBtnActive : ''}`}
             onClick={() => handleChartTypeChange('candlestick')}
           >
             Candlestick
           </button>
           <button
-            className={`${styles.themeBtn} ${chartType === 'line' ? styles.themeBtnActive : ''}`}
+            className={`${styles.optionBtn} ${chartType === 'line' ? styles.optionBtnActive : ''}`}
             onClick={() => handleChartTypeChange('line')}
           >
             Line

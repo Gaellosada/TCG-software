@@ -216,6 +216,8 @@ def compute_weighted_portfolio(
     dict[str, npt.NDArray[np.float64]],
     npt.NDArray[np.float64],
     dict[str, npt.NDArray[np.float64]],
+    dict[str, npt.NDArray[np.float64]],
+    list[int],
 ]:
     """Compute a weighted portfolio with rebalancing.
 
@@ -242,6 +244,10 @@ def compute_weighted_portfolio(
         - per_leg_returns: ``{label: daily_returns}`` for each leg
         - portfolio_equity: equity curve of the combined portfolio (length N)
         - per_leg_equities: ``{label: equity_curve}`` for each leg
+        - raw_leg_equities: ``{label: equity_curve}`` buy-and-hold leg equities
+          (same as per_leg_equities when rebalance_freq is ``"none"``)
+        - rebalance_dates: YYYYMMDD integers where rebalancing occurred (empty
+          when rebalance_freq is ``"none"`` or ``"daily"``)
 
     Raises
     ------
@@ -287,20 +293,41 @@ def compute_weighted_portfolio(
 
     # ── Dispatch by rebalance frequency ──
     if rebalance_freq == "daily":
-        portfolio_returns, portfolio_equity, per_leg_equities = _compute_daily_rebalance(
-            per_leg_returns, norm_weights, return_type, n, labels,
+        portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
+            _compute_daily_rebalance(
+                per_leg_returns, norm_weights, return_type, n, labels,
+            )
         )
     elif rebalance_freq == "none":
-        portfolio_returns, portfolio_equity, per_leg_equities = _compute_buy_and_hold(
-            per_leg_returns, norm_weights, return_type, n, labels,
+        portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
+            _compute_buy_and_hold(
+                per_leg_returns, norm_weights, return_type, n, labels,
+            )
         )
     else:
         # Periodic rebalancing: weekly, monthly, quarterly, annually
-        portfolio_returns, portfolio_equity, per_leg_equities = _compute_periodic_rebalance(
-            per_leg_returns, norm_weights, return_type, n, labels, dates, rebalance_freq,
+        portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
+            _compute_periodic_rebalance(
+                per_leg_returns, norm_weights, return_type, n, labels, dates, rebalance_freq,
+            )
         )
 
-    return portfolio_returns, per_leg_returns, portfolio_equity, per_leg_equities
+    # ── Raw (buy-and-hold) leg equities for normalized comparison ──
+    if rebalance_freq == "none":
+        raw_leg_equities = per_leg_equities
+    else:
+        _, _, raw_leg_equities, _ = _compute_buy_and_hold(
+            per_leg_returns, norm_weights, return_type, n, labels,
+        )
+
+    return (
+        portfolio_returns,
+        per_leg_returns,
+        portfolio_equity,
+        per_leg_equities,
+        raw_leg_equities,
+        rebalance_dates,
+    )
 
 
 def _compute_daily_rebalance(
@@ -309,7 +336,7 @@ def _compute_daily_rebalance(
     return_type: str,
     n: int,
     labels: list[str],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]], list[int]]:
     """Daily rebalancing = fixed-weight returns each day.
 
     Portfolio return is the weighted sum of individual leg returns.
@@ -342,7 +369,7 @@ def _compute_daily_rebalance(
     for lbl in labels:
         per_leg_equities[lbl] = portfolio_equity * abs(norm_weights[lbl])
 
-    return portfolio_returns, portfolio_equity, per_leg_equities
+    return portfolio_returns, portfolio_equity, per_leg_equities, []
 
 
 def _compute_buy_and_hold(
@@ -351,7 +378,7 @@ def _compute_buy_and_hold(
     return_type: str,
     n: int,
     labels: list[str],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]], list[int]]:
     """Buy-and-hold: legs drift independently from initial allocation.
 
     Each leg starts at (weight * 100) and grows with its own returns.
@@ -391,7 +418,7 @@ def _compute_buy_and_hold(
         else:  # log
             portfolio_returns[1:] = np.log(portfolio_equity[1:] / portfolio_equity[:-1])
 
-    return portfolio_returns, portfolio_equity, per_leg_equities
+    return portfolio_returns, portfolio_equity, per_leg_equities, []
 
 
 def _compute_periodic_rebalance(
@@ -402,13 +429,18 @@ def _compute_periodic_rebalance(
     labels: list[str],
     dates: npt.NDArray[np.int64],
     rebalance_freq: str,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]], list[int]]:
     """Periodic rebalancing: within each period, legs drift independently.
 
     At each rebalance boundary, total portfolio value is redistributed
     according to target weights.
     """
     boundaries = _detect_rebalance_boundaries(dates, rebalance_freq)
+
+    # Collect rebalance dates (exclude index 0 — that's the initial allocation)
+    rebalance_dates: list[int] = [
+        int(dates[i]) for i in range(1, n) if boundaries[i]
+    ]
 
     initial_total = 100.0
     portfolio_equity = np.empty(n, dtype=np.float64)
@@ -469,7 +501,7 @@ def _compute_periodic_rebalance(
         else:  # log
             portfolio_returns[1:] = np.log(portfolio_equity[1:] / portfolio_equity[:-1])
 
-    return portfolio_returns, portfolio_equity, per_leg_equities
+    return portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates
 
 
 # ---------------------------------------------------------------------------

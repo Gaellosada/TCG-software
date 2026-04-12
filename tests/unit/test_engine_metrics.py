@@ -123,7 +123,7 @@ class TestComputeWeightedPortfolio:
         prices = np.array([100.0, 110.0, 105.0, 115.0])
         dates = np.array([20240101, 20240102, 20240103, 20240104], dtype=np.int64)
 
-        port_ret, leg_ret, port_eq, leg_eq = compute_weighted_portfolio(
+        port_ret, leg_ret, port_eq, leg_eq, raw_leg_eq, rb_dates = compute_weighted_portfolio(
             aligned_closes={"A": prices},
             weights={"A": 1.0},
             rebalance_freq="none",
@@ -135,6 +135,9 @@ class TestComputeWeightedPortfolio:
         assert port_eq[0] == 100.0
         # Portfolio equity should track the single leg
         np.testing.assert_allclose(port_eq, leg_eq["A"], atol=1e-10)
+        # No rebalance -> raw legs are same as leg equities, no rebalance dates
+        assert raw_leg_eq is leg_eq
+        assert rb_dates == []
 
     def test_equal_weight_daily_rebalance(self):
         """Two legs with equal weight and daily rebalance."""
@@ -142,7 +145,7 @@ class TestComputeWeightedPortfolio:
         prices_b = np.array([100.0, 90.0, 100.0])
         dates = np.array([20240101, 20240102, 20240103], dtype=np.int64)
 
-        port_ret, leg_ret, port_eq, leg_eq = compute_weighted_portfolio(
+        port_ret, leg_ret, port_eq, leg_eq, _, rb_dates = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.5, "B": 0.5},
             rebalance_freq="daily",
@@ -155,12 +158,14 @@ class TestComputeWeightedPortfolio:
         # Day 2: A=+9.09%, B=+11.11%, portfolio = 0.5*0.0909 + 0.5*0.1111 = 10.10%
         expected_day2 = 0.5 * (120.0 / 110.0 - 1) + 0.5 * (100.0 / 90.0 - 1)
         np.testing.assert_allclose(port_ret[2], expected_day2, atol=1e-10)
+        # Daily rebalance returns no rebalance dates
+        assert rb_dates == []
 
     def test_daily_rebalance_equity_starts_at_100(self):
         prices_a = np.array([100.0, 105.0])
         dates = np.array([20240101, 20240102], dtype=np.int64)
 
-        _, _, port_eq, _ = compute_weighted_portfolio(
+        _, _, port_eq, _, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices_a},
             weights={"A": 1.0},
             rebalance_freq="daily",
@@ -177,7 +182,7 @@ class TestComputeWeightedPortfolio:
         prices_b = np.array([100.0, 100.0])
         dates = np.array([20240101, 20240102], dtype=np.int64)
 
-        _, _, port_eq, leg_eq = compute_weighted_portfolio(
+        _, _, port_eq, leg_eq, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.5, "B": 0.5},
             rebalance_freq="none",
@@ -198,7 +203,7 @@ class TestComputeWeightedPortfolio:
         prices_a = np.array([100.0, 110.0, 120.0, 130.0, 140.0])
         prices_b = np.array([100.0, 100.0, 100.0, 100.0, 100.0])
 
-        _, _, port_eq, leg_eq = compute_weighted_portfolio(
+        _, _, port_eq, leg_eq, _, rb_dates = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.5, "B": 0.5},
             rebalance_freq="monthly",
@@ -220,6 +225,9 @@ class TestComputeWeightedPortfolio:
         np.testing.assert_allclose(leg_eq["A"][3], 55.0 * (130.0 / 120.0), atol=1e-10)
         np.testing.assert_allclose(leg_eq["B"][3], 55.0 * (100.0 / 100.0), atol=1e-10)
 
+        # Monthly rebalance should report Feb 1 as a rebalance date
+        assert rb_dates == [20240201]
+
     def test_quarterly_rebalance(self):
         """Quarterly boundaries at months 1, 4, 7, 10."""
         # March 31 to April 1 = quarter boundary
@@ -227,7 +235,7 @@ class TestComputeWeightedPortfolio:
         prices_a = np.array([100.0, 110.0])
         prices_b = np.array([100.0, 90.0])
 
-        _, _, port_eq, leg_eq = compute_weighted_portfolio(
+        _, _, port_eq, leg_eq, _, rb_dates = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.6, "B": 0.4},
             rebalance_freq="quarterly",
@@ -241,6 +249,8 @@ class TestComputeWeightedPortfolio:
         # Then A grows by 10%, B falls by 10%
         np.testing.assert_allclose(leg_eq["A"][1], 60.0 * 1.10, atol=1e-10)
         np.testing.assert_allclose(leg_eq["B"][1], 40.0 * 0.90, atol=1e-10)
+        # Quarter boundary at April 1 -> rebalance date
+        assert rb_dates == [20240401]
 
     def test_weekly_rebalance(self):
         """Weekly rebalance at Monday boundary."""
@@ -252,7 +262,7 @@ class TestComputeWeightedPortfolio:
         prices_a = np.linspace(100.0, 112.0, n)
         prices_b = np.ones(n) * 100.0
 
-        port_ret, leg_ret, port_eq, leg_eq = compute_weighted_portfolio(
+        port_ret, leg_ret, port_eq, leg_eq, _, rb_dates = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.5, "B": 0.5},
             rebalance_freq="weekly",
@@ -266,6 +276,8 @@ class TestComputeWeightedPortfolio:
         assert port_eq[0] == 100.0
         # Portfolio should grow since A grows and B is flat
         assert port_eq[-1] > 100.0
+        # Week boundary at Jan 8 -> rebalance date
+        assert rb_dates == [20240108]
 
     def test_annually_rebalance(self):
         """Annual rebalance at year boundary."""
@@ -273,7 +285,7 @@ class TestComputeWeightedPortfolio:
         prices_a = np.array([100.0, 110.0])
         prices_b = np.array([100.0, 95.0])
 
-        _, _, port_eq, leg_eq = compute_weighted_portfolio(
+        _, _, port_eq, leg_eq, _, rb_dates = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.7, "B": 0.3},
             rebalance_freq="annually",
@@ -287,6 +299,8 @@ class TestComputeWeightedPortfolio:
         # A: 70 * 1.10 = 77, B: 30 * 0.95 = 28.5
         np.testing.assert_allclose(leg_eq["A"][1], 70.0 * 1.10, atol=1e-10)
         np.testing.assert_allclose(leg_eq["B"][1], 30.0 * 0.95, atol=1e-10)
+        # Year boundary at Jan 2 2024 -> rebalance date
+        assert rb_dates == [20240102]
 
     def test_weight_normalization(self):
         """Weights normalized by sum of absolute values."""
@@ -294,7 +308,7 @@ class TestComputeWeightedPortfolio:
         dates = np.array([20240101, 20240102], dtype=np.int64)
 
         # Weight of 2.0 should be normalized to 1.0 (only one leg)
-        _, _, port_eq_2, _ = compute_weighted_portfolio(
+        _, _, port_eq_2, _, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices_a},
             weights={"A": 2.0},
             rebalance_freq="daily",
@@ -302,7 +316,7 @@ class TestComputeWeightedPortfolio:
             dates=dates,
         )
 
-        _, _, port_eq_1, _ = compute_weighted_portfolio(
+        _, _, port_eq_1, _, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices_a},
             weights={"A": 1.0},
             rebalance_freq="daily",
@@ -317,7 +331,7 @@ class TestComputeWeightedPortfolio:
         prices_a = np.array([100.0, 90.0])  # falls 10%
         dates = np.array([20240101, 20240102], dtype=np.int64)
 
-        _, _, port_eq, leg_eq = compute_weighted_portfolio(
+        _, _, port_eq, leg_eq, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices_a},
             weights={"A": -1.0},
             rebalance_freq="none",
@@ -335,7 +349,7 @@ class TestComputeWeightedPortfolio:
         prices = np.array([100.0, 105.0, 110.0])
         dates = np.array([20240101, 20240102, 20240103], dtype=np.int64)
 
-        port_ret, _, port_eq, _ = compute_weighted_portfolio(
+        port_ret, _, port_eq, _, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices},
             weights={"A": 1.0},
             rebalance_freq="daily",
@@ -383,13 +397,38 @@ class TestComputeWeightedPortfolio:
                 np.array([20240101], dtype=np.int64),
             )
 
+    def test_raw_leg_equities_diverge_from_rebalanced(self):
+        """raw_leg_equities should differ from leg_equities when rebalancing is active."""
+        dates = np.array([20240102, 20240103, 20240104, 20240201, 20240202], dtype=np.int64)
+        prices_a = np.array([100.0, 110.0, 120.0, 130.0, 140.0])
+        prices_b = np.array([100.0, 100.0, 100.0, 100.0, 100.0])
+
+        _, _, _, leg_eq, raw_leg_eq, _ = compute_weighted_portfolio(
+            aligned_closes={"A": prices_a, "B": prices_b},
+            weights={"A": 0.5, "B": 0.5},
+            rebalance_freq="monthly",
+            return_type="normal",
+            dates=dates,
+        )
+
+        # raw_leg_eq is buy-and-hold — should NOT be the same object
+        assert raw_leg_eq is not leg_eq
+
+        # Before the rebalance boundary (day 2), values should match
+        np.testing.assert_allclose(leg_eq["A"][0], raw_leg_eq["A"][0], atol=1e-10)
+        np.testing.assert_allclose(leg_eq["A"][2], raw_leg_eq["A"][2], atol=1e-10)
+
+        # After rebalance (day 3+), rebalanced legs diverge from raw
+        # Rebalanced A gets reset to target weight; raw A keeps drifting
+        assert not np.allclose(leg_eq["A"][3:], raw_leg_eq["A"][3:], atol=1e-10)
+
     def test_rebalance_preserves_total_value(self):
         """Rebalancing should not change total portfolio value."""
         dates = np.array([20240102, 20240103, 20240201, 20240202], dtype=np.int64)
         prices_a = np.array([100.0, 120.0, 130.0, 140.0])
         prices_b = np.array([100.0, 80.0, 70.0, 60.0])
 
-        _, _, port_eq_rebal, leg_eq_rebal = compute_weighted_portfolio(
+        _, _, port_eq_rebal, leg_eq_rebal, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.5, "B": 0.5},
             rebalance_freq="monthly",
@@ -622,7 +661,7 @@ class TestIntegration:
             np.concatenate([[1.0], 1.0 + np.random.normal(0.0001, 0.005, n - 1)])
         )
 
-        port_ret, leg_ret, port_eq, leg_eq = compute_weighted_portfolio(
+        port_ret, leg_ret, port_eq, leg_eq, _, _ = compute_weighted_portfolio(
             aligned_closes={"stocks": prices_a, "bonds": prices_b},
             weights={"stocks": 0.6, "bonds": 0.4},
             rebalance_freq="daily",
@@ -659,7 +698,7 @@ class TestIntegration:
             np.concatenate([[1.0], 1.0 + np.random.normal(0.0002, 0.008, n - 1)])
         )
 
-        port_ret, leg_ret, port_eq, leg_eq = compute_weighted_portfolio(
+        port_ret, leg_ret, port_eq, leg_eq, _, _ = compute_weighted_portfolio(
             aligned_closes={"A": prices_a, "B": prices_b},
             weights={"A": 0.7, "B": 0.3},
             rebalance_freq="monthly",

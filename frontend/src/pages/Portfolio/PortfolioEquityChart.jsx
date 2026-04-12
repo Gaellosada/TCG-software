@@ -22,6 +22,8 @@ export default function PortfolioEquityChart({
   dates,
   portfolioEquity,
   legEquities,
+  rawLegEquities,
+  rebalanceDates,
   legs,
 }) {
   const theme = useTheme();
@@ -53,20 +55,25 @@ export default function PortfolioEquityChart({
       type: 'scatter',
       mode: 'lines',
       name: 'Portfolio',
-      line: { color: TRACE_COLORS[0], width: 2.5 },
+      line: { color: TRACE_COLORS[0], width: 1.5 },
       hovertemplate: '%{x}<br>Portfolio: %{y:.1f}<extra></extra>',
     });
 
     // Per-leg equity curves — only in normalized and weighted modes
     if (displayMode !== 'portfolio' && legEquities) {
+      // In normalized mode, use raw (buy-and-hold) leg equities to show
+      // true asset performance, independent of rebalancing.
+      const legSource = displayMode === 'normalized' && rawLegEquities
+        ? rawLegEquities
+        : legEquities;
       Object.keys(legEquities).forEach((label, idx) => {
         const colorIdx = (1 + idx) % TRACE_COLORS.length;
         let y;
         if (displayMode === 'normalized') {
           // For short legs, un-invert first so we show the underlying asset's performance
           const raw = shortLabels.has(label)
-            ? toLongEquivalent(legEquities[label])
-            : legEquities[label];
+            ? toLongEquivalent(legSource[label])
+            : legSource[label];
           y = normalizeTo100(raw);
         } else {
           y = legEquities[label];
@@ -77,23 +84,54 @@ export default function PortfolioEquityChart({
           type: 'scatter',
           mode: 'lines',
           name: label,
-          line: { color: TRACE_COLORS[colorIdx], width: 1.5 },
+          line: { color: TRACE_COLORS[colorIdx], width: 1 },
           hovertemplate: `%{x}<br>${label}: %{y:.1f}<extra></extra>`,
         });
+      });
+    }
+
+    // Enhancement #5: Rebalance date vertical lines
+    if (rebalanceDates && rebalanceDates.length > 0) {
+      const rbX = [];
+      const rbY = [];
+      for (const d of rebalanceDates) {
+        rbX.push(d, d, null);
+        rbY.push(0, 1, null);
+      }
+      t.push({
+        x: rbX,
+        y: rbY,
+        type: 'scatter',
+        mode: 'lines',
+        name: 'Rebalance',
+        line: { color: 'rgba(168, 85, 247, 0.35)', width: 1, dash: 'dash' },
+        showlegend: true,
+        hoverinfo: 'skip',
+        yaxis: 'y2',
       });
     }
 
     const secondaryFont = theme === 'light' ? '#6b7280' : '#636b80';
 
     const overrides = {
+      showlegend: true,
       yaxis: {
         title: { text: displayMode === 'weighted' ? 'Equity' : 'Value ($)', font: { size: 11, color: secondaryFont } },
+      },
+      yaxis2: {
+        overlaying: 'y',
+        range: [0, 1],
+        fixedrange: true,
+        showgrid: false,
+        showticklabels: false,
+        zeroline: false,
+        visible: false,
       },
       margin: { l: 70, r: 24, t: 40, b: 60 },
     };
 
     return { traces: t, layoutOverrides: overrides };
-  }, [dates, portfolioEquity, legEquities, displayMode, shortLabels, theme]);
+  }, [dates, portfolioEquity, legEquities, rawLegEquities, rebalanceDates, displayMode, shortLabels, theme]);
 
   if (!dates || dates.length === 0) return null;
 

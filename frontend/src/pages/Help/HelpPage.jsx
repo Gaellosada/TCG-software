@@ -1,6 +1,11 @@
+import { useState } from 'react';
 import styles from './HelpPage.module.css';
 
+const SECTIONS = ['general', 'data', 'portfolio'];
+
 function HelpPage() {
+  const [activeSection, setActiveSection] = useState('general');
+
   return (
     <div className={styles.page}>
       <span className={styles.label}>DOCUMENTATION</span>
@@ -9,18 +14,32 @@ function HelpPage() {
         Documentation and guides for the TCG simulation platform.
       </p>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Getting Started</h2>
+      <nav className={styles.nav}>
+        {SECTIONS.map((id) => (
+          <button
+            key={id}
+            className={`${styles.navBtn} ${activeSection === id ? styles.navBtnActive : ''}`}
+            onClick={() => {
+              setActiveSection(id);
+              document.getElementById(`help-${id}`).scrollIntoView({ behavior: 'smooth' });
+            }}
+          >
+            {id.charAt(0).toUpperCase() + id.slice(1)}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── General ── */}
+      <section id="help-general" className={styles.section}>
+        <h2 className={styles.sectionHeading}>General</h2>
         <p className={styles.conceptText}>
-          Trajectoire CAP is a financial simulation and exploration platform for
-          volatility trading strategies. Browse historical market data, construct
-          portfolios, and run backtesting simulations against real price histories.
+          Trajectoire CAP is a volatility trading simulation platform. Browse
+          historical market data, construct weighted portfolios, and run
+          backtesting simulations against real price histories.
         </p>
-      </section>
-
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Pages Overview</h2>
-
+        <p className={styles.conceptText}>
+          The platform is organized around two main sections:
+        </p>
         <div className={styles.card}>
           <h3>Data</h3>
           <p>
@@ -31,61 +50,60 @@ function HelpPage() {
         <div className={styles.card}>
           <h3>Portfolio</h3>
           <p>
-            Construct and manage portfolios of instruments. Define allocations and
-            rebalancing rules for simulation inputs.
+            Construct and manage weighted portfolios of instruments. Define
+            allocations, rebalancing rules, and analyze performance metrics.
           </p>
         </div>
+
+        <h3 className={styles.conceptTitle}>Settings</h3>
+        <p className={styles.conceptText}>
+          Use the Settings page to switch between dark and light themes and to
+          set your default chart type preference (candlestick or line).
+        </p>
+
+        <h3 className={styles.conceptTitle}>Tips</h3>
+        <ul className={styles.tips}>
+          <li>All market data is currently sourced from the legacy Java platform.</li>
+          <li>Use keyboard shortcuts where available for faster navigation.</li>
+        </ul>
+      </section>
+
+      {/* ── Data ── */}
+      <section id="help-data" className={styles.section}>
+        <h2 className={styles.sectionHeading}>Data</h2>
+        <p className={styles.conceptText}>
+          The Data page lets you browse collections of instruments organized by
+          asset class. Select a collection, pick an instrument, and view its
+          price history as an interactive chart.
+        </p>
+
+        <h3 className={styles.conceptTitle}>Price Charts</h3>
+        <p className={styles.conceptText}>
+          When OHLC data (Open, High, Low, Close) is available, the chart can
+          display as <strong>candlestick</strong> (filled bodies showing the
+          open-close range with high-low wicks). You can set your default chart
+          type in <strong>Settings</strong>.
+        </p>
+        <p className={styles.conceptText}>
+          However, many legacy futures contracts only store a{' '}
+          <strong>close/settle price</strong> — the open, high, and low fields
+          are missing. When less than half the bars have real OHLC values, the
+          chart automatically falls back to a <strong>line chart</strong> and
+          the chart-type selector is hidden.
+        </p>
         <div className={styles.card}>
-          <h3>Research</h3>
+          <h3>Which futures have candlestick?</h3>
           <p>
-            Run ad-hoc analysis and exploration. Compare instruments, compute
-            metrics, and prototype strategies with code-driven workflows.
+            Crypto futures (BTC, ETH) and VIX have full OHLC from their data
+            sources. Most other legacy futures (SP500, Gold, bonds, FX) were
+            ingested from a source that only provided settlement prices. If
+            these contracts are re-ingested from a source that includes OHLC
+            (e.g., IQFeed, Interactive Brokers), candlestick will become
+            available automatically.
           </p>
         </div>
-      </section>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Key Concepts</h2>
-
-        <h3 className={styles.conceptTitle}>Strategy Signals</h3>
-        <p className={styles.conceptText}>
-          Strategies define entry and exit rules as Python scripts with a
-          self-documenting API. Each strategy produces signals that drive
-          simulation execution.
-        </p>
-
-        <h3 className={styles.conceptTitle}>Simulation Engines</h3>
-        <p className={styles.conceptText}>
-          Two engines are available: a <strong>vectorized engine</strong> for fast
-          approximation across the full price history, and an{' '}
-          <strong>event-based engine</strong> for precise trade-by-trade simulation
-          with realistic fill modeling.
-        </p>
-
-        <h3 className={styles.conceptTitle}>Result Provenance</h3>
-        <p className={styles.conceptText}>
-          Every computation tracks the origin of its data. This is critical for
-          reproducibility — when you see a result, you can always tell where the
-          underlying data came from and whether it might be stale.
-        </p>
-        <div className={styles.provenanceList}>
-          <div className={styles.provenanceItem}>
-            <span className={`${styles.badge} ${styles.badgeLegacy}`}>Legacy</span>
-            <span>Data imported from the original Java platform. Read-only, will not be refreshed.</span>
-          </div>
-          <div className={styles.provenanceItem}>
-            <span className={`${styles.badge} ${styles.badgePrecomputed}`}>Precomputed</span>
-            <span>Cached results from previous simulation runs. Avoids redundant work.</span>
-          </div>
-          <div className={styles.provenanceItem}>
-            <span className={`${styles.badge} ${styles.badgeOnTheFly}`}>On-the-fly</span>
-            <span>Freshly computed from raw data at request time. Most current but slower.</span>
-          </div>
-        </div>
-      </section>
-
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Continuous Futures Rolling</h2>
+        <h3 className={styles.conceptTitle}>Continuous Futures Rolling</h3>
         <p className={styles.conceptText}>
           Futures contracts expire. To build a continuous price history for
           backtesting, contracts are stitched together by rolling from one
@@ -119,56 +137,32 @@ function HelpPage() {
         <h3 className={styles.conceptTitle}>Roll Dates</h3>
         <p className={styles.conceptText}>
           Gray dotted vertical lines on the chart mark where one contract ends
-          and the next begins. These are recorded for transparency — you can
-          always see exactly where rolls occurred.
+          and the next begins. These are toggleable — click the roll dates entry
+          in the chart legend to show or hide them.
         </p>
 
-        <h3 className={styles.conceptTitle}>Chart Types &amp; Data Availability</h3>
+        <h3 className={styles.conceptTitle}>Cycle Filtering</h3>
         <p className={styles.conceptText}>
-          When OHLC data (Open, High, Low, Close) is available, the chart can
-          display as <strong>candlestick</strong> (filled bodies showing the
-          open-close range with high-low wicks). You can set your default chart
-          type in <strong>Settings</strong>.
+          Filter the visible data by contract cycle to focus on specific
+          expiration months or contract series within a continuous futures chain.
         </p>
-        <p className={styles.conceptText}>
-          However, many legacy futures contracts only store a{' '}
-          <strong>close/settle price</strong> — the open, high, and low fields
-          are missing. When less than half the bars have real OHLC values, the
-          chart automatically falls back to a <strong>line chart</strong> and
-          the chart-type selector is hidden.
-        </p>
-        <div className={styles.card}>
-          <h3>Which futures have candlestick?</h3>
-          <p>
-            Crypto futures (BTC, ETH) and VIX have full OHLC from their data
-            sources. Most other legacy futures (SP500, Gold, bonds, FX) were
-            ingested from a source that only provided settlement prices. If
-            these contracts are re-ingested from a source that includes OHLC
-            (e.g., IQFeed, Interactive Brokers), candlestick will become
-            available automatically.
-          </p>
-        </div>
       </section>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Weighted Portfolios</h2>
+      {/* ── Portfolio ── */}
+      <section id="help-portfolio" className={styles.section}>
+        <h2 className={styles.sectionHeading}>Portfolio</h2>
         <p className={styles.conceptText}>
-          A weighted portfolio allocates capital across multiple instruments
-          according to specified weights. Instead of treating each position
-          equally, each instrument receives a fraction of total capital
-          proportional to its weight.
+          The Portfolio page lets you construct weighted portfolios of
+          instruments and analyze their historical performance.
         </p>
+
+        <h3 className={styles.conceptTitle}>Building Portfolios</h3>
         <p className={styles.conceptText}>
-          Weights are normalized internally, so only the ratios matter: a 60/40
-          split, 0.6/0.4, and 3/2 all produce the same allocation. Negative
-          weights represent short positions — the portfolio borrows and sells the
+          Add holdings to your portfolio and assign weights to each. Weights are
+          normalized internally, so only the ratios matter: a 60/40 split,
+          0.6/0.4, and 3/2 all produce the same allocation. Negative weights
+          represent short positions — the portfolio borrows and sells the
           instrument, profiting from price declines.
-        </p>
-        <p className={styles.conceptText}>
-          Common use cases include diversification (spreading risk across
-          uncorrelated assets), hedging (pairing long positions with negatively
-          correlated shorts), and benchmark construction (replicating an index
-          or reference portfolio).
         </p>
 
         <h3 className={styles.conceptTitle}>Chart Display Modes</h3>
@@ -204,10 +198,8 @@ function HelpPage() {
             Use this to see how much each position contributed in absolute terms.
           </p>
         </div>
-      </section>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Rebalancing</h2>
+        <h3 className={styles.conceptTitle}>Rebalancing</h3>
         <p className={styles.conceptText}>
           Rebalancing periodically resets allocations back to their target
           weights. Without rebalancing, price movements cause positions to drift:
@@ -220,6 +212,9 @@ function HelpPage() {
           mean-reversion: it systematically trims outperforming positions and
           adds to underperforming ones. Rebalanced portfolios typically exhibit
           lower volatility than a buy-and-hold equivalent.
+        </p>
+        <p className={styles.conceptText}>
+          Rebalance dates are shown as dashed purple vertical lines on the chart.
         </p>
 
         <h3 className={styles.conceptTitle}>Available Frequencies</h3>
@@ -238,15 +233,12 @@ function HelpPage() {
             to control drift, infrequent enough to limit transaction costs.
           </p>
         </div>
-      </section>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Performance Metrics</h2>
+        <h3 className={styles.conceptTitle}>Performance Metrics</h3>
         <p className={styles.conceptText}>
-          Simulation results include a set of standard risk and return metrics.
+          Portfolio results include a set of standard risk and return metrics.
           Each is computed from the portfolio's daily return series.
         </p>
-
         <div className={styles.card}>
           <h3>Total Return</h3>
           <p>
@@ -323,15 +315,12 @@ function HelpPage() {
             that require patience (or force liquidation) before recovery.
           </p>
         </div>
-      </section>
 
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Return Types</h2>
+        <h3 className={styles.conceptTitle}>Return Types</h3>
         <p className={styles.conceptText}>
           Returns can be expressed in two mathematically equivalent ways. The
           choice affects how returns aggregate over time.
         </p>
-
         <div className={styles.card}>
           <h3>Normal Returns</h3>
           <p>
@@ -353,15 +342,6 @@ function HelpPage() {
             in quantitative finance.
           </p>
         </div>
-      </section>
-
-      <section className={styles.section}>
-        <h2 className={styles.sectionHeading}>Tips</h2>
-        <ul className={styles.tips}>
-          <li>All market data is currently sourced from the legacy Java platform and tagged as Legacy provenance.</li>
-          <li>Use the Settings page to switch between dark and light themes.</li>
-          <li>The Research page will support ad-hoc analysis and instrument comparison in future phases.</li>
-        </ul>
       </section>
     </div>
   );
