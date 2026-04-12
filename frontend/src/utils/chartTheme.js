@@ -127,3 +127,43 @@ export const CHART_CONFIG = {
   modeBarButtonsToRemove: ['lasso2d', 'select2d'],
   displayModeBar: 'hover',
 };
+
+/**
+ * Build a scatter trace that draws toggleable vertical lines on a hidden overlay axis.
+ * Each date gets a line from y=0 to y=1 on the overlay axis (full chart height).
+ */
+export function createVerticalLineTrace(dates, { name, color, dash, yaxisKey }) {
+  const x = [];
+  const y = [];
+  for (const d of dates) {
+    x.push(d, d, null);
+    y.push(0, 1, null);
+  }
+  return {
+    x,
+    y,
+    type: 'scatter',
+    mode: 'lines',
+    name,
+    line: { color, width: 1, dash },
+    showlegend: true,
+    hoverinfo: 'skip',
+    yaxis: yaxisKey,
+  };
+}
+
+/**
+ * Layout config for a hidden y-axis used to anchor vertical line traces.
+ * Overlays the main y-axis, spans [0,1], invisible.
+ */
+export function hiddenOverlayAxis() {
+  return {
+    overlaying: 'y',
+    range: [0, 1],
+    fixedrange: true,
+    showgrid: false,
+    showticklabels: false,
+    zeroline: false,
+    visible: false,
+  };
+}

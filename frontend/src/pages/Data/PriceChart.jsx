@@ -55,7 +55,7 @@ function PriceChart({ collection, instrument }) {
         type: 'scatter',
         mode: 'lines',
         name: 'Close',
-        line: { color: TRACE_COLORS[0], width: 1.5 },
+        line: { color: TRACE_COLORS[0], width: 1 },
         hovertemplate: '%{x}<br>Close: %{y:,.2f}<extra></extra>',
       });
     }

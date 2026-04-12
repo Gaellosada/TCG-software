@@ -255,6 +255,8 @@ function PortfolioPage() {
                 dates={portfolio.results.dates}
                 portfolioEquity={portfolio.results.portfolio_equity}
                 legEquities={portfolio.results.leg_equities}
+                rawLegEquities={portfolio.results.raw_leg_equities}
+                rebalanceDates={portfolio.results.rebalance_dates}
                 legs={portfolio.legs}
               />
             </div>

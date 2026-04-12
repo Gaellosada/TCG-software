@@ -4,7 +4,7 @@ import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import Chart from '../../components/Chart';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
-import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
+import { TRACE_COLORS, getChartColors, createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
 import styles from './ChartBase.module.css';
@@ -61,7 +61,7 @@ function ContinuousChart({ collection }) {
     } else {
       t.push({
         x: dates, y: data.close, type: 'scatter', mode: 'lines', name: 'Close',
-        line: { color: TRACE_COLORS[0], width: 1.5 },
+        line: { color: TRACE_COLORS[0], width: 1 },
         hovertemplate: '%{x}<br>Close: %{y:,.2f}<extra></extra>',
       });
     }
@@ -75,17 +75,11 @@ function ContinuousChart({ collection }) {
     }
 
     if (rollDates.length > 0) {
-      t.push({
-        x: [null], y: [null], type: 'scatter', mode: 'lines', name: 'Roll',
-        line: { color: 'rgba(160, 160, 160, 0.6)', width: 1, dash: 'dot' },
-        showlegend: true, hoverinfo: 'skip',
-      });
+      t.push(createVerticalLineTrace(
+        rollDates.map(formatDateInt),
+        { name: 'Roll', color: 'rgba(160, 160, 160, 0.35)', dash: 'dot', yaxisKey: 'y3' },
+      ));
     }
-
-    const rollShapes = rollDates.map((d) => ({
-      type: 'line', x0: formatDateInt(d), x1: formatDateInt(d), y0: 0, y1: 1, yref: 'paper',
-      line: { color: 'rgba(160, 160, 160, 0.35)', width: 1, dash: 'dot' },
-    }));
 
     const lo = {
       xaxis: {
@@ -99,7 +93,7 @@ function ContinuousChart({ collection }) {
         yaxis2: { domain: [0, 0.2], zeroline: false, showgrid: true,
           title: { text: 'Volume', font: { size: 11, color: colors.secondaryFont } }, anchor: 'x' },
       } : {}),
-      shapes: rollShapes,
+      yaxis3: hiddenOverlayAxis(),
     };
 
     return { traces: t, layoutOverrides: lo, hasOHLC: prepared.hasOHLC };

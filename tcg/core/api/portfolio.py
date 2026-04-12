@@ -222,7 +222,14 @@ async def compute_portfolio(
 
     # ── 4. Compute portfolio ──
 
-    portfolio_ret, leg_rets, portfolio_eq, leg_eqs = compute_weighted_portfolio(
+    (
+        portfolio_ret,
+        leg_rets,
+        portfolio_eq,
+        leg_eqs,
+        raw_leg_eqs,
+        rebalance_dates,
+    ) = compute_weighted_portfolio(
         aligned_closes,
         body.weights,
         rebalance_freq.value,
@@ -252,6 +259,8 @@ async def compute_portfolio(
         "dates": dates_iso,
         "portfolio_equity": portfolio_eq.tolist(),
         "leg_equities": {label: eq.tolist() for label, eq in leg_eqs.items()},
+        "raw_leg_equities": {label: eq.tolist() for label, eq in raw_leg_eqs.items()},
+        "rebalance_dates": [int_to_iso(int(d)) for d in rebalance_dates],
         "metrics": asdict(metrics),
         "leg_metrics": {label: asdict(m) for label, m in leg_metrics.items()},
         "monthly_returns": monthly,
