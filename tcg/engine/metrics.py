@@ -200,6 +200,21 @@ def _yyyymmdd_to_datetime64(
     return strs
 
 
+def _derive_returns_from_equity(
+    equity: npt.NDArray[np.float64],
+    return_type: str,
+) -> npt.NDArray[np.float64]:
+    """Derive daily returns from an equity curve."""
+    n = len(equity)
+    returns = np.full(n, np.nan, dtype=np.float64)
+    if n > 1:
+        if return_type == "normal":
+            returns[1:] = (equity[1:] - equity[:-1]) / equity[:-1]
+        else:  # log
+            returns[1:] = np.log(equity[1:] / equity[:-1])
+    return returns
+
+
 # ---------------------------------------------------------------------------
 # Weighted portfolio with rebalancing
 # ---------------------------------------------------------------------------
@@ -409,14 +424,7 @@ def _compute_buy_and_hold(
         portfolio_equity += per_leg_equities[lbl]
 
     # Derive portfolio returns from equity curve
-    portfolio_returns = np.full(n, np.nan, dtype=np.float64)
-    if n > 1:
-        if return_type == "normal":
-            portfolio_returns[1:] = (
-                (portfolio_equity[1:] - portfolio_equity[:-1]) / portfolio_equity[:-1]
-            )
-        else:  # log
-            portfolio_returns[1:] = np.log(portfolio_equity[1:] / portfolio_equity[:-1])
+    portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
 
     return portfolio_returns, portfolio_equity, per_leg_equities, []
 
@@ -492,14 +500,7 @@ def _compute_periodic_rebalance(
         portfolio_equity[i] = sum(leg_values.values())
 
     # Derive portfolio returns from equity curve
-    portfolio_returns = np.full(n, np.nan, dtype=np.float64)
-    if n > 1:
-        if return_type == "normal":
-            portfolio_returns[1:] = (
-                (portfolio_equity[1:] - portfolio_equity[:-1]) / portfolio_equity[:-1]
-            )
-        else:  # log
-            portfolio_returns[1:] = np.log(portfolio_equity[1:] / portfolio_equity[:-1])
+    portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
 
     return portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates
 

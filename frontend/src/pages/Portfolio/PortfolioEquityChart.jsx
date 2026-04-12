@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import useTheme from '../../hooks/useTheme';
 import Chart from '../../components/Chart';
 import PillToggle from '../../components/PillToggle';
-import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
+import { TRACE_COLORS, getChartColors, createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
 import { normalizeTo100, toLongEquivalent } from '../../utils/portfolioMath';
 import styles from './PortfolioEquityChart.module.css';
 
@@ -90,25 +90,12 @@ export default function PortfolioEquityChart({
       });
     }
 
-    // Enhancement #5: Rebalance date vertical lines
+    // Rebalance date vertical lines
     if (rebalanceDates && rebalanceDates.length > 0) {
-      const rbX = [];
-      const rbY = [];
-      for (const d of rebalanceDates) {
-        rbX.push(d, d, null);
-        rbY.push(0, 1, null);
-      }
-      t.push({
-        x: rbX,
-        y: rbY,
-        type: 'scatter',
-        mode: 'lines',
-        name: 'Rebalance',
-        line: { color: 'rgba(168, 85, 247, 0.35)', width: 1, dash: 'dash' },
-        showlegend: true,
-        hoverinfo: 'skip',
-        yaxis: 'y2',
-      });
+      t.push(createVerticalLineTrace(
+        rebalanceDates,
+        { name: 'Rebalance', color: 'rgba(168, 85, 247, 0.35)', dash: 'dash', yaxisKey: 'y2' },
+      ));
     }
 
     const secondaryFont = theme === 'light' ? '#6b7280' : '#636b80';
@@ -118,15 +105,7 @@ export default function PortfolioEquityChart({
       yaxis: {
         title: { text: displayMode === 'weighted' ? 'Equity' : 'Value ($)', font: { size: 11, color: secondaryFont } },
       },
-      yaxis2: {
-        overlaying: 'y',
-        range: [0, 1],
-        fixedrange: true,
-        showgrid: false,
-        showticklabels: false,
-        zeroline: false,
-        visible: false,
-      },
+      yaxis2: hiddenOverlayAxis(),
       margin: { l: 70, r: 24, t: 40, b: 60 },
     };
 

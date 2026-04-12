@@ -21,7 +21,7 @@ function HelpPage() {
             className={`${styles.navBtn} ${activeSection === id ? styles.navBtnActive : ''}`}
             onClick={() => {
               setActiveSection(id);
-              document.getElementById(`help-${id}`).scrollIntoView({ behavior: 'smooth' });
+              document.getElementById(`help-${id}`)?.scrollIntoView({ behavior: 'smooth' });
             }}
           >
             {id.charAt(0).toUpperCase() + id.slice(1)}

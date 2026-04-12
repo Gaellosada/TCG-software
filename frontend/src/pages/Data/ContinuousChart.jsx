@@ -4,7 +4,7 @@ import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import Chart from '../../components/Chart';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
-import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
+import { TRACE_COLORS, getChartColors, createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
 import styles from './ChartBase.module.css';
@@ -75,24 +75,10 @@ function ContinuousChart({ collection }) {
     }
 
     if (rollDates.length > 0) {
-      const rollX = [];
-      const rollY = [];
-      for (const d of rollDates) {
-        const dateStr = formatDateInt(d);
-        rollX.push(dateStr, dateStr, null);
-        rollY.push(0, 1, null);
-      }
-      t.push({
-        x: rollX,
-        y: rollY,
-        type: 'scatter',
-        mode: 'lines',
-        name: 'Roll',
-        line: { color: 'rgba(160, 160, 160, 0.35)', width: 1, dash: 'dot' },
-        showlegend: true,
-        hoverinfo: 'skip',
-        yaxis: 'y3',
-      });
+      t.push(createVerticalLineTrace(
+        rollDates.map(formatDateInt),
+        { name: 'Roll', color: 'rgba(160, 160, 160, 0.35)', dash: 'dot', yaxisKey: 'y3' },
+      ));
     }
 
     const lo = {
@@ -107,15 +93,7 @@ function ContinuousChart({ collection }) {
         yaxis2: { domain: [0, 0.2], zeroline: false, showgrid: true,
           title: { text: 'Volume', font: { size: 11, color: colors.secondaryFont } }, anchor: 'x' },
       } : {}),
-      yaxis3: {
-        overlaying: 'y',
-        range: [0, 1],
-        fixedrange: true,
-        showgrid: false,
-        showticklabels: false,
-        zeroline: false,
-        visible: false,
-      },
+      yaxis3: hiddenOverlayAxis(),
     };
 
     return { traces: t, layoutOverrides: lo, hasOHLC: prepared.hasOHLC };
