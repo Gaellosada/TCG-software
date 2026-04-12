@@ -222,14 +222,7 @@ async def compute_portfolio(
 
     # ── 4. Compute portfolio ──
 
-    (
-        portfolio_ret,
-        leg_rets,
-        portfolio_eq,
-        leg_eqs,
-        raw_leg_eqs,
-        rebalance_dates,
-    ) = compute_weighted_portfolio(
+    result = compute_weighted_portfolio(
         aligned_closes,
         body.weights,
         rebalance_freq.value,
@@ -239,16 +232,21 @@ async def compute_portfolio(
 
     # ── 5. Compute metrics ──
 
-    metrics = compute_metrics(portfolio_eq)
-    leg_metrics = {label: compute_metrics(eq) for label, eq in leg_eqs.items()}
+    metrics = compute_metrics(result.portfolio_equity)
+    leg_metrics = {
+        label: compute_metrics(eq)
+        for label, eq in result.per_leg_equities.items()
+    }
 
     # ── 6. Aggregate returns ──
 
     monthly = aggregate_returns(
-        common_dates, portfolio_ret, leg_rets, body.return_type, "monthly",
+        common_dates, result.portfolio_returns, result.per_leg_returns,
+        body.return_type, "monthly",
     )
     yearly = aggregate_returns(
-        common_dates, portfolio_ret, leg_rets, body.return_type, "yearly",
+        common_dates, result.portfolio_returns, result.per_leg_returns,
+        body.return_type, "yearly",
     )
 
     # ── 7. Build response ──
@@ -257,10 +255,18 @@ async def compute_portfolio(
 
     return {
         "dates": dates_iso,
-        "portfolio_equity": portfolio_eq.tolist(),
-        "leg_equities": {label: eq.tolist() for label, eq in leg_eqs.items()},
-        "raw_leg_equities": {label: eq.tolist() for label, eq in raw_leg_eqs.items()},
-        "rebalance_dates": [int_to_iso(int(d)) for d in rebalance_dates],
+        "portfolio_equity": result.portfolio_equity.tolist(),
+        "leg_equities": {
+            label: eq.tolist()
+            for label, eq in result.per_leg_equities.items()
+        },
+        "raw_leg_equities": {
+            label: eq.tolist()
+            for label, eq in result.raw_leg_equities.items()
+        },
+        "rebalance_dates": [
+            int_to_iso(int(d)) for d in result.rebalance_dates
+        ],
         "metrics": asdict(metrics),
         "leg_metrics": {label: asdict(m) for label, m in leg_metrics.items()},
         "monthly_returns": monthly,

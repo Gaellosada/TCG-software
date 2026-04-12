@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from tcg.types.metrics import MetricsSuite
+from tcg.types.portfolio import PortfolioComputeResult
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -226,14 +227,7 @@ def compute_weighted_portfolio(
     rebalance_freq: str,
     return_type: str,
     dates: npt.NDArray[np.int64],
-) -> tuple[
-    npt.NDArray[np.float64],
-    dict[str, npt.NDArray[np.float64]],
-    npt.NDArray[np.float64],
-    dict[str, npt.NDArray[np.float64]],
-    dict[str, npt.NDArray[np.float64]],
-    list[int],
-]:
+) -> PortfolioComputeResult:
     """Compute a weighted portfolio with rebalancing.
 
     Parameters
@@ -254,15 +248,10 @@ def compute_weighted_portfolio(
 
     Returns
     -------
-    tuple of:
-        - portfolio_returns: daily returns of the combined portfolio (length N, [0]=NaN)
-        - per_leg_returns: ``{label: daily_returns}`` for each leg
-        - portfolio_equity: equity curve of the combined portfolio (length N)
-        - per_leg_equities: ``{label: equity_curve}`` for each leg
-        - raw_leg_equities: ``{label: equity_curve}`` buy-and-hold leg equities
-          (same as per_leg_equities when rebalance_freq is ``"none"``)
-        - rebalance_dates: YYYYMMDD integers where rebalancing occurred (empty
-          when rebalance_freq is ``"none"`` or ``"daily"``)
+    PortfolioComputeResult
+        Frozen dataclass with fields: ``portfolio_returns``,
+        ``per_leg_returns``, ``portfolio_equity``, ``per_leg_equities``,
+        ``raw_leg_equities``, ``rebalance_dates``.
 
     Raises
     ------
@@ -335,13 +324,13 @@ def compute_weighted_portfolio(
             per_leg_returns, norm_weights, return_type, n, labels,
         )
 
-    return (
-        portfolio_returns,
-        per_leg_returns,
-        portfolio_equity,
-        per_leg_equities,
-        raw_leg_equities,
-        rebalance_dates,
+    return PortfolioComputeResult(
+        portfolio_returns=portfolio_returns,
+        per_leg_returns=per_leg_returns,
+        portfolio_equity=portfolio_equity,
+        per_leg_equities=per_leg_equities,
+        raw_leg_equities=raw_leg_equities,
+        rebalance_dates=rebalance_dates,
     )
 
 
