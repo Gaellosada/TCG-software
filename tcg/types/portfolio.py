@@ -33,6 +33,17 @@ class PortfolioSpec:
 
 
 @dataclass(frozen=True)
+class PortfolioComputeResult:
+    """Output of compute_weighted_portfolio (engine-level computation)."""
+    portfolio_returns: npt.NDArray[np.float64]
+    per_leg_returns: dict[str, npt.NDArray[np.float64]]
+    portfolio_equity: npt.NDArray[np.float64]
+    per_leg_equities: dict[str, npt.NDArray[np.float64]]
+    raw_leg_equities: dict[str, npt.NDArray[np.float64]]
+    rebalance_dates: list[int]
+
+
+@dataclass(frozen=True)
 class PortfolioResult:
     """Output of a weighted portfolio computation."""
     dates: tuple[str, ...]

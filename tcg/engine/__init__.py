@@ -10,8 +10,10 @@ from tcg.engine.metrics import (
     compute_metrics,
     compute_weighted_portfolio,
 )
+from tcg.types.portfolio import PortfolioComputeResult
 
 __all__ = [
+    "PortfolioComputeResult",
     "aggregate_returns",
     "compute_daily_returns",
     "compute_equity_curve",

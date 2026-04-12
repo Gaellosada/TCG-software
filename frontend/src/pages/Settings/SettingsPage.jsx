@@ -66,8 +66,10 @@ function SettingsPage() {
 
       <div className={styles.settingRow}>
         <span className={styles.settingLabel}>Theme</span>
-        <div className={styles.buttonGroup}>
+        <div className={styles.buttonGroup} role="radiogroup" aria-label="Theme">
           <button
+            role="radio"
+            aria-checked={theme === 'dark'}
             className={`${styles.optionBtn} ${theme === 'dark' ? styles.optionBtnActive : ''}`}
             onClick={() => handleThemeChange('dark')}
           >
@@ -77,6 +79,8 @@ function SettingsPage() {
             </span>
           </button>
           <button
+            role="radio"
+            aria-checked={theme === 'light'}
             className={`${styles.optionBtn} ${theme === 'light' ? styles.optionBtnActive : ''}`}
             onClick={() => handleThemeChange('light')}
           >
@@ -90,14 +94,18 @@ function SettingsPage() {
 
       <div className={styles.settingRow}>
         <span className={styles.settingLabel}>Default chart</span>
-        <div className={styles.buttonGroup}>
+        <div className={styles.buttonGroup} role="radiogroup" aria-label="Default chart type">
           <button
+            role="radio"
+            aria-checked={chartType === 'candlestick'}
             className={`${styles.optionBtn} ${chartType === 'candlestick' ? styles.optionBtnActive : ''}`}
             onClick={() => handleChartTypeChange('candlestick')}
           >
             Candlestick
           </button>
           <button
+            role="radio"
+            aria-checked={chartType === 'line'}
             className={`${styles.optionBtn} ${chartType === 'line' ? styles.optionBtnActive : ''}`}
             onClick={() => handleChartTypeChange('line')}
           >
