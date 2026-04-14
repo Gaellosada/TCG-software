@@ -29,11 +29,11 @@ export async function getContinuousSeries(collection, { strategy = 'front_month'
   if (rollOffset > 0) params.set('roll_offset', String(rollOffset));
   if (start) params.set('start', start);
   if (end) params.set('end', end);
-  const res = await fetchApi(`/data/continuous/${collection}?${params}`);
+  const res = await fetchApi(`/data/continuous/${encodeURIComponent(collection)}?${params}`);
   return res;
 }
 
 export async function getAvailableCycles(collection) {
-  const res = await fetchApi(`/data/continuous/${collection}/cycles`);
+  const res = await fetchApi(`/data/continuous/${encodeURIComponent(collection)}/cycles`);
   return res.cycles || [];
 }

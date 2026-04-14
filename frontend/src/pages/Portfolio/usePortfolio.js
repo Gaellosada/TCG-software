@@ -36,6 +36,16 @@ export default function usePortfolio() {
 
   /* ── Fetch date ranges when legs change ── */
 
+  // Stable key: only data-affecting fields (not label/weight) trigger re-fetch
+  const rangesKey = useMemo(
+    () => legs.map((l) =>
+      l.type === 'continuous'
+        ? `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`
+        : `i:${l.collection}:${l.symbol}`
+    ).join('|'),
+    [legs],
+  );
+
   useEffect(() => {
     if (legs.length === 0) {
       setLegDateRanges({});
@@ -109,7 +119,7 @@ export default function usePortfolio() {
     });
 
     return () => { cancelled = true; };
-  }, [legs]);
+  }, [rangesKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Leg management ── */
 
