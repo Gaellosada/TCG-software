@@ -24,7 +24,6 @@ import hashlib
 import http.server
 import secrets
 import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -105,29 +104,38 @@ def make_handler(password_hash: str):
 
         # -- Request handlers ----------------------------------------------
 
-        def do_GET(self):
+        def _dispatch(self, method: str):
             if self.path == "/__login__":
-                self._send_login_page()
+                if method == "POST":
+                    self._handle_login()
+                else:
+                    self._send_login_page()
                 return
             if not self._has_valid_cookie():
                 self._send_login_page()
                 return
             if self.path.startswith("/api/"):
-                self._proxy_to_backend("GET")
+                self._proxy_to_backend(method)
                 return
-            self._serve_spa()
+            if method == "GET":
+                self._serve_spa()
+            else:
+                self.send_error(404)
+
+        def do_GET(self):
+            self._dispatch("GET")
 
         def do_POST(self):
-            if self.path == "/__login__":
-                self._handle_login()
-                return
-            if not self._has_valid_cookie():
-                self._send_login_page()
-                return
-            if self.path.startswith("/api/"):
-                self._proxy_to_backend("POST")
-                return
-            self.send_error(404)
+            self._dispatch("POST")
+
+        def do_PUT(self):
+            self._dispatch("PUT")
+
+        def do_DELETE(self):
+            self._dispatch("DELETE")
+
+        def do_PATCH(self):
+            self._dispatch("PATCH")
 
         def _handle_login(self):
             length = int(self.headers.get("Content-Length", 0))
@@ -182,8 +190,8 @@ def make_handler(password_hash: str):
     return Handler
 
 
-def start_tunnel(port: int) -> str | None:
-    """Start cloudflared tunnel and return the public URL."""
+def start_tunnel(port: int) -> tuple[subprocess.Popen | None, str | None]:
+    """Start cloudflared tunnel and return (process, public URL)."""
     cloudflared = shutil.which("cloudflared") or "/tmp/cloudflared"
     proc = subprocess.Popen(
         [cloudflared, "tunnel", "--url", f"http://localhost:{port}"],
@@ -198,9 +206,10 @@ def start_tunnel(port: int) -> str | None:
         if "trycloudflare.com" in line:
             for word in line.replace("|", " ").split():
                 if word.startswith("https://"):
-                    return word.strip()
+                    return proc, word.strip()
         time.sleep(0.5)
-    return None
+    proc.terminate()
+    return None, None
 
 
 def main():
@@ -222,12 +231,13 @@ def main():
     thread.start()
     print(f"  Local server running on http://localhost:{args.port}")
 
+    tunnel_proc = None
     if args.no_tunnel:
         print(f"  Password: {password}")
         print("\n  Press Ctrl+C to stop.\n")
     else:
         print("  Starting tunnel...")
-        url = start_tunnel(args.port)
+        tunnel_proc, url = start_tunnel(args.port)
         if url:
             print(f"\n  ╔══════════════════════════════════════════════╗")
             print(f"  ║  Share this with your clients:               ║")
@@ -244,6 +254,9 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n  Shutting down...")
+        if tunnel_proc:
+            tunnel_proc.terminate()
+            tunnel_proc.wait(timeout=5)
         server.shutdown()
 
 
