@@ -4,7 +4,7 @@ import styles from './HoldingsList.module.css';
  * Displays portfolio holdings with editable weights and remove buttons.
  * Purely presentational — state is managed by usePortfolio.
  */
-export default function HoldingsList({ legs, onUpdateLeg, onRemoveLeg, onOpenAddModal }) {
+export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemoveLeg, onOpenAddModal }) {
   return (
     <div className={styles.section}>
       <div className={styles.header}>
@@ -32,6 +32,8 @@ export default function HoldingsList({ legs, onUpdateLeg, onRemoveLeg, onOpenAdd
                 <th className={styles.thType}>Type</th>
                 <th className={styles.thCollection}>Collection</th>
                 <th className={styles.thInstrument}>Instrument</th>
+                <th className={styles.thRange}>Start Date</th>
+                <th className={styles.thRange}>End Date</th>
                 <th className={styles.thWeight}>Weight</th>
                 <th className={styles.thActions} aria-label="Actions" />
               </tr>
@@ -59,6 +61,12 @@ export default function HoldingsList({ legs, onUpdateLeg, onRemoveLeg, onOpenAdd
                     {leg.type === 'continuous'
                       ? `${leg.strategy || 'front_month'}`
                       : leg.symbol}
+                  </td>
+                  <td className={styles.rangeCell}>
+                    {legDateRanges?.[leg.label]?.start || '\u2014'}
+                  </td>
+                  <td className={styles.rangeCell}>
+                    {legDateRanges?.[leg.label]?.end || '\u2014'}
                   </td>
                   <td>
                     <input

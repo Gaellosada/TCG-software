@@ -93,6 +93,7 @@ class ContinuousRollConfig:
     strategy: RollStrategy
     adjustment: AdjustmentMethod = AdjustmentMethod.NONE
     cycle: str | None = None
+    roll_offset_days: int = 0
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,7 @@ function ContinuousChart({ collection }) {
 
   const [adjustment, setAdjustment] = useState('none');
   const [cycle, setCycle] = useState('');
+  const [rollOffset, setRollOffset] = useState(2);
   const [chartType, setChartType] = useState(preference);
 
   // Sync local state when global preference changes
@@ -33,11 +34,12 @@ function ContinuousChart({ collection }) {
       strategy: 'front_month',
       adjustment,
       cycle: cycle || undefined,
+      rollOffset,
     }),
-    [collection, adjustment, cycle]
+    [collection, adjustment, cycle, rollOffset]
   );
 
-  const { data, loading, error } = useAsync(fetchSeries, [collection, adjustment, cycle]);
+  const { data, loading, error } = useAsync(fetchSeries, [collection, adjustment, cycle, rollOffset]);
 
   const rollDates = (data && data.roll_dates) || [];
 
@@ -188,6 +190,19 @@ function ContinuousChart({ collection }) {
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
+        </label>
+
+        <label className={styles.controlLabel}>
+          Roll Offset (days)
+          <input
+            type="number"
+            className={styles.select}
+            style={{ width: '56px' }}
+            value={rollOffset}
+            min={0}
+            max={30}
+            onChange={(e) => setRollOffset(Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0)))}
+          />
         </label>
       </div>
 

@@ -41,11 +41,25 @@ def serialize_doc_id(doc_id: Any) -> str:
 def deserialize_doc_id(doc_id_str: str) -> list[Any]:
     """Return candidate ``_id`` values to try when querying.
 
-    The legacy Java platform stored ``_id`` as ObjectId, string, or int
-    depending on the collection. We try ObjectId first, then the raw
-    string.  Returns a list of candidates in priority order.
+    The legacy Java platform stored ``_id`` as ObjectId, string, dict
+    (composite key), or int depending on the collection. We try
+    candidates in priority order: composite dict (if the string looks
+    like ``key=val|key=val``), ObjectId, then raw string.
     """
     candidates: list[Any] = []
+
+    # Composite key: "key1=val1|key2=val2" → {"key1": "val1", "key2": "val2"}
+    if "|" in doc_id_str and "=" in doc_id_str:
+        try:
+            parts = doc_id_str.split("|")
+            reconstructed = {}
+            for part in parts:
+                k, v = part.split("=", 1)
+                reconstructed[k] = v
+            candidates.append(reconstructed)
+        except ValueError:
+            pass  # Malformed — fall through to other candidates
+
     try:
         candidates.append(ObjectId(doc_id_str))
     except (InvalidId, TypeError):

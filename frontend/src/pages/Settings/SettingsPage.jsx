@@ -4,17 +4,17 @@ import styles from './SettingsPage.module.css';
 
 function getStoredTheme() {
   try {
-    return localStorage.getItem('tcg-theme') || 'dark';
+    return localStorage.getItem('tcg-theme') || 'light';
   } catch {
-    return 'dark';
+    return 'light';
   }
 }
 
 function getStoredChartType() {
   try {
-    return localStorage.getItem('tcg-default-chart-type') || 'candlestick';
+    return localStorage.getItem('tcg-default-chart-type') || 'line';
   } catch {
-    return 'candlestick';
+    return 'line';
   }
 }
 
@@ -23,11 +23,7 @@ function applyChartType(type) {
 }
 
 function applyTheme(theme) {
-  if (theme === 'light') {
-    document.documentElement.dataset.theme = 'light';
-  } else {
-    delete document.documentElement.dataset.theme;
-  }
+  document.documentElement.dataset.theme = theme;
 }
 
 function SettingsPage() {

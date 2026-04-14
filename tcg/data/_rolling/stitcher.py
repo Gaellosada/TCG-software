@@ -71,7 +71,9 @@ class ContinuousSeriesBuilder:
             )
 
         # 1. Compute roll dates
-        roll_schedule = compute_roll_dates(contracts, config.strategy)
+        roll_schedule = compute_roll_dates(
+            contracts, config.strategy, config.roll_offset_days
+        )
 
         # 2. Trim overlaps (also strips zero-close rows)
         trimmed = trim_overlaps(contracts, roll_schedule)

@@ -62,6 +62,7 @@ class LegSpec(BaseModel):
     strategy: str | None = None      # Required for "continuous"
     adjustment: str | None = None    # Optional for "continuous" (default "none")
     cycle: str | None = None         # Optional for "continuous"
+    roll_offset: int | None = None   # Optional for "continuous" (days before expiration)
 
     @field_validator("type")
     @classmethod
@@ -81,7 +82,81 @@ class PortfolioRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Endpoint
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_legs(
+    legs: dict[str, LegSpec],
+    registry: CollectionRegistry,
+) -> dict[str, InstrumentId | ContinuousLegSpec]:
+    """Convert request leg specs to service-layer types with validation."""
+    legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
+
+    for label, leg in legs.items():
+        if leg.type == "instrument":
+            if not leg.symbol:
+                raise ValidationError(
+                    f"Leg '{label}': 'symbol' is required for instrument legs"
+                )
+            asset_class = registry.asset_class_for(leg.collection)
+            if asset_class is None:
+                raise ValidationError(
+                    f"Leg '{label}': cannot determine asset class for "
+                    f"collection '{leg.collection}'"
+                )
+            legs_spec[label] = InstrumentId(
+                symbol=leg.symbol,
+                asset_class=asset_class,
+                collection=leg.collection,
+            )
+
+        else:  # "continuous"
+            if not leg.strategy:
+                raise ValidationError(
+                    f"Leg '{label}': 'strategy' is required for continuous legs"
+                )
+            try:
+                roll_strategy = RollStrategy(leg.strategy)
+            except ValueError:
+                raise ValidationError(
+                    f"Leg '{label}': invalid strategy '{leg.strategy}'. "
+                    f"Must be one of: {', '.join(e.value for e in RollStrategy)}"
+                )
+
+            adj_method = AdjustmentMethod.NONE
+            if leg.adjustment:
+                try:
+                    adj_method = AdjustmentMethod(leg.adjustment)
+                except ValueError:
+                    raise ValidationError(
+                        f"Leg '{label}': invalid adjustment '{leg.adjustment}'. "
+                        f"Must be one of: {', '.join(e.value for e in AdjustmentMethod)}"
+                    )
+
+            roll_offset_days = 0
+            if leg.roll_offset is not None:
+                if not (0 <= leg.roll_offset <= 30):
+                    raise ValidationError(
+                        f"Leg '{label}': roll_offset must be between 0 and 30"
+                    )
+                roll_offset_days = leg.roll_offset
+
+            legs_spec[label] = ContinuousLegSpec(
+                collection=leg.collection,
+                roll_config=ContinuousRollConfig(
+                    strategy=roll_strategy,
+                    adjustment=adj_method,
+                    cycle=leg.cycle,
+                    roll_offset_days=roll_offset_days,
+                ),
+            )
+
+    return legs_spec
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
 # ---------------------------------------------------------------------------
 
 
@@ -129,57 +204,7 @@ async def compute_portfolio(
 
     # ── 2. Convert legs to service types ──
 
-    legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
-
-    for label, leg in body.legs.items():
-        if leg.type == "instrument":
-            if not leg.symbol:
-                raise ValidationError(
-                    f"Leg '{label}': 'symbol' is required for instrument legs"
-                )
-            asset_class = registry.asset_class_for(leg.collection)
-            if asset_class is None:
-                raise ValidationError(
-                    f"Leg '{label}': cannot determine asset class for "
-                    f"collection '{leg.collection}'"
-                )
-            legs_spec[label] = InstrumentId(
-                symbol=leg.symbol,
-                asset_class=asset_class,
-                collection=leg.collection,
-            )
-
-        else:  # "continuous"
-            if not leg.strategy:
-                raise ValidationError(
-                    f"Leg '{label}': 'strategy' is required for continuous legs"
-                )
-            try:
-                roll_strategy = RollStrategy(leg.strategy)
-            except ValueError:
-                raise ValidationError(
-                    f"Leg '{label}': invalid strategy '{leg.strategy}'. "
-                    f"Must be one of: {', '.join(e.value for e in RollStrategy)}"
-                )
-
-            adj_method = AdjustmentMethod.NONE
-            if leg.adjustment:
-                try:
-                    adj_method = AdjustmentMethod(leg.adjustment)
-                except ValueError:
-                    raise ValidationError(
-                        f"Leg '{label}': invalid adjustment '{leg.adjustment}'. "
-                        f"Must be one of: {', '.join(e.value for e in AdjustmentMethod)}"
-                    )
-
-            legs_spec[label] = ContinuousLegSpec(
-                collection=leg.collection,
-                roll_config=ContinuousRollConfig(
-                    strategy=roll_strategy,
-                    adjustment=adj_method,
-                    cycle=leg.cycle,
-                ),
-            )
+    legs_spec = _parse_legs(body.legs, registry)
 
     # ── 3. Fetch aligned prices ──
     #

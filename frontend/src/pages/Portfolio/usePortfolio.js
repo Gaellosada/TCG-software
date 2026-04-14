@@ -1,5 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { computePortfolio } from '../../api/portfolio';
+import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
+import { formatDateInt } from '../../utils/format';
 
 const STORAGE_KEY = 'tcg-saved-portfolios';
 const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
@@ -20,6 +22,9 @@ export default function usePortfolio() {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [legDateRanges, setLegDateRanges] = useState({});
+  const [overlapRange, setOverlapRange] = useState(null);
+  const [rangesLoading, setRangesLoading] = useState(false);
   const [portfolioName, setPortfolioName] = useState('');
   const [dirty, setDirty] = useState(false);
   const [autosave, setAutosaveState] = useState(
@@ -28,6 +33,83 @@ export default function usePortfolio() {
 
   const abortRef = useRef(null);
   const autosaveTimerRef = useRef(null);
+
+  /* ── Fetch date ranges when legs change ── */
+
+  useEffect(() => {
+    if (legs.length === 0) {
+      setLegDateRanges({});
+      setOverlapRange(null);
+      return;
+    }
+
+    let cancelled = false;
+    setRangesLoading(true);
+
+    // Fetch each leg's price data using the same APIs as the Data page
+    const promises = legs.map(async (leg) => {
+      try {
+        let dates;
+        if (leg.type === 'continuous') {
+          const res = await getContinuousSeries(leg.collection, {
+            strategy: leg.strategy || 'front_month',
+            adjustment: leg.adjustment || 'none',
+            cycle: leg.cycle || undefined,
+            rollOffset: leg.rollOffset || 0,
+          });
+          dates = res?.dates;
+        } else {
+          const res = await getInstrumentPrices(leg.collection, leg.symbol);
+          dates = res?.dates;
+        }
+        if (dates && dates.length > 0) {
+          return {
+            label: leg.label,
+            start: formatDateInt(dates[0]),
+            end: formatDateInt(dates[dates.length - 1]),
+          };
+        }
+        return { label: leg.label, start: null, end: null };
+      } catch {
+        return { label: leg.label, start: null, end: null };
+      }
+    });
+
+    Promise.all(promises).then((results) => {
+      if (cancelled) return;
+
+      const ranges = {};
+      const validStarts = [];
+      const validEnds = [];
+
+      for (const r of results) {
+        ranges[r.label] = { start: r.start, end: r.end };
+        if (r.start) {
+          validStarts.push(r.start);
+          validEnds.push(r.end);
+        }
+      }
+
+      setLegDateRanges(ranges);
+
+      if (validStarts.length > 0) {
+        // Overlap = latest start to earliest end
+        const overlapStart = validStarts.reduce((a, b) => (a > b ? a : b));
+        const overlapEnd = validEnds.reduce((a, b) => (a < b ? a : b));
+        if (overlapStart <= overlapEnd) {
+          setOverlapRange({ start: overlapStart, end: overlapEnd });
+        } else {
+          setOverlapRange(null);
+        }
+      } else {
+        setOverlapRange(null);
+      }
+
+      setRangesLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [legs]);
 
   /* ── Leg management ── */
 
@@ -44,6 +126,7 @@ export default function usePortfolio() {
         strategy: leg.strategy || null,
         adjustment: leg.adjustment || null,
         cycle: leg.cycle || null,
+        rollOffset: leg.rollOffset ?? 0,
         weight: leg.weight ?? 100,
       },
     ]);
@@ -76,6 +159,8 @@ export default function usePortfolio() {
     setResults(null);
     setError(null);
     setLoading(false);
+    setLegDateRanges({});
+    setOverlapRange(null);
     setStartDate('');
     setEndDate('');
     setPortfolioName('');
@@ -117,6 +202,9 @@ export default function usePortfolio() {
         };
         if (leg.cycle) {
           apiLegs[leg.label].cycle = leg.cycle;
+        }
+        if (leg.rollOffset > 0) {
+          apiLegs[leg.label].roll_offset = leg.rollOffset;
         }
       } else {
         apiLegs[leg.label] = {
@@ -177,6 +265,7 @@ export default function usePortfolio() {
           strategy: l.strategy,
           adjustment: l.adjustment,
           cycle: l.cycle,
+          rollOffset: l.rollOffset,
           weight: l.weight,
         })),
         weights,
@@ -257,6 +346,9 @@ export default function usePortfolio() {
     setEndDate,
     results,
     loading,
+    legDateRanges,
+    overlapRange,
+    rangesLoading,
     error,
     clearError,
     handleCalculate,

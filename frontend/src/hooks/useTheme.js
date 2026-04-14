@@ -7,12 +7,12 @@ import { useState, useEffect } from 'react';
  */
 export default function useTheme() {
   const [theme, setTheme] = useState(
-    () => document.documentElement.dataset.theme || 'dark'
+    () => document.documentElement.dataset.theme || 'light'
   );
 
   useEffect(() => {
     const observer = new MutationObserver(() => {
-      setTheme(document.documentElement.dataset.theme || 'dark');
+      setTheme(document.documentElement.dataset.theme || 'light');
     });
     observer.observe(document.documentElement, {
       attributes: true,

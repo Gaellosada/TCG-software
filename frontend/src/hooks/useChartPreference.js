@@ -7,12 +7,12 @@ import { useState, useEffect } from 'react';
  */
 export default function useChartPreference() {
   const [chartType, setChartType] = useState(
-    () => document.documentElement.dataset.chartType || 'candlestick'
+    () => document.documentElement.dataset.chartType || 'line'
   );
 
   useEffect(() => {
     const observer = new MutationObserver(() => {
-      setChartType(document.documentElement.dataset.chartType || 'candlestick');
+      setChartType(document.documentElement.dataset.chartType || 'line');
     });
     observer.observe(document.documentElement, {
       attributes: true,

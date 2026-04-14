@@ -174,6 +174,7 @@ function PortfolioPage() {
         <div className={styles.section}>
           <HoldingsList
             legs={portfolio.legs}
+            legDateRanges={portfolio.legDateRanges}
             onUpdateLeg={portfolio.updateLeg}
             onRemoveLeg={portfolio.removeLeg}
             onOpenAddModal={handleOpenModal}
@@ -217,11 +218,11 @@ function PortfolioPage() {
           {/* Time range slider */}
           <div className={styles.sliderRow}>
             <TimeRangeSlider
-              minDate={portfolio.results?.full_date_range?.start || null}
-              maxDate={portfolio.results?.full_date_range?.end || null}
+              minDate={portfolio.results?.full_date_range?.start || portfolio.overlapRange?.start || null}
+              maxDate={portfolio.results?.full_date_range?.end || portfolio.overlapRange?.end || null}
               startDate={portfolio.startDate}
               endDate={portfolio.endDate}
-              disabled={portfolio.loading}
+              disabled={portfolio.loading || portfolio.rangesLoading}
               onChange={({ startDate, endDate }) => {
                 portfolio.setStartDate(startDate);
                 portfolio.setEndDate(endDate);
