@@ -2,7 +2,9 @@ import { useState, useCallback, useEffect, useMemo } from 'react';
 import useAsync from '../../hooks/useAsync';
 import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
+import useProviderPreference from '../../hooks/useProviderPreference';
 import Chart from '../../components/Chart';
+import PillToggle from '../../components/PillToggle';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
 import { TRACE_COLORS, getChartColors, createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
@@ -13,6 +15,8 @@ function ContinuousChart({ collection }) {
   const theme = useTheme();
   const colors = getChartColors(theme);
   const preference = useChartPreference();
+  const [selectedProvider, setSelectedProvider] = useState(null);
+  const { getDefault } = useProviderPreference();
 
   const [adjustment, setAdjustment] = useState('none');
   const [cycle, setCycle] = useState('');
@@ -22,6 +26,13 @@ function ContinuousChart({ collection }) {
   useEffect(() => {
     setChartType(preference);
   }, [preference]);
+
+  // Reset provider selection when collection changes
+  useEffect(() => {
+    setSelectedProvider(null);
+  }, [collection]);
+
+  const providerParam = selectedProvider || getDefault(collection) || undefined;
 
   const { data: cyclesData } = useAsync(
     () => getAvailableCycles(collection),
@@ -33,11 +44,12 @@ function ContinuousChart({ collection }) {
       strategy: 'front_month',
       adjustment,
       cycle: cycle || undefined,
+      provider: providerParam,
     }),
-    [collection, adjustment, cycle]
+    [collection, adjustment, cycle, providerParam]
   );
 
-  const { data, loading, error } = useAsync(fetchSeries, [collection, adjustment, cycle]);
+  const { data, loading, error } = useAsync(fetchSeries, [collection, adjustment, cycle, providerParam]);
 
   const rollDates = (data && data.roll_dates) || [];
 
@@ -189,6 +201,15 @@ function ContinuousChart({ collection }) {
             ))}
           </select>
         </label>
+
+        {data?.available_providers?.length > 1 && (
+          <PillToggle
+            options={data.available_providers.map(p => ({ value: p, label: p }))}
+            value={data.provider}
+            onChange={setSelectedProvider}
+            ariaLabel="Data provider"
+          />
+        )}
       </div>
 
       <div className={styles.chartCard}>

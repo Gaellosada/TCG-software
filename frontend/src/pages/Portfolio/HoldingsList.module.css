@@ -92,6 +92,10 @@
   width: 120px;
 }
 
+.thProvider {
+  width: 100px;
+}
+
 .thWeight {
   width: 80px;
 }
@@ -155,6 +159,22 @@
 }
 
 .weightInput:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.providerSelect {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.providerSelect:focus {
   border-color: var(--accent);
   outline: none;
 }

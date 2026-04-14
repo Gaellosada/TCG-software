@@ -2,7 +2,9 @@ import { useState, useEffect, useMemo } from 'react';
 import useAsync from '../../hooks/useAsync';
 import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
+import useProviderPreference from '../../hooks/useProviderPreference';
 import Chart from '../../components/Chart';
+import PillToggle from '../../components/PillToggle';
 import { getInstrumentPrices } from '../../api/data';
 import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
@@ -14,15 +16,24 @@ function PriceChart({ collection, instrument }) {
   const colors = getChartColors(theme);
   const preference = useChartPreference();
   const [chartType, setChartType] = useState(preference);
+  const [selectedProvider, setSelectedProvider] = useState(null);
+  const { getDefault } = useProviderPreference();
 
   // Sync local state when global preference changes
   useEffect(() => {
     setChartType(preference);
   }, [preference]);
 
+  // Reset provider selection when collection/instrument changes
+  useEffect(() => {
+    setSelectedProvider(null);
+  }, [collection, instrument]);
+
+  const providerParam = selectedProvider || getDefault(collection) || undefined;
+
   const { data, loading, error } = useAsync(
-    () => getInstrumentPrices(collection, instrument),
-    [collection, instrument]
+    () => getInstrumentPrices(collection, instrument, { provider: providerParam }),
+    [collection, instrument, providerParam]
   );
 
   const { traces, layoutOverrides, hasOHLC } = useMemo(() => {
@@ -131,19 +142,29 @@ function PriceChart({ collection, instrument }) {
         </span>
       </div>
 
-      {hasOHLC && (
+      {(hasOHLC || data?.available_providers?.length > 1) && (
         <div className={styles.controls}>
-          <label className={styles.controlLabel}>
-            Chart
-            <select
-              className={styles.select}
-              value={chartType}
-              onChange={(e) => setChartType(e.target.value)}
-            >
-              <option value="candlestick">Candlestick</option>
-              <option value="line">Line</option>
-            </select>
-          </label>
+          {hasOHLC && (
+            <label className={styles.controlLabel}>
+              Chart
+              <select
+                className={styles.select}
+                value={chartType}
+                onChange={(e) => setChartType(e.target.value)}
+              >
+                <option value="candlestick">Candlestick</option>
+                <option value="line">Line</option>
+              </select>
+            </label>
+          )}
+          {data?.available_providers?.length > 1 && (
+            <PillToggle
+              options={data.available_providers.map(p => ({ value: p, label: p }))}
+              value={data.provider}
+              onChange={setSelectedProvider}
+              ariaLabel="Data provider"
+            />
+          )}
         </div>
       )}
 

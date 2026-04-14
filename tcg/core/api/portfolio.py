@@ -62,6 +62,7 @@ class LegSpec(BaseModel):
     strategy: str | None = None      # Required for "continuous"
     adjustment: str | None = None    # Optional for "continuous" (default "none")
     cycle: str | None = None         # Optional for "continuous"
+    provider: str | None = None      # Optional data provider override
 
     @field_validator("type")
     @classmethod
@@ -181,14 +182,20 @@ async def compute_portfolio(
                 ),
             )
 
+    # ── 2b. Build per-leg provider dict ──
+
+    leg_providers: dict[str, str | None] = {
+        label: leg.provider for label, leg in body.legs.items()
+    }
+
     # ── 3. Fetch aligned prices ──
     #
     # Fetch the FULL overlapping date range first so we can report it to the
     # frontend (the slider needs to know the full extent even when computing
     # on a sub-range).  Then apply the user's start/end filter locally.
 
-    full_common_dates, full_aligned_series = await svc.get_aligned_prices(
-        legs_spec,
+    full_common_dates, full_aligned_series, resolved_providers = (
+        await svc.get_aligned_prices(legs_spec, providers=leg_providers)
     )
 
     full_start_iso = int_to_iso(int(full_common_dates[0]))
@@ -275,4 +282,5 @@ async def compute_portfolio(
         "full_date_range": {"start": full_start_iso, "end": full_end_iso},
         "rebalance": rebalance_freq.value,
         "return_type": body.return_type,
+        "providers": resolved_providers,
     }

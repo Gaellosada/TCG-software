@@ -19,6 +19,7 @@ from tcg.types.market import (
     ContinuousRollConfig,
     ContinuousSeries,
     InstrumentId,
+    PriceResult,
     PriceSeries,
 )
 from tcg.types.simulation import SimResult
@@ -56,7 +57,7 @@ class MarketDataService(Protocol):
         start: date | None = None,
         end: date | None = None,
         provider: str | None = None,
-    ) -> PriceSeries | None: ...
+    ) -> PriceResult | None: ...
 
     # --- Continuous futures series ---
 
@@ -67,6 +68,7 @@ class MarketDataService(Protocol):
         *,
         start: date | None = None,
         end: date | None = None,
+        provider: str | None = None,
     ) -> ContinuousSeries | None: ...
 
     # --- Futures metadata ---
@@ -84,7 +86,8 @@ class MarketDataService(Protocol):
         *,
         start: date | None = None,
         end: date | None = None,
-    ) -> tuple[npt.NDArray[np.int64], dict[str, PriceSeries]]: ...
+        providers: dict[str, str | None] | None = None,
+    ) -> tuple[npt.NDArray[np.int64], dict[str, PriceSeries], dict[str, str]]: ...
 
 
 class StrategyStore(Protocol):

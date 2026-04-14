@@ -15,7 +15,7 @@ from pymongo import ASCENDING
 from pymongo.errors import PyMongoError
 
 from tcg.types.errors import DataAccessError
-from tcg.types.market import ContractPriceData, InstrumentId, PriceSeries
+from tcg.types.market import ContractPriceData, InstrumentId, PriceResult, PriceSeries
 from tcg.data._utils import date_to_int, filter_date_range
 
 from tcg.data._mongo.helpers import (
@@ -83,7 +83,7 @@ class MongoInstrumentReader:
         provider: str | None = None,
         start: date | None = None,
         end: date | None = None,
-    ) -> PriceSeries | None:
+    ) -> PriceResult | None:
         """Fetch OHLCV data for a single instrument.
 
         Tries multiple ``_id`` candidate types (ObjectId, then string)
@@ -91,6 +91,9 @@ class MongoInstrumentReader:
 
         Date range filtering is applied *after* extraction since
         eodDatas is stored as an embedded array, not separate documents.
+
+        Returns a ``PriceResult`` containing the prices, the resolved
+        provider, and the list of all available providers.
         """
         try:
             coll = self._db[collection]
@@ -99,17 +102,24 @@ class MongoInstrumentReader:
             if doc is None:
                 return None
 
-            series = extract_price_data(doc, provider=provider)
-            if series is None:
+            result = extract_price_data(
+                doc, provider=provider, collection=collection,
+            )
+            if result is None:
                 return None
 
             # Apply date range filter
             if start is not None or end is not None:
-                series = filter_date_range(series, start, end)
-                if series is None:
+                filtered = filter_date_range(result.prices, start, end)
+                if filtered is None:
                     return None
+                result = PriceResult(
+                    prices=filtered,
+                    provider=result.provider,
+                    available_providers=result.available_providers,
+                )
 
-            return series
+            return result
         except PyMongoError as exc:
             raise DataAccessError(
                 f"MongoDB error reading '{instrument_id}' from '{collection}': {exc}"
@@ -120,15 +130,25 @@ class MongoInstrumentReader:
         collection: str,
         *,
         cycle: str | None = None,
-    ) -> list[ContractPriceData]:
+        provider: str | None = None,
+    ) -> tuple[list[ContractPriceData], tuple[str, ...], str]:
         """Fetch all futures contracts in a collection, ordered by expiration.
 
         Queries MongoDB for documents with non-null expiration.
         If cycle is provided, filters by expirationCycle field.
         Returns contracts ordered by expiration date (ascending).
 
-        Each contract's price data uses the first available provider
-        (consistent with get_prices behavior).
+        The ``provider`` parameter is passed to each contract's
+        extraction, selecting a consistent provider across all contracts.
+
+        Returns
+        -------
+        (contracts, available_providers, resolved_provider)
+            ``contracts`` is a list of ContractPriceData.
+            ``available_providers`` is the intersection of providers
+            available across all contracts.
+            ``resolved_provider`` is the provider actually used for
+            the first contract (representative of the auto-resolved choice).
 
         Performance: benefits from indexes on ``expiration`` (sort key)
         and ``expirationCycle`` (filter). Without these, MongoDB performs
@@ -145,9 +165,14 @@ class MongoInstrumentReader:
             cursor = coll.find(query, projection).sort("expiration", ASCENDING)
 
             contracts: list[ContractPriceData] = []
+            all_available: list[set[str]] = []
+            resolved_provider: str | None = None
+
             async for doc in cursor:
-                prices = extract_price_data(doc)
-                if prices is None:
+                result = extract_price_data(
+                    doc, provider=provider, collection=collection,
+                )
+                if result is None:
                     continue
 
                 contract_id = serialize_doc_id(doc["_id"])
@@ -166,11 +191,23 @@ class MongoInstrumentReader:
                     ContractPriceData(
                         contract_id=contract_id,
                         expiration=expiration,
-                        prices=prices,
+                        prices=result.prices,
                     )
                 )
+                all_available.append(set(result.available_providers))
+                if resolved_provider is None:
+                    resolved_provider = result.provider
 
-            return contracts
+            # Intersection of available providers across all contracts
+            if all_available:
+                common_providers = all_available[0]
+                for s in all_available[1:]:
+                    common_providers &= s
+                available = tuple(sorted(common_providers))
+            else:
+                available = ()
+
+            return contracts, available, resolved_provider or ""
         except PyMongoError as exc:
             raise DataAccessError(
                 f"MongoDB error fetching futures contracts from '{collection}': {exc}"

@@ -74,6 +74,14 @@ class PriceSeries:
 
 
 @dataclass(frozen=True)
+class PriceResult:
+    """Price data with provider metadata."""
+    prices: PriceSeries
+    provider: str
+    available_providers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ContractPriceData:
     """Price data for a single futures contract, used for rolling."""
     contract_id: str
@@ -115,3 +123,5 @@ class ContinuousSeries:
     prices: PriceSeries
     roll_dates: tuple[int, ...]     # YYYYMMDD at each roll boundary
     contracts: tuple[str, ...]      # Ordered contract IDs used
+    provider: str = ""
+    available_providers: tuple[str, ...] = ()

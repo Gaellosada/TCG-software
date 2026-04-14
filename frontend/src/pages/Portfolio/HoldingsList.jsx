@@ -1,4 +1,61 @@
+import { useState, useEffect } from 'react';
+import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import styles from './HoldingsList.module.css';
+
+/**
+ * Fetches available providers for a leg and renders a dropdown (or static text).
+ */
+function ProviderSelect({ leg, onChange }) {
+  const [providers, setProviders] = useState([]);
+  const [fetched, setFetched] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchProviders() {
+      try {
+        let data;
+        if (leg.type === 'continuous') {
+          data = await getContinuousSeries(leg.collection, {
+            strategy: leg.strategy || 'front_month',
+            adjustment: leg.adjustment || 'none',
+          });
+        } else {
+          data = await getInstrumentPrices(leg.collection, leg.symbol);
+        }
+        if (!cancelled) {
+          setProviders(data.available_providers || []);
+          setFetched(true);
+        }
+      } catch {
+        if (!cancelled) setFetched(true);
+      }
+    }
+    fetchProviders();
+    return () => { cancelled = true; };
+  }, [leg.collection, leg.symbol, leg.type, leg.strategy, leg.adjustment]);
+
+  if (!fetched) {
+    return <span className={styles.monoCell}>...</span>;
+  }
+
+  if (providers.length <= 1) {
+    return <span className={styles.monoCell}>{providers[0] || 'Auto'}</span>;
+  }
+
+  return (
+    <select
+      className={styles.providerSelect}
+      value={leg.provider || ''}
+      onChange={(e) => onChange(e.target.value || null)}
+      aria-label={`Provider for ${leg.label}`}
+    >
+      <option value="">Auto</option>
+      {providers.map((p) => (
+        <option key={p} value={p}>{p}</option>
+      ))}
+    </select>
+  );
+}
 
 /**
  * Displays portfolio holdings with editable weights and remove buttons.
@@ -32,6 +89,7 @@ export default function HoldingsList({ legs, onUpdateLeg, onRemoveLeg, onOpenAdd
                 <th className={styles.thType}>Type</th>
                 <th className={styles.thCollection}>Collection</th>
                 <th className={styles.thInstrument}>Instrument</th>
+                <th className={styles.thProvider}>Provider</th>
                 <th className={styles.thWeight}>Weight</th>
                 <th className={styles.thActions} aria-label="Actions" />
               </tr>
@@ -59,6 +117,12 @@ export default function HoldingsList({ legs, onUpdateLeg, onRemoveLeg, onOpenAdd
                     {leg.type === 'continuous'
                       ? `${leg.strategy || 'front_month'}`
                       : leg.symbol}
+                  </td>
+                  <td>
+                    <ProviderSelect
+                      leg={leg}
+                      onChange={(provider) => onUpdateLeg(index, { provider })}
+                    />
                   </td>
                   <td>
                     <input

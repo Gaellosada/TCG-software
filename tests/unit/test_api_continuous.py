@@ -46,6 +46,8 @@ def _make_continuous_series(
         prices=prices,
         roll_dates=(20150105,),
         contracts=("VX_F15", "VX_G15"),
+        provider="IVOLATILITY",
+        available_providers=("DERIBIT", "IVOLATILITY"),
     )
 
 
@@ -104,6 +106,10 @@ async def test_continuous_series_success(client: AsyncClient, mock_svc):
     assert len(body["low"]) == 3
     assert len(body["close"]) == 3
     assert len(body["volume"]) == 3
+
+    # Provider metadata present with correct values
+    assert body["provider"] == "IVOLATILITY"
+    assert body["available_providers"] == ["DERIBIT", "IVOLATILITY"]
 
     # Verify service was called with correct config
     mock_svc.get_continuous.assert_awaited_once()

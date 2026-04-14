@@ -14,7 +14,8 @@ import numpy as np
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from tcg.types.market import AssetClass, InstrumentId, PriceSeries
+from tcg.types.market import AssetClass, InstrumentId, PriceResult, PriceSeries
+from tcg.data._providers import resolve_provider
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +62,19 @@ def deserialize_doc_id(doc_id_str: str) -> list[Any]:
 def extract_price_data(
     doc: dict[str, Any],
     provider: str | None = None,
-) -> PriceSeries | None:
-    """Parse ``eodDatas`` from a MongoDB document into a ``PriceSeries``.
+    collection: str = "",
+) -> PriceResult | None:
+    """Parse ``eodDatas`` from a MongoDB document into a ``PriceResult``.
 
     Parameters
     ----------
     doc:
         Raw MongoDB document containing ``eodDatas``.
     provider:
-        If specified, use that provider's data. If ``None``, use the first
-        available provider.
+        If specified, request that provider's data via the resolver.
+        If ``None``, the resolver picks the best available provider.
+    collection:
+        Collection name, used by the provider resolver for default lookup.
 
     Returns ``None`` if the document has no usable price data.
     """
@@ -78,17 +82,13 @@ def extract_price_data(
     if not eod_datas or not isinstance(eod_datas, dict):
         return None
 
-    # Select provider
-    if provider is not None:
-        bars = eod_datas.get(provider)
-        if bars is None:
-            return None
-    else:
-        # Use first available provider
-        first_key = next(iter(eod_datas), None)
-        if first_key is None:
-            return None
-        bars = eod_datas[first_key]
+    available = list(eod_datas.keys())
+    if not available:
+        return None
+
+    # Resolve provider (may raise DataNotFoundError for explicit mismatches)
+    used_provider = resolve_provider(collection, available, provider)
+    bars = eod_datas[used_provider]
 
     if not bars:
         return None
@@ -136,13 +136,19 @@ def extract_price_data(
     # Sort by date (ascending)
     order = np.argsort(np.array(dates_out, dtype=np.int64))
 
-    return PriceSeries(
+    series = PriceSeries(
         dates=np.array(dates_out, dtype=np.int64)[order],
         open=np.array(open_out, dtype=np.float64)[order],
         high=np.array(high_out, dtype=np.float64)[order],
         low=np.array(low_out, dtype=np.float64)[order],
         close=np.array(close_out, dtype=np.float64)[order],
         volume=np.array(volume_out, dtype=np.float64)[order],
+    )
+
+    return PriceResult(
+        prices=series,
+        provider=used_provider,
+        available_providers=tuple(available),
     )
 
 

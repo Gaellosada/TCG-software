@@ -50,6 +50,7 @@ async def get_continuous_series(
     cycle: str | None = Query(None, description="Expiration cycle filter (e.g. HMUZ)"),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),
+    provider: str | None = Query(None, description="Data provider filter"),
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
     """Build a continuous futures series from rolled contracts."""
@@ -79,7 +80,9 @@ async def get_continuous_series(
         cycle=cycle,
     )
 
-    series = await svc.get_continuous(collection, roll_config, start=start_date, end=end_date)
+    series = await svc.get_continuous(
+        collection, roll_config, start=start_date, end=end_date, provider=provider,
+    )
     if series is None:
         raise DataNotFoundError(
             f"No continuous series found for collection '{collection}'"
@@ -98,6 +101,8 @@ async def get_continuous_series(
         "low": series.prices.low.tolist(),
         "close": series.prices.close.tolist(),
         "volume": series.prices.volume.tolist(),
+        "provider": series.provider,
+        "available_providers": list(series.available_providers),
     }
 
 
@@ -155,23 +160,25 @@ async def get_prices(
     except ValueError as exc:
         raise ValidationError(f"Invalid date format: {exc}") from exc
 
-    series = await svc.get_prices(
+    result = await svc.get_prices(
         collection,
         instrument_id,
         start=start_date,
         end=end_date,
         provider=provider,
     )
-    if series is None:
+    if result is None:
         raise DataNotFoundError(
             f"Instrument '{instrument_id}' not found in collection '{collection}'"
         )
 
     return {
-        "dates": series.dates.tolist(),
-        "open": series.open.tolist(),
-        "high": series.high.tolist(),
-        "low": series.low.tolist(),
-        "close": series.close.tolist(),
-        "volume": series.volume.tolist(),
+        "dates": result.prices.dates.tolist(),
+        "open": result.prices.open.tolist(),
+        "high": result.prices.high.tolist(),
+        "low": result.prices.low.tolist(),
+        "close": result.prices.close.tolist(),
+        "volume": result.prices.volume.tolist(),
+        "provider": result.provider,
+        "available_providers": list(result.available_providers),
     }

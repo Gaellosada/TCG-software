@@ -45,6 +45,7 @@ export default function usePortfolio() {
         adjustment: leg.adjustment || null,
         cycle: leg.cycle || null,
         weight: leg.weight ?? 100,
+        provider: leg.provider || null,
       },
     ]);
     setDirty(true);
@@ -114,6 +115,7 @@ export default function usePortfolio() {
           collection: leg.collection,
           strategy: leg.strategy || 'front_month',
           adjustment: leg.adjustment || 'none',
+          provider: leg.provider || undefined,
         };
         if (leg.cycle) {
           apiLegs[leg.label].cycle = leg.cycle;
@@ -123,6 +125,7 @@ export default function usePortfolio() {
           type: 'instrument',
           collection: leg.collection,
           symbol: leg.symbol,
+          provider: leg.provider || undefined,
         };
       }
     }
@@ -178,6 +181,7 @@ export default function usePortfolio() {
           adjustment: l.adjustment,
           cycle: l.cycle,
           weight: l.weight,
+          provider: l.provider,
         })),
         weights,
         rebalance,

@@ -28,6 +28,7 @@ from tcg.types.market import (
     ContinuousRollConfig,
     ContinuousSeries,
     InstrumentId,
+    PriceResult,
     PriceSeries,
     RollStrategy,
 )
@@ -108,15 +109,17 @@ class TestAlignedPricesSingleLeg:
     async def test_single_instrument_id_leg(self):
         svc = _make_service()
         ps = _price_series([20240101, 20240102, 20240103], [100.0, 101.0, 102.0])
+        pr = PriceResult(prices=ps, provider="YAHOO", available_providers=("YAHOO",))
 
-        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=ps):
-            common_dates, aligned = await svc.get_aligned_prices(
+        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=pr):
+            common_dates, aligned, providers = await svc.get_aligned_prices(
                 {"spx": _spx_id()}
             )
 
         np.testing.assert_array_equal(common_dates, [20240101, 20240102, 20240103])
         assert "spx" in aligned
         np.testing.assert_array_equal(aligned["spx"].close, [100.0, 101.0, 102.0])
+        assert providers["spx"] == "YAHOO"
 
     async def test_single_continuous_leg(self):
         svc = _make_service()
@@ -124,7 +127,7 @@ class TestAlignedPricesSingleLeg:
         cs = _continuous_series(ps)
 
         with patch.object(svc, "get_continuous", new_callable=AsyncMock, return_value=cs):
-            common_dates, aligned = await svc.get_aligned_prices(
+            common_dates, aligned, providers = await svc.get_aligned_prices(
                 {"vix": _vix_leg()}
             )
 
@@ -140,14 +143,15 @@ class TestAlignedPricesMultiLeg:
         ps_spx = _price_series(
             [20240101, 20240102, 20240103], [100.0, 101.0, 102.0]
         )
+        pr_spx = PriceResult(prices=ps_spx, provider="YAHOO", available_providers=("YAHOO",))
         ps_vix = _price_series(
             [20240102, 20240103, 20240104], [15.0, 16.0, 17.0]
         )
         cs_vix = _continuous_series(ps_vix)
 
-        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=ps_spx), \
+        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=pr_spx), \
              patch.object(svc, "get_continuous", new_callable=AsyncMock, return_value=cs_vix):
-            common_dates, aligned = await svc.get_aligned_prices({
+            common_dates, aligned, _ = await svc.get_aligned_prices({
                 "spx": _spx_id(),
                 "vix": _vix_leg(),
             })
@@ -170,15 +174,19 @@ class TestAlignedPricesMultiLeg:
         ps_b = _price_series([20240102, 20240103, 20240104], [4.0, 5.0, 6.0])
         ps_c = _price_series([20240103, 20240104, 20240105], [7.0, 8.0, 9.0])
 
+        pr_a = PriceResult(prices=ps_a, provider="YAHOO", available_providers=("YAHOO",))
+        pr_b = PriceResult(prices=ps_b, provider="YAHOO", available_providers=("YAHOO",))
+        pr_c = PriceResult(prices=ps_c, provider="YAHOO", available_providers=("YAHOO",))
+
         id_a = InstrumentId(symbol="A", asset_class=AssetClass.INDEX, collection="INDEX")
         id_b = InstrumentId(symbol="B", asset_class=AssetClass.INDEX, collection="INDEX")
         id_c = InstrumentId(symbol="C", asset_class=AssetClass.INDEX, collection="INDEX")
 
         async def mock_get_prices(collection, symbol, **kwargs):
-            return {"A": ps_a, "B": ps_b, "C": ps_c}[symbol]
+            return {"A": pr_a, "B": pr_b, "C": pr_c}[symbol]
 
         with patch.object(svc, "get_prices", side_effect=mock_get_prices):
-            common_dates, aligned = await svc.get_aligned_prices({
+            common_dates, aligned, _ = await svc.get_aligned_prices({
                 "a": id_a, "b": id_b, "c": id_c,
             })
 
@@ -193,9 +201,10 @@ class TestAlignedPricesMultiLeg:
         svc = _make_service()
         # Both have same dates, just confirm output is sorted
         ps = _price_series([20240103, 20240101, 20240102], [3.0, 1.0, 2.0])
+        pr = PriceResult(prices=ps, provider="YAHOO", available_providers=("YAHOO",))
 
-        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=ps):
-            common_dates, _ = await svc.get_aligned_prices({"x": _spx_id()})
+        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=pr):
+            common_dates, _, _ = await svc.get_aligned_prices({"x": _spx_id()})
 
         # common_dates must be sorted
         assert np.all(common_dates[:-1] <= common_dates[1:])
@@ -205,11 +214,14 @@ class TestAlignedPricesMultiLeg:
         ps_a = _price_series([20240101], [100.0])
         ps_b = _price_series([20240102], [200.0])
 
+        pr_a = PriceResult(prices=ps_a, provider="YAHOO", available_providers=("YAHOO",))
+        pr_b = PriceResult(prices=ps_b, provider="YAHOO", available_providers=("YAHOO",))
+
         id_a = InstrumentId(symbol="A", asset_class=AssetClass.INDEX, collection="INDEX")
         id_b = InstrumentId(symbol="B", asset_class=AssetClass.INDEX, collection="INDEX")
 
         async def mock_get_prices(collection, symbol, **kwargs):
-            return {"A": ps_a, "B": ps_b}[symbol]
+            return {"A": pr_a, "B": pr_b}[symbol]
 
         with patch.object(svc, "get_prices", side_effect=mock_get_prices):
             with pytest.raises(ValidationError, match="No overlapping dates"):
@@ -240,26 +252,31 @@ class TestAlignedPricesReturnTypes:
     async def test_common_dates_is_int64_array(self):
         svc = _make_service()
         ps = _price_series([20240101, 20240102], [100.0, 101.0])
+        pr = PriceResult(prices=ps, provider="YAHOO", available_providers=("YAHOO",))
 
-        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=ps):
-            common_dates, aligned = await svc.get_aligned_prices({"x": _spx_id()})
+        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=pr):
+            common_dates, aligned, providers = await svc.get_aligned_prices({"x": _spx_id()})
 
         assert common_dates.dtype == np.int64
         assert isinstance(aligned["x"], PriceSeries)
+        assert providers["x"] == "YAHOO"
 
     async def test_aligned_series_dates_match_common(self):
         svc = _make_service()
         ps_a = _price_series([20240101, 20240102, 20240103], [1.0, 2.0, 3.0])
         ps_b = _price_series([20240102, 20240103, 20240104], [4.0, 5.0, 6.0])
 
+        pr_a = PriceResult(prices=ps_a, provider="YAHOO", available_providers=("YAHOO",))
+        pr_b = PriceResult(prices=ps_b, provider="YAHOO", available_providers=("YAHOO",))
+
         id_a = InstrumentId(symbol="A", asset_class=AssetClass.INDEX, collection="INDEX")
         id_b = InstrumentId(symbol="B", asset_class=AssetClass.INDEX, collection="INDEX")
 
         async def mock_get_prices(collection, symbol, **kwargs):
-            return {"A": ps_a, "B": ps_b}[symbol]
+            return {"A": pr_a, "B": pr_b}[symbol]
 
         with patch.object(svc, "get_prices", side_effect=mock_get_prices):
-            common_dates, aligned = await svc.get_aligned_prices({
+            common_dates, aligned, _ = await svc.get_aligned_prices({
                 "a": id_a, "b": id_b,
             })
 

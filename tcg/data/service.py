@@ -20,6 +20,7 @@ from tcg.types.market import (
     ContinuousRollConfig,
     ContinuousSeries,
     InstrumentId,
+    PriceResult,
     PriceSeries,
 )
 
@@ -93,7 +94,7 @@ class DefaultMarketDataService:
         start: date | None = None,
         end: date | None = None,
         provider: str | None = None,
-    ) -> PriceSeries | None:
+    ) -> PriceResult | None:
         cache_key = self._make_key(
             collection, instrument_id, provider, start, end
         )
@@ -122,6 +123,7 @@ class DefaultMarketDataService:
         *,
         start: date | None = None,
         end: date | None = None,
+        provider: str | None = None,
     ) -> ContinuousSeries | None:
         """Build a continuous futures series from individual contracts.
 
@@ -138,13 +140,17 @@ class DefaultMarketDataService:
                 f"Collection '{collection}' is not a futures collection"
             )
 
-        cache_key = self._make_continuous_key(collection, roll_config, start, end)
+        cache_key = self._make_continuous_key(
+            collection, roll_config, start, end, provider
+        )
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
 
-        contracts = await self._mongo.fetch_futures_contracts(
-            collection, cycle=roll_config.cycle
+        contracts, available_providers, resolved_provider = (
+            await self._mongo.fetch_futures_contracts(
+                collection, cycle=roll_config.cycle, provider=provider,
+            )
         )
         if not contracts:
             return None
@@ -154,6 +160,17 @@ class DefaultMarketDataService:
         # Empty series means no usable data
         if len(result.prices) == 0:
             return None
+
+        used_provider = resolved_provider
+        result = ContinuousSeries(
+            collection=result.collection,
+            roll_config=result.roll_config,
+            prices=result.prices,
+            roll_dates=result.roll_dates,
+            contracts=result.contracts,
+            provider=used_provider,
+            available_providers=available_providers,
+        )
 
         # Apply date range filter
         if start is not None or end is not None:
@@ -174,6 +191,8 @@ class DefaultMarketDataService:
                 prices=filtered_prices,
                 roll_dates=filtered_roll_dates,
                 contracts=result.contracts,
+                provider=result.provider,
+                available_providers=result.available_providers,
             )
 
         self._cache.put(cache_key, result)
@@ -193,7 +212,8 @@ class DefaultMarketDataService:
         *,
         start: date | None = None,
         end: date | None = None,
-    ) -> tuple[npt.NDArray[np.int64], dict[str, PriceSeries]]:
+        providers: dict[str, str | None] | None = None,
+    ) -> tuple[npt.NDArray[np.int64], dict[str, PriceSeries], dict[str, str]]:
         """Fetch multiple instruments and align them on common dates (inner join).
 
         Parameters
@@ -204,13 +224,18 @@ class DefaultMarketDataService:
             rolled futures).
         start, end:
             Optional date bounds applied to every leg before alignment.
+        providers:
+            Optional mapping of leg label -> requested provider.
+            Missing labels use the default resolution.
 
         Returns
         -------
-        (common_dates, aligned_series)
+        (common_dates, aligned_series, resolved_providers)
             ``common_dates`` is a sorted int64 array of YYYYMMDD dates
             present in **all** legs.  ``aligned_series`` maps each label
             to its ``PriceSeries`` filtered to those common dates.
+            ``resolved_providers`` maps each label to the provider
+            actually used.
 
         Raises
         ------
@@ -222,29 +247,40 @@ class DefaultMarketDataService:
         if not legs:
             raise ValidationError("No legs provided for alignment")
 
+        providers = providers or {}
+
         # --- 1. Fetch each leg ---
         fetched: dict[str, PriceSeries] = {}
+        resolved_providers: dict[str, str] = {}
         for label, spec in legs.items():
+            leg_provider = providers.get(label)
             if isinstance(spec, InstrumentId):
-                series = await self.get_prices(
-                    spec.collection, spec.symbol, start=start, end=end,
+                price_result = await self.get_prices(
+                    spec.collection, spec.symbol,
+                    start=start, end=end, provider=leg_provider,
                 )
+                if price_result is None:
+                    raise DataNotFoundError(
+                        f"No price data found for leg '{label}'"
+                    )
+                fetched[label] = price_result.prices
+                resolved_providers[label] = price_result.provider
             elif isinstance(spec, ContinuousLegSpec):
-                result = await self.get_continuous(
-                    spec.collection, spec.roll_config, start=start, end=end,
+                cont_result = await self.get_continuous(
+                    spec.collection, spec.roll_config,
+                    start=start, end=end, provider=leg_provider,
                 )
-                series = result.prices if result is not None else None
+                if cont_result is None:
+                    raise DataNotFoundError(
+                        f"No price data found for leg '{label}'"
+                    )
+                fetched[label] = cont_result.prices
+                resolved_providers[label] = cont_result.provider
             else:
                 raise ValidationError(
                     f"Leg '{label}': expected InstrumentId or "
                     f"ContinuousLegSpec, got {type(spec).__name__}"
                 )
-
-            if series is None:
-                raise DataNotFoundError(
-                    f"No price data found for leg '{label}'"
-                )
-            fetched[label] = series
 
         # --- 2. Compute date intersection (inner join) ---
         date_sets = [set(ps.dates.tolist()) for ps in fetched.values()]
@@ -272,7 +308,7 @@ class DefaultMarketDataService:
                 volume=ps.volume[mask],
             )
 
-        return common_dates, aligned
+        return common_dates, aligned, resolved_providers
 
     # --- Internal ---
 
@@ -293,10 +329,11 @@ class DefaultMarketDataService:
         roll_config: ContinuousRollConfig,
         start: date | None,
         end: date | None,
+        provider: str | None = None,
     ) -> str:
         """Build a deterministic cache key for continuous series."""
         return (
             f"continuous:{collection}:{roll_config.strategy}"
             f":{roll_config.adjustment}:{roll_config.cycle}"
-            f":{start}:{end}"
+            f":{provider}:{start}:{end}"
         )

@@ -1,6 +1,16 @@
 import { useState, useEffect } from 'react';
 import Icon from '../../components/Icon';
+import useProviderPreference from '../../hooks/useProviderPreference';
 import styles from './SettingsPage.module.css';
+
+const PROVIDER_COLLECTION_TYPES = [
+  { key: 'INDEX', label: 'Index', providers: ['YAHOO', 'BLOOMBERG', 'IVOLATILITY'] },
+  { key: 'ETF', label: 'ETF', providers: ['YAHOO', 'BLOOMBERG'] },
+  { key: 'FUND', label: 'Fund', providers: ['BLOOMBERG', 'YAHOO'] },
+  { key: 'FOREX', label: 'Forex', providers: ['YAHOO', 'BITSTAMP', 'COINGECKO'] },
+  { key: 'FUT_', label: 'Futures', providers: ['IVOLATILITY', 'DERIBIT', 'BLOOMBERG'] },
+  { key: 'OPT_', label: 'Options', providers: ['IVOLATILITY', 'DERIBIT', 'CBOE'] },
+];
 
 function getStoredTheme() {
   try {
@@ -33,6 +43,16 @@ function applyTheme(theme) {
 function SettingsPage() {
   const [theme, setTheme] = useState(getStoredTheme);
   const [chartType, setChartType] = useState(getStoredChartType);
+  const { getDefault, setDefault } = useProviderPreference();
+
+  // Build provider defaults state from localStorage
+  const [providerDefaults, setProviderDefaults] = useState(() => {
+    const defaults = {};
+    for (const { key } of PROVIDER_COLLECTION_TYPES) {
+      defaults[key] = getDefault(key) || '';
+    }
+    return defaults;
+  });
 
   useEffect(() => {
     applyTheme(theme);
@@ -58,6 +78,11 @@ function SettingsPage() {
     } catch {
       // localStorage unavailable — ignore
     }
+  }
+
+  function handleProviderChange(collectionKey, provider) {
+    setProviderDefaults(prev => ({ ...prev, [collectionKey]: provider }));
+    setDefault(collectionKey, provider || '');
   }
 
   return (
@@ -113,6 +138,24 @@ function SettingsPage() {
           </button>
         </div>
       </div>
+
+      <h2 className={styles.sectionTitle}>Default providers</h2>
+      {PROVIDER_COLLECTION_TYPES.map(({ key, label, providers }) => (
+        <div key={key} className={styles.settingRow}>
+          <span className={styles.settingLabel}>{label}</span>
+          <select
+            className={styles.providerSelect}
+            value={providerDefaults[key] || ''}
+            onChange={(e) => handleProviderChange(key, e.target.value)}
+            aria-label={`Default provider for ${label}`}
+          >
+            <option value="">Auto</option>
+            {providers.map(p => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </div>
+      ))}
     </div>
   );
 }

@@ -59,10 +59,16 @@ def mock_app():
         "SPX": _price_series(DATES, SPX_CLOSES),
         "VIX Futures": _price_series(DATES, VIX_CLOSES),
     }
+    resolved_providers = {
+        "SPX": "YAHOO",
+        "VIX Futures": "IVOLATILITY",
+    }
 
     svc = MagicMock()
     svc._registry = registry
-    svc.get_aligned_prices = AsyncMock(return_value=(common_dates, aligned_series))
+    svc.get_aligned_prices = AsyncMock(
+        return_value=(common_dates, aligned_series, resolved_providers)
+    )
 
     app = FastAPI()
     app.add_exception_handler(TCGError, tcg_error_handler)
@@ -153,6 +159,9 @@ class TestPortfolioCompute:
         # Metadata echoed
         assert body["rebalance"] == "monthly"
         assert body["return_type"] == "normal"
+
+        # Per-leg providers present
+        assert body["providers"] == {"SPX": "YAHOO", "VIX Futures": "IVOLATILITY"}
 
     async def test_aggregated_returns_present(self, client: AsyncClient):
         resp = await client.post("/api/portfolio/compute", json=VALID_BODY)

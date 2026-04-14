@@ -21,13 +21,14 @@ export async function getInstrumentPrices(collection, instrumentId, { start, end
   return res; // { dates, open, high, low, close, volume }
 }
 
-export async function getContinuousSeries(collection, { strategy = 'front_month', adjustment = 'none', cycle, start, end } = {}) {
+export async function getContinuousSeries(collection, { strategy = 'front_month', adjustment = 'none', cycle, start, end, provider } = {}) {
   const params = new URLSearchParams();
   params.set('strategy', strategy);
   params.set('adjustment', adjustment);
   if (cycle) params.set('cycle', cycle);
   if (start) params.set('start', start);
   if (end) params.set('end', end);
+  if (provider) params.set('provider', provider);
   const res = await fetchApi(`/data/continuous/${collection}?${params}`);
   return res;
 }

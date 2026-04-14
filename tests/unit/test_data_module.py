@@ -23,7 +23,7 @@ from tcg.data._mongo.helpers import (
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data.service import DefaultMarketDataService
 from tcg.types.errors import DataNotFoundError
-from tcg.types.market import AssetClass, InstrumentId, PriceSeries
+from tcg.types.market import AssetClass, InstrumentId, PriceResult, PriceSeries
 
 
 # ===================================================================
@@ -225,9 +225,10 @@ class TestExtractPriceData:
             {"date": 20240101, "open": 98.0, "high": 101.0, "low": 97.0, "close": 100.0, "volume": 800.0},
         ]
         doc = self._make_doc(bars)
-        series = extract_price_data(doc)
+        result = extract_price_data(doc)
 
-        assert series is not None
+        assert result is not None
+        series = result.prices
         assert len(series) == 2
         # Should be sorted by date
         assert series.dates[0] == 20240101
@@ -243,17 +244,19 @@ class TestExtractPriceData:
                 "iex": [{"date": 20240101, "open": 1.1, "high": 2.1, "low": 0.6, "close": 1.6, "volume": 200.0}],
             },
         }
-        series = extract_price_data(doc, provider="iex")
-        assert series is not None
-        assert series.close[0] == 1.6
+        result = extract_price_data(doc, provider="iex")
+        assert result is not None
+        assert result.prices.close[0] == 1.6
+        assert result.provider == "iex"
+        assert set(result.available_providers) == {"yahoo", "iex"}
 
-    def test_missing_provider(self):
+    def test_missing_provider_raises(self):
         doc = self._make_doc(
             [{"date": 20240101, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 100.0}],
             provider="yahoo",
         )
-        result = extract_price_data(doc, provider="nonexistent")
-        assert result is None
+        with pytest.raises(DataNotFoundError, match="not available"):
+            extract_price_data(doc, provider="nonexistent")
 
     def test_nan_close_drops_bar(self):
         bars = [
@@ -261,9 +264,10 @@ class TestExtractPriceData:
             {"date": 20240102, "open": 101.0, "high": 106.0, "low": 100.0, "close": 104.0, "volume": 1100.0},
         ]
         doc = self._make_doc(bars)
-        series = extract_price_data(doc)
+        result = extract_price_data(doc)
 
-        assert series is not None
+        assert result is not None
+        series = result.prices
         assert len(series) == 1
         assert series.dates[0] == 20240102
 
@@ -272,20 +276,20 @@ class TestExtractPriceData:
             {"date": 20240101, "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "volume": float("nan")},
         ]
         doc = self._make_doc(bars)
-        series = extract_price_data(doc)
+        result = extract_price_data(doc)
 
-        assert series is not None
-        assert series.volume[0] == 0.0
+        assert result is not None
+        assert result.prices.volume[0] == 0.0
 
     def test_nan_open_replaced_with_zero(self):
         bars = [
             {"date": 20240101, "open": float("nan"), "high": 105.0, "low": 99.0, "close": 103.0, "volume": 1000.0},
         ]
         doc = self._make_doc(bars)
-        series = extract_price_data(doc)
+        result = extract_price_data(doc)
 
-        assert series is not None
-        assert series.open[0] == 0.0
+        assert result is not None
+        assert result.prices.open[0] == 0.0
 
     def test_missing_eod_datas(self):
         doc = {"_id": "SPX"}
@@ -313,10 +317,10 @@ class TestExtractPriceData:
             {"date": 20240102, "open": 101.0, "high": 106.0, "low": 100.0, "close": 104.0, "volume": 1100.0},
         ]
         doc = self._make_doc(bars)
-        series = extract_price_data(doc)
-        assert series is not None
-        assert len(series) == 1
-        assert series.dates[0] == 20240102
+        result = extract_price_data(doc)
+        assert result is not None
+        assert len(result.prices) == 1
+        assert result.prices.dates[0] == 20240102
 
     def test_uses_first_available_provider(self):
         doc = {
@@ -325,19 +329,23 @@ class TestExtractPriceData:
                 "alpha": [{"date": 20240101, "open": 1.0, "high": 2.0, "low": 0.5, "close": 999.0, "volume": 100.0}],
             },
         }
-        series = extract_price_data(doc)
-        assert series is not None
-        assert series.close[0] == 999.0
+        result = extract_price_data(doc)
+        assert result is not None
+        assert result.prices.close[0] == 999.0
+        assert result.provider == "alpha"
 
-    def test_result_is_price_series(self):
+    def test_result_is_price_result(self):
         bars = [
             {"date": 20240101, "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "volume": 1000.0},
         ]
         doc = self._make_doc(bars)
-        series = extract_price_data(doc)
-        assert isinstance(series, PriceSeries)
-        assert series.dates.dtype == np.int64
-        assert series.close.dtype == np.float64
+        result = extract_price_data(doc)
+        assert isinstance(result, PriceResult)
+        assert isinstance(result.prices, PriceSeries)
+        assert result.prices.dates.dtype == np.int64
+        assert result.prices.close.dtype == np.float64
+        assert result.provider == "yahoo"
+        assert result.available_providers == ("yahoo",)
 
 
 # ===================================================================
