@@ -125,7 +125,7 @@ export const CHART_CONFIG = {
   responsive: true,
   displaylogo: false,
   modeBarButtonsToRemove: ['lasso2d', 'select2d'],
-  displayModeBar: 'hover',
+  displayModeBar: true,
 };
 
 /**
