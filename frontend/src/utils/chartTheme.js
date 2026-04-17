@@ -56,7 +56,7 @@ export function getChartColors(theme) {
  * Builds a Plotly layout from base defaults + overrides.
  * Axis keys are deep-merged; non-axis keys are overwritten.
  */
-export function buildBaseLayout(overrides = {}, theme = 'dark') {
+export function buildBaseLayout(overrides = {}, theme = 'light') {
   const c = getChartColors(theme);
 
   const axisDefaults = {

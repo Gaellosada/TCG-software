@@ -48,6 +48,7 @@ async def get_continuous_series(
     strategy: str = Query("front_month", description="Roll strategy"),
     adjustment: str = Query("none", description="Adjustment method: none, proportional, difference"),
     cycle: str | None = Query(None, description="Expiration cycle filter (e.g. HMUZ)"),
+    roll_offset: int = Query(0, ge=0, le=30, description="Days before expiration to roll"),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),
     svc: MarketDataService = Depends(get_market_data),
@@ -77,6 +78,7 @@ async def get_continuous_series(
         strategy=roll_strategy,
         adjustment=adj_method,
         cycle=cycle,
+        roll_offset_days=roll_offset,
     )
 
     series = await svc.get_continuous(collection, roll_config, start=start_date, end=end_date)

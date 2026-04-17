@@ -298,5 +298,6 @@ class DefaultMarketDataService:
         return (
             f"continuous:{collection}:{roll_config.strategy}"
             f":{roll_config.adjustment}:{roll_config.cycle}"
+            f":{roll_config.roll_offset_days}"
             f":{start}:{end}"
         )

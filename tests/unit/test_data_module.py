@@ -201,6 +201,35 @@ class TestDocIdSerialization:
         assert len(candidates) == 1
         assert candidates[0] == "SPX"
 
+    def test_deserialize_composite_key(self):
+        """Composite dict _id round-trips through serialize/deserialize."""
+        candidates = deserialize_doc_id("exchange=CBOE|ticker=VXF24")
+        # First candidate should be the reconstructed dict
+        assert len(candidates) == 2  # dict + raw string
+        assert isinstance(candidates[0], dict)
+        assert candidates[0] == {"exchange": "CBOE", "ticker": "VXF24"}
+        # Raw string is still present as fallback
+        assert candidates[1] == "exchange=CBOE|ticker=VXF24"
+
+    def test_composite_key_round_trip(self):
+        """serialize_doc_id → deserialize_doc_id reconstructs the original dict."""
+        original = {"ticker": "VXF24", "exchange": "CBOE"}
+        serialized = serialize_doc_id(original)
+        candidates = deserialize_doc_id(serialized)
+        # The dict candidate must equal the original
+        assert candidates[0] == original
+
+    def test_deserialize_single_key_value_not_composite(self):
+        """A string with '=' but no '|' is not treated as composite."""
+        candidates = deserialize_doc_id("key=value")
+        # No '|' present, so no composite reconstruction
+        assert all(not isinstance(c, dict) for c in candidates)
+
+    def test_deserialize_pipe_without_equals_not_composite(self):
+        """A string with '|' but no '=' is not treated as composite."""
+        candidates = deserialize_doc_id("foo|bar")
+        assert all(not isinstance(c, dict) for c in candidates)
+
 
 # ===================================================================
 # Helpers -- extract_price_data

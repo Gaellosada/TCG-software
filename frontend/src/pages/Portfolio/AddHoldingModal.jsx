@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { listCollections, listInstruments } from '../../api/data';
+import { listCollections, listInstruments, getAvailableCycles } from '../../api/data';
 import styles from './AddHoldingModal.module.css';
 
 /**
@@ -28,6 +28,10 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
   // Futures drill-down state
   const [selectedFutCollection, setSelectedFutCollection] = useState(null);
   const [labelInput, setLabelInput] = useState('');
+  const [adjustment, setAdjustment] = useState('none');
+  const [cycle, setCycle] = useState('');
+  const [rollOffset, setRollOffset] = useState(2);
+  const [availableCycles, setAvailableCycles] = useState([]);
 
   const overlayRef = useRef(null);
 
@@ -79,6 +83,19 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
     return () => { cancelled = true; };
   }, [isOpen]);
 
+  /* ── Load available cycles when a futures collection is selected ── */
+  useEffect(() => {
+    if (!selectedFutCollection) {
+      setAvailableCycles([]);
+      return;
+    }
+    let cancelled = false;
+    getAvailableCycles(selectedFutCollection)
+      .then((cycles) => { if (!cancelled) setAvailableCycles(cycles); })
+      .catch(() => { if (!cancelled) setAvailableCycles([]); });
+    return () => { cancelled = true; };
+  }, [selectedFutCollection]);
+
   /* ── ESC to close ── */
   useEffect(() => {
     if (!isOpen) return;
@@ -92,6 +109,9 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
     if (!isOpen) {
       setSelectedFutCollection(null);
       setLabelInput('');
+      setAdjustment('none');
+      setCycle('');
+      setRollOffset(2);
       setExpanded({});
     }
   }, [isOpen]);
@@ -127,17 +147,22 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
         type: 'continuous',
         collection,
         strategy: 'front_month',
-        adjustment: 'none',
+        adjustment,
+        cycle: cycle || null,
+        rollOffset,
         weight: 100,
       });
       onClose();
     },
-    [labelInput, onAddLeg, onClose],
+    [labelInput, adjustment, cycle, rollOffset, onAddLeg, onClose],
   );
 
   const handleBackFromFut = useCallback(() => {
     setSelectedFutCollection(null);
     setLabelInput('');
+    setAdjustment('none');
+    setCycle('');
+    setRollOffset(2);
   }, []);
 
   if (!isOpen) return null;
@@ -204,6 +229,49 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
                 <strong>{selectedFutCollection}</strong> will be added as a
                 continuous rolled series (front month).
               </p>
+
+              <div className={styles.rollingOptions}>
+                <label className={styles.optionLabel}>
+                  Adjustment
+                  <select
+                    className={styles.optionSelect}
+                    value={adjustment}
+                    onChange={(e) => setAdjustment(e.target.value)}
+                  >
+                    <option value="none">None</option>
+                    <option value="proportional">Proportional</option>
+                    <option value="difference">Difference</option>
+                  </select>
+                </label>
+
+                <label className={styles.optionLabel}>
+                  Cycle
+                  <select
+                    className={styles.optionSelect}
+                    value={cycle}
+                    onChange={(e) => setCycle(e.target.value)}
+                  >
+                    <option value="">All</option>
+                    {availableCycles.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className={styles.optionLabel}>
+                  Roll Offset (days)
+                  <input
+                    type="number"
+                    className={styles.optionSelect}
+                    style={{ width: '56px' }}
+                    value={rollOffset}
+                    min={0}
+                    max={30}
+                    onChange={(e) => setRollOffset(Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0)))}
+                  />
+                </label>
+              </div>
+
               <button
                 className={styles.addContinuousBtn}
                 type="button"

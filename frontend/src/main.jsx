@@ -7,11 +7,9 @@ import './index.css';
 // Apply persisted preferences before first render to avoid flash
 try {
   const storedTheme = localStorage.getItem('tcg-theme');
-  if (storedTheme === 'light') {
-    document.documentElement.dataset.theme = 'light';
-  }
+  document.documentElement.dataset.theme = storedTheme === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.chartType =
-    localStorage.getItem('tcg-default-chart-type') || 'candlestick';
+    localStorage.getItem('tcg-default-chart-type') || 'line';
 } catch {
   // localStorage unavailable — defaults apply
 }

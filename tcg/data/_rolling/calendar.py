@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import numpy as np
 
+from tcg.data._utils import date_to_int, int_to_date
 from tcg.types.market import ContractPriceData, PriceSeries, RollStrategy
 
 
 def compute_roll_dates(
     contracts: list[ContractPriceData],
     strategy: RollStrategy,
+    roll_offset_days: int = 0,
 ) -> list[int]:
     """Compute YYYYMMDD roll dates for FRONT_MONTH strategy.
 
-    For FRONT_MONTH: roll happens at expiration of each contract.
-    The roll date is the expiration date of the outgoing contract.
+    For FRONT_MONTH: roll happens at expiration of each contract,
+    shifted earlier by ``roll_offset_days`` calendar days.
+    The roll date is the (possibly shifted) expiration date of the
+    outgoing contract.
     Returns one date per roll boundary (len = len(contracts) - 1).
 
     Contracts must be sorted by expiration (ascending).
@@ -25,7 +31,14 @@ def compute_roll_dates(
     if strategy != RollStrategy.FRONT_MONTH:
         raise ValueError(f"Unsupported roll strategy: {strategy}")
 
-    return [c.expiration for c in contracts[:-1]]
+    if roll_offset_days == 0:
+        return [c.expiration for c in contracts[:-1]]
+
+    offset = timedelta(days=roll_offset_days)
+    return [
+        date_to_int(int_to_date(c.expiration) - offset)
+        for c in contracts[:-1]
+    ]
 
 
 def trim_overlaps(

@@ -92,6 +92,10 @@
   width: 120px;
 }
 
+.thRange {
+  width: 90px;
+}
+
 .thWeight {
   width: 80px;
 }
@@ -104,6 +108,13 @@
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.8rem;
   color: var(--text-secondary);
+}
+
+.rangeCell {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .typeBadge {

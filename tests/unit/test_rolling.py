@@ -921,3 +921,110 @@ class TestManyRolls:
 
         assert len(result.roll_dates) > 0
         assert np.all(np.isfinite(result.prices.close))
+
+
+# ── Roll offset tests ────────────────────────────────────────────────
+
+
+class TestComputeRollDatesWithOffset:
+    """Tests for roll_offset_days parameter in compute_roll_dates."""
+
+    def test_offset_zero_same_as_default(self):
+        """offset=0 must produce identical results to the no-offset call."""
+        c1 = _make_contract("VXF24", 20240115, [20240101, 20240102], [20.0, 21.0])
+        c2 = _make_contract("VXG24", 20240215, [20240116, 20240117], [22.0, 23.0])
+        c3 = _make_contract("VXH24", 20240315, [20240216, 20240217], [24.0, 25.0])
+
+        default_result = compute_roll_dates([c1, c2, c3], RollStrategy.FRONT_MONTH)
+        offset_0_result = compute_roll_dates([c1, c2, c3], RollStrategy.FRONT_MONTH, roll_offset_days=0)
+
+        assert default_result == offset_0_result
+        assert offset_0_result == [20240115, 20240215]
+
+    def test_offset_2_shifts_dates(self):
+        """offset=2 subtracts 2 calendar days from each expiration."""
+        c1 = _make_contract("VXF24", 20240115, [20240101, 20240102], [20.0, 21.0])
+        c2 = _make_contract("VXG24", 20240215, [20240116, 20240117], [22.0, 23.0])
+
+        result = compute_roll_dates([c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2)
+        # 20240115 - 2 days = 20240113
+        assert result == [20240113]
+
+    def test_offset_crosses_month_boundary(self):
+        """offset that crosses a month boundary: exp 20240301 - 2 days = 20240228."""
+        c1 = _make_contract("VXH24", 20240301, [20240220, 20240225], [30.0, 31.0])
+        c2 = _make_contract("VXJ24", 20240401, [20240302, 20240305], [32.0, 33.0])
+
+        result = compute_roll_dates([c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2)
+        # 2024 is a leap year, so 20240301 - 2 = 20240228
+        assert result == [20240228]
+
+    def test_offset_crosses_month_boundary_non_leap(self):
+        """Non-leap year: exp 20230301 - 2 days = 20230227."""
+        c1 = _make_contract("VXH23", 20230301, [20230220, 20230225], [30.0, 31.0])
+        c2 = _make_contract("VXJ23", 20230401, [20230302, 20230305], [32.0, 33.0])
+
+        result = compute_roll_dates([c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2)
+        # 2023 is NOT a leap year: 20230301 - 2 = 20230227
+        assert result == [20230227]
+
+    def test_offset_single_contract(self):
+        """Single contract returns empty list regardless of offset."""
+        c1 = _make_contract("VXF24", 20240115, [20240101], [20.0])
+        result = compute_roll_dates([c1], RollStrategy.FRONT_MONTH, roll_offset_days=5)
+        assert result == []
+
+    def test_offset_three_contracts(self):
+        """Three contracts, offset=3: each expiration shifted by 3 days."""
+        c1 = _make_contract("A", 20240115, [20240105], [50.0])
+        c2 = _make_contract("B", 20240215, [20240116], [60.0])
+        c3 = _make_contract("C", 20240315, [20240216], [70.0])
+
+        result = compute_roll_dates([c1, c2, c3], RollStrategy.FRONT_MONTH, roll_offset_days=3)
+        # 20240115 - 3 = 20240112, 20240215 - 3 = 20240212
+        assert result == [20240112, 20240212]
+
+    def test_offset_through_builder(self):
+        """End-to-end: offset flows through ContinuousSeriesBuilder correctly."""
+        c1 = _make_contract(
+            "VXF24", 20240115,
+            [20240110, 20240112, 20240113, 20240114, 20240115],
+            [20.0, 20.5, 21.0, 21.5, 22.0],
+        )
+        c2 = _make_contract(
+            "VXG24", 20240215,
+            [20240114, 20240115, 20240116, 20240117],
+            [23.0, 23.5, 24.0, 24.5],
+        )
+
+        builder = ContinuousSeriesBuilder()
+
+        # Without offset: roll at 20240115 (c1 keeps dates <= 20240115)
+        config_0 = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            roll_offset_days=0,
+        )
+        result_0 = builder.build([c1, c2], config_0)
+
+        # With offset=2: roll at 20240113 (c1 keeps dates <= 20240113)
+        config_2 = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            roll_offset_days=2,
+        )
+        result_2 = builder.build([c1, c2], config_2)
+
+        # With offset, c1 loses more dates (trimmed earlier)
+        # result_0 has c1 dates through 20240115; result_2 has c1 dates through 20240113
+        dates_0 = set(result_0.prices.dates.tolist())
+        dates_2 = set(result_2.prices.dates.tolist())
+
+        # Both should contain c1 early dates
+        assert 20240110 in dates_0
+        assert 20240110 in dates_2
+
+        # offset=0: c1 has data up to 20240115
+        assert 20240115 in dates_0
+        # offset=2: c1 trimmed at 20240113, so 20240114 and 20240115 come from c2 only
+        assert 20240113 in dates_2
