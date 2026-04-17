@@ -4,7 +4,7 @@
 
 .downloadBtn {
   position: absolute;
-  top: 6px;
+  bottom: 6px;
   right: 6px;
   z-index: 2;
   display: inline-flex;
