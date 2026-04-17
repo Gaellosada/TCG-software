@@ -1,11 +1,10 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useMemo } from 'react';
 import Plot from 'react-plotly.js';
+import Plotly from 'plotly.js';
 import useTheme from '../../hooks/useTheme';
 import ErrorBoundary from '../ErrorBoundary';
-import Icon from '../Icon';
 import { buildBaseLayout, CHART_CONFIG } from '../../utils/chartTheme';
 import { buildCsv, downloadCsv } from '../../utils/chartCsv';
-import styles from './Chart.module.css';
 
 /**
  * Shared Plotly chart wrapper with theme integration.
@@ -14,8 +13,11 @@ import styles from './Chart.module.css';
  * consistent theming, config (mode-bar, responsiveness), and sizing.
  * Wrapped in an ErrorBoundary so Plotly render errors don't crash the page.
  *
- * A CSV download button (top-right, visible on hover) exports the currently
- * visible traces — respects user visibility toggles from the Plotly legend.
+ * A CSV export button is injected into the Plotly modebar (top-right, appears
+ * on hover alongside the zoom/pan/save-png controls). It exports the currently
+ * visible traces — legend-hidden series are excluded.
+ *
+ * Pass `downloadFilename` to name the exported file; defaults to `chart.csv`.
  */
 export default function Chart({
   traces,
@@ -25,47 +27,40 @@ export default function Chart({
   downloadFilename = 'chart',
 }) {
   const theme = useTheme();
-  const graphDivRef = useRef(null);
 
   const layout = useMemo(
     () => buildBaseLayout(layoutOverrides || {}, theme),
     [layoutOverrides, theme],
   );
 
-  const handlePlotRef = useCallback((_fig, gd) => {
-    graphDivRef.current = gd;
-  }, []);
-
-  const handleDownload = useCallback(() => {
-    const live = graphDivRef.current?.data;
-    const csv = buildCsv(live || traces);
-    if (!csv) return;
-    downloadCsv(csv, downloadFilename);
-  }, [traces, downloadFilename]);
-
-  const wrapperClassName = [styles.wrapper, className].filter(Boolean).join(' ');
+  const config = useMemo(
+    () => ({
+      ...CHART_CONFIG,
+      modeBarButtonsToAdd: [
+        {
+          name: 'downloadCsv',
+          title: 'Download visible series as CSV',
+          icon: Plotly.Icons.disk,
+          click: (gd) => {
+            const csv = buildCsv(gd?.data || traces);
+            if (!csv) return;
+            downloadCsv(csv, downloadFilename);
+          },
+        },
+      ],
+    }),
+    [traces, downloadFilename],
+  );
 
   return (
-    <div className={wrapperClassName} style={style}>
-      <button
-        type="button"
-        className={styles.downloadBtn}
-        onClick={handleDownload}
-        title="Download visible series as CSV"
-        aria-label="Download visible series as CSV"
-      >
-        <Icon name="download" size={12} />
-        CSV
-      </button>
+    <div className={className} style={style}>
       <ErrorBoundary>
         <Plot
           data={traces}
           layout={layout}
-          config={CHART_CONFIG}
+          config={config}
           useResizeHandler
           style={{ width: '100%', height: '100%' }}
-          onInitialized={handlePlotRef}
-          onUpdate={handlePlotRef}
         />
       </ErrorBoundary>
     </div>

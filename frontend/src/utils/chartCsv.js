@@ -20,9 +20,15 @@ function isExportable(trace) {
   return Array.isArray(trace.x) && Array.isArray(trace.y);
 }
 
+// Guard against CSV formula injection when the value would be interpreted as
+// a formula by Excel/Sheets. We skip leading `-` because negative numbers are
+// valid data in this app (prices, returns) and should not be coerced to text.
+const INJECTION_PREFIX = /^[=+@\t\r]/;
+
 function escapeCsv(val) {
   if (val == null) return '';
-  const s = String(val);
+  let s = String(val);
+  if (INJECTION_PREFIX.test(s)) s = "'" + s;
   if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
   return s;
 }
@@ -101,11 +107,20 @@ export function buildCsv(traces) {
   return rows.join('\n') + '\n';
 }
 
+function sanitizeFilename(raw) {
+  const s = raw == null ? '' : String(raw).trim();
+  if (!s) return 'chart';
+  // Strip control chars and path separators; browsers mostly normalize these
+  // but we future-proof against surprises and clamp length.
+  const cleaned = s.replace(/[\\/\x00-\x1f]/g, '_').slice(0, 120);
+  return cleaned || 'chart';
+}
+
 /**
  * Trigger a browser download of the given CSV string.
  */
 export function downloadCsv(csv, filename) {
-  const safe = filename && filename.trim() ? filename.trim() : 'chart';
+  const safe = sanitizeFilename(filename);
   const final = safe.toLowerCase().endsWith('.csv') ? safe : `${safe}.csv`;
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -113,7 +128,10 @@ export function downloadCsv(csv, filename) {
   a.href = url;
   a.download = final;
   document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  try {
+    a.click();
+  } finally {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
 }

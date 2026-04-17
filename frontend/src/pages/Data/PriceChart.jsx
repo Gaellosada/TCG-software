@@ -152,6 +152,7 @@ function PriceChart({ collection, instrument }) {
           traces={traces}
           layoutOverrides={layoutOverrides}
           className={styles.chartWrapper}
+          downloadFilename={`${collection}-${instrument}-prices`}
         />
       </div>
     </div>

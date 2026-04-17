@@ -130,6 +130,7 @@ export default function PortfolioEquityChart({
         traces={traces}
         layoutOverrides={layoutOverrides}
         className={styles.container}
+        downloadFilename={`portfolio-equity-${displayMode}`}
       />
     </div>
   );

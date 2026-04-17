@@ -211,6 +211,7 @@ function ContinuousChart({ collection }) {
           traces={traces}
           layoutOverrides={layoutOverrides}
           className={styles.chartWrapper}
+          downloadFilename={`${collection}-continuous-${adjustment}${cycle ? `-${cycle}` : ''}`}
         />
       </div>
     </div>
