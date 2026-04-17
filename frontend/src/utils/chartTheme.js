@@ -24,6 +24,8 @@ const DARK_PALETTE = {
   selectorBorder: 'rgba(42,46,62,0.8)',
   legendBg: 'rgba(13,15,24,0.7)',
   volumeBar: 'rgba(14, 165, 233, 0.3)',
+  modebarColor: '#636b80',
+  modebarActiveColor: '#e4e8f0',
 };
 
 const LIGHT_PALETTE = {
@@ -41,9 +43,16 @@ const LIGHT_PALETTE = {
   selectorBorder: 'rgba(209,213,219,0.8)',
   legendBg: 'rgba(255,255,255,0.7)',
   volumeBar: 'rgba(2, 132, 199, 0.25)',
+  modebarColor: '#9ca3af',
+  modebarActiveColor: '#1f2937',
 };
 
 const AXIS_KEYS = ['xaxis', 'xaxis2', 'xaxis3', 'yaxis', 'yaxis2', 'yaxis3'];
+const DEEP_MERGE_KEYS = new Set(['margin', 'modebar', 'legend']);
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 /**
  * Returns the palette object for the given theme.
@@ -102,14 +111,21 @@ export function buildBaseLayout(overrides = {}, theme = 'light') {
       font: { color: c.hoverFont, size: 11 },
     },
     margin: { l: 60, r: 24, t: 40, b: 60 },
+    modebar: {
+      bgcolor: 'rgba(0,0,0,0)',
+      color: c.modebarColor,
+      activecolor: c.modebarActiveColor,
+    },
     dragmode: 'zoom',
   };
 
-  // Deep-merge axis keys, overwrite everything else
+  // Deep-merge axis keys, margin, modebar, and legend; overwrite everything else.
   const merged = { ...base };
   for (const [key, value] of Object.entries(overrides)) {
-    if (AXIS_KEYS.includes(key) && typeof value === 'object') {
+    if (AXIS_KEYS.includes(key) && isPlainObject(value)) {
       merged[key] = { ...axisDefaults, ...(base[key] || {}), ...value };
+    } else if (DEEP_MERGE_KEYS.has(key) && isPlainObject(value)) {
+      merged[key] = { ...(base[key] || {}), ...value };
     } else {
       merged[key] = value;
     }
@@ -125,7 +141,7 @@ export const CHART_CONFIG = {
   responsive: true,
   displaylogo: false,
   modeBarButtonsToRemove: ['lasso2d', 'select2d'],
-  displayModeBar: 'hover',
+  displayModeBar: true,
 };
 
 /**

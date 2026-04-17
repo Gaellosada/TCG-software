@@ -98,7 +98,7 @@ export default function PortfolioEquityChart({
       ));
     }
 
-    const secondaryFont = theme === 'light' ? '#6b7280' : '#636b80';
+    const { secondaryFont } = getChartColors(theme);
 
     const overrides = {
       showlegend: true,
@@ -106,7 +106,7 @@ export default function PortfolioEquityChart({
         title: { text: displayMode === 'weighted' ? 'Equity' : 'Value ($)', font: { size: 11, color: secondaryFont } },
       },
       yaxis2: hiddenOverlayAxis(),
-      margin: { l: 70, r: 24, t: 40, b: 60 },
+      margin: { l: 70 },
     };
 
     return { traces: t, layoutOverrides: overrides };
@@ -130,6 +130,7 @@ export default function PortfolioEquityChart({
         traces={traces}
         layoutOverrides={layoutOverrides}
         className={styles.container}
+        downloadFilename={`portfolio-equity-${displayMode}`}
       />
     </div>
   );
