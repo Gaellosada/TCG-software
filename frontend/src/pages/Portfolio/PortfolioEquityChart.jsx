@@ -98,7 +98,7 @@ export default function PortfolioEquityChart({
       ));
     }
 
-    const secondaryFont = theme === 'light' ? '#6b7280' : '#636b80';
+    const { secondaryFont } = getChartColors(theme);
 
     const overrides = {
       showlegend: true,

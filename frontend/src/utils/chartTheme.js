@@ -115,7 +115,6 @@ export function buildBaseLayout(overrides = {}, theme = 'light') {
       bgcolor: 'rgba(0,0,0,0)',
       color: c.modebarColor,
       activecolor: c.modebarActiveColor,
-      orientation: 'h',
     },
     dragmode: 'zoom',
   };
