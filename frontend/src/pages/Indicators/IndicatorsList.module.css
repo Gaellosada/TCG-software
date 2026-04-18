@@ -167,6 +167,11 @@
   background: var(--bg-hover);
 }
 
+.row:focus-visible {
+  outline: 2px solid var(--border-accent);
+  outline-offset: -2px;
+}
+
 .rowActive {
   background: var(--accent-subtle);
   border-left-color: var(--accent);
@@ -200,12 +205,20 @@
   flex-shrink: 0;
 }
 
-.row:hover .deleteBtn {
+.row:hover .deleteBtn,
+.row:focus-within .deleteBtn {
   opacity: 1;
 }
 
 .deleteBtn:hover {
   color: var(--error);
+}
+
+.deleteBtn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 .iconBtn {
@@ -221,12 +234,20 @@
   flex-shrink: 0;
 }
 
-.row:hover .iconBtn {
+.row:hover .iconBtn,
+.row:focus-within .iconBtn {
   opacity: 1;
 }
 
 .iconBtn:hover {
   color: var(--accent);
+}
+
+.iconBtn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 .defaultBadge {

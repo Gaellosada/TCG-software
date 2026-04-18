@@ -122,6 +122,15 @@ function IndicatorsList({ indicators, selectedId, onSelect, onAdd, onDelete, onR
         ) : (
           <span className={styles.rowName}>{ind.name}</span>
         )}
+        {/* Show a "default" badge on readonly indicators only in search-flat
+          * mode — section headers ("DEFAULT / CUSTOM") disappear during search,
+          * so the badge is the only visual cue distinguishing built-ins from
+          * user customs in search results. */}
+        {ind.readonly && hasSearch && !isRenaming && (
+          <span className={styles.defaultBadge} aria-label="default indicator">
+            default
+          </span>
+        )}
         {!ind.readonly && !isRenaming && (
           <button
             className={styles.iconBtn}

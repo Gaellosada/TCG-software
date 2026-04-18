@@ -36,6 +36,7 @@ function ParamsPanel({
   onRun,
   running,
   canRun,
+  runDisabledReason,
   defaultCollection,
 }) {
   // Labels currently in inline-edit mode. Also tracks "add" slots for
@@ -334,6 +335,7 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
           onClick={onRun}
           disabled={!canRun}
           aria-label="Run indicator"
+          title={runDisabledReason || undefined}
         >
           {running ? 'Computing...' : 'Run'}
         </button>

@@ -110,7 +110,7 @@ function normalizeErrorEnvelope(body, fallbackStatusText) {
   if (!body || typeof body !== 'object') {
     return { error_type: 'validation', message: fallbackStatusText || 'Request failed' };
   }
-  const validTypes = new Set(['validation', 'runtime', 'data']);
+  const validTypes = new Set(['validation', 'runtime', 'data', 'network', 'offline']);
   const error_type = validTypes.has(body.error_type) ? body.error_type : 'validation';
   const message = (typeof body.message === 'string' && body.message)
     || (typeof body.detail === 'string' && body.detail)
@@ -414,16 +414,24 @@ function IndicatorsPage() {
           }),
         });
       } catch (networkErr) {
-        // Classify so offline/network surfaces as a data-ish error card
-        // with an accurate title/message, rather than a generic runtime blurb.
+        // Classify so offline/network surfaces an accurate heading in the
+        // error card rather than the misleading "Data error" label.
         const classified = classifyFetchError(networkErr);
-        // Map classification kind → existing chart error_type palette:
-        //   offline / network / server → 'data'
-        //   client                    → 'validation'
-        //   unknown                   → 'runtime' (fallback)
+        if (classified.kind === 'aborted') {
+          // Silently suppress cancelled requests — don't render an error card.
+          setLastResult(null);
+          return;
+        }
+        // Map classification kind → chart error_type:
+        //   offline                → 'offline'  → "You're offline"
+        //   network / server       → 'network'  → "Couldn't reach the server"
+        //   client                 → 'validation'
+        //   unknown                → 'runtime' (fallback)
         let error_type = 'runtime';
-        if (classified.kind === 'offline' || classified.kind === 'network' || classified.kind === 'server') {
-          error_type = 'data';
+        if (classified.kind === 'offline') {
+          error_type = 'offline';
+        } else if (classified.kind === 'network' || classified.kind === 'server') {
+          error_type = 'network';
         } else if (classified.kind === 'client') {
           error_type = 'validation';
         }
@@ -464,6 +472,19 @@ function IndicatorsPage() {
     && !running
     && allSlotsFilled
     && !!(selectedIndicator.code && selectedIndicator.code.trim());
+
+  // Tooltip shown on the disabled Run button so keyboard and mouse users
+  // can tell what's blocking execution. Priority: most-specific first.
+  const runDisabledReason = canRun || running ? null : (() => {
+    if (!selectedIndicator) return 'Select an indicator first';
+    if (!selectedIndicator.code || !selectedIndicator.code.trim()) return 'Add code before running';
+    const emptyLabel = seriesLabels.find((lbl) => {
+      const picked = selectedIndicator.seriesMap?.[lbl];
+      return !picked || !picked.collection || !picked.instrument_id;
+    });
+    if (emptyLabel) return `Fill series slot: ${emptyLabel}`;
+    return 'Cannot run';
+  })();
 
   // Banner copy driven by the classified resolver result. If we never
   // got a classified error (just no match), fall back to the original
@@ -542,6 +563,7 @@ function IndicatorsPage() {
           onRun={runIndicator}
           running={running}
           canRun={canRun}
+          runDisabledReason={runDisabledReason}
           defaultCollection={defaultSeries?.collection || null}
         />
       </div>

@@ -121,9 +121,11 @@ function IndicatorChart({ indicator, result, loading, error }) {
 }
 
 const HEADINGS = {
-  validation: 'Validation error',
-  runtime: 'Runtime error in your code',
+  validation: 'Invalid indicator',
+  runtime: 'Indicator error',
   data: 'Data error',
+  network: "Couldn't reach the server",
+  offline: "You're offline",
 };
 
 function ErrorCard({ error }) {
@@ -133,6 +135,8 @@ function ErrorCard({ error }) {
     validation: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
     runtime: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
     data: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
+    network: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
+    offline: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
     generic: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
   }[kind];
 

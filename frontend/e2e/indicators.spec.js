@@ -173,8 +173,8 @@ test.describe('Indicators page', () => {
 
     await page.getByRole('button', { name: /Run indicator/i }).click();
 
-    // Heading matches the runtime error type.
-    await expect(page.getByRole('heading', { name: /Runtime error in your code/i })).toBeVisible();
+    // Heading matches the runtime error type (updated in ux-fix: "Indicator error").
+    await expect(page.getByRole('heading', { name: /Indicator error/i })).toBeVisible();
     await expect(page.getByText(/ZeroDivisionError: division by zero/).first()).toBeVisible();
 
     // Traceback is in a collapsible details block.
