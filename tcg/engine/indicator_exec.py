@@ -29,8 +29,13 @@ keep the calling convention uniform and auditable.
 
 If the AST walk succeeds the code is compiled and executed with a
 restricted ``__builtins__`` dict and only ``np`` / ``math`` pre-injected
-as globals. The user's module must define a top-level function named
-``compute`` which takes the series dict and returns a numpy array.
+as globals. ``np`` is a *curated facade* (see ``_NumpyFacade``), not the
+real ``numpy`` module — exposing the real module would allow RCE via
+``np.f2py.os.system(...)``, arbitrary file I/O via ``np.save`` /
+``np.loadtxt``, and shared-library loading via ``np.ctypeslib``. The
+facade exposes only a vetted allow-list of array-math symbols. The
+user's module must define a top-level function named ``compute`` which
+takes the series dict and returns a numpy array.
 
 A 5-second wall-clock timeout is enforced with :mod:`signal.SIGALRM`
 (Linux / WSL only — the project has no Windows support).
@@ -407,6 +412,156 @@ def _coerce_param_value(
 
 # --- Sandbox globals ---------------------------------------------------------
 
+# ### Design note
+# The sandbox exposes a curated *facade* (``_NumpyFacade``) instead of the
+# real ``numpy`` module. Rationale: numpy's public surface has non-underscore
+# submodules that re-export stdlib (``np.f2py.os``, ``np.ctypeslib.ctypes``)
+# and file I/O helpers (``np.save``, ``np.loadtxt``) that together give full
+# RCE and arbitrary file read/write — the AST walker never fires because none
+# of these use dunders. Blocking submodules by name (deny-list) is brittle:
+# numpy adds/renames submodules across releases. Instead we invert the policy
+# to an allow-list that mirrors the existing builtins whitelist, exposing
+# only vetted array-math symbols. The facade is a plain object with a fixed
+# ``__slots__``-style attribute set; attribute access to anything outside the
+# whitelist raises ``AttributeError`` at exec time. This keeps the policy in
+# one place (``_NUMPY_FACADE_NAMES``) and fails closed for any new numpy
+# attribute. If a legitimate indicator needs a symbol not in the list, add it
+# explicitly after reviewing its file-I/O / subprocess / ctypes exposure.
+
+
+class _NumpyFacade:
+    """Read-only proxy exposing a curated allow-list of numpy symbols.
+
+    Only names in :data:`_NUMPY_FACADE_NAMES` are reachable. Every other
+    attribute raises :class:`AttributeError` — including public submodules
+    like ``f2py``, ``ctypeslib``, ``lib``, ``testing`` that would otherwise
+    be RCE gadgets via their non-underscore re-exports of ``os`` /
+    ``subprocess`` / ``ctypes``.
+    """
+
+    __slots__ = ("_allowed",)
+
+    def __init__(self, allowed: dict[str, Any]) -> None:
+        # Store as a private dict; access goes through __getattribute__.
+        object.__setattr__(self, "_allowed", allowed)
+
+    def __getattr__(self, name: str) -> Any:  # noqa: D401 — proxy
+        allowed = object.__getattribute__(self, "_allowed")
+        if name in allowed:
+            return allowed[name]
+        raise AttributeError(
+            f"'np' facade has no attribute {name!r} — the indicator sandbox "
+            f"exposes only a curated subset of numpy"
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("'np' facade is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("'np' facade is read-only")
+
+    def __repr__(self) -> str:
+        return "<np facade (sandboxed)>"
+
+
+# Curated allow-list. Every entry must be a pure array-math helper with
+# NO side effects on the filesystem, NO subprocess execution, NO ctypes
+# access, and NO import side effects. Grouped for review clarity.
+#
+# Explicitly EXCLUDED (RCE / arbitrary I/O gadgets — do not add back):
+#   f2py, ctypeslib, lib, testing, distutils, compat, core, random
+#   (``random.BitGenerator`` is fine but the submodule surface isn't worth
+#   vetting — if users want RNG, expose ``np.random.default_rng`` alone
+#   after review), memmap, DataSource, load, save, savez, savez_compressed,
+#   savetxt, loadtxt, genfromtxt, fromfile, fromstring, frombuffer, tofile,
+#   show_config, get_include, source, lookfor, info, who, disp, deprecate,
+#   seterr, geterr, seterrcall, setbufsize.
+_NUMPY_FACADE_NAMES: tuple[str, ...] = (
+    # Array creation
+    "array", "asarray", "asanyarray", "copy",
+    "zeros", "ones", "full", "empty",
+    "zeros_like", "ones_like", "full_like", "empty_like",
+    "arange", "linspace", "logspace", "geomspace",
+    "eye", "identity", "diag", "tri", "tril", "triu",
+    # Constants
+    "nan", "inf", "pi", "e", "euler_gamma", "newaxis",
+    # Dtypes
+    "float64", "float32", "float16",
+    "int64", "int32", "int16", "int8",
+    "uint64", "uint32", "uint16", "uint8",
+    "bool_", "dtype", "integer", "floating", "number",
+    # Shape / layout
+    "reshape", "ravel", "flatten", "transpose", "swapaxes",
+    "expand_dims", "squeeze", "broadcast_to", "broadcast_arrays",
+    "concatenate", "stack", "vstack", "hstack", "dstack", "column_stack",
+    "split", "array_split", "hsplit", "vsplit",
+    "tile", "repeat", "flip", "fliplr", "flipud", "roll",
+    "atleast_1d", "atleast_2d", "atleast_3d",
+    # Element-wise math
+    "add", "subtract", "multiply", "divide", "true_divide", "floor_divide",
+    "mod", "remainder", "power", "negative", "positive",
+    "abs", "absolute", "fabs", "sign", "reciprocal",
+    "sqrt", "cbrt", "square", "exp", "exp2", "expm1",
+    "log", "log2", "log10", "log1p",
+    "sin", "cos", "tan", "arcsin", "arccos", "arctan", "arctan2",
+    "sinh", "cosh", "tanh", "arcsinh", "arccosh", "arctanh",
+    "degrees", "radians", "deg2rad", "rad2deg",
+    "floor", "ceil", "trunc", "rint", "round", "around",
+    "clip", "maximum", "minimum", "fmax", "fmin",
+    "hypot", "copysign",
+    # Logical / comparison
+    "where", "select", "piecewise",
+    "isnan", "isinf", "isfinite", "isneginf", "isposinf",
+    "isclose", "allclose", "array_equal", "array_equiv",
+    "equal", "not_equal", "less", "less_equal", "greater", "greater_equal",
+    "logical_and", "logical_or", "logical_not", "logical_xor",
+    "any", "all",
+    # Reductions / statistics
+    "sum", "prod", "cumsum", "cumprod",
+    "mean", "std", "var", "median", "average",
+    "min", "max", "amin", "amax", "ptp",
+    "argmin", "argmax", "argsort", "sort", "lexsort", "partition",
+    "percentile", "quantile",
+    "nansum", "nanprod", "nancumsum", "nancumprod",
+    "nanmean", "nanstd", "nanvar", "nanmedian",
+    "nanmin", "nanmax", "nanargmin", "nanargmax", "nanpercentile",
+    "nanquantile",
+    "count_nonzero", "nonzero",
+    "unique", "searchsorted",
+    # Indexing helpers
+    "take", "put", "choose", "compress",
+    "indices", "ix_", "r_", "c_", "meshgrid",
+    # Sliding / signal
+    "diff", "ediff1d", "gradient", "convolve", "correlate",
+    "pad", "interp",
+    # Dot / reductions-over-axes
+    "dot", "vdot", "inner", "outer", "matmul", "tensordot", "einsum",
+    "cross", "trace",
+    # Type-checks / casting
+    "isscalar", "ndim", "shape", "size",
+    "result_type", "can_cast", "promote_types",
+)
+
+
+def _build_numpy_facade() -> _NumpyFacade:
+    """Materialise the ``np`` facade from the allow-list.
+
+    Each name is resolved once against the real numpy module. If a name is
+    missing (numpy API drift), we skip it silently rather than blow up
+    import — the test suite is responsible for catching drift that removes
+    a name the default indicators rely on.
+    """
+    allowed: dict[str, Any] = {}
+    for name in _NUMPY_FACADE_NAMES:
+        value = getattr(np, name, _MISSING)
+        if value is _MISSING:
+            continue
+        allowed[name] = value
+    return _NumpyFacade(allowed)
+
+
+_MISSING = object()
+
 
 _SAFE_BUILTIN_NAMES: tuple[str, ...] = (
     "abs",
@@ -461,10 +616,18 @@ def _build_safe_builtins() -> dict[str, Any]:
 
 
 def _build_safe_globals() -> dict[str, Any]:
-    """Sandbox globals: restricted builtins + numpy + math."""
+    """Sandbox globals: restricted builtins + numpy facade + math.
+
+    Only three names enter the sandbox namespace: ``__builtins__`` (a
+    curated dict), ``np`` (the facade — NOT the real numpy module), and
+    ``math`` (the stdlib math module, which is pure array-math with no
+    filesystem / subprocess / ctypes surface). ``pandas``, ``scipy``,
+    ``ctypes``, ``os``, ``sys``, ``subprocess``, etc. are never placed
+    here regardless of what the parent process has imported elsewhere.
+    """
     return {
         "__builtins__": _build_safe_builtins(),
-        "np": np,
+        "np": _build_numpy_facade(),
         "math": math,
     }
 

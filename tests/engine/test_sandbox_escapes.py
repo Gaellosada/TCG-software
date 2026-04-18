@@ -190,3 +190,229 @@ def test_default_sma_still_runs_after_hardening() -> None:
     assert np.isnan(result[0])
     assert np.isnan(result[1])
     np.testing.assert_allclose(result[2:], [2.0, 3.0, 4.0])
+
+
+# --------------------------------------------------------------------------
+# numpy-facade attack regressions (PR robustness review: BLOCKER findings).
+#
+# Each of the four attack classes below was CONFIRMED against the pre-facade
+# executor to execute successfully. They must all be blocked now that ``np``
+# is a curated facade instead of the real ``numpy`` module.
+# --------------------------------------------------------------------------
+
+
+def _rce_marker(tmp_path, name: str) -> str:
+    """Return a tmp-path-scoped marker path used to detect RCE/file-write."""
+    return str(tmp_path / name)
+
+
+def test_rce_via_np_f2py_os_system_is_blocked(tmp_path) -> None:
+    """B1: ``np.f2py.os.system(...)`` must NOT execute a shell command.
+
+    Pre-facade: this wrote a file to the filesystem. Post-facade: the
+    attribute ``f2py`` is not exposed by the facade, so the very first
+    attribute lookup raises ``AttributeError``.
+    """
+    marker = _rce_marker(tmp_path, "rce_marker.txt")
+    code = (
+        "def compute(series):\n"
+        f"    np.f2py.os.system('echo PWNED > {marker}')\n"
+        "    return series['SPX']\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+    # Belt-and-braces: confirm the side-effect never occurred.
+    assert not (tmp_path / "rce_marker.txt").exists()
+
+
+def test_rce_via_np_f2py_subprocess_run_is_blocked(tmp_path) -> None:
+    """B1 (alt): ``np.f2py.subprocess.run(...)`` must NOT spawn a process."""
+    marker = _rce_marker(tmp_path, "rce_sub.txt")
+    code = (
+        "def compute(series):\n"
+        "    np.f2py.subprocess.run(\n"
+        f"        ['/bin/sh', '-c', 'echo PWNED > {marker}']\n"
+        "    )\n"
+        "    return series['SPX']\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+    assert not (tmp_path / "rce_sub.txt").exists()
+
+
+def test_shared_library_load_via_ctypeslib_is_blocked() -> None:
+    """B2: ``np.ctypeslib.load_library`` must be unreachable."""
+    code = (
+        "def compute(series):\n"
+        "    np.ctypeslib.load_library('libc', '/lib')\n"
+        "    return series['SPX']\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+
+
+def test_arbitrary_file_write_via_np_savetxt_is_blocked(tmp_path) -> None:
+    """B3: ``np.savetxt`` must NOT write to the filesystem."""
+    target = tmp_path / "should_not_exist.txt"
+    code = (
+        "def compute(series):\n"
+        f"    np.savetxt({str(target)!r}, series['SPX'])\n"
+        "    return series['SPX']\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+    assert not target.exists()
+
+
+def test_arbitrary_file_write_via_np_save_is_blocked(tmp_path) -> None:
+    """B3 (alt): ``np.save`` must NOT write a .npy file."""
+    target = tmp_path / "should_not_exist.npy"
+    code = (
+        "def compute(series):\n"
+        f"    np.save({str(target)!r}, series['SPX'])\n"
+        "    return series['SPX']\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+    assert not target.exists()
+
+
+def test_arbitrary_file_read_via_np_loadtxt_is_blocked() -> None:
+    """B4: ``np.loadtxt`` must NOT read from the filesystem.
+
+    We target ``/etc/passwd`` because it is world-readable on Linux — a
+    successful read would prove the exfil primitive works. Post-facade,
+    the attribute ``loadtxt`` is not exposed, so even before numpy touches
+    the disk we get ``AttributeError``.
+    """
+    code = (
+        "def compute(series):\n"
+        "    np.loadtxt('/etc/passwd')\n"
+        "    return series['SPX']\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+
+
+def test_arbitrary_file_read_via_np_genfromtxt_is_blocked() -> None:
+    """B4 (alt): ``np.genfromtxt`` must be unreachable."""
+    code = (
+        "def compute(series):\n"
+        "    np.genfromtxt('/etc/passwd')\n"
+        "    return series['SPX']\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+
+
+# Broad sweep: every numpy submodule / attribute known to re-export
+# stdlib or expose file I/O must be blocked by the facade. This covers
+# future numpy releases that may add new attributes without renaming
+# (if someone adds a new submodule ``np.newio`` that re-exports ``os``,
+# this sweep does NOT catch it automatically — but the facade's
+# allow-list policy does, because new attributes are not auto-admitted).
+_DANGEROUS_NUMPY_ATTRS: tuple[str, ...] = (
+    # Submodules that re-export stdlib modules under non-underscore names
+    "f2py", "ctypeslib", "distutils", "testing",
+    # The ``lib`` subpackage exposes npyio (save/load/memmap helpers)
+    "lib", "compat",
+    # File I/O functions that live directly on the numpy namespace
+    "save", "savez", "savez_compressed", "savetxt",
+    "load", "loadtxt", "genfromtxt", "fromregex",
+    "fromfile", "memmap", "DataSource",
+    # Utility surface that leaks internals
+    "show_config", "get_include", "source", "lookfor", "info",
+    "who", "disp", "deprecate",
+)
+
+
+@pytest.mark.parametrize("attr", _DANGEROUS_NUMPY_ATTRS)
+def test_dangerous_numpy_attr_is_blocked(attr: str) -> None:
+    """Defense-in-depth: every dangerous numpy attribute must be unreachable.
+
+    The facade admits only names in the vetted allow-list; anything else
+    — including any of the known stdlib-re-exporting submodules — must
+    raise ``AttributeError`` on access.
+    """
+    code = (
+        "def compute(series):\n"
+        f"    _ = np.{attr}\n"
+        "    return series['SPX']\n"
+    )
+    # Some of these (e.g. ``load``, ``save``) start with a non-underscore
+    # character and pass static validation — they fail at exec via the
+    # facade's ``AttributeError``. Others (none in this list today) may
+    # be caught statically. Either is acceptable.
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+
+
+# --------------------------------------------------------------------------
+# Sandbox globals hygiene — pandas / scipy / ctypes / os / subprocess must
+# NOT be reachable from the sandbox namespace, regardless of what the host
+# process has imported elsewhere.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    [
+        "pandas",
+        "pd",
+        "scipy",
+        "sp",
+        "ctypes",
+        "os",
+        "sys",
+        "subprocess",
+        "socket",
+        "pickle",
+        "builtins",
+        "importlib",
+        "__loader__",
+    ],
+)
+def test_forbidden_global_is_not_in_sandbox(forbidden: str) -> None:
+    """Referencing a forbidden global from indicator code must fail.
+
+    The sandbox globals dict is explicitly constructed in
+    :func:`tcg.engine.indicator_exec._build_safe_globals` with only
+    ``__builtins__`` / ``np`` (facade) / ``math``. Any other name must
+    either be rejected by the AST walker (underscore names) or fail at
+    exec with ``NameError`` (plain names not present in the dict).
+    """
+    # Names starting with underscore are rejected at validation time.
+    # Others (pandas, scipy, …) fail at exec with NameError.
+    code = (
+        "def compute(series):\n"
+        f"    return {forbidden}\n"
+    )
+    with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
+        run_indicator(code, {}, _series())
+
+
+def test_facade_is_not_the_real_numpy_module() -> None:
+    """Identity check: the ``np`` handed to user code is the facade, not numpy.
+
+    If this ever regresses (e.g. someone 'just injects np again for
+    convenience'), every other adversarial test above may still pass while
+    the real module is silently reachable. This test fails fast in that
+    case.
+    """
+    captured: dict[str, object] = {}
+    code = (
+        "def compute(series):\n"
+        "    return series['SPX']\n"
+    )
+    # Build sandbox globals the way run_indicator does, inspect the type.
+    from tcg.engine.indicator_exec import (
+        _build_safe_globals,
+        _NumpyFacade,
+    )
+    g = _build_safe_globals()
+    captured["np"] = g["np"]
+    assert isinstance(captured["np"], _NumpyFacade)
+    assert captured["np"] is not np
+    # Calling through run_indicator should still work — sanity.
+    result = run_indicator(code, {}, _series())
+    assert result.shape == (5,)
