@@ -5,6 +5,7 @@ import PageContainer from './components/layout/PageContainer';
 import ErrorBoundary from './components/ErrorBoundary';
 import HelpPage from './pages/Help/HelpPage';
 import DataPage from './pages/Data/DataPage';
+import IndicatorsPage from './pages/Indicators/IndicatorsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
 import ResearchPage from './pages/Research/ResearchPage';
 import SettingsPage from './pages/Settings/SettingsPage';
@@ -47,6 +48,16 @@ function App() {
                 <PageContainer>
                   <ErrorBoundary>
                     <DataPage />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/indicators"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <IndicatorsPage />
                   </ErrorBoundary>
                 </PageContainer>
               }
