@@ -15,7 +15,6 @@ second, divergent discovery code path here.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 
 import numpy as np
@@ -34,6 +33,25 @@ from tcg.engine.indicator_exec import (
 from tcg.types.errors import DataNotFoundError, ValidationError
 
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
+
+
+def _error_response(
+    error_type: str,
+    message: str,
+    *,
+    status: int = 400,
+    traceback: str | None = None,
+) -> JSONResponse:
+    """Single source of truth for the error envelope shape.
+
+    All error responses from this router share the same JSON body shape:
+    ``{"error_type": str, "message": str, "traceback"?: str}``. Keeping
+    that shape in one place avoids drift between the 10+ error sites.
+    """
+    content: dict = {"error_type": error_type, "message": message}
+    if traceback:
+        content["traceback"] = traceback
+    return JSONResponse(status_code=status, content=content)
 
 
 # ---------------------------------------------------------------------------
@@ -71,25 +89,15 @@ async def compute_indicator(
     # ── 1. Basic request validation ──
 
     if not body.series:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error_type": "validation",
-                "message": "'series' must contain at least one entry",
-            },
+        return _error_response(
+            "validation", "'series' must contain at least one entry"
         )
 
     try:
         start_date = date.fromisoformat(body.start) if body.start else None
         end_date = date.fromisoformat(body.end) if body.end else None
     except ValueError as exc:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error_type": "validation",
-                "message": f"Invalid date format: {exc}",
-            },
-        )
+        return _error_response("validation", f"Invalid date format: {exc}")
 
     # Param validation (pydantic accepts int/float/bool; we still guard NaN
     # for the numeric path and forward bools unchanged).
@@ -99,24 +107,17 @@ async def compute_indicator(
             params[name] = value
             continue
         if not isinstance(value, (int, float)):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error_type": "validation",
-                    "message": (
-                        f"param {name!r} must be numeric or bool, got "
-                        f"{type(value).__name__}"
-                    ),
-                },
+            return _error_response(
+                "validation",
+                (
+                    f"param {name!r} must be numeric or bool, got "
+                    f"{type(value).__name__}"
+                ),
             )
         fvalue = float(value)
         if fvalue != fvalue:  # NaN guard
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error_type": "validation",
-                    "message": f"param {name!r} must not be NaN",
-                },
+            return _error_response(
+                "validation", f"param {name!r} must not be NaN"
             )
         # Preserve int vs float so the sandbox can type-check properly.
         params[name] = int(value) if isinstance(value, int) else fvalue
@@ -135,24 +136,17 @@ async def compute_indicator(
                 end=end_date,
             )
         except DataNotFoundError as exc:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error_type": "data",
-                    "message": f"Series label {label!r}: {exc}",
-                },
+            return _error_response(
+                "data", f"Series label {label!r}: {exc}"
             )
         if series is None:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error_type": "data",
-                    "message": (
-                        f"Series label {label!r}: instrument "
-                        f"'{ref.instrument_id}' not found in collection "
-                        f"'{ref.collection}'"
-                    ),
-                },
+            return _error_response(
+                "data",
+                (
+                    f"Series label {label!r}: instrument "
+                    f"'{ref.instrument_id}' not found in collection "
+                    f"'{ref.collection}'"
+                ),
             )
         # Reject malformed series up front: each series' dates must be
         # strictly monotonically increasing (no duplicates, no unsorted
@@ -162,14 +156,9 @@ async def compute_indicator(
         if series.dates.size >= 2 and not bool(
             np.all(np.diff(series.dates) > 0)
         ):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error_type": "validation",
-                    "message": (
-                        f"Series {label!r} has non-monotonic or duplicate dates"
-                    ),
-                },
+            return _error_response(
+                "validation",
+                f"Series {label!r} has non-monotonic or duplicate dates",
             )
         fetched.append((label, ref, series.dates, series.close))
 
@@ -180,12 +169,8 @@ async def compute_indicator(
         common_dates = np.intersect1d(common_dates, dates, assume_unique=False)
 
     if common_dates.size == 0:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error_type": "validation",
-                "message": "No overlapping dates across requested series",
-            },
+        return _error_response(
+            "validation", "No overlapping dates across requested series"
         )
 
     aligned_closes: dict[str, np.ndarray] = {}
@@ -219,29 +204,20 @@ async def compute_indicator(
 
     # ── 4. Run the indicator in the sandbox ──
     #
-    # run_indicator is synchronous (uses SIGALRM) and may spend up to
-    # TIMEOUT_SECONDS on CPU-bound user code.  Offload to a thread so
-    # the event loop remains free for other requests during execution.
+    # run_indicator is synchronous and uses SIGALRM for the wall-clock
+    # timeout — SIGALRM only fires on the main thread, so we MUST call
+    # it inline rather than offloading to a worker thread (doing so
+    # silently disables the timeout; see PR #12 round-2 review). The
+    # event loop stalls for up to TIMEOUT_SECONDS, which is acceptable
+    # for this trusted single-user deploy.
     try:
-        indicator = await asyncio.to_thread(
-            run_indicator, body.code, params, aligned_closes
-        )
+        indicator = run_indicator(body.code, params, aligned_closes)
     except IndicatorValidationError as exc:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error_type": "validation",
-                "message": str(exc),
-            },
-        )
+        return _error_response("validation", str(exc))
     except IndicatorRuntimeError as exc:
-        content: dict = {
-            "error_type": "runtime",
-            "message": str(exc),
-        }
-        if exc.user_traceback:
-            content["traceback"] = exc.user_traceback
-        return JSONResponse(status_code=400, content=content)
+        return _error_response(
+            "runtime", str(exc), traceback=exc.user_traceback or None
+        )
 
     # ── 5. Build response ──
 

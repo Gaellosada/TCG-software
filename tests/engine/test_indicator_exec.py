@@ -434,3 +434,77 @@ class TestUserRuntimeError:
     def test_empty_series_dict_rejected(self):
         with pytest.raises(IndicatorValidationError, match="at least one"):
             run_indicator(SMA_CODE, {"window": 2}, {})
+
+
+# ── Traceback path sanitization ────────────────────────────────────────
+
+
+class TestTracebackPathSanitization:
+    """The user_traceback must not leak absolute paths on its final line."""
+
+    def test_keyerror_path_sanitized_in_traceback(self):
+        code = (
+            "def compute(series):\n"
+            "    d = {'k': 1}\n"
+            "    return d['/home/alice/secret.txt']\n"
+        )
+        with pytest.raises(IndicatorRuntimeError) as exc_info:
+            run_indicator(code, {}, _series([1.0, 2.0, 3.0]))
+        tb = exc_info.value.user_traceback
+        assert tb, "expected non-empty user_traceback"
+        assert "/home/alice/secret.txt" not in tb
+        assert "<path>" in tb
+
+    def test_exc_message_path_sanitized_in_both_envelopes(self):
+        # Trigger a KeyError whose message contains an absolute path —
+        # both the top-level `message` and the traceback's final line
+        # must be sanitized.
+        code = (
+            "def compute(series):\n"
+            "    d = {'ok': 1}\n"
+            "    return d['/tmp/secret/data.bin']\n"
+        )
+        with pytest.raises(IndicatorRuntimeError) as exc_info:
+            run_indicator(code, {}, _series([1.0, 2.0]))
+        tb = exc_info.value.user_traceback
+        msg = str(exc_info.value)
+        assert tb, "expected non-empty user_traceback"
+        assert "/tmp/secret/data.bin" not in tb
+        assert "/tmp/secret/data.bin" not in msg
+        assert "<path>" in tb
+
+
+# ── Numpy facade allow-list regression sweep ───────────────────────────
+
+
+class TestNumpyFacadeAllowList:
+    """Guard against numpy API drift and facade bypass.
+
+    ``_build_numpy_facade`` silently skips names missing from numpy, so
+    a rename upstream would quietly shrink the user-visible surface
+    without failing tests. The sweep below asserts every listed name
+    still resolves on the installed numpy.
+    """
+
+    def test_all_facade_names_resolve_on_numpy(self):
+        from tcg.engine.indicator_exec import _NUMPY_FACADE_NAMES
+
+        missing: list[str] = []
+        for name in _NUMPY_FACADE_NAMES:
+            if not hasattr(np, name):
+                missing.append(name)
+        assert not missing, (
+            f"numpy API drift — these facade names no longer resolve: "
+            f"{missing}"
+        )
+
+    def test_facade_blocks_dangerous_names(self):
+        from tcg.engine.indicator_exec import _build_numpy_facade
+
+        facade = _build_numpy_facade()
+        # Known-dangerous numpy surfaces that must NOT be reachable via
+        # the facade (even though they exist on the real numpy module).
+        dangerous = ("f2py", "ctypeslib", "save", "load", "loadtxt")
+        for name in dangerous:
+            with pytest.raises(AttributeError):
+                getattr(facade, name)

@@ -491,7 +491,10 @@ _NUMPY_FACADE_NAMES: tuple[str, ...] = (
     "uint64", "uint32", "uint16", "uint8",
     "bool_", "dtype", "integer", "floating", "number",
     # Shape / layout
-    "reshape", "ravel", "flatten", "transpose", "swapaxes",
+    # Note: `flatten` is an ndarray method, not a numpy top-level
+    # attribute — listing it would leave a dead entry that the facade
+    # silently skips. Users call `arr.flatten()` directly.
+    "reshape", "ravel", "transpose", "swapaxes",
     "expand_dims", "squeeze", "broadcast_to", "broadcast_arrays",
     "concatenate", "stack", "vstack", "hstack", "dstack", "column_stack",
     "split", "array_split", "hsplit", "vsplit",
@@ -543,6 +546,9 @@ _NUMPY_FACADE_NAMES: tuple[str, ...] = (
 )
 
 
+_MISSING = object()
+
+
 def _build_numpy_facade() -> _NumpyFacade:
     """Materialise the ``np`` facade from the allow-list.
 
@@ -558,9 +564,6 @@ def _build_numpy_facade() -> _NumpyFacade:
             continue
         allowed[name] = value
     return _NumpyFacade(allowed)
-
-
-_MISSING = object()
 
 
 _SAFE_BUILTIN_NAMES: tuple[str, ...] = (
@@ -730,19 +733,28 @@ def _coerce_to_float_array(
 
 _USER_FILENAME = "<indicator>"
 
-# Regex that matches any absolute path in an exception message: sequences
-# starting with "/" followed by at least one non-whitespace character.
-# Example: IOError("Permission denied: /home/alice/secret.txt")
-#          → IOError("Permission denied: <path>")
-_ABS_PATH_RE: re.Pattern[str] = re.compile(r"/\S+")
+# Regex that matches absolute POSIX paths in an exception message.
+# Requirements:
+#   * leading "/" must not be preceded by ":" (excludes URL schemes like
+#     http://, file://),
+#   * at least two path segments ("/word/word...") so single-slash tokens
+#     like "1/2" (fractions) and "2026/04/18" (dates) are preserved,
+#   * segments are composed of word chars, dot, or dash — trailing
+#     punctuation (comma, semicolon) stops the match cleanly.
+# Relative paths ("../foo", "./foo") are preserved by design — they are
+# not absolute filesystem paths and typically don't leak install layout.
+_ABS_PATH_RE: re.Pattern[str] = re.compile(
+    r"(?<![:/\w.])/(?:[\w.-]+/)+[\w.-]+"
+)
 
 
 def _sanitize_message(message: str) -> str:
     """Strip absolute filesystem paths from an exception message string.
 
-    Replaces any token beginning with ``/`` (an absolute path) with the
-    placeholder ``<path>`` so internal directory structure does not leak to
-    the client via the ``message`` field of the error envelope.
+    Replaces absolute POSIX paths (``/foo/bar/baz``) with ``<path>`` so
+    internal directory structure does not leak to the client. URL tails
+    (``http://host/api``), single-slash tokens (fractions, dates), and
+    relative paths are left untouched.
     """
     return _ABS_PATH_RE.sub("<path>", message)
 
@@ -768,8 +780,11 @@ def _sanitize_traceback(exc: BaseException) -> str:
 
     lines: list[str] = ["Traceback (indicator code):\n"]
     lines.extend(traceback.StackSummary.from_list(frames).format())
-    # Append the exception type + message as the final line.
-    lines.append(f"{type(exc).__name__}: {exc}\n")
+    # Append the exception type + message as the final line. The message
+    # must be routed through _sanitize_message — otherwise a KeyError
+    # containing a path (e.g. ``KeyError: '/home/alice/secret'``) leaks
+    # the path via the traceback envelope.
+    lines.append(f"{type(exc).__name__}: {_sanitize_message(str(exc))}\n")
     return "".join(lines)
 
 
