@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { loadState, saveState, STORAGE_KEY, SCHEMA_VERSION } from './storage';
+import { loadState, saveState, SCHEMA_VERSION } from './storage';
+import { INDICATORS_STORAGE_KEY } from './storageKeys';
 
 // Minimal in-memory localStorage stub. Installed via ``vi.stubGlobal``
 // because the Vitest node env does not ship a DOM.
@@ -31,12 +32,12 @@ describe('loadState', () => {
   });
 
   it('returns empty state when JSON is malformed', () => {
-    storage.setItem(STORAGE_KEY, 'not-json');
+    storage.setItem(INDICATORS_STORAGE_KEY, 'not-json');
     expect(loadState()).toEqual({ indicators: [], defaultState: {} });
   });
 
   it('returns empty state when schema version does not match', () => {
-    storage.setItem(STORAGE_KEY, JSON.stringify({
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
       version: 999,
       indicators: [{ id: 'x', name: 'X', code: '', params: {}, seriesMap: {} }],
       defaultState: {},
@@ -68,7 +69,7 @@ describe('loadState', () => {
   });
 
   it('sanitises indicators missing id', () => {
-    storage.setItem(STORAGE_KEY, JSON.stringify({
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       indicators: [
         { name: 'no id' },
@@ -82,7 +83,7 @@ describe('loadState', () => {
   });
 
   it('strips any readonly entries from the persisted indicators list', () => {
-    storage.setItem(STORAGE_KEY, JSON.stringify({
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       indicators: [
         { id: 'sma-20', name: '20-day SMA', code: '', params: {}, seriesMap: {}, readonly: true },
@@ -95,7 +96,7 @@ describe('loadState', () => {
   });
 
   it('tolerates non-object defaultState entries', () => {
-    storage.setItem(STORAGE_KEY, JSON.stringify({
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       indicators: [],
       defaultState: { 'sma-20': null, 'sma-10': 'garbage', 'sma-5': { params: { w: 1 } } },
@@ -126,7 +127,7 @@ describe('saveState', () => {
       ],
       defaultState: {},
     });
-    const raw = storage.getItem(STORAGE_KEY);
+    const raw = storage.getItem(INDICATORS_STORAGE_KEY);
     const parsed = JSON.parse(raw);
     expect(parsed.version).toBe(SCHEMA_VERSION);
     expect(parsed.indicators.map((i) => i.id)).toEqual(['user1']);
@@ -142,14 +143,14 @@ describe('saveState', () => {
         },
       },
     });
-    const parsed = JSON.parse(storage.getItem(STORAGE_KEY));
+    const parsed = JSON.parse(storage.getItem(INDICATORS_STORAGE_KEY));
     expect(parsed.defaultState['sma-20'].params).toEqual({ window: 50 });
     expect(parsed.indicators).toEqual([]);
   });
 
   it('tolerates missing fields on the input object', () => {
     expect(() => saveState({})).not.toThrow();
-    const parsed = JSON.parse(storage.getItem(STORAGE_KEY));
+    const parsed = JSON.parse(storage.getItem(INDICATORS_STORAGE_KEY));
     expect(parsed.version).toBe(SCHEMA_VERSION);
     expect(parsed.indicators).toEqual([]);
     expect(parsed.defaultState).toEqual({});

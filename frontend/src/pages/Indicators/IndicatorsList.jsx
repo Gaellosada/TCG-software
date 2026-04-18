@@ -30,11 +30,10 @@ import { LIST_COLLAPSED_KEY } from './storageKeys';
  *   search           {string}
  *   onSearchChange   {Function} (q) => void
  */
-const COLLAPSE_KEY = LIST_COLLAPSED_KEY;
 
 function loadCollapsed() {
   try {
-    const raw = localStorage.getItem(COLLAPSE_KEY);
+    const raw = localStorage.getItem(LIST_COLLAPSED_KEY);
     if (!raw) return { default: false, custom: false };
     const parsed = JSON.parse(raw);
     return {
@@ -47,7 +46,7 @@ function loadCollapsed() {
 }
 
 function saveCollapsed(next) {
-  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next)); } catch { /* quota */ }
+  try { localStorage.setItem(LIST_COLLAPSED_KEY, JSON.stringify(next)); } catch { /* quota */ }
 }
 
 function IndicatorsList({ indicators, selectedId, onSelect, onAdd, onDelete, onRename, search, onSearchChange }) {

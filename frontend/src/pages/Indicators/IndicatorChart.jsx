@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import Chart from '../../components/Chart';
 import { TRACE_COLORS } from '../../utils/chartTheme';
+import { HEADINGS } from './errorTaxonomy';
 import styles from './IndicatorChart.module.css';
 
 /**
@@ -119,14 +120,6 @@ function IndicatorChart({ indicator, result, loading, error }) {
     </div>
   );
 }
-
-const HEADINGS = {
-  validation: 'Invalid indicator',
-  runtime: 'Indicator error',
-  data: 'Data error',
-  network: "Couldn't reach the server",
-  offline: "You're offline",
-};
 
 function ErrorCard({ error }) {
   const kind = HEADINGS[error.error_type] ? error.error_type : 'generic';

@@ -72,6 +72,18 @@
   --error-card-bg: rgba(96, 165, 250, 0.08);
 }
 
+/* Transient network failure — amber/warning, hints "retry later". */
+.errorCard[data-error-type="network"] {
+  --error-card-accent: #f0a030;
+  --error-card-bg: rgba(240, 160, 48, 0.08);
+}
+
+/* User is offline — neutral/gray, not their indicator's fault. */
+.errorCard[data-error-type="offline"] {
+  --error-card-accent: #94a3b8;
+  --error-card-bg: rgba(148, 163, 184, 0.08);
+}
+
 .errorCard[data-error-type="generic"] {
   --error-card-accent: #ef4444;
   --error-card-bg: rgba(239, 68, 68, 0.08);

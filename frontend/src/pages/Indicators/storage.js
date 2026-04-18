@@ -22,8 +22,6 @@
 
 import { INDICATORS_STORAGE_KEY } from './storageKeys';
 
-// Re-export so existing imports of STORAGE_KEY from this module keep working.
-export const STORAGE_KEY = INDICATORS_STORAGE_KEY;
 export const SCHEMA_VERSION = 1;
 
 function getStorage() {
@@ -43,7 +41,7 @@ export function loadState() {
   if (!ls) return empty;
   let raw;
   try {
-    raw = ls.getItem(STORAGE_KEY);
+    raw = ls.getItem(INDICATORS_STORAGE_KEY);
   } catch {
     return empty;
   }
@@ -116,7 +114,7 @@ export function saveState(state) {
     defaultState,
   };
   try {
-    ls.setItem(STORAGE_KEY, JSON.stringify(payload));
+    ls.setItem(INDICATORS_STORAGE_KEY, JSON.stringify(payload));
   } catch {
     // Quota / access errors — nothing to do, session state keeps working.
   }

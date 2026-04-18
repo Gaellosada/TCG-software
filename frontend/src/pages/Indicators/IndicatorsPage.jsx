@@ -11,6 +11,7 @@ import { AUTOSAVE_KEY } from './storageKeys';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import { classifyFetchError } from '../../utils/fetchError';
+import { ABORTED, coerceErrorType, fetchKindToErrorType } from './errorTaxonomy';
 import styles from './IndicatorsPage.module.css';
 
 /**
@@ -22,12 +23,17 @@ import styles from './IndicatorsPage.module.css';
 function IndicatorNameInput({ indicator, onRename }) {
   const [draft, setDraft] = useState(indicator?.name || '');
   const prevIdRef = useRef(indicator?.id);
+  // Tracks whether the input currently has focus. We flip it in the
+  // focus/blur handlers and consult it in the reset effect so external
+  // renames (e.g. switching indicator) don't stomp a user's in-progress
+  // edit. A ref (not state) — toggling it must not trigger a rerender.
+  const focusedRef = useRef(false);
   // Reset draft whenever the selected indicator changes.
   useEffect(() => {
     if (prevIdRef.current !== indicator?.id) {
       prevIdRef.current = indicator?.id;
       setDraft(indicator?.name || '');
-    } else if ((indicator?.name || '') !== draft && document.activeElement?.getAttribute('data-indicator-name') !== 'true') {
+    } else if ((indicator?.name || '') !== draft && !focusedRef.current) {
       // External rename (e.g. defaults) — sync when the input is not focused.
       setDraft(indicator?.name || '');
     }
@@ -36,6 +42,7 @@ function IndicatorNameInput({ indicator, onRename }) {
 
   const readonly = !indicator || !!indicator?.readonly;
   function commit() {
+    focusedRef.current = false;
     if (!indicator || readonly) {
       setDraft(indicator?.name || '');
       return;
@@ -54,6 +61,7 @@ function IndicatorNameInput({ indicator, onRename }) {
       type="text"
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
+      onFocus={() => { focusedRef.current = true; }}
       onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); }
@@ -62,7 +70,6 @@ function IndicatorNameInput({ indicator, onRename }) {
       placeholder={indicator ? 'Indicator name' : 'Select an indicator'}
       aria-label="Indicator name"
       title={readonly ? 'Default indicator — name is fixed' : 'Indicator name'}
-      data-indicator-name="true"
     />
   );
 }
@@ -109,8 +116,7 @@ function normalizeErrorEnvelope(body, fallbackStatusText) {
   if (!body || typeof body !== 'object') {
     return { error_type: 'validation', message: fallbackStatusText || 'Request failed' };
   }
-  const validTypes = new Set(['validation', 'runtime', 'data', 'network', 'offline']);
-  const error_type = validTypes.has(body.error_type) ? body.error_type : 'validation';
+  const error_type = coerceErrorType(body.error_type);
   const message = (typeof body.message === 'string' && body.message)
     || (typeof body.detail === 'string' && body.detail)
     || fallbackStatusText
@@ -344,8 +350,17 @@ function IndicatorsPage() {
     if (!target || target.readonly) return;
     // eslint-disable-next-line no-alert
     if (!window.confirm('Delete?')) return;
-    setIndicators((prev) => prev.filter((ind) => ind.id !== id));
-    setSelectedId((sel) => (sel === id ? null : sel));
+    setIndicators((prev) => {
+      const next = prev.filter((ind) => ind.id !== id);
+      // If the deleted entry was selected, fall back to the first
+      // remaining indicator (defaults come first in the list) so the
+      // user never sees a blank middle pane when defaults are available.
+      setSelectedId((sel) => {
+        if (sel !== id) return sel;
+        return next.length > 0 ? next[0].id : null;
+      });
+      return next;
+    });
   }, []);
 
   const handleRename = useCallback((id, newName) => {
@@ -416,23 +431,11 @@ function IndicatorsPage() {
         // Classify so offline/network surfaces an accurate heading in the
         // error card rather than the misleading "Data error" label.
         const classified = classifyFetchError(networkErr);
-        if (classified.kind === 'aborted') {
+        const error_type = fetchKindToErrorType(classified.kind);
+        if (error_type === ABORTED) {
           // Silently suppress cancelled requests — don't render an error card.
           setLastResult(null);
           return;
-        }
-        // Map classification kind → chart error_type:
-        //   offline                → 'offline'  → "You're offline"
-        //   network / server       → 'network'  → "Couldn't reach the server"
-        //   client                 → 'validation'
-        //   unknown                → 'runtime' (fallback)
-        let error_type = 'runtime';
-        if (classified.kind === 'offline') {
-          error_type = 'offline';
-        } else if (classified.kind === 'network' || classified.kind === 'server') {
-          error_type = 'network';
-        } else if (classified.kind === 'client') {
-          error_type = 'validation';
         }
         setError({
           error_type,
