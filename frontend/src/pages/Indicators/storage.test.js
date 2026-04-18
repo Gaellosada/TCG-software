@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { loadState, saveState, debounce, STORAGE_KEY, SCHEMA_VERSION } from './storage';
+import { loadState, saveState, STORAGE_KEY, SCHEMA_VERSION } from './storage';
 
 // Minimal in-memory localStorage stub. Installed via ``vi.stubGlobal``
 // because the Vitest node env does not ship a DOM.
@@ -161,61 +161,3 @@ describe('saveState', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// debounce — flush behaviour (Fix 2)
-// ---------------------------------------------------------------------------
-describe('debounce.flush', () => {
-  it('invokes fn immediately with the last scheduled args when pending', () => {
-    vi.useFakeTimers();
-    const fn = vi.fn();
-    const d = debounce(fn, 300);
-
-    d('arg1');
-    expect(fn).not.toHaveBeenCalled(); // timer not fired yet
-
-    d.flush();
-    expect(fn).toHaveBeenCalledOnce();
-    expect(fn).toHaveBeenCalledWith('arg1');
-    vi.useRealTimers();
-  });
-
-  it('does nothing when no pending timer', () => {
-    vi.useFakeTimers();
-    const fn = vi.fn();
-    const d = debounce(fn, 300);
-
-    d.flush(); // no prior call — should be a no-op
-    expect(fn).not.toHaveBeenCalled();
-    vi.useRealTimers();
-  });
-
-  it('uses the last args when called multiple times before flush', () => {
-    vi.useFakeTimers();
-    const fn = vi.fn();
-    const d = debounce(fn, 300);
-
-    d('first');
-    d('second');
-    d('third');
-
-    d.flush();
-    expect(fn).toHaveBeenCalledOnce();
-    expect(fn).toHaveBeenCalledWith('third');
-    vi.useRealTimers();
-  });
-
-  it('does not double-fire after flush when timer would have expired', () => {
-    vi.useFakeTimers();
-    const fn = vi.fn();
-    const d = debounce(fn, 300);
-
-    d('data');
-    d.flush();
-    expect(fn).toHaveBeenCalledOnce();
-
-    // Advance time — timer was already cancelled, fn must not fire again.
-    vi.advanceTimersByTime(400);
-    expect(fn).toHaveBeenCalledOnce();
-    vi.useRealTimers();
-  });
-});

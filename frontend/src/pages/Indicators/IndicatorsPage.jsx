@@ -7,6 +7,7 @@ import { resolveDefaultIndexInstrument } from '../../api/indicators';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { loadState, saveState } from './storage';
+import { AUTOSAVE_KEY } from './storageKeys';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import { classifyFetchError } from '../../utils/fetchError';
@@ -65,8 +66,6 @@ function IndicatorNameInput({ indicator, onRename }) {
     />
   );
 }
-
-const AUTOSAVE_KEY = 'tcg.indicators.autosave';
 
 const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
     s = series['price']

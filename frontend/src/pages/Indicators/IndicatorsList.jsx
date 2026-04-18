@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import styles from './IndicatorsList.module.css';
+import { LIST_COLLAPSED_KEY } from './storageKeys';
 
 /**
  * Left panel — searchable, scrollable list of indicators.
@@ -29,7 +30,7 @@ import styles from './IndicatorsList.module.css';
  *   search           {string}
  *   onSearchChange   {Function} (q) => void
  */
-const COLLAPSE_KEY = 'tcg.indicators.listCollapsed';
+const COLLAPSE_KEY = LIST_COLLAPSED_KEY;
 
 function loadCollapsed() {
   try {

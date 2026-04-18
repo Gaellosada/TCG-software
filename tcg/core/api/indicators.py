@@ -15,6 +15,7 @@ second, divergent discovery code path here.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 import numpy as np
@@ -217,9 +218,14 @@ async def compute_indicator(
     common_dates_sorted = np.sort(common_dates)
 
     # ── 4. Run the indicator in the sandbox ──
-
+    #
+    # run_indicator is synchronous (uses SIGALRM) and may spend up to
+    # TIMEOUT_SECONDS on CPU-bound user code.  Offload to a thread so
+    # the event loop remains free for other requests during execution.
     try:
-        indicator = run_indicator(body.code, params, aligned_closes)
+        indicator = await asyncio.to_thread(
+            run_indicator, body.code, params, aligned_closes
+        )
     except IndicatorValidationError as exc:
         return JSONResponse(
             status_code=400,

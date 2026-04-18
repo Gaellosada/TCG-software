@@ -730,6 +730,22 @@ def _coerce_to_float_array(
 
 _USER_FILENAME = "<indicator>"
 
+# Regex that matches any absolute path in an exception message: sequences
+# starting with "/" followed by at least one non-whitespace character.
+# Example: IOError("Permission denied: /home/alice/secret.txt")
+#          → IOError("Permission denied: <path>")
+_ABS_PATH_RE: re.Pattern[str] = re.compile(r"/\S+")
+
+
+def _sanitize_message(message: str) -> str:
+    """Strip absolute filesystem paths from an exception message string.
+
+    Replaces any token beginning with ``/`` (an absolute path) with the
+    placeholder ``<path>`` so internal directory structure does not leak to
+    the client via the ``message`` field of the error envelope.
+    """
+    return _ABS_PATH_RE.sub("<path>", message)
+
 
 def _sanitize_traceback(exc: BaseException) -> str:
     """Extract only the user-code frames from *exc*'s traceback.
@@ -853,9 +869,18 @@ def run_indicator(
             exec(compiled, safe_globals, safe_locals)
         except IndicatorRuntimeError:
             raise
-        except Exception as exc:  # noqa: BLE001 — surface user errors clearly
+        except MemoryError:
+            raise
+        except Exception as exc:
+            # Why: any user-code exception (TypeError, ValueError, NameError,
+            # etc.) during module-level exec should be reported as a runtime
+            # error rather than crashing the worker.  MemoryError is re-raised
+            # above because exhausting memory is a process-level condition, not
+            # a user indicator bug.  KeyboardInterrupt and SystemExit are
+            # BaseException subclasses and are therefore not caught here.
             raise IndicatorRuntimeError(
-                f"error loading indicator: {type(exc).__name__}: {exc}",
+                f"error loading indicator: {type(exc).__name__}: "
+                f"{_sanitize_message(str(exc))}",
                 user_traceback=_sanitize_traceback(exc),
             ) from exc
 
@@ -871,9 +896,15 @@ def run_indicator(
             result = compute_fn(series_dict, **coerced)
         except IndicatorRuntimeError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except MemoryError:
+            raise
+        except Exception as exc:
+            # Why: any user-code exception raised inside compute() should
+            # surface as a structured runtime error with the sanitized
+            # traceback.  MemoryError is re-raised above.
             raise IndicatorRuntimeError(
-                f"indicator raised {type(exc).__name__}: {exc}",
+                f"indicator raised {type(exc).__name__}: "
+                f"{_sanitize_message(str(exc))}",
                 user_traceback=_sanitize_traceback(exc),
             ) from exc
 

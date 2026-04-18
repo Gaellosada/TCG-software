@@ -20,7 +20,10 @@
 // code + name are always sourced from the ``DEFAULT_INDICATORS`` registry.
 // Only the user's param / series picks for a default go to ``defaultState``.
 
-export const STORAGE_KEY = 'tcg.indicators.v1';
+import { INDICATORS_STORAGE_KEY } from './storageKeys';
+
+// Re-export so existing imports of STORAGE_KEY from this module keep working.
+export const STORAGE_KEY = INDICATORS_STORAGE_KEY;
 export const SCHEMA_VERSION = 1;
 
 function getStorage() {
@@ -119,31 +122,3 @@ export function saveState(state) {
   }
 }
 
-/**
- * Debounce helper used by the page to coalesce rapid mutations (typing
- * in the editor, fiddling with param inputs, etc.) into a single write
- * every ``waitMs`` milliseconds. Not a generic utility — lives here so
- * all storage-adjacent code stays in one module.
- */
-export function debounce(fn, waitMs) {
-  let timer = null;
-  let lastArgs = null;
-  const debounced = (...args) => {
-    lastArgs = args;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { timer = null; lastArgs = null; fn(...args); }, waitMs);
-  };
-  // flush(): cancel the pending timer and immediately invoke fn with the
-  // last scheduled arguments. Used by beforeunload / pagehide to guarantee
-  // the write lands before the browser tears down the page.
-  debounced.flush = () => {
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-      const args = lastArgs;
-      lastArgs = null;
-      if (args !== null) fn(...args);
-    }
-  };
-  return debounced;
-}
