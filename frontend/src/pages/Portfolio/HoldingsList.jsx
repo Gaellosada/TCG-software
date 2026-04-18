@@ -1,14 +1,18 @@
+import Card from '../../components/Card';
 import styles from './HoldingsList.module.css';
 
 /**
  * Displays portfolio holdings with editable weights and remove buttons.
  * Purely presentational — state is managed by usePortfolio.
+ *
+ * iter-7: the outer `.section` frame + header were extracted into the
+ * shared <Card> component. All table styling stays local.
  */
 export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemoveLeg, onOpenAddModal }) {
   return (
-    <div className={styles.section}>
-      <div className={styles.header}>
-        <span className={styles.label}>Holdings</span>
+    <Card
+      title="Holdings"
+      right={
         <button
           className={styles.addBtn}
           type="button"
@@ -17,8 +21,8 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
         >
           + Add Holding
         </button>
-      </div>
-
+      }
+    >
       {legs.length === 0 ? (
         <div className={styles.empty}>
           No instruments added. Click &quot;+ Add Holding&quot; to build your portfolio.
@@ -123,6 +127,6 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
           </div>
         );
       })()}
-    </div>
+    </Card>
   );
 }
