@@ -48,6 +48,11 @@ const ICONS = {
   moon: (
     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
   ),
+  indicators: (
+    <>
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </>
+  ),
   'chevron-down': (
     <polyline points="6 9 12 15 18 9" />
   ),

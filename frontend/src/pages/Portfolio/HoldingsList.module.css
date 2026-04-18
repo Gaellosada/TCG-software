@@ -1,25 +1,7 @@
-.section {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-primary);
-}
-
-.label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
+/*
+ * iter-7: outer frame + header moved to the shared <Card> component.
+ * Keep only the table + summary + inline-input styles in this module.
+ */
 
 .addBtn {
   padding: 5px 12px;

@@ -27,6 +27,14 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/e2e/screenshots/
 
+# Local/scratch e2e specs (ad-hoc audits, not part of the product test suite)
+frontend/e2e/ohlc-audit.spec.js
+frontend/e2e/quick-check.spec.js
+frontend/e2e/screenshots.spec.js
+frontend/e2e/ux-refinements.spec.js
+frontend/e2e/vix-audit.spec.js
+frontend/e2e/vix-zoom.spec.js
+
 # Claude Code
 CLAUDE.md
 .claude/

@@ -5,6 +5,7 @@ import AddHoldingModal from './AddHoldingModal';
 import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
+import SaveControls from '../../components/SaveControls';
 import styles from './PortfolioPage.module.css';
 
 const REBALANCE_OPTIONS = [
@@ -107,7 +108,7 @@ function PortfolioPage() {
             )}
           </div>
           <div className={styles.headerActions}>
-            {/* Save */}
+            {/* Named-save input (portfolio-specific — the name drives load). */}
             <div className={styles.saveGroup}>
               <input
                 className={styles.saveInput}
@@ -117,28 +118,21 @@ function PortfolioPage() {
                 placeholder="Portfolio name"
                 onKeyDown={(e) => { if (e.key === 'Enter') handleSave(); }}
               />
-              <button
-                className={styles.saveBtn}
-                type="button"
-                onClick={handleSave}
-                disabled={
-                  (!saveInput.trim() && !portfolio.portfolioName)
-                  || portfolio.legs.length === 0
-                  || (!portfolio.dirty && portfolio.portfolioName && saveInput.trim() === portfolio.portfolioName)
-                }
-              >
-                Save
-              </button>
             </div>
-            {/* Autosave toggle */}
-            <label className={styles.autosaveLabel} title="Automatically save changes to the current portfolio">
-              <input
-                type="checkbox"
-                checked={portfolio.autosave}
-                onChange={(e) => portfolio.setAutosave(e.target.checked)}
-              />
-              Auto save
-            </label>
+            {/* Shared Save button + Auto save checkbox. */}
+            <SaveControls
+              dirty={
+                portfolio.dirty
+                || (saveInput.trim() !== '' && saveInput.trim() !== portfolio.portfolioName)
+              }
+              autosave={portfolio.autosave}
+              onSave={handleSave}
+              onToggleAutosave={portfolio.setAutosave}
+              saveDisabled={
+                (!saveInput.trim() && !portfolio.portfolioName)
+                || portfolio.legs.length === 0
+              }
+            />
             {/* Clear — with confirmation */}
             <button
               className={styles.clearBtn}

@@ -1,0 +1,139 @@
+/*
+ * Indicators page layout.
+ *
+ * Row structure (iter-8):
+ *   1. listPanel / editorPanel / paramsPanel  (3-col top row, min-height 720px)
+ *      — bumped from 540px in iter-7 per user request (+33%).
+ *   2. chartPanel (full width, min-height 720px; wrapped in a shared Card)
+ *
+ * In iter-8 the indicator's name input + Save + Auto save moved OUT of
+ * the editor panel and into a compact top-bar at the TOP of the params
+ * (right) column. The editor panel now just hosts the CodeMirror editor.
+ *
+ * The page itself grows vertically — it scrolls inside the route pane
+ * when the viewport is too short to fit the full layout.
+ */
+.page {
+  display: grid;
+  grid-template-columns: 240px 1fr 320px;
+  /* Row mins reduced from 720px/720px (→ 1440px total, too tall for 1080p).
+   * 420px editor + 360px chart = 780px minimum, fits in a 900px usable
+   * viewport while still letting the grid grow proportionally on larger screens. */
+  grid-template-rows: minmax(420px, 1.4fr) minmax(360px, 2fr);
+  min-height: 100%;
+  position: relative;
+}
+
+.banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  font-size: 0.78rem;
+}
+
+.listPanel {
+  grid-column: 1;
+  grid-row: 1;
+  border-right: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.editorPanel {
+  grid-column: 2;
+  grid-row: 1;
+  border-right: 1px solid var(--border-primary);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.nameInput {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  padding: 5px 8px;
+  outline: none;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.nameInput:focus {
+  border-color: var(--border-accent);
+}
+
+.nameInput:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.paramsPanel {
+  grid-column: 3;
+  grid-row: 1;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * Top-of-column bar: hosts the indicator name + Save + Auto save.
+ *
+ * The right column is 320 px wide. We try to fit everything on one row
+ * (flex-wrap: wrap kicks in if it doesn't): the name input flexes to
+ * fill the remaining width while Save + Auto save stay compact.
+ *   name input: flex: 1 via SaveControls.leftSlot
+ *   save btn  : 60-70 px
+ *   auto save : ~90 px (checkbox + label)
+ * ~170 px of chrome leaves ~150 px for the name input — enough to read
+ * "Indicator 1" style text. On narrow screens the .root flex-wrap
+ * allows Save + Auto save to fall onto a second line.
+ */
+.paramsTopBar {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.paramsSaveControls {
+  gap: 8px;
+}
+
+.chartPanel {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  border-top: 1px solid var(--border-primary);
+  padding: 14px 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.resultsCard {
+  flex: 1;
+  min-height: 0;
+}
+
+.resultsCardBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}

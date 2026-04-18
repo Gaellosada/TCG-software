@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { formatDateInt } from '../../utils/format';
+import { useAutosave } from '../../components/SaveControls';
 
 const STORAGE_KEY = 'tcg-saved-portfolios';
 const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
@@ -32,7 +33,6 @@ export default function usePortfolio() {
   );
 
   const abortRef = useRef(null);
-  const autosaveTimerRef = useRef(null);
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -326,19 +326,25 @@ export default function usePortfolio() {
     localStorage.setItem(AUTOSAVE_KEY, String(on));
   }, []);
 
-  /* ── Autosave: debounced save when portfolio changes ── */
-
-  useEffect(() => {
-    if (!autosave || !portfolioName || legs.length === 0 || !dirty) return;
-
-    // Debounce: save 500ms after last change
-    clearTimeout(autosaveTimerRef.current);
-    autosaveTimerRef.current = setTimeout(() => {
-      savePortfolio(portfolioName);
-    }, 500);
-
-    return () => clearTimeout(autosaveTimerRef.current);
-  }, [autosave, portfolioName, legs, rebalance, dirty, savePortfolio]);
+  /* ── Autosave: shared useAutosave hook ── */
+  // Payload identity changes when any persisted field does; the hook
+  // debounces writes + flushes on beforeunload/pagehide.
+  const autosavePayload = useMemo(
+    () => ({ legs, rebalance, name: portfolioName }),
+    [legs, rebalance, portfolioName],
+  );
+  const autosaveEnabled = !!autosave && !!portfolioName && legs.length > 0;
+  const handleAutosave = useCallback(
+    () => { if (portfolioName) savePortfolio(portfolioName); },
+    [portfolioName, savePortfolio],
+  );
+  useAutosave({
+    enabled: autosaveEnabled,
+    dirty,
+    value: autosavePayload,
+    onSave: handleAutosave,
+    debounceMs: 500,
+  });
 
   return {
     legs,

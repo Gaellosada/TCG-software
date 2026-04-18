@@ -1,0 +1,234 @@
+"""Indicators router — run user-defined Python indicators on price series.
+
+Exposes:
+
+* ``POST /api/indicators/compute`` — execute a user-supplied ``compute``
+  function against one or more aligned price time series.
+
+In-memory only: indicator definitions are NOT persisted.
+
+Instrument discovery (including the default S&P 500 spot index the
+frontend preselects) is delegated to the existing ``/api/data/*``
+endpoints — the same path the Data page uses — so we avoid inventing a
+second, divergent discovery code path here.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import numpy as np
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from tcg.core.api.data import get_market_data
+from tcg.data._utils import int_to_iso
+from tcg.data.protocols import MarketDataService
+from tcg.engine.indicator_exec import (
+    IndicatorRuntimeError,
+    IndicatorValidationError,
+    run_indicator,
+)
+from tcg.types.errors import DataNotFoundError, ValidationError
+
+router = APIRouter(prefix="/api/indicators", tags=["indicators"])
+
+
+def _error_response(
+    error_type: str,
+    message: str,
+    *,
+    status: int = 400,
+    traceback: str | None = None,
+) -> JSONResponse:
+    """Single source of truth for the error envelope shape.
+
+    All error responses from this router share the same JSON body shape:
+    ``{"error_type": str, "message": str, "traceback"?: str}``. Keeping
+    that shape in one place avoids drift between the 10+ error sites.
+    """
+    content: dict = {"error_type": error_type, "message": message}
+    if traceback:
+        content["traceback"] = traceback
+    return JSONResponse(status_code=status, content=content)
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+
+
+class SeriesRef(BaseModel):
+    collection: str
+    instrument_id: str
+
+
+class IndicatorComputeRequest(BaseModel):
+    code: str
+    params: dict[str, int | float | bool] = {}
+    # Label → series ref. The key is the user-chosen label that the
+    # indicator code accesses as ``series['price']`` etc.
+    series: dict[str, SeriesRef]
+    start: str | None = None
+    end: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/compute")
+async def compute_indicator(
+    body: IndicatorComputeRequest,
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict:
+    """Execute a user-defined indicator against one or more price series."""
+
+    # ── 1. Basic request validation ──
+
+    if not body.series:
+        return _error_response(
+            "validation", "'series' must contain at least one entry"
+        )
+
+    try:
+        start_date = date.fromisoformat(body.start) if body.start else None
+        end_date = date.fromisoformat(body.end) if body.end else None
+    except ValueError as exc:
+        return _error_response("validation", f"Invalid date format: {exc}")
+
+    # Param validation (pydantic accepts int/float/bool; we still guard NaN
+    # for the numeric path and forward bools unchanged).
+    params: dict[str, int | float | bool] = {}
+    for name, value in body.params.items():
+        if isinstance(value, bool):
+            params[name] = value
+            continue
+        if not isinstance(value, (int, float)):
+            return _error_response(
+                "validation",
+                (
+                    f"param {name!r} must be numeric or bool, got "
+                    f"{type(value).__name__}"
+                ),
+            )
+        fvalue = float(value)
+        if fvalue != fvalue:  # NaN guard
+            return _error_response(
+                "validation", f"param {name!r} must not be NaN"
+            )
+        # Preserve int vs float so the sandbox can type-check properly.
+        params[name] = int(value) if isinstance(value, int) else fvalue
+
+    # ── 2. Fetch each labeled series ──
+
+    # Preserve the user's insertion order so the response matches the
+    # request — Python dicts preserve insertion order (3.7+).
+    fetched: list[tuple[str, SeriesRef, np.ndarray, np.ndarray]] = []
+    for label, ref in body.series.items():
+        try:
+            series = await svc.get_prices(
+                ref.collection,
+                ref.instrument_id,
+                start=start_date,
+                end=end_date,
+            )
+        except DataNotFoundError as exc:
+            return _error_response(
+                "data", f"Series label {label!r}: {exc}"
+            )
+        if series is None:
+            return _error_response(
+                "data",
+                (
+                    f"Series label {label!r}: instrument "
+                    f"'{ref.instrument_id}' not found in collection "
+                    f"'{ref.collection}'"
+                ),
+            )
+        # Reject malformed series up front: each series' dates must be
+        # strictly monotonically increasing (no duplicates, no unsorted
+        # input). Otherwise ``np.intersect1d`` + ``np.isin`` alignment
+        # below silently produces differing lengths, which later fails
+        # with a confusing sandbox-level error.
+        if series.dates.size >= 2 and not bool(
+            np.all(np.diff(series.dates) > 0)
+        ):
+            return _error_response(
+                "validation",
+                f"Series {label!r} has non-monotonic or duplicate dates",
+            )
+        fetched.append((label, ref, series.dates, series.close))
+
+    # ── 3. Inner-join on the intersection of dates ──
+
+    common_dates = fetched[0][2]
+    for _label, _ref, dates, _close in fetched[1:]:
+        common_dates = np.intersect1d(common_dates, dates, assume_unique=False)
+
+    if common_dates.size == 0:
+        return _error_response(
+            "validation", "No overlapping dates across requested series"
+        )
+
+    aligned_closes: dict[str, np.ndarray] = {}
+    series_response: list[dict] = []
+    for label, ref, dates, closes in fetched:
+        mask = np.isin(dates, common_dates)
+        aligned_dates = dates[mask]
+        aligned = closes[mask]
+        # Sort each series by date so alignment order matches common_dates.
+        order = np.argsort(aligned_dates)
+        aligned_closes_sorted = aligned[order].astype(np.float64, copy=False)
+        aligned_closes[label] = aligned_closes_sorted
+        # NaN-safe serialization: JSON ``NaN`` is not valid JSON per RFC
+        # 8259. Map NaN → ``None`` the same way the indicator list does
+        # below. This matches strict JSON parsers on the frontend.
+        close_list: list[float | None] = [
+            None if (v != v) else float(v)
+            for v in aligned_closes_sorted.tolist()
+        ]
+        series_response.append(
+            {
+                "label": label,
+                "collection": ref.collection,
+                "instrument_id": ref.instrument_id,
+                "close": close_list,
+            }
+        )
+
+    # Also sort the common_dates array ascending for the response.
+    common_dates_sorted = np.sort(common_dates)
+
+    # ── 4. Run the indicator in the sandbox ──
+    #
+    # run_indicator is synchronous and uses SIGALRM for the wall-clock
+    # timeout — SIGALRM only fires on the main thread, so we MUST call
+    # it inline rather than offloading to a worker thread (doing so
+    # silently disables the timeout; see PR #12 round-2 review). The
+    # event loop stalls for up to TIMEOUT_SECONDS, which is acceptable
+    # for this trusted single-user deploy.
+    try:
+        indicator = run_indicator(body.code, params, aligned_closes)
+    except IndicatorValidationError as exc:
+        return _error_response("validation", str(exc))
+    except IndicatorRuntimeError as exc:
+        return _error_response(
+            "runtime", str(exc), traceback=exc.user_traceback or None
+        )
+
+    # ── 5. Build response ──
+
+    dates_iso = [int_to_iso(int(d)) for d in common_dates_sorted]
+    indicator_list: list[float | None] = [
+        None if (v != v) else float(v)  # NaN → null
+        for v in indicator.tolist()
+    ]
+
+    return {
+        "dates": dates_iso,
+        "series": series_response,
+        "indicator": indicator_list,
+    }

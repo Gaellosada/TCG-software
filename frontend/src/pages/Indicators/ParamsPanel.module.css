@@ -1,0 +1,410 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.section {
+  padding: 10px 14px 10px;
+}
+
+.sectionHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.sectionLabel {
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.miniBtn {
+  background: none;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.miniBtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.miniBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.placeholder {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+.divider {
+  height: 1px;
+  background: var(--border-secondary);
+  margin: 0 14px;
+}
+
+.paramsList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.paramRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.paramLabel {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  min-width: 80px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paramInput {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+  width: 80px;
+  outline: none;
+}
+
+.paramInput:focus {
+  border-color: var(--border-accent);
+}
+
+.paramInput:disabled {
+  opacity: 0.6;
+}
+
+.removeBtn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 4px;
+  transition: color 0.15s;
+}
+
+.removeBtn:hover:not(:disabled) {
+  color: var(--error);
+}
+
+.removeBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.seriesList {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/*
+ * Each series slot row: holdings-ish, subtle. Roughly 20% more vertical
+ * padding than before, sits on a slightly lighter surface so it reads
+ * as a grouped card rather than a raw line. Kept toned down (smaller
+ * font, no accent border, no shadow) so it doesn't compete visually
+ * with Holdings rows on the Portfolio page.
+ */
+.seriesRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 10px;
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-secondary);
+}
+
+.seriesRowGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 10px;
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-secondary);
+}
+
+/* Inside a group, the main row row no longer needs its own surface. */
+.seriesRowGroup .seriesRow {
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.detailsPane {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--border-accent);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+}
+
+.detailsHeader {
+  font-size: 0.78rem;
+  margin-bottom: 4px;
+}
+
+.detailsBody {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.detailsCode {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: pre;
+  line-height: 1.45;
+}
+
+.seriesChip {
+  flex: 1;
+  font-size: 0.72rem;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--badge-legacy-bg);
+  color: var(--badge-legacy-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adder {
+  margin-top: 6px;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.adderRow {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.adderInput {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  padding: 4px 6px;
+  outline: none;
+}
+
+.adderInput:focus {
+  border-color: var(--border-accent);
+}
+
+.adderActions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.adderSelect {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  padding: 4px 6px;
+  outline: none;
+  margin-bottom: 6px;
+}
+
+.adderSelect:focus {
+  border-color: var(--border-accent);
+}
+
+.adderSelect:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.quickBtn {
+  margin-top: 6px;
+  width: 100%;
+  background: var(--accent-subtle);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 0.75rem;
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.quickBtn:hover {
+  opacity: 0.85;
+}
+
+.runBtn {
+  width: 100%;
+  padding: 8px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.runBtn:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.runBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.errorBanner {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--error-bg);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.errorText {
+  font-size: 0.78rem;
+  color: var(--error-text);
+  font-family: 'JetBrains Mono', monospace;
+  word-break: break-word;
+}
+
+.nameInput {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.88rem;
+  padding: 5px 8px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.nameInput:focus {
+  border-color: var(--border-accent);
+}
+
+.nameInput:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.paramCheckbox {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.paramCheckbox:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.seriesLabelWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.seriesLabelText {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.iconBtn {
+  background: none;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 2px 6px;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.iconBtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.iconBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

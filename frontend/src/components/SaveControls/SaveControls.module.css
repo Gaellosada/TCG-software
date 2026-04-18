@@ -1,0 +1,67 @@
+.root {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/*
+ * Optional inline slot (e.g. an indicator's name input).
+ * Takes the remaining row width so Save + Auto save stay right-anchored.
+ */
+.leftSlot {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.saveBtn {
+  padding: 5px 14px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.saveBtn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.saveBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.autosaveLabel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.autosaveLabel input[type="checkbox"] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.savedAt {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.unsaved {
+  font-size: 0.72rem;
+  color: var(--accent-warm, #f0a030);
+  font-weight: 500;
+}
