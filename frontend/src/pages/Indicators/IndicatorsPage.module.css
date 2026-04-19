@@ -16,22 +16,23 @@
 .page {
   display: grid;
   grid-template-columns: 240px 1fr 320px;
-  /* Row mins reduced from 720px/720px (→ 1440px total, too tall for 1080p).
-   * 420px editor + 360px chart = 780px minimum, fits in a 900px usable
-   * viewport while still letting the grid grow proportionally on larger screens. */
-  grid-template-rows: minmax(420px, 1.4fr) minmax(360px, 2fr);
+  /* Chart row min + flex share bumped 50% vs the pre-existing
+   * minmax(360px, 2fr) so the Results section gets noticeably more
+   * vertical real estate for plots. The editor row is unchanged. */
+  grid-template-rows: minmax(420px, 1.4fr) minmax(540px, 3fr);
   min-height: 100%;
   position: relative;
 }
 
 /*
  * Split-mode variant: when the selected indicator has ``ownPanel``,
- * the chart row hosts two stacked Plotly charts instead of one. Double
- * the row's min height (and its flex share) so each half gets roughly
- * the same vertical space the single overlay chart used to get.
+ * the single chart hosts two stacked subplots (price on top, indicator
+ * on bottom) via y-axis domain split. Double the chart row relative to
+ * overlay mode so each subplot gets roughly the same vertical space the
+ * overlay chart itself gets.
  */
 .pageSplit {
-  grid-template-rows: minmax(420px, 1fr) minmax(720px, 4fr);
+  grid-template-rows: minmax(420px, 1fr) minmax(1080px, 6fr);
 }
 
 .banner {
