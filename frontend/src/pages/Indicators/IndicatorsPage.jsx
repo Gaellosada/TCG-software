@@ -545,6 +545,7 @@ function IndicatorsPage() {
       </div>
       <div className={styles.editorPanel}>
         <EditorPanel
+          indicatorId={selectedIndicator?.id ?? null}
           code={selectedIndicator?.code ?? ''}
           onCodeChange={handleCodeChange}
           doc={selectedIndicator?.doc ?? ''}

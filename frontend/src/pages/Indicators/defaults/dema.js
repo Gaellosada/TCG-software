@@ -38,7 +38,7 @@ export default {
   code,
   params: {},
   seriesMap: {},
-  doc: `Double Exponential Moving Average — reduces EMA lag via \`2·EMA(close) − EMA(EMA(close))\`. First valid output requires \`2·(window − 1)\` bars of closing prices.
+  doc: `Double Exponential Moving Average — reduces EMA lag via \`2·EMA(close) − EMA(EMA(close))\`. First valid output is at index \`2·(window − 1)\` of the closing-price series.
 
 **Parameters**
 - \`window\`: EMA span. Smaller window → tighter tracking but more noise; note warmup doubles vs plain EMA.`,

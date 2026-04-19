@@ -79,6 +79,33 @@ describe('<EditorPanel>', () => {
     // Wraps around when pressing ArrowLeft from Code (idx 0 - 1 = last)
   });
 
+  it('remounts DocView when indicatorId changes (drops in-progress draft)', async () => {
+    const onDocChange = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <EditorPanel
+        {...defaultProps({ viewMode: 'doc', indicatorId: 'a', doc: 'a-doc', onDocChange })}
+      />,
+    );
+    // Enter edit mode and start typing a draft for indicator 'a'.
+    await user.click(screen.getByRole('button', { name: /edit/i }));
+    const textarea = screen.getByLabelText(/indicator documentation/i);
+    await user.clear(textarea);
+    await user.type(textarea, 'draft for A');
+    // Switch to indicator 'b' mid-edit. DocView should remount (new key) —
+    // the draft for 'a' must NOT survive into 'b', and onDocChange must
+    // NOT have been called (no silent cross-indicator commit).
+    rerender(
+      <EditorPanel
+        {...defaultProps({ viewMode: 'doc', indicatorId: 'b', doc: 'b-doc', onDocChange })}
+      />,
+    );
+    expect(onDocChange).not.toHaveBeenCalled();
+    // Indicator 'b' renders in read mode with its own value; no textarea.
+    expect(screen.queryByLabelText(/indicator documentation/i)).toBeNull();
+    expect(screen.getByText(/b-doc/)).toBeTruthy();
+  });
+
   it('exposes role="tabpanel" for the body', () => {
     render(<EditorPanel {...defaultProps({ viewMode: 'code' })} />);
     const tabpanel = screen.getByRole('tabpanel');

@@ -9,6 +9,11 @@ import styles from './EditorPanel.module.css';
  * view-mode state — it is page-level, not persisted.
  *
  * Props:
+ *   indicatorId        {string|null}   — used as React key on DocView so
+ *                                        its internal draft is dropped
+ *                                        when the selected indicator
+ *                                        changes (prevents cross-indicator
+ *                                        draft leak on mid-edit switch)
  *   code               {string}
  *   onCodeChange       {(string) => void}
  *   doc                {string}
@@ -29,6 +34,7 @@ const TABS = [
 ];
 
 function EditorPanel({
+  indicatorId,
   code,
   onCodeChange,
   doc,
@@ -100,6 +106,7 @@ function EditorPanel({
           />
         ) : (
           <DocView
+            key={indicatorId ?? 'none'}
             value={doc}
             onChange={onDocChange}
             readOnly={readOnly}
