@@ -29,4 +29,5 @@ export default {
 **Parameters**
 - \`window\`: rolling window for mean and standard deviation. Larger values produce wider, slower-moving bands.
 - \`num_std\`: multiplier on the rolling standard deviation. Larger values widen the channel; typical value 2.0.`,
+  ownPanel: false,
 };

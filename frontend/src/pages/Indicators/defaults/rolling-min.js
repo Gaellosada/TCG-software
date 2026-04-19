@@ -22,4 +22,5 @@ export default {
 
 **Parameters**
 - \`window\`: lookback period. Larger values track longer-term lows.`,
+  ownPanel: false,
 };

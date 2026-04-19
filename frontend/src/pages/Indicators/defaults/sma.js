@@ -16,4 +16,5 @@ export default {
 
 **Parameters**
 - \`window\`: number of bars in the averaging window. Larger values smooth more aggressively but lag price more.`,
+  ownPanel: false,
 };

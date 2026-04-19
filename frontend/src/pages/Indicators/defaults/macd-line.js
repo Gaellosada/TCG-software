@@ -37,4 +37,5 @@ export default {
 **Parameters**
 - \`fast\`: span of the fast EMA. Typical value 12. Smaller values react more quickly to price.
 - \`slow\`: span of the slow EMA. Must exceed \`fast\`. Typical value 26. Controls the trend baseline.`,
+  ownPanel: true,
 };

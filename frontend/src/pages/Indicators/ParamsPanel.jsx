@@ -23,6 +23,8 @@ import styles from './ParamsPanel.module.css';
  *   running          {boolean}
  *   canRun           {boolean}
  *   defaultCollection {string|null} hint for SeriesPicker mounts
+ *   ownPanel         {boolean}      render indicator in a separate chart below
+ *   onOwnPanelChange {Function}     (nextBool) => void — noop when readonly
  *
  *   Note: run errors are rendered in the chart panel (IndicatorChart)
  *   — this panel no longer shows a duplicate banner.
@@ -38,6 +40,8 @@ function ParamsPanel({
   canRun,
   runDisabledReason,
   defaultCollection,
+  ownPanel,
+  onOwnPanelChange,
 }) {
   // Labels currently in inline-edit mode. Also tracks "add" slots for
   // empty labels (in which case value=null).
@@ -330,6 +334,36 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
       {/* Run section */}
       <div className={styles.section}>
         <div className={styles.sectionLabel}>Run</div>
+        {/*
+          "Show in separate panel below" toggle — per-indicator flag that
+          drives IndicatorChart to split into two stacked charts (price on
+          top, indicator on bottom) instead of overlaying. Disabled for
+          defaults (readonly) and when no indicator is selected; the
+          default's authored flag still shows through via ``checked``.
+        */}
+        <label
+          className={styles.ownPanelRow}
+          title={
+            !indicator
+              ? 'Select an indicator first'
+              : indicator.readonly
+                ? 'Default indicator — panel placement is fixed'
+                : 'Render this indicator in a separate chart below the price chart'
+          }
+        >
+          <input
+            type="checkbox"
+            className={styles.ownPanelCheckbox}
+            checked={!!ownPanel}
+            onChange={(e) => {
+              if (!indicator || indicator.readonly) return;
+              if (onOwnPanelChange) onOwnPanelChange(e.target.checked);
+            }}
+            disabled={!indicator || !!indicator.readonly}
+            aria-label="Show indicator in separate panel below"
+          />
+          <span className={styles.ownPanelLabel}>Show in separate panel below</span>
+        </label>
         <button
           className={styles.runBtn}
           onClick={onRun}

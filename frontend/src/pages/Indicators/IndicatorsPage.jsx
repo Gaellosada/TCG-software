@@ -106,6 +106,8 @@ function hydrateDefault(def, savedEntry) {
     readonly: true,
     params,
     seriesMap,
+    // ownPanel is locked at the registry — users cannot override it for defaults.
+    ownPanel: !!def.ownPanel,
   };
 }
 
@@ -141,6 +143,10 @@ function buildPersistablePayload(indicators) {
       doc: typeof ind.doc === 'string' ? ind.doc : '',
       params: ind.params,
       seriesMap: ind.seriesMap,
+      // ``ownPanel`` is persisted for customs only — defaults source it
+      // from the registry (see ``hydrateDefault``), so we intentionally
+      // do NOT include it in ``defaultState`` below.
+      ownPanel: !!ind.ownPanel,
     }));
   const defaultState = {};
   for (const ind of indicators) {
@@ -228,6 +234,8 @@ function IndicatorsPage() {
         doc: typeof ind.doc === 'string' ? ind.doc : '',
         params: reconcileParams(ind.params || {}, spec.params),
         seriesMap: reconcileSeriesMap(ind.seriesMap || {}, spec.seriesLabels),
+        // Legacy payloads lacking the flag default to overlay mode.
+        ownPanel: typeof ind.ownPanel === 'boolean' ? ind.ownPanel : false,
       };
     });
     const merged = [...defaults, ...userIndicators];
@@ -344,6 +352,7 @@ function IndicatorsPage() {
         doc: '',
         params: reconcileParams({}, spec.params),
         seriesMap,
+        ownPanel: false,
       };
       setSelectedId(id);
       return [...prev, newInd];
@@ -397,6 +406,16 @@ function IndicatorsPage() {
       // params or series labels. The dirty flag picks up the change via
       // serializePersistablePayload (which now includes ``doc``).
       return { ...ind, doc: typeof doc === 'string' ? doc : '' };
+    }));
+  }, [selectedId]);
+
+  const handleOwnPanelChange = useCallback((on) => {
+    setIndicators((prev) => prev.map((ind) => {
+      if (ind.id !== selectedId) return ind;
+      // Defaults are locked — defend in depth in case the UI ever sends
+      // an event for one (the checkbox should already be disabled).
+      if (ind.readonly) return ind;
+      return { ...ind, ownPanel: !!on };
     }));
   }, [selectedId]);
 
@@ -590,6 +609,8 @@ function IndicatorsPage() {
           canRun={canRun}
           runDisabledReason={runDisabledReason}
           defaultCollection={defaultSeries?.collection || null}
+          ownPanel={!!selectedIndicator?.ownPanel}
+          onOwnPanelChange={handleOwnPanelChange}
         />
       </div>
       <div className={styles.chartPanel}>

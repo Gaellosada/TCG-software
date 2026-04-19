@@ -51,4 +51,5 @@ export default {
 - \`fast\`: span of the fast EMA. Typical value 12.
 - \`slow\`: span of the slow EMA. Must exceed \`fast\`. Typical value 26.
 - \`signal\`: span of the EMA applied to the MACD line. Typical value 9.`,
+  ownPanel: true,
 };

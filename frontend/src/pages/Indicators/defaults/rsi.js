@@ -44,4 +44,5 @@ export default {
 
 **Notes**
 - Conventional overbought/oversold thresholds are 70 and 30.`,
+  ownPanel: true,
 };

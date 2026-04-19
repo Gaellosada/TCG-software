@@ -9,19 +9,28 @@
 //   {
 //     "version": 1,
 //     "indicators": [                    // user-authored only
-//       { "id", "name", "code", "doc", "params", "seriesMap" }
+//       { "id", "name", "code", "doc", "params", "seriesMap", "ownPanel" }
 //     ],
 //     "defaultState": {                  // per-session overlay for readonly defaults
 //       "<defaultId>": { "params", "seriesMap" }
 //     }
 //   }
 //
-// ``doc`` (Wave 1a, indicator-doc-tab) is a markdown string owned by the
-// user for custom indicators. Default indicators' docs live in the
+// ``doc`` (indicator-doc-tab) is a markdown string owned by the user for
+// custom indicators. Default indicators' docs live in the
 // ``DEFAULT_INDICATORS`` registry and are NEVER persisted here. A
 // missing or non-string ``doc`` on read is coerced to the empty string
-// so legacy payloads (pre-``doc``) load cleanly — no schema bump, no
-// migration step.
+// so legacy payloads (pre-``doc``) load cleanly — no schema bump.
+//
+// Read-only defaults never round-trip through ``indicators[]`` — their
+// code + name are always sourced from the ``DEFAULT_INDICATORS`` registry.
+// Only the user's param / series picks for a default go to ``defaultState``.
+// ``ownPanel`` for a default is ALSO registry-sourced (locked) and never
+// appears in ``defaultState``.
+//
+// Back-compat: payloads written before ``ownPanel`` existed on user
+// indicators simply omit the key; ``loadState`` coerces a missing/non-boolean
+// value to ``false`` — no schema bump required. Same policy for ``doc``.
 
 import { INDICATORS_STORAGE_KEY } from './storageKeys';
 
@@ -73,6 +82,7 @@ export function loadState() {
       doc: typeof ind.doc === 'string' ? ind.doc : '',
       params: (ind.params && typeof ind.params === 'object') ? ind.params : {},
       seriesMap: (ind.seriesMap && typeof ind.seriesMap === 'object') ? ind.seriesMap : {},
+      ownPanel: typeof ind.ownPanel === 'boolean' ? ind.ownPanel : false,
     });
   }
 
@@ -115,6 +125,7 @@ export function saveState(state) {
         doc: typeof ind.doc === 'string' ? ind.doc : '',
         params: (ind.params && typeof ind.params === 'object') ? ind.params : {},
         seriesMap: (ind.seriesMap && typeof ind.seriesMap === 'object') ? ind.seriesMap : {},
+        ownPanel: typeof ind.ownPanel === 'boolean' ? ind.ownPanel : false,
       })),
     defaultState,
   };

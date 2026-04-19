@@ -23,4 +23,5 @@ export default {
 
 **Parameters**
 - \`window\`: number of bars in the weighting window. Smaller values track price more closely; larger values smooth more.`,
+  ownPanel: false,
 };

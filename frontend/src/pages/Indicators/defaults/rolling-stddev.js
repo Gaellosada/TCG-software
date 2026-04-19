@@ -32,4 +32,5 @@ export default {
 
 **Parameters**
 - \`window\`: rolling window. Larger values give a smoother, longer-term volatility estimate.`,
+  ownPanel: true,
 };
