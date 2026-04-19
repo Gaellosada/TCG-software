@@ -12,11 +12,9 @@ const code = `def compute(series, window: int = 10, fast: int = 2, slow: int = 3
     fast_sc = 2.0 / (fast + 1)
     slow_sc = 2.0 / (slow + 1)
     abs_diff = np.abs(np.diff(s))
-    # Rolling sum of abs_diff over 'window' elements; cumsum trick gives
-    # length n-1-(window-1) = n-window values starting at index window-1 of s.
+    # Prefix-sum of |diff| with a leading 0 so csum[i] - csum[i-window]
+    # gives the rolling |diff| sum ending at s-index i.
     csum = np.concatenate((np.array([0.0]), np.cumsum(abs_diff)))
-    # volatility[k] corresponds to s-index (window + k - 1) for k in [0, n-window]
-    # Here we align directly to s-indices i in [window, n-1].
     out[window-1] = s[window-1]
     prev = s[window-1]
     for i in range(window, n):
