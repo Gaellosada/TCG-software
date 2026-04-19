@@ -1,0 +1,584 @@
+/*
+ * Shared styles for the Signals page child components:
+ *   SignalsList, BlockEditor, OperandPicker, ParamsPanel, SignalChart.
+ */
+
+/* ---------- SignalsList ---------- */
+
+.listPanelBody {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.listHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.listTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.addBtn {
+  background: none;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.addBtn:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.listSearchRow {
+  padding: 6px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-secondary);
+}
+
+.search {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.listBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.listEmpty {
+  padding: 14px 12px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  gap: 6px;
+  outline: none;
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+.rowActive {
+  background: var(--bg-selected, var(--bg-hover));
+}
+
+.rowName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.renameInput {
+  flex: 1;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-accent, var(--border-primary));
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 2px 6px;
+  min-width: 0;
+  outline: none;
+}
+
+.iconBtn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 2px 4px;
+}
+
+.iconBtn:hover {
+  color: var(--accent);
+}
+
+.deleteBtn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.deleteBtn:hover {
+  color: var(--error-text, #ef4444);
+}
+
+/* ---------- BlockEditor ---------- */
+
+.blockEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.directionTabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-primary);
+  padding-bottom: 6px;
+}
+
+.directionTab {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.directionTab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.directionTabActive {
+  background: var(--bg-tertiary);
+  border-color: var(--border-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.directionTabCount {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.directionHint {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  padding: 2px 4px;
+}
+
+.blocksList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.blocksEmpty {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-style: italic;
+  padding: 12px;
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+}
+
+.block {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  padding: 8px 10px;
+  position: relative;
+}
+
+.blockOrLabel {
+  position: absolute;
+  top: -10px;
+  left: 10px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0 6px;
+  letter-spacing: 0.08em;
+}
+
+.blockHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.blockLabel {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.blockEmpty {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  padding: 6px 0;
+  font-style: italic;
+}
+
+.addBlockBtn,
+.addCondBtn {
+  align-self: flex-start;
+  background: none;
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  margin-top: 6px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.addBlockBtn:hover,
+.addCondBtn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.condition {
+  border-top: 1px solid var(--border-secondary);
+  padding: 6px 0;
+  margin-top: 4px;
+  position: relative;
+}
+
+.condition:first-of-type {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.conditionAndLabel {
+  position: absolute;
+  top: -7px;
+  left: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0 4px;
+  letter-spacing: 0.08em;
+}
+
+.conditionRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.conditionLabel {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  min-width: 42px;
+}
+
+.opSelect {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  padding: 2px 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.conditionSlots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 42px;
+}
+
+.conditionSlot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.conditionSlotLabel {
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.lookbackInput {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 2px 6px;
+  width: 100px;
+}
+
+/* ---------- OperandPicker ---------- */
+
+.operandPicker {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.operandTabs {
+  display: flex;
+  gap: 2px;
+}
+
+.operandTab {
+  flex: 1;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 2px 4px;
+}
+
+.operandTab:hover {
+  background: var(--bg-hover);
+}
+
+.operandTabActive {
+  background: var(--bg-primary);
+  border-color: var(--border-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.operandBody {
+  padding: 4px;
+}
+
+.operandEmpty {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 2px;
+}
+
+.operandSelect {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  padding: 2px 6px;
+  width: 100%;
+}
+
+.operandConstant {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 2px 6px;
+  width: 120px;
+}
+
+/* ---------- ParamsPanel ---------- */
+
+.paramsPanelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.paramsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.paramsSectionLabel {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.paramsPlaceholder {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.summaryList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.summaryList li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-secondary);
+  padding: 2px 0;
+}
+
+.summaryList li span {
+  color: var(--text-secondary);
+}
+
+.paramsDivider {
+  height: 1px;
+  background: var(--border-secondary);
+  margin: 4px 0;
+}
+
+.runBtn {
+  width: 100%;
+  background: var(--accent, #2563eb);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 6px 10px;
+  transition: opacity 0.15s;
+}
+
+.runBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.runHint {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.3;
+}
+
+/* ---------- SignalChart ---------- */
+
+.chartPanelBody {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.chartState {
+  padding: 18px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.chartWrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.chart {
+  width: 100%;
+  height: 100%;
+}
+
+.errorCard {
+  padding: 12px;
+  border: 1px solid var(--error-border, rgba(239, 68, 68, 0.35));
+  border-radius: var(--radius-sm);
+  background: var(--error-bg, rgba(239, 68, 68, 0.08));
+  color: var(--error-text, #ef4444);
+  margin: 8px;
+}
+
+.errorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.errorHeading {
+  font-size: 0.95rem;
+  margin: 0;
+  font-weight: 600;
+}
+
+.errorMessage {
+  font-size: 0.82rem;
+  margin: 6px 0 0;
+}
+
+.copyBtn {
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 2px 8px;
+}
+
+.tracebackDetails {
+  margin-top: 6px;
+  font-size: 0.78rem;
+}
+
+.tracebackPre {
+  font-size: 0.72rem;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 240px;
+}
