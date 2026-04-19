@@ -132,7 +132,7 @@ function IndicatorChart({ indicator, result, loading, error }) {
       indicatorLayout: indicatorLO,
       hasData: true,
     };
-  }, [result, indicator]);
+  }, [result, indicator?.name]);
 
   if (loading) {
     return (

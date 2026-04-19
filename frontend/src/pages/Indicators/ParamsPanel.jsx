@@ -360,7 +360,6 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
               if (onOwnPanelChange) onOwnPanelChange(e.target.checked);
             }}
             disabled={!indicator || !!indicator.readonly}
-            aria-label="Show indicator in separate panel below"
           />
           <span className={styles.ownPanelLabel}>Show in separate panel below</span>
         </label>

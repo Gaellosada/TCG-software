@@ -40,7 +40,7 @@ function baseProps(overrides = {}) {
 describe('<ParamsPanel> — ownPanel checkbox', () => {
   it('renders the checkbox labelled "Show in separate panel below"', () => {
     render(<ParamsPanel {...baseProps()} />);
-    const cb = screen.getByRole('checkbox', { name: /show indicator in separate panel below/i });
+    const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     expect(cb).toBeTruthy();
     expect(cb.checked).toBe(false);
     expect(screen.getByText(/show in separate panel below/i)).toBeTruthy();
@@ -48,14 +48,14 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
 
   it('reflects the current ownPanel value', () => {
     render(<ParamsPanel {...baseProps({ ownPanel: true })} />);
-    const cb = screen.getByRole('checkbox', { name: /show indicator in separate panel below/i });
+    const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     expect(cb.checked).toBe(true);
   });
 
   it('calls onOwnPanelChange with the new checked state when toggled', () => {
     const onOwnPanelChange = vi.fn();
     render(<ParamsPanel {...baseProps({ ownPanel: false, onOwnPanelChange })} />);
-    const cb = screen.getByRole('checkbox', { name: /show indicator in separate panel below/i });
+    const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     fireEvent.click(cb);
     expect(onOwnPanelChange).toHaveBeenCalledTimes(1);
     expect(onOwnPanelChange).toHaveBeenCalledWith(true);
@@ -72,7 +72,7 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
         })}
       />,
     );
-    const cb = screen.getByRole('checkbox', { name: /show indicator in separate panel below/i });
+    const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     expect(cb.disabled).toBe(true);
     // Even if the click somehow fires, our onChange handler must early-return.
     fireEvent.click(cb);
@@ -81,7 +81,7 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
 
   it('is disabled when no indicator is selected', () => {
     render(<ParamsPanel {...baseProps({ indicator: null })} />);
-    const cb = screen.getByRole('checkbox', { name: /show indicator in separate panel below/i });
+    const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     expect(cb.disabled).toBe(true);
   });
 });
