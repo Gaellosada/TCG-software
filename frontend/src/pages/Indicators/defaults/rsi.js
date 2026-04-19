@@ -37,4 +37,11 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Relative Strength Index — bounded oscillator in [0, 100] over closing prices: \`RSI = 100 − 100 / (1 + avg_gain / avg_loss)\`. Uses Wilder's smoothing; first RS is seeded with the simple mean of the first \`window\` up/down moves.
+
+**Parameters**
+- \`window\`: lookback for average gain/loss. Typical value 14. Smaller window → more reactive; larger → smoother.
+
+**Notes**
+- Conventional overbought/oversold thresholds are 70 and 30.`,
 };

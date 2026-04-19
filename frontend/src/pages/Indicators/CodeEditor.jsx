@@ -6,14 +6,16 @@ import styles from './CodeEditor.module.css';
 
 /**
  * Center-top panel — CodeMirror 6 editor with Python syntax
- * highlighting and the canonical ``one-dark`` theme. The component
- * preserves the previous interface exactly so the parent wiring does
- * not change:
+ * highlighting and the canonical ``one-dark`` theme.
  *
  *   value      {string}   code content
  *   onChange   {Function} (string) => void
  *   readOnly   {boolean}  disables editing when true
  *   placeholder {string}  optional placeholder text
+ *
+ * Wave 1a (indicator-doc-tab): the header/title that used to live here
+ * now lives in ``EditorPanel`` which wraps this component alongside the
+ * new ``DocView``. This component is purely the editor body now.
  *
  * Layout: the editor fills 100% of its flex parent (which has
  * ``min-height: 0``) — ``style={{ height: '100%' }}`` on the inner
@@ -41,9 +43,6 @@ function CodeEditor({ value, onChange, readOnly, placeholder }) {
 
   return (
     <div className={styles.panel}>
-      <div className={styles.header}>
-        <span className={styles.title}>Code</span>
-      </div>
       <div className={wrapperClass} data-readonly={readOnly ? 'true' : 'false'}>
         <CodeMirror
           value={effectiveValue}

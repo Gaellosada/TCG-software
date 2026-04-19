@@ -52,6 +52,7 @@ describe('loadState', () => {
           id: 'i1',
           name: 'My ind',
           code: "def compute(series):\n    return series['price']",
+          doc: '',
           params: { window: 20 },
           seriesMap: { price: { collection: 'INDEX', instrument_id: '^GSPC' } },
         },
@@ -66,6 +67,52 @@ describe('loadState', () => {
     saveState(state);
     const loaded = loadState();
     expect(loaded).toEqual(state);
+  });
+
+  it('round-trips the ``doc`` field on user indicators', () => {
+    const state = {
+      indicators: [
+        {
+          id: 'i-doc',
+          name: 'Documented',
+          code: 'def compute(series):\n    return series',
+          doc: '# Hi\n\nThis is **markdown**.',
+          params: {},
+          seriesMap: {},
+        },
+      ],
+      defaultState: {},
+    };
+    saveState(state);
+    const loaded = loadState();
+    expect(loaded.indicators).toHaveLength(1);
+    expect(loaded.indicators[0].doc).toBe('# Hi\n\nThis is **markdown**.');
+  });
+
+  it('coerces a missing ``doc`` field on load to the empty string (legacy payloads)', () => {
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      indicators: [
+        { id: 'legacy', name: 'Legacy', code: 'x', params: {}, seriesMap: {} },
+      ],
+      defaultState: {},
+    }));
+    const out = loadState();
+    expect(out.indicators).toHaveLength(1);
+    expect(out.indicators[0].doc).toBe('');
+  });
+
+  it('coerces a non-string ``doc`` field on load to the empty string', () => {
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      indicators: [
+        { id: 'weird', name: 'Weird', code: '', doc: 42, params: {}, seriesMap: {} },
+        { id: 'nullish', name: 'Nullish', code: '', doc: null, params: {}, seriesMap: {} },
+      ],
+      defaultState: {},
+    }));
+    const out = loadState();
+    expect(out.indicators.map((i) => i.doc)).toEqual(['', '']);
   });
 
   it('sanitises indicators missing id', () => {

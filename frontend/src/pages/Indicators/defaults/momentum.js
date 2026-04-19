@@ -16,4 +16,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Momentum — absolute price change over \`window\` bars: \`M[i] = close[i] − close[i−window]\`. Unlike ROC it is not normalised, so magnitude depends on price level.
+
+**Parameters**
+- \`window\`: lookback period in bars. Larger values capture longer-term directional moves.`,
 };

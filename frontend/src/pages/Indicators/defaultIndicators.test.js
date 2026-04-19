@@ -83,6 +83,8 @@ describe('DEFAULT_INDICATORS — per-entry shape and spec', () => {
         expect(entry.code.length).toBeGreaterThan(0);
         expect(entry.params).toEqual({});
         expect(entry.seriesMap).toEqual({});
+        expect(typeof entry.doc).toBe('string');
+        expect(entry.doc.length).toBeGreaterThan(20);
       });
 
       it('parses to the expected params and series labels', () => {

@@ -32,4 +32,9 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `MACD Line — difference between a fast and slow EMA of closing prices: \`fast_EMA(close) − slow_EMA(close)\`. Each EMA is seeded with its first-\`n\`-bar SMA.
+
+**Parameters**
+- \`fast\`: span of the fast EMA. Typical value 12. Smaller values react more quickly to price.
+- \`slow\`: span of the slow EMA. Must exceed \`fast\`. Typical value 26. Controls the trend baseline.`,
 };

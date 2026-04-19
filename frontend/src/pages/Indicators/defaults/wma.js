@@ -19,4 +19,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Weighted Moving Average — linearly increasing weights over closing prices so the most recent bar has weight \`window\` and the oldest has weight 1. Output is NaN for the first \`window - 1\` bars.
+
+**Parameters**
+- \`window\`: number of bars in the weighting window. Smaller values track price more closely; larger values smooth more.`,
 };

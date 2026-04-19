@@ -45,4 +45,10 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `MACD Histogram — difference between the MACD line and its signal line: \`MACD − signal\`. Positive bars indicate the MACD is above its signal (bullish momentum); negative bars indicate the opposite.
+
+**Parameters**
+- \`fast\`: span of the fast EMA. Typical value 12.
+- \`slow\`: span of the slow EMA. Must exceed \`fast\`. Typical value 26.
+- \`signal\`: span of the EMA applied to the MACD line. Typical value 9.`,
 };

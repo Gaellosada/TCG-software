@@ -36,4 +36,10 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Kaufman Adaptive Moving Average — self-adjusting MA over closing prices that tightens when price trends and widens when price chops. The smoothing constant \`SC\` is squared: \`SC = (ER·(fast_sc − slow_sc) + slow_sc)²\` where ER is the efficiency ratio over the lookback.
+
+**Parameters**
+- \`window\`: lookback for the efficiency ratio. Larger values make ER smoother and adaptation slower.
+- \`fast\`: span of the fast EMA limit (used when ER ≈ 1, trending market). Typical value 2.
+- \`slow\`: span of the slow EMA limit (used when ER ≈ 0, choppy market). Must exceed \`fast\`. Typical value 30.`,
 };

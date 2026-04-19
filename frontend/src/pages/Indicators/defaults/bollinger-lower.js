@@ -24,4 +24,9 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Bollinger Lower Band — rolling mean of closing prices minus \`num_std\` standard deviations: \`SMA(close, window) − num_std × σ\`. NaN for the first \`window − 1\` bars.
+
+**Parameters**
+- \`window\`: rolling window for mean and standard deviation. Larger values produce wider, slower-moving bands.
+- \`num_std\`: multiplier on the rolling standard deviation. Larger values widen the channel; typical value 2.0.`,
 };

@@ -18,4 +18,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Rate of Change — percentage price change over \`window\` bars: \`ROC[i] = (close[i] − close[i−window]) / close[i−window] × 100\`. NaN when the lagged close is zero.
+
+**Parameters**
+- \`window\`: lookback period in bars. Larger values measure longer-term momentum.`,
 };

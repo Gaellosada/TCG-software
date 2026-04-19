@@ -45,4 +45,10 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `MACD Signal line — EMA of the MACD line (fast\_EMA(close) − slow\_EMA(close)) over \`signal\` bars. Seeded with the mean of the first \`signal\` valid MACD values.
+
+**Parameters**
+- \`fast\`: span of the fast EMA inside the MACD line. Typical value 12.
+- \`slow\`: span of the slow EMA inside the MACD line. Must exceed \`fast\`. Typical value 26.
+- \`signal\`: span of the EMA applied to the MACD line itself. Typical value 9.`,
 };

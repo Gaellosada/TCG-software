@@ -5,32 +5,11 @@
   min-height: 0;
 }
 
-.header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px 8px;
-  border-bottom: 1px solid var(--border-primary);
-  flex-shrink: 0;
-}
-
-.title {
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-secondary);
-}
-
-.badge {
-  font-size: 0.65rem;
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  background: var(--badge-legacy-bg);
-  color: var(--badge-legacy-text);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
+/*
+ * Header / title / badge tokens moved to ``EditorPanel.module.css``
+ * in Wave 1a (indicator-doc-tab). The tab bar provided by that wrapper
+ * now owns the panel's top chrome for both Code and Documentation views.
+ */
 
 /*
  * CodeMirror root fills the flex parent. ``min-height: 0`` is
