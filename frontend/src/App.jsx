@@ -6,6 +6,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import HelpPage from './pages/Help/HelpPage';
 import DataPage from './pages/Data/DataPage';
 import IndicatorsPage from './pages/Indicators/IndicatorsPage';
+import SignalsPage from './pages/Signals/SignalsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
 import ResearchPage from './pages/Research/ResearchPage';
 import SettingsPage from './pages/Settings/SettingsPage';
@@ -58,6 +59,16 @@ function App() {
                 <PageContainer>
                   <ErrorBoundary>
                     <IndicatorsPage />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/signals"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <SignalsPage />
                   </ErrorBoundary>
                 </PageContainer>
               }

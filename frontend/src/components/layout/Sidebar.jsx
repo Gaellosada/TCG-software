@@ -5,6 +5,7 @@ import styles from './Sidebar.module.css';
 const MAIN_NAV = [
   { to: '/data', label: 'Data', icon: 'data' },
   { to: '/indicators', label: 'Indicators', icon: 'indicators' },
+  { to: '/signals', label: 'Signals', icon: 'signals' },
   { to: '/portfolio', label: 'Portfolio', icon: 'portfolio' },
   { to: '/research', label: 'Research', icon: 'research' },
 ];
