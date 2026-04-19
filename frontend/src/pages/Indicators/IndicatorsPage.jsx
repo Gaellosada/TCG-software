@@ -544,7 +544,7 @@ function IndicatorsPage() {
   })();
 
   return (
-    <div className={styles.page}>
+    <div className={`${styles.page} ${selectedIndicator?.ownPanel ? styles.pageSplit : ''}`}>
       {bannerText && (
         <div className={styles.banner} data-banner-kind={defaultSeriesError?.kind || 'not-found'}>
           {bannerText}
