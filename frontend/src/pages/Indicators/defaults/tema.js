@@ -45,4 +45,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Triple Exponential Moving Average — further reduces lag via \`3·EMA − 3·EMA(EMA) + EMA(EMA(EMA))\` over closing prices. First valid output requires \`3·(window − 1)\` bars.
+
+**Parameters**
+- \`window\`: EMA span applied at each of the three levels. Warmup is three times that of a plain EMA.`,
 };

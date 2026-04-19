@@ -12,4 +12,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Simple Moving Average — equally-weighted rolling mean of closing prices over \`window\` bars. Output is NaN for the first \`window - 1\` bars.
+
+**Parameters**
+- \`window\`: number of bars in the averaging window. Larger values smooth more aggressively but lag price more.`,
 };

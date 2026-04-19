@@ -28,4 +28,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Rolling population standard deviation (ddof=0) of closing prices over \`window\` bars. Computed via the cumsum identity \`var = E[x²] − (E[x])²\`; near-zero negative variances from floating-point cancellation are clipped to 0.
+
+**Parameters**
+- \`window\`: rolling window. Larger values give a smoother, longer-term volatility estimate.`,
 };

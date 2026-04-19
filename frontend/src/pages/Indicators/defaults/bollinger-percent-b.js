@@ -33,4 +33,9 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Bollinger %B — normalised position of closing price within the Bollinger bands: \`%B = (close − lower) / (upper − lower)\`. Value 0 = at lower band, 1 = at upper band. NaN when band width is zero (flat series).
+
+**Parameters**
+- \`window\`: rolling window for the SMA and standard deviation.
+- \`num_std\`: standard-deviation multiplier defining band width. Typical value 2.0.`,
 };

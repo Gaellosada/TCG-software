@@ -18,4 +18,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Simple (arithmetic) return of closing prices over \`window\` bars: \`(close[i] − close[i−window]) / close[i−window]\`. NaN when the lagged close is zero. Default \`window = 1\` gives bar-by-bar returns.
+
+**Parameters**
+- \`window\`: number of bars in the return horizon. Increase for multi-bar period returns.`,
 };

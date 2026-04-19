@@ -26,4 +26,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Rolling Z-Score — number of standard deviations the current close is from its rolling mean: \`(close − mean) / σ\`, using population standard deviation. NaN when the rolling std is zero.
+
+**Parameters**
+- \`window\`: rolling window for mean and standard deviation. Smaller window → more sensitive to recent price levels.`,
 };

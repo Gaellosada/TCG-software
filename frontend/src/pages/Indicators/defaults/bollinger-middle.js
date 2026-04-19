@@ -14,4 +14,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Bollinger Middle Band — simple moving average of closing prices over \`window\` bars; numerically identical to the SMA entry but kept separate so upper/middle/lower render as three distinct overlays.
+
+**Parameters**
+- \`window\`: rolling window for the average. Larger values smooth more and lag price more.`,
 };

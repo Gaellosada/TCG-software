@@ -18,4 +18,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Rolling maximum of closing prices over \`window\` bars. Useful as a resistance level proxy or in channel breakout conditions.
+
+**Parameters**
+- \`window\`: lookback period. Larger values track longer-term highs.`,
 };

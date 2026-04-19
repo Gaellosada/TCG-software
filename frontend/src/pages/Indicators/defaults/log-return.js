@@ -19,4 +19,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Log return of closing prices over \`window\` bars: \`log(close[i] / close[i−window])\`. Additive across time; NaN when the lagged close is non-positive. Default \`window = 1\` gives bar-by-bar log returns.
+
+**Parameters**
+- \`window\`: number of bars in the return horizon. Increase for multi-bar period returns.`,
 };

@@ -23,4 +23,8 @@ export default {
   code,
   params: {},
   seriesMap: {},
+  doc: `Exponential Moving Average — recursive filter over closing prices with smoothing factor \`alpha = 2 / (window + 1)\`. Seeded with the SMA of the first \`window\` bars; output is NaN before index \`window - 1\`.
+
+**Parameters**
+- \`window\`: span of the EMA. Smaller window → faster but noisier response; larger window → smoother but more lag.`,
 };
