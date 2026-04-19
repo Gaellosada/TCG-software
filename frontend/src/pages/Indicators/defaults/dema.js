@@ -16,7 +16,7 @@ const code = `def compute(series, window: int = 20):
         prev = alpha * s[i] + (1 - alpha) * prev
         ema1[i] = prev
     # EMA of EMA — starts at ema1[window-1], seed is the mean of the next
-    # ``window`` values of ema1.
+    # 'window' values of ema1.
     ema2 = np.full(n, np.nan, dtype=float)
     start = window - 1
     seed2_end = start + window
