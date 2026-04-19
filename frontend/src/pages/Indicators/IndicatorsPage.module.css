@@ -19,7 +19,7 @@
   /* Chart row min + flex share bumped 50% vs the pre-existing
    * minmax(360px, 2fr) so the Results section gets noticeably more
    * vertical real estate for plots. The editor row is unchanged. */
-  grid-template-rows: minmax(420px, 1.4fr) minmax(540px, 3fr);
+  grid-template-rows: minmax(420px, 1.4fr) minmax(486px, 2.7fr);
   min-height: 100%;
   position: relative;
 }
@@ -32,7 +32,7 @@
  * overlay chart itself gets.
  */
 .pageSplit {
-  grid-template-rows: minmax(420px, 1fr) minmax(1080px, 6fr);
+  grid-template-rows: minmax(420px, 1fr) minmax(972px, 5.4fr);
 }
 
 .banner {
