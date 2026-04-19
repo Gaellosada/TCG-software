@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import IndicatorsList from './IndicatorsList';
-import CodeEditor from './CodeEditor';
+import EditorPanel from './EditorPanel';
 import ParamsPanel from './ParamsPanel';
 import IndicatorChart from './IndicatorChart';
 import { resolveDefaultIndexInstrument } from '../../api/indicators';
@@ -102,6 +102,7 @@ function hydrateDefault(def, savedEntry) {
     id: def.id,
     name: def.name,
     code: def.code,
+    doc: typeof def.doc === 'string' ? def.doc : '',
     readonly: true,
     params,
     seriesMap,
@@ -137,6 +138,7 @@ function buildPersistablePayload(indicators) {
       id: ind.id,
       name: ind.name,
       code: ind.code,
+      doc: typeof ind.doc === 'string' ? ind.doc : '',
       params: ind.params,
       seriesMap: ind.seriesMap,
     }));
@@ -199,6 +201,9 @@ function IndicatorsPage() {
   });
   // Last payload that hit localStorage — used to derive ``dirty``.
   const [lastSavedPayload, setLastSavedPayload] = useState(null);
+  // Code/Documentation tab state for the middle panel. Page-level only —
+  // NOT persisted (always resets to 'code' on reload).
+  const [viewMode, setViewMode] = useState('code');
 
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
@@ -220,6 +225,7 @@ function IndicatorsPage() {
         id: ind.id,
         name: ind.name,
         code: ind.code || '',
+        doc: typeof ind.doc === 'string' ? ind.doc : '',
         params: reconcileParams(ind.params || {}, spec.params),
         seriesMap: reconcileSeriesMap(ind.seriesMap || {}, spec.seriesLabels),
       };
@@ -335,6 +341,7 @@ function IndicatorsPage() {
         id,
         name: nextIndicatorName(prev),
         code: NEW_CODE_TEMPLATE,
+        doc: '',
         params: reconcileParams({}, spec.params),
         seriesMap,
       };
@@ -379,6 +386,17 @@ function IndicatorsPage() {
       const nextParams = reconcileParams(ind.params, spec.params);
       const nextSeriesMap = reconcileSeriesMap(ind.seriesMap, spec.seriesLabels);
       return { ...ind, code, params: nextParams, seriesMap: nextSeriesMap };
+    }));
+  }, [selectedId]);
+
+  const handleDocChange = useCallback((doc) => {
+    setIndicators((prev) => prev.map((ind) => {
+      if (ind.id !== selectedId) return ind;
+      if (ind.readonly) return ind; // defensive — DocView also blocks this
+      // No spec reparse: ``doc`` is plain markdown, it cannot affect
+      // params or series labels. The dirty flag picks up the change via
+      // serializePersistablePayload (which now includes ``doc``).
+      return { ...ind, doc: typeof doc === 'string' ? doc : '' };
     }));
   }, [selectedId]);
 
@@ -526,10 +544,14 @@ function IndicatorsPage() {
         />
       </div>
       <div className={styles.editorPanel}>
-        <CodeEditor
-          value={selectedIndicator?.code ?? ''}
-          onChange={handleCodeChange}
+        <EditorPanel
+          code={selectedIndicator?.code ?? ''}
+          onCodeChange={handleCodeChange}
+          doc={selectedIndicator?.doc ?? ''}
+          onDocChange={handleDocChange}
           readOnly={!selectedIndicator || !!selectedIndicator?.readonly}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
         />
       </div>
       <div className={styles.paramsPanel}>

@@ -9,16 +9,19 @@
 //   {
 //     "version": 1,
 //     "indicators": [                    // user-authored only
-//       { "id", "name", "code", "params", "seriesMap" }
+//       { "id", "name", "code", "doc", "params", "seriesMap" }
 //     ],
 //     "defaultState": {                  // per-session overlay for readonly defaults
 //       "<defaultId>": { "params", "seriesMap" }
 //     }
 //   }
 //
-// Read-only defaults never round-trip through ``indicators[]`` — their
-// code + name are always sourced from the ``DEFAULT_INDICATORS`` registry.
-// Only the user's param / series picks for a default go to ``defaultState``.
+// ``doc`` (Wave 1a, indicator-doc-tab) is a markdown string owned by the
+// user for custom indicators. Default indicators' docs live in the
+// ``DEFAULT_INDICATORS`` registry and are NEVER persisted here. A
+// missing or non-string ``doc`` on read is coerced to the empty string
+// so legacy payloads (pre-``doc``) load cleanly — no schema bump, no
+// migration step.
 
 import { INDICATORS_STORAGE_KEY } from './storageKeys';
 
@@ -67,6 +70,7 @@ export function loadState() {
       id: ind.id,
       name: typeof ind.name === 'string' ? ind.name : 'Untitled',
       code: typeof ind.code === 'string' ? ind.code : '',
+      doc: typeof ind.doc === 'string' ? ind.doc : '',
       params: (ind.params && typeof ind.params === 'object') ? ind.params : {},
       seriesMap: (ind.seriesMap && typeof ind.seriesMap === 'object') ? ind.seriesMap : {},
     });
@@ -108,6 +112,7 @@ export function saveState(state) {
         id: ind.id,
         name: typeof ind.name === 'string' ? ind.name : 'Untitled',
         code: typeof ind.code === 'string' ? ind.code : '',
+        doc: typeof ind.doc === 'string' ? ind.doc : '',
         params: (ind.params && typeof ind.params === 'object') ? ind.params : {},
         seriesMap: (ind.seriesMap && typeof ind.seriesMap === 'object') ? ind.seriesMap : {},
       })),
