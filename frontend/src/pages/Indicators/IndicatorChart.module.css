@@ -39,27 +39,6 @@
   display: flex;
 }
 
-/*
- * Split-mode container — price chart on top, indicator chart below,
- * 50/50 via ``flex: 1`` on each child. Sits inside the existing panel
- * body (no extra scrolling). Each half gets its own padding so the
- * Plotly toolbars don't collide with the divider between panes.
- */
-.chartSplit {
-  flex: 1;
-  min-height: 0;
-  padding: 4px 8px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.chartWrapHalf {
-  flex: 1 1 0;
-  min-height: 0;
-  display: flex;
-}
-
 .chart {
   flex: 1;
   width: 100%;
