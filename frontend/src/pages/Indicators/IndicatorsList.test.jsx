@@ -13,7 +13,7 @@ beforeEach(() => {
 });
 
 const SAMPLE = [
-  { id: 'd1', name: '20-day SMA', readonly: true },
+  { id: 'd1', name: 'SMA', readonly: true },
   { id: 'u1', name: 'My RSI', readonly: false },
   { id: 'u2', name: 'My MACD' },
 ];
@@ -102,7 +102,7 @@ describe('<IndicatorsList>', () => {
   it('renders items under DEFAULT by default (expanded)', () => {
     render(<IndicatorsList {...defaultProps()} />);
     // The default indicator row is visible.
-    expect(screen.getByText('20-day SMA')).toBeTruthy();
+    expect(screen.getByText('SMA')).toBeTruthy();
     // Header reports expanded.
     const header = screen.getByTestId('category-default');
     expect(header.getAttribute('aria-expanded')).toBe('true');
@@ -114,7 +114,7 @@ describe('<IndicatorsList>', () => {
     const header = screen.getByTestId('category-default');
     fireEvent.click(header);
     // Items are gone.
-    expect(screen.queryByText('20-day SMA')).toBeNull();
+    expect(screen.queryByText('SMA')).toBeNull();
     // Header still visible with count suffix "(1)".
     expect(header.getAttribute('data-collapsed')).toBe('true');
     expect(within(header).getByText(/\(1\)/)).toBeTruthy();
@@ -125,7 +125,7 @@ describe('<IndicatorsList>', () => {
     const header = screen.getByTestId('category-default');
     fireEvent.click(header); // collapse
     fireEvent.click(header); // re-expand
-    expect(screen.getByText('20-day SMA')).toBeTruthy();
+    expect(screen.getByText('SMA')).toBeTruthy();
     expect(header.getAttribute('data-collapsed')).toBe('false');
   });
 
@@ -146,7 +146,7 @@ describe('<IndicatorsList>', () => {
     );
     render(<IndicatorsList {...defaultProps()} />);
     // Default section is collapsed: its items should not render.
-    expect(screen.queryByText('20-day SMA')).toBeNull();
+    expect(screen.queryByText('SMA')).toBeNull();
     // Header is present with collapsed attribute.
     expect(screen.getByTestId('category-default').getAttribute('data-collapsed')).toBe('true');
     // Custom items render (not collapsed).
@@ -186,11 +186,11 @@ describe('<IndicatorsList>', () => {
       <IndicatorsList
         {...defaultProps({
           search: 'sma',
-          indicators: [{ id: 'd1', name: '20-day SMA', readonly: true }],
+          indicators: [{ id: 'd1', name: 'SMA', readonly: true }],
         })}
       />,
     );
-    expect(screen.getByText('20-day SMA')).toBeTruthy();
+    expect(screen.getByText('SMA')).toBeTruthy();
     // No section headers in search mode.
     expect(screen.queryByTestId('category-default')).toBeNull();
   });

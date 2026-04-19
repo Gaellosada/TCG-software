@@ -94,7 +94,7 @@ test.describe('Indicators page', () => {
     // 4) The default indicator row is visible (badge was retired in
     //    iter-7 — its category lives under the DEFAULT section header
     //    instead). The code panel has the readonly overlay applied.
-    await expect(page.locator('text=20-day SMA')).toBeVisible();
+    await expect(page.getByText('SMA', { exact: true })).toBeVisible();
     await expect(page.locator('[data-readonly="true"]')).toHaveCount(1);
 
     // 5) Run button exists and is enabled (default's ``price`` slot was
@@ -187,18 +187,18 @@ test.describe('Indicators page', () => {
   test('clicking DEFAULT header collapses items; clicking again expands', async ({ page }) => {
     await page.goto(`${BASE}/indicators`);
     await page.waitForLoadState('networkidle');
-    // Default indicator "20-day SMA" is visible initially.
-    await expect(page.locator('text=20-day SMA')).toBeVisible();
+    // First default indicator ("SMA") is visible initially.
+    await expect(page.getByText('SMA', { exact: true })).toBeVisible();
     const header = page.getByTestId('category-default');
     await expect(header).toHaveAttribute('data-collapsed', 'false');
     // Collapse.
     await header.click();
     await expect(header).toHaveAttribute('data-collapsed', 'true');
-    await expect(page.locator('text=20-day SMA')).toHaveCount(0);
+    await expect(page.getByText('SMA', { exact: true })).toHaveCount(0);
     // Re-expand.
     await header.click();
     await expect(header).toHaveAttribute('data-collapsed', 'false');
-    await expect(page.locator('text=20-day SMA')).toBeVisible();
+    await expect(page.getByText('SMA', { exact: true })).toBeVisible();
   });
 
   test('classified banner appears when navigator.onLine is false', async ({ page }) => {
