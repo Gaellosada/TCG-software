@@ -55,6 +55,7 @@ describe('loadState', () => {
           doc: '',
           params: { window: 20 },
           seriesMap: { price: { collection: 'INDEX', instrument_id: '^GSPC' } },
+          ownPanel: false,
         },
       ],
       defaultState: {
@@ -79,6 +80,7 @@ describe('loadState', () => {
           doc: '# Hi\n\nThis is **markdown**.',
           params: {},
           seriesMap: {},
+          ownPanel: false,
         },
       ],
       defaultState: {},
@@ -87,6 +89,25 @@ describe('loadState', () => {
     const loaded = loadState();
     expect(loaded.indicators).toHaveLength(1);
     expect(loaded.indicators[0].doc).toBe('# Hi\n\nThis is **markdown**.');
+  });
+
+  it('round-trips ownPanel=true for a user indicator', () => {
+    const state = {
+      indicators: [
+        {
+          id: 'i2',
+          name: 'Detached',
+          code: "def compute(series):\n    return series['close']",
+          doc: '',
+          params: {},
+          seriesMap: { close: { collection: 'INDEX', instrument_id: '^GSPC' } },
+          ownPanel: true,
+        },
+      ],
+      defaultState: {},
+    };
+    saveState(state);
+    expect(loadState()).toEqual(state);
   });
 
   it('coerces a missing ``doc`` field on load to the empty string (legacy payloads)', () => {
@@ -102,6 +123,19 @@ describe('loadState', () => {
     expect(out.indicators[0].doc).toBe('');
   });
 
+  it('coerces missing ownPanel on a legacy payload to false', () => {
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      indicators: [
+        { id: 'legacy', name: 'Legacy', code: '', params: {}, seriesMap: {} },
+      ],
+      defaultState: {},
+    }));
+    const out = loadState();
+    expect(out.indicators).toHaveLength(1);
+    expect(out.indicators[0].ownPanel).toBe(false);
+  });
+
   it('coerces a non-string ``doc`` field on load to the empty string', () => {
     storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
@@ -113,6 +147,18 @@ describe('loadState', () => {
     }));
     const out = loadState();
     expect(out.indicators.map((i) => i.doc)).toEqual(['', '']);
+  });
+
+  it('coerces non-boolean ownPanel to false', () => {
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      indicators: [
+        { id: 'weird', name: 'Weird', code: '', params: {}, seriesMap: {}, ownPanel: 'yes' },
+      ],
+      defaultState: {},
+    }));
+    const out = loadState();
+    expect(out.indicators[0].ownPanel).toBe(false);
   });
 
   it('sanitises indicators missing id', () => {

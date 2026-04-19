@@ -30,4 +30,5 @@ export default {
 
 **Parameters**
 - \`window\`: rolling window for mean and standard deviation. Smaller window → more sensitive to recent price levels.`,
+  ownPanel: true,
 };

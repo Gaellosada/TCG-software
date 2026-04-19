@@ -49,4 +49,5 @@ export default {
 
 **Parameters**
 - \`window\`: EMA span applied at each of the three levels. Warmup is three times that of a plain EMA.`,
+  ownPanel: false,
 };

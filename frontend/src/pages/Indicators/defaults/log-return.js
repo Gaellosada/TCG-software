@@ -23,4 +23,5 @@ export default {
 
 **Parameters**
 - \`window\`: number of bars in the return horizon. Increase for multi-bar period returns.`,
+  ownPanel: true,
 };

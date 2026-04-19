@@ -42,4 +42,5 @@ export default {
 - \`window\`: lookback for the efficiency ratio. Larger values make ER smoother and adaptation slower.
 - \`fast\`: span of the fast EMA limit (used when ER ≈ 1, trending market). Typical value 2.
 - \`slow\`: span of the slow EMA limit (used when ER ≈ 0, choppy market). Must exceed \`fast\`. Typical value 30.`,
+  ownPanel: false,
 };

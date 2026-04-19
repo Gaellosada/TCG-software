@@ -27,4 +27,5 @@ export default {
 
 **Parameters**
 - \`window\`: span of the EMA. Smaller window → faster but noisier response; larger window → smoother but more lag.`,
+  ownPanel: false,
 };

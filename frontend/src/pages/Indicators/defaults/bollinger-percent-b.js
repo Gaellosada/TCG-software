@@ -38,4 +38,5 @@ export default {
 **Parameters**
 - \`window\`: rolling window for the SMA and standard deviation.
 - \`num_std\`: standard-deviation multiplier defining band width. Typical value 2.0.`,
+  ownPanel: true,
 };

@@ -299,6 +299,50 @@
   opacity: 0.85;
 }
 
+/*
+ * "Show in separate panel below" toggle — sits directly above the Run
+ * button. Minimal chrome (no card, no border) so it reads as a form
+ * option rather than another section. Label colour matches the
+ * .sectionLabel tracked-uppercase convention used elsewhere in this panel.
+ */
+.ownPanelRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ownPanelRow:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+.ownPanelCheckbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ownPanelCheckbox:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ownPanelLabel {
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.ownPanelRow:has(input:disabled) .ownPanelLabel {
+  opacity: 0.6;
+}
+
 .runBtn {
   width: 100%;
   padding: 8px;

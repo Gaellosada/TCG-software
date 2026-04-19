@@ -17,28 +17,28 @@ import { parseIndicatorSpec } from './paramParser';
 // Expectation table — mirrors the brief. Single source of truth for the test.
 // ---------------------------------------------------------------------------
 const EXPECTATIONS = {
-  sma:                 { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  ema:                 { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  wma:                 { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  dema:                { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  tema:                { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  kama:                { params: [{ name: 'window', type: 'int',   default: 10  }, { name: 'fast',   type: 'int',   default: 2   }, { name: 'slow', type: 'int', default: 30 }], seriesLabels: ['close'] },
-  rsi:                 { params: [{ name: 'window', type: 'int',   default: 14  }],                                                                       seriesLabels: ['close'] },
-  roc:                 { params: [{ name: 'window', type: 'int',   default: 10  }],                                                                       seriesLabels: ['close'] },
-  momentum:            { params: [{ name: 'window', type: 'int',   default: 10  }],                                                                       seriesLabels: ['close'] },
-  'macd-line':         { params: [{ name: 'fast',   type: 'int',   default: 12  }, { name: 'slow',   type: 'int',   default: 26  }],                       seriesLabels: ['close'] },
-  'macd-signal':       { params: [{ name: 'fast',   type: 'int',   default: 12  }, { name: 'slow',   type: 'int',   default: 26  }, { name: 'signal', type: 'int', default: 9 }], seriesLabels: ['close'] },
-  'macd-histogram':    { params: [{ name: 'fast',   type: 'int',   default: 12  }, { name: 'slow',   type: 'int',   default: 26  }, { name: 'signal', type: 'int', default: 9 }], seriesLabels: ['close'] },
-  'bollinger-upper':   { params: [{ name: 'window', type: 'int',   default: 20  }, { name: 'num_std', type: 'float', default: 2.0 }],                      seriesLabels: ['close'] },
-  'bollinger-middle':  { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  'bollinger-lower':   { params: [{ name: 'window', type: 'int',   default: 20  }, { name: 'num_std', type: 'float', default: 2.0 }],                      seriesLabels: ['close'] },
-  'bollinger-percent-b': { params: [{ name: 'window', type: 'int', default: 20  }, { name: 'num_std', type: 'float', default: 2.0 }],                     seriesLabels: ['close'] },
-  'rolling-stddev':    { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  'log-return':        { params: [{ name: 'window', type: 'int',   default: 1   }],                                                                       seriesLabels: ['close'] },
-  'simple-return':     { params: [{ name: 'window', type: 'int',   default: 1   }],                                                                       seriesLabels: ['close'] },
-  'rolling-zscore':    { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  'rolling-min':       { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
-  'rolling-max':       { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'] },
+  sma:                 { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
+  ema:                 { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
+  wma:                 { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
+  dema:                { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
+  tema:                { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
+  kama:                { params: [{ name: 'window', type: 'int',   default: 10  }, { name: 'fast',   type: 'int',   default: 2   }, { name: 'slow', type: 'int', default: 30 }], seriesLabels: ['close'], ownPanel: false },
+  rsi:                 { params: [{ name: 'window', type: 'int',   default: 14  }],                                                                       seriesLabels: ['close'], ownPanel: true },
+  roc:                 { params: [{ name: 'window', type: 'int',   default: 10  }],                                                                       seriesLabels: ['close'], ownPanel: true },
+  momentum:            { params: [{ name: 'window', type: 'int',   default: 10  }],                                                                       seriesLabels: ['close'], ownPanel: true },
+  'macd-line':         { params: [{ name: 'fast',   type: 'int',   default: 12  }, { name: 'slow',   type: 'int',   default: 26  }],                       seriesLabels: ['close'], ownPanel: true },
+  'macd-signal':       { params: [{ name: 'fast',   type: 'int',   default: 12  }, { name: 'slow',   type: 'int',   default: 26  }, { name: 'signal', type: 'int', default: 9 }], seriesLabels: ['close'], ownPanel: true },
+  'macd-histogram':    { params: [{ name: 'fast',   type: 'int',   default: 12  }, { name: 'slow',   type: 'int',   default: 26  }, { name: 'signal', type: 'int', default: 9 }], seriesLabels: ['close'], ownPanel: true },
+  'bollinger-upper':   { params: [{ name: 'window', type: 'int',   default: 20  }, { name: 'num_std', type: 'float', default: 2.0 }],                      seriesLabels: ['close'], ownPanel: false },
+  'bollinger-middle':  { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
+  'bollinger-lower':   { params: [{ name: 'window', type: 'int',   default: 20  }, { name: 'num_std', type: 'float', default: 2.0 }],                      seriesLabels: ['close'], ownPanel: false },
+  'bollinger-percent-b': { params: [{ name: 'window', type: 'int', default: 20  }, { name: 'num_std', type: 'float', default: 2.0 }],                     seriesLabels: ['close'], ownPanel: true },
+  'rolling-stddev':    { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: true },
+  'log-return':        { params: [{ name: 'window', type: 'int',   default: 1   }],                                                                       seriesLabels: ['close'], ownPanel: true },
+  'simple-return':     { params: [{ name: 'window', type: 'int',   default: 1   }],                                                                       seriesLabels: ['close'], ownPanel: true },
+  'rolling-zscore':    { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: true },
+  'rolling-min':       { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
+  'rolling-max':       { params: [{ name: 'window', type: 'int',   default: 20  }],                                                                       seriesLabels: ['close'], ownPanel: false },
 };
 
 const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
@@ -68,6 +68,13 @@ describe('DEFAULT_INDICATORS — library invariants', () => {
     const expected = Object.keys(EXPECTATIONS).sort();
     expect(ids).toEqual(expected);
   });
+
+  it('splits 11 overlay / 11 own-panel across defaults', () => {
+    const overlay = DEFAULT_INDICATORS.filter((e) => e.ownPanel === false).length;
+    const ownPanel = DEFAULT_INDICATORS.filter((e) => e.ownPanel === true).length;
+    expect(overlay).toBe(11);
+    expect(ownPanel).toBe(11);
+  });
 });
 
 describe('DEFAULT_INDICATORS — per-entry shape and spec', () => {
@@ -85,6 +92,18 @@ describe('DEFAULT_INDICATORS — per-entry shape and spec', () => {
         expect(entry.seriesMap).toEqual({});
         expect(typeof entry.doc).toBe('string');
         expect(entry.doc.length).toBeGreaterThan(20);
+        expect(
+          typeof entry.ownPanel,
+          `ownPanel must be boolean for id ${JSON.stringify(entry.id)}`,
+        ).toBe('boolean');
+      });
+
+      it('ships the expected ownPanel flag', () => {
+        const expected = EXPECTATIONS[entry.id];
+        expect(
+          entry.ownPanel,
+          `ownPanel mismatch for id ${JSON.stringify(entry.id)}`,
+        ).toBe(expected.ownPanel);
       });
 
       it('parses to the expected params and series labels', () => {

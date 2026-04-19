@@ -24,6 +24,16 @@
   position: relative;
 }
 
+/*
+ * Split-mode variant: when the selected indicator has ``ownPanel``,
+ * the chart row hosts two stacked Plotly charts instead of one. Double
+ * the row's min height (and its flex share) so each half gets roughly
+ * the same vertical space the single overlay chart used to get.
+ */
+.pageSplit {
+  grid-template-rows: minmax(420px, 1fr) minmax(720px, 4fr);
+}
+
 .banner {
   position: absolute;
   top: 12px;

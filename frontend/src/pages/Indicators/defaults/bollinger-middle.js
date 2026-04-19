@@ -18,4 +18,5 @@ export default {
 
 **Parameters**
 - \`window\`: rolling window for the average. Larger values smooth more and lag price more.`,
+  ownPanel: false,
 };

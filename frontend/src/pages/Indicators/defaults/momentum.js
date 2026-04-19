@@ -20,4 +20,5 @@ export default {
 
 **Parameters**
 - \`window\`: lookback period in bars. Larger values capture longer-term directional moves.`,
+  ownPanel: true,
 };

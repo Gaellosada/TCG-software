@@ -5,19 +5,51 @@ import { HEADINGS } from './errorTaxonomy';
 import styles from './IndicatorChart.module.css';
 
 /**
- * Bottom panel — either a Plotly chart or a styled error card.
+ * Bottom panel — either one Plotly chart, two stacked charts, or an
+ * error card, depending on state.
+ *
+ * Layout modes (driven by ``indicator.ownPanel``):
+ *   - ``ownPanel === false`` (default): price + indicator overlaid on a
+ *     single chart. Retains the Y2 heuristic so small-magnitude indicators
+ *     (RSI-ish things) get a secondary axis instead of being squashed.
+ *   - ``ownPanel === true``: two ``<Chart>`` components stacked vertically
+ *     via a flex column — top carries the price traces only (no Y2),
+ *     bottom carries the indicator trace only on its own natural scale.
+ *     Avoids the "indicator is a flat line next to a $5k price" problem
+ *     for indicators whose units genuinely differ from price (RSI, MACD,
+ *     returns, etc.). Loading/error states are shared across both panes.
  *
  * Props:
- *   indicator {Object|null}   current selected indicator (used for title)
+ *   indicator {Object|null}   current selected indicator (used for title;
+ *                             ``indicator.ownPanel`` drives the split)
  *   result    {Object|null}   backend compute response
  *   loading   {boolean}       request in-flight
  *   error     {Object|null}   { error_type, message, traceback? }
  *                             — rendered in place of the chart when present
  */
 function IndicatorChart({ indicator, result, loading, error }) {
-  const { traces, layoutOverrides, hasData } = useMemo(() => {
+  const ownPanel = !!indicator?.ownPanel;
+
+  const {
+    combinedTraces,
+    combinedLayout,
+    priceTraces,
+    priceLayout,
+    indicatorTrace,
+    indicatorLayout,
+    hasData,
+  } = useMemo(() => {
+    const empty = {
+      combinedTraces: [],
+      combinedLayout: {},
+      priceTraces: [],
+      priceLayout: {},
+      indicatorTrace: null,
+      indicatorLayout: {},
+      hasData: false,
+    };
     if (!result || !result.dates || result.dates.length === 0) {
-      return { traces: [], layoutOverrides: {}, hasData: false };
+      return empty;
     }
 
     const dates = result.dates;
@@ -32,6 +64,7 @@ function IndicatorChart({ indicator, result, loading, error }) {
       connectgaps: false,
     }));
 
+    // Y2 heuristic — only meaningful in overlay mode.
     const priceAbsMax = Math.max(
       0,
       ...((result.series || []).flatMap((s) =>
@@ -46,7 +79,7 @@ function IndicatorChart({ indicator, result, loading, error }) {
     );
     const useY2 = indAbsMax < 10 && priceAbsMax > 100;
 
-    const indTrace = {
+    const baseIndTrace = {
       x: dates,
       y: result.indicator,
       type: 'scatter',
@@ -55,10 +88,14 @@ function IndicatorChart({ indicator, result, loading, error }) {
       line: { color: '#f59e0b', width: 1.5 },
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
       connectgaps: false,
-      ...(useY2 ? { yaxis: 'y2' } : {}),
     };
 
-    const lo = {
+    // Overlay variant retains the Y2 tag when needed.
+    const overlayIndTrace = useY2
+      ? { ...baseIndTrace, yaxis: 'y2' }
+      : baseIndTrace;
+
+    const combinedLO = {
       yaxis: { title: { text: 'Price', font: { size: 11 } } },
       ...(useY2
         ? {
@@ -74,8 +111,28 @@ function IndicatorChart({ indicator, result, loading, error }) {
       legend: { orientation: 'h', y: -0.15 },
     };
 
-    return { traces: [...seriesTraces, indTrace], layoutOverrides: lo, hasData: true };
-  }, [result, indicator]);
+    // Split layouts — each pane owns a single natural y-scale.
+    const priceLO = {
+      yaxis: { title: { text: 'Price', font: { size: 11 } } },
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.15 },
+    };
+    const indicatorLO = {
+      yaxis: { title: { text: 'Indicator', font: { size: 11 } } },
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.15 },
+    };
+
+    return {
+      combinedTraces: [...seriesTraces, overlayIndTrace],
+      combinedLayout: combinedLO,
+      priceTraces: seriesTraces,
+      priceLayout: priceLO,
+      indicatorTrace: baseIndTrace,
+      indicatorLayout: indicatorLO,
+      hasData: true,
+    };
+  }, [result, indicator?.name]);
 
   if (loading) {
     return (
@@ -85,7 +142,10 @@ function IndicatorChart({ indicator, result, loading, error }) {
     );
   }
 
-  // Error takes precedence over empty state (but not over loading).
+  // Error takes precedence over empty state (but not over loading). In
+  // split mode, the error card still renders full-body — the compute
+  // call is a single request so there's nothing meaningful to attribute
+  // to "price pane" vs "indicator pane".
   if (error) {
     return (
       <div className={styles.panel}>
@@ -104,15 +164,47 @@ function IndicatorChart({ indicator, result, loading, error }) {
     );
   }
 
+  const headerTitle = indicator?.name || 'Indicator';
+
+  if (ownPanel) {
+    // Stacked layout — equal-height flex children inside ``chartSplit``.
+    const filename = `indicator-${indicator?.name || 'result'}`;
+    return (
+      <div className={styles.panel}>
+        <div className={styles.header}>
+          <span className={styles.title}>{headerTitle}</span>
+        </div>
+        <div className={styles.chartSplit} data-testid="indicator-chart-split">
+          <div className={styles.chartWrapHalf}>
+            <Chart
+              traces={priceTraces}
+              layoutOverrides={priceLayout}
+              className={styles.chart}
+              downloadFilename={`${filename}-price`}
+            />
+          </div>
+          <div className={styles.chartWrapHalf}>
+            <Chart
+              traces={indicatorTrace ? [indicatorTrace] : []}
+              layoutOverrides={indicatorLayout}
+              className={styles.chart}
+              downloadFilename={`${filename}-indicator`}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
-        <span className={styles.title}>{indicator?.name || 'Indicator'}</span>
+        <span className={styles.title}>{headerTitle}</span>
       </div>
-      <div className={styles.chartWrap}>
+      <div className={styles.chartWrap} data-testid="indicator-chart-overlay">
         <Chart
-          traces={traces}
-          layoutOverrides={layoutOverrides}
+          traces={combinedTraces}
+          layoutOverrides={combinedLayout}
           className={styles.chart}
           downloadFilename={`indicator-${indicator?.name || 'result'}`}
         />

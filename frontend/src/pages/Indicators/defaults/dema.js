@@ -42,4 +42,5 @@ export default {
 
 **Parameters**
 - \`window\`: EMA span. Smaller window → tighter tracking but more noise; note warmup doubles vs plain EMA.`,
+  ownPanel: false,
 };
