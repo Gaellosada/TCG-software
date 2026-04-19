@@ -166,3 +166,72 @@ def test_default_indicator_runs_with_larger_window(
 
     assert result.shape == (_SERIES_LENGTH,)
     assert result.dtype == np.float64
+
+
+# -- Correctness spot-checks ------------------------------------------------
+# Independent numpy reference implementations for a representative subset
+# (SMA, EMA, RSI). These guard against the shipped code drifting from the
+# canonical definitions — caught here even if every default keeps running.
+
+
+def _sma_reference(close: np.ndarray, window: int) -> np.ndarray:
+    out = np.full(close.shape[0], np.nan, dtype=float)
+    if close.shape[0] < window:
+        return out
+    out[window - 1:] = np.convolve(close, np.ones(window) / window, mode="valid")
+    return out
+
+
+def _ema_reference(close: np.ndarray, window: int) -> np.ndarray:
+    n = close.shape[0]
+    out = np.full(n, np.nan, dtype=float)
+    if n < window:
+        return out
+    alpha = 2.0 / (window + 1)
+    prev = float(np.mean(close[:window]))
+    out[window - 1] = prev
+    for i in range(window, n):
+        prev = alpha * close[i] + (1 - alpha) * prev
+        out[i] = prev
+    return out
+
+
+def _rsi_reference(close: np.ndarray, window: int) -> np.ndarray:
+    n = close.shape[0]
+    out = np.full(n, np.nan, dtype=float)
+    if n <= window:
+        return out
+    diff = np.diff(close)
+    gains = np.where(diff > 0, diff, 0.0)
+    losses = np.where(diff < 0, -diff, 0.0)
+    avg_gain = float(np.mean(gains[:window]))
+    avg_loss = float(np.mean(losses[:window]))
+    rs = np.inf if avg_loss == 0 else avg_gain / avg_loss
+    out[window] = 100.0 - 100.0 / (1.0 + rs)
+    for i in range(window + 1, n):
+        avg_gain = ((window - 1) * avg_gain + gains[i - 1]) / window
+        avg_loss = ((window - 1) * avg_loss + losses[i - 1]) / window
+        rs = np.inf if avg_loss == 0 else avg_gain / avg_loss
+        out[i] = 100.0 - 100.0 / (1.0 + rs)
+    return out
+
+
+@pytest.mark.parametrize(
+    "stem, reference, window",
+    [
+        ("sma", _sma_reference, 20),
+        ("ema", _ema_reference, 20),
+        ("rsi", _rsi_reference, 14),
+    ],
+)
+def test_default_indicator_matches_reference(
+    stem: str,
+    reference,
+    window: int,
+    series_dict: dict[str, np.ndarray],
+) -> None:
+    """Shipped source matches an independent numpy reference implementation."""
+    py_source = _extract_python_source(DEFAULTS_DIR / f"{stem}.js")
+    result = run_indicator(py_source, {"window": window}, series_dict)
+    expected = reference(series_dict["close"], window)
+    np.testing.assert_allclose(result, expected, rtol=1e-9, atol=1e-9, equal_nan=True)

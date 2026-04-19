@@ -14,7 +14,10 @@ import { test, expect } from '@playwright/test';
 const BASE = 'http://localhost:5173';
 
 // Install route mocks that the Indicators page needs on every test.
+// Returns a getter for the last /api/indicators/compute request's code field
+// so each test can assert the submitted source matches the chosen indicator.
 async function installMocks(page) {
+  const captured = { code: null };
   // Clear any persisted state from a prior run.
   await page.addInitScript(() => {
     try { window.localStorage.clear(); } catch { /* ignore */ }
@@ -63,6 +66,7 @@ async function installMocks(page) {
   // array so IndicatorChart's hasData branch is reached.
   await page.route('**/api/indicators/compute', async (route) => {
     const postData = route.request().postDataJSON() || {};
+    captured.code = typeof postData.code === 'string' ? postData.code : null;
     const labels = Object.keys(postData.series || {});
     const series = labels.map((label) => {
       const ref = postData.series[label];
@@ -89,6 +93,8 @@ async function installMocks(page) {
   await page.route('**/api/data/series-summary*', async (route) => {
     await route.fulfill({ status: 404, body: '{}' });
   });
+
+  return captured;
 }
 
 // Navigate to the Indicators page and wait until the default list loads.
@@ -129,28 +135,26 @@ async function runAndAssertChart(page, indicatorName) {
   await expect(page.locator('[data-error-type]')).toHaveCount(0);
 }
 
+// Per-indicator substrings that MUST appear in the posted ``code`` field.
+// Picks a fragment of each indicator's signature that unambiguously
+// identifies it (so a wrong default being run is caught by the mock).
+const CODE_SIGNATURES = {
+  SMA: ['def compute(series, window: int = 20):', "series['close']"],
+  RSI: ['def compute(series, window: int = 14):', 'gains', 'losses'],
+  'MACD Line': ['fast: int = 12', 'slow: int = 26'],
+  'Bollinger %B': ['window: int = 20', 'num_std'],
+};
+
 test.describe('Default indicator library — e2e', () => {
-  test('SMA renders chart on Run', async ({ page }) => {
-    await installMocks(page);
-    await gotoIndicators(page);
-    await runAndAssertChart(page, 'SMA');
-  });
-
-  test('RSI renders chart on Run', async ({ page }) => {
-    await installMocks(page);
-    await gotoIndicators(page);
-    await runAndAssertChart(page, 'RSI');
-  });
-
-  test('MACD Line renders chart on Run', async ({ page }) => {
-    await installMocks(page);
-    await gotoIndicators(page);
-    await runAndAssertChart(page, 'MACD Line');
-  });
-
-  test('Bollinger %B renders chart on Run', async ({ page }) => {
-    await installMocks(page);
-    await gotoIndicators(page);
-    await runAndAssertChart(page, 'Bollinger %B');
-  });
+  for (const [indicatorName, fragments] of Object.entries(CODE_SIGNATURES)) {
+    test(`${indicatorName} renders chart on Run and posts matching code`, async ({ page }) => {
+      const captured = await installMocks(page);
+      await gotoIndicators(page);
+      await runAndAssertChart(page, indicatorName);
+      expect(captured.code, `no code captured for ${indicatorName}`).not.toBeNull();
+      for (const fragment of fragments) {
+        expect(captured.code).toContain(fragment);
+      }
+    });
+  }
 });
