@@ -4,30 +4,29 @@ import { TRACE_COLORS } from '../../utils/chartTheme';
 import styles from './Signals.module.css';
 
 /**
- * Bottom panel — stacked Plotly chart with:
- *   - top pane (yaxis)  : price of the FIRST instrument operand walked
- *                         in stable order (long_entry → long_exit →
- *                         short_entry → short_exit; block index; cond
- *                         index; lhs before rhs). Entry/exit markers are
- *                         plotted on this price line. If no instrument
- *                         operand is present anywhere in the spec, the
- *                         top pane is hidden and only the position
- *                         subplot renders.
- *   - bottom pane (yaxis2): ``position`` series (∈ [-1, +1]) from the
- *                         backend response.
+ * Bottom panel — v2 multi-instrument position chart.
  *
- * We don't fetch the price ourselves — the backend-response already
- * includes the price series for the first instrument operand it
- * encountered (same walk order). This component just knows how to
- * render it.
+ * Response shape (iter-3, see PLAN.md):
+ *   {
+ *     timestamps: number[],   // unix ms
+ *     positions: [
+ *       {
+ *         instrument: {collection, instrument_id},
+ *         values: number[],         // ∈ [-1, +1]
+ *         clipped_mask: boolean[],
+ *         price: {label, values} | null,
+ *       },
+ *     ],
+ *     clipped: boolean,             // global OR across all masks
+ *   }
  *
- * Props:
- *   result   {Object|null}  shape: { index, position, long_score, short_score,
- *                                    entries_long, exits_long,
- *                                    entries_short, exits_short,
- *                                    price?: {label, values} }
- *   loading  {boolean}
- *   error    {Object|null}  { error_type, message, traceback? }
+ * Rendering:
+ *   - One subplot per instrument, stacked vertically, shared x-axis.
+ *   - Position series ∈ [-1, 1] on the left axis.
+ *   - If ``price`` is present, overlay on a right y-axis within the
+ *     same subplot.
+ *   - If ``clipped === true``, show a red/amber warning banner above the
+ *     chart listing affected instruments + bar count.
  */
 const ERROR_HEADINGS = {
   validation: 'Invalid signal',
@@ -38,123 +37,117 @@ const ERROR_HEADINGS = {
 };
 
 function SignalChart({ result, loading, error }) {
-  const { traces, layoutOverrides, hasData, hasPrice } = useMemo(() => {
-    if (!result || !Array.isArray(result.index) || result.index.length === 0) {
-      return { traces: [], layoutOverrides: {}, hasData: false, hasPrice: false };
+  const { traces, layoutOverrides, hasData, clipSummary } = useMemo(() => {
+    if (!result || !Array.isArray(result.timestamps) || result.timestamps.length === 0) {
+      return { traces: [], layoutOverrides: {}, hasData: false, clipSummary: null };
     }
-    const dates = result.index;
-    const position = Array.isArray(result.position) ? result.position : [];
-    const entriesLong = Array.isArray(result.entries_long) ? result.entries_long : [];
-    const exitsLong = Array.isArray(result.exits_long) ? result.exits_long : [];
-    const entriesShort = Array.isArray(result.entries_short) ? result.entries_short : [];
-    const exitsShort = Array.isArray(result.exits_short) ? result.exits_short : [];
+    const positions = Array.isArray(result.positions) ? result.positions : [];
+    if (positions.length === 0) {
+      return { traces: [], layoutOverrides: {}, hasData: false, clipSummary: null };
+    }
+    // Convert unix-ms timestamps to Date objects so Plotly treats them
+    // as a datetime axis.
+    const dates = result.timestamps.map((ms) => new Date(ms));
 
-    // Price series is optional; when absent we render position-only.
-    const priceValues = (result.price && Array.isArray(result.price.values))
-      ? result.price.values
-      : null;
-    const priceLabel = (result.price && typeof result.price.label === 'string')
-      ? result.price.label
-      : 'Price';
-    const hasPrice = priceValues !== null;
+    const N = positions.length;
+    const traces = [];
+    const lo = {
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.08 },
+    };
 
-    const priceTraces = [];
-    if (hasPrice) {
-      priceTraces.push({
+    // Divide vertical space into N rows; reserve small gaps between them.
+    const gap = 0.04;
+    const bandHeight = (1 - gap * (N - 1)) / N;
+
+    const clipRows = [];
+
+    positions.forEach((p, idx) => {
+      // Plotly stacks subplots top-to-bottom visually when idx 0 has
+      // the HIGHEST y-domain. Row 0 → top; row N-1 → bottom.
+      const topEdge = 1 - idx * (bandHeight + gap);
+      const bottomEdge = topEdge - bandHeight;
+      const yKey = idx === 0 ? 'y' : `y${idx + 1}`;
+      const yAxisName = idx === 0 ? 'yaxis' : `yaxis${idx + 1}`;
+      const xAnchor = yKey;
+      const instLabel = `${p.instrument.collection}:${p.instrument.instrument_id}`;
+      const posTrace = {
         x: dates,
-        y: priceValues,
+        y: p.values,
         type: 'scatter',
         mode: 'lines',
-        name: priceLabel,
-        yaxis: 'y',
-        line: { color: TRACE_COLORS[0] || '#2563eb', width: 1 },
-        hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
+        name: `pos — ${instLabel}`,
+        yaxis: yKey,
+        line: { color: TRACE_COLORS[idx] || '#f59e0b', width: 1.5 },
+        fill: 'tozeroy',
+        fillcolor: `rgba(245, 158, 11, 0.12)`,
+        hovertemplate: '%{x}<br>%{y:.3f}<extra></extra>',
         connectgaps: false,
-      });
+      };
+      traces.push(posTrace);
 
-      function markerTrace(indices, name, color, symbol) {
-        const xs = [];
-        const ys = [];
-        for (const i of indices) {
-          if (i >= 0 && i < dates.length) {
-            xs.push(dates[i]);
-            ys.push(priceValues[i]);
-          }
-        }
-        return {
-          x: xs,
-          y: ys,
+      lo[yAxisName] = {
+        title: { text: instLabel, font: { size: 10 } },
+        domain: [Math.max(0, bottomEdge), Math.min(1, topEdge)],
+        range: [-1.1, 1.1],
+        zeroline: true,
+      };
+
+      // If price present, overlay on a right axis with the same domain.
+      if (p.price && Array.isArray(p.price.values)) {
+        const priceYKey = idx === 0 ? 'y1r' : `y${idx + 1}r`; // logical label
+        const priceAxisName = `yaxis${N + idx + 1}`;
+        const priceAxisId = `y${N + idx + 1}`;
+        traces.push({
+          x: dates,
+          y: p.price.values,
           type: 'scatter',
-          mode: 'markers',
-          name,
-          yaxis: 'y',
-          marker: { color, symbol, size: 10, line: { width: 1, color: '#ffffff' } },
-          hovertemplate: '%{x}<br>%{y:,.4f}<extra>' + name + '</extra>',
+          mode: 'lines',
+          name: `price — ${p.price.label}`,
+          yaxis: priceAxisId,
+          line: { color: TRACE_COLORS[(idx + 3) % TRACE_COLORS.length] || '#2563eb', width: 1 },
+          hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
+          connectgaps: false,
+          opacity: 0.7,
+        });
+        lo[priceAxisName] = {
+          domain: [Math.max(0, bottomEdge), Math.min(1, topEdge)],
+          overlaying: yKey,
+          side: 'right',
+          showgrid: false,
         };
       }
 
-      priceTraces.push(markerTrace(entriesLong,  'Long entry',  '#10b981', 'triangle-up'));
-      priceTraces.push(markerTrace(exitsLong,    'Long exit',   '#059669', 'triangle-down'));
-      priceTraces.push(markerTrace(entriesShort, 'Short entry', '#ef4444', 'triangle-down'));
-      priceTraces.push(markerTrace(exitsShort,   'Short exit',  '#dc2626', 'triangle-up'));
-    }
+      // The bottom-most subplot owns the x-axis anchor; everything else
+      // hides its own tick labels so the axis appears at the bottom only.
+      if (idx === N - 1) {
+        lo.xaxis = { anchor: xAnchor };
+      } else {
+        lo[yAxisName].showticklabels = true;
+      }
 
-    const positionTrace = {
-      x: dates,
-      y: position,
-      type: 'scatter',
-      mode: 'lines',
-      name: 'Position',
-      yaxis: hasPrice ? 'y2' : 'y',
-      line: { color: '#f59e0b', width: 1.5 },
-      fill: 'tozeroy',
-      fillcolor: 'rgba(245, 158, 11, 0.15)',
-      hovertemplate: '%{x}<br>%{y:.3f}<extra></extra>',
-      connectgaps: false,
-    };
+      // Clip counting
+      const mask = Array.isArray(p.clipped_mask) ? p.clipped_mask : [];
+      const clipCount = mask.reduce((n, b) => (b ? n + 1 : n), 0);
+      if (clipCount > 0) {
+        clipRows.push({ instrument: instLabel, count: clipCount });
+      }
+    });
 
-    let lo;
-    if (hasPrice) {
-      lo = {
-        xaxis: { anchor: 'y2' },
-        yaxis: {
-          title: { text: 'Price', font: { size: 11 } },
-          domain: [0.42, 1.0],
-        },
-        yaxis2: {
-          title: { text: 'Position', font: { size: 11 } },
-          domain: [0, 0.38],
-          range: [-1.05, 1.05],
-          anchor: 'x',
-          zeroline: true,
-        },
-        showlegend: true,
-      };
-    } else {
-      // No instrument operand — render the position subplot full-height
-      // with a dashed zero line for context.
-      lo = {
-        yaxis: {
-          title: { text: 'Position', font: { size: 11 } },
-          range: [-1.05, 1.05],
-          zeroline: true,
-        },
-        showlegend: true,
-        legend: { orientation: 'h', y: -0.15 },
-      };
-    }
+    const clipSummary = result.clipped ? { rows: clipRows } : null;
+
     return {
-      traces: [...priceTraces, positionTrace],
+      traces,
       layoutOverrides: lo,
       hasData: true,
-      hasPrice,
+      clipSummary,
     };
   }, [result]);
 
   if (loading) {
     return (
       <div className={styles.chartPanelBody}>
-        <div className={styles.chartState}>Computing...</div>
+        <div className={styles.chartState}>Computing…</div>
       </div>
     );
   }
@@ -170,28 +163,40 @@ function SignalChart({ result, loading, error }) {
   if (!hasData) {
     return (
       <div className={styles.chartPanelBody}>
-        <div className={styles.chartState}>Run to see chart</div>
+        <div className={styles.chartState} data-testid="signal-chart-empty">
+          Run a signal to see positions
+        </div>
       </div>
     );
   }
 
-  const testId = hasPrice ? 'signal-chart-full' : 'signal-chart-position-only';
   return (
     <div className={styles.chartPanelBody}>
-      {!hasPrice && (
+      {clipSummary && (
         <div
-          className={styles.chartState}
-          data-testid="signal-chart-subtitle"
+          className={styles.clipBanner}
+          role="alert"
+          data-testid="signal-chart-clip-banner"
         >
-          No instrument operand in this signal — price overlay hidden.
+          <span className={styles.clipBannerIcon} aria-hidden="true">⚠</span>
+          <span>
+            <strong>Position clipped</strong> to [-1, +1] on{' '}
+            {clipSummary.rows.map((r, i) => (
+              <span key={r.instrument}>
+                {i > 0 && ', '}
+                <code>{r.instrument}</code> ({r.count} bar{r.count === 1 ? '' : 's'})
+              </span>
+            ))}
+            . Raw long/short weight sums exceed 1.0 at those timestamps.
+          </span>
         </div>
       )}
-      <div className={styles.chartWrap} data-testid={testId}>
+      <div className={styles.chartWrap} data-testid="signal-chart-multi">
         <Chart
           traces={traces}
           layoutOverrides={layoutOverrides}
           className={styles.chart}
-          downloadFilename="signal-result"
+          downloadFilename="signal-positions"
         />
       </div>
     </div>
