@@ -53,6 +53,15 @@ const ICONS = {
       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
     </>
   ),
+  signals: (
+    <>
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <path d="M16.24 7.76a6 6 0 0 1 0 8.49" />
+      <path d="M7.76 16.24a6 6 0 0 1 0-8.49" />
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+      <path d="M4.93 19.07a10 10 0 0 1 0-14.14" />
+    </>
+  ),
   'chevron-down': (
     <polyline points="6 9 12 15 18 9" />
   ),
@@ -61,6 +70,13 @@ const ICONS = {
   ),
   'chevron-right': (
     <polyline points="9 18 15 12 9 6" />
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </>
   ),
 };
 

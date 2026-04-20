@@ -1,0 +1,1100 @@
+/*
+ * Shared styles for the Signals page child components:
+ *   SignalsList, BlockEditor, OperandPicker, ParamsPanel, SignalChart.
+ */
+
+/* ---------- SignalsList ---------- */
+
+.listPanelBody {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.listHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.listTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.addBtn {
+  background: none;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.addBtn:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.listSearchRow {
+  padding: 6px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-secondary);
+}
+
+.search {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.listBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.listEmpty {
+  padding: 14px 12px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  gap: 6px;
+  outline: none;
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+.rowActive {
+  background: var(--bg-selected, var(--bg-hover));
+}
+
+.rowName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.renameInput {
+  flex: 1;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-accent, var(--border-primary));
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 2px 6px;
+  min-width: 0;
+  outline: none;
+}
+
+.iconBtn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 2px 4px;
+}
+
+.iconBtn:hover {
+  color: var(--accent);
+}
+
+.deleteBtn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  line-height: 1;
+  width: var(--signal-control-height);
+  height: var(--signal-control-height);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.deleteBtn:hover {
+  color: var(--error-text, #ef4444);
+  border-color: var(--error-text, #ef4444);
+}
+
+/* ---------- BlockEditor ---------- */
+
+.blockEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.directionTabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-primary);
+  padding-bottom: 6px;
+}
+
+.directionTab {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.directionTab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.directionTabActive {
+  background: var(--bg-tertiary);
+  border-color: var(--border-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.directionTabCount {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.directionHint {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  padding: 0 4px;
+}
+
+.blocksList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.blocksEmpty {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-style: italic;
+  padding: 12px;
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+}
+
+.block {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  padding: 4px 8px 4px;
+  position: relative;
+}
+
+.blockOrLabel {
+  position: absolute;
+  top: -10px;
+  left: 10px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0 6px;
+  letter-spacing: 0.08em;
+}
+
+.blockHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.blockLabel {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.blockEmpty {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  padding: 6px 0;
+  font-style: italic;
+}
+
+.addBlockBtn,
+.addCondBtn {
+  align-self: flex-start;
+  background: none;
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.74rem;
+  padding: 2px 8px;
+  margin-top: 2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.addBlockBtn:hover,
+.addCondBtn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.condition {
+  border-top: 1px solid var(--border-secondary);
+  padding: 4px 0;
+  margin-top: 3px;
+  position: relative;
+}
+
+.condition:first-of-type {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 2px;
+}
+
+.conditionAndLabel {
+  position: absolute;
+  top: -7px;
+  left: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0 4px;
+  letter-spacing: 0.08em;
+}
+
+/*
+ * Iter-2: each condition row is HORIZONTAL —
+ *   <cond-label>  <operand1>  <op-select>  <operand2>  <remove-btn>
+ * with ``in_range`` and ``rolling_*`` variants following the same
+ * left-to-right pattern. Flex-wrap lets very narrow viewports break
+ * the row gracefully rather than clipping.
+ */
+.conditionRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin-bottom: 2px;
+  min-width: 0;
+  min-height: var(--signal-control-height);
+}
+
+.conditionLabel {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  min-width: 42px;
+  display: flex;
+  align-items: center;
+}
+
+.conditionOperandCell {
+  flex: 1 1 0;
+  min-width: 96px;
+  display: flex;
+}
+
+.conditionOperandCell > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.conditionOpCell {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.conditionRangeSep {
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  padding: 0 2px;
+}
+
+.conditionLookbackCell {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Small (i) info button shown next to the op selector for rolling ops.
+   Copy lives in ROLLING_OP_HELP in conditionOps.js and is surfaced via
+   native `title=""` — no custom tooltip component needed. */
+.rollingInfoBtn {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-serif, serif);
+  font-style: italic;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 50%;
+  cursor: help;
+  padding: 0;
+  line-height: 1;
+}
+
+.rollingInfoBtn:hover {
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+}
+
+.conditionInlineLabel {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.opSelect {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  padding: 0 6px;
+  min-width: 0;
+  height: var(--signal-control-height);
+}
+
+.lookbackInput {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 0 6px;
+  width: 64px;
+  height: var(--signal-control-height);
+}
+
+/* ---------- OperandSlot (iter-3) ---------- */
+
+/* Equal-height control baseline — every interactive element in a
+   condition row targets this via ``.controlHeight`` or matches via
+   ``padding + border + font-size``. Used by the Playwright measurement
+   to assert ±2 px tolerance across the row. */
+:root {
+  --signal-control-height: 26px;
+}
+
+.operandSlot,
+.operandSlotFilled {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  min-height: var(--signal-control-height);
+}
+
+.operandAddBtn {
+  width: 100%;
+  height: var(--signal-control-height);
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.operandAddBtn:hover {
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+  background: var(--bg-hover);
+}
+
+.operandMenu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 20;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  padding: 4px;
+}
+
+.operandMenuItem {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 6px 10px;
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+
+.operandMenuItem:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.operandEditor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.operandEditor > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.operandClearBtn {
+  flex: 0 0 auto;
+  width: var(--signal-control-height);
+  height: var(--signal-control-height);
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.operandClearBtn:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+/* v5 (iter-5 ask #3): lay the indicator operand out as a row — indicator
+   select | input-id select | params-override popover trigger — so the
+   params panel no longer forces the block row to grow vertically. The
+   expanded params grid floats to the right as an absolute popover
+   (rule below on .indicatorOverrideGrid). */
+.operandIndicator {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.operandIndicator > select,
+.operandIndicator > .indicatorOverride {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.operandInstrumentWrap {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- IndicatorParamsOverride ---------- */
+
+.indicatorOverride {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.76rem;
+  /* iter-5 ask #3: expanded grid is an absolute-positioned popover
+     anchored to this summary button — so the block row no longer
+     grows vertically when the user opens the params panel. */
+  position: relative;
+}
+
+.indicatorOverrideSummary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 3px 6px;
+  font-size: 0.74rem;
+  color: var(--text-primary);
+  text-align: left;
+  min-height: var(--signal-control-height);
+}
+
+.indicatorOverrideSummary:hover {
+  background: var(--bg-hover);
+}
+
+.indicatorOverrideChevron {
+  font-size: 0.75rem;
+  width: 10px;
+  color: var(--text-secondary);
+}
+
+.indicatorOverrideName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.indicatorOverrideBadge {
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: var(--accent, #2563eb);
+  color: white;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.04em;
+}
+
+.indicatorOverrideGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  /* iter-5 ask #3: float the expanded params panel to the right of the
+     summary button rather than pushing it below. Right-anchored so it
+     never overflows off the right edge of the block. */
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 240px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.indicatorOverrideRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+}
+
+.indicatorOverrideLabel {
+  min-width: 70px;
+  color: var(--text-secondary);
+}
+
+.indicatorOverrideInput {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.76rem;
+  padding: 2px 4px;
+  height: 22px;
+}
+
+.indicatorOverrideReset {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+}
+
+.indicatorOverrideReset:hover {
+  color: var(--accent);
+  border-color: var(--border-primary);
+}
+
+.indicatorOverrideResetAll {
+  align-self: flex-start;
+  background: none;
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  margin-top: 4px;
+}
+
+.indicatorOverrideResetAll:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---------- BlockHeader (iter-3) ---------- */
+
+.blockHeaderRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--signal-control-height);
+  margin-bottom: 4px;
+  position: relative;
+}
+
+.blockInstrumentCell {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.blockInstrumentBtn {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 4px 8px;
+  text-align: left;
+  height: var(--signal-control-height);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blockInstrumentBtnEmpty {
+  color: var(--text-secondary);
+  font-style: italic;
+  border-style: dashed;
+}
+
+.blockInstrumentBtn:hover {
+  border-color: var(--accent, #2563eb);
+}
+
+.blockInstrumentPopover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  padding: 6px;
+  min-width: 240px;
+}
+
+/* v3: replaces blockInstrumentBtn — a simple select bound to the
+   signal's declared inputs. */
+.blockInputSelect {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 4px 6px;
+  height: var(--signal-control-height);
+  outline: none;
+}
+
+.blockInputSelect:focus {
+  border-color: var(--border-accent);
+}
+
+.blockInputWarn {
+  margin-left: 4px;
+  color: var(--color-warn, #d69e2e);
+  font-weight: 700;
+}
+
+.blockWeightCell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.blockWeightInput {
+  width: 64px;
+  height: var(--signal-control-height);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 2px 6px;
+}
+
+.blockDeleteBtn {
+  flex: 0 0 auto;
+  width: var(--signal-control-height);
+  height: var(--signal-control-height);
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.blockDeleteBtn:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.blockStatusDotRow {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+}
+
+.blockStatusDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.blockStatusDotOk {
+  background: #10b981;
+}
+
+.blockStatusDotWarn {
+  background: #f59e0b;
+}
+
+/* ---------- Clip banner (iter-3) ---------- */
+
+.clipBanner {
+  margin: 6px 6px 6px;
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  color: #92400e;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.4;
+}
+
+:global(.dark) .clipBanner,
+[data-theme='dark'] .clipBanner {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.clipBannerIcon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+/* ---------- OperandPicker (legacy — kept for back-compat) ---------- */
+
+.operandPicker {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.operandTabs {
+  display: flex;
+  gap: 2px;
+}
+
+.operandTab {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.68rem;
+  padding: 2px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.operandTab:hover {
+  background: var(--bg-hover);
+}
+
+.operandTabActive {
+  background: var(--bg-primary);
+  border-color: var(--border-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.operandBody {
+  padding: 4px;
+}
+
+.operandEmpty {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 2px;
+}
+
+.operandSelect {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  padding: 0 6px;
+  width: 100%;
+  height: var(--signal-control-height);
+}
+
+.operandConstant {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 0 6px;
+  width: 100%;
+  height: var(--signal-control-height);
+}
+
+/* ---------- ParamsPanel ---------- */
+
+.paramsPanelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.paramsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.paramsSectionLabel {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.paramsPlaceholder {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.summaryList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.summaryList li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-secondary);
+  padding: 2px 0;
+}
+
+.summaryList li span {
+  color: var(--text-secondary);
+}
+
+.paramsDivider {
+  height: 1px;
+  background: var(--border-secondary);
+  margin: 4px 0;
+}
+
+.runBtn {
+  width: 100%;
+  background: var(--accent, #2563eb);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 6px 10px;
+  transition: opacity 0.15s;
+}
+
+.runBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.runHint {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.3;
+}
+
+/* ---------- Results (iter-5 ask #6) ---------- */
+
+/*
+ * ``chartPanelBody`` kept for the iter-4 single-plot view (retired in
+ * iter-5) and potential future callers. ``resultsViewBody`` is the new
+ * 2-plot container — splits the Results card vertically 50/50 between
+ * the top and bottom Plotly instances.
+ */
+.chartPanelBody {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.resultsViewBody {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+}
+
+.resultsPlotTop,
+.resultsPlotBottom {
+  flex: 1 1 50%;
+  min-height: 0;
+  position: relative;
+}
+
+.chartState {
+  padding: 18px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.chartWrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.chart {
+  width: 100%;
+  height: 100%;
+}
+
+.errorCard {
+  padding: 12px;
+  border: 1px solid var(--error-border, rgba(239, 68, 68, 0.35));
+  border-radius: var(--radius-sm);
+  background: var(--error-bg, rgba(239, 68, 68, 0.08));
+  color: var(--error-text, #ef4444);
+  margin: 8px;
+}
+
+.errorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.errorHeading {
+  font-size: 0.95rem;
+  margin: 0;
+  font-weight: 600;
+}
+
+.errorMessage {
+  font-size: 0.82rem;
+  margin: 6px 0 0;
+}
+
+.copyBtn {
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 2px 8px;
+}
+
+.tracebackDetails {
+  margin-top: 6px;
+  font-size: 0.78rem;
+}
+
+.tracebackPre {
+  font-size: 0.72rem;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 240px;
+}

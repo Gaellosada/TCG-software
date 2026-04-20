@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import Card from '../../components/Card';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import styles from './HoldingsList.module.css';
 
 /**
@@ -9,6 +11,8 @@ import styles from './HoldingsList.module.css';
  * shared <Card> component. All table styling stays local.
  */
 export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemoveLeg, onOpenAddModal }) {
+  // iter-4: pending-remove state holds {index, label} for the ConfirmDialog.
+  const [pendingRemove, setPendingRemove] = useState(null);
   return (
     <Card
       title="Holdings"
@@ -92,11 +96,7 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                     <button
                       className={styles.removeBtn}
                       type="button"
-                      onClick={() => {
-                        if (window.confirm(`Remove "${leg.label}" from portfolio?`)) {
-                          onRemoveLeg(index);
-                        }
-                      }}
+                      onClick={() => setPendingRemove({ index, label: leg.label })}
                       title={`Remove ${leg.label}`}
                       aria-label={`Remove ${leg.label}`}
                     >
@@ -127,6 +127,26 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
           </div>
         );
       })()}
+
+      {/* iter-4: confirm before removing a leg. */}
+      <ConfirmDialog
+        open={pendingRemove !== null}
+        title="Remove holding?"
+        message={
+          pendingRemove
+            ? `"${pendingRemove.label}" will be removed from this portfolio.`
+            : ''
+        }
+        confirmLabel="Remove"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={() => {
+          const pending = pendingRemove;
+          setPendingRemove(null);
+          if (pending) onRemoveLeg(pending.index);
+        }}
+        onCancel={() => setPendingRemove(null)}
+      />
     </Card>
   );
 }
