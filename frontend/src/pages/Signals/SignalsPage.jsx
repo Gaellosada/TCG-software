@@ -221,14 +221,20 @@ function SignalsPage() {
   // blockShape.isBlockRunnable for the single-source definition.
   const { runDisabledReason, missingIds } = useMemo(() => {
     if (!selectedSignal) return { runDisabledReason: 'Select a signal first', missingIds: [] };
-    const allBlocks = Object.values(selectedSignal.rules || {}).flatMap(
-      (blocks) => (Array.isArray(blocks) ? blocks : []),
-    );
-    const nonEmpty = allBlocks.filter((b) => (b.conditions || []).length > 0 || b.instrument);
+    // PROB-2 fix: preserve each block's direction so isBlockRunnable can
+    // enforce the entry-weight>0 gate.
+    const rules = selectedSignal.rules || {};
+    const blocksWithDir = Object.keys(rules).flatMap((dir) => {
+      const blocks = Array.isArray(rules[dir]) ? rules[dir] : [];
+      return blocks.map((b) => ({ block: b, direction: dir }));
+    });
+    const nonEmpty = blocksWithDir.filter(({ block: b }) => (
+      (b.conditions || []).length > 0 || b.instrument
+    ));
     if (nonEmpty.length === 0) {
       return { runDisabledReason: 'Add at least one block with an instrument + condition', missingIds: [] };
     }
-    for (const b of nonEmpty) {
+    for (const { block: b, direction } of nonEmpty) {
       if (!b.instrument) {
         return {
           runDisabledReason: 'Every block needs an instrument — pick one in the block header.',
@@ -241,7 +247,16 @@ function SignalsPage() {
           missingIds: [],
         };
       }
-      if (!isBlockRunnable(b)) {
+      // Direction-aware: entry blocks additionally require weight > 0.
+      const isEntry = direction === 'long_entry' || direction === 'short_entry';
+      if (isEntry && (!Number.isFinite(b.weight) || b.weight <= 0)) {
+        return {
+          runDisabledReason: 'Every entry block needs a positive weight — '
+            + 'set a weight > 0 in the block header.',
+          missingIds: [],
+        };
+      }
+      if (!isBlockRunnable(b, direction)) {
         return {
           runDisabledReason: 'Every operand must be set — pick an indicator, '
             + 'instrument or constant for each slot.',

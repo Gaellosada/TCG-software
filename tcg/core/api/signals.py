@@ -12,7 +12,7 @@ Request::
 
     {
       "spec":       Signal,            // { id, name, rules }
-      "indicators": {id: IndicatorSpec}
+      "indicators": IndicatorSpec[]    // each entry has required ``id``
     }
 
 Response::
@@ -162,6 +162,11 @@ class _SeriesRefIn(BaseModel):
 
 
 class _IndicatorSpecIn(BaseModel):
+    # PLAN.md §Authoritative v2 contract pins IndicatorSpec = {id, name, code,
+    # params, seriesMap}. ``id`` is required (used as lookup key by the
+    # evaluator) and ``name`` is optional metadata shipped by the frontend.
+    id: str
+    name: str = ""
     code: str
     params: dict[str, int | float | bool] = Field(default_factory=dict)
     # Frontend sends camelCase; accept both forms.
@@ -170,7 +175,10 @@ class _IndicatorSpecIn(BaseModel):
 
 class SignalComputeRequest(BaseModel):
     spec: _SignalIn
-    indicators: dict[str, _IndicatorSpecIn] = Field(default_factory=dict)
+    # PLAN.md §Request body: indicators is an ARRAY of IndicatorSpec. Each
+    # entry's ``id`` is the handler-side lookup key; duplicate ids are
+    # rejected as a validation error (see _indicators_by_id below).
+    indicators: list[_IndicatorSpecIn] = Field(default_factory=list)
     # Reserved for future inline instrument bundles (v1: unused).
     instruments: dict[str, Any] = Field(default_factory=dict)
     start: str | None = None
@@ -382,9 +390,19 @@ async def compute_signal(
     except SignalValidationError as exc:
         return _error_response("validation", str(exc))
 
+    # PLAN.md pins the request body's ``indicators`` field as an array of
+    # IndicatorSpec objects, each with a required ``id``. The evaluator
+    # still wants a lookup table keyed by id, so we fold the list into a
+    # dict here and surface duplicate ids as a validation error (rather
+    # than letting one entry silently clobber the other).
     indicators: dict[str, IndicatorSpecInput] = {}
-    for ind_id, ind_spec in body.indicators.items():
-        indicators[ind_id] = IndicatorSpecInput(
+    for ind_spec in body.indicators:
+        if ind_spec.id in indicators:
+            return _error_response(
+                "validation",
+                f"duplicate indicator id {ind_spec.id!r} in request body",
+            )
+        indicators[ind_spec.id] = IndicatorSpecInput(
             code=ind_spec.code,
             params=dict(ind_spec.params),
             series_map={

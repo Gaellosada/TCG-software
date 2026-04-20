@@ -122,8 +122,11 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {
-                "sma3": {
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [
+                {
+                    "id": "sma3",
+                    "name": "sma3",
                     "code": SMA_CODE,
                     "params": {"window": 3},
                     "seriesMap": {
@@ -133,7 +136,7 @@ class TestComputeEndpoint:
                         }
                     },
                 }
-            },
+            ],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -186,7 +189,8 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -230,7 +234,8 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -274,8 +279,11 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {
-                "bad": {
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [
+                {
+                    "id": "bad",
+                    "name": "bad",
                     "code": bad_code,
                     "params": {},
                     "seriesMap": {
@@ -285,7 +293,7 @@ class TestComputeEndpoint:
                         }
                     },
                 }
-            },
+            ],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -332,7 +340,8 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -379,8 +388,11 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {
-                "sma3": {
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [
+                {
+                    "id": "sma3",
+                    "name": "sma3",
                     "code": SMA_CODE,
                     "params": {"window": 3},
                     "seriesMap": {
@@ -390,7 +402,7 @@ class TestComputeEndpoint:
                         }
                     },
                 }
-            },
+            ],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -429,7 +441,8 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -482,7 +495,8 @@ class TestV2Clipping:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -496,3 +510,138 @@ class TestV2Clipping:
         assert p0["clipped_mask"] == expected_mask
         # Post-clip values: 0 at t=0..2, 1 at t=3..9.
         assert p0["values"] == [0.0, 0.0, 0.0] + [1.0] * 7
+
+
+# ── PROB-1 fix: frontend-shape round-trip ────────────────────────────────
+
+
+class TestFrontendRequestShape:
+    async def test_frontend_request_shape_round_trip(self, client: AsyncClient):
+        """Imitate the exact body that ``buildComputeRequestBody`` emits.
+
+        Per ``frontend/src/pages/Signals/requestBuilder.js``::
+
+            {
+              spec: {id, name, rules},
+              indicators: [
+                { id, name, code, params, seriesMap },
+                ...
+              ]
+            }
+
+        with every indicator operand carrying explicit ``params_override``
+        and ``series_override`` keys (null when absent). This mirrors the
+        shape the UI actually POSTs — the contract drift caught by
+        Review #1 (PROB-1) would make this test return HTTP 422 before
+        the fix.
+        """
+        body = {
+            "spec": {
+                "id": "sig-frontend",
+                "name": "Frontend-shape signal",
+                "rules": {
+                    "long_entry": [
+                        {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "collection": "INDEX",
+                                        "instrument_id": "SPX",
+                                        "field": "close",
+                                    },
+                                    "rhs": {
+                                        "kind": "indicator",
+                                        "indicator_id": "sma3",
+                                        "output": "default",
+                                        # Frontend normaliseOperand ALWAYS
+                                        # emits these keys, null when absent.
+                                        "params_override": None,
+                                        "series_override": None,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    "long_exit": [],
+                    "short_entry": [],
+                    "short_exit": [],
+                },
+            },
+            # Array shape (PLAN.md §Authoritative v2 contract).
+            "indicators": [
+                {
+                    "id": "sma3",
+                    "name": "SMA 3",
+                    "code": SMA_CODE,
+                    "params": {"window": 3},
+                    "seriesMap": {
+                        "price": {
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        }
+                    },
+                }
+            ],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "positions" in data
+        assert len(data["positions"]) == 1
+        p0 = data["positions"][0]
+        assert p0["instrument"] == SPX_REF
+        # SMA(3) crossover kicks in at t=2 when closes are monotone
+        # increasing (see test_happy_path_e2e_with_indicator).
+        assert p0["values"][2] == 1.0
+
+    async def test_duplicate_indicator_id_rejected(self, client: AsyncClient):
+        """Two list entries sharing an id → validation error."""
+        body = {
+            "spec": {
+                "id": "s",
+                "name": "s",
+                "rules": {
+                    "long_entry": [],
+                    "long_exit": [],
+                    "short_entry": [],
+                    "short_exit": [],
+                },
+            },
+            "indicators": [
+                {
+                    "id": "dup",
+                    "name": "A",
+                    "code": SMA_CODE,
+                    "params": {"window": 3},
+                    "seriesMap": {
+                        "price": {
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        }
+                    },
+                },
+                {
+                    "id": "dup",
+                    "name": "B",
+                    "code": SMA_CODE,
+                    "params": {"window": 5},
+                    "seriesMap": {
+                        "price": {
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        }
+                    },
+                },
+            ],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "dup" in data["message"]

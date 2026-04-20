@@ -158,7 +158,9 @@ function Block({
   indicators,
 }) {
   const conditions = block.conditions || [];
-  const runnable = isBlockRunnable(block);
+  // PROB-2 fix: pass direction so entry blocks with weight=0 show as
+  // not-runnable in the per-block status dot (matches backend semantics).
+  const runnable = isBlockRunnable(block, direction);
   return (
     <div className={styles.block} data-testid={`block-${blockIdx}`}>
       {!isFirst && <div className={styles.blockOrLabel}>OR</div>}

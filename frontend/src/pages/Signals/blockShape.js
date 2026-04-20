@@ -86,10 +86,20 @@ export function isConditionComplete(condition) {
  *     (implied by isConditionComplete → isOperandComplete, but spelled
  *     out in the docstring for readers).
  *
- * Weight is not checked here — a weight of 0 is valid (inactive block)
- * and the backend tolerates it.
+ * ENTRY directions additionally require a strictly positive weight
+ * (PROB-2 fix, Review #1): the backend's ``_is_usable_block`` drops
+ * entry blocks with ``weight <= 0``, so the UI must not promise a Run
+ * that the backend will silently discard. EXIT directions do not gate
+ * on weight — the backend ignores weight on ``*_exit`` blocks.
+ *
+ * @param {Object} block
+ * @param {string} [direction] — one of ``long_entry`` / ``long_exit`` /
+ *   ``short_entry`` / ``short_exit``. Only ``*_entry`` values switch on
+ *   the weight check. Any other value (including ``undefined``) skips
+ *   the weight gate for backwards compatibility with non-directional
+ *   callers (tests, tooling).
  */
-export function isBlockRunnable(block) {
+export function isBlockRunnable(block, direction) {
   if (!block || typeof block !== 'object') return false;
   const inst = block.instrument;
   if (!inst || typeof inst !== 'object') return false;
@@ -98,6 +108,12 @@ export function isBlockRunnable(block) {
   if (!Array.isArray(block.conditions) || block.conditions.length === 0) return false;
   for (const c of block.conditions) {
     if (!isConditionComplete(c)) return false;
+  }
+  // PROB-2 fix: entry blocks require weight > 0. Backend silently skips
+  // entry blocks with weight <= 0 (signal_exec._is_usable_block); if the
+  // UI considered them runnable the Run button would lie to the user.
+  if (direction === 'long_entry' || direction === 'short_entry') {
+    if (!Number.isFinite(block.weight) || block.weight <= 0) return false;
   }
   return true;
 }

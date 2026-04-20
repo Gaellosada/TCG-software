@@ -155,8 +155,43 @@ describe('isBlockRunnable', () => {
     expect(isBlockRunnable(block({ conditions: [cond] }))).toBe(true);
   });
 
-  it('weight does not gate runnability — zero weight is fine', () => {
+  it('no direction argument — weight is not gated (backwards compat)', () => {
     expect(isBlockRunnable(block({ weight: 0 }))).toBe(true);
+  });
+
+  // PROB-2 fix (Review #1): entry blocks require weight > 0 to match
+  // backend _is_usable_block semantics; exit blocks are not weight-gated.
+  describe('PROB-2: direction-aware weight gate', () => {
+    it('long_entry + weight=0 → false (backend would silently skip)', () => {
+      expect(isBlockRunnable(block({ weight: 0 }), 'long_entry')).toBe(false);
+    });
+    it('short_entry + weight=0 → false', () => {
+      expect(isBlockRunnable(block({ weight: 0 }), 'short_entry')).toBe(false);
+    });
+    it('long_entry + weight>0 → true', () => {
+      expect(isBlockRunnable(block({ weight: 0.5 }), 'long_entry')).toBe(true);
+    });
+    it('short_entry + weight>0 → true', () => {
+      expect(isBlockRunnable(block({ weight: 1 }), 'short_entry')).toBe(true);
+    });
+    it('long_exit + weight=0 → true (exit blocks ignore weight)', () => {
+      expect(isBlockRunnable(block({ weight: 0 }), 'long_exit')).toBe(true);
+    });
+    it('short_exit + weight=0 → true', () => {
+      expect(isBlockRunnable(block({ weight: 0 }), 'short_exit')).toBe(true);
+    });
+    it('long_exit + weight>0 → true', () => {
+      expect(isBlockRunnable(block({ weight: 0.7 }), 'long_exit')).toBe(true);
+    });
+    it('short_exit + weight>0 → true', () => {
+      expect(isBlockRunnable(block({ weight: 0.7 }), 'short_exit')).toBe(true);
+    });
+    it('entry + NaN weight → false', () => {
+      expect(isBlockRunnable(block({ weight: NaN }), 'long_entry')).toBe(false);
+    });
+    it('entry + negative weight → false', () => {
+      expect(isBlockRunnable(block({ weight: -0.1 }), 'long_entry')).toBe(false);
+    });
   });
 
   it('runnability matrix — all kinds as lhs/rhs in a single block', () => {
