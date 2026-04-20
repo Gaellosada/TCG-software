@@ -298,11 +298,20 @@
   letter-spacing: 0.08em;
 }
 
+/*
+ * Iter-2: each condition row is HORIZONTAL —
+ *   <cond-label>  <operand1>  <op-select>  <operand2>  <remove-btn>
+ * with ``in_range`` and ``rolling_*`` variants following the same
+ * left-to-right pattern. Flex-wrap lets very narrow viewports break
+ * the row gracefully rather than clipping.
+ */
 .conditionRow {
   display: flex;
-  align-items: center;
+  align-items: stretch;
+  flex-wrap: nowrap;
   gap: 6px;
   margin-bottom: 4px;
+  min-width: 0;
 }
 
 .conditionLabel {
@@ -310,6 +319,47 @@
   color: var(--text-secondary);
   font-weight: 500;
   min-width: 42px;
+  display: flex;
+  align-items: center;
+}
+
+.conditionOperandCell {
+  flex: 1 1 0;
+  min-width: 96px;
+  display: flex;
+}
+
+.conditionOperandCell > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.conditionOpCell {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.conditionRangeSep {
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  padding: 0 2px;
+}
+
+.conditionLookbackCell {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.conditionInlineLabel {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .opSelect {
@@ -319,28 +369,7 @@
   color: var(--text-primary);
   font-size: 0.78rem;
   padding: 2px 6px;
-  flex: 1;
   min-width: 0;
-}
-
-.conditionSlots {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-left: 42px;
-}
-
-.conditionSlot {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.conditionSlotLabel {
-  font-size: 0.68rem;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
 .lookbackInput {
@@ -350,7 +379,7 @@
   color: var(--text-primary);
   font-size: 0.82rem;
   padding: 2px 6px;
-  width: 100px;
+  width: 80px;
 }
 
 /* ---------- OperandPicker ---------- */
@@ -372,13 +401,17 @@
 
 .operandTab {
   flex: 1;
+  min-width: 0;
   background: none;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 0.72rem;
-  padding: 2px 4px;
+  font-size: 0.68rem;
+  padding: 2px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .operandTab:hover {

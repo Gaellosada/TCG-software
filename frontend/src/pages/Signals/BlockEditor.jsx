@@ -31,14 +31,13 @@ const DIRECTION_LABELS = {
  *   indicators        {Array}    list of saved indicators from the Indicators
  *                                localStorage; rendered in the Indicator tab
  *                                of the operand picker.
- *   defaultCollection {string|null}  hint for SeriesPicker mounts
  *
  * Block logic is local to this component — mutations always produce a
  * deep-ish clone of the active direction and propagate the full
  * ``rules`` object upward. The parent is responsible for plumbing this
  * into its signal state + storage.
  */
-function BlockEditor({ rules, onRulesChange, indicators, defaultCollection }) {
+function BlockEditor({ rules, onRulesChange, indicators }) {
   const [direction, setDirection] = useState('long_entry');
   const blocks = Array.isArray(rules?.[direction]) ? rules[direction] : [];
 
@@ -127,7 +126,6 @@ function BlockEditor({ rules, onRulesChange, indicators, defaultCollection }) {
               onUpdateCondition={(condIdx, next) => handleUpdateCondition(blockIdx, condIdx, next)}
               onRemoveBlock={() => handleRemoveBlock(blockIdx)}
               indicators={indicators}
-              defaultCollection={defaultCollection}
             />
           ))
         )}
@@ -153,7 +151,6 @@ function Block({
   onUpdateCondition,
   onRemoveBlock,
   indicators,
-  defaultCollection,
 }) {
   const conditions = block.conditions || [];
   return (
@@ -187,7 +184,6 @@ function Block({
             onChange={(next) => onUpdateCondition(condIdx, next)}
             onRemove={() => onRemoveCondition(condIdx)}
             indicators={indicators}
-            defaultCollection={defaultCollection}
           />
         ))
       )}
@@ -211,7 +207,6 @@ function Condition({
   onChange,
   onRemove,
   indicators,
-  defaultCollection,
 }) {
   const shape = conditionShape(condition.op);
 
@@ -228,100 +223,91 @@ function Condition({
     onChange({ ...condition, lookback: Number.isFinite(n) ? n : 1 });
   }
 
+  const opSelect = (
+    <select
+      className={styles.opSelect}
+      value={condition.op}
+      onChange={(e) => updateOp(e.target.value)}
+      aria-label="Operator"
+      data-testid={`op-select-${blockIdx}-${condIdx}`}
+    >
+      {ALL_OPS.map((op) => (
+        <option key={op} value={op}>{OP_LABELS[op] || op}</option>
+      ))}
+    </select>
+  );
+
   return (
     <div className={styles.condition} data-testid={`condition-${blockIdx}-${condIdx}`}>
       {!isFirst && <div className={styles.conditionAndLabel}>AND</div>}
+      {/*
+        Iter-2: condition renders HORIZONTALLY —
+          <operand1>  <op-select>  <operand2>         (binary)
+          <operand>   in_range    <min> .. <max>      (range)
+          <operand>   rolling_xx  <lookback>          (rolling)
+        A single flex row keeps the operator visually centred between its
+        operands rather than stacked above them.
+      */}
       <div className={styles.conditionRow}>
         <span className={styles.conditionLabel}>Cond {condIdx + 1}</span>
-        <select
-          className={styles.opSelect}
-          value={condition.op}
-          onChange={(e) => updateOp(e.target.value)}
-          aria-label="Operator"
-          data-testid={`op-select-${blockIdx}-${condIdx}`}
-        >
-          {ALL_OPS.map((op) => (
-            <option key={op} value={op}>{OP_LABELS[op] || op}</option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className={styles.deleteBtn}
-          onClick={onRemove}
-          title="Remove condition"
-          aria-label={`Remove condition ${condIdx + 1} of block ${blockIdx + 1}`}
-          data-testid={`remove-condition-${blockIdx}-${condIdx}`}
-        >
-          ×
-        </button>
-      </div>
-      <div className={styles.conditionSlots}>
         {shape === 'binary' && (
           <>
-            <div className={styles.conditionSlot}>
-              <div className={styles.conditionSlotLabel}>lhs</div>
+            <div className={styles.conditionOperandCell}>
               <OperandPicker
                 value={condition.lhs}
                 onChange={(next) => updateOperand('lhs', next)}
                 indicators={indicators}
-                defaultCollection={defaultCollection}
               />
             </div>
-            <div className={styles.conditionSlot}>
-              <div className={styles.conditionSlotLabel}>rhs</div>
+            <div className={styles.conditionOpCell}>{opSelect}</div>
+            <div className={styles.conditionOperandCell}>
               <OperandPicker
                 value={condition.rhs}
                 onChange={(next) => updateOperand('rhs', next)}
                 indicators={indicators}
-                defaultCollection={defaultCollection}
               />
             </div>
           </>
         )}
         {shape === 'range' && (
           <>
-            <div className={styles.conditionSlot}>
-              <div className={styles.conditionSlotLabel}>operand</div>
+            <div className={styles.conditionOperandCell}>
               <OperandPicker
                 value={condition.operand}
                 onChange={(next) => updateOperand('operand', next)}
                 indicators={indicators}
-                defaultCollection={defaultCollection}
               />
             </div>
-            <div className={styles.conditionSlot}>
-              <div className={styles.conditionSlotLabel}>min</div>
+            <div className={styles.conditionOpCell}>{opSelect}</div>
+            <div className={styles.conditionOperandCell}>
               <OperandPicker
                 value={condition.min}
                 onChange={(next) => updateOperand('min', next)}
                 indicators={indicators}
-                defaultCollection={defaultCollection}
               />
             </div>
-            <div className={styles.conditionSlot}>
-              <div className={styles.conditionSlotLabel}>max</div>
+            <span className={styles.conditionRangeSep}>..</span>
+            <div className={styles.conditionOperandCell}>
               <OperandPicker
                 value={condition.max}
                 onChange={(next) => updateOperand('max', next)}
                 indicators={indicators}
-                defaultCollection={defaultCollection}
               />
             </div>
           </>
         )}
         {shape === 'rolling' && (
           <>
-            <div className={styles.conditionSlot}>
-              <div className={styles.conditionSlotLabel}>operand</div>
+            <div className={styles.conditionOperandCell}>
               <OperandPicker
                 value={condition.operand}
                 onChange={(next) => updateOperand('operand', next)}
                 indicators={indicators}
-                defaultCollection={defaultCollection}
               />
             </div>
-            <div className={styles.conditionSlot}>
-              <div className={styles.conditionSlotLabel}>lookback</div>
+            <div className={styles.conditionOpCell}>{opSelect}</div>
+            <div className={styles.conditionLookbackCell}>
+              <span className={styles.conditionInlineLabel}>lookback</span>
               <input
                 type="number"
                 min="1"
@@ -334,6 +320,16 @@ function Condition({
             </div>
           </>
         )}
+        <button
+          type="button"
+          className={styles.deleteBtn}
+          onClick={onRemove}
+          title="Remove condition"
+          aria-label={`Remove condition ${condIdx + 1} of block ${blockIdx + 1}`}
+          data-testid={`remove-condition-${blockIdx}-${condIdx}`}
+        >
+          ×
+        </button>
       </div>
     </div>
   );

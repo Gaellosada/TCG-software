@@ -14,29 +14,30 @@ import styles from './Signals.module.css';
  *   - Constant   — numeric input.
  *
  * The initial tab is derived from the ``value`` prop's ``kind`` so a
- * user editing an existing operand lands on the right tab.
+ * user editing an existing operand lands on the right tab. When
+ * ``value`` is ``null`` (iter-2: unset operand), NO tab is active and
+ * the body renders a "pick me" hint — the user must explicitly click a
+ * tab to commit to a kind.
  *
  * Props:
  *   value             {Object|null}  current operand spec (``{kind, ...}``)
+ *                                    or ``null`` when unset.
  *   onChange          {Function}     (nextOperand) => void — fires on any change
  *   indicators        {Array}        [{id, name}, ...] — already-saved indicators
- *   defaultCollection {string|null}  hint passed through to SeriesPicker
  */
-function OperandPicker({ value, onChange, indicators, defaultCollection }) {
-  const initialTab = (value && value.kind) || 'constant';
+function OperandPicker({ value, onChange, indicators }) {
+  const initialTab = (value && value.kind) || null;
   const [tab, setTab] = useState(initialTab);
 
   function selectTab(nextTab) {
     setTab(nextTab);
-    // When the user switches tabs, emit a sensible default for that tab so
-    // the condition payload is always valid. We do NOT preserve the old
-    // operand across tabs — semantics differ.
+    // When the user clicks a tab, emit a stub for that tab so the
+    // condition payload is always shape-valid. Per iter-2 policy we do
+    // NOT pre-select an indicator id or a collection — the stub is
+    // deliberately incomplete until the user picks.
     if (nextTab === 'indicator') {
-      const firstId = (indicators && indicators[0] && indicators[0].id) || '';
-      onChange({ kind: 'indicator', indicator_id: firstId, output: 'default' });
+      onChange({ kind: 'indicator', indicator_id: '', output: 'default' });
     } else if (nextTab === 'instrument') {
-      // Leave it to the SeriesPicker save to fire a full update — for now
-      // emit a stub so the condition is shape-valid.
       onChange({ kind: 'instrument', collection: '', instrument_id: '', field: 'close' });
     } else {
       onChange({ kind: 'constant', value: 0 });
@@ -65,6 +66,11 @@ function OperandPicker({ value, onChange, indicators, defaultCollection }) {
         ))}
       </div>
       <div className={styles.operandBody}>
+        {tab === null && (
+          <div className={styles.operandEmpty} data-testid="operand-unset">
+            Pick a kind above.
+          </div>
+        )}
         {tab === 'indicator' && (
           <IndicatorOperandBody
             value={value}
@@ -75,7 +81,6 @@ function OperandPicker({ value, onChange, indicators, defaultCollection }) {
         {tab === 'instrument' && (
           <InstrumentOperandBody
             value={value}
-            defaultCollection={defaultCollection}
             onChange={onChange}
           />
         )}
@@ -100,7 +105,7 @@ function IndicatorOperandBody({ value, indicators, onChange }) {
   return (
     <select
       className={styles.operandSelect}
-      value={selectedId || list[0].id}
+      value={selectedId || ''}
       onChange={(e) => onChange({
         kind: 'indicator',
         indicator_id: e.target.value,
@@ -108,6 +113,7 @@ function IndicatorOperandBody({ value, indicators, onChange }) {
       })}
       aria-label="Pick indicator"
     >
+      <option value="" disabled>Select indicator…</option>
       {list.map((ind) => (
         <option key={ind.id} value={ind.id}>{ind.name || ind.id}</option>
       ))}
@@ -115,7 +121,7 @@ function IndicatorOperandBody({ value, indicators, onChange }) {
   );
 }
 
-function InstrumentOperandBody({ value, defaultCollection, onChange }) {
+function InstrumentOperandBody({ value, onChange }) {
   // SeriesPicker handles collection + instrument selection end-to-end.
   // It emits ``{collection, instrument_id}``; we wrap that into an
   // instrument operand with ``field: 'close'`` (v1 contract).
@@ -124,6 +130,7 @@ function InstrumentOperandBody({ value, defaultCollection, onChange }) {
     : null;
   // We render SeriesPicker inline in "live" mode: every save is pushed
   // upward as the new operand. Cancel just keeps current selection.
+  // Iter-2: no ``defaultCollection`` — the user must pick the collection.
   return (
     <SeriesPicker
       value={picked}
@@ -134,7 +141,7 @@ function InstrumentOperandBody({ value, defaultCollection, onChange }) {
         field: 'close',
       })}
       onCancel={() => { /* picker stays open — no-op */ }}
-      defaultCollection={defaultCollection || null}
+      defaultCollection={null}
       saveLabel="Use"
     />
   );

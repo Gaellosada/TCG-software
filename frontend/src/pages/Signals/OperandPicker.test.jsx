@@ -18,7 +18,6 @@ describe('OperandPicker tab switching', () => {
         value={{ kind: 'constant', value: 0 }}
         onChange={() => {}}
         indicators={[{ id: 'sma-20', name: '20-day SMA' }]}
-        defaultCollection="INDEX"
       />,
     );
     expect(screen.getByTestId('operand-tab-indicator')).toBeDefined();
@@ -38,7 +37,11 @@ describe('OperandPicker tab switching', () => {
     expect(screen.getByTestId('operand-tab-constant').getAttribute('aria-selected')).toBe('false');
   });
 
-  it('switching to Indicator emits an indicator operand with the first indicator_id', () => {
+  // Iter-2: switching to Indicator emits an INCOMPLETE stub (empty
+  // indicator_id). The user must pick an id from the dropdown — we no
+  // longer auto-seed the first indicator. See iter-2 ORDERS "no default
+  // injection".
+  it('switching to Indicator emits an empty-indicator stub (no default id injected)', () => {
     const onChange = vi.fn();
     render(
       <OperandPicker
@@ -53,7 +56,7 @@ describe('OperandPicker tab switching', () => {
     fireEvent.click(screen.getByTestId('operand-tab-indicator'));
     expect(onChange).toHaveBeenCalledWith({
       kind: 'indicator',
-      indicator_id: 'sma-20',
+      indicator_id: '',
       output: 'default',
     });
   });
