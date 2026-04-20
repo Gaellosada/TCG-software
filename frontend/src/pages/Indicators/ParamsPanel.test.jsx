@@ -1,15 +1,14 @@
 // @vitest-environment jsdom
 //
-// Tests for ParamsPanel: ownPanel checkbox and value mapping adapters
-// (toPickerValue / fromPickerValue) used to bridge InstrumentPicker's
-// discriminated-union format with the internal { collection, instrument_id }
-// series map.
+// Tests for ParamsPanel: ownPanel checkbox and value mapping adapter
+// (fromPickerValue) used to bridge InstrumentPickerModal's discriminated-union
+// output with the internal { collection, instrument_id } series map.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import ParamsPanel, { toPickerValue, fromPickerValue } from './ParamsPanel';
+import ParamsPanel, { fromPickerValue } from './ParamsPanel';
 
-// InstrumentPicker loads collections/instruments on mount — mock the API
+// InstrumentPickerModal loads collections/instruments on mount — mock the API
 // so the component doesn't throw during rendering.
 vi.mock('../../api/data', () => ({
   listCollections: vi.fn(async () => ['INDEX', 'FUT_ES']),
@@ -85,7 +84,6 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
     );
     const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     expect(cb.disabled).toBe(true);
-    // Even if the click somehow fires, our onChange handler must early-return.
     fireEvent.click(cb);
     expect(onOwnPanelChange).not.toHaveBeenCalled();
   });
@@ -97,22 +95,13 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
   });
 });
 
-describe('value mapping — toPickerValue / fromPickerValue', () => {
-  it('toPickerValue wraps a seriesMap entry as a spot instrument', () => {
-    expect(toPickerValue({ collection: 'INDEX', instrument_id: 'SPX' }))
-      .toEqual({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' });
-  });
-
-  it('toPickerValue returns null for null input', () => {
-    expect(toPickerValue(null)).toBeNull();
-  });
-
-  it('fromPickerValue passes through spot type', () => {
+describe('value mapping — fromPickerValue', () => {
+  it('passes through spot type', () => {
     expect(fromPickerValue({ type: 'spot', collection: 'AAPL', instrument_id: 'AAPL' }))
       .toEqual({ collection: 'AAPL', instrument_id: 'AAPL' });
   });
 
-  it('fromPickerValue uses collection as instrument_id for continuous', () => {
+  it('uses collection as instrument_id for continuous', () => {
     expect(fromPickerValue({
       type: 'continuous',
       collection: 'FUT_ES',
@@ -123,15 +112,33 @@ describe('value mapping — toPickerValue / fromPickerValue', () => {
     })).toEqual({ collection: 'FUT_ES', instrument_id: 'FUT_ES' });
   });
 
-  it('fromPickerValue returns null for null input', () => {
+  it('returns null for null input', () => {
     expect(fromPickerValue(null)).toBeNull();
   });
 });
 
-describe('<ParamsPanel> — InstrumentPicker integration', () => {
-  it('renders an InstrumentPicker for each series label', () => {
+describe('<ParamsPanel> — instrument picker button', () => {
+  it('renders a picker trigger button for each series label', () => {
     render(<ParamsPanel {...baseProps({ seriesLabels: ['close', 'volume'] })} />);
     expect(screen.getByTestId('instrument-picker-close')).toBeTruthy();
     expect(screen.getByTestId('instrument-picker-volume')).toBeTruthy();
+  });
+
+  it('shows "Select instrument" when no instrument is picked', () => {
+    render(<ParamsPanel {...baseProps({ seriesLabels: ['close'] })} />);
+    const btn = screen.getByTestId('instrument-picker-close');
+    expect(btn.textContent).toBe('Select instrument');
+  });
+
+  it('shows "Change instrument" when an instrument is already picked', () => {
+    render(<ParamsPanel {...baseProps({
+      seriesLabels: ['close'],
+      indicator: {
+        ...baseProps().indicator,
+        seriesMap: { close: { collection: 'INDEX', instrument_id: 'SPX' } },
+      },
+    })} />);
+    const btn = screen.getByTestId('instrument-picker-close');
+    expect(btn.textContent).toBe('Change instrument');
   });
 });

@@ -201,6 +201,29 @@
   white-space: nowrap;
 }
 
+.pickBtn {
+  width: 100%;
+  padding: 5px 10px;
+  margin-top: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.1s;
+}
+
+.pickBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.pickBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /*
  * "Show in separate panel below" toggle — sits directly above the Run

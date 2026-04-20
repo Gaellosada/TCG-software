@@ -6,7 +6,7 @@ afterEach(() => { cleanup(); });
 import BlockEditor from './BlockEditor';
 import { emptyRules } from './storage';
 
-// InstrumentPicker pulls from /api/data/*; stub the network layer so its
+// InstrumentPickerModal pulls from /api/data/*; stub the network layer so its
 // useEffect doesn't blow up in jsdom.
 vi.mock('../../api/data', () => ({
   listCollections: vi.fn(async () => ['INDEX']),
@@ -98,7 +98,7 @@ describe('BlockEditor (v3 / iter-4)', () => {
     expect(screen.getByTestId('block-weight-0')).toBeDefined();
   });
 
-  it('block header shows an input-id dropdown (uses InstrumentPicker)', () => {
+  it('block header shows an input-id dropdown (no inline picker)', () => {
     const seeded = {
       ...emptyRules(),
       long_entry: [{ input_id: 'X', weight: 0.5, conditions: [] }],
