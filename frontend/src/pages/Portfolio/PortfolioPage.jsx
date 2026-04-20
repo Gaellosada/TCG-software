@@ -6,6 +6,7 @@ import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
 import SaveControls from '../../components/SaveControls';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import styles from './PortfolioPage.module.css';
 
 const REBALANCE_OPTIONS = [
@@ -22,6 +23,11 @@ function PortfolioPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [saveInput, setSaveInput] = useState('');
   const [savedList, setSavedList] = useState(() => portfolio.getSavedPortfolios());
+  // iter-4: replaced window.confirm with shared ConfirmDialog.
+  // deleteTarget holds the portfolioName pending-delete (null = dialog closed).
+  // clearConfirmOpen gates the clear-all dialog (no payload needed).
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
 
   // Pre-fill save input when a portfolio is loaded
   useEffect(() => {
@@ -92,11 +98,7 @@ function PortfolioPage() {
               <button
                 className={styles.deleteBtn}
                 type="button"
-                onClick={() => {
-                  if (window.confirm(`Delete saved portfolio "${portfolio.portfolioName}"?`)) {
-                    handleDeleteSaved(portfolio.portfolioName);
-                  }
-                }}
+                onClick={() => setDeleteTarget(portfolio.portfolioName)}
                 title="Delete saved portfolio"
                 aria-label="Delete saved portfolio"
               >
@@ -137,11 +139,7 @@ function PortfolioPage() {
             <button
               className={styles.clearBtn}
               type="button"
-              onClick={() => {
-                if (window.confirm('Clear all holdings and results?')) {
-                  portfolio.clearAll();
-                }
-              }}
+              onClick={() => setClearConfirmOpen(true)}
               disabled={portfolio.legs.length === 0 && !portfolio.results}
             >
               Clear
@@ -288,6 +286,41 @@ function PortfolioPage() {
         isOpen={modalOpen}
         onClose={handleCloseModal}
         onAddLeg={portfolio.addLeg}
+      />
+
+      {/* ── Delete saved portfolio confirmation ── */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete saved portfolio?"
+        message={
+          deleteTarget
+            ? `The saved portfolio "${deleteTarget}" will be permanently removed.`
+            : ''
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={() => {
+          const name = deleteTarget;
+          setDeleteTarget(null);
+          if (name) handleDeleteSaved(name);
+        }}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
+      {/* ── Clear-all confirmation ── */}
+      <ConfirmDialog
+        open={clearConfirmOpen}
+        title="Clear all holdings and results?"
+        message="All holdings and computed results will be cleared. This cannot be undone."
+        confirmLabel="Clear"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={() => {
+          setClearConfirmOpen(false);
+          portfolio.clearAll();
+        }}
+        onCancel={() => setClearConfirmOpen(false)}
       />
     </div>
   );

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import SeriesPicker from '../Indicators/SeriesPicker';
 import IndicatorParamsOverride from './IndicatorParamsOverride';
-import ConfirmDialog from './ConfirmDialog';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import { defaultIndicatorOperand } from './conditionOps';
 import styles from './Signals.module.css';
 

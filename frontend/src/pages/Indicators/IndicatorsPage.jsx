@@ -10,6 +10,7 @@ import { loadState, saveState } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import { classifyFetchError } from '../../utils/fetchError';
 import { ABORTED, coerceErrorType, fetchKindToErrorType } from './errorTaxonomy';
 import styles from './IndicatorsPage.module.css';
@@ -222,6 +223,9 @@ function IndicatorsPage() {
   // Code/Documentation tab state for the middle panel. Page-level only —
   // NOT persisted (always resets to 'code' on reload).
   const [viewMode, setViewMode] = useState('code');
+  // iter-4: replaced window.confirm with shared ConfirmDialog.
+  // pendingDeleteId holds the indicator id awaiting confirmation (null = closed).
+  const [pendingDeleteId, setPendingDeleteId] = useState(null);
 
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
@@ -376,8 +380,16 @@ function IndicatorsPage() {
   const handleDelete = useCallback((id) => {
     const target = indicatorsRef.current.find((i) => i.id === id);
     if (!target || target.readonly) return;
-    // eslint-disable-next-line no-alert
-    if (!window.confirm('Delete?')) return;
+    // iter-4: open shared ConfirmDialog instead of synchronous window.confirm.
+    setPendingDeleteId(id);
+  }, []);
+
+  const handleConfirmDelete = useCallback(() => {
+    const id = pendingDeleteId;
+    setPendingDeleteId(null);
+    if (!id) return;
+    const target = indicatorsRef.current.find((i) => i.id === id);
+    if (!target || target.readonly) return;
     setIndicators((prev) => {
       const next = prev.filter((ind) => ind.id !== id);
       // If the deleted entry was selected, fall back to the first
@@ -389,7 +401,7 @@ function IndicatorsPage() {
       });
       return next;
     });
-  }, []);
+  }, [pendingDeleteId]);
 
   const handleRename = useCallback((id, newName) => {
     setIndicators((prev) => prev.map((ind) => {
@@ -640,6 +652,17 @@ function IndicatorsPage() {
           />
         </Card>
       </div>
+      {/* iter-4: shared ConfirmDialog replaces the previous window.confirm. */}
+      <ConfirmDialog
+        open={pendingDeleteId !== null}
+        title="Delete indicator?"
+        message="This indicator will be permanently removed from your library."
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setPendingDeleteId(null)}
+      />
     </div>
   );
 }

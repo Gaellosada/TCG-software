@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import SeriesPicker from '../Indicators/SeriesPicker';
-import ConfirmDialog from './ConfirmDialog';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import styles from './Signals.module.css';
 
 /**
