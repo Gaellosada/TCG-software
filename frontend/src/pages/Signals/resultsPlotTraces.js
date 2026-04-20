@@ -235,8 +235,24 @@ export function buildIndicatorTraces(indicators, dates, colorOffset = 0) {
 }
 
 /**
- * Bottom plot: inputs (price) + indicators (right axis) + event
- * markers (on the price axis).
+ * Partition indicators into overlay (rendered on the bottom plot) and
+ * ownPanel (each gets a dedicated Chart instance below the bottom plot).
+ */
+export function partitionIndicators(indicators) {
+  const overlay = [];
+  const ownPanel = [];
+  if (!Array.isArray(indicators)) return { overlay, ownPanel };
+  for (const ind of indicators) {
+    if (ind.ownPanel) ownPanel.push(ind);
+    else overlay.push(ind);
+  }
+  return { overlay, ownPanel };
+}
+
+/**
+ * Bottom plot: inputs (price) + overlay indicators (right axis) + event
+ * markers (on the price axis). Indicators with ownPanel: true are
+ * excluded — they render in dedicated panels.
  */
 export function buildBottomPlot(result) {
   if (!result || !Array.isArray(result.timestamps) || result.timestamps.length === 0) {
@@ -245,8 +261,10 @@ export function buildBottomPlot(result) {
   const positions = Array.isArray(result.positions) ? result.positions : [];
   const dates = toDates(result.timestamps);
   const inputTraces = buildInputTraces(positions, dates);
-  const indicators = Array.isArray(result.indicators) ? result.indicators : [];
-  const indicatorTraces = buildIndicatorTraces(indicators, dates, inputTraces.length);
+  const { overlay } = partitionIndicators(
+    Array.isArray(result.indicators) ? result.indicators : [],
+  );
+  const indicatorTraces = buildIndicatorTraces(overlay, dates, inputTraces.length);
   const events = Array.isArray(result.events) ? result.events : [];
   const eventTraces = buildEventMarkerTraces(events, positions, dates);
 
@@ -271,6 +289,52 @@ export function buildBottomPlot(result) {
     layoutOverrides: lo,
     hasData: traces.length > 0,
   };
+}
+
+/**
+ * Build dedicated panel plots for indicators with ownPanel: true.
+ * Each panel shows the input prices on the left axis and the indicator
+ * on the right axis.
+ */
+export function buildOwnPanelPlots(result) {
+  if (!result || !Array.isArray(result.timestamps) || result.timestamps.length === 0) {
+    return [];
+  }
+  const { ownPanel } = partitionIndicators(
+    Array.isArray(result.indicators) ? result.indicators : [],
+  );
+  if (ownPanel.length === 0) return [];
+
+  const positions = Array.isArray(result.positions) ? result.positions : [];
+  const dates = toDates(result.timestamps);
+
+  return ownPanel.map((ind, i) => {
+    const inputTraces = buildInputTraces(positions, dates);
+    const indTrace = {
+      x: dates,
+      y: ind.series,
+      type: 'scatter',
+      mode: 'lines',
+      name: `ind: ${ind.indicator_id}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
+      line: { color: TRACE_COLORS[i % TRACE_COLORS.length], width: 1.5 },
+      yaxis: 'y2',
+      connectgaps: false,
+      hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
+    };
+    return {
+      traces: [...inputTraces, indTrace],
+      layoutOverrides: {
+        showlegend: true,
+        legend: { orientation: 'h', y: -0.2 },
+        xaxis: { title: { text: '' } },
+        yaxis: { title: { text: 'price' } },
+        yaxis2: { overlaying: 'y', side: 'right', showgrid: false, title: { text: ind.indicator_id } },
+      },
+      hasData: Array.isArray(ind.series) && ind.series.length > 0,
+      title: ind.indicator_id,
+      downloadFilename: `signal-indicator-${ind.indicator_id}`,
+    };
+  });
 }
 
 /**

@@ -4,6 +4,7 @@ import styles from './Signals.module.css';
 import {
   buildTopPlot,
   buildBottomPlot,
+  buildOwnPanelPlots,
   buildClipSummary,
 } from './resultsPlotTraces';
 
@@ -70,6 +71,7 @@ function ErrorCard({ error }) {
 function ResultsView({ result, loading, error }) {
   const top = useMemo(() => buildTopPlot(result), [result]);
   const bottom = useMemo(() => buildBottomPlot(result), [result]);
+  const ownPanelPlots = useMemo(() => buildOwnPanelPlots(result), [result]);
   const clipSummary = useMemo(() => buildClipSummary(result), [result]);
 
   if (loading) {
@@ -135,6 +137,16 @@ function ResultsView({ result, loading, error }) {
           downloadFilename="signal-inputs-indicators-events"
         />
       </div>
+      {ownPanelPlots.filter((p) => p.hasData).map((plot) => (
+        <div key={plot.title} className={styles.resultsPlotPanel} data-testid={`results-plot-panel-${plot.title}`}>
+          <Chart
+            traces={plot.traces}
+            layoutOverrides={plot.layoutOverrides}
+            className={styles.chart}
+            downloadFilename={plot.downloadFilename}
+          />
+        </div>
+      ))}
     </div>
   );
 }

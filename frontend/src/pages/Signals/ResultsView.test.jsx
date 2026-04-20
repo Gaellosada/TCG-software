@@ -135,4 +135,47 @@ describe('<ResultsView>', () => {
     const filenames = chartCalls.map((c) => c.downloadFilename);
     expect(new Set(filenames).size).toBe(2);
   });
+
+  it('renders a third Chart for an indicator with ownPanel: true', () => {
+    const result = makeResult({
+      indicators: [
+        { input_id: 'X', indicator_id: 'sma', series: [100, 101, 102], ownPanel: false },
+        { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
+      ],
+    });
+    render(<ResultsView result={result} loading={false} error={null} />);
+    // 2 standard charts + 1 ownPanel chart = 3 total
+    expect(chartCalls).toHaveLength(3);
+    const panelChart = chartCalls[2];
+    expect(panelChart.downloadFilename).toBe('signal-indicator-rsi');
+    // The panel chart should have the indicator trace on y2
+    const y2Trace = panelChart.traces.find((t) => t.yaxis === 'y2');
+    expect(y2Trace).toBeDefined();
+    expect(y2Trace.y).toEqual([50, 60, 70]);
+  });
+
+  it('does not render ownPanel chart when indicator series is empty', () => {
+    const result = makeResult({
+      indicators: [
+        { input_id: 'X', indicator_id: 'empty', series: [], ownPanel: true },
+      ],
+    });
+    render(<ResultsView result={result} loading={false} error={null} />);
+    // Only 2 standard charts since hasData is false for the empty ownPanel
+    expect(chartCalls).toHaveLength(2);
+  });
+
+  it('renders multiple ownPanel Charts for multiple ownPanel indicators', () => {
+    const result = makeResult({
+      indicators: [
+        { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
+        { input_id: 'X', indicator_id: 'macd', series: [0.1, 0.2, 0.3], ownPanel: true },
+      ],
+    });
+    render(<ResultsView result={result} loading={false} error={null} />);
+    // 2 standard + 2 ownPanel = 4
+    expect(chartCalls).toHaveLength(4);
+    expect(chartCalls[2].downloadFilename).toBe('signal-indicator-rsi');
+    expect(chartCalls[3].downloadFilename).toBe('signal-indicator-macd');
+  });
 });

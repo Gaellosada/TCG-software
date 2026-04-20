@@ -1021,11 +1021,18 @@
   flex: 1;
   min-height: 0;
   gap: 8px;
+  overflow-y: auto;
 }
 
 .resultsPlotTop,
 .resultsPlotBottom {
-  flex: 1 1 50%;
+  flex: 1 1 0;
+  min-height: 0;
+  position: relative;
+}
+
+.resultsPlotPanel {
+  flex: 0 0 250px;
   min-height: 0;
   position: relative;
 }

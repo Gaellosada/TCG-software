@@ -208,6 +208,7 @@ class _IndicatorSpecIn(BaseModel):
     code: str
     params: dict[str, int | float | bool] = Field(default_factory=dict)
     seriesMap: dict[str, _SeriesRefIn] = Field(default_factory=dict)
+    ownPanel: bool = False
 
 
 class SignalComputeRequest(BaseModel):
@@ -582,6 +583,9 @@ async def compute_signal(
             }
         )
 
+    indicator_own_panel: dict[str, bool] = {
+        spec.id: spec.ownPanel for spec in body.indicators
+    }
     indicators_out: list[dict] = []
     for ind in result.indicator_series:
         indicators_out.append(
@@ -589,6 +593,7 @@ async def compute_signal(
                 "input_id": ind.input_id,
                 "indicator_id": ind.indicator_id,
                 "series": _nan_safe(ind.series),
+                "ownPanel": indicator_own_panel.get(ind.indicator_id, False),
             }
         )
 

@@ -8,6 +8,8 @@ import {
   aggregateRealizedPnl,
   buildTopPlot,
   buildBottomPlot,
+  buildOwnPanelPlots,
+  partitionIndicators,
   buildEventMarkerTraces,
   buildIndicatorTraces,
   buildClipSummary,
@@ -233,5 +235,123 @@ describe('buildClipSummary', () => {
       { instrument: 'X', count: 2 },
       { instrument: 'Z', count: 1 },
     ]);
+  });
+});
+
+describe('partitionIndicators', () => {
+  it('separates ownPanel indicators from overlay indicators', () => {
+    const indicators = [
+      { indicator_id: 'sma', ownPanel: false, series: [1, 2, 3] },
+      { indicator_id: 'rsi', ownPanel: true, series: [50, 60, 70] },
+      { indicator_id: 'ema', series: [4, 5, 6] },
+      { indicator_id: 'macd', ownPanel: true, series: [0.1, 0.2, 0.3] },
+    ];
+    const { overlay, ownPanel } = partitionIndicators(indicators);
+    expect(overlay).toHaveLength(2);
+    expect(ownPanel).toHaveLength(2);
+    expect(overlay[0].indicator_id).toBe('sma');
+    expect(overlay[1].indicator_id).toBe('ema');
+    expect(ownPanel[0].indicator_id).toBe('rsi');
+    expect(ownPanel[1].indicator_id).toBe('macd');
+  });
+
+  it('returns empty arrays for non-array input', () => {
+    const { overlay, ownPanel } = partitionIndicators(undefined);
+    expect(overlay).toEqual([]);
+    expect(ownPanel).toEqual([]);
+  });
+
+  it('puts all indicators in overlay when none have ownPanel', () => {
+    const indicators = [
+      { indicator_id: 'sma', series: [1, 2] },
+      { indicator_id: 'ema', ownPanel: false, series: [3, 4] },
+    ];
+    const { overlay, ownPanel } = partitionIndicators(indicators);
+    expect(overlay).toHaveLength(2);
+    expect(ownPanel).toHaveLength(0);
+  });
+});
+
+describe('buildBottomPlot — ownPanel filtering', () => {
+  it('excludes ownPanel indicators from the bottom plot', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [10, 20, 30])],
+      indicators: [
+        { input_id: 'X', indicator_id: 'sma', series: [11, 19, 29], ownPanel: false },
+        { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
+      ],
+      events: [],
+    };
+    const { traces } = buildBottomPlot(result);
+    const indicatorNames = traces.filter((t) => t.name && t.name.startsWith('ind:')).map((t) => t.name);
+    expect(indicatorNames.some((n) => n.includes('sma'))).toBe(true);
+    expect(indicatorNames.some((n) => n.includes('rsi'))).toBe(false);
+  });
+});
+
+describe('buildOwnPanelPlots', () => {
+  it('returns empty array when no ownPanel indicators', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [10, 20, 30])],
+      indicators: [
+        { input_id: 'X', indicator_id: 'sma', series: [11, 19, 29], ownPanel: false },
+      ],
+      events: [],
+    };
+    expect(buildOwnPanelPlots(result)).toHaveLength(0);
+  });
+
+  it('returns empty array when result is null', () => {
+    expect(buildOwnPanelPlots(null)).toHaveLength(0);
+  });
+
+  it('returns one plot per ownPanel indicator with correct structure', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [10, 20, 30])],
+      indicators: [
+        { input_id: 'X', indicator_id: 'sma', series: [11, 19, 29], ownPanel: false },
+        { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
+        { input_id: 'X', indicator_id: 'macd', series: [0.1, 0.2, 0.3], ownPanel: true },
+      ],
+      events: [],
+    };
+    const panels = buildOwnPanelPlots(result);
+    expect(panels).toHaveLength(2);
+
+    // First panel: rsi
+    expect(panels[0].title).toBe('rsi');
+    expect(panels[0].downloadFilename).toBe('signal-indicator-rsi');
+    expect(panels[0].hasData).toBe(true);
+    // Should have input traces + 1 indicator trace
+    const rsiTraces = panels[0].traces;
+    expect(rsiTraces.length).toBeGreaterThanOrEqual(2); // at least 1 input + 1 indicator
+    const indTrace = rsiTraces.find((t) => t.yaxis === 'y2');
+    expect(indTrace).toBeDefined();
+    expect(indTrace.y).toEqual([50, 60, 70]);
+    expect(indTrace.name).toMatch(/rsi/);
+    // Layout has y2 for the indicator
+    expect(panels[0].layoutOverrides.yaxis2.side).toBe('right');
+    expect(panels[0].layoutOverrides.yaxis2.title.text).toBe('rsi');
+
+    // Second panel: macd
+    expect(panels[1].title).toBe('macd');
+    expect(panels[1].downloadFilename).toBe('signal-indicator-macd');
+  });
+
+  it('marks hasData false when indicator series is empty', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [10, 20, 30])],
+      indicators: [
+        { input_id: 'X', indicator_id: 'empty', series: [], ownPanel: true },
+      ],
+      events: [],
+    };
+    const panels = buildOwnPanelPlots(result);
+    expect(panels).toHaveLength(1);
+    expect(panels[0].hasData).toBe(false);
   });
 });
