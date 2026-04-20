@@ -1,7 +1,34 @@
 import { useState, useEffect, useRef } from 'react';
-import SeriesPicker from './SeriesPicker';
+import InstrumentPicker from '../../components/InstrumentPicker/InstrumentPicker';
 import { getSeriesSummary } from '../../api/seriesSummary';
 import styles from './ParamsPanel.module.css';
+
+/**
+ * Convert internal seriesMap entry to InstrumentPicker value format.
+ * Internal: { collection, instrument_id }
+ * Picker:   { type: 'spot', collection, instrument_id }
+ */
+export function toPickerValue(seriesEntry) {
+  if (!seriesEntry) return null;
+  return { type: 'spot', collection: seriesEntry.collection, instrument_id: seriesEntry.instrument_id };
+}
+
+/**
+ * Convert InstrumentPicker value back to internal seriesMap entry.
+ * Picker spot:       { type: 'spot', collection, instrument_id }
+ * Picker continuous: { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+ * Internal:          { collection, instrument_id }
+ *
+ * For continuous futures the instrument_id is set to the collection name
+ * (the continuous series is identified by its collection).
+ */
+export function fromPickerValue(pickerValue) {
+  if (!pickerValue) return null;
+  if (pickerValue.type === 'continuous') {
+    return { collection: pickerValue.collection, instrument_id: pickerValue.collection };
+  }
+  return { collection: pickerValue.collection, instrument_id: pickerValue.instrument_id };
+}
 
 /**
  * Right panel — parameters, time-series slots, and Run button.
@@ -22,7 +49,7 @@ import styles from './ParamsPanel.module.css';
  *   onRun            {Function}     () => void
  *   running          {boolean}
  *   canRun           {boolean}
- *   defaultCollection {string|null} hint for SeriesPicker mounts
+ *   defaultCollection {string|null} hint for InstrumentPicker initial state
  *   ownPanel         {boolean}      render indicator in a separate chart below
  *   onOwnPanelChange {Function}     (nextBool) => void — noop when readonly
  *
@@ -43,10 +70,6 @@ function ParamsPanel({
   ownPanel,
   onOwnPanelChange,
 }) {
-  // Labels currently in inline-edit mode. Also tracks "add" slots for
-  // empty labels (in which case value=null).
-  const [editingLabels, setEditingLabels] = useState(() => new Set());
-
   // Per-input raw string drafts for numeric fields. Keyed by param name.
   // Allows the user to type "-", "1.", "-0." etc. without snapping to 0.
   // A draft is removed when the user blurs and a valid number is committed.
@@ -59,7 +82,6 @@ function ParamsPanel({
   const [summaries, setSummaries] = useState({});
 
   useEffect(() => {
-    setEditingLabels(new Set());
     setExpandedLabels(new Set());
     setSummaries({});
     // Reset numeric drafts when switching indicator so stale drafts don't leak.
@@ -114,27 +136,6 @@ function ParamsPanel({
   const disabled = !indicator;
   const params = indicator?.params || {};
   const seriesMap = indicator?.seriesMap || {};
-
-  function startEdit(label) {
-    setEditingLabels((prev) => {
-      const next = new Set(prev);
-      next.add(label);
-      return next;
-    });
-  }
-
-  function stopEdit(label) {
-    setEditingLabels((prev) => {
-      const next = new Set(prev);
-      next.delete(label);
-      return next;
-    });
-  }
-
-  function handlePickerSave(label, entry) {
-    onSeriesSave(label, entry);
-    stopEdit(label);
-  }
 
   return (
     <div className={styles.panel}>
@@ -253,52 +254,35 @@ function ParamsPanel({
           <div className={styles.seriesList}>
             {seriesLabels.map((label) => {
               const picked = seriesMap[label] || null;
-              const isEditing = editingLabels.has(label);
-              if (isEditing || !picked) {
-                return (
-                  <div key={label} className={styles.seriesRow}>
-                    <div className={styles.seriesLabelWrap}>
-                      <span className={`${styles.seriesLabelText} codeRefLabel`}>{label}</span>
-                      <SeriesPicker
-                        value={picked}
-                        onSave={(entry) => handlePickerSave(label, entry)}
-                        onCancel={() => stopEdit(label)}
-                        defaultCollection={defaultCollection}
-                        saveLabel="Save"
-                      />
-                    </div>
-                  </div>
-                );
-              }
               const isExpanded = expandedLabels.has(label);
               const summary = summaries[label];
               return (
                 <div key={label} className={styles.seriesRowGroup}>
                   <div className={styles.seriesRow}>
                     <span className={`${styles.seriesLabelText} codeRefLabel`}>{label}</span>
-                    <span className={styles.seriesChip}>
-                      {picked.collection} / {picked.instrument_id}
-                    </span>
-                    <button
-                      className={styles.iconBtn}
-                      onClick={() => toggleDetails(label, picked)}
-                      title={isExpanded ? 'Hide details' : 'Show details'}
-                      aria-label={`${isExpanded ? 'Hide' : 'Show'} details for ${label}`}
-                      aria-expanded={isExpanded}
-                      disabled={disabled}
-                    >
-                      ⓘ
-                    </button>
-                    <button
-                      className={styles.iconBtn}
-                      onClick={() => startEdit(label)}
-                      title="Edit series"
-                      aria-label={`Edit series ${label}`}
-                      disabled={disabled}
-                    >
-                      ✎
-                    </button>
+                    {picked && (
+                      <>
+                        <span className={styles.seriesChip}>
+                          {picked.collection} / {picked.instrument_id}
+                        </span>
+                        <button
+                          className={styles.iconBtn}
+                          onClick={() => toggleDetails(label, picked)}
+                          title={isExpanded ? 'Hide details' : 'Show details'}
+                          aria-label={`${isExpanded ? 'Hide' : 'Show'} details for ${label}`}
+                          aria-expanded={isExpanded}
+                          disabled={disabled}
+                        >
+                          ⓘ
+                        </button>
+                      </>
+                    )}
                   </div>
+                  <InstrumentPicker
+                    value={toPickerValue(picked)}
+                    onChange={(next) => onSeriesSave(label, fromPickerValue(next))}
+                    testId={`instrument-picker-${label}`}
+                  />
                   {isExpanded && (
                     <div className={styles.detailsPane} role="region" aria-label={`Details for ${label}`}>
                       <div className={styles.detailsHeader}>

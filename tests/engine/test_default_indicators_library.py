@@ -1,4 +1,4 @@
-"""Smoke tests for the 22 default indicators shipped with the UI.
+"""Smoke tests for the 23 default indicators shipped with the UI.
 
 Each test:
  1. Reads the raw .js file for the indicator.
@@ -101,9 +101,9 @@ def _extract_defaults(py_source: str) -> dict[str, int | float | bool]:
 # Discover all default indicator files up front so pytest's collection
 # lists them by id in the progress output.
 _INDICATOR_FILES = sorted(DEFAULTS_DIR.glob("*.js"))
-if len(_INDICATOR_FILES) != 22:
+if len(_INDICATOR_FILES) != 23:
     raise AssertionError(
-        f"expected 22 default indicator files under {DEFAULTS_DIR}, got "
+        f"expected 23 default indicator files under {DEFAULTS_DIR}, got "
         f"{len(_INDICATOR_FILES)}"
     )
 

@@ -98,7 +98,7 @@ describe('BlockEditor (v3 / iter-4)', () => {
     expect(screen.getByTestId('block-weight-0')).toBeDefined();
   });
 
-  it('block header shows an input-id dropdown (no more SeriesPicker popover)', () => {
+  it('block header shows an input-id dropdown (uses InstrumentPicker)', () => {
     const seeded = {
       ...emptyRules(),
       long_entry: [{ input_id: 'X', weight: 0.5, conditions: [] }],

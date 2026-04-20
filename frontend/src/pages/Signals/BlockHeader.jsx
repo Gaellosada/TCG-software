@@ -8,7 +8,7 @@ import styles from './Signals.module.css';
  * the signal's declared inputs), weight input (entry tabs only —
  * hidden on exit tabs), delete-block button gated by ConfirmDialog.
  *
- * No more inline SeriesPicker popover — the user picks instruments once
+ * No more inline instrument popover — the user picks instruments once
  * in the InputsPanel at the top of the page, then references them here.
  *
  * Props:
