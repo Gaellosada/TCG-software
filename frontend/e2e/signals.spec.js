@@ -222,3 +222,126 @@ test.describe('Signals page (v3)', () => {
     await expect(page.getByTestId('input-row-0')).toBeVisible();
   });
 });
+
+// ----------------------------------------------------------------------
+// iter-5 ask #6 smoke test — 2-plot Results section (I3 worktree).
+// Kept in a separate describe block so I2's focus-regression test (if
+// added) and this one don't fight for placement. DO NOT merge with the
+// v3 block above.
+// ----------------------------------------------------------------------
+test.describe('Signals Results 2-plot (iter-5)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      try { window.localStorage.removeItem('tcg.signals.v2'); } catch { /* noop */ }
+    });
+
+    await page.route('**/api/data/collections*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ collections: ['INDEX'] }),
+      });
+    });
+    await page.route('**/api/data/INDEX*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [{ symbol: '^GSPC', asset_class: 'INDEX', collection: 'INDEX' }],
+          total: 1, skip: 0, limit: 500,
+        }),
+      });
+    });
+
+    // iter-5 payload contract P5-6 — realized_pnl + events + indicators.
+    await page.route('**/api/signals/compute', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          timestamps: [1577923200000, 1578009600000, 1578268800000],
+          positions: [
+            {
+              input_id: 'X',
+              instrument: { type: 'spot', collection: 'INDEX', instrument_id: '^GSPC' },
+              values: [0, 1, 0],
+              clipped_mask: [false, false, false],
+              price: { label: '^GSPC.close', values: [3200, 3250, 3275] },
+            },
+          ],
+          indicators: [
+            { input_id: 'X', indicator_id: 'sma', series: [3205, 3240, 3270] },
+          ],
+          events: [
+            {
+              input_id: 'X', block_id: 'b1', kind: 'long_entry',
+              fired_indices: [0], latched_indices: [0],
+            },
+          ],
+          realized_pnl: [[0, 50, 75]],
+          entries_skipped_budget: 0,
+          clipped: false,
+          diagnostics: {},
+        }),
+      });
+    });
+  });
+
+  test('renders 2 distinct plotly divs in the Results section after Run', async ({ page }) => {
+    // Pre-seed a runnable v3 signal: one configured spot input plus a
+    // long_entry block referencing that input with a complete instrument
+    // condition. This matches the Run-gate in SignalsPage.
+    await page.addInitScript(() => {
+      try {
+        const signals = {
+          version: 3,
+          signals: [{
+            id: 'sig-smoke',
+            name: 'Smoke Signal',
+            inputs: [{
+              id: 'X',
+              instrument: { type: 'spot', collection: 'INDEX', instrument_id: '^GSPC' },
+            }],
+            rules: {
+              long_entry: [{
+                input_id: 'X',
+                weight: 1,
+                conditions: [{
+                  op: 'gt',
+                  lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+                  rhs: { kind: 'constant', value: 0 },
+                }],
+              }],
+              long_exit: [], short_entry: [], short_exit: [],
+            },
+          }],
+        };
+        window.localStorage.setItem('tcg.signals.v3', JSON.stringify(signals));
+      } catch { /* noop */ }
+    });
+
+    await page.goto(`${BASE}/signals`);
+    await expect(page.getByText('Smoke Signal')).toBeVisible();
+
+    // Before Run: empty chart state.
+    await expect(page.getByTestId('signal-chart-empty')).toBeVisible();
+
+    const runBtn = page.getByTestId('run-signal-btn');
+    await expect(runBtn).toBeEnabled();
+    await runBtn.click();
+
+    // After Run: both plot containers mount.
+    await expect(page.getByTestId('results-view')).toBeVisible();
+    await expect(page.getByTestId('results-plot-top')).toBeVisible();
+    await expect(page.getByTestId('results-plot-bottom')).toBeVisible();
+
+    // There must be TWO Plotly divs — one per plot. Plotly renders each
+    // instance as a .js-plotly-plot div.
+    const plots = page.locator('.js-plotly-plot');
+    await expect(plots).toHaveCount(2);
+
+    // The shell empty-state must disappear once data is present.
+    await expect(page.getByTestId('signal-chart-empty')).toHaveCount(0);
+  });
+});
+

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import SignalsList from './SignalsList';
 import BlockEditor from './BlockEditor';
 import ParamsPanel from './ParamsPanel';
-import SignalChart from './SignalChart';
+import ResultsView from './ResultsView';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
 import { loadState, saveState, emptyRules } from './storage';
@@ -404,7 +404,7 @@ function SignalsPage() {
           bodyClassName={styles.resultsCardBody}
           data-testid="signal-results-card"
         >
-          <SignalChart result={lastResult} loading={running} error={error} />
+          <ResultsView result={lastResult} loading={running} error={error} />
         </Card>
       </div>
       <ConfirmDialog
