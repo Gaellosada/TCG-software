@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import OperandSlot from './OperandSlot';
 import BlockHeader from './BlockHeader';
-import ConfirmDialog from './ConfirmDialog';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import {
   ALL_OPS,
   OP_LABELS,

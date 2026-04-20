@@ -3,7 +3,7 @@ import SignalsList from './SignalsList';
 import BlockEditor from './BlockEditor';
 import ParamsPanel from './ParamsPanel';
 import SignalChart from './SignalChart';
-import ConfirmDialog from './ConfirmDialog';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import { loadState, saveState, emptyRules } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
