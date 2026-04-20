@@ -199,7 +199,12 @@ async def test_entry_weight_zero_skipped():
 
 
 @pytest.mark.asyncio
-async def test_clipping_on_weight_gt_one():
+async def test_budget_skip_two_long_entries():
+    """Two long_entry blocks at w=0.8 each: first latches (total 0.8);
+    second is SKIPPED on every bar (0.8 + 0.8 > 1.0). Under iter-5
+    latching semantics, position = 0.8 for all bars; clipped_mask
+    (repurposed as "budget-skipped this bar") True on every bar.
+    """
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     cond = CompareCondition(
@@ -220,12 +225,20 @@ async def test_clipping_on_weight_gt_one():
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
     assert result.clipped is True
-    assert list(result.positions[0].values) == [1.0] * 5
+    assert list(result.positions[0].values) == pytest.approx([0.8] * 5)
     assert all(result.positions[0].clipped_mask)
+    # Diagnostic: second block tried and failed on every bar (5 skips).
+    assert result.entries_skipped_budget == 5
 
 
 @pytest.mark.asyncio
-async def test_exit_kills_position():
+async def test_exit_reentry_same_bar_relatches():
+    """Under latching: entry cond fires on every bar; exit cond fires
+    at t=3,4. Clear-pass then entry-pass within the same bar: exit
+    clears the long latch, but the entry condition is still True so the
+    block re-latches → position stays 1.0. This is the documented
+    same-bar exit+entry behaviour (research §2.4).
+    """
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = CompareCondition(
@@ -249,7 +262,163 @@ async def test_exit_kills_position():
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
     vals = list(result.positions[0].values)
-    assert vals == [1.0, 1.0, 1.0, 0.0, 0.0]
+    assert vals == pytest.approx([1.0, 1.0, 1.0, 1.0, 1.0])
+
+
+@pytest.mark.asyncio
+async def test_latched_entry_persists_without_condition():
+    """Entry fires at t=1 only; position latches and persists through
+    t=2..4 even though condition is False (the new iter-5 behaviour).
+    """
+    closes = np.array([10.0, 11.0, 10.0, 10.0, 10.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    # close > 10.5 is True only at t=1 (where close=11).
+    entry = CompareCondition(
+        op="gt",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=10.5),
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(
+            long_entry=(Block(input_id="X", weight=0.5, conditions=(entry,)),),
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    vals = list(result.positions[0].values)
+    assert vals == pytest.approx([0.0, 0.5, 0.5, 0.5, 0.5])
+
+
+@pytest.mark.asyncio
+async def test_same_side_exit_clears_does_not_reentry_when_cond_false():
+    """Entry fires at t=1; exit fires at t=3. Entry condition is False
+    at t=3 (no re-entry). Position goes 0 → 0.5 at t=1, persists until
+    t=3 where the latch is cleared and stays cleared.
+    """
+    closes = np.array([10.0, 11.0, 10.0, 10.0, 10.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = CompareCondition(
+        op="gt",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=10.5),
+    )
+    # exit fires where close <= 10 — fires at t=0, 2, 3, 4.
+    exit_c = CompareCondition(
+        op="le",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=10.0),
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(
+            long_entry=(Block(input_id="X", weight=0.5, conditions=(entry,)),),
+            long_exit=(Block(input_id="X", weight=0.0, conditions=(exit_c,)),),
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    vals = list(result.positions[0].values)
+    # t=0: exit fires (nothing to clear), entry cond false → 0
+    # t=1: exit false, entry fires → 0.5
+    # t=2: exit fires → clear; entry cond false → 0
+    # t=3, t=4: still 0
+    assert vals == pytest.approx([0.0, 0.5, 0.0, 0.0, 0.0])
+
+
+@pytest.mark.asyncio
+async def test_cross_side_exit_does_not_clear_opposite():
+    """Guardrail N6: long_exit must NOT clear a latched short and
+    vice-versa. Setup: at t=1 short latches; at t=2 long_exit fires.
+    Short must stay latched.
+    """
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    # Short entry fires whenever close >= 11 (t=1..4).
+    short_entry_c = CompareCondition(
+        op="ge",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=11.0),
+    )
+    # long_exit fires whenever close >= 12 (t=2..4).
+    long_exit_c = CompareCondition(
+        op="ge",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=12.0),
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(
+            short_entry=(
+                Block(input_id="X", weight=0.5, conditions=(short_entry_c,)),
+            ),
+            long_exit=(
+                Block(input_id="X", weight=0.0, conditions=(long_exit_c,)),
+            ),
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    vals = list(result.positions[0].values)
+    # t=0: no entry → 0
+    # t=1: short latches → -0.5
+    # t=2: long_exit fires (no long latches to clear); short stays → -0.5
+    # t=3, t=4: short still latched (condition still true; already latched) → -0.5
+    assert vals == pytest.approx([0.0, -0.5, -0.5, -0.5, -0.5])
+
+
+@pytest.mark.asyncio
+async def test_global_budget_across_inputs():
+    """Global budget (P5-3): long on X w=0.6 latches first; attempt to
+    latch short on Y w=0.5 is SKIPPED (0.6 + 0.5 > 1.0). Second short
+    on Y at w=0.3 succeeds (0.6 + 0.3 ≤ 1.0).
+    """
+    spx = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    ndx = np.array([100.0, 99.0, 98.0, 97.0, 96.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
+    )
+    long_x = CompareCondition(
+        op="gt",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=10.5),
+    )  # True t=1..4
+    short_y = CompareCondition(
+        op="lt",
+        lhs=InstrumentOperand(input_id="Y"),
+        rhs=ConstantOperand(value=99.5),
+    )  # True t=1..4
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(
+            long_entry=(
+                Block(input_id="X", weight=0.6, conditions=(long_x,)),
+            ),
+            short_entry=(
+                # Declaration order: the 0.5 block comes first → gets
+                # first chance → skipped (0.6 + 0.5 > 1.0).
+                Block(input_id="Y", weight=0.5, conditions=(short_y,)),
+                Block(input_id="Y", weight=0.3, conditions=(short_y,)),
+            ),
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    by_id = {p.input_id: p for p in result.positions}
+    # X: long 0.6 latched from t=1 onward.
+    assert list(by_id["X"].values) == pytest.approx([0.0, 0.6, 0.6, 0.6, 0.6])
+    # Y: only the 0.3 short latches (the 0.5 block is skipped forever).
+    assert list(by_id["Y"].values) == pytest.approx(
+        [0.0, -0.3, -0.3, -0.3, -0.3]
+    )
+    # ≥4 skip events (one per bar where the 0.5 block's cond was true
+    # but budget was insufficient, every bar from t=1).
+    assert result.entries_skipped_budget >= 4
+    assert result.clipped is True
 
 
 @pytest.mark.asyncio

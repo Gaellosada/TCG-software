@@ -25,6 +25,13 @@ from tcg.types.market import PriceSeries
 DATES = np.array(
     [20240102, 20240103, 20240104, 20240105, 20240108, 20240109], dtype=np.int64
 )
+LATCH_DATES = np.array(
+    [
+        20240102, 20240103, 20240104, 20240105,
+        20240108, 20240109, 20240110, 20240111,
+    ],
+    dtype=np.int64,
+)
 
 
 def _price_series(closes: np.ndarray) -> PriceSeries:
@@ -234,3 +241,204 @@ async def test_http_roundtrip_v3_two_inputs_indicator_operand(
     # Prices are attached and labeled per the underlying instrument.
     assert by_id["X"]["price"]["label"] == "SPX.close"
     assert by_id["Y"]["price"]["label"] == "NDX.close"
+
+
+# ---------------------------------------------------------------------------
+# iter-5 — latched-position semantics over the HTTP boundary
+# ---------------------------------------------------------------------------
+
+
+# Designed so that each bar triggers exactly one block's condition via
+# equality comparisons against a single close series.
+LATCH_CLOSES = np.array(
+    [100.0, 11.0, 100.0, 33.0, 44.0, 11.0, 66.0, 22.0]
+)
+
+
+def _latch_price_series(closes: np.ndarray) -> PriceSeries:
+    n = LATCH_DATES.shape[0]
+    return PriceSeries(
+        dates=LATCH_DATES,
+        open=closes - 1.0,
+        high=closes + 1.0,
+        low=closes - 2.0,
+        close=closes,
+        volume=np.full(n, 1000.0, dtype=np.float64),
+    )
+
+
+@pytest.fixture
+def latch_app():
+    """ASGI app wired with an 8-bar SPX series crafted for latching
+    coverage (one firing pattern per bar)."""
+    svc = MagicMock()
+
+    async def fake_get_prices(collection, instrument_id, start=None, end=None):
+        if instrument_id == "SPX":
+            return _latch_price_series(LATCH_CLOSES)
+        return None
+
+    svc.get_prices = AsyncMock(side_effect=fake_get_prices)
+
+    app = FastAPI()
+    app.add_exception_handler(TCGError, tcg_error_handler)
+    app.include_router(signals_router)
+    app.state.market_data = svc
+    return app
+
+
+@pytest.fixture
+async def latch_client(latch_app):
+    transport = ASGITransport(app=latch_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+def _eq_block(input_id: str, weight: float, threshold: float) -> dict:
+    """Helper: build a block that fires when ``close == threshold``."""
+    return {
+        "input_id": input_id,
+        "weight": weight,
+        "conditions": [
+            {
+                "op": "eq",
+                "lhs": {
+                    "kind": "instrument",
+                    "input_id": input_id,
+                    "field": "close",
+                },
+                "rhs": {"kind": "constant", "value": threshold},
+            }
+        ],
+    }
+
+
+async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
+    """Mandatory HTTP integration test (guardrail G2, P5-3..P5-6).
+
+    8-bar SPX close series ``[100, 11, 100, 33, 44, 11, 66, 22]`` with
+    block conditions crafted so each bar fires exactly the block we
+    want to exercise. Asserts:
+      (a) entry latch persists across a bar where condition is False
+          (t=2 holds A's latch);
+      (b) same-side exit clears same-side latches (t=3 long_exit → 0);
+      (c) cross-side exit does NOT clear the opposite latch
+          (t=6 short_exit leaves the long latch alone);
+      (d) global budget ≤ 1.0 SKIPS would-be-latches (t=7 block C
+          w=0.5 can't latch on top of A w=0.6);
+      (e) events / realized_pnl / indicators shapes match the P5-6
+          contract consumed by I3.
+    """
+    body = {
+        "spec": {
+            "id": "latch-demo",
+            "name": "Latching coverage",
+            "inputs": [
+                {
+                    "id": "X",
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "INDEX",
+                        "instrument_id": "SPX",
+                    },
+                }
+            ],
+            "rules": {
+                # Declaration order matters: A (w=0.6) is evaluated
+                # before C (w=0.5) at bars where both could latch.
+                "long_entry": [
+                    _eq_block("X", 0.6, 11.0),  # block A → t=1, t=5
+                    _eq_block("X", 0.5, 22.0),  # block C → t=7 (SKIP)
+                ],
+                "long_exit": [
+                    _eq_block("X", 0.0, 33.0),  # fires t=3
+                ],
+                "short_entry": [
+                    _eq_block("X", 0.4, 44.0),  # block B → t=4
+                ],
+                "short_exit": [
+                    _eq_block("X", 0.0, 66.0),  # fires t=6
+                ],
+            },
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+
+    resp = await latch_client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # ---- Response shape (iter-5 additions live alongside iter-3 keys) ----
+    assert set(data.keys()) >= {
+        "timestamps",
+        "positions",
+        "realized_pnl",
+        "events",
+        "indicators",
+        "entries_skipped_budget",
+        "clipped",
+        "diagnostics",
+    }
+    assert isinstance(data["realized_pnl"], list)
+    assert isinstance(data["events"], list)
+    assert isinstance(data["indicators"], list)
+    assert isinstance(data["entries_skipped_budget"], int)
+
+    # ---- Position path (P5-3..P5-5) ----
+    by_id = {p["input_id"]: p for p in data["positions"]}
+    vals = by_id["X"]["values"]
+    # (a) latch persists at t=2; (b) same-side exit clears at t=3;
+    # (c) cross-side exit at t=6 does NOT clear the long;
+    # (d) t=7 C's entry skipped → position unchanged.
+    assert vals == pytest.approx([0.0, 0.6, 0.6, 0.0, -0.4, 0.2, 0.6, 0.6])
+
+    # Budget skip surface ----
+    assert data["entries_skipped_budget"] == 1
+    # clipped_mask (repurposed) marks the bar where an entry was skipped.
+    skipped = by_id["X"]["clipped_mask"]
+    assert skipped[7] is True
+    assert sum(1 for s in skipped if s) == 1
+    assert data["clipped"] is True
+
+    # ---- Events payload ----
+    ev_by = {
+        (ev["input_id"], ev["block_id"]): ev for ev in data["events"]
+    }
+    # A (long_entry#0): fired t=1, t=5; both resulted in a latch (after
+    # t=3 clear, A re-latches at t=5).
+    a = ev_by[("X", "long_entry#0")]
+    assert a["kind"] == "long_entry"
+    assert a["fired_indices"] == [1, 5]
+    assert a["latched_indices"] == [1, 5]
+    # C (long_entry#1): fired t=7 but SKIPPED → latched_indices empty.
+    c = ev_by[("X", "long_entry#1")]
+    assert c["fired_indices"] == [7]
+    assert c["latched_indices"] == []
+    # long_exit: fired t=3; latched_indices mirrors fired for exit
+    # blocks (per P5-6).
+    lex = ev_by[("X", "long_exit#0")]
+    assert lex["kind"] == "long_exit"
+    assert lex["fired_indices"] == [3]
+    assert lex["latched_indices"] == [3]
+    # B (short_entry#0): fired t=4, latched t=4.
+    b = ev_by[("X", "short_entry#0")]
+    assert b["fired_indices"] == [4]
+    assert b["latched_indices"] == [4]
+    # short_exit: fired t=6; latched_indices == fired_indices.
+    sex = ev_by[("X", "short_exit#0")]
+    assert sex["fired_indices"] == [6]
+    assert sex["latched_indices"] == [6]
+
+    # ---- realized_pnl shape + monotonicity where expected ----
+    assert len(data["realized_pnl"]) == 1
+    pnl = data["realized_pnl"][0]
+    assert len(pnl) == len(data["timestamps"])
+    # First bar always zero.
+    assert pnl[0] == 0.0
+    # Every entry is a finite float.
+    for v in pnl:
+        assert isinstance(v, float)
+
+    # ---- indicators (no indicator operands in this test) ----
+    assert data["indicators"] == []
