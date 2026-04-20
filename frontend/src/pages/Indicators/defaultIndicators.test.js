@@ -82,20 +82,6 @@ describe('DEFAULT_INDICATORS — library invariants', () => {
     expect(ids).toEqual(expected);
   });
 
-  it('sparse-output indicators render as markers so they stay visible', () => {
-    // swing-pivots and engulfment-pattern both emit values only on event
-    // bars (pivot / breakout) and NaN everywhere else. A plain 'lines'
-    // trace over mostly-NaN data is visually empty, so these indicators
-    // opt into marker rendering via chartMode. Regression guard: if the
-    // flag is ever dropped, the indicator disappears from the chart.
-    const SPARSE_MARKER_IDS = ['swing-pivots', 'engulfment-pattern'];
-    for (const id of SPARSE_MARKER_IDS) {
-      const entry = DEFAULT_INDICATORS.find((e) => e.id === id);
-      expect(entry, `${id} missing from DEFAULT_INDICATORS`).toBeDefined();
-      expect(entry.chartMode, `${id} must declare chartMode = 'markers'`).toBe('markers');
-    }
-  });
-
   it('splits overlay / own-panel across defaults as expected', () => {
     const overlay = DEFAULT_INDICATORS.filter((e) => e.ownPanel === false).length;
     const ownPanel = DEFAULT_INDICATORS.filter((e) => e.ownPanel === true).length;

@@ -40,21 +40,18 @@ function IndicatorChart({ indicator, result, loading, error }) {
       connectgaps: false,
     }));
 
-    // Rendering mode — default to a continuous line; indicators that emit
-    // sparse outputs (e.g. swing-pivots, engulfment-pattern) opt into
-    // markers via indicator.chartMode so the points are actually visible
-    // on the chart.
+    // Rendering mode — default to a continuous line. Indicators that emit
+    // sparse outputs (e.g. swing-pivots, engulfment-pattern) rely on
+    // ``connectgaps: true`` below so NaN gaps between isolated non-NaN
+    // points are bridged — the indicator renders as a zigzag line that
+    // visually connects consecutive pivots / breakouts across the NaN
+    // bars between them. Without connectgaps a sparse output would draw
+    // no line segments and be invisible.
     //
-    // Marker styling is mode-dependent: for sparse 'markers' outputs the
-    // points can sit directly on top of the price line (swing-pivots
-    // emits actual price levels at pivot bars) — at the default Plotly
-    // marker size of 6, with no border, a small amber dot on a thin
-    // price line is visually absorbed. So in markers mode we bump the
-    // size, switch to a diamond symbol, and add a contrasting border so
-    // the points pop against whatever the underlying price line looks
-    // like. 'lines' mode keeps the previous thin-line styling untouched.
+    // ``chartMode`` is honoured as an author hint (registry-only — not
+    // round-tripped through user state) but no fancy marker styling is
+    // applied for 'markers'; Plotly's defaults are fine.
     const chartMode = indicator?.chartMode || 'lines';
-    const isMarkersMode = chartMode === 'markers';
     const INDICATOR_COLOR = '#f59e0b';
     const baseIndTrace = {
       x: dates,
@@ -63,19 +60,13 @@ function IndicatorChart({ indicator, result, loading, error }) {
       mode: chartMode,
       name: indicator?.name || 'Indicator',
       line: { color: INDICATOR_COLOR, width: 1 },
-      marker: isMarkersMode
-        ? {
-            color: INDICATOR_COLOR,
-            size: 10,
-            symbol: 'diamond',
-            // Dark outline gives the marker a crisp shape boundary against
-            // whatever the price line / background is — works on both
-            // light and dark themes.
-            line: { color: '#1a1a1a', width: 1 },
-          }
-        : { color: INDICATOR_COLOR, size: 6 },
+      marker: { color: INDICATOR_COLOR, size: 6 },
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
-      connectgaps: false,
+      // Bridge NaN gaps on the indicator trace so sparse-output indicators
+      // (swing-pivots, engulfment-pattern) render as a visible zigzag line
+      // connecting consecutive non-NaN points. Price trace keeps
+      // connectgaps=false (actual missing data must remain as gaps).
+      connectgaps: true,
     };
 
     if (ownPanel) {

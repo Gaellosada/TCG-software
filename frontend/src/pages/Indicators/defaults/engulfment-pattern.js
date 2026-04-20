@@ -1,11 +1,12 @@
 // Engulfment Pattern — rolling range-breakout detector.
 // State machine emitting the breakout price level (POSITIVE) on the bar
 // the breakout occurs; NaN otherwise.
-// Because output is sparse (most bars are NaN), the chart renders markers
-// rather than a line trace (see ``chartMode`` below). Direction
-// (bullish / bearish) is NOT encoded in the sign: users cross-reference
-// the marker position against the candle to see if it hit the high side
-// or the low side.
+// The chart renders this as a zigzag line (connectgaps=true on the
+// indicator trace) overlaid on price, so sparse breakout points are
+// joined across the NaN bars between them and remain visible against
+// the price trace. Direction (bullish / bearish) is NOT encoded in the
+// sign: users cross-reference the point's position against the candle
+// to see if it hit the high side or the low side.
 const code = `def compute(series, min_engulfing_periods: int = 5):
     o = series['open']
     h = series['high']
@@ -69,10 +70,6 @@ export default {
   code,
   params: {},
   seriesMap: {},
-  // Chart renders breakouts as markers rather than a continuous line — most
-  // bars are NaN (only breakout bars carry a value), so a line trace would
-  // be effectively invisible. Same pattern as swing-pivots.
-  chartMode: 'markers',
   doc: `> ⚠️ **Requires OHLC data.** This indicator reads the **open, high, and low** series in addition to close-derived state. Some datasets in this platform only contain close / adjusted-close — if yours does, this indicator will fail or return all-NaN. Check your source before selecting this indicator.
 
 **Intuition.** Tracks a rolling consolidation "engulfment box" — the highest high and lowest low over a stretch of bars during which neither extreme is broken. When a subsequent bar pierces the box on the high side or the low side, the indicator emits the breakout price level on that bar and starts tracking a new box from the breakout bar's range. Practitioners use it as a range-breakout entry signal: long consolidations often precede larger directional moves.
@@ -101,13 +98,13 @@ Both-sides-in-one-bar tiebreak: pick the level closer to the open
 **Parameters**
 - \`min_engulfing_periods\` (int, default 5): minimum consolidation length before breakouts are reported. Shorter values yield more and noisier signals.
 
-**Output encoding.** Both upside and downside breakouts are emitted as the raw **positive** price level at the breakout bar (upside = \`max(open_t, eng_high)\`, downside = \`min(open_t, eng_low)\`); non-breakout bars are \`NaN\`. Direction is **not** encoded in the sign — to distinguish a bullish from a bearish breakout, cross-reference the marker position against the candle (markers sitting near the candle high flag an upside break; near the low, a downside break). On the chart the points render as markers so the sparse output is visible.
+**Output encoding.** Both upside and downside breakouts are emitted as the raw **positive** price level at the breakout bar (upside = \`max(open_t, eng_high)\`, downside = \`min(open_t, eng_low)\`); non-breakout bars are \`NaN\`. Direction is **not** encoded in the sign — to distinguish a bullish from a bearish breakout, cross-reference the point's position against the candle (points sitting near the candle high flag an upside break; near the low, a downside break). On the chart, breakout levels render as a zigzag line overlaid on price — consecutive breakouts are joined across the NaN bars between them so the sparse output is visible.
 
 **Edge cases**
 - Output is \`NaN\` on non-breakout bars. Consumers can \`~np.isnan()\` to detect events.
 - A truly flat series that never breaks will never emit a signal.
 - \`NaN\` in the input corrupts the state machine for subsequent bars; clean upstream.
 
-**Notes on output contract.** The underlying semantics emit two quantities (breakout level + signed period count) and previously folded direction into the sign of the level. That produced negative price values which rendered off-chart; the current contract emits only the positive level and relies on marker rendering for visibility.`,
+**Notes on output contract.** The underlying semantics emit two quantities (breakout level + signed period count) and previously folded direction into the sign of the level. That produced negative price values which rendered off-chart; the current contract emits only the positive level and relies on the zigzag line overlay for visibility.`,
   ownPanel: false,
 };

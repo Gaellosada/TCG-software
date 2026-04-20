@@ -1,8 +1,9 @@
 // Swing Pivots — confirmed local extrema with inflection lag.
 // Emits the price level at confirmed swing highs AND swing lows as a
 // POSITIVE value; NaN elsewhere. The chart renders this indicator as
-// markers (see ``chartMode`` below) because the output is sparse
-// (<5% of bars are pivots) and a plain line trace would be invisible.
+// a zigzag line (connectgaps=true on the indicator trace) so consecutive
+// confirmed pivots are joined across the NaN bars between them — the
+// line visually passes through the price at each pivot bar.
 const code = `def compute(series, total_periods: int = 20, inflection_periods: int = 5):
     s = series['close']
     n = s.shape[0]
@@ -47,9 +48,6 @@ export default {
   code,
   params: {},
   seriesMap: {},
-  // Chart renders pivots as markers rather than a continuous line — the
-  // output is NaN at ~95% of bars, so a line trace would draw nothing.
-  chartMode: 'markers',
   doc: `⚠️ **Note.** This detects **pivot inflections** (confirmed swing highs and swing lows with a confirmation delay), **NOT** a rolling high/low envelope. If you want price-range bands (upper = rolling max of highs, lower = rolling min of lows, à la Donchian Channel), use \`trailing-extreme\` with the appropriate mode instead.
 
 **Intuition.** Detects confirmed swing highs and swing lows (local extrema) in close using two windows: a larger \`total_periods\` window used to define the extreme, and a smaller \`inflection_periods\` window used as a confirmation delay. A swing high is confirmed when the bar \`inflection_periods\` ago was the maximum of the enclosing \`total_periods\` window AND is a new high since the last confirmed swing low. Swing lows are symmetric. Practitioners use these pivots for support / resistance levels, Elliott-wave labelling, and zig-zag chart overlays. Because pivots are confirmed with a lag, outputs are always stamped at the pivot bar itself (not the confirmation bar).
@@ -71,7 +69,7 @@ The \`last_max = None\` reset after a low (and vice versa) enforces the alternat
 - \`total_periods\` (int, default 20): window over which the extreme must hold.
 - \`inflection_periods\` (int, default 5): confirmation delay. Must satisfy \`1 <= inflection_periods <= total_periods\`.
 
-**Output encoding.** Both swing highs and swing lows are emitted as the raw **positive** price level at the pivot bar; non-pivot bars are \`NaN\`. Direction is not encoded in the sign — distinguish a high from a low by position (a point above nearby prices is a high, below is a low) or by cross-referencing with the close trace. On the chart the points render as markers so the sparse output is visible.
+**Output encoding.** Both swing highs and swing lows are emitted as the raw **positive** price level at the pivot bar; non-pivot bars are \`NaN\`. Direction is not encoded in the sign — distinguish a high from a low by position (a point above nearby prices is a high, below is a low) or by cross-referencing with the close trace. On the chart, pivots render as a zigzag line connecting consecutive swing highs and lows — the line visually passes through the price at each confirmed pivot bar.
 
 **Edge cases**
 - Output is \`NaN\` on all non-pivot bars. The first bar at which a pivot can be emitted is index \`total_periods - 1 - inflection_periods\` — that is the first bar where \`t >= total_periods - 1\` and thus \`cand_idx = t - inflection_periods\` lies inside a full \`total_periods\`-length window.
