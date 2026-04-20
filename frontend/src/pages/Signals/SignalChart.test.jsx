@@ -1,15 +1,10 @@
 // @vitest-environment jsdom
 //
-// Tests for SignalChart's position-only fallback path.
+// SignalChart tests for the iter-3 v2 response shape.
+// Response: { timestamps, positions: [{instrument, values, clipped_mask, price}], clipped }
 //
-// When the signal spec references no instrument operand, the backend emits
-// `result.price === null` (or omits the field entirely). In that case the
-// component must render ONLY the stacked position subplot — no markers
-// pane, no price trace, no crash. These tests lock down that contract.
-//
-// The shared Chart component is mocked with a minimal stub that captures
-// traces + layoutOverrides so assertions don't depend on Plotly being
-// usable inside jsdom.
+// The shared Chart component is mocked with a stub that captures the
+// traces + layoutOverrides so Plotly doesn't have to run inside jsdom.
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -29,19 +24,21 @@ vi.mock('../../components/Chart', () => {
   return { default: ChartStub };
 });
 
-// Import AFTER vi.mock so the stub is wired.
 import SignalChart from './SignalChart';
 
-function makePositionOnlyResult(overrides = {}) {
+function makeV2Result(overrides = {}) {
+  // Three timestamps, one instrument, no price, no clipping.
   return {
-    index: ['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04'],
-    position: [0, 1, 1, 0],
-    long_score: [0, 1, 1, 0],
-    short_score: [0, 0, 0, 0],
-    entries_long: [1],
-    exits_long: [3],
-    entries_short: [],
-    exits_short: [],
+    timestamps: [1577923200000, 1578009600000, 1578268800000],
+    positions: [
+      {
+        instrument: { collection: 'INDEX', instrument_id: '^GSPC' },
+        values: [0, 1, 0],
+        clipped_mask: [false, false, false],
+        price: null,
+      },
+    ],
+    clipped: false,
     ...overrides,
   };
 }
@@ -56,79 +53,85 @@ afterEach(() => {
   consoleErrorSpy.mockRestore();
 });
 
-describe('<SignalChart> — position-only fallback (no instrument operand)', () => {
-  it('renders the position-only pane when result.price is null', () => {
-    const result = makePositionOnlyResult({ price: null });
-    render(<SignalChart result={result} loading={false} error={null} />);
+describe('<SignalChart> v2', () => {
+  it('renders the empty state when no result', () => {
+    render(<SignalChart result={null} loading={false} error={null} />);
+    expect(screen.getByTestId('signal-chart-empty')).toBeDefined();
+  });
 
-    // The position-only testid is present; the full-chart testid is not.
-    expect(screen.getByTestId('signal-chart-position-only')).toBeDefined();
-    expect(screen.queryByTestId('signal-chart-full')).toBeNull();
-
-    // Exactly one trace reaches Chart: the position series. No price line,
-    // no entry/exit marker traces.
+  it('renders one position trace per instrument, no price', () => {
+    render(<SignalChart result={makeV2Result()} loading={false} error={null} />);
+    expect(screen.getByTestId('signal-chart-multi')).toBeDefined();
     expect(chartProps).toHaveLength(1);
+    // One position trace for the one instrument.
     expect(chartProps[0].traces).toHaveLength(1);
-    expect(chartProps[0].traces[0].name).toBe('Position');
-
-    // Layout has no yaxis2 subplot (no stacked price pane).
-    expect(chartProps[0].layoutOverrides.yaxis2).toBeUndefined();
-    // Position trace uses y (not y2) when price is absent.
-    expect(chartProps[0].traces[0].yaxis).toBe('y');
-
-    // No render errors.
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    expect(chartProps[0].traces[0].name).toMatch(/pos/);
+    expect(chartProps[0].layoutOverrides.yaxis).toBeDefined();
   });
 
-  it('behaves identically when the price key is absent entirely', () => {
-    const result = makePositionOnlyResult(); // no `price` key at all
-    render(<SignalChart result={result} loading={false} error={null} />);
-
-    expect(screen.getByTestId('signal-chart-position-only')).toBeDefined();
-    expect(screen.queryByTestId('signal-chart-full')).toBeNull();
-
-    expect(chartProps).toHaveLength(1);
-    expect(chartProps[0].traces).toHaveLength(1);
-    expect(chartProps[0].traces[0].name).toBe('Position');
-    expect(chartProps[0].layoutOverrides.yaxis2).toBeUndefined();
-
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-  });
-
-  it('shows a muted subtitle in position-only mode', () => {
-    const result = makePositionOnlyResult({ price: null });
-    render(<SignalChart result={result} loading={false} error={null} />);
-    const subtitle = screen.getByTestId('signal-chart-subtitle');
-    expect(subtitle).toBeDefined();
-    expect(subtitle.textContent).toMatch(/No instrument operand/i);
-    expect(subtitle.textContent).toMatch(/price overlay hidden/i);
-  });
-
-  it('does not show the subtitle when price is present', () => {
-    const result = makePositionOnlyResult({
-      price: { label: 'AAPL.close', values: [100, 101, 102, 103] },
+  it('overlays price on a right-hand axis when price is present', () => {
+    const result = makeV2Result({
+      positions: [
+        {
+          instrument: { collection: 'INDEX', instrument_id: '^GSPC' },
+          values: [0, 1, 0],
+          clipped_mask: [false, false, false],
+          price: { label: '^GSPC.close', values: [100, 101, 102] },
+        },
+      ],
     });
     render(<SignalChart result={result} loading={false} error={null} />);
-    expect(screen.queryByTestId('signal-chart-subtitle')).toBeNull();
+    // Position + price = 2 traces.
+    expect(chartProps[0].traces).toHaveLength(2);
+    expect(chartProps[0].traces.some((t) => t.name.includes('price'))).toBe(true);
   });
 
-  it('renders the full (price + markers) pane when result.price is present', () => {
-    // Sanity check: the non-null branch still works and exposes the other
-    // testid. This guards the null-branch assertions above against
-    // accidentally always passing.
-    const result = makePositionOnlyResult({
-      price: { label: 'AAPL close', values: [100, 101, 102, 103] },
+  it('stacks multiple instruments with per-instrument axes', () => {
+    const result = makeV2Result({
+      positions: [
+        {
+          instrument: { collection: 'INDEX', instrument_id: '^GSPC' },
+          values: [0, 1, 0],
+          clipped_mask: [false, false, false],
+          price: null,
+        },
+        {
+          instrument: { collection: 'INDEX', instrument_id: '^NDX' },
+          values: [0, 0.5, -0.3],
+          clipped_mask: [false, false, false],
+          price: null,
+        },
+      ],
     });
     render(<SignalChart result={result} loading={false} error={null} />);
-
-    expect(screen.getByTestId('signal-chart-full')).toBeDefined();
-    expect(screen.queryByTestId('signal-chart-position-only')).toBeNull();
-
-    // Price trace + 4 marker traces + position trace = 6 traces total.
-    expect(chartProps).toHaveLength(1);
-    expect(chartProps[0].traces.length).toBeGreaterThan(1);
+    expect(chartProps[0].traces).toHaveLength(2);
+    expect(chartProps[0].layoutOverrides.yaxis).toBeDefined();
     expect(chartProps[0].layoutOverrides.yaxis2).toBeDefined();
+  });
 
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  it('shows a clip-banner when clipped=true', () => {
+    const result = makeV2Result({
+      positions: [
+        {
+          instrument: { collection: 'INDEX', instrument_id: '^GSPC' },
+          values: [0, 1, 0.5],
+          clipped_mask: [false, true, true],
+          price: null,
+        },
+      ],
+      clipped: true,
+    });
+    render(<SignalChart result={result} loading={false} error={null} />);
+    const banner = screen.getByTestId('signal-chart-clip-banner');
+    expect(banner).toBeDefined();
+    expect(banner.textContent).toMatch(/Position clipped/);
+    // Mentions the instrument label + bar count (2 bars).
+    expect(banner.textContent).toMatch(/\^GSPC/);
+    expect(banner.textContent).toMatch(/2 bars/);
+  });
+
+  it('does NOT render the banner when clipped=false', () => {
+    render(<SignalChart result={makeV2Result()} loading={false} error={null} />);
+    expect(screen.queryByTestId('signal-chart-clip-banner')).toBeNull();
   });
 });

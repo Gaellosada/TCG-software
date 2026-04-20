@@ -1,5 +1,7 @@
 import { useState } from 'react';
-import OperandPicker from './OperandPicker';
+import OperandSlot from './OperandSlot';
+import BlockHeader from './BlockHeader';
+import ConfirmDialog from './ConfirmDialog';
 import {
   ALL_OPS,
   OP_LABELS,
@@ -7,6 +9,7 @@ import {
   defaultCondition,
   migrateCondition,
 } from './conditionOps';
+import { defaultBlock, isBlockRunnable } from './blockShape';
 import { DIRECTIONS } from './storage';
 import styles from './Signals.module.css';
 
@@ -18,24 +21,16 @@ const DIRECTION_LABELS = {
 };
 
 /**
- * Middle panel — block/condition editor for a single signal.
+ * Middle panel — block/condition editor (iter-3 redesign).
  *
- * Four direction tabs (long_entry / long_exit / short_entry / short_exit)
- * switch the set of blocks being edited. Within each direction:
- *   - blocks are OR'd together (any block firing ⇒ score > 0),
- *   - conditions inside a block are AND'd (all must fire).
+ * Block header uses BlockHeader (instrument + weight + delete).
+ * Operand slots use OperandSlot (+ menu / × confirm).
+ * Deletes route through ConfirmDialog.
  *
  * Props:
- *   rules             {Object}   {long_entry: Block[], long_exit: Block[], ...}
- *   onRulesChange     {Function} (nextRules) => void
- *   indicators        {Array}    list of saved indicators from the Indicators
- *                                localStorage; rendered in the Indicator tab
- *                                of the operand picker.
- *
- * Block logic is local to this component — mutations always produce a
- * deep-ish clone of the active direction and propagate the full
- * ``rules`` object upward. The parent is responsible for plumbing this
- * into its signal state + storage.
+ *   rules              {Object}
+ *   onRulesChange      {Function}
+ *   indicators         {Array}
  */
 function BlockEditor({ rules, onRulesChange, indicators }) {
   const [direction, setDirection] = useState('long_entry');
@@ -46,11 +41,18 @@ function BlockEditor({ rules, onRulesChange, indicators }) {
   }
 
   function handleAddBlock() {
-    updateBlocks([...blocks, { conditions: [defaultCondition('gt')] }]);
+    // Iter-3 + ORDERS guardrail 2: no defaults — a fresh block has a
+    // null instrument, weight 0, and NO conditions. User explicitly adds
+    // each piece.
+    updateBlocks([...blocks, defaultBlock()]);
   }
 
   function handleRemoveBlock(blockIdx) {
     updateBlocks(blocks.filter((_, i) => i !== blockIdx));
+  }
+
+  function handleUpdateBlock(blockIdx, nextBlock) {
+    updateBlocks(blocks.map((b, i) => (i === blockIdx ? nextBlock : b)));
   }
 
   function handleAddCondition(blockIdx) {
@@ -105,8 +107,7 @@ function BlockEditor({ rules, onRulesChange, indicators }) {
       </div>
 
       <div className={styles.directionHint}>
-        Blocks are <strong>OR</strong>&rsquo;d together. Conditions inside a block
-        are <strong>AND</strong>&rsquo;d.
+        Blocks are <strong>OR</strong>&rsquo;d. Conditions in a block are <strong>AND</strong>&rsquo;d.
       </div>
 
       <div className={styles.blocksList}>
@@ -120,7 +121,9 @@ function BlockEditor({ rules, onRulesChange, indicators }) {
               key={blockIdx}
               blockIdx={blockIdx}
               block={block}
+              direction={direction}
               isFirst={blockIdx === 0}
+              onUpdateBlock={(next) => handleUpdateBlock(blockIdx, next)}
               onAddCondition={() => handleAddCondition(blockIdx)}
               onRemoveCondition={(condIdx) => handleRemoveCondition(blockIdx, condIdx)}
               onUpdateCondition={(condIdx, next) => handleUpdateCondition(blockIdx, condIdx, next)}
@@ -145,7 +148,9 @@ function BlockEditor({ rules, onRulesChange, indicators }) {
 function Block({
   blockIdx,
   block,
+  direction,
   isFirst,
+  onUpdateBlock,
   onAddCondition,
   onRemoveCondition,
   onUpdateCondition,
@@ -153,25 +158,31 @@ function Block({
   indicators,
 }) {
   const conditions = block.conditions || [];
+  // PROB-2 fix: pass direction so entry blocks with weight=0 show as
+  // not-runnable in the per-block status dot (matches backend semantics).
+  const runnable = isBlockRunnable(block, direction);
   return (
     <div className={styles.block} data-testid={`block-${blockIdx}`}>
       {!isFirst && <div className={styles.blockOrLabel}>OR</div>}
-      <div className={styles.blockHeader}>
-        <span className={styles.blockLabel}>Block {blockIdx + 1}</span>
-        <button
-          type="button"
-          className={styles.deleteBtn}
-          onClick={onRemoveBlock}
-          title="Remove block"
-          aria-label={`Remove block ${blockIdx + 1}`}
-          data-testid={`remove-block-${blockIdx}`}
-        >
-          ×
-        </button>
+      <div className={styles.blockStatusDotRow}>
+        <span
+          className={`${styles.blockStatusDot} ${runnable ? styles.blockStatusDotOk : styles.blockStatusDotWarn}`}
+          title={runnable ? 'Block ready' : 'Block not yet runnable (pick instrument + at least one complete condition)'}
+          data-testid={`block-status-${blockIdx}`}
+          data-runnable={runnable ? 'true' : 'false'}
+          aria-hidden="true"
+        />
       </div>
+      <BlockHeader
+        block={block}
+        direction={direction}
+        onChange={onUpdateBlock}
+        onDelete={onRemoveBlock}
+        blockIndex={blockIdx + 1}
+      />
       {conditions.length === 0 ? (
         <div className={styles.blockEmpty}>
-          Empty block — this block will never fire. Add a condition.
+          Empty block — add a condition below.
         </div>
       ) : (
         conditions.map((cond, condIdx) => (
@@ -208,6 +219,7 @@ function Condition({
   onRemove,
   indicators,
 }) {
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const shape = conditionShape(condition.op);
 
   function updateOp(nextOp) {
@@ -240,31 +252,25 @@ function Condition({
   return (
     <div className={styles.condition} data-testid={`condition-${blockIdx}-${condIdx}`}>
       {!isFirst && <div className={styles.conditionAndLabel}>AND</div>}
-      {/*
-        Iter-2: condition renders HORIZONTALLY —
-          <operand1>  <op-select>  <operand2>         (binary)
-          <operand>   in_range    <min> .. <max>      (range)
-          <operand>   rolling_xx  <lookback>          (rolling)
-        A single flex row keeps the operator visually centred between its
-        operands rather than stacked above them.
-      */}
       <div className={styles.conditionRow}>
         <span className={styles.conditionLabel}>Cond {condIdx + 1}</span>
         {shape === 'binary' && (
           <>
             <div className={styles.conditionOperandCell}>
-              <OperandPicker
-                value={condition.lhs}
+              <OperandSlot
+                operand={condition.lhs}
                 onChange={(next) => updateOperand('lhs', next)}
                 indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} lhs`}
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
             <div className={styles.conditionOperandCell}>
-              <OperandPicker
-                value={condition.rhs}
+              <OperandSlot
+                operand={condition.rhs}
                 onChange={(next) => updateOperand('rhs', next)}
                 indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} rhs`}
               />
             </div>
           </>
@@ -272,26 +278,29 @@ function Condition({
         {shape === 'range' && (
           <>
             <div className={styles.conditionOperandCell}>
-              <OperandPicker
-                value={condition.operand}
+              <OperandSlot
+                operand={condition.operand}
                 onChange={(next) => updateOperand('operand', next)}
                 indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} operand`}
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
             <div className={styles.conditionOperandCell}>
-              <OperandPicker
-                value={condition.min}
+              <OperandSlot
+                operand={condition.min}
                 onChange={(next) => updateOperand('min', next)}
                 indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} min`}
               />
             </div>
             <span className={styles.conditionRangeSep}>..</span>
             <div className={styles.conditionOperandCell}>
-              <OperandPicker
-                value={condition.max}
+              <OperandSlot
+                operand={condition.max}
                 onChange={(next) => updateOperand('max', next)}
                 indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} max`}
               />
             </div>
           </>
@@ -299,10 +308,11 @@ function Condition({
         {shape === 'rolling' && (
           <>
             <div className={styles.conditionOperandCell}>
-              <OperandPicker
-                value={condition.operand}
+              <OperandSlot
+                operand={condition.operand}
                 onChange={(next) => updateOperand('operand', next)}
                 indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} operand`}
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
@@ -323,7 +333,7 @@ function Condition({
         <button
           type="button"
           className={styles.deleteBtn}
-          onClick={onRemove}
+          onClick={() => setConfirmRemove(true)}
           title="Remove condition"
           aria-label={`Remove condition ${condIdx + 1} of block ${blockIdx + 1}`}
           data-testid={`remove-condition-${blockIdx}-${condIdx}`}
@@ -331,6 +341,16 @@ function Condition({
           ×
         </button>
       </div>
+      <ConfirmDialog
+        open={confirmRemove}
+        title="Delete condition?"
+        message="This condition will be removed from the block."
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={() => { setConfirmRemove(false); onRemove(); }}
+        onCancel={() => setConfirmRemove(false)}
+      />
     </div>
   );
 }

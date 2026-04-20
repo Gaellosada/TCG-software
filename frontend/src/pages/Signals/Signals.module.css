@@ -137,16 +137,21 @@
 
 .deleteBtn {
   background: none;
-  border: none;
+  border: 1px solid transparent;
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 1rem;
-  padding: 0 4px;
+  padding: 0;
   line-height: 1;
+  width: var(--signal-control-height);
+  height: var(--signal-control-height);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
 }
 
 .deleteBtn:hover {
   color: var(--error-text, #ef4444);
+  border-color: var(--error-text, #ef4444);
 }
 
 /* ---------- BlockEditor ---------- */
@@ -154,7 +159,7 @@
 .blockEditor {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
 }
 
 .directionTabs {
@@ -193,15 +198,15 @@
 }
 
 .directionHint {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: var(--text-secondary);
-  padding: 2px 4px;
+  padding: 0 4px;
 }
 
 .blocksList {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .blocksEmpty {
@@ -217,7 +222,7 @@
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-sm);
   background: var(--bg-secondary);
-  padding: 8px 10px;
+  padding: 4px 8px 4px;
   position: relative;
 }
 
@@ -261,9 +266,9 @@
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 0.78rem;
-  padding: 4px 10px;
-  margin-top: 6px;
+  font-size: 0.74rem;
+  padding: 2px 8px;
+  margin-top: 2px;
   transition: color 0.15s, border-color 0.15s;
 }
 
@@ -275,15 +280,15 @@
 
 .condition {
   border-top: 1px solid var(--border-secondary);
-  padding: 6px 0;
-  margin-top: 4px;
+  padding: 4px 0;
+  margin-top: 3px;
   position: relative;
 }
 
 .condition:first-of-type {
   border-top: none;
   margin-top: 0;
-  padding-top: 0;
+  padding-top: 2px;
 }
 
 .conditionAndLabel {
@@ -307,11 +312,12 @@
  */
 .conditionRow {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   flex-wrap: nowrap;
   gap: 6px;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   min-width: 0;
+  min-height: var(--signal-control-height);
 }
 
 .conditionLabel {
@@ -368,8 +374,9 @@
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 0.78rem;
-  padding: 2px 6px;
+  padding: 0 6px;
   min-width: 0;
+  height: var(--signal-control-height);
 }
 
 .lookbackInput {
@@ -378,11 +385,389 @@
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 0.82rem;
-  padding: 2px 6px;
-  width: 80px;
+  padding: 0 6px;
+  width: 64px;
+  height: var(--signal-control-height);
 }
 
-/* ---------- OperandPicker ---------- */
+/* ---------- OperandSlot (iter-3) ---------- */
+
+/* Equal-height control baseline — every interactive element in a
+   condition row targets this via ``.controlHeight`` or matches via
+   ``padding + border + font-size``. Used by the Playwright measurement
+   to assert ±2 px tolerance across the row. */
+:root {
+  --signal-control-height: 26px;
+}
+
+.operandSlot,
+.operandSlotFilled {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  min-height: var(--signal-control-height);
+}
+
+.operandAddBtn {
+  width: 100%;
+  height: var(--signal-control-height);
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.operandAddBtn:hover {
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+  background: var(--bg-hover);
+}
+
+.operandMenu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 20;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  padding: 4px;
+}
+
+.operandMenuItem {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 6px 10px;
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+
+.operandMenuItem:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.operandEditor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.operandEditor > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.operandClearBtn {
+  flex: 0 0 auto;
+  width: var(--signal-control-height);
+  height: var(--signal-control-height);
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.operandClearBtn:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.operandIndicator {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.operandInstrumentWrap {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- IndicatorParamsOverride ---------- */
+
+.indicatorOverride {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.76rem;
+}
+
+.indicatorOverrideSummary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 3px 6px;
+  font-size: 0.74rem;
+  color: var(--text-primary);
+  text-align: left;
+  min-height: var(--signal-control-height);
+}
+
+.indicatorOverrideSummary:hover {
+  background: var(--bg-hover);
+}
+
+.indicatorOverrideChevron {
+  font-size: 0.75rem;
+  width: 10px;
+  color: var(--text-secondary);
+}
+
+.indicatorOverrideName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.indicatorOverrideBadge {
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: var(--accent, #2563eb);
+  color: white;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.04em;
+}
+
+.indicatorOverrideGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 2px 2px;
+}
+
+.indicatorOverrideRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+}
+
+.indicatorOverrideLabel {
+  min-width: 70px;
+  color: var(--text-secondary);
+}
+
+.indicatorOverrideInput {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.76rem;
+  padding: 2px 4px;
+  height: 22px;
+}
+
+.indicatorOverrideReset {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+}
+
+.indicatorOverrideReset:hover {
+  color: var(--accent);
+  border-color: var(--border-primary);
+}
+
+.indicatorOverrideResetAll {
+  align-self: flex-start;
+  background: none;
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  margin-top: 4px;
+}
+
+.indicatorOverrideResetAll:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---------- BlockHeader (iter-3) ---------- */
+
+.blockHeaderRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--signal-control-height);
+  margin-bottom: 4px;
+  position: relative;
+}
+
+.blockInstrumentCell {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.blockInstrumentBtn {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 4px 8px;
+  text-align: left;
+  height: var(--signal-control-height);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blockInstrumentBtnEmpty {
+  color: var(--text-secondary);
+  font-style: italic;
+  border-style: dashed;
+}
+
+.blockInstrumentBtn:hover {
+  border-color: var(--accent, #2563eb);
+}
+
+.blockInstrumentPopover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  padding: 6px;
+  min-width: 240px;
+}
+
+.blockWeightCell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.blockWeightInput {
+  width: 64px;
+  height: var(--signal-control-height);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 2px 6px;
+}
+
+.blockWeightSuffix {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.blockDeleteBtn {
+  flex: 0 0 auto;
+  width: var(--signal-control-height);
+  height: var(--signal-control-height);
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.blockDeleteBtn:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.blockStatusDotRow {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+}
+
+.blockStatusDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.blockStatusDotOk {
+  background: #10b981;
+}
+
+.blockStatusDotWarn {
+  background: #f59e0b;
+}
+
+/* ---------- Clip banner (iter-3) ---------- */
+
+.clipBanner {
+  margin: 6px 6px 6px;
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  color: #92400e;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.4;
+}
+
+:global(.dark) .clipBanner,
+[data-theme='dark'] .clipBanner {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.clipBannerIcon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+/* ---------- OperandPicker (legacy — kept for back-compat) ---------- */
 
 .operandPicker {
   border: 1px solid var(--border-primary);
@@ -442,8 +827,9 @@
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 0.78rem;
-  padding: 2px 6px;
+  padding: 0 6px;
   width: 100%;
+  height: var(--signal-control-height);
 }
 
 .operandConstant {
@@ -452,8 +838,9 @@
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 0.82rem;
-  padding: 2px 6px;
-  width: 120px;
+  padding: 0 6px;
+  width: 100%;
+  height: var(--signal-control-height);
 }
 
 /* ---------- ParamsPanel ---------- */

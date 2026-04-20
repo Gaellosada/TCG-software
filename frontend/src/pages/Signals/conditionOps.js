@@ -50,6 +50,25 @@ export function conditionShape(op) {
 }
 
 /**
+ * Build a brand-new indicator operand spec.
+ *
+ * iter-3: every field starts null — consistent with the iter-2 "no
+ * defaults" policy. ``params_override`` and ``series_override`` are
+ * present as explicit nulls so the request builder can always ship them
+ * verbatim to the backend (the backend expects the keys to exist so the
+ * override-merge step has a deterministic shape).
+ */
+export function defaultIndicatorOperand() {
+  return {
+    kind: 'indicator',
+    indicator_id: null,
+    output: null,
+    params_override: null,
+    series_override: null,
+  };
+}
+
+/**
  * Build a default condition object for a given op.
  *
  * IMPORTANT — iter-2 policy: a freshly-added condition must NOT inject any

@@ -1,7 +1,12 @@
-"""API tests for /api/signals/compute — mirrors tests/api/test_indicators.py.
+"""API tests for /api/signals/compute -- v2 shape (iter-3).
 
 Builds a FastAPI app with only the signals router and a mocked
-MarketDataService.
+MarketDataService. Every test exercises the v2 request/response
+contract:
+
+    request:  blocks carry ``instrument`` + ``weight``; indicator operands
+              may carry ``params_override`` / ``series_override``.
+    response: ``{timestamps, positions: [...], clipped, diagnostics}``.
 """
 
 from __future__ import annotations
@@ -68,16 +73,24 @@ SMA_CODE = (
     "def compute(series, window: int = 3):\n"
     "    s = series['price']\n"
     "    out = np.full_like(s, np.nan, dtype=float)\n"
-    "    out[window-1:] = np.convolve(s, np.ones(window)/window, mode='valid')\n"
+    "    w = int(window)\n"
+    "    if w <= len(s):\n"
+    "        out[w-1:] = np.convolve(s, np.ones(w)/w, mode='valid')\n"
     "    return out\n"
 )
+
+
+SPX_REF = {"collection": "INDEX", "instrument_id": "SPX"}
 
 
 class TestComputeEndpoint:
 
     async def test_happy_path_e2e_with_indicator(self, client: AsyncClient):
-        """End-to-end: signal with one instrument operand and one indicator
-        operand (a 3-period SMA). Must return a non-trivial position vector.
+        """v2 happy path: single-instrument signal with one indicator operand.
+
+        v2 update from iter-1: block carries ``instrument`` + ``weight``
+        and response exposes ``positions[0].values`` instead of a flat
+        ``position``.
         """
         body = {
             "spec": {
@@ -86,6 +99,8 @@ class TestComputeEndpoint:
                 "rules": {
                     "long_entry": [
                         {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -99,7 +114,7 @@ class TestComputeEndpoint:
                                         "indicator_id": "sma3",
                                     },
                                 }
-                            ]
+                            ],
                         }
                     ],
                     "long_exit": [],
@@ -107,8 +122,11 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {
-                "sma3": {
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [
+                {
+                    "id": "sma3",
+                    "name": "sma3",
                     "code": SMA_CODE,
                     "params": {"window": 3},
                     "seriesMap": {
@@ -118,46 +136,61 @@ class TestComputeEndpoint:
                         }
                     },
                 }
-            },
+            ],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
         assert resp.status_code == 200, resp.text
         data = resp.json()
 
-        # Shape checks.
-        assert len(data["index"]) == 10
-        assert data["index"][0] == "2024-01-02T00:00:00Z"
-        assert len(data["position"]) == 10
-        assert len(data["long_score"]) == 10
-        assert len(data["short_score"]) == 10
-        assert isinstance(data["entries_long"], list)
-        assert isinstance(data["exits_long"], list)
+        # v2 shape.
+        assert "timestamps" in data
+        assert "positions" in data
+        assert "clipped" in data
+        assert isinstance(data["timestamps"], list)
+        assert len(data["timestamps"]) == 10
 
-        # Close is monotonically increasing → price > SMA(3) should hold
-        # from t=2 onwards (SMA is NaN at t=0,1 → NaN→0 → position=0 there).
-        assert data["position"][0] == 0.0
-        assert data["position"][1] == 0.0
-        assert data["position"][2] == 1.0
-        assert data["position"][-1] == 1.0
-        assert data["entries_long"] == [2]
-        assert data["exits_long"] == []
+        assert len(data["positions"]) == 1
+        p0 = data["positions"][0]
+        assert p0["instrument"] == SPX_REF
+        assert len(p0["values"]) == 10
+        assert len(p0["clipped_mask"]) == 10
+        assert p0["clipped_mask"] == [False] * 10
+
+        # Close is monotonically increasing → price > SMA(3) fires from t=2.
+        assert p0["values"][0] == 0.0
+        assert p0["values"][1] == 0.0
+        assert p0["values"][2] == 1.0
+        assert p0["values"][-1] == 1.0
+        assert data["clipped"] is False
+
+        # Price series attached (walk picks lhs instrument operand first).
+        assert p0["price"] is not None
+        assert p0["price"]["label"] == "SPX.close"
+        assert p0["price"]["values"] == CLOSES.tolist()
 
     async def test_validation_error_unknown_op(self, client: AsyncClient):
+        # v2 update: block carries instrument + weight (though validation
+        # fails before any evaluation).
         body = {
             "spec": {
                 "id": "x",
                 "name": "x",
                 "rules": {
                     "long_entry": [
-                        {"conditions": [{"op": "frobnicate"}]}
+                        {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
+                            "conditions": [{"op": "frobnicate"}],
+                        }
                     ],
                     "long_exit": [],
                     "short_entry": [],
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -178,6 +211,11 @@ class TestComputeEndpoint:
                 "rules": {
                     "long_entry": [
                         {
+                            "instrument": {
+                                "collection": "INDEX",
+                                "instrument_id": "NOPE",
+                            },
+                            "weight": 1.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -188,7 +226,7 @@ class TestComputeEndpoint:
                                     },
                                     "rhs": {"kind": "constant", "value": 0.0},
                                 }
-                            ]
+                            ],
                         }
                     ],
                     "long_exit": [],
@@ -196,7 +234,8 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -208,7 +247,7 @@ class TestComputeEndpoint:
         assert "traceback" not in data
 
     async def test_runtime_error_from_indicator(self, client: AsyncClient):
-        """An indicator whose user code raises must surface error_type='runtime'
+        """Indicator whose user code raises must surface error_type='runtime'
         with a sanitized traceback."""
         bad_code = (
             "def compute(series):\n"
@@ -221,6 +260,8 @@ class TestComputeEndpoint:
                 "rules": {
                     "long_entry": [
                         {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -230,7 +271,7 @@ class TestComputeEndpoint:
                                     },
                                     "rhs": {"kind": "constant", "value": 0.0},
                                 }
-                            ]
+                            ],
                         }
                     ],
                     "long_exit": [],
@@ -238,8 +279,11 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {
-                "bad": {
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [
+                {
+                    "id": "bad",
+                    "name": "bad",
                     "code": bad_code,
                     "params": {},
                     "seriesMap": {
@@ -249,7 +293,7 @@ class TestComputeEndpoint:
                         }
                     },
                 }
-            },
+            ],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
@@ -259,19 +303,15 @@ class TestComputeEndpoint:
         assert "traceback" in data
         tb = data["traceback"]
         assert "<indicator>" in tb
-        # Internal module paths must NOT leak.
         assert "tcg/" not in tb
 
-    async def test_price_field_present_when_instrument_operand_exists(
-        self, client: AsyncClient
-    ):
-        """When the signal has at least one instrument operand, the response
-        must carry ``price = {label, values}`` aligned on the union index.
+    async def test_price_field_present_per_instrument(self, client: AsyncClient):
+        """v2: each positions[i] carries its own price payload.
 
-        Walk order is ``long_entry → long_exit → short_entry → short_exit``,
-        then block, then condition, then ``lhs`` before ``rhs`` / ``operand``
-        before ``min``/``max``. Here a single long_entry comparison picks
-        the lhs instrument (``SPX.close``).
+        Walk order: first instrument operand inside the block's
+        conditions (lhs before rhs), falling back to the block's
+        top-level instrument at field=close. Here the single block's
+        first operand is an ``instrument`` lhs → ``SPX.close``.
         """
         body = {
             "spec": {
@@ -280,6 +320,8 @@ class TestComputeEndpoint:
                 "rules": {
                     "long_entry": [
                         {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -290,7 +332,7 @@ class TestComputeEndpoint:
                                     },
                                     "rhs": {"kind": "constant", "value": 0.0},
                                 }
-                            ]
+                            ],
                         }
                     ],
                     "long_exit": [],
@@ -298,27 +340,27 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
         assert resp.status_code == 200, resp.text
         data = resp.json()
 
-        assert data["price"] is not None
-        assert set(data["price"].keys()) == {"label", "values"}
-        assert data["price"]["label"] == "SPX.close"
-        # values aligned to index
-        assert len(data["price"]["values"]) == len(data["index"])
-        # and equal to the fixture's CLOSES (10..19) cast to float.
-        assert data["price"]["values"] == CLOSES.tolist()
+        assert len(data["positions"]) == 1
+        p0 = data["positions"][0]
+        assert p0["price"] is not None
+        assert set(p0["price"].keys()) == {"label", "values"}
+        assert p0["price"]["label"] == "SPX.close"
+        assert p0["price"]["values"] == CLOSES.tolist()
 
-    async def test_price_field_null_when_no_instrument_operand(
+    async def test_price_falls_back_to_block_instrument_close(
         self, client: AsyncClient
     ):
-        """A signal with only indicator/constant operands → ``price`` is
-        JSON ``null``. We use an indicator operand against a constant so the
-        evaluator still produces a union index.
+        """When a block's conditions reference no instrument operand, the
+        price payload MUST fall back to ``block.instrument`` at
+        ``field=close`` -- per PLAN.md §Response body walk order note.
         """
         body = {
             "spec": {
@@ -327,6 +369,8 @@ class TestComputeEndpoint:
                 "rules": {
                     "long_entry": [
                         {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -336,7 +380,7 @@ class TestComputeEndpoint:
                                     },
                                     "rhs": {"kind": "constant", "value": 0.0},
                                 }
-                            ]
+                            ],
                         }
                     ],
                     "long_exit": [],
@@ -344,8 +388,11 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {
-                "sma3": {
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [
+                {
+                    "id": "sma3",
+                    "name": "sma3",
                     "code": SMA_CODE,
                     "params": {"window": 3},
                     "seriesMap": {
@@ -355,18 +402,18 @@ class TestComputeEndpoint:
                         }
                     },
                 }
-            },
+            ],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
         assert resp.status_code == 200, resp.text
         data = resp.json()
-
-        assert "price" in data
-        assert data["price"] is None
+        p0 = data["positions"][0]
+        assert p0["price"] is not None
+        assert p0["price"]["label"] == "SPX.close"
 
     async def test_rolling_condition_via_api(self, client: AsyncClient):
-        """Rolling lookback is honoured end-to-end."""
+        """Rolling lookback honoured end-to-end (v2 response shape)."""
         body = {
             "spec": {
                 "id": "x",
@@ -374,6 +421,8 @@ class TestComputeEndpoint:
                 "rules": {
                     "long_entry": [
                         {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
                             "conditions": [
                                 {
                                     "op": "rolling_gt",
@@ -384,7 +433,7 @@ class TestComputeEndpoint:
                                     },
                                     "lookback": 1,
                                 }
-                            ]
+                            ],
                         }
                     ],
                     "long_exit": [],
@@ -392,14 +441,207 @@ class TestComputeEndpoint:
                     "short_exit": [],
                 },
             },
-            "indicators": {},
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        # CLOSES is strictly increasing → rolling_gt with lookback=1 fires
-        # from t=1 onwards.
-        assert data["position"][0] == 0.0
-        assert data["position"][1] == 1.0
-        assert data["position"][-1] == 1.0
+        p0 = data["positions"][0]
+        # CLOSES strictly increasing → rolling_gt lookback=1 fires from t=1.
+        assert p0["values"][0] == 0.0
+        assert p0["values"][1] == 1.0
+        assert p0["values"][-1] == 1.0
+
+
+# ── v2: dedicated clipping round-trip ─────────────────────────────────────
+
+
+class TestV2Clipping:
+    async def test_three_entry_blocks_round_trip_clip(self, client: AsyncClient):
+        """Round-trip a v2 request with three entry blocks summing weight
+        > 1 on the same instrument; assert ``clipped=True`` on the crafted
+        timesteps and ``clipped_mask`` reflects exactly those steps.
+        """
+        # Three blocks each weight 0.5 firing together on ``gt`` close > 12
+        # (CLOSES = 10..19 → fires t=3..9). 0.5*3 = 1.5 > 1 ⇒ clipping on
+        # all those timesteps.
+        body = {
+            "spec": {
+                "id": "s",
+                "name": "s",
+                "rules": {
+                    "long_entry": [
+                        {
+                            "instrument": SPX_REF,
+                            "weight": 0.5,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "collection": "INDEX",
+                                        "instrument_id": "SPX",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 12.0},
+                                }
+                            ],
+                        }
+                    ]
+                    * 3,  # three identical blocks
+                    "long_exit": [],
+                    "short_entry": [],
+                    "short_exit": [],
+                },
+            },
+            # PROB-1 fix: list contract (see PLAN.md)
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["clipped"] is True
+
+        p0 = data["positions"][0]
+        # CLOSES > 12 at t=3..9 (7 timesteps).
+        expected_mask = [False, False, False] + [True] * 7
+        assert p0["clipped_mask"] == expected_mask
+        # Post-clip values: 0 at t=0..2, 1 at t=3..9.
+        assert p0["values"] == [0.0, 0.0, 0.0] + [1.0] * 7
+
+
+# ── PROB-1 fix: frontend-shape round-trip ────────────────────────────────
+
+
+class TestFrontendRequestShape:
+    async def test_frontend_request_shape_round_trip(self, client: AsyncClient):
+        """Imitate the exact body that ``buildComputeRequestBody`` emits.
+
+        Per ``frontend/src/pages/Signals/requestBuilder.js``::
+
+            {
+              spec: {id, name, rules},
+              indicators: [
+                { id, name, code, params, seriesMap },
+                ...
+              ]
+            }
+
+        with every indicator operand carrying explicit ``params_override``
+        and ``series_override`` keys (null when absent). This mirrors the
+        shape the UI actually POSTs — the contract drift caught by
+        Review #1 (PROB-1) would make this test return HTTP 422 before
+        the fix.
+        """
+        body = {
+            "spec": {
+                "id": "sig-frontend",
+                "name": "Frontend-shape signal",
+                "rules": {
+                    "long_entry": [
+                        {
+                            "instrument": SPX_REF,
+                            "weight": 1.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "collection": "INDEX",
+                                        "instrument_id": "SPX",
+                                        "field": "close",
+                                    },
+                                    "rhs": {
+                                        "kind": "indicator",
+                                        "indicator_id": "sma3",
+                                        "output": "default",
+                                        # Frontend normaliseOperand ALWAYS
+                                        # emits these keys, null when absent.
+                                        "params_override": None,
+                                        "series_override": None,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    "long_exit": [],
+                    "short_entry": [],
+                    "short_exit": [],
+                },
+            },
+            # Array shape (PLAN.md §Authoritative v2 contract).
+            "indicators": [
+                {
+                    "id": "sma3",
+                    "name": "SMA 3",
+                    "code": SMA_CODE,
+                    "params": {"window": 3},
+                    "seriesMap": {
+                        "price": {
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        }
+                    },
+                }
+            ],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "positions" in data
+        assert len(data["positions"]) == 1
+        p0 = data["positions"][0]
+        assert p0["instrument"] == SPX_REF
+        # SMA(3) crossover kicks in at t=2 when closes are monotone
+        # increasing (see test_happy_path_e2e_with_indicator).
+        assert p0["values"][2] == 1.0
+
+    async def test_duplicate_indicator_id_rejected(self, client: AsyncClient):
+        """Two list entries sharing an id → validation error."""
+        body = {
+            "spec": {
+                "id": "s",
+                "name": "s",
+                "rules": {
+                    "long_entry": [],
+                    "long_exit": [],
+                    "short_entry": [],
+                    "short_exit": [],
+                },
+            },
+            "indicators": [
+                {
+                    "id": "dup",
+                    "name": "A",
+                    "code": SMA_CODE,
+                    "params": {"window": 3},
+                    "seriesMap": {
+                        "price": {
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        }
+                    },
+                },
+                {
+                    "id": "dup",
+                    "name": "B",
+                    "code": SMA_CODE,
+                    "params": {"window": 5},
+                    "seriesMap": {
+                        "price": {
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        }
+                    },
+                },
+            ],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "dup" in data["message"]

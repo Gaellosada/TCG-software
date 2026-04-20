@@ -1,18 +1,14 @@
 import { test, expect } from '@playwright/test';
 
-// End-to-end spec for the Signals page. Mocks every backend endpoint so
-// no real server is needed; Vite dev server on 5173 handles the frontend.
+// End-to-end spec for the Signals page (iter-3 v2 contract).
+// Mocks every backend endpoint so no real server is needed.
 const BASE = 'http://localhost:5173';
 
-test.describe('Signals page', () => {
+test.describe('Signals page (v2)', () => {
   test.beforeEach(async ({ page }) => {
-    // Seed the Indicators localStorage with one user indicator so the
-    // signal has something to reference. Fresh Signals storage.
+    // Seed the Indicators localStorage with one user indicator.
     await page.addInitScript(() => {
       try {
-        // Do NOT clear localStorage here — we rely on it surviving the
-        // reload for the persistence test. Each test starts with a fresh
-        // Playwright browser context, so state is isolated per-test.
         if (window.localStorage.getItem('tcg.indicators.v1')) return;
         window.localStorage.setItem('tcg.indicators.v1', JSON.stringify({
           version: 1,
@@ -32,7 +28,6 @@ test.describe('Signals page', () => {
       } catch { /* ignore */ }
     });
 
-    // Mock the discovery endpoints (shared with the Data/Indicators pages).
     await page.route('**/api/data/collections*', async (route) => {
       await route.fulfill({
         status: 200,
@@ -53,26 +48,23 @@ test.describe('Signals page', () => {
       });
     });
 
-    // Mock the signals-compute endpoint. Return a tiny, deterministic
-    // payload so we can assert the chart renders without real data.
-    // Shape matches backend `price` contract: {label: "<instrument_id>.<field>",
-    // values: [<number|null>, ...]} — NaN-as-null per /api/signals/compute.
+    // v2 mock — positions array, clipped flag, timestamps in unix ms.
     await page.route('**/api/signals/compute', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          index: ['2020-01-02', '2020-01-03', '2020-01-06'],
-          position: [0.0, 1.0, 0.0],
-          long_score: [0.0, 1.0, 0.0],
-          short_score: [0.0, 0.0, 0.0],
-          entries_long: [1],
-          exits_long: [2],
-          entries_short: [],
-          exits_short: [],
-          // matches backend `price` contract: label = "<instrument_id>.<field>",
-          // values may contain nulls where the backend emitted NaN.
-          price: { label: '^GSPC.close', values: [3200, 3250, null] },
+          timestamps: [1577923200000, 1578009600000, 1578268800000],
+          positions: [
+            {
+              instrument: { collection: 'INDEX', instrument_id: '^GSPC' },
+              values: [0, 1, 0],
+              clipped_mask: [false, false, false],
+              price: { label: '^GSPC.close', values: [3200, 3250, null] },
+            },
+          ],
+          clipped: false,
+          diagnostics: {},
         }),
       });
     });
@@ -83,100 +75,36 @@ test.describe('Signals page', () => {
     page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
 
     await page.goto(`${BASE}/signals`);
-    // List header is always present. Scope to main to disambiguate from
-    // the identical sidebar nav label.
     await expect(page.getByRole('main').getByText('Signals', { exact: true })).toBeVisible();
     await expect(page.getByTestId('add-signal-btn')).toBeVisible();
-    // No signals yet → editor shows the empty state.
     await expect(page.getByText(/Select a signal on the left/)).toBeVisible();
 
     expect(consoleErrors).toEqual([]);
   });
 
-  test('create a signal, add a block + condition, run, chart renders', async ({ page }) => {
+  test('create signal, add block with no defaults (empty instrument, 0 weight)', async ({ page }) => {
     const consoleErrors = [];
     page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
 
     await page.goto(`${BASE}/signals`);
-    // Create a signal.
     await page.getByTestId('add-signal-btn').click();
-    // The block editor should now be visible.
     await expect(page.getByTestId('block-editor')).toBeVisible();
-    // All four direction tabs visible.
+
+    // All four direction tabs.
     await expect(page.getByTestId('direction-tab-long_entry')).toBeVisible();
     await expect(page.getByTestId('direction-tab-long_exit')).toBeVisible();
     await expect(page.getByTestId('direction-tab-short_entry')).toBeVisible();
     await expect(page.getByTestId('direction-tab-short_exit')).toBeVisible();
-    // Add a block + condition (default condition is added with the block).
+
+    // Add a block — iter-3 no defaults: empty instrument + no conditions.
     await page.getByTestId('add-block-btn').click();
     await expect(page.getByTestId('block-0')).toBeVisible();
-    await expect(page.getByTestId('condition-0-0')).toBeVisible();
-    // Iter-2: operands are unset on a fresh condition, so Run is initially
-    // disabled. Pick Constant on both operands to make the condition complete,
-    // then Run unlocks.
-    // Iter-2: commit a constant on both operand pickers by dispatching
-    // click() through evaluate — the horizontal condition-row layout has
-    // tight gaps between flex cells that can confuse Playwright's
-    // pointer-event hit-testing even when force:true is set.
-    const condition = page.getByTestId('condition-0-0');
-    await expect(condition.getByTestId('operand-tab-constant')).toHaveCount(2);
-    await condition.getByTestId('operand-tab-constant').first().evaluate((el) => el.click());
-    await condition.getByTestId('operand-tab-constant').last().evaluate((el) => el.click());
-    await expect(page.getByTestId('run-signal-btn')).toBeEnabled();
-    await page.getByTestId('run-signal-btn').click();
-
-    // Chart renders — the full-mode test id fires when the response
-    // carries a price block.
-    await expect(page.getByTestId('signal-chart-full')).toBeVisible({ timeout: 5000 });
-
-    expect(consoleErrors).toEqual([]);
-  });
-
-  test('renders position-only chart when backend emits price: null', async ({ page }) => {
-    // Override the default mock with a null-price payload to exercise the
-    // fallback path end-to-end on the live page.
-    await page.route('**/api/signals/compute', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          index: ['2020-01-02', '2020-01-03', '2020-01-06'],
-          position: [0.0, 1.0, 0.0],
-          long_score: [0.0, 1.0, 0.0],
-          short_score: [0.0, 0.0, 0.0],
-          entries_long: [1],
-          exits_long: [2],
-          entries_short: [],
-          exits_short: [],
-          price: null,
-        }),
-      });
-    });
-
-    const consoleErrors = [];
-    page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
-
-    await page.goto(`${BASE}/signals`);
-    await page.getByTestId('add-signal-btn').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible();
-    await page.getByTestId('add-block-btn').click();
-    await expect(page.getByTestId('condition-0-0')).toBeVisible();
-    // Iter-2: pick Constant on both operands to make the condition complete.
-    // Iter-2: commit a constant on both operand pickers by dispatching
-    // click() through evaluate — the horizontal condition-row layout has
-    // tight gaps between flex cells that can confuse Playwright's
-    // pointer-event hit-testing even when force:true is set.
-    const condition = page.getByTestId('condition-0-0');
-    await expect(condition.getByTestId('operand-tab-constant')).toHaveCount(2);
-    await condition.getByTestId('operand-tab-constant').first().evaluate((el) => el.click());
-    await condition.getByTestId('operand-tab-constant').last().evaluate((el) => el.click());
-    await expect(page.getByTestId('run-signal-btn')).toBeEnabled();
-    await page.getByTestId('run-signal-btn').click();
-
-    // Position-only testid fires when response carries no price block.
-    await expect(page.getByTestId('signal-chart-position-only')).toBeVisible({ timeout: 5000 });
-    // Subtitle explains why the price overlay is absent.
-    await expect(page.getByTestId('signal-chart-subtitle')).toBeVisible();
+    // Empty instrument button present.
+    await expect(page.getByTestId('block-instrument-btn-0')).toBeVisible();
+    // Weight input visible on entry tabs.
+    await expect(page.getByTestId('block-weight-0')).toBeVisible();
+    // Run is disabled (no instrument, no conditions).
+    await expect(page.getByTestId('run-signal-btn')).toBeDisabled();
 
     expect(consoleErrors).toEqual([]);
   });
@@ -184,10 +112,31 @@ test.describe('Signals page', () => {
   test('persists signals across reload', async ({ page }) => {
     await page.goto(`${BASE}/signals`);
     await page.getByTestId('add-signal-btn').click();
-    // Give the autosave debounce (500 ms) time to flush.
     await page.waitForTimeout(800);
-    // Reload — the signal should still be there.
     await page.reload();
     await expect(page.locator('[data-testid^="signal-row-"]').first()).toBeVisible();
+  });
+
+  test('block delete uses a confirmation dialog (no window.confirm)', async ({ page }) => {
+    await page.goto(`${BASE}/signals`);
+    await page.getByTestId('add-signal-btn').click();
+    await page.getByTestId('add-block-btn').click();
+    await expect(page.getByTestId('block-0')).toBeVisible();
+
+    // Hook window.confirm — the test asserts it is NEVER invoked.
+    await page.evaluate(() => {
+      window.__confirmCalls = 0;
+      const orig = window.confirm;
+      window.confirm = (...args) => { window.__confirmCalls += 1; return orig.apply(window, args); };
+    });
+
+    await page.getByTestId('remove-block-0').click();
+    // Modal confirm dialog appears.
+    await expect(page.getByTestId('confirm-dialog')).toBeVisible();
+    await page.getByTestId('confirm-dialog-cancel').click();
+    await expect(page.getByTestId('confirm-dialog')).not.toBeVisible();
+
+    const confirmCalls = await page.evaluate(() => window.__confirmCalls);
+    expect(confirmCalls).toBe(0);
   });
 });

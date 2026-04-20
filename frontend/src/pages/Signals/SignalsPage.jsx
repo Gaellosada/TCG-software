@@ -3,11 +3,12 @@ import SignalsList from './SignalsList';
 import BlockEditor from './BlockEditor';
 import ParamsPanel from './ParamsPanel';
 import SignalChart from './SignalChart';
+import ConfirmDialog from './ConfirmDialog';
 import { loadState, saveState, emptyRules } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import { buildComputeRequestBody } from './requestBuilder';
-import { isConditionComplete } from './conditionOps';
+import { isBlockRunnable } from './blockShape';
 import { classifyFetchError } from '../../utils/fetchError';
 import { coerceErrorType, fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 // Reuse the Indicators page's storage + param parser so referenced
@@ -110,6 +111,7 @@ function SignalsPage() {
     }
   });
   const [lastSavedPayload, setLastSavedPayload] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
@@ -182,9 +184,17 @@ function SignalsPage() {
     setLastResult(null);
   }, []);
 
+  // Iter-3 (guardrail 11): replace window.confirm with ConfirmDialog.
+  // SignalsList emits a delete request; we stash the id and open the
+  // dialog, running the actual delete on confirm.
   const handleDelete = useCallback((id) => {
-    // eslint-disable-next-line no-alert
-    if (!window.confirm('Delete?')) return;
+    setConfirmDeleteId(id);
+  }, []);
+
+  const handleConfirmDelete = useCallback(() => {
+    const id = confirmDeleteId;
+    setConfirmDeleteId(null);
+    if (!id) return;
     setSignals((prev) => {
       const next = prev.filter((s) => s.id !== id);
       setSelectedId((sel) => {
@@ -193,7 +203,7 @@ function SignalsPage() {
       });
       return next;
     });
-  }, []);
+  }, [confirmDeleteId]);
 
   const handleRename = useCallback((id, newName) => {
     setSignals((prev) => prev.map((s) => (s.id !== id ? s : { ...s, name: newName })));
@@ -204,31 +214,54 @@ function SignalsPage() {
   }, [selectedId]);
 
   // --- Validation + run ----------------------------------------------------
+  // Iter-3: every block must be *runnable* (instrument picked + ≥1 fully-
+  // specified condition). Empty blocks (zero conditions) are silently
+  // filtered by the backend / request builder, but a block with an
+  // instrument and conditions that are incomplete blocks Run. See
+  // blockShape.isBlockRunnable for the single-source definition.
   const { runDisabledReason, missingIds } = useMemo(() => {
     if (!selectedSignal) return { runDisabledReason: 'Select a signal first', missingIds: [] };
-    const totalBlocks = Object.values(selectedSignal.rules || {}).reduce(
-      (sum, blocks) => sum + (Array.isArray(blocks) ? blocks.length : 0),
-      0,
-    );
-    if (totalBlocks === 0) {
-      return { runDisabledReason: 'Add at least one block', missingIds: [] };
+    // PROB-2 fix: preserve each block's direction so isBlockRunnable can
+    // enforce the entry-weight>0 gate.
+    const rules = selectedSignal.rules || {};
+    const blocksWithDir = Object.keys(rules).flatMap((dir) => {
+      const blocks = Array.isArray(rules[dir]) ? rules[dir] : [];
+      return blocks.map((b) => ({ block: b, direction: dir }));
+    });
+    const nonEmpty = blocksWithDir.filter(({ block: b }) => (
+      (b.conditions || []).length > 0 || b.instrument
+    ));
+    if (nonEmpty.length === 0) {
+      return { runDisabledReason: 'Add at least one block with an instrument + condition', missingIds: [] };
     }
-    // Iter-2: operands are unset (``null``) until the user picks. Keep Run
-    // disabled if any condition still has an unset / incomplete operand —
-    // otherwise the backend would 422 every time.
-    for (const dir of Object.keys(selectedSignal.rules || {})) {
-      const blocks = selectedSignal.rules[dir] || [];
-      for (const block of blocks) {
-        const conds = (block && block.conditions) || [];
-        for (const cond of conds) {
-          if (!isConditionComplete(cond)) {
-            return {
-              runDisabledReason: 'Every operand must be set — pick an indicator, '
-                + 'instrument or constant for each slot.',
-              missingIds: [],
-            };
-          }
-        }
+    for (const { block: b, direction } of nonEmpty) {
+      if (!b.instrument) {
+        return {
+          runDisabledReason: 'Every block needs an instrument — pick one in the block header.',
+          missingIds: [],
+        };
+      }
+      if (!(b.conditions || []).length) {
+        return {
+          runDisabledReason: 'Every block needs at least one condition.',
+          missingIds: [],
+        };
+      }
+      // Direction-aware: entry blocks additionally require weight > 0.
+      const isEntry = direction === 'long_entry' || direction === 'short_entry';
+      if (isEntry && (!Number.isFinite(b.weight) || b.weight <= 0)) {
+        return {
+          runDisabledReason: 'Every entry block needs a positive weight — '
+            + 'set a weight > 0 in the block header.',
+          missingIds: [],
+        };
+      }
+      if (!isBlockRunnable(b, direction)) {
+        return {
+          runDisabledReason: 'Every operand must be set — pick an indicator, '
+            + 'instrument or constant for each slot.',
+          missingIds: [],
+        };
       }
     }
     const { missing } = buildComputeRequestBody(selectedSignal, availableIndicators);
@@ -341,6 +374,16 @@ function SignalsPage() {
           <SignalChart result={lastResult} loading={running} error={error} />
         </Card>
       </div>
+      <ConfirmDialog
+        open={confirmDeleteId !== null}
+        title="Delete signal?"
+        message="The signal and all its blocks will be permanently removed."
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   conditionShape,
   defaultCondition,
+  defaultIndicatorOperand,
   isOperandComplete,
   isConditionComplete,
   operandSlots,
@@ -119,6 +120,30 @@ describe('isConditionComplete', () => {
   });
 });
 
+describe('defaultIndicatorOperand — iter-3 override fields', () => {
+  it('returns an all-null shape with explicit params_override / series_override keys', () => {
+    expect(defaultIndicatorOperand()).toEqual({
+      kind: 'indicator',
+      indicator_id: null,
+      output: null,
+      params_override: null,
+      series_override: null,
+    });
+  });
+  it('keys are own-enumerable (so JSON.stringify emits nulls, not undefineds)', () => {
+    const op = defaultIndicatorOperand();
+    // If these keys weren't present, they'd be missing from the JSON entirely.
+    const encoded = JSON.parse(JSON.stringify(op));
+    expect('params_override' in encoded).toBe(true);
+    expect('series_override' in encoded).toBe(true);
+    expect(encoded.params_override).toBe(null);
+    expect(encoded.series_override).toBe(null);
+  });
+  it('defaultIndicatorOperand is not complete (iter-2 no-defaults policy)', () => {
+    expect(isOperandComplete(defaultIndicatorOperand())).toBe(false);
+  });
+});
+
 describe('migrateCondition — preserves compatible slots, leaves remainder unset', () => {
   it('same shape preserves operands, only op changes', () => {
     const current = {
@@ -159,5 +184,50 @@ describe('migrateCondition — preserves compatible slots, leaves remainder unse
   it('null current → default (all-null) condition', () => {
     const next = migrateCondition(null, 'gt');
     expect(next).toEqual({ op: 'gt', lhs: null, rhs: null });
+  });
+
+  it('preserves indicator override fields when operator stays in the same shape', () => {
+    const current = {
+      op: 'gt',
+      lhs: {
+        kind: 'indicator', indicator_id: 'sma', output: 'default',
+        params_override: { window: 50 }, series_override: { close: 'close' },
+      },
+      rhs: { kind: 'constant', value: 0 },
+    };
+    const next = migrateCondition(current, 'lt');
+    expect(next.lhs).toEqual(current.lhs);
+    expect(next.lhs.params_override).toEqual({ window: 50 });
+    expect(next.lhs.series_override).toEqual({ close: 'close' });
+  });
+
+  it('preserves indicator override fields when migrating binary → range (lhs → operand)', () => {
+    const current = {
+      op: 'gt',
+      lhs: {
+        kind: 'indicator', indicator_id: 'rsi', output: 'default',
+        params_override: { window: 7 }, series_override: null,
+      },
+      rhs: { kind: 'constant', value: 30 },
+    };
+    const next = migrateCondition(current, 'in_range');
+    expect(next.operand).toEqual(current.lhs);
+    expect(next.operand.params_override).toEqual({ window: 7 });
+  });
+
+  it('preserves indicator override fields when migrating range → rolling (operand → operand)', () => {
+    const current = {
+      op: 'in_range',
+      operand: {
+        kind: 'indicator', indicator_id: 'x', output: 'default',
+        params_override: { p: 1 }, series_override: { s: 't' },
+      },
+      min: { kind: 'constant', value: 0 },
+      max: { kind: 'constant', value: 10 },
+    };
+    const next = migrateCondition(current, 'rolling_gt');
+    expect(next.operand).toEqual(current.operand);
+    expect(next.operand.params_override).toEqual({ p: 1 });
+    expect(next.operand.series_override).toEqual({ s: 't' });
   });
 });
