@@ -26,10 +26,9 @@ const code = `def compute(series, fast: int = 12, slow: int = 26, signal: int = 
         ema_s[i] = prev
     macd = ema_f - ema_s
     # Signal EMA seeded at slow-1 (first valid macd index) + signal - 1.
+    # The 'n < slow + signal - 1' guard above ensures end <= n here.
     start = slow - 1
     end = start + signal
-    if end > n:
-        return out
     seed_sig = np.mean(macd[start:end])
     out[end - 1] = seed_sig
     prev = seed_sig
@@ -42,14 +41,27 @@ export default {
   id: 'macd-signal',
   name: 'MACD Signal',
   readonly: true,
+  category: 'momentum',
   code,
   params: {},
   seriesMap: {},
-  doc: `MACD Signal line — EMA of the MACD line (fast\_EMA(close) − slow\_EMA(close)) over \`signal\` bars. Seeded with the mean of the first \`signal\` valid MACD values.
+  doc: `**Intuition.** The MACD Signal line is an EMA applied to the MACD Line itself. It acts as a smoothed trigger: when MACD crosses above its signal line traders view this as bullish, and crosses below as bearish. The signal line lags the MACD line by design so that noisy oscillations around zero don't each trigger a crossover.
+
+**Formula.**
+\`\`\`
+MACD_t   = EMA(close, fast)_t - EMA(close, slow)_t
+Signal_t = EMA(MACD, signal)_t
+\`\`\`
+The signal EMA is seeded with the mean of the first \`signal\` valid \`MACD\` values (i.e. starting at index \`slow - 1\`).
 
 **Parameters**
-- \`fast\`: span of the fast EMA inside the MACD line. Typical value 12.
-- \`slow\`: span of the slow EMA inside the MACD line. Must exceed \`fast\`. Typical value 26.
-- \`signal\`: span of the EMA applied to the MACD line itself. Typical value 9.`,
+- \`fast\` (int, default 12): span of the fast EMA inside the MACD line.
+- \`slow\` (int, default 26): span of the slow EMA inside the MACD line. Must exceed \`fast\`.
+- \`signal\` (int, default 9): span of the EMA applied to the MACD line.
+
+**Edge cases**
+- Output is \`NaN\` for the first \`slow + signal - 2\` bars (warm-up: MACD needs \`slow - 1\`, then signal needs \`signal\` valid MACDs to seed).
+- If \`n < slow + signal - 1\` the output is all \`NaN\`.
+- \`NaN\` in close before the MACD seed bar pollutes both EMAs and propagates.`,
   ownPanel: true,
 };

@@ -29,13 +29,28 @@ export default {
   id: 'macd-line',
   name: 'MACD Line',
   readonly: true,
+  category: 'momentum',
   code,
   params: {},
   seriesMap: {},
-  doc: `MACD Line — difference between a fast and slow EMA of closing prices: \`fast_EMA(close) − slow_EMA(close)\`. Each EMA is seeded with its first-\`n\`-bar SMA.
+  doc: `**Intuition.** The MACD Line is the difference between a fast and a slow EMA of close. When fast EMA > slow EMA the line is positive and price momentum is upward; when fast < slow the line is negative. Zero-crossings and turns in slope are the primary signals. It is the first of three related plots (line, signal, histogram) that together form the MACD system.
+
+**Formula.**
+\`\`\`
+EMA_fast_t = EMA(close, fast)_t
+EMA_slow_t = EMA(close, slow)_t
+MACD_t     = EMA_fast_t - EMA_slow_t
+\`\`\`
+Both EMAs are seeded with their first-\`n\`-bar SMA.
 
 **Parameters**
-- \`fast\`: span of the fast EMA. Typical value 12. Smaller values react more quickly to price.
-- \`slow\`: span of the slow EMA. Must exceed \`fast\`. Typical value 26. Controls the trend baseline.`,
+- \`fast\` (int, default 12): span of the fast EMA. Smaller values react more quickly to price.
+- \`slow\` (int, default 26): span of the slow EMA. Must exceed \`fast\`. Controls the trend baseline.
+
+**Edge cases**
+- Output is \`NaN\` for the first \`slow - 1\` bars (warm-up — the slow EMA controls the start index).
+- If \`n < slow\` the output is all \`NaN\`.
+- If \`fast >= slow\` the indicator still computes but the interpretation inverts; users should ensure \`fast < slow\`.
+- \`NaN\` in the input before the seed bar contaminates \`np.mean\` and propagates downstream.`,
   ownPanel: true,
 };
