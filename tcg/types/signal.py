@@ -6,16 +6,50 @@ Each condition compares one or two operands, each of which resolves to a
 numeric time series (an Indicator, an instrument price field, or a
 constant).
 
-All types are frozen dataclasses — the contract is authoritative and
+All types are frozen dataclasses -- the contract is authoritative and
 must not be mutated after construction. Condition variants are
 discriminated by ``op`` at parse time; this module provides the concrete
 dataclass types and a :func:`parse_condition` helper.
+
+v2 additions (iter-3)
+---------------------
+* :class:`Block` gains ``instrument: InstrumentRef | None`` and
+  ``weight: float``. ``instrument`` points to the instrument whose
+  position series this block contributes to; ``weight`` is the unsigned
+  contribution added to that instrument's long/short score when the
+  block fires. ``weight`` is ignored on exit tabs but kept on the
+  dataclass for a uniform shape. Sentinel values ``instrument=None`` and
+  ``weight=0.0`` mean "not yet picked" -- such blocks are skipped by the
+  evaluator (they contribute nothing).
+* :class:`IndicatorOperand` gains ``params_override`` and
+  ``series_override`` optional maps; when supplied they are merged on
+  top of the base indicator spec before execution. ``None`` or empty
+  maps ⇒ inherit defaults.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
+
+
+# ---------------------------------------------------------------------------
+# Instrument reference (v2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InstrumentRef:
+    """Reference to an instrument (used as a per-block identifier in v2).
+
+    Distinct from :class:`InstrumentOperand`, which is a condition operand
+    pointing at a specific price ``field``.  ``InstrumentRef`` only
+    identifies *which* instrument a block's position contributes to; the
+    block does not pick a field.
+    """
+
+    collection: str
+    instrument_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -25,10 +59,17 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class IndicatorOperand:
-    """Operand backed by a user-defined indicator (spec shipped in request)."""
+    """Operand backed by a user-defined indicator (spec shipped in request).
+
+    v2: optional ``params_override`` / ``series_override`` let a single
+    condition customise the indicator's params or series map without
+    editing the base spec. ``None``/empty means "inherit defaults".
+    """
 
     indicator_id: str
     output: str = "default"
+    params_override: dict[str, Any] | None = None
+    series_override: dict[str, str] | None = None
     kind: Literal["indicator"] = "indicator"
 
 
@@ -112,9 +153,20 @@ Condition = CompareCondition | CrossCondition | InRangeCondition | RollingCondit
 
 @dataclass(frozen=True)
 class Block:
-    """A single AND-block of conditions. Zero conditions → always false."""
+    """A single AND-block of conditions. Zero conditions → always false.
+
+    v2 fields:
+      * ``instrument`` -- :class:`InstrumentRef` identifying the target
+        instrument for the block's contribution, or ``None`` (sentinel
+        "not yet picked" -- the evaluator skips the block).
+      * ``weight`` -- unsigned contribution in [0, 1+]. Ignored on exit
+        tabs. ``0.0`` is the sentinel "not yet picked" on entry tabs; the
+        evaluator skips such blocks.
+    """
 
     conditions: tuple[Condition, ...] = ()
+    instrument: InstrumentRef | None = None
+    weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -147,6 +199,7 @@ __all__ = [
     "InRangeCondition",
     "IndicatorOperand",
     "InstrumentOperand",
+    "InstrumentRef",
     "Operand",
     "RollingCondition",
     "Signal",

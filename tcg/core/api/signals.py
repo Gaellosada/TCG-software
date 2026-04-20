@@ -1,21 +1,43 @@
-"""Signals router — evaluate a user-defined Signal spec against market data.
+"""Signals router -- evaluate a user-defined Signal spec against market data.
 
 Exposes:
 
-* ``POST /api/signals/compute`` — evaluate a Signal over its referenced
-  Indicators and Instruments and return per-timestep
-  ``position``/``long_score``/``short_score`` vectors plus entry/exit
-  index lists.
+* ``POST /api/signals/compute`` -- evaluate a Signal over its referenced
+  Indicators and Instruments and return per-instrument position series
+  plus a global clipping flag.
 
-Signals are OR-of-AND rule blocks across four directions. Indicator
-specs live in browser localStorage, so the request carries every
-referenced indicator spec inline; the backend executes them via
-:func:`tcg.engine.indicator_exec.run_indicator`.
+v2 request/response (iter-3) -- see PLAN.md §Authoritative v2 contract:
+
+Request::
+
+    {
+      "spec":       Signal,            // { id, name, rules }
+      "indicators": {id: IndicatorSpec}
+    }
+
+Response::
+
+    {
+      "timestamps": number[],          // unix ms, union-aligned
+      "positions": [
+        {
+          "instrument": { "collection", "instrument_id" },
+          "values":        float[],
+          "clipped_mask":  bool[],
+          "price": { "label", "values" } | null
+        }
+      ],
+      "clipped":     bool,
+      "diagnostics": { ... }
+    }
+
+Error envelope (unchanged):
+``{error_type, message, traceback?}``.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 import numpy as np
@@ -44,6 +66,7 @@ from tcg.types.signal import (
     InRangeCondition,
     IndicatorOperand,
     InstrumentOperand,
+    InstrumentRef,
     Operand,
     RollingCondition,
     Signal,
@@ -83,6 +106,9 @@ class _OperandIn(BaseModel):
     # indicator
     indicator_id: str | None = None
     output: str = "default"
+    # v2: indicator operand per-use overrides
+    params_override: dict[str, Any] | None = None
+    series_override: dict[str, str] | None = None
     # instrument
     collection: str | None = None
     instrument_id: str | None = None
@@ -104,8 +130,17 @@ class _ConditionIn(BaseModel):
     lookback: int | None = None
 
 
+class _InstrumentRefIn(BaseModel):
+    collection: str
+    instrument_id: str
+
+
 class _BlockIn(BaseModel):
+    """v2 block: top-level ``instrument`` + unsigned ``weight``."""
+
     conditions: list[_ConditionIn] = Field(default_factory=list)
+    instrument: _InstrumentRefIn | None = None
+    weight: float = 0.0
 
 
 class _SignalRulesIn(BaseModel):
@@ -161,7 +196,14 @@ def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
                 f"{path}: indicator operand requires 'indicator_id'"
             )
         return IndicatorOperand(
-            indicator_id=op_in.indicator_id, output=op_in.output
+            indicator_id=op_in.indicator_id,
+            output=op_in.output,
+            params_override=(
+                dict(op_in.params_override) if op_in.params_override else None
+            ),
+            series_override=(
+                dict(op_in.series_override) if op_in.series_override else None
+            ),
         )
     if op_in.kind == "instrument":
         if not op_in.collection or not op_in.instrument_id:
@@ -226,7 +268,19 @@ def _parse_blocks(
             _parse_condition(c, path=f"{direction}[{i}].conditions[{j}]")
             for j, c in enumerate(blk.conditions)
         )
-        out.append(Block(conditions=conds))
+        instrument: InstrumentRef | None = None
+        if blk.instrument is not None:
+            instrument = InstrumentRef(
+                collection=blk.instrument.collection,
+                instrument_id=blk.instrument.instrument_id,
+            )
+        out.append(
+            Block(
+                conditions=conds,
+                instrument=instrument,
+                weight=float(blk.weight),
+            )
+        )
     return tuple(out)
 
 
@@ -295,12 +349,25 @@ def _make_fetcher(
 # ---------------------------------------------------------------------------
 
 
+def _int_yyyymmdd_to_unix_ms(d: int) -> int:
+    """Convert a YYYYMMDD int to a UTC unix-ms timestamp at 00:00:00."""
+    iso = int_to_iso(int(d))  # "YYYY-MM-DD"
+    dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def _nan_safe(arr: npt.NDArray[np.float64] | None) -> list[float | None]:
+    if arr is None:
+        return []
+    return [None if (v != v) else float(v) for v in arr.tolist()]
+
+
 @router.post("/compute")
 async def compute_signal(
     body: SignalComputeRequest,
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
-    """Evaluate a Signal spec and return per-timestep scores + positions."""
+    """Evaluate a Signal spec and return per-instrument positions + clip flag."""
 
     # ── 1. Parse dates ──
     try:
@@ -339,36 +406,39 @@ async def compute_signal(
             "runtime", str(exc), traceback=exc.user_traceback or None
         )
 
-    # ── 4. Build response ──
-    # Render NaN as JSON null, matching /api/indicators/compute.
-    def _nan_safe(arr: npt.NDArray[np.float64]) -> list[float | None]:
-        return [None if (v != v) else float(v) for v in arr.tolist()]
-
-    index_iso = [
-        f"{int_to_iso(int(d))}T00:00:00Z" for d in result.index.tolist()
+    # ── 4. Build v2 response ──
+    # timestamps: union-aligned unix-milliseconds. Empty list when the
+    # spec references no series (degenerate all-constants case).
+    timestamps = [
+        _int_yyyymmdd_to_unix_ms(int(d)) for d in result.index.tolist()
     ]
 
-    # ``price`` — first instrument operand's resolved series (NaN→null).
-    # ``None`` when the signal references no instrument operand; the
-    # frontend falls back to a position-only chart in that case.
-    if result.price_label is None or result.price_values is None:
-        price_payload: dict | None = None
-    else:
-        price_payload = {
-            "label": result.price_label,
-            "values": _nan_safe(result.price_values),
-        }
+    positions_out: list[dict] = []
+    for p in result.positions:
+        if p.price_label is None or p.price_values is None:
+            price_payload: dict | None = None
+        else:
+            price_payload = {
+                "label": p.price_label,
+                "values": _nan_safe(p.price_values),
+            }
+        positions_out.append(
+            {
+                "instrument": {
+                    "collection": p.instrument.collection,
+                    "instrument_id": p.instrument.instrument_id,
+                },
+                "values": _nan_safe(p.values),
+                "clipped_mask": [bool(x) for x in p.clipped_mask.tolist()],
+                "price": price_payload,
+            }
+        )
 
     return {
-        "index": index_iso,
-        "position": _nan_safe(result.position),
-        "long_score": _nan_safe(result.long_score),
-        "short_score": _nan_safe(result.short_score),
-        "entries_long": result.entries_long,
-        "exits_long": result.exits_long,
-        "entries_short": result.entries_short,
-        "exits_short": result.exits_short,
-        "price": price_payload,
+        "timestamps": timestamps,
+        "positions": positions_out,
+        "clipped": bool(result.clipped),
+        "diagnostics": dict(result.diagnostics),
     }
 
 
