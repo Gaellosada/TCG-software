@@ -1,30 +1,29 @@
-"""Signal specification types -- entry/exit rule composition for trading.
+"""Signal specification types -- v3 (iter-4, named inputs).
 
 A ``Signal`` is an OR of AND-blocks of boolean conditions across four
 directions: ``long_entry``, ``long_exit``, ``short_entry``, ``short_exit``.
 Each condition compares one or two operands, each of which resolves to a
-numeric time series (an Indicator, an instrument price field, or a
-constant).
+numeric time series.
 
-All types are frozen dataclasses -- the contract is authoritative and
-must not be mutated after construction. Condition variants are
-discriminated by ``op`` at parse time; this module provides the concrete
-dataclass types and a :func:`parse_condition` helper.
+v3 architectural rewrite (iter-4)
+---------------------------------
+* Signals now carry a top-level ``inputs: tuple[Input, ...]`` list. Each
+  Input has a single-letter ``id`` (X, Y, Z, ...) assigned on creation,
+  user-renameable, and an ``instrument`` which is either
+  :class:`InstrumentSpot` (collection + instrument_id) or
+  :class:`InstrumentContinuous` (a rolling futures spec).
+* Blocks carry ``input_id`` instead of ``instrument`` / ``InstrumentRef``.
+  A block contributes to the position series of its bound input's
+  instrument.
+* ``InstrumentOperand`` no longer carries ``collection`` /
+  ``instrument_id``. It now carries only ``input_id`` (and ``field`` for
+  OHLCV selection).
+* ``IndicatorOperand`` carries ``input_id``. The bound input's instrument
+  replaces the indicator's base ``seriesMap`` primary label. Optional
+  ``series_override`` now maps ``label -> input_id`` (label → instrument
+  provided by another input).
 
-v2 additions (iter-3)
----------------------
-* :class:`Block` gains ``instrument: InstrumentRef | None`` and
-  ``weight: float``. ``instrument`` points to the instrument whose
-  position series this block contributes to; ``weight`` is the unsigned
-  contribution added to that instrument's long/short score when the
-  block fires. ``weight`` is ignored on exit tabs but kept on the
-  dataclass for a uniform shape. Sentinel values ``instrument=None`` and
-  ``weight=0.0`` mean "not yet picked" -- such blocks are skipped by the
-  evaluator (they contribute nothing).
-* :class:`IndicatorOperand` gains ``params_override`` and
-  ``series_override`` optional maps; when supplied they are merged on
-  top of the base indicator spec before execution. ``None`` or empty
-  maps ⇒ inherit defaults.
+There is NO v2 reader and NO migration — v2 state is discarded on load.
 """
 
 from __future__ import annotations
@@ -34,22 +33,47 @@ from typing import Any, Literal
 
 
 # ---------------------------------------------------------------------------
-# Instrument reference (v2)
+# Input instrument (discriminated union)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class InstrumentRef:
-    """Reference to an instrument (used as a per-block identifier in v2).
-
-    Distinct from :class:`InstrumentOperand`, which is a condition operand
-    pointing at a specific price ``field``.  ``InstrumentRef`` only
-    identifies *which* instrument a block's position contributes to; the
-    block does not pick a field.
-    """
+class InstrumentSpot:
+    """Spot instrument — a single (collection, instrument_id)."""
 
     collection: str
     instrument_id: str
+    kind: Literal["spot"] = "spot"
+
+
+@dataclass(frozen=True)
+class InstrumentContinuous:
+    """Continuous-futures instrument — rolled from a FUT_* collection."""
+
+    collection: str
+    adjustment: Literal["none", "proportional", "difference"] = "none"
+    cycle: str | None = None  # e.g. "HMUZ" quarterly
+    roll_offset: int = 0
+    strategy: Literal["front_month"] = "front_month"
+    kind: Literal["continuous"] = "continuous"
+
+
+InputInstrument = InstrumentSpot | InstrumentContinuous
+
+
+@dataclass(frozen=True)
+class Input:
+    """A named price-series input declared at the top of a signal.
+
+    ``id`` is typically a single letter (X, Y, Z, ...) assigned
+    automatically on creation and user-renameable. ``instrument`` is the
+    fully-configured source; an unconfigured input (missing collection
+    or instrument_id, missing cycle/adjustment for continuous) is not
+    runnable.
+    """
+
+    id: str
+    instrument: InputInstrument
 
 
 # ---------------------------------------------------------------------------
@@ -59,26 +83,32 @@ class InstrumentRef:
 
 @dataclass(frozen=True)
 class IndicatorOperand:
-    """Operand backed by a user-defined indicator (spec shipped in request).
+    """Operand backed by a user-defined indicator.
 
-    v2: optional ``params_override`` / ``series_override`` let a single
-    condition customise the indicator's params or series map without
-    editing the base spec. ``None``/empty means "inherit defaults".
+    v3: ``input_id`` identifies the bound input; the input's instrument
+    replaces the indicator's primary series-map instrument at execution
+    time. ``series_override`` maps ``label -> input_id`` to rebind
+    non-primary labels to other declared inputs. ``params_override``
+    still maps ``param_name -> value`` (unchanged).
     """
 
     indicator_id: str
+    input_id: str
     output: str = "default"
     params_override: dict[str, Any] | None = None
-    series_override: dict[str, str] | None = None
+    series_override: dict[str, str] | None = None  # v3: label -> input_id
     kind: Literal["indicator"] = "indicator"
 
 
 @dataclass(frozen=True)
 class InstrumentOperand:
-    """Operand backed by an instrument price field (default: ``close``)."""
+    """Operand backed by an input's price field (default: ``close``).
 
-    collection: str
-    instrument_id: str
+    v3: ``input_id`` replaces the v2 ``collection`` + ``instrument_id``
+    pair. The operand resolves through the bound input's instrument.
+    """
+
+    input_id: str
     field: str = "close"
     kind: Literal["instrument"] = "instrument"
 
@@ -95,7 +125,7 @@ Operand = IndicatorOperand | InstrumentOperand | ConstantOperand
 
 
 # ---------------------------------------------------------------------------
-# Condition variants
+# Condition variants (unchanged vs v2)
 # ---------------------------------------------------------------------------
 
 
@@ -110,11 +140,7 @@ class CompareCondition:
 
 @dataclass(frozen=True)
 class CrossCondition:
-    """Directional crossover between two series.
-
-    ``cross_above(A, B)[t] = A[t-1] <= B[t-1] AND A[t] > B[t]``; symmetric
-    for ``cross_below``. Index 0 is always false.
-    """
+    """Directional crossover between two series."""
 
     op: Literal["cross_above", "cross_below"]
     lhs: Operand
@@ -133,10 +159,7 @@ class InRangeCondition:
 
 @dataclass(frozen=True)
 class RollingCondition:
-    """``operand[t] <op> operand[t - lookback]`` for ``rolling_gt|rolling_lt``.
-
-    For ``t < lookback`` the condition is false.
-    """
+    """``operand[t] <op> operand[t - lookback]`` for ``rolling_gt|rolling_lt``."""
 
     op: Literal["rolling_gt", "rolling_lt"]
     operand: Operand
@@ -153,29 +176,24 @@ Condition = CompareCondition | CrossCondition | InRangeCondition | RollingCondit
 
 @dataclass(frozen=True)
 class Block:
-    """A single AND-block of conditions. Zero conditions → always false.
+    """A single AND-block of conditions.
 
-    v2 fields:
-      * ``instrument`` -- :class:`InstrumentRef` identifying the target
-        instrument for the block's contribution, or ``None`` (sentinel
-        "not yet picked" -- the evaluator skips the block).
+    v3 fields:
+      * ``input_id`` -- id of the declared :class:`Input` whose
+        instrument this block's position contributes to. ``""`` is the
+        sentinel "not yet picked" (evaluator skips the block).
       * ``weight`` -- unsigned contribution in [0, 1+]. Ignored on exit
-        tabs. ``0.0`` is the sentinel "not yet picked" on entry tabs; the
-        evaluator skips such blocks.
+        tabs. ``0.0`` on entry tabs = sentinel "not yet picked".
     """
 
     conditions: tuple[Condition, ...] = ()
-    instrument: InstrumentRef | None = None
+    input_id: str = ""
     weight: float = 0.0
 
 
 @dataclass(frozen=True)
 class SignalRules:
-    """Per-direction lists of OR-ed AND-blocks.
-
-    Blocks are stored as tuples (frozen-friendly). Zero blocks in a
-    direction ⇒ that direction's score is zero everywhere.
-    """
+    """Per-direction lists of OR-ed AND-blocks."""
 
     long_entry: tuple[Block, ...] = ()
     long_exit: tuple[Block, ...] = ()
@@ -185,8 +203,15 @@ class SignalRules:
 
 @dataclass(frozen=True)
 class Signal:
+    """A signal spec — declared inputs + direction rules.
+
+    v3: ``inputs`` is a tuple of :class:`Input`. Blocks and operands
+    bind through these inputs by id.
+    """
+
     id: str
     name: str
+    inputs: tuple[Input, ...] = ()
     rules: SignalRules = field(default_factory=SignalRules)
 
 
@@ -196,10 +221,13 @@ __all__ = [
     "Condition",
     "ConstantOperand",
     "CrossCondition",
-    "InRangeCondition",
     "IndicatorOperand",
+    "Input",
+    "InputInstrument",
+    "InRangeCondition",
+    "InstrumentContinuous",
     "InstrumentOperand",
-    "InstrumentRef",
+    "InstrumentSpot",
     "Operand",
     "RollingCondition",
     "Signal",

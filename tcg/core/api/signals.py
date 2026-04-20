@@ -1,38 +1,51 @@
 """Signals router -- evaluate a user-defined Signal spec against market data.
 
-Exposes:
-
-* ``POST /api/signals/compute`` -- evaluate a Signal over its referenced
-  Indicators and Instruments and return per-instrument position series
-  plus a global clipping flag.
-
-v2 request/response (iter-3) -- see PLAN.md §Authoritative v2 contract:
+v3 (iter-4) -- named inputs
 
 Request::
 
     {
-      "spec":       Signal,            // { id, name, rules }
-      "indicators": IndicatorSpec[]    // each entry has required ``id``
+      "spec": {
+        "id", "name",
+        "inputs": [
+          { "id": "X", "instrument": {
+              "type": "spot", "collection", "instrument_id"
+          } },
+          { "id": "Y", "instrument": {
+              "type": "continuous", "collection", "adjustment",
+              "cycle", "rollOffset", "strategy"
+          } }
+        ],
+        "rules": { long_entry, long_exit, short_entry, short_exit }
+      },
+      "indicators": IndicatorSpec[]
     }
 
-Response::
+Blocks have ``{input_id, weight, conditions}``. Instrument operands have
+``{kind:'instrument', input_id, field}``. Indicator operands have
+``{kind:'indicator', indicator_id, input_id, params_override,
+series_override}`` where ``series_override`` maps ``label -> input_id``.
+
+Response (shape-compatible with iter-3, with per-input entries keyed by
+``input_id`` + ``instrument`` discriminated):
 
     {
-      "timestamps": number[],          // unix ms, union-aligned
+      "timestamps": number[],
       "positions": [
         {
-          "instrument": { "collection", "instrument_id" },
+          "input_id": str,
+          "instrument": {type, collection, instrument_id?|adjustment+cycle+...},
           "values":        float[],
           "clipped_mask":  bool[],
-          "price": { "label", "values" } | null
+          "price":         {label, values} | null
         }
       ],
+      "indicators": [],            // reserved, array for shape stability
       "clipped":     bool,
       "diagnostics": { ... }
     }
 
-Error envelope (unchanged):
-``{error_type, message, traceback?}``.
+Error envelope unchanged: ``{error_type, message, traceback?}``.
 """
 
 from __future__ import annotations
@@ -57,16 +70,20 @@ from tcg.engine.signal_exec import (
     evaluate_signal,
 )
 from tcg.types.errors import DataNotFoundError
+from tcg.types.market import AdjustmentMethod, ContinuousRollConfig, RollStrategy
 from tcg.types.signal import (
     Block,
     CompareCondition,
     Condition,
     ConstantOperand,
     CrossCondition,
-    InRangeCondition,
     IndicatorOperand,
+    InRangeCondition,
+    Input,
+    InputInstrument,
+    InstrumentContinuous,
     InstrumentOperand,
-    InstrumentRef,
+    InstrumentSpot,
     Operand,
     RollingCondition,
     Signal,
@@ -77,7 +94,7 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 
 
 # ---------------------------------------------------------------------------
-# Error envelope (matches /api/indicators/compute verbatim)
+# Error envelope
 # ---------------------------------------------------------------------------
 
 
@@ -95,23 +112,45 @@ def _error_response(
 
 
 # ---------------------------------------------------------------------------
-# Pydantic request models (raw JSON shape from the frontend)
+# Pydantic request models
 # ---------------------------------------------------------------------------
 
 
-class _OperandIn(BaseModel):
-    """Generic operand; discriminated by ``kind`` at parse time."""
+class _SpotInstrumentIn(BaseModel):
+    type: Literal["spot"]
+    collection: str
+    instrument_id: str
 
+
+class _ContinuousInstrumentIn(BaseModel):
+    type: Literal["continuous"]
+    collection: str
+    adjustment: Literal["none", "proportional", "difference"] = "none"
+    cycle: str | None = None
+    # Accept camelCase from the frontend.
+    rollOffset: int = 0
+    strategy: Literal["front_month"] = "front_month"
+
+
+class _InputIn(BaseModel):
+    id: str
+    # Pydantic v2 discriminated union on ``type``.
+    instrument: _SpotInstrumentIn | _ContinuousInstrumentIn = Field(
+        discriminator="type"
+    )
+
+
+class _OperandIn(BaseModel):
     kind: Literal["indicator", "instrument", "constant"]
     # indicator
     indicator_id: str | None = None
     output: str = "default"
-    # v2: indicator operand per-use overrides
     params_override: dict[str, Any] | None = None
+    # v3: series_override maps label -> input_id (str)
     series_override: dict[str, str] | None = None
+    # instrument + indicator
+    input_id: str | None = None
     # instrument
-    collection: str | None = None
-    instrument_id: str | None = None
     field: str = "close"
     # constant
     value: float | None = None
@@ -119,27 +158,19 @@ class _OperandIn(BaseModel):
 
 class _ConditionIn(BaseModel):
     op: str
-    # Compare / cross
     lhs: _OperandIn | None = None
     rhs: _OperandIn | None = None
-    # In-range
     operand: _OperandIn | None = None
     min: _OperandIn | None = None
     max: _OperandIn | None = None
-    # Rolling
     lookback: int | None = None
 
 
-class _InstrumentRefIn(BaseModel):
-    collection: str
-    instrument_id: str
-
-
 class _BlockIn(BaseModel):
-    """v2 block: top-level ``instrument`` + unsigned ``weight``."""
+    """v3 block: ``input_id`` + unsigned ``weight``."""
 
     conditions: list[_ConditionIn] = Field(default_factory=list)
-    instrument: _InstrumentRefIn | None = None
+    input_id: str = ""
     weight: float = 0.0
 
 
@@ -153,6 +184,7 @@ class _SignalRulesIn(BaseModel):
 class _SignalIn(BaseModel):
     id: str = ""
     name: str = ""
+    inputs: list[_InputIn] = Field(default_factory=list)
     rules: _SignalRulesIn = Field(default_factory=_SignalRulesIn)
 
 
@@ -162,24 +194,16 @@ class _SeriesRefIn(BaseModel):
 
 
 class _IndicatorSpecIn(BaseModel):
-    # PLAN.md §Authoritative v2 contract pins IndicatorSpec = {id, name, code,
-    # params, seriesMap}. ``id`` is required (used as lookup key by the
-    # evaluator) and ``name`` is optional metadata shipped by the frontend.
     id: str
     name: str = ""
     code: str
     params: dict[str, int | float | bool] = Field(default_factory=dict)
-    # Frontend sends camelCase; accept both forms.
     seriesMap: dict[str, _SeriesRefIn] = Field(default_factory=dict)
 
 
 class SignalComputeRequest(BaseModel):
     spec: _SignalIn
-    # PLAN.md §Request body: indicators is an ARRAY of IndicatorSpec. Each
-    # entry's ``id`` is the handler-side lookup key; duplicate ids are
-    # rejected as a validation error (see _indicators_by_id below).
     indicators: list[_IndicatorSpecIn] = Field(default_factory=list)
-    # Reserved for future inline instrument bundles (v1: unused).
     instruments: dict[str, Any] = Field(default_factory=dict)
     start: str | None = None
     end: str | None = None
@@ -195,6 +219,35 @@ _CROSS_OPS = {"cross_above", "cross_below"}
 _ROLLING_OPS = {"rolling_gt", "rolling_lt"}
 
 
+def _parse_input(inp_in: _InputIn) -> Input:
+    iid = inp_in.id
+    if not iid:
+        raise SignalValidationError("input id must be non-empty")
+    inst_in = inp_in.instrument
+    if isinstance(inst_in, _SpotInstrumentIn):
+        if not inst_in.collection or not inst_in.instrument_id:
+            raise SignalValidationError(
+                f"input {iid!r}: spot instrument requires collection + instrument_id"
+            )
+        instrument: InputInstrument = InstrumentSpot(
+            collection=inst_in.collection,
+            instrument_id=inst_in.instrument_id,
+        )
+    else:
+        if not inst_in.collection:
+            raise SignalValidationError(
+                f"input {iid!r}: continuous instrument requires collection"
+            )
+        instrument = InstrumentContinuous(
+            collection=inst_in.collection,
+            adjustment=inst_in.adjustment,
+            cycle=inst_in.cycle,
+            roll_offset=int(inst_in.rollOffset),
+            strategy=inst_in.strategy,
+        )
+    return Input(id=iid, instrument=instrument)
+
+
 def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
     if op_in is None:
         raise SignalValidationError(f"{path}: operand required")
@@ -203,8 +256,13 @@ def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
             raise SignalValidationError(
                 f"{path}: indicator operand requires 'indicator_id'"
             )
+        if not op_in.input_id:
+            raise SignalValidationError(
+                f"{path}: indicator operand requires 'input_id'"
+            )
         return IndicatorOperand(
             indicator_id=op_in.indicator_id,
+            input_id=op_in.input_id,
             output=op_in.output,
             params_override=(
                 dict(op_in.params_override) if op_in.params_override else None
@@ -214,14 +272,12 @@ def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
             ),
         )
     if op_in.kind == "instrument":
-        if not op_in.collection or not op_in.instrument_id:
+        if not op_in.input_id:
             raise SignalValidationError(
-                f"{path}: instrument operand requires 'collection' and "
-                f"'instrument_id'"
+                f"{path}: instrument operand requires 'input_id'"
             )
         return InstrumentOperand(
-            collection=op_in.collection,
-            instrument_id=op_in.instrument_id,
+            input_id=op_in.input_id,
             field=op_in.field or "close",
         )
     if op_in.kind == "constant":
@@ -276,16 +332,10 @@ def _parse_blocks(
             _parse_condition(c, path=f"{direction}[{i}].conditions[{j}]")
             for j, c in enumerate(blk.conditions)
         )
-        instrument: InstrumentRef | None = None
-        if blk.instrument is not None:
-            instrument = InstrumentRef(
-                collection=blk.instrument.collection,
-                instrument_id=blk.instrument.instrument_id,
-            )
         out.append(
             Block(
                 conditions=conds,
-                instrument=instrument,
+                input_id=blk.input_id or "",
                 weight=float(blk.weight),
             )
         )
@@ -293,6 +343,7 @@ def _parse_blocks(
 
 
 def _parse_signal(raw: _SignalIn) -> Signal:
+    inputs = tuple(_parse_input(i) for i in raw.inputs)
     rules = SignalRules(
         long_entry=_parse_blocks(raw.rules.long_entry, direction="long_entry"),
         long_exit=_parse_blocks(raw.rules.long_exit, direction="long_exit"),
@@ -301,12 +352,36 @@ def _parse_signal(raw: _SignalIn) -> Signal:
         ),
         short_exit=_parse_blocks(raw.rules.short_exit, direction="short_exit"),
     )
-    return Signal(id=raw.id, name=raw.name, rules=rules)
+    return Signal(id=raw.id, name=raw.name, inputs=inputs, rules=rules)
 
 
 # ---------------------------------------------------------------------------
-# Price fetcher adapter
+# Price fetcher adapter — dispatches on InputInstrument kind
 # ---------------------------------------------------------------------------
+
+
+_ADJ_MAP: dict[str, AdjustmentMethod] = {
+    "none": AdjustmentMethod.NONE,
+    "proportional": AdjustmentMethod.PROPORTIONAL,
+    "difference": AdjustmentMethod.DIFFERENCE,
+}
+
+
+def _pick_field(series, field: str) -> npt.NDArray[np.float64]:
+    if field == "close":
+        return series.close.astype(np.float64, copy=False)
+    if field == "open":
+        return series.open.astype(np.float64, copy=False)
+    if field == "high":
+        return series.high.astype(np.float64, copy=False)
+    if field == "low":
+        return series.low.astype(np.float64, copy=False)
+    if field == "volume":
+        return series.volume.astype(np.float64, copy=False)
+    raise SignalValidationError(
+        f"instrument field {field!r} is not supported; "
+        f"expected one of close/open/high/low/volume"
+    )
 
 
 def _make_fetcher(
@@ -314,40 +389,65 @@ def _make_fetcher(
     start: date | None,
     end: date | None,
 ) -> Any:
-    """Adapt MarketDataService.get_prices to the (coll, id, field) → (dates, values) shape."""
-
     async def fetch(
-        collection: str, instrument_id: str, field: str
+        instrument: InputInstrument, field: str
     ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+        if isinstance(instrument, InstrumentSpot):
+            try:
+                series = await svc.get_prices(
+                    instrument.collection,
+                    instrument.instrument_id,
+                    start=start,
+                    end=end,
+                )
+            except DataNotFoundError as exc:
+                raise SignalDataError(
+                    f"instrument {instrument.collection}/"
+                    f"{instrument.instrument_id}: {exc}"
+                ) from exc
+            if series is None:
+                raise SignalDataError(
+                    f"instrument '{instrument.instrument_id}' not found in "
+                    f"collection '{instrument.collection}'"
+                )
+            values = _pick_field(series, field)
+            return series.dates, values
+
+        # continuous
         try:
-            series = await svc.get_prices(
-                collection, instrument_id, start=start, end=end
+            strategy = RollStrategy.FRONT_MONTH
+        except AttributeError:  # pragma: no cover — RollStrategy shape guard
+            raise SignalValidationError(
+                "continuous input: RollStrategy.FRONT_MONTH unavailable"
+            )
+        adj = _ADJ_MAP.get(instrument.adjustment)
+        if adj is None:
+            raise SignalValidationError(
+                f"continuous input: unknown adjustment {instrument.adjustment!r}"
+            )
+        roll_config = ContinuousRollConfig(
+            strategy=strategy,
+            adjustment=adj,
+            cycle=instrument.cycle or None,
+            roll_offset_days=int(instrument.roll_offset),
+        )
+        try:
+            cseries = await svc.get_continuous(
+                instrument.collection,
+                roll_config,
+                start=start,
+                end=end,
             )
         except DataNotFoundError as exc:
             raise SignalDataError(
-                f"instrument {collection}/{instrument_id}: {exc}"
+                f"continuous {instrument.collection}: {exc}"
             ) from exc
-        if series is None:
+        if cseries is None:
             raise SignalDataError(
-                f"instrument '{instrument_id}' not found in collection "
-                f"'{collection}'"
+                f"continuous series unavailable for {instrument.collection!r}"
             )
-        if field == "close":
-            values = series.close
-        elif field == "open":
-            values = series.open
-        elif field == "high":
-            values = series.high
-        elif field == "low":
-            values = series.low
-        elif field == "volume":
-            values = series.volume
-        else:
-            raise SignalValidationError(
-                f"instrument field {field!r} is not supported; "
-                f"expected one of close/open/high/low/volume"
-            )
-        return series.dates, values.astype(np.float64, copy=False)
+        values = _pick_field(cseries.prices, field)
+        return cseries.prices.dates, values
 
     return fetch
 
@@ -358,8 +458,7 @@ def _make_fetcher(
 
 
 def _int_yyyymmdd_to_unix_ms(d: int) -> int:
-    """Convert a YYYYMMDD int to a UTC unix-ms timestamp at 00:00:00."""
-    iso = int_to_iso(int(d))  # "YYYY-MM-DD"
+    iso = int_to_iso(int(d))
     dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
 
@@ -370,31 +469,41 @@ def _nan_safe(arr: npt.NDArray[np.float64] | None) -> list[float | None]:
     return [None if (v != v) else float(v) for v in arr.tolist()]
 
 
+def _instrument_payload(inst: InputInstrument) -> dict:
+    if isinstance(inst, InstrumentSpot):
+        return {
+            "type": "spot",
+            "collection": inst.collection,
+            "instrument_id": inst.instrument_id,
+        }
+    return {
+        "type": "continuous",
+        "collection": inst.collection,
+        "adjustment": inst.adjustment,
+        "cycle": inst.cycle,
+        "rollOffset": int(inst.roll_offset),
+        "strategy": inst.strategy,
+    }
+
+
 @router.post("/compute")
 async def compute_signal(
     body: SignalComputeRequest,
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
-    """Evaluate a Signal spec and return per-instrument positions + clip flag."""
+    """Evaluate a v3 Signal and return per-input positions + clip flag."""
 
-    # ── 1. Parse dates ──
     try:
         start_date = date.fromisoformat(body.start) if body.start else None
         end_date = date.fromisoformat(body.end) if body.end else None
     except ValueError as exc:
         return _error_response("validation", f"Invalid date format: {exc}")
 
-    # ── 2. Parse / translate spec ──
     try:
         signal = _parse_signal(body.spec)
     except SignalValidationError as exc:
         return _error_response("validation", str(exc))
 
-    # PLAN.md pins the request body's ``indicators`` field as an array of
-    # IndicatorSpec objects, each with a required ``id``. The evaluator
-    # still wants a lookup table keyed by id, so we fold the list into a
-    # dict here and surface duplicate ids as a validation error (rather
-    # than letting one entry silently clobber the other).
     indicators: dict[str, IndicatorSpecInput] = {}
     for ind_spec in body.indicators:
         if ind_spec.id in indicators:
@@ -402,16 +511,18 @@ async def compute_signal(
                 "validation",
                 f"duplicate indicator id {ind_spec.id!r} in request body",
             )
+        # Preserve declaration order via seriesMap insertion order.
+        series_labels = tuple(ind_spec.seriesMap.keys())
         indicators[ind_spec.id] = IndicatorSpecInput(
             code=ind_spec.code,
             params=dict(ind_spec.params),
+            series_labels=series_labels,
             series_map={
                 label: (ref.collection, ref.instrument_id)
                 for label, ref in ind_spec.seriesMap.items()
             },
         )
 
-    # ── 3. Evaluate ──
     fetcher = _make_fetcher(svc, start_date, end_date)
     try:
         result = await evaluate_signal(signal, indicators, fetcher)
@@ -424,9 +535,6 @@ async def compute_signal(
             "runtime", str(exc), traceback=exc.user_traceback or None
         )
 
-    # ── 4. Build v2 response ──
-    # timestamps: union-aligned unix-milliseconds. Empty list when the
-    # spec references no series (degenerate all-constants case).
     timestamps = [
         _int_yyyymmdd_to_unix_ms(int(d)) for d in result.index.tolist()
     ]
@@ -442,10 +550,8 @@ async def compute_signal(
             }
         positions_out.append(
             {
-                "instrument": {
-                    "collection": p.instrument.collection,
-                    "instrument_id": p.instrument.instrument_id,
-                },
+                "input_id": p.input_id,
+                "instrument": _instrument_payload(p.instrument),
                 "values": _nan_safe(p.values),
                 "clipped_mask": [bool(x) for x in p.clipped_mask.tolist()],
                 "price": price_payload,
@@ -455,6 +561,7 @@ async def compute_signal(
     return {
         "timestamps": timestamps,
         "positions": positions_out,
+        "indicators": [],
         "clipped": bool(result.clipped),
         "diagnostics": dict(result.diagnostics),
     }
