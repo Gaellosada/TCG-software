@@ -94,11 +94,16 @@ function nextIndicatorName(existing) {
 
 // Hydrate a default indicator from the registry + persisted per-session
 // state. Returns the merged shape the rest of the page works with.
-function hydrateDefault(def, savedEntry) {
+//
+// Exported for unit tests. ``chartMode`` is a registry-only author hint
+// (no user-editable counterpart in localStorage) — it flows straight
+// from ``def`` into the hydrated object and is NEVER overridden by the
+// ``defaultState`` overlay, which only carries ``params`` / ``seriesMap``.
+export function hydrateDefault(def, savedEntry) {
   const spec = parseIndicatorSpec(def.code);
   const params = reconcileParams(savedEntry?.params || {}, spec.params);
   const seriesMap = reconcileSeriesMap(savedEntry?.seriesMap || {}, spec.seriesLabels);
-  return {
+  const hydrated = {
     id: def.id,
     name: def.name,
     code: def.code,
@@ -109,6 +114,13 @@ function hydrateDefault(def, savedEntry) {
     // ownPanel is locked at the registry — users cannot override it for defaults.
     ownPanel: !!def.ownPanel,
   };
+  // chartMode is optional — only propagate when the registry entry sets
+  // it, so hydrated objects for entries without the hint stay clean
+  // (chart falls back to 'lines' via ``IndicatorChart.jsx``).
+  if (typeof def.chartMode === 'string' && def.chartMode) {
+    hydrated.chartMode = def.chartMode;
+  }
+  return hydrated;
 }
 
 // Normalize a backend error response into the structured shape the

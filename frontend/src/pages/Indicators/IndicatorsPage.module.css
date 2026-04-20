@@ -1,10 +1,14 @@
 /*
  * Indicators page layout.
  *
- * Row structure (iter-8):
- *   1. listPanel / editorPanel / paramsPanel  (3-col top row, min-height 720px)
- *      — bumped from 540px in iter-7 per user request (+33%).
- *   2. chartPanel (full width, min-height 720px; wrapped in a shared Card)
+ * Row structure (iter-9):
+ *   1. listPanel / editorPanel / paramsPanel  (3-col top row)
+ *   2. chartPanel (full width; wrapped in a shared Card)
+ *
+ * Iter-9: panel row min-heights bumped +20% vs iter-8 per user request
+ * for more vertical room in the code editor and chart panels.
+ *   editor row:  420 → 504 px
+ *   chart  row:  486 → 583 px   (split mode: 972 → 1166 px)
  *
  * In iter-8 the indicator's name input + Save + Auto save moved OUT of
  * the editor panel and into a compact top-bar at the TOP of the params
@@ -18,8 +22,8 @@
   grid-template-columns: 240px 1fr 320px;
   /* Chart row min + flex share bumped 50% vs the pre-existing
    * minmax(360px, 2fr) so the Results section gets noticeably more
-   * vertical real estate for plots. The editor row is unchanged. */
-  grid-template-rows: minmax(420px, 1.4fr) minmax(486px, 2.7fr);
+   * vertical real estate for plots. Iter-9: both rows +20%. */
+  grid-template-rows: minmax(504px, 1.4fr) minmax(583px, 2.7fr);
   min-height: 100%;
   position: relative;
 }
@@ -32,7 +36,7 @@
  * overlay chart itself gets.
  */
 .pageSplit {
-  grid-template-rows: minmax(420px, 1fr) minmax(972px, 5.4fr);
+  grid-template-rows: minmax(504px, 1fr) minmax(1166px, 5.4fr);
 }
 
 .banner {

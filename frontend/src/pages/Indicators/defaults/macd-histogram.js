@@ -25,10 +25,9 @@ const code = `def compute(series, fast: int = 12, slow: int = 26, signal: int = 
         ema_s[i] = prev
     macd = ema_f - ema_s
     sig = np.full(n, np.nan, dtype=float)
+    # The 'n < slow + signal - 1' guard above ensures end <= n here.
     start = slow - 1
     end = start + signal
-    if end > n:
-        return out
     seed_sig = np.mean(macd[start:end])
     sig[end - 1] = seed_sig
     prev = seed_sig
@@ -42,14 +41,27 @@ export default {
   id: 'macd-histogram',
   name: 'MACD Histogram',
   readonly: true,
+  category: 'momentum',
   code,
   params: {},
   seriesMap: {},
-  doc: `MACD Histogram — difference between the MACD line and its signal line: \`MACD − signal\`. Positive bars indicate the MACD is above its signal (bullish momentum); negative bars indicate the opposite.
+  doc: `**Intuition.** The MACD Histogram is the gap between the MACD Line and the MACD Signal — positive when the MACD is above its signal (bullish momentum), negative when below. Histogram bars shrinking towards zero warn that the current momentum phase is fading; a change of sign is a crossover event. It is often the most actionable view of the MACD family.
+
+**Formula.**
+\`\`\`
+MACD_t      = EMA(close, fast)_t - EMA(close, slow)_t
+Signal_t    = EMA(MACD, signal)_t
+Histogram_t = MACD_t - Signal_t
+\`\`\`
 
 **Parameters**
-- \`fast\`: span of the fast EMA. Typical value 12.
-- \`slow\`: span of the slow EMA. Must exceed \`fast\`. Typical value 26.
-- \`signal\`: span of the EMA applied to the MACD line. Typical value 9.`,
+- \`fast\` (int, default 12): span of the fast EMA.
+- \`slow\` (int, default 26): span of the slow EMA. Must exceed \`fast\`.
+- \`signal\` (int, default 9): span of the EMA applied to the MACD line.
+
+**Edge cases**
+- Output is \`NaN\` for the first \`slow + signal - 2\` bars (same warm-up as MACD Signal).
+- If \`n < slow + signal - 1\` the output is all \`NaN\`.
+- Inherits \`NaN\` propagation from close → EMAs → MACD → signal.`,
   ownPanel: true,
 };

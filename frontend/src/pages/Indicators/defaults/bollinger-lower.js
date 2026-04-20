@@ -21,13 +21,27 @@ export default {
   id: 'bollinger-lower',
   name: 'Bollinger Lower',
   readonly: true,
+  category: 'volatility',
   code,
   params: {},
   seriesMap: {},
-  doc: `Bollinger Lower Band — rolling mean of closing prices minus \`num_std\` standard deviations: \`SMA(close, window) − num_std × σ\`. NaN for the first \`window − 1\` bars.
+  doc: `**Intuition.** The Bollinger Lower band is an SMA of close minus a multiple of the rolling (population) standard deviation of close. It defines a statistical floor that adapts to recent volatility. Price touching or piercing the lower band is often read as an over-extension to the downside.
+
+**Formula.**
+\`\`\`
+mean_t   = (1 / window) * sum_{k = t - window + 1}^{t} close_k
+var_t    = (1 / window) * sum_{k = t - window + 1}^{t} close_k^2 - mean_t^2
+lower_t  = mean_t - num_std * sqrt(var_t)
+\`\`\`
+Variance is clipped at zero to protect against floating-point negatives from \`E[x^2] - E[x]^2\` cancellation.
 
 **Parameters**
-- \`window\`: rolling window for mean and standard deviation. Larger values produce wider, slower-moving bands.
-- \`num_std\`: multiplier on the rolling standard deviation. Larger values widen the channel; typical value 2.0.`,
+- \`window\` (int, default 20): rolling window for mean and standard deviation. Larger values produce wider, slower-moving bands.
+- \`num_std\` (float, default 2.0): multiplier on the rolling standard deviation. Larger values widen the channel.
+
+**Edge cases**
+- Output is \`NaN\` for the first \`window - 1\` bars (warm-up).
+- Uses the population variance (denominator \`window\`, not \`window - 1\`); matches the canonical Bollinger definition.
+- \`NaN\` anywhere in the window poisons \`np.cumsum\` and propagates forward for the rest of the series.`,
   ownPanel: false,
 };

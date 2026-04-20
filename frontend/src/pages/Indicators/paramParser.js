@@ -215,9 +215,28 @@ function parseParamsFromSignature(argsSrc) {
     const annot = lhs.slice(colonIdx + 1).trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
     const type = parseAnnotation(annot);
-    if (!type) continue;
+    if (!type) {
+      // Unsupported annotation — e.g. ``str``, ``list``, ``Optional[int]``.
+      // Silent-skip is preserved at runtime (the backend will surface the
+      // proper error at Run time) but we warn the author so typos and
+      // unsupported types don't silently vanish from the UI.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[paramParser] skipping parameter ${JSON.stringify(name)}: unsupported type ${JSON.stringify(annot)} (expected int | float | bool)`,
+      );
+      continue;
+    }
     const def = parseTypedDefault(rhs, type);
-    if (def === null) continue;
+    if (def === null) {
+      // Non-literal default (e.g. ``abs(-1)``) or type/literal mismatch
+      // (e.g. ``bool = 0``, ``int = 1.5``). Same silent-skip rationale as
+      // above — warn so the author knows why the UI shows no control.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[paramParser] skipping parameter ${JSON.stringify(name)}: non-literal or type-mismatched default ${JSON.stringify(rhs)} for annotation ${JSON.stringify(type)}`,
+      );
+      continue;
+    }
     out.push({ name, type, default: def });
   }
   return out;
