@@ -331,8 +331,8 @@ export function buildOwnPanelPlots(result) {
         yaxis2: { overlaying: 'y', side: 'right', showgrid: false, title: { text: ind.indicator_id } },
       },
       hasData: Array.isArray(ind.series) && ind.series.length > 0,
-      title: ind.indicator_id,
-      downloadFilename: `signal-indicator-${ind.indicator_id}`,
+      title: `${ind.indicator_id}${ind.input_id ? `-${ind.input_id}` : ''}`,
+      downloadFilename: `signal-indicator-${ind.indicator_id}${ind.input_id ? `-${ind.input_id}` : ''}`,
     };
   });
 }

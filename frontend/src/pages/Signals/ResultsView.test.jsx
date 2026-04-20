@@ -147,7 +147,7 @@ describe('<ResultsView>', () => {
     // 2 standard charts + 1 ownPanel chart = 3 total
     expect(chartCalls).toHaveLength(3);
     const panelChart = chartCalls[2];
-    expect(panelChart.downloadFilename).toBe('signal-indicator-rsi');
+    expect(panelChart.downloadFilename).toBe('signal-indicator-rsi-X');
     // The panel chart should have the indicator trace on y2
     const y2Trace = panelChart.traces.find((t) => t.yaxis === 'y2');
     expect(y2Trace).toBeDefined();
@@ -175,7 +175,7 @@ describe('<ResultsView>', () => {
     render(<ResultsView result={result} loading={false} error={null} />);
     // 2 standard + 2 ownPanel = 4
     expect(chartCalls).toHaveLength(4);
-    expect(chartCalls[2].downloadFilename).toBe('signal-indicator-rsi');
-    expect(chartCalls[3].downloadFilename).toBe('signal-indicator-macd');
+    expect(chartCalls[2].downloadFilename).toBe('signal-indicator-rsi-X');
+    expect(chartCalls[3].downloadFilename).toBe('signal-indicator-macd-X');
   });
 });

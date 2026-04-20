@@ -322,8 +322,8 @@ describe('buildOwnPanelPlots', () => {
     expect(panels).toHaveLength(2);
 
     // First panel: rsi
-    expect(panels[0].title).toBe('rsi');
-    expect(panels[0].downloadFilename).toBe('signal-indicator-rsi');
+    expect(panels[0].title).toBe('rsi-X');
+    expect(panels[0].downloadFilename).toBe('signal-indicator-rsi-X');
     expect(panels[0].hasData).toBe(true);
     // Should have input traces + 1 indicator trace
     const rsiTraces = panels[0].traces;
@@ -337,8 +337,8 @@ describe('buildOwnPanelPlots', () => {
     expect(panels[0].layoutOverrides.yaxis2.title.text).toBe('rsi');
 
     // Second panel: macd
-    expect(panels[1].title).toBe('macd');
-    expect(panels[1].downloadFilename).toBe('signal-indicator-macd');
+    expect(panels[1].title).toBe('macd-X');
+    expect(panels[1].downloadFilename).toBe('signal-indicator-macd-X');
   });
 
   it('marks hasData false when indicator series is empty', () => {
