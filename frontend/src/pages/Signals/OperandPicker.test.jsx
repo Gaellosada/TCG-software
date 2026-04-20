@@ -18,7 +18,6 @@ describe('OperandPicker tab switching', () => {
         value={{ kind: 'constant', value: 0 }}
         onChange={() => {}}
         indicators={[{ id: 'sma-20', name: '20-day SMA' }]}
-        defaultCollection="INDEX"
       />,
     );
     expect(screen.getByTestId('operand-tab-indicator')).toBeDefined();
