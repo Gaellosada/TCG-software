@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 
 // ---------------------------------------------------------------------------
@@ -289,5 +289,37 @@ describe('reconcileSeriesMap', () => {
   it('resets malformed existing entries to null', () => {
     const existing = { price: { collection: 'INDEX' /* no instrument_id */ } };
     expect(reconcileSeriesMap(existing, ['price'])).toEqual({ price: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseIndicatorSpec — author-feedback warnings for silent-skips
+// ---------------------------------------------------------------------------
+describe('parseIndicatorSpec — silent-skip warnings', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('warns once when a param is skipped because its annotation is unsupported', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const code = `def compute(series, label: str = "x"):
+    pass`;
+    const spec = parseIndicatorSpec(code);
+    expect(spec.params).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const msg = warn.mock.calls[0][0];
+    expect(msg).toContain('label');
+    expect(msg).toContain('str');
+  });
+
+  it('warns once when a param is skipped because its default is not a literal', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const code = `def compute(series, w: int = abs(-1)):
+    pass`;
+    const spec = parseIndicatorSpec(code);
+    expect(spec.params).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const msg = warn.mock.calls[0][0];
+    expect(msg).toContain('w');
   });
 });

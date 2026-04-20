@@ -119,3 +119,52 @@
 - User-provided weights like `{SPX: 0.6, VIX: -0.4}` are normalized to `{SPX: 0.6, VIX: -0.4}` (sum of abs = 1.0, already normalized). Weights like `{SPX: 3, VIX: -2}` become `{SPX: 0.6, VIX: -0.4}`.
 
 **Locations:** `tcg/engine/metrics.py` (`compute_weighted_portfolio`).
+
+## Default indicator library pruning (2026-04)
+
+**Decision:** The default indicator registry was restructured to 5 canonical logical indicators (10 JS entries) + 13 legacy Java ports = 23 entries total. The previous library (22 entries, many near-duplicates) is superseded. Four Java indicator classes were audited and documented as explicitly not-shipped.
+
+**Rationale:**
+- The previous library had heavy overlap: `rolling-min` and `rolling-max` are one `trailing-extreme` with a direction flag; `log-return` and `simple-return` are one-liners the user can write directly in the sandbox; `rolling-zscore` is a user-derivable composition of mean and stddev; `dema`, `tema`, `kama` are niche EMA variants that belong in a user's own library, not in the default starting set.
+- The legacy Java simulator contains 17 hand-tuned indicators that encode domain experience (swing-pivot rules, engulfment breakout heuristics, percentile bands) that are genuinely hard to rederive from scratch. Shipping these as defaults surfaces decades of accumulated signal-design choices to every new user without them needing to port Java.
+- The two-tier split (canonical + legacy port) is explicit in `docs/indicators.md` so users understand the provenance and the behavioural guarantees.
+
+### Dropped entries (12)
+
+Twelve entries from the previous library were removed:
+
+- `wma` — linear-weighted MA; derivable, not canonical.
+- `dema` — niche EMA variant (Mulloy 1994).
+- `tema` — niche EMA variant.
+- `kama` — specialist adaptive MA; not in the universal starting set.
+- `roc` — rate-of-change; subsumed by `slope-acceleration`.
+- `momentum` — `x_t - x_{t-n}`; subsumed by `weighted-impetus` (telescoping identity).
+- `rolling-stddev` — subsumed partially by `slope-statistics` (stddev of returns).
+- `rolling-zscore` — user-derivable from mean + stddev.
+- `rolling-min` — subsumed by `trailing-extreme` with `use_min = True`.
+- `rolling-max` — subsumed by `trailing-extreme` with `use_min = False`.
+- `log-return` — one-line sandbox expression; `centred-slope` is the closest symmetric variant.
+- `simple-return` — channel 1 of `slope-acceleration`.
+
+### Not-shipped Java ports (4) — rationale
+
+Four Java indicator classes from `trajectoirecap.platform.parent/simulator/src/main/java/com/simulator/indicator/` were audited and deliberately not shipped as JS defaults:
+
+- **`IndicatorSimple` (passthrough)** — identity adapter in the Java two-stage Filter/Indicator architecture. Not practitioner-facing; shipping it as a JS default would be visual clutter. The JS sandbox contract takes raw series directly so no adapter is needed.
+- **`IndicatorOperation` (scalar-transform: add / sub / mul / div by constant)** — higher-order composition over an upstream indicator. Does not fit the JS `compute(series, ...)` contract which consumes raw OHLCV only, not upstream indicators. Trivially expressed inline in any sandbox cell (`out = my_indicator + k`).
+- **`IndicatorBollingerBands` (single-class multi-channel port)** — redundant with the canonical 4-file Bollinger bundle already shipped. The 4-file form is required by the scalar-per-bar contract; porting the Java single-class form adds maintenance cost with no new capability.
+- **`IndicatorFilterHistory` (rolling-window history)** — emits the whole rolling window of values as an array per bar. Non-scalar output violates the `compute` contract (`compute` must return a 1-D array aligned to the input length, not a 2-D lookback buffer). Infrastructure primitive, not an end-user indicator.
+
+### Spec corrections surfaced to user at delivery
+
+Three terminology / semantics corrections were made during the rework and are worth flagging:
+
+- **ATR uses arithmetic mean, not Wilder smoothing.** `AtrSequential.java:114` is `currentValue = sum / numPeriods`. The textbook Wilder ATR is an exponential smoothing, but the legacy Java engine is SMA-of-TR. The port preserves the Java truth; the `atr.js` `doc` field flags the divergence and points to the Java line. Users preferring Wilder's recursion can swap the source (one-line change).
+- **"Weighted Impetus", not "Volume-Weighted Impetus".** The Java class `IndicatorWeightedImpetus` does not reference volume anywhere; the "weighting" is by signed magnitude of the price change, not by volume. A "Volume-Weighted Impetus" would mislead. The user-suggested name during Wave 1 research was therefore rejected.
+- **"Swing Pivots", not "Donchian Channel".** The Java class `IndicatorMinMax` detects discrete local extrema with a confirmation delay — a zig-zag / swing-high-low detector. A Donchian Channel is a continuous rolling-high / rolling-low envelope (which is what `trailing-extreme` provides). Naming `IndicatorMinMax` "Donchian Channel" would mislead.
+
+### `absolute-mean` corrects a Java latent bug
+
+`IndicatorAvg.java` seeds `sum += Math.abs(currentValue)` in init but the streaming step runs `sum += currentFilterValue; sum -= queue.poll()` on signed values. The result is an inconsistent mixing of abs and signed behaviour that only matches the user's mental model when the input is positive. The port applies `abs` in both phases so the indicator is consistently "rolling mean of the absolute value", which is what practitioners reading the class name expect.
+
+**Locations:** `frontend/src/pages/Indicators/defaults/*.js`, `frontend/src/pages/Indicators/defaultIndicators.js`, `docs/indicators.md`.

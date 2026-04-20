@@ -40,13 +40,18 @@ function IndicatorChart({ indicator, result, loading, error }) {
       connectgaps: false,
     }));
 
+    // Rendering mode — default to a continuous line; indicators that emit
+    // sparse outputs (e.g. swing-pivots) can opt into markers via
+    // indicator.chartMode so the points are actually visible on the chart.
+    const chartMode = indicator?.chartMode || 'lines';
     const baseIndTrace = {
       x: dates,
       y: result.indicator,
       type: 'scatter',
-      mode: 'lines',
+      mode: chartMode,
       name: indicator?.name || 'Indicator',
-      line: { color: '#f59e0b', width: 1.5 },
+      line: { color: '#f59e0b', width: 1 },
+      marker: { color: '#f59e0b', size: 6 },
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
       connectgaps: false,
     };

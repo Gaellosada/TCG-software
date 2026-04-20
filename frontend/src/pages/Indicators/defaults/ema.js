@@ -20,12 +20,25 @@ export default {
   id: 'ema',
   name: 'EMA',
   readonly: true,
+  category: 'trend',
   code,
   params: {},
   seriesMap: {},
-  doc: `Exponential Moving Average — recursive filter over closing prices with smoothing factor \`alpha = 2 / (window + 1)\`. Seeded with the SMA of the first \`window\` bars; output is NaN before index \`window - 1\`.
+  doc: `**Intuition.** The Exponential Moving Average smooths a price series by recursively blending today's close with yesterday's EMA. Weights decay geometrically with age, so recent prices dominate and older prices fade quickly. Compared to the SMA, the EMA reacts faster to price changes for the same nominal window.
+
+**Formula.**
+\`\`\`
+alpha   = 2 / (window + 1)
+EMA_t   = alpha * close_t + (1 - alpha) * EMA_{t-1}
+EMA_{window-1} = SMA(close[0..window-1])          (seed)
+\`\`\`
 
 **Parameters**
-- \`window\`: span of the EMA. Smaller window → faster but noisier response; larger window → smoother but more lag.`,
+- \`window\` (int, default 20): nominal span of the EMA. Controls \`alpha\`. Smaller values react faster but are noisier; larger values are smoother but lag more.
+
+**Edge cases**
+- Output is \`NaN\` for the first \`window - 1\` bars (warm-up while seeding).
+- If the input has fewer than \`window\` bars the output is all \`NaN\`.
+- A \`NaN\` close before the seed bar will pollute the seed via \`np.mean\`; clean the input upstream.`,
   ownPanel: false,
 };

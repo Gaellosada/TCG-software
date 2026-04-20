@@ -34,15 +34,31 @@ export default {
   id: 'rsi',
   name: 'RSI',
   readonly: true,
+  category: 'momentum',
   code,
   params: {},
   seriesMap: {},
-  doc: `Relative Strength Index — bounded oscillator in [0, 100] over closing prices: \`RSI = 100 − 100 / (1 + avg_gain / avg_loss)\`. Uses Wilder's smoothing; first RS is seeded with the simple mean of the first \`window\` up/down moves.
+  doc: `**Intuition.** The Relative Strength Index is Wilder's bounded momentum oscillator. It compares the average magnitude of up-moves to the average magnitude of down-moves over the last \`window\` bars and maps the ratio onto \`[0, 100]\`. Readings above 70 are traditionally "overbought", below 30 "oversold". In practice traders use it to spot momentum exhaustion, divergences with price, and breakouts of its midline.
+
+**Formula.**
+\`\`\`
+diff_t     = close_t - close_{t-1}
+gain_t     = max(diff_t, 0)
+loss_t     = max(-diff_t, 0)
+avg_gain_t = ((window-1) * avg_gain_{t-1} + gain_t) / window      (Wilder smoothing)
+avg_loss_t = ((window-1) * avg_loss_{t-1} + loss_t) / window
+RS_t       = avg_gain_t / avg_loss_t
+RSI_t      = 100 - 100 / (1 + RS_t)
+\`\`\`
+The first \`avg_gain\` / \`avg_loss\` are seeded with the simple mean of the first \`window\` gains / losses.
 
 **Parameters**
-- \`window\`: lookback for average gain/loss. Typical value 14. Smaller window → more reactive; larger → smoother.
+- \`window\` (int, default 14): lookback for Wilder's smoothing of the gain / loss averages. Smaller values react faster but whipsaw more.
 
-**Notes**
-- Conventional overbought/oversold thresholds are 70 and 30.`,
+**Edge cases**
+- Output is \`NaN\` for the first \`window\` bars (warm-up — the first RSI is emitted at index \`window\`).
+- When the rolling \`avg_loss\` is exactly zero the ratio \`RS\` is treated as \`+inf\` and \`RSI\` pins to 100.
+- When both averages are zero (flat series) \`RS\` stays at \`+inf\` and \`RSI\` also pins to 100; the indicator cannot distinguish flat from strictly rising in that degenerate case.
+- \`NaN\` in the input propagates through \`np.diff\` and contaminates subsequent smoothed values until the window is clean again.`,
   ownPanel: true,
 };
