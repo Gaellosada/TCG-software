@@ -3,6 +3,20 @@
 // Thin wrapper over ``POST /api/signals/compute``. Kept separate from the
 // page code so components can mock the fetch in tests without stubbing
 // ``globalThis.fetch`` directly.
+//
+// iter-3 response shape (PLAN.md § v2 contract):
+//   {
+//     timestamps: number[],                    // unix ms, union-aligned
+//     positions: Array<{
+//       instrument: {collection: string, instrument_id: string},
+//       values:       number[],                // length == timestamps.length
+//       clipped_mask: boolean[],               // length == timestamps.length
+//       price: {label: string, values: number[]} | null
+//     }>,
+//     clipped: boolean,                        // OR across all masks
+//     diagnostics?: object
+//   }
+// Error envelope unchanged: {error_type, message, traceback?}.
 
 /**
  * POST a signal-compute request and return the parsed response.
@@ -12,9 +26,16 @@
  * ``{error_type, message, traceback?}``. Network errors propagate
  * untouched so the caller can classify via ``utils/fetchError``.
  *
- * @param {Object} spec         the Signal to evaluate (see PLAN.md § Contract)
- * @param {Object} indicators   map of indicator_id → {code, params, seriesMap}
- * @returns {Promise<Object>}   the compute response
+ * @param {Object} spec
+ *   the v2 Signal to evaluate — ``{id, name, rules: {long_entry, long_exit,
+ *   short_entry, short_exit}}`` where each rule is a list of Blocks
+ *   ``{instrument, weight, conditions}``. See PLAN.md § Authoritative v2 contract.
+ * @param {Array<{id: string, name: string, code: string, params: object, seriesMap: object}>} indicators
+ *   list of every IndicatorSpec referenced by any operand in ``spec`` —
+ *   v2 uses an array (not a map) so the backend can preserve iteration
+ *   order when diagnostics reference indicator indices.
+ * @returns {Promise<Object>}
+ *   the compute response with shape documented in the file header.
  */
 export async function computeSignal(spec, indicators) {
   const res = await fetch('/api/signals/compute', {
@@ -22,8 +43,7 @@ export async function computeSignal(spec, indicators) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       spec,
-      indicators: indicators || {},
-      instruments: {},
+      indicators: indicators || [],
     }),
   });
   if (!res.ok) {
