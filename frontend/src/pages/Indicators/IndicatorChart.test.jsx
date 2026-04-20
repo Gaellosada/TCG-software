@@ -207,6 +207,71 @@ describe('<IndicatorChart> — ownPanel split', () => {
     expect(layoutOverrides.yaxis2).toBeUndefined();
   });
 
+  it('applies visibility-boosted marker styling when chartMode is markers', () => {
+    // Regression guard for sparse-output indicators (swing-pivots,
+    // engulfment-pattern). These emit values at only ~5% of bars as
+    // markers layered on top of the price line — at Plotly's default
+    // size=6 with no border, a small amber dot on a thin price line
+    // is visually absorbed and the user sees nothing. The chart layer
+    // must therefore bump the size, switch to a distinctive symbol,
+    // and add a contrasting border when chartMode === 'markers' so the
+    // points pop against the price line regardless of theme.
+    render(
+      <IndicatorChart
+        indicator={{
+          id: 'pivots',
+          name: 'Swing Pivots',
+          ownPanel: false,
+          chartMode: 'markers',
+        }}
+        result={makeResult()}
+        loading={false}
+        error={null}
+      />,
+    );
+    const traces = chartProps[0].traces;
+    const indTrace = traces[traces.length - 1];
+    expect(indTrace.mode).toBe('markers');
+    // Size must be > 6 (default) so markers are actually visible over
+    // price; this is the core visibility requirement.
+    expect(indTrace.marker.size).toBeGreaterThan(6);
+    // Distinctive symbol (anything non-default-circle is acceptable —
+    // the regression we're guarding against is "looks like a tiny
+    // default dot indistinguishable from noise").
+    expect(indTrace.marker.symbol).toBeDefined();
+    expect(indTrace.marker.symbol).not.toBe('circle');
+    // Border must exist with a visible stroke — a border is what
+    // separates the marker from the price line it sits on top of.
+    expect(indTrace.marker.line).toBeDefined();
+    expect(indTrace.marker.line.width).toBeGreaterThan(0);
+    expect(typeof indTrace.marker.line.color).toBe('string');
+    expect(indTrace.marker.line.color.length).toBeGreaterThan(0);
+  });
+
+  it('keeps default thin-line marker styling when chartMode is lines (unchanged behaviour)', () => {
+    // Symmetric counterpart: the sparse-output styling MUST NOT bleed
+    // into the default 'lines' path. Most indicators render as a
+    // continuous line and their marker style is irrelevant, but if we
+    // accidentally set a large diamond marker globally it would appear
+    // at every data point on a line trace, which is unwanted.
+    render(
+      <IndicatorChart
+        indicator={{ id: 'rsi', name: 'RSI', ownPanel: false }}
+        result={makeResult()}
+        loading={false}
+        error={null}
+      />,
+    );
+    const traces = chartProps[0].traces;
+    const indTrace = traces[traces.length - 1];
+    expect(indTrace.mode).toBe('lines');
+    // Line-mode marker stays at the historical default (size 6, no
+    // symbol override, no border) — documented as the baseline style.
+    expect(indTrace.marker.size).toBe(6);
+    expect(indTrace.marker.symbol).toBeUndefined();
+    expect(indTrace.marker.line).toBeUndefined();
+  });
+
   it('renders the shared error card (no chart) when an error is present, even with ownPanel=true', () => {
     render(
       <IndicatorChart

@@ -41,17 +41,39 @@ function IndicatorChart({ indicator, result, loading, error }) {
     }));
 
     // Rendering mode — default to a continuous line; indicators that emit
-    // sparse outputs (e.g. swing-pivots) can opt into markers via
-    // indicator.chartMode so the points are actually visible on the chart.
+    // sparse outputs (e.g. swing-pivots, engulfment-pattern) opt into
+    // markers via indicator.chartMode so the points are actually visible
+    // on the chart.
+    //
+    // Marker styling is mode-dependent: for sparse 'markers' outputs the
+    // points can sit directly on top of the price line (swing-pivots
+    // emits actual price levels at pivot bars) — at the default Plotly
+    // marker size of 6, with no border, a small amber dot on a thin
+    // price line is visually absorbed. So in markers mode we bump the
+    // size, switch to a diamond symbol, and add a contrasting border so
+    // the points pop against whatever the underlying price line looks
+    // like. 'lines' mode keeps the previous thin-line styling untouched.
     const chartMode = indicator?.chartMode || 'lines';
+    const isMarkersMode = chartMode === 'markers';
+    const INDICATOR_COLOR = '#f59e0b';
     const baseIndTrace = {
       x: dates,
       y: result.indicator,
       type: 'scatter',
       mode: chartMode,
       name: indicator?.name || 'Indicator',
-      line: { color: '#f59e0b', width: 1 },
-      marker: { color: '#f59e0b', size: 6 },
+      line: { color: INDICATOR_COLOR, width: 1 },
+      marker: isMarkersMode
+        ? {
+            color: INDICATOR_COLOR,
+            size: 10,
+            symbol: 'diamond',
+            // Dark outline gives the marker a crisp shape boundary against
+            // whatever the price line / background is — works on both
+            // light and dark themes.
+            line: { color: '#1a1a1a', width: 1 },
+          }
+        : { color: INDICATOR_COLOR, size: 6 },
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
       connectgaps: false,
     };
