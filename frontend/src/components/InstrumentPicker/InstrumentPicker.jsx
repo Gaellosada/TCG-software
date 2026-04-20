@@ -107,7 +107,7 @@ export default function InstrumentPicker({ value, onChange, ariaLabel, testId })
         collection: '',
         adjustment: 'none',
         cycle: null,
-        rollOffset: 2,
+        rollOffset: 0,
         strategy: 'front_month',
       });
     }
@@ -126,7 +126,7 @@ export default function InstrumentPicker({ value, onChange, ariaLabel, testId })
         collection: '',
         adjustment: 'none',
         cycle: null,
-        rollOffset: 2,
+        rollOffset: 0,
         strategy: 'front_month',
       };
     onChange({ ...base, ...patch });
@@ -240,7 +240,7 @@ export default function InstrumentPicker({ value, onChange, ariaLabel, testId })
               max="30"
               step="1"
               className={styles.rollOffsetInput}
-              value={Number.isFinite(value?.rollOffset) ? value.rollOffset : 2}
+              value={Number.isFinite(value?.rollOffset) ? value.rollOffset : 0}
               onChange={(e) => {
                 const raw = parseInt(e.target.value, 10);
                 const n = Number.isFinite(raw) ? Math.max(0, Math.min(30, raw)) : 0;
