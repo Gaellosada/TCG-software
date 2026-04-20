@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import InstrumentPicker from '../../components/InstrumentPicker/InstrumentPicker';
-import ConfirmDialog from './ConfirmDialog';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import { nextInputId } from './storage';
 import { isInputConfigured } from './blockShape';
 import styles from './InputsPanel.module.css';
