@@ -55,7 +55,11 @@ const ICONS = {
   ),
   signals: (
     <>
-      <path d="M2 12h3l3-8 4 16 3-8h7" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <path d="M16.24 7.76a6 6 0 0 1 0 8.49" />
+      <path d="M7.76 16.24a6 6 0 0 1 0-8.49" />
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+      <path d="M4.93 19.07a10 10 0 0 1 0-14.14" />
     </>
   ),
   'chevron-down': (
