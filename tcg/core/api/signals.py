@@ -26,8 +26,8 @@ Blocks have ``{input_id, weight, conditions}``. Instrument operands have
 ``{kind:'indicator', indicator_id, input_id, params_override,
 series_override}`` where ``series_override`` maps ``label -> input_id``.
 
-Response (shape-compatible with iter-3, with per-input entries keyed by
-``input_id`` + ``instrument`` discriminated):
+Response (iter-5 extends iter-3 shape — additive only, I3 consumer
+contract P5-6):
 
     {
       "timestamps": number[],
@@ -36,11 +36,20 @@ Response (shape-compatible with iter-3, with per-input entries keyed by
           "input_id": str,
           "instrument": {type, collection, instrument_id?|adjustment+cycle+...},
           "values":        float[],
-          "clipped_mask":  bool[],
+          "clipped_mask":  bool[],            // repurposed: budget-skipped at t
           "price":         {label, values} | null
         }
       ],
-      "indicators": [],            // reserved, array for shape stability
+      // iter-5 additions (flat arrays so I3 can consume directly):
+      "realized_pnl": float[][],              // per-input cumulative pct return
+      "events": [
+        {"input_id", "block_id", "kind",
+         "fired_indices": int[], "latched_indices": int[]}
+      ],
+      "indicators": [                         // reserved slot now populated
+        {"input_id", "indicator_id", "series": (float|null)[]}
+      ],
+      "entries_skipped_budget": int,          // diagnostic counter
       "clipped":     bool,
       "diagnostics": { ... }
     }
@@ -540,6 +549,7 @@ async def compute_signal(
     ]
 
     positions_out: list[dict] = []
+    realized_pnl_out: list[list[float]] = []
     for p in result.positions:
         if p.price_label is None or p.price_values is None:
             price_payload: dict | None = None
@@ -557,11 +567,38 @@ async def compute_signal(
                 "price": price_payload,
             }
         )
+        # realized_pnl is nan-safe by construction (0 on nan steps).
+        realized_pnl_out.append([float(v) for v in p.realized_pnl.tolist()])
+
+    events_out: list[dict] = []
+    for ev in result.events:
+        events_out.append(
+            {
+                "input_id": ev.input_id,
+                "block_id": ev.block_id,
+                "kind": ev.kind,
+                "fired_indices": [int(i) for i in ev.fired_indices],
+                "latched_indices": [int(i) for i in ev.latched_indices],
+            }
+        )
+
+    indicators_out: list[dict] = []
+    for ind in result.indicator_series:
+        indicators_out.append(
+            {
+                "input_id": ind.input_id,
+                "indicator_id": ind.indicator_id,
+                "series": _nan_safe(ind.series),
+            }
+        )
 
     return {
         "timestamps": timestamps,
         "positions": positions_out,
-        "indicators": [],
+        "realized_pnl": realized_pnl_out,
+        "events": events_out,
+        "indicators": indicators_out,
+        "entries_skipped_budget": int(result.entries_skipped_budget),
         "clipped": bool(result.clipped),
         "diagnostics": dict(result.diagnostics),
     }

@@ -1,26 +1,41 @@
-"""Signal evaluator -- pure NumPy, vectorised.
+"""Signal evaluator -- pure NumPy + per-bar stateful latching (iter-5).
 
-v3 (iter-4): inputs replace block/operand instruments
------------------------------------------------------
+v3 (iter-4) — inputs replace block/operand instruments
+------------------------------------------------------
 Every signal declares a top-level ``inputs`` list; blocks reference an
 input by id, and operands (instrument + indicator) bind through an input.
 This means rebinding an input swaps the instrument for every block and
 every operand referencing it — the single code-path is now the bound
 input.
 
-Composition (per timestep ``t`` and per declared instrument ``I``):
+iter-5 semantics (ask #5) — latched positions with GLOBAL budget
+----------------------------------------------------------------
+Positions are no longer stateless per-bar sums. Each entry block owns a
+boolean latch keyed by (input_id, block_id, side). Per bar ``t``, in
+declaration order of blocks:
 
-    long_score_I  = Σ b.weight over active long_entry blocks
-                    whose input_id's instrument == I
-    short_score_I = Σ b.weight over active short_entry blocks
-                    whose input_id's instrument == I
-    long_exit_I   = any active long_exit  block whose input_id == I
-    short_exit_I  = any active short_exit block whose input_id == I
-    long_pos_I    = 0 if long_exit_I  else min(long_score_I,  1.0)
-    short_pos_I   = 0 if short_exit_I else min(short_score_I, 1.0)
-    position_I    = long_pos_I - short_pos_I           # ∈ [-1, 1]
-    clipped_I     = (long_score_I  > 1 and not long_exit_I)
-                    OR (short_score_I > 1 and not short_exit_I)
+  1. **Clear pass (same-side only).** For each long_exit block whose
+     AND-condition fires at ``t`` and whose ``input_id`` matches, clear
+     every long latch under the same input. Same for short_exit/short.
+     Cross-side clearing is forbidden.
+  2. **Entry pass.** For each entry block in declaration order whose
+     condition fires at ``t`` AND whose latch is currently False:
+     compute candidate ``total = sum(all active latched weights across
+     ALL inputs and BOTH sides) + block.weight``. If ``total ≤ 1.0``
+     set latch True (else SKIP — record a ``entries_skipped_budget``
+     counter increment).
+
+After both passes at bar ``t``:
+
+    long_pos_I(t)  = Σ latched long weights for input I
+    short_pos_I(t) = Σ latched short weights for input I
+    position_I(t)  = long_pos_I(t) − short_pos_I(t)   # in [-1, +1]
+    position_I(t)  = 0 if any-nan-poison at t (preserved from iter-4)
+
+The budget is GLOBAL (sum across every input and both sides ≤ 1.0, per
+orchestrator decision P5-3). Weight representation is a fraction in
+[0, 1] everywhere (P5-2). Latch state is per-(input, block); exit
+clearing is per-input-per-side (never cross-side, guardrail N6).
 
 A block is "usable" iff
   * it has ≥1 condition;
@@ -46,7 +61,7 @@ when the fetcher protocol doesn't support it) surface as
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -609,23 +624,61 @@ def _eval_block_activity(
 
 @dataclass(frozen=True)
 class InstrumentPositionResult:
-    """Per-(referenced) input output returned by :func:`evaluate_signal`."""
+    """Per-(referenced) input output returned by :func:`evaluate_signal`.
+
+    iter-5:
+      * ``values`` is now the latched net position (sum of latched long
+        weights − sum of latched short weights).
+      * ``clipped_mask`` now marks bars where at least one entry for
+        *this input* was SKIPPED due to the global budget cap.
+      * ``realized_pnl`` is a per-bar cumulative return contribution for
+        this input:
+            pnl(0)   = 0
+            pnl(t)   = pnl(t-1) + position(t-1) * (price(t) − price(t-1))
+                       / price(t-1)   (when price(t-1) finite & non-zero)
+        NaN prices produce a 0-step for that bar (no drift on missing
+        data).
+    """
 
     input_id: str
     instrument: InputInstrument
     values: npt.NDArray[np.float64]
     clipped_mask: npt.NDArray[np.bool_]
+    realized_pnl: npt.NDArray[np.float64]
     price_label: str | None = None
     price_values: npt.NDArray[np.float64] | None = None
 
 
 @dataclass(frozen=True)
+class BlockEvent:
+    """Per-block firing/latching record emitted in the response (P5-6)."""
+
+    input_id: str
+    block_id: str
+    kind: Literal["long_entry", "long_exit", "short_entry", "short_exit"]
+    fired_indices: tuple[int, ...]
+    latched_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class IndicatorSeriesResult:
+    """Resolved indicator operand series exposed alongside positions."""
+
+    input_id: str
+    indicator_id: str
+    series: npt.NDArray[np.float64]
+
+
+@dataclass(frozen=True)
 class SignalEvalResult:
-    """Top-level evaluation result (v3)."""
+    """Top-level evaluation result (v3 + iter-5 extensions)."""
 
     index: npt.NDArray[np.int64]
     positions: tuple[InstrumentPositionResult, ...]
     clipped: bool
+    events: tuple[BlockEvent, ...]
+    indicator_series: tuple[IndicatorSeriesResult, ...]
+    entries_skipped_budget: int
     diagnostics: dict[str, object]
 
 
@@ -688,83 +741,226 @@ async def evaluate_signal(
                     instrument=inputs[rid].instrument,
                     values=np.array([], dtype=np.float64),
                     clipped_mask=np.array([], dtype=np.bool_),
+                    realized_pnl=np.array([], dtype=np.float64),
                     price_label=None,
                     price_values=None,
                 )
                 for rid in referenced_ids
             ),
             clipped=False,
+            events=(),
+            indicator_series=(),
+            entries_skipped_budget=0,
             diagnostics={"T": 0, "inputs": len(referenced_ids)},
         )
 
-    # ── 4. Per-input composition ──
+    # ── 4. Build per-(input, side, block_index) tables of usable blocks ──
+    #
+    # Each usable block is assigned a stable declaration-order id within
+    # its side ("{kind}#{idx}" where idx is zero-based declaration order
+    # in the side's tuple). Entries are processed in declaration order
+    # so budget-skip is deterministic (P5-5).
+    BlockRec = tuple[
+        str,  # block_id
+        Literal[
+            "long_entry", "long_exit", "short_entry", "short_exit"
+        ],  # kind
+        Block,
+        npt.NDArray[np.bool_],  # condition truth (T-vector)
+        npt.NDArray[np.bool_],  # condition nan mask (T-vector)
+    ]
+
+    def _side_records(
+        rules_tuple: tuple[Block, ...],
+        *,
+        is_entry: bool,
+        kind: Literal[
+            "long_entry", "long_exit", "short_entry", "short_exit"
+        ],
+    ) -> list[BlockRec]:
+        recs: list[BlockRec] = []
+        for idx, blk in enumerate(rules_tuple):
+            if not _is_usable_block(blk, is_entry=is_entry, inputs=inputs):
+                continue
+            active, blk_nan = _eval_block_activity(
+                blk, indicators, inputs, values_by_key, T
+            )
+            recs.append((f"{kind}#{idx}", kind, blk, active, blk_nan))
+        return recs
+
+    long_entry_recs = _side_records(
+        signal.rules.long_entry, is_entry=True, kind="long_entry"
+    )
+    short_entry_recs = _side_records(
+        signal.rules.short_entry, is_entry=True, kind="short_entry"
+    )
+    long_exit_recs = _side_records(
+        signal.rules.long_exit, is_entry=False, kind="long_exit"
+    )
+    short_exit_recs = _side_records(
+        signal.rules.short_exit, is_entry=False, kind="short_exit"
+    )
+
+    # Per-input nan-poison mask: union of every usable block's condition
+    # nan mask for blocks bound to that input (preserves iter-4
+    # semantics — nan bar zeroes output but does NOT clear latches).
+    nan_poison: dict[str, npt.NDArray[np.bool_]] = {
+        rid: np.zeros(T, dtype=np.bool_) for rid in referenced_ids
+    }
+    for recs in (
+        long_entry_recs, short_entry_recs, long_exit_recs, short_exit_recs
+    ):
+        for _bid, _kind, blk, _truth, blk_nan in recs:
+            if blk.input_id in nan_poison:
+                nan_poison[blk.input_id] = nan_poison[blk.input_id] | blk_nan
+
+    # ── 5. Latch state + per-bar positions (sequential) ──
+    #
+    # latches[(input_id, block_id, side)] = bool. Only entry blocks
+    # carry latches; exits CLEAR latches.
+    latches_long: dict[tuple[str, str], bool] = {}
+    latches_short: dict[tuple[str, str], bool] = {}
+    for bid, _kind, blk, _truth, _nan in long_entry_recs:
+        latches_long[(blk.input_id, bid)] = False
+    for bid, _kind, blk, _truth, _nan in short_entry_recs:
+        latches_short[(blk.input_id, bid)] = False
+
+    # Output buffers.
+    long_pos: dict[str, npt.NDArray[np.float64]] = {
+        rid: np.zeros(T, dtype=np.float64) for rid in referenced_ids
+    }
+    short_pos: dict[str, npt.NDArray[np.float64]] = {
+        rid: np.zeros(T, dtype=np.float64) for rid in referenced_ids
+    }
+    budget_skip_per_input: dict[str, npt.NDArray[np.bool_]] = {
+        rid: np.zeros(T, dtype=np.bool_) for rid in referenced_ids
+    }
+
+    # Event accumulators (fired + latched indices per block).
+    event_fired: dict[tuple[str, str], list[int]] = {}
+    event_latched: dict[tuple[str, str], list[int]] = {}
+    event_meta: dict[
+        tuple[str, str],
+        tuple[str, Literal["long_entry", "long_exit", "short_entry", "short_exit"]],
+    ] = {}
+    for recs in (
+        long_entry_recs, short_entry_recs, long_exit_recs, short_exit_recs
+    ):
+        for bid, kind, blk, _truth, _nan in recs:
+            key = (blk.input_id, bid)
+            event_fired[key] = []
+            event_latched[key] = []
+            event_meta[key] = (blk.input_id, kind)
+
+    entries_skipped_budget = 0
+
+    # Fast weight lookups keyed by (input_id, block_id).
+    _weight_lookup_long: dict[tuple[str, str], float] = {
+        (blk.input_id, bid): float(blk.weight)
+        for bid, _kind, blk, _truth, _nan in long_entry_recs
+    }
+    _weight_lookup_short: dict[tuple[str, str], float] = {
+        (blk.input_id, bid): float(blk.weight)
+        for bid, _kind, blk, _truth, _nan in short_entry_recs
+    }
+    # Float-comparison slack so w1=0.6, w2=0.4 don't fail ≤ 1.0 by FP
+    # rounding. Tolerates total up to 1 + 1e-9.
+    _BUDGET_EPS = 1e-9
+
+    for t in range(T):
+        # --- (a) record fired-indices for ALL usable blocks at t ---
+        for recs in (
+            long_entry_recs,
+            short_entry_recs,
+            long_exit_recs,
+            short_exit_recs,
+        ):
+            for bid, _kind, blk, truth, _nan in recs:
+                if bool(truth[t]):
+                    event_fired[(blk.input_id, bid)].append(t)
+
+        # --- (b) clear-pass: same-side exits clear same-side latches ---
+        for bid, _kind, blk, truth, _nan in long_exit_recs:
+            if bool(truth[t]):
+                # Record the exit's "latched index" = same as fired.
+                event_latched[(blk.input_id, bid)].append(t)
+                for (lkey_in, lkey_b), v in list(latches_long.items()):
+                    if lkey_in == blk.input_id and v:
+                        latches_long[(lkey_in, lkey_b)] = False
+        for bid, _kind, blk, truth, _nan in short_exit_recs:
+            if bool(truth[t]):
+                event_latched[(blk.input_id, bid)].append(t)
+                for (lkey_in, lkey_b), v in list(latches_short.items()):
+                    if lkey_in == blk.input_id and v:
+                        latches_short[(lkey_in, lkey_b)] = False
+
+        # --- (c) entry-pass (declaration order; GLOBAL budget ≤ 1.0) ---
+        def _current_total_weight() -> float:
+            tot = 0.0
+            for (in_id, bid), latched in latches_long.items():
+                if latched:
+                    tot += _weight_lookup_long[(in_id, bid)]
+            for (in_id, bid), latched in latches_short.items():
+                if latched:
+                    tot += _weight_lookup_short[(in_id, bid)]
+            return tot
+
+        # Build weight lookups once per evaluation (closure capture).
+        # They are created just-in-time on first iteration via nonlocal
+        # guard. Hoist to module-outer scope for readability:
+        # (see the explicit construction just above the t-loop below)
+        for bid, _kind, blk, truth, _nan in long_entry_recs:
+            if not bool(truth[t]):
+                continue
+            if latches_long[(blk.input_id, bid)]:
+                continue
+            tot = _current_total_weight()
+            w = float(blk.weight)
+            if tot + w <= 1.0 + _BUDGET_EPS:
+                latches_long[(blk.input_id, bid)] = True
+                event_latched[(blk.input_id, bid)].append(t)
+            else:
+                entries_skipped_budget += 1
+                budget_skip_per_input[blk.input_id][t] = True
+
+        for bid, _kind, blk, truth, _nan in short_entry_recs:
+            if not bool(truth[t]):
+                continue
+            if latches_short[(blk.input_id, bid)]:
+                continue
+            tot = _current_total_weight()
+            w = float(blk.weight)
+            if tot + w <= 1.0 + _BUDGET_EPS:
+                latches_short[(blk.input_id, bid)] = True
+                event_latched[(blk.input_id, bid)].append(t)
+            else:
+                entries_skipped_budget += 1
+                budget_skip_per_input[blk.input_id][t] = True
+
+        # --- (d) emit per-input net position at t ---
+        for rid in referenced_ids:
+            lsum = 0.0
+            ssum = 0.0
+            for (in_id, bid), latched in latches_long.items():
+                if in_id == rid and latched:
+                    lsum += _weight_lookup_long[(in_id, bid)]
+            for (in_id, bid), latched in latches_short.items():
+                if in_id == rid and latched:
+                    ssum += _weight_lookup_short[(in_id, bid)]
+            long_pos[rid][t] = lsum
+            short_pos[rid][t] = ssum
+
+    # ── 6. Assemble per-input results (prices, pnl, clipped mask) ──
     results: list[InstrumentPositionResult] = []
     any_clipped_overall = False
 
     for ref_id in referenced_ids:
         inp = inputs[ref_id]
-        long_score = np.zeros(T, dtype=np.float64)
-        short_score = np.zeros(T, dtype=np.float64)
-        long_exit_fired = np.zeros(T, dtype=np.bool_)
-        short_exit_fired = np.zeros(T, dtype=np.bool_)
-        nan_poison = np.zeros(T, dtype=np.bool_)
 
-        def _add_blocks(
-            blocks: tuple[Block, ...],
-            *,
-            is_entry: bool,
-            bucket: npt.NDArray,
-            kind: str,
-        ) -> None:
-            nonlocal nan_poison
-            for blk in blocks:
-                if blk.input_id != ref_id:
-                    continue
-                if not _is_usable_block(blk, is_entry=is_entry, inputs=inputs):
-                    continue
-                active, blk_nan = _eval_block_activity(
-                    blk, indicators, inputs, values_by_key, T
-                )
-                nan_poison = nan_poison | blk_nan
-                if kind == "score":
-                    bucket += active.astype(np.float64) * float(blk.weight)
-                else:
-                    bucket |= active
+        position = long_pos[ref_id] - short_pos[ref_id]
+        position = np.where(nan_poison[ref_id], 0.0, position)
 
-        _add_blocks(
-            signal.rules.long_entry, is_entry=True, bucket=long_score, kind="score"
-        )
-        _add_blocks(
-            signal.rules.short_entry,
-            is_entry=True,
-            bucket=short_score,
-            kind="score",
-        )
-        _add_blocks(
-            signal.rules.long_exit,
-            is_entry=False,
-            bucket=long_exit_fired,
-            kind="exit",
-        )
-        _add_blocks(
-            signal.rules.short_exit,
-            is_entry=False,
-            bucket=short_exit_fired,
-            kind="exit",
-        )
-
-        clipped_mask = (
-            ((long_score > 1.0) & ~long_exit_fired)
-            | ((short_score > 1.0) & ~short_exit_fired)
-        )
-
-        long_pos = np.where(long_exit_fired, 0.0, np.minimum(long_score, 1.0))
-        short_pos = np.where(
-            short_exit_fired, 0.0, np.minimum(short_score, 1.0)
-        )
-        position = long_pos - short_pos
-        position = np.where(nan_poison, 0.0, position)
-
+        clipped_mask = budget_skip_per_input[ref_id]
         if bool(clipped_mask.any()):
             any_clipped_overall = True
 
@@ -783,31 +979,90 @@ async def evaluate_signal(
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]
 
+        # Realized PnL: cumulative of position[t-1] * pct_return[t].
+        # NaN-safe: zero contribution when either price is nan/zero.
+        realized_pnl = np.zeros(T, dtype=np.float64)
+        if price_values is not None and T >= 2:
+            prev_price = price_values[:-1]
+            cur_price = price_values[1:]
+            valid = (
+                np.isfinite(prev_price)
+                & np.isfinite(cur_price)
+                & (prev_price != 0.0)
+            )
+            step = np.zeros(T - 1, dtype=np.float64)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                raw = position[:-1] * (cur_price - prev_price) / prev_price
+            step[valid] = raw[valid]
+            realized_pnl[1:] = np.cumsum(step)
+
         results.append(
             InstrumentPositionResult(
                 input_id=ref_id,
                 instrument=inp.instrument,
                 values=position,
                 clipped_mask=clipped_mask,
+                realized_pnl=realized_pnl,
                 price_label=price_label,
                 price_values=price_values,
             )
         )
 
-    diagnostics = {
+    # ── 7. Events payload ──
+    events: list[BlockEvent] = []
+    for key, fired_list in event_fired.items():
+        in_id, kind = event_meta[key]
+        latched_list = event_latched[key]
+        events.append(
+            BlockEvent(
+                input_id=in_id,
+                block_id=key[1],
+                kind=kind,
+                fired_indices=tuple(fired_list),
+                latched_indices=tuple(latched_list),
+            )
+        )
+
+    # ── 8. Indicator series (expose every indicator operand value) ──
+    indicator_series: list[IndicatorSeriesResult] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for op in _walk_operands(signal):
+        if not isinstance(op, IndicatorOperand):
+            continue
+        pair = (op.input_id, op.indicator_id)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        k = _operand_key(op, indicators, inputs)
+        if k in values_by_key:
+            indicator_series.append(
+                IndicatorSeriesResult(
+                    input_id=op.input_id,
+                    indicator_id=op.indicator_id,
+                    series=values_by_key[k],
+                )
+            )
+
+    diagnostics: dict[str, object] = {
         "T": int(T),
         "inputs": len(referenced_ids),
+        "entries_skipped_budget": int(entries_skipped_budget),
     }
 
     return SignalEvalResult(
         index=index,
         positions=tuple(results),
         clipped=any_clipped_overall,
+        events=tuple(events),
+        indicator_series=tuple(indicator_series),
+        entries_skipped_budget=int(entries_skipped_budget),
         diagnostics=diagnostics,
     )
 
 
 __all__ = [
+    "BlockEvent",
+    "IndicatorSeriesResult",
     "IndicatorSpecInput",
     "InstrumentPositionResult",
     "PriceFetcher",
