@@ -675,6 +675,30 @@
   min-width: 240px;
 }
 
+/* v3: replaces blockInstrumentBtn — a simple select bound to the
+   signal's declared inputs. */
+.blockInputSelect {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  padding: 4px 6px;
+  height: var(--signal-control-height);
+  outline: none;
+}
+
+.blockInputSelect:focus {
+  border-color: var(--border-accent);
+}
+
+.blockInputWarn {
+  margin-left: 4px;
+  color: var(--color-warn, #d69e2e);
+  font-weight: 700;
+}
+
 .blockWeightCell {
   display: flex;
   align-items: center;

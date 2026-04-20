@@ -4,11 +4,12 @@ import BlockEditor from './BlockEditor';
 import ParamsPanel from './ParamsPanel';
 import SignalChart from './SignalChart';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import InputsPanel from './InputsPanel';
 import { loadState, saveState, emptyRules } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import { buildComputeRequestBody } from './requestBuilder';
-import { isBlockRunnable } from './blockShape';
+import { isBlockRunnable, isInputConfigured } from './blockShape';
 import { classifyFetchError } from '../../utils/fetchError';
 import { coerceErrorType, fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 // Reuse the Indicators page's storage + param parser so referenced
@@ -127,6 +128,7 @@ function SignalsPage() {
     const initial = (saved.signals || []).map((s) => ({
       id: s.id,
       name: s.name || 'Untitled',
+      inputs: Array.isArray(s.inputs) ? s.inputs : [],
       rules: { ...emptyRules(), ...(s.rules || {}) },
     }));
     setSignals(initial);
@@ -176,7 +178,12 @@ function SignalsPage() {
       const id = (globalThis.crypto && globalThis.crypto.randomUUID)
         ? globalThis.crypto.randomUUID()
         : `sig-${Date.now()}-${Math.random()}`;
-      const newSig = { id, name: nextSignalName(prev), rules: emptyRules() };
+      const newSig = {
+        id,
+        name: nextSignalName(prev),
+        inputs: [],
+        rules: emptyRules(),
+      };
       setSelectedId(id);
       return [...prev, newSig];
     });
@@ -185,8 +192,6 @@ function SignalsPage() {
   }, []);
 
   // Iter-3 (guardrail 11): replace window.confirm with ConfirmDialog.
-  // SignalsList emits a delete request; we stash the id and open the
-  // dialog, running the actual delete on confirm.
   const handleDelete = useCallback((id) => {
     setConfirmDeleteId(id);
   }, []);
@@ -209,35 +214,59 @@ function SignalsPage() {
     setSignals((prev) => prev.map((s) => (s.id !== id ? s : { ...s, name: newName })));
   }, []);
 
+  const handleInputsChange = useCallback((nextInputs) => {
+    setSignals((prev) => prev.map((s) => (
+      s.id !== selectedId ? s : { ...s, inputs: nextInputs }
+    )));
+  }, [selectedId]);
+
   const handleRulesChange = useCallback((nextRules) => {
     setSignals((prev) => prev.map((s) => (s.id !== selectedId ? s : { ...s, rules: nextRules })));
   }, [selectedId]);
 
   // --- Validation + run ----------------------------------------------------
-  // Iter-3: every block must be *runnable* (instrument picked + ≥1 fully-
-  // specified condition). Empty blocks (zero conditions) are silently
-  // filtered by the backend / request builder, but a block with an
-  // instrument and conditions that are incomplete blocks Run. See
-  // blockShape.isBlockRunnable for the single-source definition.
+  // v3: Run gate checks inputs too — every input must be configured
+  // (instrument picked), every block's input_id must resolve to one of
+  // them, every operand's input_id must resolve, every condition must
+  // be complete.
   const { runDisabledReason, missingIds } = useMemo(() => {
     if (!selectedSignal) return { runDisabledReason: 'Select a signal first', missingIds: [] };
-    // PROB-2 fix: preserve each block's direction so isBlockRunnable can
-    // enforce the entry-weight>0 gate.
+    const inputs = Array.isArray(selectedSignal.inputs) ? selectedSignal.inputs : [];
+    if (inputs.length === 0) {
+      return {
+        runDisabledReason: 'Add at least one input at the top of the page.',
+        missingIds: [],
+      };
+    }
+    // Every input that's referenced by the rules must be configured;
+    // conservatively require every declared input to be configured so
+    // there's no dangling-instrument UX.
+    for (const input of inputs) {
+      if (!isInputConfigured(input)) {
+        return {
+          runDisabledReason: `Input "${input.id}" needs an instrument — open the Inputs panel to pick one.`,
+          missingIds: [],
+        };
+      }
+    }
     const rules = selectedSignal.rules || {};
     const blocksWithDir = Object.keys(rules).flatMap((dir) => {
       const blocks = Array.isArray(rules[dir]) ? rules[dir] : [];
       return blocks.map((b) => ({ block: b, direction: dir }));
     });
     const nonEmpty = blocksWithDir.filter(({ block: b }) => (
-      (b.conditions || []).length > 0 || b.instrument
+      (b.conditions || []).length > 0 || b.input_id
     ));
     if (nonEmpty.length === 0) {
-      return { runDisabledReason: 'Add at least one block with an instrument + condition', missingIds: [] };
+      return {
+        runDisabledReason: 'Add at least one block with an input + condition',
+        missingIds: [],
+      };
     }
     for (const { block: b, direction } of nonEmpty) {
-      if (!b.instrument) {
+      if (!b.input_id) {
         return {
-          runDisabledReason: 'Every block needs an instrument — pick one in the block header.',
+          runDisabledReason: 'Every block needs an input — pick one in the block header.',
           missingIds: [],
         };
       }
@@ -247,7 +276,6 @@ function SignalsPage() {
           missingIds: [],
         };
       }
-      // Direction-aware: entry blocks additionally require weight > 0.
       const isEntry = direction === 'long_entry' || direction === 'short_entry';
       if (isEntry && (!Number.isFinite(b.weight) || b.weight <= 0)) {
         return {
@@ -256,10 +284,10 @@ function SignalsPage() {
           missingIds: [],
         };
       }
-      if (!isBlockRunnable(b, direction)) {
+      if (!isBlockRunnable(b, direction, inputs)) {
         return {
-          runDisabledReason: 'Every operand must be set — pick an indicator, '
-            + 'instrument or constant for each slot.',
+          runDisabledReason: 'Every operand must be set — pick an input, '
+            + 'indicator or constant for each slot.',
           missingIds: [],
         };
       }
@@ -294,8 +322,6 @@ function SignalsPage() {
       const data = await computeSignal(body.spec, body.indicators);
       setLastResult(data);
     } catch (e) {
-      // Two failure modes: (a) non-2xx with an envelope on ``e.body``;
-      // (b) network-layer failure (no ``e.status``).
       if (e && typeof e === 'object' && 'status' in e) {
         setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
         setLastResult(null);
@@ -333,11 +359,18 @@ function SignalsPage() {
       </div>
       <div className={styles.editorPanel}>
         {selectedSignal ? (
-          <BlockEditor
-            rules={selectedSignal.rules}
-            onRulesChange={handleRulesChange}
-            indicators={availableIndicators}
-          />
+          <>
+            <InputsPanel
+              inputs={selectedSignal.inputs || []}
+              onChange={handleInputsChange}
+            />
+            <BlockEditor
+              rules={selectedSignal.rules}
+              onRulesChange={handleRulesChange}
+              inputs={selectedSignal.inputs || []}
+              indicators={availableIndicators}
+            />
+          </>
         ) : (
           <div className={styles.editorEmpty}>
             Select a signal on the left, or click <strong>+ New</strong> to create one.

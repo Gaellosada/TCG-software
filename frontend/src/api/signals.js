@@ -4,15 +4,17 @@
 // page code so components can mock the fetch in tests without stubbing
 // ``globalThis.fetch`` directly.
 //
-// iter-3 response shape (PLAN.md § v2 contract):
+// iter-4 response shape (PLAN.md § v3 contract):
 //   {
 //     timestamps: number[],                    // unix ms, union-aligned
 //     positions: Array<{
-//       instrument: {collection: string, instrument_id: string},
+//       input_id:   string,
+//       instrument: {type: 'spot'|'continuous', ...},
 //       values:       number[],                // length == timestamps.length
 //       clipped_mask: boolean[],               // length == timestamps.length
 //       price: {label: string, values: number[]} | null
 //     }>,
+//     indicators: Array<IndicatorTrace>,       // ALWAYS a list (iter-3 PROB-1)
 //     clipped: boolean,                        // OR across all masks
 //     diagnostics?: object
 //   }
@@ -27,13 +29,12 @@
  * untouched so the caller can classify via ``utils/fetchError``.
  *
  * @param {Object} spec
- *   the v2 Signal to evaluate — ``{id, name, rules: {long_entry, long_exit,
- *   short_entry, short_exit}}`` where each rule is a list of Blocks
- *   ``{instrument, weight, conditions}``. See PLAN.md § Authoritative v2 contract.
+ *   the v3 Signal to evaluate — ``{id, name, inputs, rules: {long_entry,
+ *   long_exit, short_entry, short_exit}}`` where each rule is a list of
+ *   Blocks ``{input_id, weight, conditions}``. See PLAN.md § v3 contract.
  * @param {Array<{id: string, name: string, code: string, params: object, seriesMap: object}>} indicators
  *   list of every IndicatorSpec referenced by any operand in ``spec`` —
- *   v2 uses an array (not a map) so the backend can preserve iteration
- *   order when diagnostics reference indicator indices.
+ *   always an array (iter-3 PROB-1).
  * @returns {Promise<Object>}
  *   the compute response with shape documented in the file header.
  */

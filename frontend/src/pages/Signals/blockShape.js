@@ -1,117 +1,135 @@
-// Pure data helpers for Block-level validation.
+// Pure data helpers for Block-level validation — v3 (iter-4).
 //
-// These helpers are the single source of truth for the question
-// "is this block complete enough to Run?". They are imported by both
-// the UI (to gate the Run button and per-row state) and by the request
-// builder (pre-submit validation). No React imports — unit-testable in
-// isolation.
+// Single source of truth for "is this block complete enough to Run?".
+// Used by the UI (Run gate, per-block status dot) and the request
+// builder. No React imports — unit-testable in isolation.
 //
-// A Block's v2 shape is
-//   { instrument: {collection, instrument_id} | null,
-//     weight:     number (finite, non-negative),
-//     conditions: Condition[] }
-// Each Condition has a discriminated shape keyed off its ``op`` (see
-// conditionOps.js § conditionShape / operandSlots).
+// v3 Block shape:
+//   { input_id: string, weight: number, conditions: Condition[] }
+// v3 Operand shapes:
+//   - indicator:  { kind:'indicator', indicator_id, input_id, output,
+//                   params_override, series_override }
+//   - instrument: { kind:'instrument', input_id, field }
+//   - constant:   { kind:'constant', value }
 //
-// Note: this module intentionally does NOT re-export the operand /
-// condition helpers from conditionOps.js — it provides its OWN
-// ``isOperandComplete`` because the brief for the Run-gate requires
-// stricter validation of the ``instrument`` operand (``field`` must be
-// set, not just collection + instrument_id). conditionOps.isOperandComplete
-// is looser (it does not require ``field``) and is kept for backwards
-// compatibility with iter-2 UI state.
+// Runnability additionally requires every referenced input_id to resolve
+// against the signal's ``inputs`` list AND every such input's instrument
+// to be fully configured.
 
 import { operandSlots } from './conditionOps';
 
 /**
  * Build a brand-new empty block.
- *   - instrument: null        — user must pick before Run.
- *   - weight: 0               — sensible non-negative default.
- *   - conditions: []          — empty until user adds rows.
- *
- * Weight of 0 is deliberately the default (per iter-3 "no defaults"
- * spirit — the weight slider / input is the user's explicit knob).
+ * - input_id: ''  — user must pick.
+ * - weight:    0  — no pre-filled contribution.
+ * - conditions: []
  */
 export function defaultBlock() {
-  return { instrument: null, weight: 0, conditions: [] };
+  return { input_id: '', weight: 0, conditions: [] };
 }
 
 /**
- * Return true iff an operand is fully specified for submission.
- *
- * Per operand kind:
- *   - indicator: ``indicator_id`` is a non-empty string.
- *   - instrument: ``collection`` + ``instrument_id`` + ``field`` are all
- *     non-empty strings.
- *   - constant: ``value`` is finite.
- *
- * Unknown / null operands ⇒ false.
+ * True iff an input's instrument is fully configured.
+ *   - spot:       requires collection + instrument_id.
+ *   - continuous: requires collection + adjustment + cycle + rollOffset + strategy.
  */
-export function isOperandComplete(operand) {
-  if (!operand || typeof operand !== 'object') return false;
-  if (operand.kind === 'constant') {
-    return Number.isFinite(operand.value);
+export function isInputConfigured(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (!input.id || typeof input.id !== 'string') return false;
+  const inst = input.instrument;
+  if (!inst || typeof inst !== 'object') return false;
+  if (inst.type === 'spot') {
+    return typeof inst.collection === 'string' && inst.collection.length > 0
+      && typeof inst.instrument_id === 'string' && inst.instrument_id.length > 0;
   }
-  if (operand.kind === 'indicator') {
-    return typeof operand.indicator_id === 'string' && operand.indicator_id.length > 0;
-  }
-  if (operand.kind === 'instrument') {
-    return typeof operand.collection === 'string' && operand.collection.length > 0
-      && typeof operand.instrument_id === 'string' && operand.instrument_id.length > 0
-      && typeof operand.field === 'string' && operand.field.length > 0;
+  if (inst.type === 'continuous') {
+    return typeof inst.collection === 'string' && inst.collection.length > 0
+      && ['none', 'proportional', 'difference'].includes(inst.adjustment)
+      && typeof inst.cycle === 'string' && inst.cycle.length > 0
+      && Number.isFinite(inst.rollOffset)
+      && inst.strategy === 'front_month';
   }
   return false;
 }
 
 /**
- * Return true iff every operand slot on a condition is complete.
- * Reuses the operand-slot list declared in conditionOps so new ops
- * automatically plug into the Run-gate.
+ * True iff the operand is complete AND any referenced input_ids resolve
+ * against ``inputsById``.
  */
-export function isConditionComplete(condition) {
+export function isOperandComplete(operand, inputsById) {
+  if (!operand || typeof operand !== 'object') return false;
+  if (operand.kind === 'constant') {
+    return Number.isFinite(operand.value);
+  }
+  const byId = inputsById || {};
+  if (operand.kind === 'indicator') {
+    if (typeof operand.indicator_id !== 'string' || !operand.indicator_id) return false;
+    if (typeof operand.input_id !== 'string' || !operand.input_id) return false;
+    if (!byId[operand.input_id]) return false;
+    // series_override values (label -> input_id) must also resolve.
+    const so = operand.series_override;
+    if (so && typeof so === 'object') {
+      for (const k of Object.keys(so)) {
+        if (!byId[so[k]]) return false;
+      }
+    }
+    return true;
+  }
+  if (operand.kind === 'instrument') {
+    if (typeof operand.input_id !== 'string' || !operand.input_id) return false;
+    if (!byId[operand.input_id]) return false;
+    if (typeof operand.field !== 'string' || !operand.field) return false;
+    return true;
+  }
+  return false;
+}
+
+/** True iff every operand slot on a condition is complete. */
+export function isConditionComplete(condition, inputsById) {
   if (!condition || typeof condition !== 'object') return false;
   if (typeof condition.op !== 'string' || !condition.op) return false;
   for (const slot of operandSlots(condition.op)) {
-    if (!isOperandComplete(condition[slot])) return false;
+    if (!isOperandComplete(condition[slot], inputsById)) return false;
   }
   return true;
 }
 
 /**
- * Return true iff a block can be submitted to the backend:
- *   - instrument picked (non-null ``{collection, instrument_id}``)
- *   - at least one condition
- *   - every condition complete (all operand slots filled)
- *   - every indicator operand has a non-empty ``indicator_id``
- *     (implied by isConditionComplete → isOperandComplete, but spelled
- *     out in the docstring for readers).
- *
- * ENTRY directions additionally require a strictly positive weight
- * (PROB-2 fix, Review #1): the backend's ``_is_usable_block`` drops
- * entry blocks with ``weight <= 0``, so the UI must not promise a Run
- * that the backend will silently discard. EXIT directions do not gate
- * on weight — the backend ignores weight on ``*_exit`` blocks.
+ * Build an ``input_id -> input`` map from the signal's declared inputs.
+ */
+export function indexInputs(inputs) {
+  const out = {};
+  if (!Array.isArray(inputs)) return out;
+  for (const i of inputs) {
+    if (i && typeof i.id === 'string' && i.id) out[i.id] = i;
+  }
+  return out;
+}
+
+/**
+ * True iff the block can be submitted to the backend.
+ *   - input_id resolves to a declared Input that is itself fully
+ *     configured (isInputConfigured);
+ *   - at least one condition;
+ *   - every condition complete (every operand complete and every
+ *     referenced input_id resolves);
+ *   - entry directions additionally require weight > 0.
  *
  * @param {Object} block
- * @param {string} [direction] — one of ``long_entry`` / ``long_exit`` /
- *   ``short_entry`` / ``short_exit``. Only ``*_entry`` values switch on
- *   the weight check. Any other value (including ``undefined``) skips
- *   the weight gate for backwards compatibility with non-directional
- *   callers (tests, tooling).
+ * @param {string} direction — long_entry / long_exit / short_entry / short_exit
+ * @param {Array<Input>} inputs — the signal's declared inputs array.
  */
-export function isBlockRunnable(block, direction) {
+export function isBlockRunnable(block, direction, inputs) {
   if (!block || typeof block !== 'object') return false;
-  const inst = block.instrument;
-  if (!inst || typeof inst !== 'object') return false;
-  if (typeof inst.collection !== 'string' || !inst.collection) return false;
-  if (typeof inst.instrument_id !== 'string' || !inst.instrument_id) return false;
+  if (typeof block.input_id !== 'string' || !block.input_id) return false;
+  const byId = indexInputs(inputs);
+  const bound = byId[block.input_id];
+  if (!bound) return false;
+  if (!isInputConfigured(bound)) return false;
   if (!Array.isArray(block.conditions) || block.conditions.length === 0) return false;
   for (const c of block.conditions) {
-    if (!isConditionComplete(c)) return false;
+    if (!isConditionComplete(c, byId)) return false;
   }
-  // PROB-2 fix: entry blocks require weight > 0. Backend silently skips
-  // entry blocks with weight <= 0 (signal_exec._is_usable_block); if the
-  // UI considered them runnable the Run button would lie to the user.
   if (direction === 'long_entry' || direction === 'short_entry') {
     if (!Number.isFinite(block.weight) || block.weight <= 0) return false;
   }

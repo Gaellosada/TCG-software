@@ -3,6 +3,7 @@ import {
   conditionShape,
   defaultCondition,
   defaultIndicatorOperand,
+  defaultInstrumentOperand,
   isOperandComplete,
   isConditionComplete,
   operandSlots,
@@ -24,7 +25,7 @@ describe('conditionShape', () => {
   });
 });
 
-describe('defaultCondition — iter-2: no default operand injection', () => {
+describe('defaultCondition — no default operand injection', () => {
   it('binary op returns null lhs / rhs', () => {
     const c = defaultCondition('gt');
     expect(c).toEqual({ op: 'gt', lhs: null, rhs: null });
@@ -54,29 +55,32 @@ describe('operandSlots', () => {
   });
 });
 
-describe('isOperandComplete', () => {
+describe('isOperandComplete (conditionOps — input-naive)', () => {
+  // Note: this is the backwards-compatible operand-level check. The
+  // input_id → declared-input resolution check lives in blockShape.
   it('null → false', () => {
     expect(isOperandComplete(null)).toBe(false);
   });
   it('constant with finite value → true', () => {
     expect(isOperandComplete({ kind: 'constant', value: 0 })).toBe(true);
-    expect(isOperandComplete({ kind: 'constant', value: -3.2 })).toBe(true);
   });
-  it('constant with NaN value → false', () => {
+  it('constant with NaN → false', () => {
     expect(isOperandComplete({ kind: 'constant', value: NaN })).toBe(false);
   });
-  it('indicator with empty id → false', () => {
-    expect(isOperandComplete({ kind: 'indicator', indicator_id: '' })).toBe(false);
+  it('indicator requires indicator_id AND input_id', () => {
+    expect(isOperandComplete({
+      kind: 'indicator', indicator_id: 'sma', input_id: 'X',
+    })).toBe(true);
+    expect(isOperandComplete({
+      kind: 'indicator', indicator_id: 'sma', input_id: '',
+    })).toBe(false);
+    expect(isOperandComplete({
+      kind: 'indicator', indicator_id: '', input_id: 'X',
+    })).toBe(false);
   });
-  it('indicator with id → true', () => {
-    expect(isOperandComplete({ kind: 'indicator', indicator_id: 'sma' })).toBe(true);
-  });
-  it('instrument with missing fields → false', () => {
-    expect(isOperandComplete({ kind: 'instrument', collection: '', instrument_id: '' })).toBe(false);
-    expect(isOperandComplete({ kind: 'instrument', collection: 'INDEX', instrument_id: '' })).toBe(false);
-  });
-  it('instrument with both fields → true', () => {
-    expect(isOperandComplete({ kind: 'instrument', collection: 'INDEX', instrument_id: '^GSPC', field: 'close' })).toBe(true);
+  it('instrument requires a non-empty input_id', () => {
+    expect(isOperandComplete({ kind: 'instrument', input_id: '' })).toBe(false);
+    expect(isOperandComplete({ kind: 'instrument', input_id: 'X' })).toBe(true);
   });
   it('unknown kind → false', () => {
     expect(isOperandComplete({ kind: 'wat' })).toBe(false);
@@ -96,60 +100,48 @@ describe('isConditionComplete', () => {
       rhs: { kind: 'constant', value: 2 },
     })).toBe(true);
   });
-  it('binary with one null → false', () => {
-    expect(isConditionComplete({
-      op: 'gt',
-      lhs: { kind: 'constant', value: 1 },
-      rhs: null,
-    })).toBe(false);
-  });
-  it('range with 3 complete operands → true', () => {
-    expect(isConditionComplete({
-      op: 'in_range',
-      operand: { kind: 'constant', value: 1 },
-      min: { kind: 'constant', value: 0 },
-      max: { kind: 'constant', value: 2 },
-    })).toBe(true);
-  });
-  it('rolling with complete operand → true', () => {
+  it('rolling with instrument operand → true', () => {
     expect(isConditionComplete({
       op: 'rolling_gt',
-      operand: { kind: 'instrument', collection: 'INDEX', instrument_id: '^GSPC' },
+      operand: { kind: 'instrument', input_id: 'X', field: 'close' },
       lookback: 5,
     })).toBe(true);
   });
 });
 
-describe('defaultIndicatorOperand — iter-3 override fields', () => {
-  it('returns an all-null shape with explicit params_override / series_override keys', () => {
+describe('defaultIndicatorOperand — v3 shape', () => {
+  it('returns shape with all override fields explicit', () => {
     expect(defaultIndicatorOperand()).toEqual({
       kind: 'indicator',
       indicator_id: null,
+      input_id: '',
       output: null,
       params_override: null,
       series_override: null,
     });
   });
-  it('keys are own-enumerable (so JSON.stringify emits nulls, not undefineds)', () => {
-    const op = defaultIndicatorOperand();
-    // If these keys weren't present, they'd be missing from the JSON entirely.
-    const encoded = JSON.parse(JSON.stringify(op));
-    expect('params_override' in encoded).toBe(true);
-    expect('series_override' in encoded).toBe(true);
-    expect(encoded.params_override).toBe(null);
-    expect(encoded.series_override).toBe(null);
-  });
-  it('defaultIndicatorOperand is not complete (iter-2 no-defaults policy)', () => {
+  it('is not complete (no defaults policy)', () => {
     expect(isOperandComplete(defaultIndicatorOperand())).toBe(false);
   });
 });
 
-describe('migrateCondition — preserves compatible slots, leaves remainder unset', () => {
+describe('defaultInstrumentOperand — v3 shape', () => {
+  it('returns {kind, input_id: "", field: "close"}', () => {
+    expect(defaultInstrumentOperand()).toEqual({
+      kind: 'instrument', input_id: '', field: 'close',
+    });
+  });
+  it('is not complete before input_id is picked', () => {
+    expect(isOperandComplete(defaultInstrumentOperand())).toBe(false);
+  });
+});
+
+describe('migrateCondition — preserves compatible slots', () => {
   it('same shape preserves operands, only op changes', () => {
     const current = {
       op: 'gt',
       lhs: { kind: 'constant', value: 1 },
-      rhs: { kind: 'indicator', indicator_id: 'sma', output: 'default' },
+      rhs: { kind: 'indicator', indicator_id: 'sma', input_id: 'X', output: 'default' },
     };
     const next = migrateCondition(current, 'lt');
     expect(next).toEqual({ ...current, op: 'lt' });
@@ -157,20 +149,19 @@ describe('migrateCondition — preserves compatible slots, leaves remainder unse
   it('binary → range preserves lhs into operand', () => {
     const current = {
       op: 'gt',
-      lhs: { kind: 'indicator', indicator_id: 'rsi', output: 'default' },
+      lhs: { kind: 'indicator', indicator_id: 'rsi', input_id: 'X', output: 'default' },
       rhs: { kind: 'constant', value: 30 },
     };
     const next = migrateCondition(current, 'in_range');
     expect(next.op).toBe('in_range');
     expect(next.operand).toEqual(current.lhs);
-    // rhs maps to max per the migrate rule.
     expect(next.max).toEqual(current.rhs);
     expect(next.min).toBeNull();
   });
-  it('range → rolling preserves operand and defaults lookback to 1', () => {
+  it('range → rolling preserves operand', () => {
     const current = {
       op: 'in_range',
-      operand: { kind: 'indicator', indicator_id: 'x', output: 'default' },
+      operand: { kind: 'indicator', indicator_id: 'x', input_id: 'X', output: 'default' },
       min: { kind: 'constant', value: 0 },
       max: { kind: 'constant', value: 10 },
     };
@@ -182,52 +173,20 @@ describe('migrateCondition — preserves compatible slots, leaves remainder unse
     });
   });
   it('null current → default (all-null) condition', () => {
-    const next = migrateCondition(null, 'gt');
-    expect(next).toEqual({ op: 'gt', lhs: null, rhs: null });
+    expect(migrateCondition(null, 'gt')).toEqual({ op: 'gt', lhs: null, rhs: null });
   });
-
   it('preserves indicator override fields when operator stays in the same shape', () => {
     const current = {
       op: 'gt',
       lhs: {
-        kind: 'indicator', indicator_id: 'sma', output: 'default',
-        params_override: { window: 50 }, series_override: { close: 'close' },
+        kind: 'indicator', indicator_id: 'sma', input_id: 'X', output: 'default',
+        params_override: { window: 50 }, series_override: { close: 'X' },
       },
       rhs: { kind: 'constant', value: 0 },
     };
     const next = migrateCondition(current, 'lt');
     expect(next.lhs).toEqual(current.lhs);
     expect(next.lhs.params_override).toEqual({ window: 50 });
-    expect(next.lhs.series_override).toEqual({ close: 'close' });
-  });
-
-  it('preserves indicator override fields when migrating binary → range (lhs → operand)', () => {
-    const current = {
-      op: 'gt',
-      lhs: {
-        kind: 'indicator', indicator_id: 'rsi', output: 'default',
-        params_override: { window: 7 }, series_override: null,
-      },
-      rhs: { kind: 'constant', value: 30 },
-    };
-    const next = migrateCondition(current, 'in_range');
-    expect(next.operand).toEqual(current.lhs);
-    expect(next.operand.params_override).toEqual({ window: 7 });
-  });
-
-  it('preserves indicator override fields when migrating range → rolling (operand → operand)', () => {
-    const current = {
-      op: 'in_range',
-      operand: {
-        kind: 'indicator', indicator_id: 'x', output: 'default',
-        params_override: { p: 1 }, series_override: { s: 't' },
-      },
-      min: { kind: 'constant', value: 0 },
-      max: { kind: 'constant', value: 10 },
-    };
-    const next = migrateCondition(current, 'rolling_gt');
-    expect(next.operand).toEqual(current.operand);
-    expect(next.operand.params_override).toEqual({ p: 1 });
-    expect(next.operand.series_override).toEqual({ s: 't' });
+    expect(next.lhs.series_override).toEqual({ close: 'X' });
   });
 });

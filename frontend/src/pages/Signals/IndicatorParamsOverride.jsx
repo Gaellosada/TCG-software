@@ -1,24 +1,27 @@
 import { useMemo, useState } from 'react';
 import { parseIndicatorSpec } from '../Indicators/paramParser';
+import { isInputConfigured } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
- * Per-operand override controls for an Indicator reference.
+ * Per-operand override controls for an Indicator reference (v3 / iter-4).
  *
  * Reads the indicator's base ``params`` / ``seriesMap`` (the Indicators-
  * page defaults, already reconciled against the parsed spec), and renders
- * one editor per param and per series label. Edits produce
- * ``operand.params_override[name]`` / ``operand.series_override[label]``
- * entries. Clearing a field back to the default removes the key; when
- * the override object becomes empty, it collapses to ``null`` so
- * round-trip equals default.
+ * one editor per param and per series label.
+ *
+ * v3 change: ``series_override`` is now ``{ label -> input_id }`` — labels
+ * are rebound to one of the signal's declared inputs (by id). Non-primary
+ * labels default to the indicator's baseSeriesMap instrument; the primary
+ * label is already replaced by the operand's ``input_id``.
  *
  * Props:
  *   indicator         {Object|null}  {id, name, code, params, seriesMap}
  *   operand           {Object}       the indicator operand (kind='indicator')
+ *   inputs            {Array}        the signal's declared inputs
  *   onOperandChange   {Function}     (nextOperand) => void
  */
-function IndicatorParamsOverride({ indicator, operand, onOperandChange }) {
+function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }) {
   const [expanded, setExpanded] = useState(false);
 
   const spec = useMemo(() => {
@@ -32,6 +35,7 @@ function IndicatorParamsOverride({ indicator, operand, onOperandChange }) {
   const baseSeries = (indicator && indicator.seriesMap) || {};
   const paramsOverride = operand.params_override || {};
   const seriesOverride = operand.series_override || {};
+  const inputList = Array.isArray(inputs) ? inputs : [];
 
   const hasAnyOverride = Object.keys(paramsOverride).length > 0
     || Object.keys(seriesOverride).length > 0;
@@ -72,13 +76,15 @@ function IndicatorParamsOverride({ indicator, operand, onOperandChange }) {
     writeOperand(nextParams, seriesOverride);
   }
 
-  function setSeries(label, partial) {
-    // partial = {collection, instrument_id}
+  function setSeries(label, inputId) {
+    // v3: each series override is the string id of one of the signal's
+    // declared inputs (or absent = use the base series_map from the
+    // indicator defaults).
     const nextSeries = { ...seriesOverride };
-    if (!partial || (!partial.collection && !partial.instrument_id)) {
+    if (!inputId) {
       delete nextSeries[label];
     } else {
-      nextSeries[label] = partial;
+      nextSeries[label] = inputId;
     }
     writeOperand(paramsOverride, nextSeries);
   }
@@ -165,32 +171,46 @@ function IndicatorParamsOverride({ indicator, operand, onOperandChange }) {
               </div>
             );
           })}
-          {spec.seriesLabels.map((label) => {
-            const baseS = baseSeries[label] || null;
-            const overrideS = seriesOverride[label];
+          {spec.seriesLabels.map((label, idx) => {
+            const overrideInputId = seriesOverride[label];
             const isOverridden = label in seriesOverride;
-            const display = isOverridden ? overrideS : baseS;
-            const displayStr = display
-              ? `${display.collection}:${display.instrument_id}`
-              : '';
+            // The primary label (idx=0) is implicitly bound via the
+            // operand's ``input_id`` — show a hint so the user doesn't
+            // try to "also" override it here.
+            const isPrimary = idx === 0;
+            const baseS = baseSeries[label] || null;
+            const baseStr = baseS
+              ? `${baseS.collection}:${baseS.instrument_id}`
+              : '(unset)';
             return (
               <div key={`s-${label}`} className={styles.indicatorOverrideRow}>
-                <label className={styles.indicatorOverrideLabel}>{label}</label>
-                <input
-                  type="text"
-                  className={styles.indicatorOverrideInput}
-                  value={displayStr}
-                  placeholder="COLLECTION:SYMBOL"
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    const [col, sym] = raw.split(':');
-                    if (!col && !sym) setSeries(label, null);
-                    else setSeries(label, { collection: col || '', instrument_id: sym || '' });
-                  }}
-                  aria-label={`${label} series override`}
-                  data-testid={`override-series-${label}`}
-                />
-                {isOverridden && (
+                <label className={styles.indicatorOverrideLabel}>
+                  {label}{isPrimary ? ' (primary)' : ''}
+                </label>
+                {isPrimary ? (
+                  <span className={styles.operandEmpty} style={{ fontSize: '0.75rem' }}>
+                    bound via operand input
+                  </span>
+                ) : (
+                  <select
+                    className={styles.indicatorOverrideInput}
+                    value={overrideInputId || ''}
+                    onChange={(e) => setSeries(label, e.target.value || null)}
+                    aria-label={`${label} series override`}
+                    data-testid={`override-series-${label}`}
+                  >
+                    <option value="">default ({baseStr})</option>
+                    {inputList.map((input) => {
+                      const ok = isInputConfigured(input);
+                      return (
+                        <option key={input.id} value={input.id}>
+                          {input.id}{!ok ? ' (needs instrument)' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                )}
+                {!isPrimary && isOverridden && (
                   <button
                     type="button"
                     className={styles.indicatorOverrideReset}

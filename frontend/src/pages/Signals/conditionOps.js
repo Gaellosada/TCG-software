@@ -50,22 +50,32 @@ export function conditionShape(op) {
 }
 
 /**
- * Build a brand-new indicator operand spec.
+ * Build a brand-new indicator operand spec (v3).
  *
- * iter-3: every field starts null — consistent with the iter-2 "no
- * defaults" policy. ``params_override`` and ``series_override`` are
- * present as explicit nulls so the request builder can always ship them
- * verbatim to the backend (the backend expects the keys to exist so the
- * override-merge step has a deterministic shape).
+ * iter-4: the v2 ``collection``/``instrument_id`` fields are gone; the
+ * operand now carries ``input_id`` identifying which declared input's
+ * instrument replaces the indicator's primary series label. Every field
+ * starts null/'' — user must pick.
  */
 export function defaultIndicatorOperand() {
   return {
     kind: 'indicator',
     indicator_id: null,
+    input_id: '',
     output: null,
     params_override: null,
     series_override: null,
   };
+}
+
+/**
+ * Build a brand-new instrument operand spec (v3).
+ *
+ * iter-4: ``input_id`` replaces the v2 ``collection``/``instrument_id``
+ * pair. ``field`` defaults to ``'close'`` (user-editable).
+ */
+export function defaultInstrumentOperand() {
+  return { kind: 'instrument', input_id: '', field: 'close' };
 }
 
 /**
@@ -101,21 +111,21 @@ export function operandSlots(op) {
 }
 
 /**
- * Return ``true`` if the operand is "fully specified" — meaning Run can
- * ship it to the backend without tripping validation. Unset (``null``)
- * and instrument stubs with empty ``collection``/``instrument_id`` count
- * as incomplete. An indicator operand with empty ``indicator_id`` is also
- * incomplete.
+ * Return ``true`` if the operand is "fully specified" at the operand
+ * level only (does NOT verify that ``input_id`` resolves against a
+ * signal's inputs — that's ``blockShape.isOperandComplete(operand,
+ * inputsById)``). Kept for backwards compatibility with callers that
+ * haven't yet passed an inputs map.
  */
 export function isOperandComplete(operand) {
   if (!operand || typeof operand !== 'object') return false;
   if (operand.kind === 'constant') return Number.isFinite(operand.value);
   if (operand.kind === 'indicator') {
-    return typeof operand.indicator_id === 'string' && operand.indicator_id.length > 0;
+    return typeof operand.indicator_id === 'string' && operand.indicator_id.length > 0
+      && typeof operand.input_id === 'string' && operand.input_id.length > 0;
   }
   if (operand.kind === 'instrument') {
-    return typeof operand.collection === 'string' && operand.collection.length > 0
-      && typeof operand.instrument_id === 'string' && operand.instrument_id.length > 0;
+    return typeof operand.input_id === 'string' && operand.input_id.length > 0;
   }
   return false;
 }

@@ -21,18 +21,19 @@ const DIRECTION_LABELS = {
 };
 
 /**
- * Middle panel — block/condition editor (iter-3 redesign).
+ * Middle panel — block/condition editor (v3 / iter-4).
  *
- * Block header uses BlockHeader (instrument + weight + delete).
+ * Block header uses BlockHeader (input dropdown + weight + delete).
  * Operand slots use OperandSlot (+ menu / × confirm).
  * Deletes route through ConfirmDialog.
  *
  * Props:
  *   rules              {Object}
  *   onRulesChange      {Function}
+ *   inputs             {Array}   the signal's declared inputs
  *   indicators         {Array}
  */
-function BlockEditor({ rules, onRulesChange, indicators }) {
+function BlockEditor({ rules, onRulesChange, inputs, indicators }) {
   const [direction, setDirection] = useState('long_entry');
   const blocks = Array.isArray(rules?.[direction]) ? rules[direction] : [];
 
@@ -42,7 +43,7 @@ function BlockEditor({ rules, onRulesChange, indicators }) {
 
   function handleAddBlock() {
     // Iter-3 + ORDERS guardrail 2: no defaults — a fresh block has a
-    // null instrument, weight 0, and NO conditions. User explicitly adds
+    // blank input_id, weight 0, and NO conditions. User explicitly adds
     // each piece.
     updateBlocks([...blocks, defaultBlock()]);
   }
@@ -128,6 +129,7 @@ function BlockEditor({ rules, onRulesChange, indicators }) {
               onRemoveCondition={(condIdx) => handleRemoveCondition(blockIdx, condIdx)}
               onUpdateCondition={(condIdx, next) => handleUpdateCondition(blockIdx, condIdx, next)}
               onRemoveBlock={() => handleRemoveBlock(blockIdx)}
+              inputs={inputs}
               indicators={indicators}
             />
           ))
@@ -155,19 +157,20 @@ function Block({
   onRemoveCondition,
   onUpdateCondition,
   onRemoveBlock,
+  inputs,
   indicators,
 }) {
   const conditions = block.conditions || [];
-  // PROB-2 fix: pass direction so entry blocks with weight=0 show as
-  // not-runnable in the per-block status dot (matches backend semantics).
-  const runnable = isBlockRunnable(block, direction);
+  // v3: isBlockRunnable now takes the inputs array so it can verify
+  // the block's input_id resolves + the resolved input is configured.
+  const runnable = isBlockRunnable(block, direction, inputs);
   return (
     <div className={styles.block} data-testid={`block-${blockIdx}`}>
       {!isFirst && <div className={styles.blockOrLabel}>OR</div>}
       <div className={styles.blockStatusDotRow}>
         <span
           className={`${styles.blockStatusDot} ${runnable ? styles.blockStatusDotOk : styles.blockStatusDotWarn}`}
-          title={runnable ? 'Block ready' : 'Block not yet runnable (pick instrument + at least one complete condition)'}
+          title={runnable ? 'Block ready' : 'Block not yet runnable (pick input + at least one complete condition)'}
           data-testid={`block-status-${blockIdx}`}
           data-runnable={runnable ? 'true' : 'false'}
           aria-hidden="true"
@@ -176,6 +179,7 @@ function Block({
       <BlockHeader
         block={block}
         direction={direction}
+        inputs={inputs}
         onChange={onUpdateBlock}
         onDelete={onRemoveBlock}
         blockIndex={blockIdx + 1}
@@ -194,6 +198,7 @@ function Block({
             condition={cond}
             onChange={(next) => onUpdateCondition(condIdx, next)}
             onRemove={() => onRemoveCondition(condIdx)}
+            inputs={inputs}
             indicators={indicators}
           />
         ))
@@ -217,6 +222,7 @@ function Condition({
   condition,
   onChange,
   onRemove,
+  inputs,
   indicators,
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -260,6 +266,7 @@ function Condition({
               <OperandSlot
                 operand={condition.lhs}
                 onChange={(next) => updateOperand('lhs', next)}
+                inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} lhs`}
               />
@@ -269,6 +276,7 @@ function Condition({
               <OperandSlot
                 operand={condition.rhs}
                 onChange={(next) => updateOperand('rhs', next)}
+                inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} rhs`}
               />
@@ -281,6 +289,7 @@ function Condition({
               <OperandSlot
                 operand={condition.operand}
                 onChange={(next) => updateOperand('operand', next)}
+                inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} operand`}
               />
@@ -290,6 +299,7 @@ function Condition({
               <OperandSlot
                 operand={condition.min}
                 onChange={(next) => updateOperand('min', next)}
+                inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} min`}
               />
@@ -299,6 +309,7 @@ function Condition({
               <OperandSlot
                 operand={condition.max}
                 onChange={(next) => updateOperand('max', next)}
+                inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} max`}
               />
@@ -311,6 +322,7 @@ function Condition({
               <OperandSlot
                 operand={condition.operand}
                 onChange={(next) => updateOperand('operand', next)}
+                inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} operand`}
               />

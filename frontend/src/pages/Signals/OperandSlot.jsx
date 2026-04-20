@@ -1,25 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
-import SeriesPicker from '../Indicators/SeriesPicker';
 import IndicatorParamsOverride from './IndicatorParamsOverride';
 import ConfirmDialog from '../../components/ConfirmDialog';
-import { defaultIndicatorOperand } from './conditionOps';
+import { defaultIndicatorOperand, defaultInstrumentOperand } from './conditionOps';
+import { isInputConfigured } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
- * One operand lives in one slot. States:
+ * One operand lives in one slot (v3 / iter-4). States:
  *   - empty  (operand == null): renders a ``+`` button that opens a popover
  *             menu {Indicator, Instrument, Constant}. Picking installs the
  *             default operand for that kind.
  *   - filled: renders the appropriate inline editor + a small ``×`` button
  *             that opens a ConfirmDialog and, on confirm, resets to null.
  *
+ * v3 operand shapes:
+ *   indicator:   { kind:'indicator', indicator_id, input_id, output,
+ *                  params_override, series_override: {label: input_id} }
+ *   instrument:  { kind:'instrument', input_id, field }
+ *   constant:    { kind:'constant', value }
+ *
  * Props:
  *   operand      {Object|null}
- *   onChange     {Function} (nextOperand | null) => void
- *   indicators   {Array}
- *   slotLabel    {string?}  aria hint, shown in the confirm dialog
+ *   onChange     {Function}  (nextOperand | null) => void
+ *   indicators   {Array}     available indicator specs (for indicator kind)
+ *   inputs       {Array}     the signal's declared inputs (for input-id refs)
+ *   slotLabel    {string?}   aria hint, shown in the confirm dialog
  */
-function OperandSlot({ operand, onChange, indicators, slotLabel }) {
+function OperandSlot({ operand, onChange, indicators, inputs, slotLabel }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const rootRef = useRef(null);
@@ -46,11 +53,8 @@ function OperandSlot({ operand, onChange, indicators, slotLabel }) {
   function pickKind(kind) {
     setMenuOpen(false);
     if (kind === 'indicator') onChange(defaultIndicatorOperand());
-    else if (kind === 'instrument') {
-      onChange({ kind: 'instrument', collection: '', instrument_id: '', field: 'close' });
-    } else if (kind === 'constant') {
-      onChange({ kind: 'constant', value: 0 });
-    }
+    else if (kind === 'instrument') onChange(defaultInstrumentOperand());
+    else if (kind === 'constant') onChange({ kind: 'constant', value: 0 });
   }
 
   const empty = operand === null || operand === undefined;
@@ -112,11 +116,12 @@ function OperandSlot({ operand, onChange, indicators, slotLabel }) {
           <IndicatorEditor
             operand={operand}
             indicators={indicators}
+            inputs={inputs}
             onChange={onChange}
           />
         )}
         {operand.kind === 'instrument' && (
-          <InstrumentEditor operand={operand} onChange={onChange} />
+          <InstrumentEditor operand={operand} inputs={inputs} onChange={onChange} />
         )}
         {operand.kind === 'constant' && (
           <ConstantEditor operand={operand} onChange={onChange} />
@@ -146,7 +151,35 @@ function OperandSlot({ operand, onChange, indicators, slotLabel }) {
   );
 }
 
-function IndicatorEditor({ operand, indicators, onChange }) {
+/**
+ * Small reusable select: bind a value to one of the signal's declared
+ * input ids. Shows " (needs instrument)" next to ids that aren't fully
+ * configured so the user knows they still have work to do.
+ */
+function InputIdSelect({ value, inputs, onChange, ariaLabel, testId }) {
+  const list = Array.isArray(inputs) ? inputs : [];
+  return (
+    <select
+      className={styles.operandSelect}
+      value={value || ''}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label={ariaLabel || 'Input'}
+      data-testid={testId}
+    >
+      <option value="">Pick input…</option>
+      {list.map((input) => {
+        const ok = isInputConfigured(input);
+        return (
+          <option key={input.id} value={input.id}>
+            {input.id}{!ok ? ' (needs instrument)' : ''}
+          </option>
+        );
+      })}
+    </select>
+  );
+}
+
+function IndicatorEditor({ operand, indicators, inputs, onChange }) {
   const list = Array.isArray(indicators) ? indicators : [];
   const selectedId = operand.indicator_id || '';
   const selectedInd = list.find((i) => i.id === selectedId) || null;
@@ -181,10 +214,18 @@ function IndicatorEditor({ operand, indicators, onChange }) {
           <option key={ind.id} value={ind.id}>{ind.name || ind.id}</option>
         ))}
       </select>
+      <InputIdSelect
+        value={operand.input_id}
+        inputs={inputs}
+        onChange={(id) => onChange({ ...operand, input_id: id })}
+        ariaLabel="Indicator input binding"
+        testId="operand-indicator-input"
+      />
       {selectedInd && (
         <IndicatorParamsOverride
           indicator={selectedInd}
           operand={operand}
+          inputs={inputs}
           onOperandChange={onChange}
         />
       )}
@@ -192,24 +233,33 @@ function IndicatorEditor({ operand, indicators, onChange }) {
   );
 }
 
-function InstrumentEditor({ operand, onChange }) {
-  const picked = (operand.collection && operand.instrument_id)
-    ? { collection: operand.collection, instrument_id: operand.instrument_id }
-    : null;
+function InstrumentEditor({ operand, inputs, onChange }) {
   return (
     <div className={styles.operandInstrumentWrap}>
-      <SeriesPicker
-        value={picked}
-        onSave={(entry) => onChange({
+      <InputIdSelect
+        value={operand.input_id}
+        inputs={inputs}
+        onChange={(id) => onChange({
           kind: 'instrument',
-          collection: entry.collection,
-          instrument_id: entry.instrument_id,
+          input_id: id,
           field: operand.field || 'close',
         })}
-        onCancel={() => { /* stays open */ }}
-        defaultCollection={null}
-        saveLabel="Use"
+        ariaLabel="Instrument input"
+        testId="operand-instrument-input"
       />
+      <select
+        className={styles.operandSelect}
+        value={operand.field || 'close'}
+        onChange={(e) => onChange({ ...operand, field: e.target.value })}
+        aria-label="Instrument field"
+        data-testid="operand-instrument-field"
+      >
+        <option value="open">open</option>
+        <option value="high">high</option>
+        <option value="low">low</option>
+        <option value="close">close</option>
+        <option value="volume">volume</option>
+      </select>
     </div>
   );
 }

@@ -4,19 +4,21 @@ import { TRACE_COLORS } from '../../utils/chartTheme';
 import styles from './Signals.module.css';
 
 /**
- * Bottom panel — v2 multi-instrument position chart.
+ * Bottom panel — v3 multi-input position chart (iter-4).
  *
- * Response shape (iter-3, see PLAN.md):
+ * Response shape (see PLAN.md § v3 contract):
  *   {
  *     timestamps: number[],   // unix ms
  *     positions: [
  *       {
- *         instrument: {collection, instrument_id},
+ *         input_id: string,
+ *         instrument: {type:'spot'|'continuous', ...},
  *         values: number[],         // ∈ [-1, +1]
  *         clipped_mask: boolean[],
  *         price: {label, values} | null,
  *       },
  *     ],
+ *     indicators: IndicatorTrace[], // always a list (iter-3 PROB-1)
  *     clipped: boolean,             // global OR across all masks
  *   }
  *
@@ -35,6 +37,28 @@ const ERROR_HEADINGS = {
   network: "Couldn't reach the server",
   offline: "You're offline",
 };
+
+/**
+ * Build a human-readable label for a position. v3 positions carry
+ * ``input_id`` plus a typed instrument; we combine them so multi-input
+ * signals read as "X • INDEX:SPX" / "Y • cont FUT_ES".
+ */
+function formatInstrumentLabel(position) {
+  const inst = position && position.instrument;
+  const inputId = position && position.input_id;
+  let instStr = '';
+  if (inst && typeof inst === 'object') {
+    if (inst.type === 'continuous') {
+      instStr = `cont ${inst.collection || '?'}`;
+    } else {
+      // spot or anything else we can't recognise — best effort.
+      const col = inst.collection || '?';
+      const sym = inst.instrument_id || '?';
+      instStr = `${col}:${sym}`;
+    }
+  }
+  return inputId ? `${inputId} • ${instStr}` : instStr;
+}
 
 function SignalChart({ result, loading, error }) {
   const { traces, layoutOverrides, hasData, clipSummary } = useMemo(() => {
@@ -70,7 +94,7 @@ function SignalChart({ result, loading, error }) {
       const yKey = idx === 0 ? 'y' : `y${idx + 1}`;
       const yAxisName = idx === 0 ? 'yaxis' : `yaxis${idx + 1}`;
       const xAnchor = yKey;
-      const instLabel = `${p.instrument.collection}:${p.instrument.instrument_id}`;
+      const instLabel = formatInstrumentLabel(p);
       const posTrace = {
         x: dates,
         y: p.values,

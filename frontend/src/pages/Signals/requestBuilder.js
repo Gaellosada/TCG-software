@@ -1,18 +1,25 @@
-// Pure helpers for building a signal-compute request body.
+// Pure helpers for building a signal-compute request body — v3 (iter-4).
 //
-// Kept separate from ``SignalsPage.jsx`` so that unit tests can import
-// them without pulling the Plotly/CodeMirror dependency tree into the
-// test env.
+// Kept separate from ``SignalsPage.jsx`` so unit tests can import them
+// without pulling the Plotly/CodeMirror dependency tree into the test env.
 //
-// iter-3 contract (see PLAN.md § Authoritative v2 contract):
+// iter-4 contract:
 //   body = { spec: Signal, indicators: IndicatorSpec[] }
-// where IndicatorSpec = {id, name, code, params, seriesMap}.
+// where:
+//   - Signal = { id, name, inputs: Input[], rules }
+//   - Input = { id, instrument: InputInstrument }
+//   - Block = { input_id, weight, conditions }
+//   - Operand kinds:
+//       indicator:   { kind, indicator_id, input_id, output,
+//                      params_override, series_override }
+//       instrument:  { kind, input_id, field }
+//       constant:    { kind, value }
+//   - IndicatorSpec = { id, name, code, params, seriesMap }
 //
 // Every indicator operand in ``spec`` is normalised so that
 // ``params_override`` and ``series_override`` are always present as
 // explicit keys — null if absent. The backend relies on the keys being
-// there to run its override-merge step with a deterministic shape (null
-// ⇒ inherit; object ⇒ merge on top).
+// there to run its override-merge step with a deterministic shape.
 
 import { collectIndicatorIds } from '../../api/signals';
 
@@ -33,7 +40,16 @@ export function normaliseSpecForRequest(signal) {
     const blocks = Array.isArray(rules[dir]) ? rules[dir] : [];
     outRules[dir] = blocks.map(normaliseBlock);
   }
-  return { ...signal, rules: outRules };
+  const inputs = Array.isArray(signal.inputs) ? signal.inputs.map(normaliseInput) : [];
+  return { ...signal, inputs, rules: outRules };
+}
+
+function normaliseInput(input) {
+  if (!input || typeof input !== 'object') return input;
+  return {
+    id: typeof input.id === 'string' ? input.id : '',
+    instrument: input.instrument ?? null,
+  };
 }
 
 function normaliseBlock(block) {
@@ -41,10 +57,8 @@ function normaliseBlock(block) {
   const conditions = Array.isArray(block.conditions)
     ? block.conditions.map(normaliseCondition)
     : [];
-  // instrument and weight flow through verbatim — the storage layer
-  // already shaped them (null / finite non-negative number).
   return {
-    instrument: block.instrument ?? null,
+    input_id: typeof block.input_id === 'string' ? block.input_id : '',
     weight: typeof block.weight === 'number' ? block.weight : 0,
     conditions,
   };
@@ -65,7 +79,8 @@ function normaliseOperand(operand) {
   if (!operand || typeof operand !== 'object') return operand;
   if (operand.kind !== 'indicator') return operand;
   // ALWAYS emit both override keys — null if absent — so the backend
-  // sees a deterministic shape.
+  // sees a deterministic shape. series_override is { label -> input_id }
+  // in v3.
   return {
     ...operand,
     params_override: operand.params_override ?? null,

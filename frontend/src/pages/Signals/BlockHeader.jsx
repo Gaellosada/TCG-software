@@ -1,36 +1,35 @@
 import { useState } from 'react';
-import SeriesPicker from '../Indicators/SeriesPicker';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import { isInputConfigured } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
- * Per-block controls: instrument picker (reuses Indicators SeriesPicker),
- * weight input (entry tabs only — hidden on exit tabs), delete-block button
- * gated by a ConfirmDialog.
+ * Per-block controls (v3 / iter-4): input dropdown (references one of
+ * the signal's declared inputs), weight input (entry tabs only —
+ * hidden on exit tabs), delete-block button gated by ConfirmDialog.
+ *
+ * No more inline SeriesPicker popover — the user picks instruments once
+ * in the InputsPanel at the top of the page, then references them here.
  *
  * Props:
- *   block       {Object}   { instrument, weight, conditions }
+ *   block       {Object}   { input_id, weight, conditions }
  *   direction   {string}   long_entry | long_exit | short_entry | short_exit
+ *   inputs      {Array}    the signal's declared inputs
  *   onChange    {Function} (nextBlock) => void
  *   onDelete    {Function} () => void
  *   blockIndex  {number}   1-based index shown in the label
  */
-function BlockHeader({ block, direction, onChange, onDelete, blockIndex }) {
+function BlockHeader({ block, direction, inputs, onChange, onDelete, blockIndex }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [instPickerOpen, setInstPickerOpen] = useState(false);
-
   const isEntry = direction === 'long_entry' || direction === 'short_entry';
-  const instrument = block.instrument;
-  const instSummary = instrument
-    ? `${instrument.collection}:${instrument.instrument_id}`
-    : 'Pick instrument…';
 
-  function setInstrument(entry) {
-    onChange({
-      ...block,
-      instrument: { collection: entry.collection, instrument_id: entry.instrument_id },
-    });
-    setInstPickerOpen(false);
+  const list = Array.isArray(inputs) ? inputs : [];
+  const selectedId = typeof block.input_id === 'string' ? block.input_id : '';
+  const resolved = list.find((i) => i && i.id === selectedId) || null;
+  const resolvedConfigured = resolved ? isInputConfigured(resolved) : false;
+
+  function setInputId(id) {
+    onChange({ ...block, input_id: id });
   }
 
   function setWeight(raw) {
@@ -39,30 +38,36 @@ function BlockHeader({ block, direction, onChange, onDelete, blockIndex }) {
     onChange({ ...block, weight: n });
   }
 
+  const showUnconfiguredWarning = resolved && !resolvedConfigured;
+  const showUnknownWarning = !!selectedId && !resolved;
+
   return (
     <div className={styles.blockHeaderRow} data-testid={`block-header-${blockIndex - 1}`}>
       <span className={styles.blockLabel}>Block {blockIndex}</span>
 
       <div className={styles.blockInstrumentCell}>
-        <button
-          type="button"
-          className={`${styles.blockInstrumentBtn} ${!instrument ? styles.blockInstrumentBtnEmpty : ''}`}
-          onClick={() => setInstPickerOpen((v) => !v)}
-          aria-label="Pick instrument for block"
-          data-testid={`block-instrument-btn-${blockIndex - 1}`}
+        <select
+          className={styles.blockInputSelect}
+          value={selectedId}
+          onChange={(e) => setInputId(e.target.value)}
+          aria-label={`Input for block ${blockIndex}`}
+          data-testid={`block-input-select-${blockIndex - 1}`}
         >
-          {instSummary}
-        </button>
-        {instPickerOpen && (
-          <div className={styles.blockInstrumentPopover} data-testid="block-instrument-popover">
-            <SeriesPicker
-              value={instrument ? { collection: instrument.collection, instrument_id: instrument.instrument_id } : null}
-              onSave={setInstrument}
-              onCancel={() => setInstPickerOpen(false)}
-              defaultCollection={null}
-              saveLabel="Use"
-            />
-          </div>
+          <option value="">Pick input…</option>
+          {list.map((input) => {
+            const ok = isInputConfigured(input);
+            return (
+              <option key={input.id} value={input.id}>
+                {input.id}{!ok ? ' (needs instrument)' : ''}
+              </option>
+            );
+          })}
+        </select>
+        {showUnconfiguredWarning && (
+          <span className={styles.blockInputWarn} title="This input has no instrument yet">!</span>
+        )}
+        {showUnknownWarning && (
+          <span className={styles.blockInputWarn} title={`Unknown input id "${selectedId}"`}>?</span>
         )}
       </div>
 
