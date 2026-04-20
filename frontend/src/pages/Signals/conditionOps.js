@@ -22,6 +22,16 @@ export const ALL_OPS = Object.freeze([
   ...ROLLING_OPS,
 ]);
 
+/**
+ * Help copy for rolling operators — surfaced via an inline info button
+ * next to the op selector in the condition editor so users understand
+ * the lookback-based semantics without having to read docs.
+ */
+export const ROLLING_OP_HELP = Object.freeze({
+  rolling_gt: "Fires when the operand's current value is greater than its value `lookback` bars ago.",
+  rolling_lt: "Fires when the operand's current value is less than its value `lookback` bars ago.",
+});
+
 /** Human-facing labels (shown in the op dropdown). */
 export const OP_LABELS = Object.freeze({
   gt: '>',

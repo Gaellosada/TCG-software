@@ -103,9 +103,11 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
     });
   }
 
-  const summary = indicator
-    ? `${indicator.name || indicator.id}${hasAnyOverride ? ' *' : ''}`
-    : 'No indicator';
+  // iter-5 ask #3: the indicator name is already shown by the <select> to
+  // the left of this panel — keep the summary compact ("params") so the
+  // row stays short. The override badge communicates "this has edits".
+  const overrideCount = Object.keys(paramsOverride).length
+    + Object.keys(seriesOverride).length;
 
   return (
     <div className={styles.indicatorOverride} data-testid="indicator-override">
@@ -115,13 +117,16 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
         onClick={() => setExpanded((e) => !e)}
         aria-expanded={expanded}
         data-testid="indicator-override-toggle"
+        title={indicator ? `Params for ${indicator.name || indicator.id}` : 'No indicator'}
       >
         <span className={styles.indicatorOverrideChevron} aria-hidden="true">
           {expanded ? '▾' : '▸'}
         </span>
-        <span className={styles.indicatorOverrideName}>{summary}</span>
+        <span className={styles.indicatorOverrideName}>params</span>
         {hasAnyOverride && (
-          <span className={styles.indicatorOverrideBadge} title="Has overrides">override</span>
+          <span className={styles.indicatorOverrideBadge} title="Has overrides">
+            {overrideCount}
+          </span>
         )}
       </button>
       {expanded && indicator && (

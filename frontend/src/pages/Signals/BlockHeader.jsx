@@ -86,7 +86,6 @@ function BlockHeader({ block, direction, inputs, onChange, onDelete, blockIndex 
             aria-label={`Weight for block ${blockIndex}`}
             data-testid={`block-weight-${blockIndex - 1}`}
           />
-          <span className={styles.blockWeightSuffix} aria-hidden="true">×</span>
         </div>
       )}
 

@@ -90,8 +90,13 @@ function InputsPanel({ inputs, onChange }) {
           {list.map((input, idx) => {
             const ok = isInputConfigured(input);
             return (
+              // Key by idx (not `${idx}-${input.id}`) so renaming the id
+              // doesn't remount the row and kill focus on the id <input>.
+              // Rows are append-only (handleAdd pushes to end) and deletes
+              // are confirmed via dialog, so index-based keys are stable
+              // per-row identity while the user is editing.
               <div
-                key={`${idx}-${input.id}`}
+                key={idx}
                 className={styles.row}
                 data-testid={`input-row-${idx}`}
               >

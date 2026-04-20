@@ -5,6 +5,7 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import {
   ALL_OPS,
   OP_LABELS,
+  ROLLING_OP_HELP,
   conditionShape,
   defaultCondition,
   migrateCondition,
@@ -328,6 +329,18 @@ function Condition({
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
+            {ROLLING_OP_HELP[condition.op] && (
+              <button
+                type="button"
+                className={styles.rollingInfoBtn}
+                title={ROLLING_OP_HELP[condition.op]}
+                aria-label={`About ${OP_LABELS[condition.op] || condition.op}`}
+                data-testid={`rolling-info-${blockIdx}-${condIdx}`}
+                onClick={(e) => e.preventDefault()}
+              >
+                i
+              </button>
+            )}
             <div className={styles.conditionLookbackCell}>
               <span className={styles.conditionInlineLabel}>lookback</span>
               <input

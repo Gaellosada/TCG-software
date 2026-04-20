@@ -176,6 +176,38 @@ test.describe('Signals page (v3)', () => {
     expect(confirmCalls).toBe(0);
   });
 
+  test('typing into an input id keeps focus across every keystroke', async ({ page }) => {
+    // Regression for iter-5 ask #2 — InputsPanel used
+    // `key={`${idx}-${input.id}`}` which remounts the row on every accepted
+    // keystroke and blurs the id <input>. Fix was `key={idx}`.
+    await page.goto(`${BASE}/signals`);
+    await page.getByTestId('add-signal-btn').click();
+    await page.getByTestId('inputs-add-btn').click();
+
+    const idInput = page.getByTestId('input-id-0');
+    await expect(idInput).toBeVisible();
+    // First input gets a default id like "A". Focus and append characters
+    // so each keystroke dispatches a renameId that previously remounted.
+    await idInput.focus();
+    // Move caret to end.
+    await page.keyboard.press('End');
+
+    const suffix = 'xyz';
+    for (const ch of suffix) {
+      await page.keyboard.type(ch);
+      const stillFocused = await page.evaluate((testid) => {
+        const active = document.activeElement;
+        return !!active && active.getAttribute('data-testid') === testid;
+      }, 'input-id-0');
+      expect(stillFocused, `focus lost after typing "${ch}"`).toBe(true);
+    }
+
+    // Final value contains every typed character (id grew from 1 → 1+3 chars).
+    const finalValue = await idInput.inputValue();
+    expect(finalValue.endsWith(suffix)).toBe(true);
+    expect(finalValue.length).toBeGreaterThanOrEqual(suffix.length + 1);
+  });
+
   test('input delete uses a confirmation dialog too', async ({ page }) => {
     await page.goto(`${BASE}/signals`);
     await page.getByTestId('add-signal-btn').click();

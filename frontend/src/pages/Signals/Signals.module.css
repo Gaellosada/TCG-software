@@ -361,6 +361,34 @@
   gap: 4px;
 }
 
+/* Small (i) info button shown next to the op selector for rolling ops.
+   Copy lives in ROLLING_OP_HELP in conditionOps.js and is surfaced via
+   native `title=""` — no custom tooltip component needed. */
+.rollingInfoBtn {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-serif, serif);
+  font-style: italic;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 50%;
+  cursor: help;
+  padding: 0;
+  line-height: 1;
+}
+
+.rollingInfoBtn:hover {
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+}
+
 .conditionInlineLabel {
   font-size: 0.7rem;
   color: var(--text-secondary);
@@ -492,11 +520,23 @@
   border-color: #ef4444;
 }
 
+/* v5 (iter-5 ask #3): lay the indicator operand out as a row — indicator
+   select | input-id select | params-override popover trigger — so the
+   params panel no longer forces the block row to grow vertically. The
+   expanded params grid floats to the right as an absolute popover
+   (rule below on .indicatorOverrideGrid). */
 .operandIndicator {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
   gap: 4px;
   flex: 1;
+  min-width: 0;
+}
+
+.operandIndicator > select,
+.operandIndicator > .indicatorOverride {
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -511,6 +551,10 @@
   display: flex;
   flex-direction: column;
   font-size: 0.76rem;
+  /* iter-5 ask #3: expanded grid is an absolute-positioned popover
+     anchored to this summary button — so the block row no longer
+     grows vertically when the user opens the params panel. */
+  position: relative;
 }
 
 .indicatorOverrideSummary {
@@ -559,8 +603,20 @@
 .indicatorOverrideGrid {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 4px 2px 2px;
+  gap: 4px;
+  padding: 8px;
+  /* iter-5 ask #3: float the expanded params panel to the right of the
+     summary button rather than pushing it below. Right-anchored so it
+     never overflows off the right edge of the block. */
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 240px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
 }
 
 .indicatorOverrideRow {
@@ -715,11 +771,6 @@
   color: var(--text-primary);
   font-size: 0.82rem;
   padding: 2px 6px;
-}
-
-.blockWeightSuffix {
-  color: var(--text-secondary);
-  font-size: 0.8rem;
 }
 
 .blockDeleteBtn {
