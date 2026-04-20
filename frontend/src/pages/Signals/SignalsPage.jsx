@@ -7,6 +7,7 @@ import { loadState, saveState, emptyRules } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import { buildComputeRequestBody } from './requestBuilder';
+import { isConditionComplete } from './conditionOps';
 import { classifyFetchError } from '../../utils/fetchError';
 import { coerceErrorType, fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 // Reuse the Indicators page's storage + param parser so referenced
@@ -212,6 +213,24 @@ function SignalsPage() {
     if (totalBlocks === 0) {
       return { runDisabledReason: 'Add at least one block', missingIds: [] };
     }
+    // Iter-2: operands are unset (``null``) until the user picks. Keep Run
+    // disabled if any condition still has an unset / incomplete operand —
+    // otherwise the backend would 422 every time.
+    for (const dir of Object.keys(selectedSignal.rules || {})) {
+      const blocks = selectedSignal.rules[dir] || [];
+      for (const block of blocks) {
+        const conds = (block && block.conditions) || [];
+        for (const cond of conds) {
+          if (!isConditionComplete(cond)) {
+            return {
+              runDisabledReason: 'Every operand must be set — pick an indicator, '
+                + 'instrument or constant for each slot.',
+              missingIds: [],
+            };
+          }
+        }
+      }
+    }
     const { missing } = buildComputeRequestBody(selectedSignal, availableIndicators);
     if (missing.length > 0) {
       return {
@@ -285,7 +304,6 @@ function SignalsPage() {
             rules={selectedSignal.rules}
             onRulesChange={handleRulesChange}
             indicators={availableIndicators}
-            defaultCollection="INDEX"
           />
         ) : (
           <div className={styles.editorEmpty}>

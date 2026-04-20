@@ -5,7 +5,13 @@
 .page {
   display: grid;
   grid-template-columns: 240px 1fr 320px;
-  grid-template-rows: minmax(420px, 1.4fr) minmax(486px, 2.7fr);
+  /*
+   * Iter-2: match the Indicators page editor-row min-height (504 px,
+   * +20 % over the iter-1 420 px value) so the Signals BlockEditor
+   * gets the same vertical real estate as the Indicators CodeMirror
+   * panel. See IndicatorsPage.module.css iter-9 comment.
+   */
+  grid-template-rows: minmax(504px, 1.4fr) minmax(486px, 2.7fr);
   min-height: 100%;
   position: relative;
 }

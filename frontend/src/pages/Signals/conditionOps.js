@@ -49,29 +49,65 @@ export function conditionShape(op) {
   return 'binary';
 }
 
-/** Build a default condition object for a given op. */
+/**
+ * Build a default condition object for a given op.
+ *
+ * IMPORTANT — iter-2 policy: a freshly-added condition must NOT inject any
+ * default instrument / indicator / constant into its operand slots. Every
+ * operand starts as ``null`` ("unset") and the user must explicitly pick
+ * something before Run is enabled. Structural (non-operand) fields like
+ * ``lookback`` still get a sane numeric default since they have no
+ * "please pick" UI.
+ */
 export function defaultCondition(op = 'gt') {
   const shape = conditionShape(op);
   if (shape === 'range') {
-    return {
-      op,
-      operand: { kind: 'constant', value: 0 },
-      min: { kind: 'constant', value: 0 },
-      max: { kind: 'constant', value: 1 },
-    };
+    return { op, operand: null, min: null, max: null };
   }
   if (shape === 'rolling') {
-    return {
-      op,
-      operand: { kind: 'constant', value: 0 },
-      lookback: 1,
-    };
+    return { op, operand: null, lookback: 1 };
   }
-  return {
-    op,
-    lhs: { kind: 'constant', value: 0 },
-    rhs: { kind: 'constant', value: 0 },
-  };
+  return { op, lhs: null, rhs: null };
+}
+
+/**
+ * Return the list of operand-slot names for a given condition shape.
+ * Used by Run-validation to detect unset operands.
+ */
+export function operandSlots(op) {
+  const shape = conditionShape(op);
+  if (shape === 'range') return ['operand', 'min', 'max'];
+  if (shape === 'rolling') return ['operand'];
+  return ['lhs', 'rhs'];
+}
+
+/**
+ * Return ``true`` if the operand is "fully specified" — meaning Run can
+ * ship it to the backend without tripping validation. Unset (``null``)
+ * and instrument stubs with empty ``collection``/``instrument_id`` count
+ * as incomplete. An indicator operand with empty ``indicator_id`` is also
+ * incomplete.
+ */
+export function isOperandComplete(operand) {
+  if (!operand || typeof operand !== 'object') return false;
+  if (operand.kind === 'constant') return Number.isFinite(operand.value);
+  if (operand.kind === 'indicator') {
+    return typeof operand.indicator_id === 'string' && operand.indicator_id.length > 0;
+  }
+  if (operand.kind === 'instrument') {
+    return typeof operand.collection === 'string' && operand.collection.length > 0
+      && typeof operand.instrument_id === 'string' && operand.instrument_id.length > 0;
+  }
+  return false;
+}
+
+/** Return ``true`` if every operand slot on the condition is complete. */
+export function isConditionComplete(condition) {
+  if (!condition || typeof condition !== 'object') return false;
+  for (const slot of operandSlots(condition.op)) {
+    if (!isOperandComplete(condition[slot])) return false;
+  }
+  return true;
 }
 
 /**
@@ -89,7 +125,9 @@ export function migrateCondition(current, nextOp) {
   if (nextShape === currShape) {
     return { ...current, op: nextOp };
   }
-  // Try to preserve the most-structurally-similar slot.
+  // Try to preserve the most-structurally-similar slot — but never fabricate
+  // a default operand: if nothing compatible carries over, the slot stays
+  // ``null`` (unset) per iter-2 policy.
   if (nextShape === 'binary') {
     const lhs = current.lhs || current.operand || base.lhs;
     const rhs = current.rhs || current.max || base.rhs;
@@ -106,7 +144,7 @@ export function migrateCondition(current, nextOp) {
   }
   if (nextShape === 'rolling') {
     const operand = current.operand || current.lhs || base.operand;
-    const lookback = Number.isFinite(current.lookback) ? current.lookback : base.lookback;
+    const lookback = Number.isFinite(current.lookback) ? current.lookback : 1;
     return { op: nextOp, operand, lookback };
   }
   return base;

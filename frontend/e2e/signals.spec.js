@@ -111,8 +111,17 @@ test.describe('Signals page', () => {
     await page.getByTestId('add-block-btn').click();
     await expect(page.getByTestId('block-0')).toBeVisible();
     await expect(page.getByTestId('condition-0-0')).toBeVisible();
-    // The default op is ``gt`` with two constant operands → no missing-indicator
-    // validation error. Run should be enabled.
+    // Iter-2: operands are unset on a fresh condition, so Run is initially
+    // disabled. Pick Constant on both operands to make the condition complete,
+    // then Run unlocks.
+    // Iter-2: commit a constant on both operand pickers by dispatching
+    // click() through evaluate — the horizontal condition-row layout has
+    // tight gaps between flex cells that can confuse Playwright's
+    // pointer-event hit-testing even when force:true is set.
+    const condition = page.getByTestId('condition-0-0');
+    await expect(condition.getByTestId('operand-tab-constant')).toHaveCount(2);
+    await condition.getByTestId('operand-tab-constant').first().evaluate((el) => el.click());
+    await condition.getByTestId('operand-tab-constant').last().evaluate((el) => el.click());
     await expect(page.getByTestId('run-signal-btn')).toBeEnabled();
     await page.getByTestId('run-signal-btn').click();
 
@@ -152,6 +161,15 @@ test.describe('Signals page', () => {
     await expect(page.getByTestId('block-editor')).toBeVisible();
     await page.getByTestId('add-block-btn').click();
     await expect(page.getByTestId('condition-0-0')).toBeVisible();
+    // Iter-2: pick Constant on both operands to make the condition complete.
+    // Iter-2: commit a constant on both operand pickers by dispatching
+    // click() through evaluate — the horizontal condition-row layout has
+    // tight gaps between flex cells that can confuse Playwright's
+    // pointer-event hit-testing even when force:true is set.
+    const condition = page.getByTestId('condition-0-0');
+    await expect(condition.getByTestId('operand-tab-constant')).toHaveCount(2);
+    await condition.getByTestId('operand-tab-constant').first().evaluate((el) => el.click());
+    await condition.getByTestId('operand-tab-constant').last().evaluate((el) => el.click());
     await expect(page.getByTestId('run-signal-btn')).toBeEnabled();
     await page.getByTestId('run-signal-btn').click();
 
