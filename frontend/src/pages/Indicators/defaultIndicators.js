@@ -63,6 +63,7 @@ import bollingerUpper from './defaults/bollinger-upper';
 import bollingerMiddle from './defaults/bollinger-middle';
 import bollingerLower from './defaults/bollinger-lower';
 import bollingerPercentB from './defaults/bollinger-percent-b';
+import historicalVol from './defaults/historical-vol';
 
 // --- Pattern ----------------------------------------------------------
 import engulfmentPattern from './defaults/engulfment-pattern';
@@ -95,6 +96,7 @@ export const DEFAULT_INDICATORS = [
   bollingerMiddle,
   bollingerLower,
   bollingerPercentB,
+  historicalVol,
   // Pattern
   engulfmentPattern,
   engulfmentExit,
