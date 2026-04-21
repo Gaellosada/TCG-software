@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date
+from fastapi import APIRouter, Depends, Query
 
-from fastapi import APIRouter, Depends, Query, Request
-
+from tcg.core.api._dates import parse_iso_range
+from tcg.core.api.common import get_market_data
 from tcg.data.protocols import MarketDataService
 from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.market import (
@@ -16,11 +16,6 @@ from tcg.types.market import (
 )
 
 router = APIRouter(prefix="/api/data", tags=["data"])
-
-
-def get_market_data(request: Request) -> MarketDataService:
-    """Dependency: retrieve the MarketDataService from app state."""
-    return request.app.state.market_data
 
 
 @router.get("/collections")
@@ -69,10 +64,9 @@ async def get_continuous_series(
         )
 
     try:
-        start_date = date.fromisoformat(start) if start else None
-        end_date = date.fromisoformat(end) if end else None
+        start_date, end_date = parse_iso_range(start, end)
     except ValueError as exc:
-        raise ValidationError(f"Invalid date format: {exc}") from exc
+        raise ValidationError(str(exc)) from exc
 
     roll_config = ContinuousRollConfig(
         strategy=roll_strategy,
@@ -152,10 +146,9 @@ async def get_prices(
 ) -> dict:
     """Fetch OHLCV price data for an instrument."""
     try:
-        start_date = date.fromisoformat(start) if start else None
-        end_date = date.fromisoformat(end) if end else None
+        start_date, end_date = parse_iso_range(start, end)
     except ValueError as exc:
-        raise ValidationError(f"Invalid date format: {exc}") from exc
+        raise ValidationError(str(exc)) from exc
 
     series = await svc.get_prices(
         collection,

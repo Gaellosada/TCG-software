@@ -10,6 +10,8 @@ import numpy.typing as npt
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from tcg.core.api._dates import parse_iso_range
+from tcg.core.api.common import get_market_data
 from tcg.core.api.signals import (
     IndicatorSpecIn,
     SignalIn,
@@ -48,11 +50,6 @@ router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
-
-
-def get_market_data(request: Request) -> MarketDataService:
-    """Dependency: retrieve the MarketDataService from app state."""
-    return request.app.state.market_data
 
 
 def get_registry(request: Request) -> CollectionRegistry:
@@ -329,12 +326,10 @@ async def compute_portfolio(
             f"return_type must be 'normal' or 'log', got {body.return_type!r}"
         )
 
-    # Date parsing
     try:
-        start_date = date.fromisoformat(body.start) if body.start else None
-        end_date = date.fromisoformat(body.end) if body.end else None
+        start_date, end_date = parse_iso_range(body.start, body.end)
     except ValueError as exc:
-        raise ValidationError(f"Invalid date format: {exc}") from exc
+        raise ValidationError(str(exc)) from exc
 
     # ── 2. Separate legs by type ──
 

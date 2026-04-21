@@ -15,15 +15,18 @@ second, divergent discovery code path here.
 
 from __future__ import annotations
 
-from datetime import date
-from typing import Annotated, Literal
-
 import numpy as np
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from tcg.core.api.common import ADJUSTMENT_MAP, error_response
-from tcg.core.api.data import get_market_data
+from tcg.core.api._dates import parse_iso_range
+from tcg.core.api._models import (
+    ContinuousInstrumentRef,
+    SeriesRef,
+    SpotInstrumentRef,
+)
+from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api.common import ADJUSTMENT_MAP, error_response, get_market_data
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.indicator_exec import (
@@ -41,26 +44,6 @@ router = APIRouter(prefix="/api/indicators", tags=["indicators"])
 # Request / response models
 # ---------------------------------------------------------------------------
 
-
-class SpotSeriesRef(BaseModel):
-    type: Literal["spot"]
-    collection: str
-    instrument_id: str
-
-
-class ContinuousSeriesRef(BaseModel):
-    type: Literal["continuous"]
-    collection: str
-    adjustment: Literal["none", "proportional", "difference"] = "none"
-    cycle: str | None = None
-    # Accept camelCase from the frontend (matches signals.py convention).
-    rollOffset: int = 0
-    strategy: Literal["front_month"] = "front_month"
-
-
-SeriesRef = Annotated[
-    SpotSeriesRef | ContinuousSeriesRef, Field(discriminator="type")
-]
 
 class IndicatorComputeRequest(BaseModel):
     code: str
@@ -92,10 +75,9 @@ async def compute_indicator(
         )
 
     try:
-        start_date = date.fromisoformat(body.start) if body.start else None
-        end_date = date.fromisoformat(body.end) if body.end else None
+        start_date, end_date = parse_iso_range(body.start, body.end)
     except ValueError as exc:
-        return error_response("validation", f"Invalid date format: {exc}")
+        return error_response("validation", str(exc))
 
     # Param validation (pydantic accepts int/float/bool; we still guard NaN
     # for the numeric path and forward bools unchanged).
@@ -125,7 +107,7 @@ async def compute_indicator(
     # Preserve the user's insertion order so the response matches the
     # request — Python dicts preserve insertion order (3.7+).
     fetched: list[
-        tuple[str, SpotSeriesRef | ContinuousSeriesRef, np.ndarray, np.ndarray]
+        tuple[str, SpotInstrumentRef | ContinuousInstrumentRef, np.ndarray, np.ndarray]
     ] = []
     for label, ref in body.series.items():
         try:
@@ -226,13 +208,7 @@ async def compute_indicator(
         order = np.argsort(aligned_dates)
         aligned_closes_sorted = aligned[order].astype(np.float64, copy=False)
         aligned_closes[label] = aligned_closes_sorted
-        # NaN-safe serialization: JSON ``NaN`` is not valid JSON per RFC
-        # 8259. Map NaN → ``None`` the same way the indicator list does
-        # below. This matches strict JSON parsers on the frontend.
-        close_list: list[float | None] = [
-            None if (v != v) else float(v)
-            for v in aligned_closes_sorted.tolist()
-        ]
+        close_list = nan_safe_floats(aligned_closes_sorted)
         # Build the response entry — shape differs by instrument type so
         # the frontend can reconstruct the ref for follow-up requests.
         entry: dict = {"label": label, "close": close_list}
@@ -279,10 +255,7 @@ async def compute_indicator(
     # ── 5. Build response ──
 
     dates_iso = [int_to_iso(int(d)) for d in common_dates_sorted]
-    indicator_list: list[float | None] = [
-        None if (v != v) else float(v)  # NaN → null
-        for v in indicator.tolist()
-    ]
+    indicator_list = nan_safe_floats(indicator)
 
     return {
         "dates": dates_iso,
