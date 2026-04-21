@@ -560,6 +560,11 @@ def _eval_condition(
             )
         truth = np.zeros(T, dtype=np.bool_)
         nan_at_t = np.isnan(x).copy()
+        # The first kk positions lack a full lookback window — poison them
+        # so block latching treats them as unknown instead of a hard False
+        # (which would let a block claim "exit satisfied" before any data
+        # existed).
+        nan_at_t[: min(kk, T)] = True
         if T > kk:
             cur = x[kk:]
             prev = x[:-kk]

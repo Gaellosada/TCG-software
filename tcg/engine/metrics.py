@@ -559,10 +559,12 @@ def compute_metrics(
         sharpe_ratio = 0.0
 
     # ── Sortino ratio ──
-    # Downside deviation: std of negative excess returns only
+    # Target semi-deviation (Sortino & Price 1994): RMS of negative
+    # excess returns divided by the FULL sample count, not only the
+    # count of losing days.
     downside = excess[excess < 0]
-    if len(downside) > 0:
-        downside_std = float(np.sqrt(np.mean(downside ** 2)))
+    if len(excess) > 0 and len(downside) > 0:
+        downside_std = float(np.sqrt(np.sum(downside ** 2) / len(excess)))
         annualized_downside = downside_std * np.sqrt(252.0)
         if annualized_downside > 0:
             sortino_ratio = float(
@@ -583,9 +585,16 @@ def compute_metrics(
     calmar_ratio = annualized_return / abs_dd if abs_dd > 0 else 0.0
 
     # ── CVaR 5% (expected shortfall) ──
-    sorted_returns = np.sort(daily_returns)
-    cutoff = max(1, int(np.ceil(len(sorted_returns) * 0.05)))
-    cvar_5 = float(np.mean(sorted_returns[:cutoff]))
+    # With <20 samples the 5% tail collapses onto a single extreme
+    # observation and the statistic stops being meaningful — emit 0.0 so
+    # the metric clearly flags "insufficient data" instead of a noisy
+    # point estimate masquerading as a real tail risk.
+    if len(daily_returns) >= 20:
+        sorted_returns = np.sort(daily_returns)
+        cutoff = max(1, int(np.ceil(len(sorted_returns) * 0.05)))
+        cvar_5 = float(np.mean(sorted_returns[:cutoff]))
+    else:
+        cvar_5 = 0.0
 
     # ── Time underwater (days in drawdown) ──
     time_underwater_days = int(np.sum(drawdown < 0))

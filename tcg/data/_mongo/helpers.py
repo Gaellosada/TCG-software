@@ -121,6 +121,15 @@ def extract_price_data(
         date_val = bar.get("date")
         if date_val is None:
             continue
+        try:
+            date_int = int(date_val)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Dropping bar with non-integer date: instrument=%s date=%r",
+                doc_id_str,
+                date_val,
+            )
+            continue
 
         close_val = _to_float(bar.get("close"))
         # Drop entire bar if close is NaN (architecture section 3.10)
@@ -137,7 +146,7 @@ def extract_price_data(
         low_val = _sanitize_non_critical(_to_float(bar.get("low")), 0.0)
         volume_val = _sanitize_non_critical(_to_float(bar.get("volume")), 0.0)
 
-        dates_out.append(int(date_val))
+        dates_out.append(date_int)
         open_out.append(open_val)
         high_out.append(high_val)
         low_out.append(low_val)

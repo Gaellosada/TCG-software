@@ -32,7 +32,7 @@ export function formatDateInt(dateInt) {
  * @returns {string}
  */
 export function formatNumber(value, decimals = 2) {
-  if (value == null || Number.isNaN(value)) return '--';
+  if (value == null || !Number.isFinite(value)) return '--';
   return value.toLocaleString('en-US', {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
@@ -46,7 +46,7 @@ export function formatNumber(value, decimals = 2) {
  * @returns {string}
  */
 export function formatPercent(value, decimals = 2) {
-  if (value == null || Number.isNaN(value)) return '--';
+  if (value == null || !Number.isFinite(value)) return '--';
   return `${(value * 100).toFixed(decimals)}%`;
 }
 
@@ -57,7 +57,7 @@ export function formatPercent(value, decimals = 2) {
  * @returns {string}
  */
 export function formatCurrency(value, currency = 'USD') {
-  if (value == null || Number.isNaN(value)) return '--';
+  if (value == null || !Number.isFinite(value)) return '--';
   return value.toLocaleString('en-US', {
     style: 'currency',
     currency,

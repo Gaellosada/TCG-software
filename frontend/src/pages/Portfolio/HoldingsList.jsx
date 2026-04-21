@@ -123,10 +123,10 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                         )}
                       </td>
                       <td className={styles.rangeCell}>
-                        {legDateRanges?.[leg.label]?.start || '\u2014'}
+                        {legDateRanges?.[leg.id]?.start || '\u2014'}
                       </td>
                       <td className={styles.rangeCell}>
-                        {legDateRanges?.[leg.label]?.end || '\u2014'}
+                        {legDateRanges?.[leg.id]?.end || '\u2014'}
                       </td>
                       <td>
                         <input

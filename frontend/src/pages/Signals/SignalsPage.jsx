@@ -80,6 +80,13 @@ function SignalsPage() {
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
 
+  // Abort controller for the in-flight /api/signals/compute request.
+  // Switching signals or unmounting aborts any stale work.
+  const runAbortRef = useRef(null);
+  useEffect(() => () => {
+    if (runAbortRef.current) runAbortRef.current.abort();
+  }, []);
+
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
     try { localStorage.setItem(AUTOSAVE_KEY, String(on)); } catch { /* ignore */ }
@@ -302,12 +309,17 @@ function SignalsPage() {
       setLastResult(null);
       return;
     }
+    if (runAbortRef.current) runAbortRef.current.abort();
+    const controller = new AbortController();
+    runAbortRef.current = controller;
     setRunning(true);
     setError(null);
     try {
-      const data = await computeSignal(body.spec, body.indicators);
+      const data = await computeSignal(body.spec, body.indicators, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setLastResult(data);
     } catch (e) {
+      if (controller.signal.aborted) return;
       if (e && typeof e === 'object' && 'status' in e) {
         setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
         setLastResult(null);
@@ -325,9 +337,21 @@ function SignalsPage() {
         }
       }
     } finally {
-      setRunning(false);
+      if (!controller.signal.aborted) setRunning(false);
+      if (runAbortRef.current === controller) runAbortRef.current = null;
     }
   }, [selectedSignal, availableIndicators]);
+
+  // Cancel any in-flight signal run when the user switches signals.
+  useEffect(() => {
+    return () => {
+      if (runAbortRef.current) {
+        runAbortRef.current.abort();
+        runAbortRef.current = null;
+        setRunning(false);
+      }
+    };
+  }, [selectedId]);
 
   // Drive the grid results-row height from the number of ownPanel indicators
   // so the row grows and the flex chain inside fills it naturally.

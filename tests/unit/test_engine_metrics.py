@@ -508,6 +508,26 @@ class TestComputeMetrics:
         assert m.sortino_ratio != 0.0, "Sortino should be non-zero with one negative return"
         assert m.sortino_ratio > 0, "Sortino should be positive for net-positive returns"
 
+    def test_sortino_divisor_uses_full_sample(self):
+        """Downside deviation must divide by N_total (target semi-deviation),
+        not by N_downside. Hand-computed against Sortino & Price (1994)."""
+        # Four daily returns: +2%, -1%, +3%, -2%  (risk_free_rate=0 → excess=returns)
+        r = np.array([0.02, -0.01, 0.03, -0.02])
+        equity = 100.0 * np.cumprod(np.concatenate([[1.0], 1.0 + r]))
+        m = compute_metrics(equity, risk_free_rate=0.0)
+
+        # Target semi-deviation with full-sample divisor:
+        # σ_d = sqrt(((-0.01)^2 + (-0.02)^2) / 4) = sqrt(0.0000625) = 0.0079056941...
+        expected_sigma_d = float(np.sqrt((0.01**2 + 0.02**2) / 4))
+        expected_sortino = (np.mean(r) * 252.0) / (expected_sigma_d * np.sqrt(252.0))
+        np.testing.assert_allclose(m.sortino_ratio, expected_sortino, rtol=1e-10)
+
+        # Guard against the buggy N_downside divisor: it would give a
+        # visibly different (smaller) value.
+        buggy_sigma_d = float(np.sqrt((0.01**2 + 0.02**2) / 2))
+        buggy_sortino = (np.mean(r) * 252.0) / (buggy_sigma_d * np.sqrt(252.0))
+        assert not np.isclose(m.sortino_ratio, buggy_sortino, rtol=1e-6)
+
     def test_annualized_volatility(self):
         """Annualized vol should be daily vol * sqrt(252)."""
         np.random.seed(123)

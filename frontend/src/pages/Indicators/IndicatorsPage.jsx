@@ -231,6 +231,14 @@ function IndicatorsPage() {
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
 
+  // Abort controller for the in-flight /api/indicators/compute request.
+  // Ensures switching indicators or unmounting cancels stale work so its
+  // result can't overwrite the current selection's state.
+  const runAbortRef = useRef(null);
+  useEffect(() => () => {
+    if (runAbortRef.current) runAbortRef.current.abort();
+  }, []);
+
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
     try { localStorage.setItem(AUTOSAVE_KEY, String(on)); } catch { /* quota — ignore */ }
@@ -470,6 +478,11 @@ function IndicatorsPage() {
 
   const runIndicator = useCallback(async () => {
     if (!selectedIndicator) return;
+    // Cancel any still-running compute so a stale response can't clobber
+    // the state after the user switched indicators or hit Run again.
+    if (runAbortRef.current) runAbortRef.current.abort();
+    const controller = new AbortController();
+    runAbortRef.current = controller;
     setRunning(true);
     setError(null);
     try {
@@ -497,8 +510,12 @@ function IndicatorsPage() {
             params: selectedIndicator.params,
             series: seriesPayload,
           }),
+          signal: controller.signal,
         });
       } catch (networkErr) {
+        if (controller.signal.aborted) {
+          return;
+        }
         // Classify so offline/network surfaces an accurate heading in the
         // error card rather than the misleading "Data error" label.
         const classified = classifyFetchError(networkErr);
@@ -515,23 +532,39 @@ function IndicatorsPage() {
         setLastResult(null);
         return;
       }
+      if (controller.signal.aborted) return;
       if (!res.ok) {
         // Parse the structured error envelope:
         //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
         // Legacy shapes ({detail: "..."} or {message: "..."}) fall back to
         // error_type='validation'.
         const body = await res.json().catch(() => null);
+        if (controller.signal.aborted) return;
         const structured = normalizeErrorEnvelope(body, res.statusText);
         setError(structured);
         setLastResult(null);
         return;
       }
       const data = await res.json();
+      if (controller.signal.aborted) return;
       setLastResult(data);
     } finally {
-      setRunning(false);
+      if (!controller.signal.aborted) setRunning(false);
+      if (runAbortRef.current === controller) runAbortRef.current = null;
     }
   }, [selectedIndicator]);
+
+  // Cancel any in-flight run when the user switches indicators —
+  // otherwise a stale response could overwrite state for the new one.
+  useEffect(() => {
+    return () => {
+      if (runAbortRef.current) {
+        runAbortRef.current.abort();
+        runAbortRef.current = null;
+        setRunning(false);
+      }
+    };
+  }, [selectedId]);
 
   const seriesLabels = parsedSpec.seriesLabels;
   const allSlotsFilled = selectedIndicator

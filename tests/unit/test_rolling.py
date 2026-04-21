@@ -299,6 +299,37 @@ class TestContinuousSeriesBuilder:
         assert result.contracts == ("VXF24",)
         np.testing.assert_array_equal(result.prices.close, [20.0, 21.0, 22.0])
 
+    def test_single_contract_zero_close_stripped(self):
+        """Single-contract path strips zero-close rows like multi-contract path."""
+        c1 = _make_contract(
+            "VXF24", 20240115,
+            [20240101, 20240102, 20240103, 20240104],
+            [20.0, 0.0, 21.0, 22.0],
+        )
+        config = ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH)
+        result = self.builder.build([c1], config)
+
+        assert result.roll_dates == ()
+        assert result.contracts == ("VXF24",)
+        np.testing.assert_array_equal(
+            result.prices.dates, [20240101, 20240103, 20240104]
+        )
+        np.testing.assert_array_equal(result.prices.close, [20.0, 21.0, 22.0])
+
+    def test_single_contract_all_zero_close_returns_empty(self):
+        """Single contract with only zero-close rows yields empty series."""
+        c1 = _make_contract(
+            "VXF24", 20240115,
+            [20240101, 20240102],
+            [0.0, 0.0],
+        )
+        config = ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH)
+        result = self.builder.build([c1], config)
+
+        assert result.roll_dates == ()
+        assert result.contracts == ()
+        assert len(result.prices) == 0
+
     def test_two_contracts_no_adjustment(self):
         """Raw concatenation with no adjustment, verify roll date."""
         c1 = _make_contract(

@@ -38,7 +38,7 @@
  * @returns {Promise<Object>}
  *   the compute response with shape documented in the file header.
  */
-export async function computeSignal(spec, indicators) {
+export async function computeSignal(spec, indicators, { signal } = {}) {
   const res = await fetch('/api/signals/compute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -46,6 +46,7 @@ export async function computeSignal(spec, indicators) {
       spec,
       indicators: indicators || [],
     }),
+    signal,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);

@@ -174,7 +174,8 @@ describe('usePortfolio — signal leg support', () => {
     expect(getContinuousSeries).not.toHaveBeenCalled();
 
     // The leg's date range should be derived from the input's dates.
-    const range = result.current.legDateRanges['Test Signal'];
+    const legId = result.current.legs[0].id;
+    const range = result.current.legDateRanges[legId];
     expect(range).toBeDefined();
     expect(range.start).toBeTruthy();
     expect(range.end).toBeTruthy();
