@@ -47,6 +47,7 @@ const EXPECTATIONS = {
   'engulfment-pattern':          { params: [{ name: 'min_engulfing_periods', type: 'int', default: 5 }],                                                                                                             seriesLabels: ['open', 'high', 'low'],   ownPanel: false },
   'engulfment-exit':             { params: [{ name: 'box_lookback', type: 'int', default: 20 }, { name: 'ratio_win', type: 'float', default: 2.0 }, { name: 'ratio_loss', type: 'float', default: 1.0 }],            seriesLabels: ['open', 'high', 'low', 'entry'], ownPanel: false },
   'swing-pivots':                { params: [{ name: 'total_periods', type: 'int', default: 20 }, { name: 'inflection_periods', type: 'int', default: 5 }],                                                           seriesLabels: ['close'],                 ownPanel: false },
+  'historical-vol':              { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                           seriesLabels: ['close'],                 ownPanel: true  },
 };
 
 const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
@@ -57,8 +58,8 @@ const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
 const CATEGORIES = ['trend', 'momentum', 'volatility', 'pattern', 'statistical'];
 
 describe('DEFAULT_INDICATORS — library invariants', () => {
-  it('contains exactly 23 entries', () => {
-    expect(DEFAULT_INDICATORS).toHaveLength(23);
+  it('contains exactly 24 entries', () => {
+    expect(DEFAULT_INDICATORS).toHaveLength(24);
   });
 
   it('has unique ids', () => {

@@ -37,5 +37,4 @@ where \`std(..., ddof=1)\` is the sample standard deviation (Bessel-corrected, d
 - A single \`NaN\` in the close series will propagate through every window that contains it, producing \`NaN\` for \`window\` consecutive output bars.
 - Uses simple percentage returns (\`close_t / close_{t-1} - 1\`), **not** log returns. The difference is negligible for small daily moves but diverges for large moves.`,
   ownPanel: true,
-  chartMode: 'lines',
 };
