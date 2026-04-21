@@ -189,7 +189,7 @@ class _SignalRulesIn(BaseModel):
     short_exit: list[_BlockIn] = Field(default_factory=list)
 
 
-class _SignalIn(BaseModel):
+class SignalIn(BaseModel):
     id: str = ""
     name: str = ""
     inputs: list[_InputIn] = Field(default_factory=list)
@@ -201,7 +201,7 @@ class _SeriesRefIn(BaseModel):
     instrument_id: str
 
 
-class _IndicatorSpecIn(BaseModel):
+class IndicatorSpecIn(BaseModel):
     id: str
     name: str = ""
     code: str
@@ -211,8 +211,8 @@ class _IndicatorSpecIn(BaseModel):
 
 
 class SignalComputeRequest(BaseModel):
-    spec: _SignalIn
-    indicators: list[_IndicatorSpecIn] = Field(default_factory=list)
+    spec: SignalIn
+    indicators: list[IndicatorSpecIn] = Field(default_factory=list)
     instruments: dict[str, Any] = Field(default_factory=dict)
     start: str | None = None
     end: str | None = None
@@ -351,7 +351,7 @@ def _parse_blocks(
     return tuple(out)
 
 
-def _parse_signal(raw: _SignalIn) -> Signal:
+def parse_signal(raw: SignalIn) -> Signal:
     inputs = tuple(_parse_input(i) for i in raw.inputs)
     rules = SignalRules(
         long_entry=_parse_blocks(raw.rules.long_entry, direction="long_entry"),
@@ -369,7 +369,7 @@ def _parse_signal(raw: _SignalIn) -> Signal:
 # ---------------------------------------------------------------------------
 
 
-async def _compute_input_overlap(
+async def compute_input_overlap(
     svc: MarketDataService,
     signal: Signal,
     start: date | None,
@@ -480,7 +480,7 @@ def _pick_field(series, field: str) -> npt.NDArray[np.float64]:
     )
 
 
-def _make_fetcher(
+def make_signal_fetcher(
     svc: MarketDataService,
     start: date | None,
     end: date | None,
@@ -596,7 +596,7 @@ async def compute_signal(
         return _error_response("validation", f"Invalid date format: {exc}")
 
     try:
-        signal = _parse_signal(body.spec)
+        signal = parse_signal(body.spec)
     except SignalValidationError as exc:
         return _error_response("validation", str(exc))
 
@@ -621,13 +621,13 @@ async def compute_signal(
 
     # --- compute the biggest overlap of all input date ranges ----------
     try:
-        overlap_start, overlap_end = await _compute_input_overlap(
+        overlap_start, overlap_end = await compute_input_overlap(
             svc, signal, start_date, end_date,
         )
     except SignalDataError as exc:
         return _error_response("data", str(exc))
 
-    fetcher = _make_fetcher(svc, overlap_start, overlap_end)
+    fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
     try:
         result = await evaluate_signal(signal, indicators, fetcher)
     except SignalValidationError as exc:
@@ -702,4 +702,12 @@ async def compute_signal(
     }
 
 
-__all__ = ["router", "SignalComputeRequest"]
+__all__ = [
+    "router",
+    "SignalComputeRequest",
+    "SignalIn",
+    "IndicatorSpecIn",
+    "parse_signal",
+    "make_signal_fetcher",
+    "compute_input_overlap",
+]

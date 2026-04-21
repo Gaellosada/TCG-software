@@ -36,10 +36,120 @@ function renderList(onRemoveLeg = vi.fn(), onUpdateLeg = vi.fn()) {
       onUpdateLeg={onUpdateLeg}
       onRemoveLeg={onRemoveLeg}
       onOpenAddModal={() => {}}
+      onOpenSignalModal={() => {}}
     />,
   );
   return { legs, onRemoveLeg };
 }
+
+describe('<HoldingsList> signal leg support', () => {
+  const signalLeg = {
+    id: 1,
+    label: 'My Signal',
+    type: 'signal',
+    signalId: 's1',
+    signalName: 'Test Signal',
+    signalSpec: { id: 's1', name: 'Test Signal', inputs: [], rules: {} },
+    weight: 50,
+    collection: null,
+    symbol: null,
+    strategy: null,
+    adjustment: null,
+    cycle: null,
+    rollOffset: 0,
+  };
+
+  it('renders the "+ Add Signal" button', () => {
+    render(
+      <HoldingsList
+        legs={[]}
+        legDateRanges={{}}
+        onUpdateLeg={vi.fn()}
+        onRemoveLeg={vi.fn()}
+        onOpenAddModal={vi.fn()}
+        onOpenSignalModal={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Add signal' })).toBeDefined();
+    expect(screen.getByText('+ Add Signal')).toBeDefined();
+  });
+
+  it('calls onOpenSignalModal when "+ Add Signal" is clicked', () => {
+    const onOpenSignalModal = vi.fn();
+    render(
+      <HoldingsList
+        legs={[]}
+        legDateRanges={{}}
+        onUpdateLeg={vi.fn()}
+        onRemoveLeg={vi.fn()}
+        onOpenAddModal={vi.fn()}
+        onOpenSignalModal={onOpenSignalModal}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Add signal' }));
+    expect(onOpenSignalModal).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders signal leg with "Signal" badge and signal name in instrument column', () => {
+    render(
+      <HoldingsList
+        legs={[signalLeg]}
+        legDateRanges={{}}
+        onUpdateLeg={vi.fn()}
+        onRemoveLeg={vi.fn()}
+        onOpenAddModal={vi.fn()}
+        onOpenSignalModal={vi.fn()}
+      />,
+    );
+    // Type badge should say "Signal".
+    expect(screen.getByText('Signal')).toBeDefined();
+
+    // The instrument column shows the signal name as an expandable button.
+    expect(screen.getByText('Test Signal')).toBeDefined();
+
+    // Input count shown next to signal name.
+    expect(screen.getByText('0 inputs')).toBeDefined();
+  });
+
+  it('renders expandable signal inputs when signal has configured inputs', () => {
+    const legWithInputs = {
+      ...signalLeg,
+      signalSpec: {
+        id: 's1',
+        name: 'Test Signal',
+        inputs: [
+          { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
+          { id: 'Y', instrument: { type: 'continuous', collection: 'CME', adjustment: 'none', cycle: null, rollOffset: 0, strategy: 'front_month' } },
+        ],
+        rules: {},
+      },
+    };
+    render(
+      <HoldingsList
+        legs={[legWithInputs]}
+        legDateRanges={{}}
+        onUpdateLeg={vi.fn()}
+        onRemoveLeg={vi.fn()}
+        onOpenAddModal={vi.fn()}
+        onOpenSignalModal={vi.fn()}
+      />,
+    );
+
+    // Shows "2 inputs"
+    expect(screen.getByText('2 inputs')).toBeDefined();
+
+    // Click expand button to reveal inputs
+    fireEvent.click(screen.getByRole('button', { name: /Expand inputs/ }));
+
+    // Input ids should be visible
+    expect(screen.getByText('X')).toBeDefined();
+    expect(screen.getByText('Y')).toBeDefined();
+
+    // Instrument descriptions should be visible
+    expect(screen.getByText(/SPX/)).toBeDefined();
+    expect(screen.getByText(/CME/)).toBeDefined();
+  });
+});
 
 describe('<HoldingsList> remove-leg confirmation', () => {
   it('clicking the row remove button opens the ConfirmDialog (not window.confirm)', () => {
