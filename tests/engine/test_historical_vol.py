@@ -20,7 +20,7 @@ HISTORICAL_VOL_CODE = """def compute(series, window: int = 20):
     for i in range(window - 1, n):
         chunk = s[i - window + 1 : i + 1]
         rets = chunk[1:] / chunk[:-1] - 1.0
-        out[i] = np.std(rets, ddof=1) * (252.0 ** 0.5)
+        out[i] = np.std(rets, ddof=1) * (252.0 ** 0.5) * 100.0
     return out"""
 
 
@@ -37,7 +37,7 @@ def _expected_hvol(close, window):
     for i in range(window - 1, n):
         chunk = close[i - window + 1 : i + 1]
         rets = chunk[1:] / chunk[:-1] - 1.0
-        out[i] = np.std(rets, ddof=1) * (252.0 ** 0.5)
+        out[i] = np.std(rets, ddof=1) * (252.0 ** 0.5) * 100.0
     return out
 
 
@@ -80,26 +80,26 @@ class TestKnownValues:
         #   returns = [102/100 - 1, 101/102 - 1] = [0.02, -0.00980392156862745]
         #   std(ddof=1) * sqrt(252)
         rets_2 = np.array([102.0 / 100.0 - 1.0, 101.0 / 102.0 - 1.0])
-        expected_2 = np.std(rets_2, ddof=1) * (252.0 ** 0.5)
+        expected_2 = np.std(rets_2, ddof=1) * (252.0 ** 0.5) * 100.0
 
         # i=3: chunk=[102,101,103]
         #   returns = [101/102 - 1, 103/101 - 1]
         rets_3 = np.array([101.0 / 102.0 - 1.0, 103.0 / 101.0 - 1.0])
-        expected_3 = np.std(rets_3, ddof=1) * (252.0 ** 0.5)
+        expected_3 = np.std(rets_3, ddof=1) * (252.0 ** 0.5) * 100.0
 
         # i=4: chunk=[101,103,105]
         #   returns = [103/101 - 1, 105/103 - 1]
         rets_4 = np.array([103.0 / 101.0 - 1.0, 105.0 / 103.0 - 1.0])
-        expected_4 = np.std(rets_4, ddof=1) * (252.0 ** 0.5)
+        expected_4 = np.std(rets_4, ddof=1) * (252.0 ** 0.5) * 100.0
 
         np.testing.assert_allclose(result[2], expected_2, rtol=1e-10)
         np.testing.assert_allclose(result[3], expected_3, rtol=1e-10)
         np.testing.assert_allclose(result[4], expected_4, rtol=1e-10)
 
-        # Cross-check against pre-computed numeric values.
-        np.testing.assert_allclose(result[2], 0.3345481898762581, rtol=1e-10)
-        np.testing.assert_allclose(result[3], 0.332325423111838, rtol=1e-10)
-        np.testing.assert_allclose(result[4], 0.004316051969748184, rtol=1e-10)
+        # Cross-check against pre-computed numeric values (percentage).
+        np.testing.assert_allclose(result[2], 33.45481898762581, rtol=1e-10)
+        np.testing.assert_allclose(result[3], 33.2325423111838, rtol=1e-10)
+        np.testing.assert_allclose(result[4], 0.4316051969748184, rtol=1e-10)
 
 
 class TestShortInput:

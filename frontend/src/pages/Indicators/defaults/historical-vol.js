@@ -8,7 +8,7 @@ const code = `def compute(series, window: int = 20):
     for i in range(window - 1, n):
         chunk = s[i - window + 1 : i + 1]
         rets = chunk[1:] / chunk[:-1] - 1.0
-        out[i] = np.std(rets, ddof=1) * (252.0 ** 0.5)
+        out[i] = np.std(rets, ddof=1) * (252.0 ** 0.5) * 100.0
     return out`;
 
 export default {
@@ -19,12 +19,12 @@ export default {
   code,
   params: {},
   seriesMap: {},
-  doc: `**Intuition.** Historical Volatility measures how much an instrument's price has fluctuated over a recent window, expressed as an annualised percentage. It is the classic realised-volatility estimator: compute simple percentage returns over a rolling window, take their sample standard deviation, then scale to annual units by multiplying by \`sqrt(252)\`. Higher values mean the instrument has been moving more; lower values mean it has been calm. Traders use it to gauge regime (trending vs. range-bound), to compare implied volatility against realised, and to size positions.
+  doc: `**Intuition.** Historical Volatility measures how much an instrument's price has fluctuated over a recent window, expressed as an annualised percentage (e.g. 16 means 16%). It is the classic realised-volatility estimator: compute simple percentage returns over a rolling window, take their sample standard deviation, then scale to annual units by multiplying by \`sqrt(252)\`. Higher values mean the instrument has been moving more; lower values mean it has been calm. Traders use it to gauge regime (trending vs. range-bound), to compare implied volatility against realised, and to size positions.
 
 **Formula.**
 \`\`\`
 ret_t     = close_t / close_{t-1} - 1          (simple percentage return)
-hvol_t    = std(ret_{t-window+2} ... ret_t, ddof=1) * sqrt(252)
+hvol_t    = std(ret_{t-window+2} ... ret_t, ddof=1) * sqrt(252) * 100
 \`\`\`
 where \`std(..., ddof=1)\` is the sample standard deviation (Bessel-corrected, denominator \`window - 2\` since there are \`window - 1\` returns in a window of \`window\` closes).
 
