@@ -227,6 +227,11 @@
   color: var(--text-primary);
 }
 
+.codeBlock code {
+  font: inherit;
+  color: inherit;
+}
+
 /* ── Workflow diagram ── */
 
 .workflow {

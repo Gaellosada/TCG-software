@@ -37,6 +37,7 @@ function HelpPage() {
           <button
             key={id}
             className={`${styles.navBtn} ${activeSection === id ? styles.navBtnActive : ''}`}
+            aria-current={activeSection === id ? 'true' : undefined}
             onClick={() => {
               setActiveSection(id);
               document.getElementById(`help-${id}`)?.scrollIntoView({ behavior: 'smooth' });
@@ -163,7 +164,7 @@ function HelpPage() {
         <h2 className={styles.sectionHeading}>Portfolio</h2>
         <p className={styles.conceptText}>
           Construct weighted portfolios of instruments and analyze their historical
-          performance with a full metrics suite.
+          performance.
         </p>
 
         <h3 className={styles.conceptTitle}>Building Portfolios</h3>
@@ -218,36 +219,24 @@ function HelpPage() {
           </p>
         </div>
 
-        <h3 className={styles.conceptTitle}>Return Types</h3>
-        <div className={styles.card}>
-          <h3>Normal Returns</h3>
-          <p>
-            Standard percentage: (P_today - P_yesterday) / P_yesterday. Intuitive but not
-            additive over time.
-          </p>
-        </div>
-        <div className={styles.card}>
-          <h3>Log Returns</h3>
-          <p>
-            ln(P_today / P_yesterday). Additive over time, making them standard for
-            multi-period analysis. Nearly identical to normal returns at small magnitudes.
-          </p>
-        </div>
+        <h3 className={styles.conceptTitle}>Returns Grid</h3>
+        <p className={styles.conceptText}>
+          Below the equity chart, a monthly returns heatmap and yearly returns summary
+          are available. A toggle lets you view returns as either normal or log values.
+        </p>
 
-        <Details title="Math detail: return aggregation">
+        <Details title="Normal vs. log returns">
           <p>
-            Two consecutive normal returns of +10% compound to +21% (1.1 &times; 1.1 = 1.21),
-            not +20%. Log returns are additive: ln(1.1) + ln(1.1) = ln(1.21). This property
-            makes log returns preferable for statistical modeling and time-series analysis.
+            <strong>Normal:</strong> (P_today &minus; P_yesterday) / P_yesterday. Intuitive
+            but not additive over time — two consecutive +10% returns compound to
+            +21% (1.1 &times; 1.1 = 1.21), not +20%.
+          </p>
+          <p>
+            <strong>Log:</strong> ln(P_today / P_yesterday). Additive over time:
+            ln(1.1) + ln(1.1) = ln(1.21). Standard for multi-period analysis and
+            statistical modeling. Nearly identical to normal returns at small magnitudes.
           </p>
         </Details>
-
-        <h3 className={styles.conceptTitle}>Metrics</h3>
-        <p className={styles.conceptText}>
-          The metrics panel shows: Sharpe ratio, Sortino ratio, max drawdown, CAGR,
-          Calmar ratio, and win rate. Below the main chart, a monthly returns heatmap
-          and yearly returns summary are available.
-        </p>
 
         <h3 className={styles.conceptTitle}>Save / Load</h3>
         <p className={styles.conceptText}>
@@ -295,7 +284,7 @@ function HelpPage() {
             Additional parameters must have a type annotation (<code>int</code>,{' '}
             <code>float</code>, or <code>bool</code>) and a default value.
           </p>
-          <div className={styles.codeBlock}>
+          <pre className={styles.codeBlock}><code>
 {`def compute(series, window: int = 20):
     s = series['price']
     out = np.full_like(s, np.nan, dtype=float)
@@ -303,7 +292,7 @@ function HelpPage() {
         s, np.ones(window)/window, mode='valid'
     )
     return out`}
-          </div>
+          </code></pre>
           <p>
             Parameters declared in the signature appear as editable fields in the right
             panel. Their default values set the initial inputs. The function must return
@@ -331,31 +320,33 @@ function HelpPage() {
         <div className={styles.card}>
           <h3>Inputs</h3>
           <p>
-            Declare data sources (instruments) the signal operates on. These become
-            available in conditions.
+            Declare data sources (instruments) the signal operates on. Each input
+            gets a name and an instrument, and becomes available in blocks below.
           </p>
         </div>
         <div className={styles.card}>
           <h3>Blocks</h3>
           <p>
             Four block types: long entry, long exit, short entry, short exit.
-            Each block selects an input and contains weighted conditions.
+            Each block selects an input and contains one or more conditions.
+            Blocks can be renamed by clicking the pencil icon in the block header.
           </p>
         </div>
         <div className={styles.card}>
           <h3>Conditions</h3>
           <p>
             Each condition compares two operands (indicator values, constants, or price
-            fields) with a comparison operator. Conditions within a block are combined
-            by their weights.
+            fields) with a comparison operator. Conditions within a block
+            are <strong>AND</strong>&rsquo;d — all must be true for the block to fire.
+            Blocks within a direction are <strong>OR</strong>&rsquo;d — any one block
+            firing is enough.
           </p>
         </div>
 
         <h3 className={styles.conceptTitle}>Weights and Capital</h3>
         <p className={styles.conceptText}>
-          Entry block weights control capital allocation. The total budget should
-          not exceed 1.0 (100% of capital). Negative weights are not used on blocks
-          — use Short Entry blocks instead.
+          Entry blocks have a weight that controls capital allocation. Weights above 1.0
+          apply leverage. Set the initial capital in the right panel before running.
         </p>
 
         <Details title="Position model: latched entries">
@@ -371,11 +362,36 @@ function HelpPage() {
           </p>
         </Details>
 
+        <h3 className={styles.conceptTitle}>Run Options</h3>
+        <div className={styles.card}>
+          <h3>Initial Capital</h3>
+          <p>
+            Scales the P&amp;L curve in the results. Set this to your intended position
+            size before running.
+          </p>
+        </div>
+        <div className={styles.card}>
+          <h3>Don&apos;t Repeat Entries/Exits</h3>
+          <p>
+            When checked, consecutive duplicate entry/exit markers are hidden in the
+            results chart. The underlying computation is unchanged — this is a
+            display-only filter.
+          </p>
+        </div>
+
+        <h3 className={styles.conceptTitle}>Documentation</h3>
+        <p className={styles.conceptText}>
+          A documentation tab is available alongside the direction tabs. Use it to
+          record notes about the signal&apos;s logic or intended use.
+        </p>
+
         <h3 className={styles.conceptTitle}>Results</h3>
         <p className={styles.conceptText}>
-          After running a signal, two stacked charts appear: the top chart shows
-          input prices alongside the realized P&amp;L curve, and the bottom chart
+          After running, two stacked charts appear: the top chart shows input prices
+          with the realized P&amp;L and capital equity curves, and the bottom chart
           overlays indicator values with entry/exit markers on the price series.
+          Indicators with the &ldquo;own panel&rdquo; flag get additional dedicated
+          charts below.
         </p>
       </section>
 
