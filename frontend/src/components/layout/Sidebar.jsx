@@ -7,7 +7,6 @@ const MAIN_NAV = [
   { to: '/indicators', label: 'Indicators', icon: 'indicators' },
   { to: '/signals', label: 'Signals', icon: 'signals' },
   { to: '/portfolio', label: 'Portfolio', icon: 'portfolio' },
-  { to: '/research', label: 'Research', icon: 'research' },
 ];
 
 const BOTTOM_NAV = [

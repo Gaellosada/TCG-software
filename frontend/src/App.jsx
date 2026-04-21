@@ -8,7 +8,6 @@ import DataPage from './pages/Data/DataPage';
 import IndicatorsPage from './pages/Indicators/IndicatorsPage';
 import SignalsPage from './pages/Signals/SignalsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
-import ResearchPage from './pages/Research/ResearchPage';
 import SettingsPage from './pages/Settings/SettingsPage';
 import './App.css';
 
@@ -80,14 +79,6 @@ function App() {
                   <ErrorBoundary>
                     <PortfolioPage />
                   </ErrorBoundary>
-                </PageContainer>
-              }
-            />
-            <Route
-              path="/research"
-              element={
-                <PageContainer>
-                  <ResearchPage />
                 </PageContainer>
               }
             />
