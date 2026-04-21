@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import usePortfolio from './usePortfolio';
 import HoldingsList from './HoldingsList';
 import AddHoldingModal from './AddHoldingModal';
+import SignalPickerModal from './SignalPickerModal';
 import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
@@ -21,6 +22,7 @@ const REBALANCE_OPTIONS = [
 function PortfolioPage() {
   const portfolio = usePortfolio();
   const [modalOpen, setModalOpen] = useState(false);
+  const [signalModalOpen, setSignalModalOpen] = useState(false);
   const [saveInput, setSaveInput] = useState('');
   const [savedList, setSavedList] = useState(() => portfolio.getSavedPortfolios());
   // iter-4: replaced window.confirm with shared ConfirmDialog.
@@ -170,6 +172,7 @@ function PortfolioPage() {
             onUpdateLeg={portfolio.updateLeg}
             onRemoveLeg={portfolio.removeLeg}
             onOpenAddModal={handleOpenModal}
+            onOpenSignalModal={() => setSignalModalOpen(true)}
           />
         </div>
 
@@ -210,8 +213,8 @@ function PortfolioPage() {
           {/* Time range slider */}
           <div className={styles.sliderRow}>
             <TimeRangeSlider
-              minDate={portfolio.results?.full_date_range?.start || portfolio.overlapRange?.start || null}
-              maxDate={portfolio.results?.full_date_range?.end || portfolio.overlapRange?.end || null}
+              minDate={portfolio.overlapRange?.start || null}
+              maxDate={portfolio.overlapRange?.end || null}
               startDate={portfolio.startDate}
               endDate={portfolio.endDate}
               disabled={portfolio.loading || portfolio.rangesLoading}
@@ -286,6 +289,16 @@ function PortfolioPage() {
         isOpen={modalOpen}
         onClose={handleCloseModal}
         onAddLeg={portfolio.addLeg}
+      />
+
+      {/* ── Add Signal Modal ── */}
+      <SignalPickerModal
+        isOpen={signalModalOpen}
+        onClose={() => setSignalModalOpen(false)}
+        onSelect={(signal) => {
+          portfolio.addSignalLeg(signal);
+          setSignalModalOpen(false);
+        }}
       />
 
       {/* ── Delete saved portfolio confirmation ── */}

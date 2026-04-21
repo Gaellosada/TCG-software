@@ -20,6 +20,16 @@
   opacity: 0.9;
 }
 
+.headerButtons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.addSignalBtn {
+  background: var(--accent-warm, #f0a030);
+}
+
 .empty {
   padding: 32px 16px;
   text-align: center;
@@ -66,12 +76,8 @@
   width: 90px;
 }
 
-.thCollection {
-  width: 100px;
-}
-
 .thInstrument {
-  width: 120px;
+  min-width: 160px;
 }
 
 .thRange {
@@ -118,6 +124,103 @@
   background: rgba(240, 160, 48, 0.12);
   color: var(--accent-warm);
 }
+
+.typeBadge[data-type="signal"] {
+  background: rgba(167, 139, 250, 0.12);
+  color: var(--cat-signals);
+}
+
+/* ── Instrument column: merged collection + symbol ── */
+
+.instrumentPrimary {
+  display: block;
+  font-weight: 500;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+}
+
+.instrumentSecondary {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+/* ── Signal expand button in the instrument column ── */
+
+.expandBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  transition: color 0.15s;
+}
+
+.expandBtn:hover {
+  color: var(--accent);
+}
+
+.expandArrow {
+  display: inline-block;
+  font-size: 0.7rem;
+  transition: transform 0.15s;
+  color: var(--text-muted);
+}
+
+.expandArrow[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+.inputCount {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* ── Signal input detail row (expanded) ── */
+
+.detailRow td {
+  padding: 0 !important;
+  border-bottom: 1px solid var(--border-secondary) !important;
+}
+
+.detailCell {
+  background: var(--bg-secondary, var(--bg-primary));
+}
+
+.inputsDetail {
+  padding: 6px 16px 8px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.inputDetailRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.78rem;
+}
+
+.inputDetailId {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: var(--cat-signals);
+  min-width: 20px;
+}
+
+.inputDetailInstrument {
+  color: var(--text-secondary);
+}
+
+/* ── Existing styles ── */
 
 .labelInput {
   width: 100%;

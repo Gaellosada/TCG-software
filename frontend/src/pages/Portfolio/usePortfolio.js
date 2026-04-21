@@ -3,6 +3,8 @@ import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { formatDateInt } from '../../utils/format';
 import { useAutosave } from '../../components/SaveControls';
+import { buildComputeRequestBody } from '../Signals/requestBuilder';
+import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 
 const STORAGE_KEY = 'tcg-saved-portfolios';
 const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
@@ -34,15 +36,85 @@ export default function usePortfolio() {
 
   const abortRef = useRef(null);
 
+  /* ── Helpers ── */
+
+  /**
+   * Fetch the date range for a signal leg by fetching each input's instrument
+   * range and computing the overlap (latest start, earliest end).
+   */
+  async function fetchSignalLegRange(leg) {
+    const inputs = leg.signalSpec?.inputs || [];
+    const configured = inputs.filter((inp) => inp.instrument);
+    if (configured.length === 0) {
+      return { label: leg.label, start: null, end: null };
+    }
+
+    const inputRanges = await Promise.all(
+      configured.map(async (inp) => {
+        try {
+          let dates;
+          const inst = inp.instrument;
+          if (inst.type === 'continuous') {
+            const res = await getContinuousSeries(inst.collection, {
+              strategy: inst.strategy || 'front_month',
+              adjustment: inst.adjustment || 'none',
+              cycle: inst.cycle || undefined,
+              rollOffset: inst.rollOffset || 0,
+            });
+            dates = res?.dates;
+          } else {
+            const res = await getInstrumentPrices(
+              inst.collection,
+              inst.instrument_id || inst.symbol,
+            );
+            dates = res?.dates;
+          }
+          if (dates && dates.length > 0) {
+            return {
+              start: formatDateInt(dates[0]),
+              end: formatDateInt(dates[dates.length - 1]),
+            };
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    const valid = inputRanges.filter(Boolean);
+    if (valid.length === 0) {
+      return { label: leg.label, start: null, end: null };
+    }
+
+    // Overlap = latest start, earliest end
+    const start = valid.reduce((a, b) => (a.start > b.start ? a : b)).start;
+    const end = valid.reduce((a, b) => (a.end < b.end ? a : b)).end;
+
+    if (start <= end) {
+      return { label: leg.label, start, end };
+    }
+    return { label: leg.label, start: null, end: null };
+  }
+
   /* ── Fetch date ranges when legs change ── */
 
   // Stable key: only data-affecting fields (not label/weight) trigger re-fetch
   const rangesKey = useMemo(
-    () => legs.map((l) =>
-      l.type === 'continuous'
-        ? `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`
-        : `i:${l.collection}:${l.symbol}`
-    ).join('|'),
+    () => legs.map((l) => {
+      if (l.type === 'signal') {
+        // Include input instruments so re-binding triggers a refetch
+        const inputKeys = (l.signalSpec?.inputs || []).map((inp) => {
+          const inst = inp.instrument;
+          if (!inst) return 'null';
+          if (inst.type === 'continuous') return `c:${inst.collection}:${inst.strategy}:${inst.adjustment}:${inst.cycle}:${inst.rollOffset}`;
+          return `i:${inst.collection}:${inst.instrument_id}`;
+        }).join(',');
+        return `s:${l.signalId}:[${inputKeys}]`;
+      }
+      if (l.type === 'continuous') return `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`;
+      return `i:${l.collection}:${l.symbol}`;
+    }).join('|'),
     [legs],
   );
 
@@ -56,8 +128,12 @@ export default function usePortfolio() {
     let cancelled = false;
     setRangesLoading(true);
 
-    // Fetch each leg's price data using the same APIs as the Data page
+    // Fetch each leg's price data using the same APIs as the Data page.
+    // Signal legs derive their range from the overlap of their inputs' ranges.
     const promises = legs.map(async (leg) => {
+      if (leg.type === 'signal') {
+        return fetchSignalLegRange(leg);
+      }
       try {
         let dates;
         if (leg.type === 'continuous') {
@@ -116,6 +192,8 @@ export default function usePortfolio() {
       }
 
       setRangesLoading(false);
+    }).catch(() => {
+      if (!cancelled) setRangesLoading(false);
     });
 
     return () => { cancelled = true; };
@@ -140,6 +218,39 @@ export default function usePortfolio() {
         weight: leg.weight ?? 100,
       },
     ]);
+    setDirty(true);
+  }, []);
+
+  const addSignalLeg = useCallback((signal) => {
+    const id = nextId++;
+    setLegs((prev) => {
+      // Auto-suffix to avoid duplicate labels (keys would collapse in the API dict).
+      let label = signal.name || `Signal ${id}`;
+      const existing = new Set(prev.map((l) => l.label));
+      if (existing.has(label)) {
+        let n = 2;
+        while (existing.has(`${label} (${n})`)) n++;
+        label = `${label} (${n})`;
+      }
+      return [
+        ...prev,
+        {
+          id,
+          label,
+          type: 'signal',
+          signalId: signal.id,
+          signalName: signal.name,
+          signalSpec: signal,
+          weight: 100,
+          collection: null,
+          symbol: null,
+          strategy: null,
+          adjustment: null,
+          cycle: null,
+          rollOffset: 0,
+        },
+      ];
+    });
     setDirty(true);
   }, []);
 
@@ -177,16 +288,6 @@ export default function usePortfolio() {
     setDirty(false);
   }, []);
 
-  /* ── Derived weights ── */
-
-  const weights = useMemo(
-    () => legs.reduce((acc, leg) => {
-      acc[leg.label] = Number(leg.weight) || 0;
-      return acc;
-    }, {}),
-    [legs],
-  );
-
   /* ── Calculate ── */
 
   const handleCalculate = useCallback(async () => {
@@ -201,9 +302,20 @@ export default function usePortfolio() {
     }
 
     // Build legs dict for API
+    const availableIndicators = hydrateAvailableIndicators();
     const apiLegs = {};
     for (const leg of legs) {
-      if (leg.type === 'continuous') {
+      if (leg.type === 'signal') {
+        const { body, missing } = buildComputeRequestBody(leg.signalSpec, availableIndicators);
+        if (missing.length > 0) {
+          setError(`Signal "${leg.label}" references missing indicators: ${missing.join(', ')}. Please check the Indicators page.`);
+          return;
+        }
+        apiLegs[leg.label] = {
+          type: 'signal',
+          signal_spec: body,
+        };
+      } else if (leg.type === 'continuous') {
         apiLegs[leg.label] = {
           type: 'continuous',
           collection: leg.collection,
@@ -265,7 +377,11 @@ export default function usePortfolio() {
 
   const savePortfolio = useCallback(
     (name) => {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      let saved;
+      try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+      catch { saved = {}; }
+      const weightsDict = {};
+      for (const l of legs) weightsDict[l.label] = Number(l.weight) || 0;
       saved[name] = {
         legs: legs.map((l) => ({
           label: l.label,
@@ -277,8 +393,12 @@ export default function usePortfolio() {
           cycle: l.cycle,
           rollOffset: l.rollOffset,
           weight: l.weight,
+          // Signal-specific fields (null for non-signal legs).
+          signalId: l.signalId || null,
+          signalName: l.signalName || null,
+          signalSpec: l.signalSpec || null,
         })),
-        weights,
+        weights: weightsDict,
         rebalance,
         savedAt: new Date().toISOString(),
       };
@@ -286,11 +406,13 @@ export default function usePortfolio() {
       setPortfolioName(name);
       setDirty(false);
     },
-    [legs, weights, rebalance],
+    [legs, rebalance],
   );
 
   const loadPortfolio = useCallback((name) => {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+    catch { saved = {}; }
     const entry = saved[name];
     if (!entry) return false;
 
@@ -311,13 +433,17 @@ export default function usePortfolio() {
   }, []);
 
   const deleteSavedPortfolio = useCallback((name) => {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+    catch { saved = {}; }
     delete saved[name];
     localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
   }, []);
 
   const getSavedPortfolios = useCallback(() => {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+    catch { saved = {}; }
     return Object.keys(saved);
   }, []);
 
@@ -349,10 +475,10 @@ export default function usePortfolio() {
   return {
     legs,
     addLeg,
+    addSignalLeg,
     updateLeg,
     removeLeg,
     clearAll,
-    weights,
     rebalance,
     setRebalance: setRebalanceAndDirty,
     dirty,
