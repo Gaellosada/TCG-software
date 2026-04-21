@@ -36,7 +36,7 @@ contract P5-6):
           "input_id": str,
           "instrument": {type, collection, instrument_id?|adjustment+cycle+...},
           "values":        float[],
-          "clipped_mask":  bool[],            // repurposed: budget-skipped at t
+          "clipped_mask":  bool[],            // always false (leverage allowed)
           "price":         {label, values} | null
         }
       ],

@@ -1100,19 +1100,6 @@
 
 /* ---------- Results (iter-5 ask #6) ---------- */
 
-/*
- * ``chartPanelBody`` kept for the iter-4 single-plot view (retired in
- * iter-5) and potential future callers. ``resultsViewBody`` is the new
- * 2-plot container — splits the Results card vertically 50/50 between
- * the top and bottom Plotly instances.
- */
-.chartPanelBody {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-
 .resultsViewBody {
   display: flex;
   flex-direction: column;
@@ -1131,12 +1118,6 @@
   padding: 18px;
   color: var(--text-secondary);
   font-size: 0.85rem;
-}
-
-.chartWrap {
-  flex: 1;
-  min-height: 0;
-  position: relative;
 }
 
 .chart {

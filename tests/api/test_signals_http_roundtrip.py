@@ -324,8 +324,8 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
       (b) same-side exit clears same-side latches (t=3 long_exit → 0);
       (c) cross-side exit does NOT clear the opposite latch
           (t=6 short_exit leaves the long latch alone);
-      (d) global budget ≤ 1.0 SKIPS would-be-latches (t=7 block C
-          w=0.5 can't latch on top of A w=0.6);
+      (d) leverage allowed — t=7 block C w=0.5 latches on top of
+          A w=0.6 → position = 1.1;
       (e) events / realized_pnl / indicators shapes match the P5-6
           contract consumed by I3.
     """
@@ -348,7 +348,7 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
                 # before C (w=0.5) at bars where both could latch.
                 "long_entry": [
                     _eq_block("X", 0.6, 11.0),  # block A → t=1, t=5
-                    _eq_block("X", 0.5, 22.0),  # block C → t=7 (SKIP)
+                    _eq_block("X", 0.5, 22.0),  # block C → t=7
                 ],
                 "long_exit": [
                     _eq_block("X", 0.0, 33.0),  # fires t=3
