@@ -45,7 +45,7 @@ export function isInputConfigured(input) {
   if (inst.type === 'continuous') {
     return typeof inst.collection === 'string' && inst.collection.length > 0
       && ['none', 'proportional', 'difference'].includes(inst.adjustment)
-      && typeof inst.cycle === 'string' && inst.cycle.length > 0
+      && (inst.cycle == null || typeof inst.cycle === 'string')
       && Number.isFinite(inst.rollOffset)
       && inst.strategy === 'front_month';
   }

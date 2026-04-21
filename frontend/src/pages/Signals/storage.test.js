@@ -78,6 +78,7 @@ describe('Signals storage (v3)', () => {
         {
           id: 's1',
           name: 'My signal',
+          doc: '',
           inputs: [
             { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
             {

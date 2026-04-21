@@ -96,20 +96,21 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
 });
 
 describe('value mapping — fromPickerValue', () => {
-  it('passes through spot type', () => {
-    expect(fromPickerValue({ type: 'spot', collection: 'AAPL', instrument_id: 'AAPL' }))
-      .toEqual({ collection: 'AAPL', instrument_id: 'AAPL' });
+  it('passes through spot type with all fields', () => {
+    expect(fromPickerValue({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' }))
+      .toEqual({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' });
   });
 
-  it('uses collection as instrument_id for continuous', () => {
-    expect(fromPickerValue({
+  it('passes through continuous type with all fields', () => {
+    const input = {
       type: 'continuous',
       collection: 'FUT_ES',
-      adjustment: 'ratio',
-      cycle: 'front',
-      rollOffset: -5,
+      adjustment: 'proportional',
+      cycle: 'H',
+      rollOffset: 2,
       strategy: 'front_month',
-    })).toEqual({ collection: 'FUT_ES', instrument_id: 'FUT_ES' });
+    };
+    expect(fromPickerValue(input)).toEqual(input);
   });
 
   it('returns null for null input', () => {
@@ -130,15 +131,18 @@ describe('<ParamsPanel> — instrument picker button', () => {
     expect(btn.textContent).toBe('Select instrument');
   });
 
-  it('shows "Change instrument" when an instrument is already picked', () => {
+  it('shows change icon and chip when an instrument is already picked', () => {
     render(<ParamsPanel {...baseProps({
       seriesLabels: ['close'],
       indicator: {
         ...baseProps().indicator,
-        seriesMap: { close: { collection: 'INDEX', instrument_id: 'SPX' } },
+        seriesMap: { close: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
       },
     })} />);
+    // When picked, the edit button (✎) carries the testid; the chip shows the label.
     const btn = screen.getByTestId('instrument-picker-close');
-    expect(btn.textContent).toBe('Change instrument');
+    expect(btn.title).toBe('Change instrument');
+    // Chip label: "INDEX / SPX"
+    expect(screen.getByText('INDEX / SPX')).toBeTruthy();
   });
 });

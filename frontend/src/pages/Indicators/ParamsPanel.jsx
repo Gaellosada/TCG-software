@@ -5,19 +5,19 @@ import styles from './ParamsPanel.module.css';
 
 /**
  * Convert InstrumentPickerModal selection to internal seriesMap entry.
- * Modal spot:       { type: 'spot', collection, instrument_id }
- * Modal continuous: { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
- * Internal:         { collection, instrument_id }
+ * Passes through the full discriminated-union SeriesRef so the backend
+ * receives the correct type tag.
  *
- * For continuous futures the instrument_id is set to the collection name
- * (the continuous series is identified by its collection).
+ * Spot:       { type: 'spot', collection, instrument_id }
+ * Continuous: { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+ *
+ * Extensibility: any future pickerValue.type (e.g. 'options') passes through
+ * unchanged — add explicit handling only when special-casing is needed.
  */
 export function fromPickerValue(pickerValue) {
   if (!pickerValue) return null;
-  if (pickerValue.type === 'continuous') {
-    return { collection: pickerValue.collection, instrument_id: pickerValue.collection };
-  }
-  return { collection: pickerValue.collection, instrument_id: pickerValue.instrument_id };
+  // Pass through the full discriminated union — the type field is authoritative.
+  return { ...pickerValue };
 }
 
 /**
@@ -84,7 +84,11 @@ function ParamsPanel({
       next.add(label);
       return next;
     });
-    if (!picked || !picked.collection || !picked.instrument_id) return;
+    // Continuous series have no instrument_id — the series is identified by
+    // collection alone. getSeriesSummary requires instrument_id so skip the
+    // preview for continuous entries (they show no details panel).
+    if (!picked || !picked.collection) return;
+    if (picked.type === 'continuous' || !picked.instrument_id) return;
     setSummaries((prev) => ({
       ...prev,
       [label]: { loading: true, error: null, data: null, ref: picked },
@@ -237,10 +241,23 @@ function ParamsPanel({
                 <div key={label} className={styles.seriesRowGroup}>
                   <div className={styles.seriesRow}>
                     <span className={`${styles.seriesLabelText} codeRefLabel`}>{label}</span>
-                    {picked && (
+                    {picked ? (
                       <span className={styles.seriesChip}>
-                        {picked.collection} / {picked.instrument_id}
+                        {picked.type === 'continuous'
+                          ? `${picked.collection} (continuous)`
+                          : `${picked.collection} / ${picked.instrument_id}`}
                       </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className={styles.selectChipBtn}
+                        onClick={() => setPickerLabel(label)}
+                        disabled={disabled}
+                        data-testid={`instrument-picker-${label}`}
+                        aria-label={`Select instrument for ${label}`}
+                      >
+                        Select instrument
+                      </button>
                     )}
                     {picked && (
                       <button
@@ -254,16 +271,20 @@ function ParamsPanel({
                         ⓘ
                       </button>
                     )}
+                    {picked && (
+                      <button
+                        type="button"
+                        className={styles.iconBtn}
+                        onClick={() => setPickerLabel(label)}
+                        disabled={disabled}
+                        data-testid={`instrument-picker-${label}`}
+                        title="Change instrument"
+                        aria-label={`Change instrument for ${label}`}
+                      >
+                        ✎
+                      </button>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    className={styles.pickBtn}
-                    onClick={() => setPickerLabel(label)}
-                    disabled={disabled}
-                    data-testid={`instrument-picker-${label}`}
-                  >
-                    {picked ? 'Change instrument' : 'Select instrument'}
-                  </button>
                   {isExpanded && (
                     <div className={styles.detailsPane} role="region" aria-label={`Details for ${label}`}>
                       <div className={styles.detailsHeader}>

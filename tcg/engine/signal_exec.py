@@ -914,28 +914,18 @@ async def evaluate_signal(
                 continue
             if latches_long[(blk.input_id, bid)]:
                 continue
-            tot = _current_total_weight()
-            w = float(blk.weight)
-            if tot + w <= 1.0 + _BUDGET_EPS:
-                latches_long[(blk.input_id, bid)] = True
-                event_latched[(blk.input_id, bid)].append(t)
-            else:
-                entries_skipped_budget += 1
-                budget_skip_per_input[blk.input_id][t] = True
+            # Leverage is allowed — no budget cap.
+            latches_long[(blk.input_id, bid)] = True
+            event_latched[(blk.input_id, bid)].append(t)
 
         for bid, _kind, blk, truth, _nan in short_entry_recs:
             if not bool(truth[t]):
                 continue
             if latches_short[(blk.input_id, bid)]:
                 continue
-            tot = _current_total_weight()
-            w = float(blk.weight)
-            if tot + w <= 1.0 + _BUDGET_EPS:
-                latches_short[(blk.input_id, bid)] = True
-                event_latched[(blk.input_id, bid)].append(t)
-            else:
-                entries_skipped_budget += 1
-                budget_skip_per_input[blk.input_id][t] = True
+            # Leverage is allowed — no budget cap.
+            latches_short[(blk.input_id, bid)] = True
+            event_latched[(blk.input_id, bid)].append(t)
 
         # --- (d) emit per-input net position at t ---
         for rid in referenced_ids:

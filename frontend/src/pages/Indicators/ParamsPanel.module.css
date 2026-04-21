@@ -201,26 +201,33 @@
   white-space: nowrap;
 }
 
-.pickBtn {
-  width: 100%;
-  padding: 5px 10px;
-  margin-top: 4px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
+/* Clickable chip shown in the series row when no instrument is selected yet.
+   Matches the visual style of .seriesChip but has a dashed border and acts
+   as a button (opens InstrumentPickerModal). */
+.selectChipBtn {
+  flex: 1;
+  font-size: 0.72rem;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: none;
+  border: 1px dashed var(--border-primary);
+  color: var(--text-muted);
+  font-style: italic;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.1s;
+  transition: border-color 0.1s, color 0.1s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.pickBtn:hover:not(:disabled) {
+.selectChipBtn:hover:not(:disabled) {
   border-color: var(--accent);
+  color: var(--accent);
 }
 
-.pickBtn:disabled {
+.selectChipBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

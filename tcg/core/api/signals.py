@@ -366,6 +366,93 @@ def _parse_signal(raw: _SignalIn) -> Signal:
 
 
 # ---------------------------------------------------------------------------
+# Input date-range overlap — restrict evaluation to common timeframe
+# ---------------------------------------------------------------------------
+
+
+async def _compute_input_overlap(
+    svc: MarketDataService,
+    signal: Signal,
+    start: date | None,
+    end: date | None,
+) -> tuple[date | None, date | None]:
+    """Pre-fetch all input instruments and return the overlapping date range.
+
+    Returns ``(start, end)`` clamped to the intersection of all inputs'
+    date ranges so the engine only evaluates bars where every input is
+    defined — analogous to the portfolio page's aligned-price logic.
+    """
+    if len(signal.inputs) <= 1:
+        return start, end
+
+    date_arrays: list[npt.NDArray[np.int64]] = []
+    for inp in signal.inputs:
+        inst = inp.instrument
+        match type(inst).__name__:
+            case "InstrumentSpot":
+                try:
+                    series = await svc.get_prices(
+                        inst.collection,  # type: ignore[union-attr]
+                        inst.instrument_id,  # type: ignore[union-attr]
+                        start=start,
+                        end=end,
+                    )
+                except DataNotFoundError as exc:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: {exc}"
+                    ) from exc
+                date_arrays.append(series.dates)
+            case "InstrumentContinuous":
+                adj = _ADJ_MAP.get(inst.adjustment)  # type: ignore[union-attr]
+                if adj is None:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: unknown adjustment "
+                        f"{inst.adjustment!r}"  # type: ignore[union-attr]
+                    )
+                roll_config = ContinuousRollConfig(
+                    strategy=RollStrategy.FRONT_MONTH,
+                    adjustment=adj,
+                    cycle=inst.cycle or None,  # type: ignore[union-attr]
+                    roll_offset_days=int(inst.roll_offset),  # type: ignore[union-attr]
+                )
+                try:
+                    cseries = await svc.get_continuous(
+                        inst.collection,  # type: ignore[union-attr]
+                        roll_config,
+                        start=start,
+                        end=end,
+                    )
+                except DataNotFoundError as exc:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: {exc}"
+                    ) from exc
+                date_arrays.append(cseries.prices.dates)
+            case _:
+                raise SignalDataError(
+                    f"input {inp.id!r}: unsupported instrument type"
+                )
+
+    # Intersect all date arrays to find the common range.
+    common = date_arrays[0]
+    for arr in date_arrays[1:]:
+        common = np.intersect1d(common, arr, assume_unique=False)
+
+    if common.size == 0:
+        raise SignalDataError(
+            "no overlapping dates across inputs — "
+            "the selected instruments have disjoint date ranges"
+        )
+
+    # Convert int dates (YYYYMMDD) to stdlib date for the fetcher bounds.
+    lo = int(common[0])
+    hi = int(common[-1])
+    overlap_start = date(lo // 10000, (lo % 10000) // 100, lo % 100)
+    overlap_end = date(hi // 10000, (hi % 10000) // 100, hi % 100)
+
+    return overlap_start, overlap_end
+
+
+# ---------------------------------------------------------------------------
 # Price fetcher adapter — dispatches on InputInstrument kind
 # ---------------------------------------------------------------------------
 
@@ -533,7 +620,15 @@ async def compute_signal(
             },
         )
 
-    fetcher = _make_fetcher(svc, start_date, end_date)
+    # --- compute the biggest overlap of all input date ranges ----------
+    try:
+        overlap_start, overlap_end = await _compute_input_overlap(
+            svc, signal, start_date, end_date,
+        )
+    except SignalDataError as exc:
+        return _error_response("data", str(exc))
+
+    fetcher = _make_fetcher(svc, overlap_start, overlap_end)
     try:
         result = await evaluate_signal(signal, indicators, fetcher)
     except SignalValidationError as exc:

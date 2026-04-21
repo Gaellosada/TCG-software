@@ -200,10 +200,8 @@ async def test_entry_weight_zero_skipped():
 
 @pytest.mark.asyncio
 async def test_budget_skip_two_long_entries():
-    """Two long_entry blocks at w=0.8 each: first latches (total 0.8);
-    second is SKIPPED on every bar (0.8 + 0.8 > 1.0). Under iter-5
-    latching semantics, position = 0.8 for all bars; clipped_mask
-    (repurposed as "budget-skipped this bar") True on every bar.
+    """Two long_entry blocks at w=0.8 each: both latch (leverage allowed).
+    Position = 0.8 + 0.8 = 1.6 for all bars after t=0. No budget skips.
     """
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
@@ -224,11 +222,9 @@ async def test_budget_skip_two_long_entries():
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
-    assert result.clipped is True
-    assert list(result.positions[0].values) == pytest.approx([0.8] * 5)
-    assert all(result.positions[0].clipped_mask)
-    # Diagnostic: second block tried and failed on every bar (5 skips).
-    assert result.entries_skipped_budget == 5
+    # Leverage allowed: both blocks latch, 0.8 + 0.8 = 1.6.
+    assert list(result.positions[0].values) == pytest.approx([1.6] * 5)
+    assert result.entries_skipped_budget == 0
 
 
 @pytest.mark.asyncio
@@ -372,9 +368,8 @@ async def test_cross_side_exit_does_not_clear_opposite():
 
 @pytest.mark.asyncio
 async def test_global_budget_across_inputs():
-    """Global budget (P5-3): long on X w=0.6 latches first; attempt to
-    latch short on Y w=0.5 is SKIPPED (0.6 + 0.5 > 1.0). Second short
-    on Y at w=0.3 succeeds (0.6 + 0.3 ≤ 1.0).
+    """Leverage allowed: long on X w=0.6 latches; BOTH short blocks on Y
+    latch (0.5 + 0.3 = 0.8 short). No budget skips.
     """
     spx = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     ndx = np.array([100.0, 99.0, 98.0, 97.0, 96.0])
@@ -400,8 +395,6 @@ async def test_global_budget_across_inputs():
                 Block(input_id="X", weight=0.6, conditions=(long_x,)),
             ),
             short_entry=(
-                # Declaration order: the 0.5 block comes first → gets
-                # first chance → skipped (0.6 + 0.5 > 1.0).
                 Block(input_id="Y", weight=0.5, conditions=(short_y,)),
                 Block(input_id="Y", weight=0.3, conditions=(short_y,)),
             ),
@@ -411,14 +404,11 @@ async def test_global_budget_across_inputs():
     by_id = {p.input_id: p for p in result.positions}
     # X: long 0.6 latched from t=1 onward.
     assert list(by_id["X"].values) == pytest.approx([0.0, 0.6, 0.6, 0.6, 0.6])
-    # Y: only the 0.3 short latches (the 0.5 block is skipped forever).
+    # Y: both short blocks latch (leverage allowed): -0.5 + -0.3 = -0.8.
     assert list(by_id["Y"].values) == pytest.approx(
-        [0.0, -0.3, -0.3, -0.3, -0.3]
+        [0.0, -0.8, -0.8, -0.8, -0.8]
     )
-    # ≥4 skip events (one per bar where the 0.5 block's cond was true
-    # but budget was insufficient, every bar from t=1).
-    assert result.entries_skipped_budget >= 4
-    assert result.clipped is True
+    assert result.entries_skipped_budget == 0
 
 
 @pytest.mark.asyncio

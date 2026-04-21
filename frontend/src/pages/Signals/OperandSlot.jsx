@@ -267,6 +267,11 @@ function InstrumentEditor({ operand, inputs, onChange }) {
 function ConstantEditor({ operand, onChange }) {
   const current = Number.isFinite(operand.value) ? operand.value : 0;
   const [draft, setDraft] = useState(String(current));
+  // Sync draft when the underlying operand value changes (e.g. parent
+  // swaps the operand object via direction tab switch or undo).
+  useEffect(() => {
+    setDraft(String(current));
+  }, [current]);
   return (
     <input
       className={styles.operandConstant}

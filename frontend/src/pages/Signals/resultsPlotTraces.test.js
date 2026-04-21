@@ -1,4 +1,4 @@
-// Pure-JS tests for the Results 2-plot trace helpers (iter-5 ask #6).
+// Pure-JS tests for the Results trace helpers.
 //
 // Covers trace construction without rendering React / Plotly.
 
@@ -6,9 +6,9 @@ import { describe, it, expect } from 'vitest';
 import {
   buildInputTraces,
   aggregateRealizedPnl,
-  buildTopPlot,
-  buildBottomPlot,
-  buildOwnPanelPlots,
+  buildResultsPlot,
+  computeSubplotDomains,
+  countOwnPanelIndicators,
   partitionIndicators,
   buildEventMarkerTraces,
   buildIndicatorTraces,
@@ -47,6 +47,18 @@ describe('buildInputTraces', () => {
     const positions = [{ input_id: 'X', price: null }];
     expect(buildInputTraces(positions, dates)).toHaveLength(0);
   });
+
+  it('sets yaxis when opts.yaxis is provided', () => {
+    const positions = [positionWithPrice('X', [1, 2, 3])];
+    const traces = buildInputTraces(positions, dates, { yaxis: 'y3' });
+    expect(traces[0].yaxis).toBe('y3');
+  });
+
+  it('does not set yaxis when opts.yaxis is omitted', () => {
+    const positions = [positionWithPrice('X', [1, 2, 3])];
+    const traces = buildInputTraces(positions, dates);
+    expect(traces[0].yaxis).toBeUndefined();
+  });
 });
 
 describe('aggregateRealizedPnl', () => {
@@ -65,44 +77,11 @@ describe('aggregateRealizedPnl', () => {
   });
 });
 
-describe('buildTopPlot', () => {
-  it('returns empty when timestamps are missing', () => {
-    const r = buildTopPlot({ positions: [] });
-    expect(r.hasData).toBe(false);
-  });
-
-  it('includes price traces only when pnl missing', () => {
-    const result = {
-      timestamps: ts,
-      positions: [positionWithPrice('X', [1, 2, 3])],
-    };
-    const { traces, layoutOverrides, hasData } = buildTopPlot(result);
-    expect(hasData).toBe(true);
-    expect(traces).toHaveLength(1);
-    expect(layoutOverrides.yaxis2).toBeUndefined();
-  });
-
-  it('adds a realized P&L trace on a right y-axis when payload provided', () => {
-    const result = {
-      timestamps: ts,
-      positions: [positionWithPrice('X', [1, 2, 3])],
-      realized_pnl: [[0, 1, 2]],
-    };
-    const { traces, layoutOverrides } = buildTopPlot(result);
-    expect(traces).toHaveLength(2);
-    const pnl = traces.find((t) => t.name === 'realized P&L');
-    expect(pnl).toBeDefined();
-    expect(pnl.yaxis).toBe('y2');
-    expect(layoutOverrides.yaxis2.overlaying).toBe('y');
-    expect(layoutOverrides.yaxis2.side).toBe('right');
-  });
-});
-
 describe('buildEventMarkerTraces', () => {
   const positions = [positionWithPrice('X', [100, 101, 102])];
-  it('emits markers at latched_indices on the price line', () => {
+  it('emits markers at fired_indices by default', () => {
     const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [0], latched_indices: [0, 2] },
+      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [0, 2], latched_indices: [0] },
     ];
     const traces = buildEventMarkerTraces(events, positions, dates);
     expect(traces).toHaveLength(1);
@@ -113,9 +92,39 @@ describe('buildEventMarkerTraces', () => {
     expect(traces[0].marker.color).toBe(EVENT_MARKER.long_entry.color);
   });
 
+  it('emits entry markers at latched_indices when noRepeat is true', () => {
+    const events = [
+      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [0, 1, 2], latched_indices: [0, 2] },
+    ];
+    const traces = buildEventMarkerTraces(events, positions, dates, undefined, { noRepeat: true });
+    expect(traces).toHaveLength(1);
+    expect(traces[0].x).toHaveLength(2);
+    expect(traces[0].y).toEqual([100, 102]);
+  });
+
+  it('filters exit markers to effective exits when noRepeat is true', () => {
+    // Position goes: 0.5, 0.5, 0.0 — exit fires at t=1 and t=2, but only
+    // t=2 actually changes the position (0.5→0.0).
+    const pos = [{
+      input_id: 'X',
+      instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'X' },
+      values: [0.5, 0.5, 0.0],
+      clipped_mask: [false, false, false],
+      price: { label: 'X.close', values: [100, 101, 102] },
+    }];
+    const events = [
+      { input_id: 'X', block_id: 'b1', kind: 'long_exit', fired_indices: [1, 2], latched_indices: [1, 2] },
+    ];
+    const traces = buildEventMarkerTraces(events, pos, dates, undefined, { noRepeat: true });
+    expect(traces).toHaveLength(1);
+    // Only bar 2 is effective (position changed from 0.5 to 0.0).
+    expect(traces[0].x).toHaveLength(1);
+    expect(traces[0].y).toEqual([102]);
+  });
+
   it('uses open variants for exit kinds', () => {
     const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_exit', latched_indices: [1] },
+      { input_id: 'X', block_id: 'b1', kind: 'long_exit', fired_indices: [1], latched_indices: [1] },
     ];
     const [trace] = buildEventMarkerTraces(events, positions, dates);
     expect(trace.marker.symbol).toBe('triangle-down-open');
@@ -123,11 +132,11 @@ describe('buildEventMarkerTraces', () => {
 
   it('applies the short_entry / short_exit colour convention', () => {
     const entry = buildEventMarkerTraces(
-      [{ input_id: 'X', block_id: 'b2', kind: 'short_entry', latched_indices: [1] }],
+      [{ input_id: 'X', block_id: 'b2', kind: 'short_entry', fired_indices: [1], latched_indices: [1] }],
       positions, dates,
     );
     const exit = buildEventMarkerTraces(
-      [{ input_id: 'X', block_id: 'b3', kind: 'short_exit', latched_indices: [2] }],
+      [{ input_id: 'X', block_id: 'b3', kind: 'short_exit', fired_indices: [2], latched_indices: [2] }],
       positions, dates,
     );
     expect(entry[0].marker.color).toBe('#ef4444');
@@ -136,7 +145,7 @@ describe('buildEventMarkerTraces', () => {
     expect(exit[0].marker.symbol).toBe('triangle-up-open');
   });
 
-  it('falls back to fired_indices when latched_indices is absent', () => {
+  it('uses fired_indices by default even when latched_indices is absent', () => {
     const events = [
       { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [1] },
     ];
@@ -147,20 +156,20 @@ describe('buildEventMarkerTraces', () => {
 
   it('skips events whose input has no price (no synthesis)', () => {
     const pos = [{ input_id: 'X', price: null }];
-    const events = [{ input_id: 'X', kind: 'long_entry', latched_indices: [0] }];
+    const events = [{ input_id: 'X', kind: 'long_entry', fired_indices: [0] }];
     expect(buildEventMarkerTraces(events, pos, dates)).toHaveLength(0);
   });
 
   it('drops bars where the price is null (no synthesis)', () => {
     const pos = [positionWithPrice('X', [100, null, 102])];
-    const events = [{ input_id: 'X', kind: 'long_entry', latched_indices: [0, 1, 2] }];
+    const events = [{ input_id: 'X', kind: 'long_entry', fired_indices: [0, 1, 2] }];
     const [trace] = buildEventMarkerTraces(events, pos, dates);
     expect(trace.x).toHaveLength(2);
     expect(trace.y).toEqual([100, 102]);
   });
 
   it('ignores unknown kinds gracefully', () => {
-    const events = [{ input_id: 'X', kind: 'not_a_kind', latched_indices: [0] }];
+    const events = [{ input_id: 'X', kind: 'not_a_kind', fired_indices: [0] }];
     expect(buildEventMarkerTraces(events, positions, dates)).toHaveLength(0);
   });
 
@@ -168,10 +177,18 @@ describe('buildEventMarkerTraces', () => {
     expect(buildEventMarkerTraces([], positions, dates)).toEqual([]);
     expect(buildEventMarkerTraces(undefined, positions, dates)).toEqual([]);
   });
+
+  it('sets yaxis on traces when yaxis parameter is provided', () => {
+    const events = [
+      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [0] },
+    ];
+    const traces = buildEventMarkerTraces(events, positions, dates, 'y2');
+    expect(traces[0].yaxis).toBe('y2');
+  });
 });
 
 describe('buildIndicatorTraces', () => {
-  it('emits one line per indicator entry on y2', () => {
+  it('emits one line per indicator entry on y2 by default', () => {
     const inds = [
       { input_id: 'X', indicator_id: 'sma', series: [1, 2, 3] },
       { input_id: 'X', indicator_id: 'rsi', series: [4, 5, 6] },
@@ -183,36 +200,15 @@ describe('buildIndicatorTraces', () => {
     expect(traces[0].line.dash).toBe('dot');
   });
 
+  it('uses custom yaxis when provided', () => {
+    const inds = [{ input_id: 'X', indicator_id: 'sma', series: [1, 2, 3] }];
+    const traces = buildIndicatorTraces(inds, dates, 0, 'y5');
+    expect(traces[0].yaxis).toBe('y5');
+  });
+
   it('skips entries without a series array', () => {
     const inds = [{ indicator_id: 'x', series: null }];
     expect(buildIndicatorTraces(inds, dates)).toHaveLength(0);
-  });
-});
-
-describe('buildBottomPlot', () => {
-  it('merges inputs + indicators + events into one trace list', () => {
-    const result = {
-      timestamps: ts,
-      positions: [positionWithPrice('X', [10, 20, 30])],
-      indicators: [{ input_id: 'X', indicator_id: 'sma', series: [11, 19, 29] }],
-      events: [{ input_id: 'X', block_id: 'b1', kind: 'long_entry', latched_indices: [1] }],
-    };
-    const { traces, layoutOverrides, hasData } = buildBottomPlot(result);
-    expect(hasData).toBe(true);
-    // 1 input + 1 indicator + 1 event-marker trace
-    expect(traces).toHaveLength(3);
-    expect(layoutOverrides.yaxis2.side).toBe('right');
-  });
-
-  it('omits the y2 axis when there are no indicators', () => {
-    const result = {
-      timestamps: ts,
-      positions: [positionWithPrice('X', [10, 20, 30])],
-      indicators: [],
-      events: [],
-    };
-    const { layoutOverrides } = buildBottomPlot(result);
-    expect(layoutOverrides.yaxis2).toBeUndefined();
   });
 });
 
@@ -272,86 +268,280 @@ describe('partitionIndicators', () => {
   });
 });
 
-describe('buildBottomPlot — ownPanel filtering', () => {
-  it('excludes ownPanel indicators from the bottom plot', () => {
+/* ================================================================== */
+/*  computeSubplotDomains                                              */
+/* ================================================================== */
+
+describe('computeSubplotDomains', () => {
+  it('returns 2 domains when there are no ownPanel indicators', () => {
+    const domains = computeSubplotDomains(0);
+    expect(domains).toHaveLength(2);
+    // Top domain should be higher than bottom domain
+    expect(domains[0][1]).toBeGreaterThan(domains[1][1]);
+    // All values between 0 and 1
+    for (const [lo, hi] of domains) {
+      expect(lo).toBeGreaterThanOrEqual(0);
+      expect(hi).toBeLessThanOrEqual(1);
+      expect(hi).toBeGreaterThan(lo);
+    }
+  });
+
+  it('returns 2 + N domains for N ownPanel indicators', () => {
+    const domains = computeSubplotDomains(3);
+    expect(domains).toHaveLength(5);
+    // Each domain has lo < hi
+    for (const [lo, hi] of domains) {
+      expect(hi).toBeGreaterThan(lo);
+    }
+  });
+
+  it('domains are ordered top-down (highest first)', () => {
+    const domains = computeSubplotDomains(2);
+    for (let i = 0; i < domains.length - 1; i++) {
+      // Upper bound of domain[i] > upper bound of domain[i+1]
+      expect(domains[i][1]).toBeGreaterThan(domains[i + 1][1]);
+    }
+  });
+
+  it('domains do not overlap', () => {
+    const domains = computeSubplotDomains(2);
+    // Sorted top-down, so domain[i].lower >= domain[i+1].upper
+    for (let i = 0; i < domains.length - 1; i++) {
+      expect(domains[i][0]).toBeGreaterThanOrEqual(domains[i + 1][1]);
+    }
+  });
+
+  it('all domains fit within [0, 1]', () => {
+    const domains = computeSubplotDomains(5);
+    for (const [lo, hi] of domains) {
+      expect(lo).toBeGreaterThanOrEqual(0);
+      expect(hi).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+/* ================================================================== */
+/*  buildResultsPlot — unified subplot builder                         */
+/* ================================================================== */
+
+describe('buildResultsPlot', () => {
+  it('returns empty when result is null', () => {
+    const r = buildResultsPlot(null);
+    expect(r.hasData).toBe(false);
+    expect(r.traces).toEqual([]);
+  });
+
+  it('returns empty when timestamps array is empty', () => {
+    const r = buildResultsPlot({ timestamps: [], positions: [] });
+    expect(r.hasData).toBe(false);
+  });
+
+  it('returns traces with correct structure for basic result', () => {
     const result = {
       timestamps: ts,
-      positions: [positionWithPrice('X', [10, 20, 30])],
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      realized_pnl: [[0, 1, 2]],
+      indicators: [],
+      events: [],
+    };
+    const { traces, layoutOverrides, hasData } = buildResultsPlot(result);
+    expect(hasData).toBe(true);
+    // Top subplot: P&L + capital. Bottom subplot: 1 price.
+    expect(traces.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('all traces share the same x-axis (no xaxis2/xaxis3)', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      realized_pnl: [[0, 1, 2]],
       indicators: [
-        { input_id: 'X', indicator_id: 'sma', series: [11, 19, 29], ownPanel: false },
+        { input_id: 'X', indicator_id: 'sma', series: [1, 2, 3], ownPanel: false },
         { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
       ],
       events: [],
     };
-    const { traces } = buildBottomPlot(result);
-    const indicatorNames = traces.filter((t) => t.name && t.name.startsWith('ind:')).map((t) => t.name);
-    expect(indicatorNames.some((n) => n.includes('sma'))).toBe(true);
-    expect(indicatorNames.some((n) => n.includes('rsi'))).toBe(false);
+    const { traces, layoutOverrides } = buildResultsPlot(result);
+    // No trace should reference xaxis other than default 'x'
+    for (const t of traces) {
+      if (t.xaxis) {
+        expect(t.xaxis).toBe('x');
+      }
+    }
+    // Layout should only have one xaxis
+    expect(layoutOverrides.xaxis).toBeDefined();
+    expect(layoutOverrides.xaxis2).toBeUndefined();
+    expect(layoutOverrides.xaxis3).toBeUndefined();
   });
-});
 
-describe('buildOwnPanelPlots', () => {
-  it('returns empty array when no ownPanel indicators', () => {
+  it('has no yaxis with side:right anywhere', () => {
     const result = {
       timestamps: ts,
-      positions: [positionWithPrice('X', [10, 20, 30])],
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      realized_pnl: [[0, 1, 2]],
       indicators: [
-        { input_id: 'X', indicator_id: 'sma', series: [11, 19, 29], ownPanel: false },
+        { input_id: 'X', indicator_id: 'sma', series: [1, 2, 3], ownPanel: false },
+        { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
       ],
       events: [],
     };
-    expect(buildOwnPanelPlots(result)).toHaveLength(0);
+    const { layoutOverrides } = buildResultsPlot(result);
+    for (const [key, value] of Object.entries(layoutOverrides)) {
+      if (key.startsWith('yaxis') && typeof value === 'object') {
+        expect(value.side).not.toBe('right');
+      }
+    }
   });
 
-  it('returns empty array when result is null', () => {
-    expect(buildOwnPanelPlots(null)).toHaveLength(0);
-  });
-
-  it('returns one plot per ownPanel indicator with correct structure', () => {
+  it('assigns top subplot traces (prices + P&L + capital) to default y-axis', () => {
     const result = {
       timestamps: ts,
-      positions: [positionWithPrice('X', [10, 20, 30])],
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      realized_pnl: [[0, 1, 2]],
+      indicators: [],
+      events: [],
+    };
+    const { traces } = buildResultsPlot(result);
+    // Top subplot price trace should have no yaxis (defaults to 'y')
+    const topPrice = traces.find((t) => t.name.includes('X') && !t.yaxis);
+    expect(topPrice).toBeDefined();
+    // P&L trace should be on default y-axis (no yaxis property)
+    const pnl = traces.find((t) => t.name === 'realized P&L');
+    expect(pnl).toBeDefined();
+    expect(pnl.yaxis).toBeUndefined();
+    // Capital trace should also be on default y-axis
+    const cap = traces.find((t) => t.name === 'capital');
+    expect(cap).toBeDefined();
+    expect(cap.yaxis).toBeUndefined();
+  });
+
+  it('assigns bottom subplot traces to y2', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [{ input_id: 'X', indicator_id: 'sma', series: [1, 2, 3] }],
+      events: [{ input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [1], latched_indices: [1] }],
+    };
+    const { traces } = buildResultsPlot(result);
+    // Bottom subplot price traces should be on y2
+    const bottomPrices = traces.filter((t) => t.name.includes('X') && t.yaxis === 'y2');
+    expect(bottomPrices.length).toBeGreaterThanOrEqual(1);
+    // Indicator traces on y2
+    const indTraces = traces.filter((t) => t.name && t.name.startsWith('ind:'));
+    expect(indTraces.length).toBeGreaterThanOrEqual(1);
+    for (const t of indTraces) {
+      expect(t.yaxis).toBe('y2');
+    }
+    // Event marker traces on y2
+    const eventTraces = traces.filter((t) => t.name && t.name.includes('long entry'));
+    expect(eventTraces.length).toBeGreaterThanOrEqual(1);
+    for (const t of eventTraces) {
+      expect(t.yaxis).toBe('y2');
+    }
+  });
+
+  it('assigns ownPanel indicators to y3, y4, etc.', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
       indicators: [
-        { input_id: 'X', indicator_id: 'sma', series: [11, 19, 29], ownPanel: false },
         { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
         { input_id: 'X', indicator_id: 'macd', series: [0.1, 0.2, 0.3], ownPanel: true },
       ],
       events: [],
     };
-    const panels = buildOwnPanelPlots(result);
-    expect(panels).toHaveLength(2);
-
-    // First panel: rsi
-    expect(panels[0].title).toBe('rsi-X');
-    expect(panels[0].downloadFilename).toBe('signal-indicator-rsi-X');
-    expect(panels[0].hasData).toBe(true);
-    // Should have input traces + 1 indicator trace
-    const rsiTraces = panels[0].traces;
-    expect(rsiTraces.length).toBeGreaterThanOrEqual(2); // at least 1 input + 1 indicator
-    const indTrace = rsiTraces.find((t) => t.yaxis === 'y2');
-    expect(indTrace).toBeDefined();
-    expect(indTrace.y).toEqual([50, 60, 70]);
-    expect(indTrace.name).toMatch(/rsi/);
-    // Layout has y2 for the indicator
-    expect(panels[0].layoutOverrides.yaxis2.side).toBe('right');
-    expect(panels[0].layoutOverrides.yaxis2.title.text).toBe('rsi');
-
-    // Second panel: macd
-    expect(panels[1].title).toBe('macd-X');
-    expect(panels[1].downloadFilename).toBe('signal-indicator-macd-X');
+    const { traces, layoutOverrides } = buildResultsPlot(result);
+    const rsiTrace = traces.find((t) => t.name && t.name.includes('rsi'));
+    const macdTrace = traces.find((t) => t.name && t.name.includes('macd'));
+    expect(rsiTrace.yaxis).toBe('y3');
+    expect(macdTrace.yaxis).toBe('y4');
+    // Layout should have matching yaxis entries with domain arrays
+    expect(layoutOverrides.yaxis3).toBeDefined();
+    expect(layoutOverrides.yaxis3.title.text).toBe('rsi');
+    expect(layoutOverrides.yaxis3.domain).toBeDefined();
+    expect(layoutOverrides.yaxis4).toBeDefined();
+    expect(layoutOverrides.yaxis4.title.text).toBe('macd');
+    expect(layoutOverrides.yaxis4.domain).toBeDefined();
   });
 
-  it('marks hasData false when indicator series is empty', () => {
+  it('layout has domain arrays on yaxis and yaxis2', () => {
     const result = {
       timestamps: ts,
-      positions: [positionWithPrice('X', [10, 20, 30])],
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [],
+      events: [],
+    };
+    const { layoutOverrides } = buildResultsPlot(result);
+    expect(layoutOverrides.yaxis.domain).toBeDefined();
+    expect(layoutOverrides.yaxis.domain).toHaveLength(2);
+    expect(layoutOverrides.yaxis2.domain).toBeDefined();
+    expect(layoutOverrides.yaxis2.domain).toHaveLength(2);
+    // Top domain is higher than bottom domain
+    expect(layoutOverrides.yaxis.domain[1]).toBeGreaterThan(layoutOverrides.yaxis2.domain[1]);
+  });
+
+  it('excludes ownPanel indicators with empty series', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
       indicators: [
         { input_id: 'X', indicator_id: 'empty', series: [], ownPanel: true },
       ],
       events: [],
     };
-    const panels = buildOwnPanelPlots(result);
-    expect(panels).toHaveLength(1);
-    expect(panels[0].hasData).toBe(false);
+    const { layoutOverrides } = buildResultsPlot(result);
+    // No yaxis3 because the empty ownPanel is excluded
+    expect(layoutOverrides.yaxis3).toBeUndefined();
+  });
+
+  it('excludes ownPanel indicators from the bottom subplot overlay', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [
+        { input_id: 'X', indicator_id: 'sma', series: [1, 2, 3], ownPanel: false },
+        { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
+      ],
+      events: [],
+    };
+    const { traces } = buildResultsPlot(result);
+    // sma should appear as overlay on y2
+    const smaTrace = traces.find((t) => t.name && t.name.includes('sma'));
+    expect(smaTrace).toBeDefined();
+    expect(smaTrace.yaxis).toBe('y2');
+    // rsi should NOT appear on y2
+    const rsiTraces = traces.filter((t) => t.name && t.name.includes('rsi'));
+    for (const t of rsiTraces) {
+      expect(t.yaxis).not.toBe('y2');
+    }
+  });
+});
+
+/* ================================================================== */
+/*  countOwnPanelIndicators                                            */
+/* ================================================================== */
+
+describe('countOwnPanelIndicators', () => {
+  it('returns 0 for null result', () => {
+    expect(countOwnPanelIndicators(null)).toBe(0);
+  });
+
+  it('returns 0 when no ownPanel indicators', () => {
+    const result = {
+      indicators: [{ indicator_id: 'sma', series: [1], ownPanel: false }],
+    };
+    expect(countOwnPanelIndicators(result)).toBe(0);
+  });
+
+  it('counts only ownPanel indicators with data', () => {
+    const result = {
+      indicators: [
+        { indicator_id: 'rsi', series: [50, 60], ownPanel: true },
+        { indicator_id: 'macd', series: [0.1], ownPanel: true },
+        { indicator_id: 'empty', series: [], ownPanel: true },
+        { indicator_id: 'sma', series: [1, 2], ownPanel: false },
+      ],
+    };
+    expect(countOwnPanelIndicators(result)).toBe(2);
   });
 });

@@ -287,7 +287,7 @@ test.describe('Signals Results 2-plot (iter-5)', () => {
     });
   });
 
-  test('renders 2 distinct plotly divs in the Results section after Run', async ({ page }) => {
+  test('renders unified subplot chart in the Results section after Run', async ({ page }) => {
     // Pre-seed a runnable v3 signal: one configured spot input plus a
     // long_entry block referencing that input with a complete instrument
     // condition. This matches the Run-gate in SignalsPage.
@@ -330,15 +330,14 @@ test.describe('Signals Results 2-plot (iter-5)', () => {
     await expect(runBtn).toBeEnabled();
     await runBtn.click();
 
-    // After Run: both plot containers mount.
+    // After Run: unified subplot chart mounts (single Plotly figure with
+    // shared x-axis across all subplots).
     await expect(page.getByTestId('results-view')).toBeVisible();
-    await expect(page.getByTestId('results-plot-top')).toBeVisible();
-    await expect(page.getByTestId('results-plot-bottom')).toBeVisible();
+    await expect(page.getByTestId('results-plot-unified')).toBeVisible();
 
-    // There must be TWO Plotly divs — one per plot. Plotly renders each
-    // instance as a .js-plotly-plot div.
+    // There must be exactly ONE Plotly div — the unified subplot figure.
     const plots = page.locator('.js-plotly-plot');
-    await expect(plots).toHaveCount(2);
+    await expect(plots).toHaveCount(1);
 
     // The shell empty-state must disappear once data is present.
     await expect(page.getByTestId('signal-chart-empty')).toHaveCount(0);

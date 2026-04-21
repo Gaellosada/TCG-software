@@ -69,6 +69,16 @@ describe('isInputConfigured', () => {
     expect(isInputConfigured(CONT_INPUT)).toBe(true);
   });
 
+  it('accepts a continuous input with null cycle (all months)', () => {
+    expect(isInputConfigured({
+      id: 'Z',
+      instrument: {
+        type: 'continuous', collection: 'FUT_SP_500', adjustment: 'none',
+        cycle: null, rollOffset: 0, strategy: 'front_month',
+      },
+    })).toBe(true);
+  });
+
   it('rejects a continuous input missing required fields', () => {
     expect(isInputConfigured({
       id: 'Z',

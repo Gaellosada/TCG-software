@@ -1,10 +1,7 @@
 import styles from './Signals.module.css';
 
 /**
- * Right panel — Signal metadata + Run button. The Signals page has no
- * per-signal "parameters" the way Indicators do (the whole spec IS the
- * parameters), so this panel is intentionally spare: a summary box with
- * block counts per direction, a guarded Run button, and that's it.
+ * Right panel — Signal metadata + Run button.
  *
  * Props:
  *   signal             {Object|null}
@@ -12,8 +9,10 @@ import styles from './Signals.module.css';
  *   running            {boolean}
  *   canRun             {boolean}
  *   runDisabledReason  {string|null}
+ *   capital            {number}       display-only initial capital for P&L scaling
+ *   onCapitalChange    {Function}     (number) => void
  */
-function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason }) {
+function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange, noRepeat, onNoRepeatChange }) {
   const rules = signal?.rules || {};
   const counts = {
     long_entry: (rules.long_entry || []).length,
@@ -21,6 +20,11 @@ function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason }) {
     short_entry: (rules.short_entry || []).length,
     short_exit: (rules.short_exit || []).length,
   };
+
+  function handleCapitalChange(e) {
+    const v = parseFloat(e.target.value);
+    if (Number.isFinite(v) && v > 0) onCapitalChange(v);
+  }
 
   return (
     <div className={styles.paramsPanelBody}>
@@ -40,6 +44,34 @@ function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason }) {
       <div className={styles.paramsDivider} />
       <div className={styles.paramsSection}>
         <div className={styles.paramsSectionLabel}>Run</div>
+        <div className={styles.capitalRow}>
+          <label className={styles.capitalLabel} htmlFor="initial-capital">Initial capital</label>
+          <input
+            id="initial-capital"
+            type="number"
+            min="1"
+            step="100"
+            className={styles.capitalInput}
+            value={capital}
+            onChange={handleCapitalChange}
+            data-testid="initial-capital"
+          />
+        </div>
+        <label className={styles.noRepeatRow}>
+          <input
+            type="checkbox"
+            checked={noRepeat}
+            onChange={(e) => onNoRepeatChange(e.target.checked)}
+            data-testid="no-repeat-checkbox"
+          />
+          <span className={styles.noRepeatLabel}>Don&apos;t repeat entries/exits</span>
+          <span
+            className={styles.noRepeatInfo}
+            title="When checked, only show effective entries and exits — consecutive duplicate markers are hidden. Computation is unchanged."
+          >
+            &#9432;
+          </span>
+        </label>
         <button
           type="button"
           className={styles.runBtn}

@@ -154,7 +154,8 @@ function sanitiseSignal(raw) {
       .filter((b) => b && typeof b === 'object')
       .map(sanitiseBlock);
   }
-  return { id: raw.id, name, inputs, rules };
+  const doc = typeof raw.doc === 'string' ? raw.doc : '';
+  return { id: raw.id, name, inputs, rules, doc };
 }
 
 export function loadState() {
