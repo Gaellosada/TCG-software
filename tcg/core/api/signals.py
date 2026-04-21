@@ -64,9 +64,9 @@ from typing import Any, Literal
 import numpy as np
 import numpy.typing as npt
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from tcg.core.api.common import ADJUSTMENT_MAP, error_response
 from tcg.core.api.data import get_market_data
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
@@ -78,7 +78,7 @@ from tcg.engine.signal_exec import (
     evaluate_signal,
 )
 from tcg.types.errors import DataNotFoundError
-from tcg.types.market import AdjustmentMethod, ContinuousRollConfig, RollStrategy
+from tcg.types.market import ContinuousRollConfig, RollStrategy
 from tcg.types.signal import (
     Block,
     CompareCondition,
@@ -104,19 +104,6 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 # ---------------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------------
-
-
-def _error_response(
-    error_type: str,
-    message: str,
-    *,
-    status: int = 400,
-    traceback: str | None = None,
-) -> JSONResponse:
-    content: dict = {"error_type": error_type, "message": message}
-    if traceback:
-        content["traceback"] = traceback
-    return JSONResponse(status_code=status, content=content)
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +389,7 @@ async def compute_input_overlap(
                     ) from exc
                 date_arrays.append(series.dates)
             case "InstrumentContinuous":
-                adj = _ADJ_MAP.get(inst.adjustment)  # type: ignore[union-attr]
+                adj = ADJUSTMENT_MAP.get(inst.adjustment)  # type: ignore[union-attr]
                 if adj is None:
                     raise SignalDataError(
                         f"input {inp.id!r}: unknown adjustment "
@@ -456,13 +443,6 @@ async def compute_input_overlap(
 # ---------------------------------------------------------------------------
 
 
-_ADJ_MAP: dict[str, AdjustmentMethod] = {
-    "none": AdjustmentMethod.NONE,
-    "proportional": AdjustmentMethod.PROPORTIONAL,
-    "difference": AdjustmentMethod.DIFFERENCE,
-}
-
-
 def _pick_field(series, field: str) -> npt.NDArray[np.float64]:
     if field == "close":
         return series.close.astype(np.float64, copy=False)
@@ -510,13 +490,8 @@ def make_signal_fetcher(
             return series.dates, values
 
         # continuous
-        try:
-            strategy = RollStrategy.FRONT_MONTH
-        except AttributeError:  # pragma: no cover — RollStrategy shape guard
-            raise SignalValidationError(
-                "continuous input: RollStrategy.FRONT_MONTH unavailable"
-            )
-        adj = _ADJ_MAP.get(instrument.adjustment)
+        strategy = RollStrategy.FRONT_MONTH
+        adj = ADJUSTMENT_MAP.get(instrument.adjustment)
         if adj is None:
             raise SignalValidationError(
                 f"continuous input: unknown adjustment {instrument.adjustment!r}"
@@ -593,17 +568,17 @@ async def compute_signal(
         start_date = date.fromisoformat(body.start) if body.start else None
         end_date = date.fromisoformat(body.end) if body.end else None
     except ValueError as exc:
-        return _error_response("validation", f"Invalid date format: {exc}")
+        return error_response("validation", f"Invalid date format: {exc}")
 
     try:
         signal = parse_signal(body.spec)
     except SignalValidationError as exc:
-        return _error_response("validation", str(exc))
+        return error_response("validation", str(exc))
 
     indicators: dict[str, IndicatorSpecInput] = {}
     for ind_spec in body.indicators:
         if ind_spec.id in indicators:
-            return _error_response(
+            return error_response(
                 "validation",
                 f"duplicate indicator id {ind_spec.id!r} in request body",
             )
@@ -625,17 +600,17 @@ async def compute_signal(
             svc, signal, start_date, end_date,
         )
     except SignalDataError as exc:
-        return _error_response("data", str(exc))
+        return error_response("data", str(exc))
 
     fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
     try:
         result = await evaluate_signal(signal, indicators, fetcher)
     except SignalValidationError as exc:
-        return _error_response("validation", str(exc))
+        return error_response("validation", str(exc))
     except SignalDataError as exc:
-        return _error_response("data", str(exc))
+        return error_response("data", str(exc))
     except SignalRuntimeError as exc:
-        return _error_response(
+        return error_response(
             "runtime", str(exc), traceback=exc.user_traceback or None
         )
 

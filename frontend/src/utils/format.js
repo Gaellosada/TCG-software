@@ -5,7 +5,12 @@
  */
 export function formatDate(date) {
   const d = typeof date === 'string' ? new Date(date) : date;
-  return d.toISOString().slice(0, 10);
+  // Format from local components so a Date built from local midnight
+  // doesn't slip to the previous day in positive-offset timezones.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 /**

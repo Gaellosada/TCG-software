@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useRef } from 'react';
+import { formatDate } from '../../utils/format';
 import styles from './TimeRangeSlider.module.css';
 
 function parseDate(dateStr) {
@@ -44,7 +45,7 @@ export default function TimeRangeSlider({ minDate, maxDate, startDate, endDate, 
   disabledRef.current = disabled;
 
   const effectiveMin = minDate || '1990-01-01';
-  const effectiveMax = maxDate || new Date().toISOString().slice(0, 10);
+  const effectiveMax = maxDate || formatDate(new Date());
 
   const totalMonths = useMemo(
     () => dateToMonthIndex(effectiveMin, effectiveMax),

@@ -167,34 +167,31 @@ function ParamsPanel({
               const hasDraft = Object.prototype.hasOwnProperty.call(numericDrafts, spec.name);
               const displayValue = hasDraft ? numericDrafts[spec.name] : String(committed);
 
+              // For int params, refuse to commit a non-integer — otherwise
+              // the backend rejects `parseFloat("1.5")=1.5` with a type error
+              // the user can't easily correlate to the field they edited.
+              function commitNumeric(n) {
+                if (!Number.isFinite(n)) return false;
+                if (spec.type === 'int' && !Number.isInteger(n)) return false;
+                onParamChange(spec.name, n);
+                return true;
+              }
+
               function handleNumericChange(e) {
                 const text = e.target.value;
                 setNumericDrafts((prev) => ({ ...prev, [spec.name]: text }));
-                const n = parseFloat(text);
-                if (Number.isFinite(n)) {
-                  onParamChange(spec.name, n);
-                }
+                commitNumeric(parseFloat(text));
               }
 
               function handleNumericBlur() {
                 const draft = numericDrafts[spec.name];
-                if (draft !== undefined) {
-                  const n = parseFloat(draft);
-                  if (!Number.isFinite(n)) {
-                    setNumericDrafts((prev) => {
-                      const next = { ...prev };
-                      delete next[spec.name];
-                      return next;
-                    });
-                  } else {
-                    onParamChange(spec.name, n);
-                    setNumericDrafts((prev) => {
-                      const next = { ...prev };
-                      delete next[spec.name];
-                      return next;
-                    });
-                  }
-                }
+                if (draft === undefined) return;
+                commitNumeric(parseFloat(draft));
+                setNumericDrafts((prev) => {
+                  const next = { ...prev };
+                  delete next[spec.name];
+                  return next;
+                });
               }
 
               return (

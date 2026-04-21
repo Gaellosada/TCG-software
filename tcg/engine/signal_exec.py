@@ -472,6 +472,11 @@ def _union_align(
             values_by_key[key] = np.full(index.size, scalar, dtype=np.float64)
             continue
         assert dates is not None and vals is not None
+        if dates.size == 0:
+            # Empty series — every output bar is NaN. Skip the searchsorted
+            # dance, which would dereference dates[-1] on a zero-length array.
+            values_by_key[key] = np.full(index.size, np.nan, dtype=np.float64)
+            continue
         pos = np.searchsorted(dates, index)
         safe_pos = np.clip(pos, 0, dates.size - 1)
         match = dates[safe_pos] == index
