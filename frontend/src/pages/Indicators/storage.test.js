@@ -54,14 +54,14 @@ describe('loadState', () => {
           code: "def compute(series):\n    return series['price']",
           doc: '',
           params: { window: 20 },
-          seriesMap: { price: { collection: 'INDEX', instrument_id: '^GSPC' } },
+          seriesMap: { price: { type: 'spot', collection: 'INDEX', instrument_id: '^GSPC' } },
           ownPanel: false,
         },
       ],
       defaultState: {
         'sma-20': {
           params: { window: 30 },
-          seriesMap: { price: { collection: 'INDEX', instrument_id: '^GSPC' } },
+          seriesMap: { price: { type: 'spot', collection: 'INDEX', instrument_id: '^GSPC' } },
         },
       },
     };
@@ -100,7 +100,7 @@ describe('loadState', () => {
           code: "def compute(series):\n    return series['close']",
           doc: '',
           params: {},
-          seriesMap: { close: { collection: 'INDEX', instrument_id: '^GSPC' } },
+          seriesMap: { close: { type: 'spot', collection: 'INDEX', instrument_id: '^GSPC' } },
           ownPanel: true,
         },
       ],
@@ -108,6 +108,59 @@ describe('loadState', () => {
     };
     saveState(state);
     expect(loadState()).toEqual(state);
+  });
+
+  it('injects type:"spot" into legacy seriesMap entries that lack a type field', () => {
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      indicators: [
+        {
+          id: 'legacy',
+          name: 'Legacy',
+          code: '',
+          doc: '',
+          params: {},
+          seriesMap: { price: { collection: 'INDEX', instrument_id: '^GSPC' } },
+          ownPanel: false,
+        },
+      ],
+      defaultState: {
+        'sma-20': {
+          params: {},
+          seriesMap: { price: { collection: 'ETF', instrument_id: 'SPY' } },
+        },
+      },
+    }));
+    const out = loadState();
+    expect(out.indicators[0].seriesMap.price).toEqual({
+      type: 'spot', collection: 'INDEX', instrument_id: '^GSPC',
+    });
+    expect(out.defaultState['sma-20'].seriesMap.price).toEqual({
+      type: 'spot', collection: 'ETF', instrument_id: 'SPY',
+    });
+  });
+
+  it('preserves existing type field on seriesMap entries (no double-wrapping)', () => {
+    storage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      indicators: [
+        {
+          id: 'typed',
+          name: 'Typed',
+          code: '',
+          doc: '',
+          params: {},
+          seriesMap: {
+            price: { type: 'continuous', collection: 'FUT_ES', adjustment: 'none', cycle: '', rollOffset: 2, strategy: 'front_month' },
+          },
+          ownPanel: false,
+        },
+      ],
+      defaultState: {},
+    }));
+    const out = loadState();
+    expect(out.indicators[0].seriesMap.price.type).toBe('continuous');
+    expect(out.indicators[0].seriesMap.price.adjustment).toBe('none');
   });
 
   it('coerces a missing ``doc`` field on load to the empty string (legacy payloads)', () => {

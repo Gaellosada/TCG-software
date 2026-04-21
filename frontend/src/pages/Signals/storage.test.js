@@ -78,6 +78,7 @@ describe('Signals storage (v3)', () => {
         {
           id: 's1',
           name: 'My signal',
+          doc: '',
           inputs: [
             { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
             {
@@ -97,6 +98,7 @@ describe('Signals storage (v3)', () => {
               {
                 input_id: 'X',
                 weight: 0.4,
+                name: '',
                 conditions: [
                   {
                     op: 'gt',
@@ -110,6 +112,7 @@ describe('Signals storage (v3)', () => {
               {
                 input_id: 'X',
                 weight: 0,
+                name: '',
                 conditions: [
                   {
                     op: 'cross_below',
@@ -124,6 +127,7 @@ describe('Signals storage (v3)', () => {
               {
                 input_id: 'Y',
                 weight: 0,
+                name: '',
                 conditions: [
                   {
                     op: 'rolling_gt',

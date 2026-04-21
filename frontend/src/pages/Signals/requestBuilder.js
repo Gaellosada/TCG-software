@@ -119,6 +119,7 @@ export function buildComputeRequestBody(signal, availableIndicators) {
       code: ind.code,
       params: ind.params,
       seriesMap: ind.seriesMap,
+      ownPanel: !!ind.ownPanel,
     });
   }
   return {

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import OperandSlot from './OperandSlot';
 import BlockHeader from './BlockHeader';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import DocView from '../Indicators/DocView';
 import {
   ALL_OPS,
   OP_LABELS,
@@ -34,8 +35,10 @@ const DIRECTION_LABELS = {
  *   inputs             {Array}   the signal's declared inputs
  *   indicators         {Array}
  */
-function BlockEditor({ rules, onRulesChange, inputs, indicators }) {
-  const [direction, setDirection] = useState('long_entry');
+function BlockEditor({ rules, onRulesChange, inputs, indicators, doc, onDocChange }) {
+  const [activeTab, setActiveTab] = useState('long_entry');
+  const isDocTab = activeTab === 'doc';
+  const direction = isDocTab ? 'long_entry' : activeTab;
   const blocks = Array.isArray(rules?.[direction]) ? rules[direction] : [];
 
   function updateBlocks(nextBlocks) {
@@ -94,10 +97,10 @@ function BlockEditor({ rules, onRulesChange, inputs, indicators }) {
               type="button"
               key={dir}
               role="tab"
-              aria-selected={direction === dir}
+              aria-selected={activeTab === dir}
               data-testid={`direction-tab-${dir}`}
-              className={`${styles.directionTab} ${direction === dir ? styles.directionTabActive : ''}`}
-              onClick={() => setDirection(dir)}
+              className={`${styles.directionTab} ${activeTab === dir ? styles.directionTabActive : ''}`}
+              onClick={() => setActiveTab(dir)}
             >
               {DIRECTION_LABELS[dir]}
               {count > 0 && (
@@ -106,44 +109,68 @@ function BlockEditor({ rules, onRulesChange, inputs, indicators }) {
             </button>
           );
         })}
-      </div>
-
-      <div className={styles.directionHint}>
-        Blocks are <strong>OR</strong>&rsquo;d. Conditions in a block are <strong>AND</strong>&rsquo;d.
-      </div>
-
-      <div className={styles.blocksList}>
-        {blocks.length === 0 ? (
-          <div className={styles.blocksEmpty}>
-            No blocks. Add one to express a rule in this direction.
-          </div>
-        ) : (
-          blocks.map((block, blockIdx) => (
-            <Block
-              key={blockIdx}
-              blockIdx={blockIdx}
-              block={block}
-              direction={direction}
-              isFirst={blockIdx === 0}
-              onUpdateBlock={(next) => handleUpdateBlock(blockIdx, next)}
-              onAddCondition={() => handleAddCondition(blockIdx)}
-              onRemoveCondition={(condIdx) => handleRemoveCondition(blockIdx, condIdx)}
-              onUpdateCondition={(condIdx, next) => handleUpdateCondition(blockIdx, condIdx, next)}
-              onRemoveBlock={() => handleRemoveBlock(blockIdx)}
-              inputs={inputs}
-              indicators={indicators}
-            />
-          ))
-        )}
+        <span className={styles.directionTabSpacer} />
         <button
           type="button"
-          className={styles.addBlockBtn}
-          onClick={handleAddBlock}
-          data-testid="add-block-btn"
+          role="tab"
+          aria-selected={isDocTab}
+          data-testid="direction-tab-doc"
+          className={`${styles.directionTab} ${isDocTab ? styles.directionTabActive : ''}`}
+          onClick={() => setActiveTab('doc')}
         >
-          + Add block (OR)
+          Documentation
         </button>
       </div>
+
+      {isDocTab ? (
+        <div className={styles.docViewWrapper}>
+          <DocView
+            value={doc}
+            onChange={onDocChange}
+            readOnly={false}
+            placeholder="No documentation yet. Click Edit to add some."
+          />
+        </div>
+      ) : (
+        <>
+          <div className={styles.directionHint}>
+            Blocks are <strong>OR</strong>&rsquo;d. Conditions in a block are <strong>AND</strong>&rsquo;d.
+          </div>
+
+          <div className={styles.blocksList}>
+            {blocks.length === 0 ? (
+              <div className={styles.blocksEmpty}>
+                No blocks. Add one to express a rule in this direction.
+              </div>
+            ) : (
+              blocks.map((block, blockIdx) => (
+                <Block
+                  key={`${direction}-${blockIdx}`}
+                  blockIdx={blockIdx}
+                  block={block}
+                  direction={direction}
+                  isFirst={blockIdx === 0}
+                  onUpdateBlock={(next) => handleUpdateBlock(blockIdx, next)}
+                  onAddCondition={() => handleAddCondition(blockIdx)}
+                  onRemoveCondition={(condIdx) => handleRemoveCondition(blockIdx, condIdx)}
+                  onUpdateCondition={(condIdx, next) => handleUpdateCondition(blockIdx, condIdx, next)}
+                  onRemoveBlock={() => handleRemoveBlock(blockIdx)}
+                  inputs={inputs}
+                  indicators={indicators}
+                />
+              ))
+            )}
+            <button
+              type="button"
+              className={styles.addBlockBtn}
+              onClick={handleAddBlock}
+              data-testid="add-block-btn"
+            >
+              + Add block (OR)
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -168,15 +195,6 @@ function Block({
   return (
     <div className={styles.block} data-testid={`block-${blockIdx}`}>
       {!isFirst && <div className={styles.blockOrLabel}>OR</div>}
-      <div className={styles.blockStatusDotRow}>
-        <span
-          className={`${styles.blockStatusDot} ${runnable ? styles.blockStatusDotOk : styles.blockStatusDotWarn}`}
-          title={runnable ? 'Block ready' : 'Block not yet runnable (pick input + at least one complete condition)'}
-          data-testid={`block-status-${blockIdx}`}
-          data-runnable={runnable ? 'true' : 'false'}
-          aria-hidden="true"
-        />
-      </div>
       <BlockHeader
         block={block}
         direction={direction}
@@ -184,6 +202,8 @@ function Block({
         onChange={onUpdateBlock}
         onDelete={onRemoveBlock}
         blockIndex={blockIdx + 1}
+        status={runnable ? 'ok' : 'warn'}
+        blockIdx={blockIdx}
       />
       {conditions.length === 0 ? (
         <div className={styles.blockEmpty}>

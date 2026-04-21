@@ -1,24 +1,25 @@
 import { useMemo, useState } from 'react';
 import Chart from '../../components/Chart';
 import styles from './Signals.module.css';
-import {
-  buildTopPlot,
-  buildBottomPlot,
-  buildClipSummary,
-} from './resultsPlotTraces';
+import { buildResultsPlot } from './resultsPlotTraces';
 
 /**
- * Results section — iter-5 ask #6.
+ * Results section — unified subplot chart.
  *
- * Two stacked Plotly charts in a vertical flex column:
- *   - Top plot: all declared inputs (price) + realized P&L (aggregated).
- *   - Bottom plot: inputs + indicators + entry/exit markers.
+ * A SINGLE <Chart> with Plotly domain-based subplots (stacked vertically,
+ * shared x-axis):
+ *   - Top subplot:    prices + P&L + capital (aggregated).
+ *   - Bottom subplot: prices + overlay indicators + entry/exit markers.
+ *   - Additional subplots: one per ownPanel indicator.
  *
- * Each plot is an independent ``<Chart>`` (its own legend, CSV export,
- * modebar). Loading / empty / error / clip-banner states are owned by
- * this shell and shown ABOVE the charts so both plots share the same
- * framing.
+ * The grid row height is driven by SignalsPage via the CSS variable
+ * ``--results-row-min``, which grows when ownPanel indicators are present.
+ * This component fills that space via ``flex: 1``.
+ *
+ * Loading / empty / error states are owned by this shell and shown
+ * ABOVE the chart.
  */
+
 const ERROR_HEADINGS = {
   validation: 'Invalid signal',
   runtime: 'Signal error',
@@ -67,10 +68,8 @@ function ErrorCard({ error }) {
   );
 }
 
-function ResultsView({ result, loading, error }) {
-  const top = useMemo(() => buildTopPlot(result), [result]);
-  const bottom = useMemo(() => buildBottomPlot(result), [result]);
-  const clipSummary = useMemo(() => buildClipSummary(result), [result]);
+function ResultsView({ result, loading, error, capital = 1000, noRepeat = false }) {
+  const plot = useMemo(() => buildResultsPlot(result, { capital, noRepeat }), [result, capital, noRepeat]);
 
   if (loading) {
     return (
@@ -88,7 +87,7 @@ function ResultsView({ result, loading, error }) {
     );
   }
 
-  if (!top.hasData && !bottom.hasData) {
+  if (!plot.hasData) {
     return (
       <div className={styles.resultsViewBody}>
         <div className={styles.chartState} data-testid="signal-chart-empty">
@@ -100,39 +99,16 @@ function ResultsView({ result, loading, error }) {
 
   return (
     <div className={styles.resultsViewBody} data-testid="results-view">
-      {clipSummary && clipSummary.rows.length > 0 && (
-        <div
-          className={styles.clipBanner}
-          role="alert"
-          data-testid="signal-chart-clip-banner"
-        >
-          <span className={styles.clipBannerIcon} aria-hidden="true">⚠</span>
-          <span>
-            <strong>Position clipped</strong> to [-1, +1] on{' '}
-            {clipSummary.rows.map((r, i) => (
-              <span key={r.instrument}>
-                {i > 0 && ', '}
-                <code>{r.instrument}</code> ({r.count} bar{r.count === 1 ? '' : 's'})
-              </span>
-            ))}
-            . Raw long/short weight sums exceed 1.0 at those timestamps.
-          </span>
-        </div>
-      )}
-      <div className={styles.resultsPlotTop} data-testid="results-plot-top">
+      <div
+        className={styles.resultsPlotUnified}
+        data-testid="results-plot-unified"
+      >
         <Chart
-          traces={top.traces}
-          layoutOverrides={top.layoutOverrides}
+          traces={plot.traces}
+          layoutOverrides={plot.layoutOverrides}
           className={styles.chart}
-          downloadFilename="signal-inputs-pnl"
-        />
-      </div>
-      <div className={styles.resultsPlotBottom} data-testid="results-plot-bottom">
-        <Chart
-          traces={bottom.traces}
-          layoutOverrides={bottom.layoutOverrides}
-          className={styles.chart}
-          downloadFilename="signal-inputs-indicators-events"
+          style={{ width: '100%', height: '100%' }}
+          downloadFilename="signal-results"
         />
       </div>
     </div>

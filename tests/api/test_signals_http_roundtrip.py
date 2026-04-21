@@ -324,8 +324,8 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
       (b) same-side exit clears same-side latches (t=3 long_exit → 0);
       (c) cross-side exit does NOT clear the opposite latch
           (t=6 short_exit leaves the long latch alone);
-      (d) global budget ≤ 1.0 SKIPS would-be-latches (t=7 block C
-          w=0.5 can't latch on top of A w=0.6);
+      (d) leverage allowed — t=7 block C w=0.5 latches on top of
+          A w=0.6 → position = 1.1;
       (e) events / realized_pnl / indicators shapes match the P5-6
           contract consumed by I3.
     """
@@ -348,7 +348,7 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
                 # before C (w=0.5) at bars where both could latch.
                 "long_entry": [
                     _eq_block("X", 0.6, 11.0),  # block A → t=1, t=5
-                    _eq_block("X", 0.5, 22.0),  # block C → t=7 (SKIP)
+                    _eq_block("X", 0.5, 22.0),  # block C → t=7
                 ],
                 "long_exit": [
                     _eq_block("X", 0.0, 33.0),  # fires t=3
@@ -376,30 +376,20 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
         "realized_pnl",
         "events",
         "indicators",
-        "entries_skipped_budget",
         "clipped",
         "diagnostics",
     }
     assert isinstance(data["realized_pnl"], list)
     assert isinstance(data["events"], list)
     assert isinstance(data["indicators"], list)
-    assert isinstance(data["entries_skipped_budget"], int)
 
     # ---- Position path (P5-3..P5-5) ----
     by_id = {p["input_id"]: p for p in data["positions"]}
     vals = by_id["X"]["values"]
     # (a) latch persists at t=2; (b) same-side exit clears at t=3;
     # (c) cross-side exit at t=6 does NOT clear the long;
-    # (d) t=7 C's entry skipped → position unchanged.
-    assert vals == pytest.approx([0.0, 0.6, 0.6, 0.0, -0.4, 0.2, 0.6, 0.6])
-
-    # Budget skip surface ----
-    assert data["entries_skipped_budget"] == 1
-    # clipped_mask (repurposed) marks the bar where an entry was skipped.
-    skipped = by_id["X"]["clipped_mask"]
-    assert skipped[7] is True
-    assert sum(1 for s in skipped if s) == 1
-    assert data["clipped"] is True
+    # (d) leverage allowed — t=7 block C w=0.5 latches on top of A w=0.6 → 1.1.
+    assert vals == pytest.approx([0.0, 0.6, 0.6, 0.0, -0.4, 0.2, 0.6, 1.1])
 
     # ---- Events payload ----
     ev_by = {
@@ -411,10 +401,10 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
     assert a["kind"] == "long_entry"
     assert a["fired_indices"] == [1, 5]
     assert a["latched_indices"] == [1, 5]
-    # C (long_entry#1): fired t=7 but SKIPPED → latched_indices empty.
+    # C (long_entry#1): fired t=7, latched (leverage allowed).
     c = ev_by[("X", "long_entry#1")]
     assert c["fired_indices"] == [7]
-    assert c["latched_indices"] == []
+    assert c["latched_indices"] == [7]
     # long_exit: fired t=3; latched_indices mirrors fired for exit
     # blocks (per P5-6).
     lex = ev_by[("X", "long_exit#0")]
