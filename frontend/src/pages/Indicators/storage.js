@@ -36,6 +36,32 @@ import { INDICATORS_STORAGE_KEY } from './storageKeys';
 
 export const SCHEMA_VERSION = 1;
 
+/**
+ * Inject ``type: 'spot'`` into any seriesMap entry that is missing the
+ * type field. Legacy payloads (written before the discriminated-union
+ * SeriesRef was introduced) stored entries as ``{ collection, instrument_id }``.
+ * This coercion is safe — continuous entries always have ``type: 'continuous'``
+ * and ``instrument_id`` is not a required field for them.
+ */
+function coerceSeriesMap(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const out = {};
+  for (const [label, entry] of Object.entries(raw)) {
+    if (!entry || typeof entry !== 'object') {
+      out[label] = entry;
+      continue;
+    }
+    // Already typed — pass through.
+    if (typeof entry.type === 'string') {
+      out[label] = entry;
+      continue;
+    }
+    // Legacy spot entry: add type field.
+    out[label] = { type: 'spot', ...entry };
+  }
+  return out;
+}
+
 function getStorage() {
   try {
     if (typeof globalThis !== 'undefined' && globalThis.localStorage) {
@@ -81,7 +107,8 @@ export function loadState() {
       code: typeof ind.code === 'string' ? ind.code : '',
       doc: typeof ind.doc === 'string' ? ind.doc : '',
       params: (ind.params && typeof ind.params === 'object') ? ind.params : {},
-      seriesMap: (ind.seriesMap && typeof ind.seriesMap === 'object') ? ind.seriesMap : {},
+      // coerceSeriesMap injects type:'spot' on legacy entries that lack it.
+      seriesMap: coerceSeriesMap(ind.seriesMap),
       ownPanel: typeof ind.ownPanel === 'boolean' ? ind.ownPanel : false,
     });
   }
@@ -94,7 +121,8 @@ export function loadState() {
     if (!entry || typeof entry !== 'object') continue;
     defaultState[id] = {
       params: (entry.params && typeof entry.params === 'object') ? entry.params : {},
-      seriesMap: (entry.seriesMap && typeof entry.seriesMap === 'object') ? entry.seriesMap : {},
+      // coerceSeriesMap injects type:'spot' on legacy entries that lack it.
+      seriesMap: coerceSeriesMap(entry.seriesMap),
     };
   }
 

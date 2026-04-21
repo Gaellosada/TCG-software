@@ -16,7 +16,13 @@ from httpx import ASGITransport, AsyncClient
 from tcg.core.api.errors import tcg_error_handler
 from tcg.core.api.indicators import router as indicators_router
 from tcg.types.errors import TCGError
-from tcg.types.market import PriceSeries
+from tcg.types.market import (
+    AdjustmentMethod,
+    ContinuousRollConfig,
+    ContinuousSeries,
+    PriceSeries,
+    RollStrategy,
+)
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────
@@ -45,6 +51,22 @@ def _price_series(closes: np.ndarray | None = None) -> PriceSeries:
         low=c - 2.0,
         close=c,
         volume=np.full(n, 1000.0, dtype=np.float64),
+    )
+
+
+def _continuous_series(collection: str = "FUT_X") -> ContinuousSeries:
+    prices = _price_series()
+    return ContinuousSeries(
+        collection=collection,
+        roll_config=ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            cycle="Z",
+            roll_offset_days=0,
+        ),
+        prices=prices,
+        roll_dates=(20240108,),
+        contracts=("FUT_X_Z24", "FUT_X_Z25"),
     )
 
 
@@ -86,7 +108,7 @@ class TestCompute:
             "code": SMA_CODE,
             "params": {"window": 3},
             "series": {
-                "price": {"collection": "INDEX", "instrument_id": "SPX"}
+                "price": {"type": "spot", "collection": "INDEX", "instrument_id": "SPX"}
             },
         }
         resp = await client.post("/api/indicators/compute", json=body)
@@ -134,8 +156,8 @@ class TestCompute:
             "code": code,
             "params": {"weight": 0.5},
             "series": {
-                "price": {"collection": "INDEX", "instrument_id": "SPX"},
-                "vix": {"collection": "INDEX", "instrument_id": "VIX"},
+                "price": {"type": "spot", "collection": "INDEX", "instrument_id": "SPX"},
+                "vix": {"type": "spot", "collection": "INDEX", "instrument_id": "VIX"},
             },
         }
         transport = ASGITransport(app=mock_app)
@@ -155,7 +177,7 @@ class TestCompute:
             "code": "import os\ndef compute(series):\n    return series['price']\n",
             "params": {},
             "series": {
-                "price": {"collection": "INDEX", "instrument_id": "SPX"}
+                "price": {"type": "spot", "collection": "INDEX", "instrument_id": "SPX"}
             },
         }
         resp = await client.post("/api/indicators/compute", json=body)
@@ -171,7 +193,7 @@ class TestCompute:
             "code": "def other(series):\n    return series['price']\n",
             "params": {},
             "series": {
-                "price": {"collection": "INDEX", "instrument_id": "SPX"}
+                "price": {"type": "spot", "collection": "INDEX", "instrument_id": "SPX"}
             },
         }
         resp = await client.post("/api/indicators/compute", json=body)
@@ -199,6 +221,7 @@ class TestCompute:
                     "params": {"window": 3},
                     "series": {
                         "price": {
+                            "type": "spot",
                             "collection": "INDEX",
                             "instrument_id": "NOPE",
                         }
@@ -229,6 +252,7 @@ class TestCompute:
                     "params": {"window": 3},
                     "series": {
                         "price": {
+                            "type": "spot",
                             "collection": "INDEX",
                             "instrument_id": "SPX",
                         }
@@ -270,6 +294,7 @@ class TestCompute:
                     "params": {"window": 3},
                     "series": {
                         "price": {
+                            "type": "spot",
                             "collection": "INDEX",
                             "instrument_id": "SPX",
                         }
@@ -320,10 +345,12 @@ class TestCompute:
                     "params": {"w": 2},
                     "series": {
                         "price": {
+                            "type": "spot",
                             "collection": "INDEX",
                             "instrument_id": "SPX",
                         },
                         "vix": {
+                            "type": "spot",
                             "collection": "INDEX",
                             "instrument_id": "VIX",
                         },
@@ -354,7 +381,7 @@ class TestCompute:
         body = {
             "code": code,
             "params": {"window": 3},
-            "series": {"price": {"collection": "INDEX", "instrument_id": "SPX"}},
+            "series": {"price": {"type": "spot", "collection": "INDEX", "instrument_id": "SPX"}},
         }
         resp = await client.post("/api/indicators/compute", json=body)
         assert resp.status_code == 400
@@ -382,7 +409,7 @@ class TestCompute:
         body = {
             "code": code,
             "params": {},
-            "series": {"price": {"collection": "INDEX", "instrument_id": "SPX"}},
+            "series": {"price": {"type": "spot", "collection": "INDEX", "instrument_id": "SPX"}},
         }
         resp = await client.post("/api/indicators/compute", json=body)
         assert resp.status_code == 400
@@ -402,6 +429,7 @@ class TestCompute:
                     "params": {"window": 3},
                     "series": {
                         "price": {
+                            "type": "spot",
                             "collection": "INDEX",
                             "instrument_id": "MISSING",
                         }
@@ -413,3 +441,53 @@ class TestCompute:
         assert data["error_type"] == "data"
         assert "MISSING" in data["message"]
         assert "traceback" not in data
+
+    async def test_continuous_series_returns_200(self, mock_app):
+        """A ContinuousSeriesRef fetches via svc.get_continuous and returns
+        the aligned series data with the correct echoed ref fields."""
+        cs = _continuous_series("FUT_X")
+        mock_app.state.market_data.get_continuous = AsyncMock(return_value=cs)
+
+        body = {
+            "code": SMA_CODE,
+            "params": {"window": 3},
+            "series": {
+                "price": {
+                    "type": "continuous",
+                    "collection": "FUT_X",
+                    "adjustment": "none",
+                    "cycle": "Z",
+                    "rollOffset": 0,
+                    "strategy": "front_month",
+                },
+            },
+        }
+        transport = ASGITransport(app=mock_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/api/indicators/compute", json=body)
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+        # Dates and indicator output aligned to the mocked continuous series
+        assert len(data["dates"]) == len(DATES)
+        assert data["dates"][0] == "2024-01-02"
+
+        # Echoed series ref
+        assert len(data["series"]) == 1
+        s = data["series"][0]
+        assert s["label"] == "price"
+        assert s["type"] == "continuous"
+        assert s["collection"] == "FUT_X"
+        assert s["adjustment"] == "none"
+        assert s["cycle"] == "Z"
+        assert s["rollOffset"] == 0
+        assert s["strategy"] == "front_month"
+        assert len(s["close"]) == len(DATES)
+
+        # Indicator produced (not all None)
+        assert any(v is not None for v in data["indicator"])
+
+        # get_continuous was called (not get_prices)
+        mock_app.state.market_data.get_continuous.assert_awaited_once()
+        mock_app.state.market_data.get_prices.assert_not_awaited()

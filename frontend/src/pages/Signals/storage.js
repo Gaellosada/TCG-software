@@ -134,10 +134,11 @@ function sanitiseWeight(raw) {
 function sanitiseBlock(raw) {
   const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
   const weight = sanitiseWeight(raw.weight);
+  const name = typeof raw.name === 'string' ? raw.name : '';
   const conditions = Array.isArray(raw.conditions)
     ? raw.conditions.filter((c) => c && typeof c === 'object' && typeof c.op === 'string')
     : [];
-  return { input_id, weight, conditions };
+  return { input_id, weight, name, conditions };
 }
 
 function sanitiseSignal(raw) {
@@ -154,7 +155,8 @@ function sanitiseSignal(raw) {
       .filter((b) => b && typeof b === 'object')
       .map(sanitiseBlock);
   }
-  return { id: raw.id, name, inputs, rules };
+  const doc = typeof raw.doc === 'string' ? raw.doc : '';
+  return { id: raw.id, name, inputs, rules, doc };
 }
 
 export function loadState() {

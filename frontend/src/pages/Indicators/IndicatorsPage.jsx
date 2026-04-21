@@ -185,6 +185,7 @@ function applyDefaultSeries(ind, defaultSeries) {
   for (const [label, picked] of Object.entries(updated)) {
     if (picked === null) {
       updated[label] = {
+        type: 'spot',
         collection: defaultSeries.collection,
         instrument_id: defaultSeries.instrument_id,
       };
@@ -355,6 +356,7 @@ function IndicatorsPage() {
         for (const label of Object.keys(seriesMap)) {
           if (seriesMap[label] === null) {
             seriesMap[label] = {
+              type: 'spot',
               collection: defaultSeries.collection,
               instrument_id: defaultSeries.instrument_id,
             };
@@ -453,11 +455,14 @@ function IndicatorsPage() {
   const handleSeriesSave = useCallback((label, entry) => {
     setIndicators((prev) => prev.map((ind) => {
       if (ind.id !== selectedId) return ind;
+      // Persist the full SeriesRef discriminated union (type + all fields).
+      // Spot:       { type: 'spot', collection, instrument_id }
+      // Continuous: { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
       return {
         ...ind,
         seriesMap: {
           ...ind.seriesMap,
-          [label]: { collection: entry.collection, instrument_id: entry.instrument_id },
+          [label]: entry,
         },
       };
     }));
@@ -471,10 +476,15 @@ function IndicatorsPage() {
       const seriesPayload = {};
       for (const [label, picked] of Object.entries(selectedIndicator.seriesMap || {})) {
         if (picked) {
-          seriesPayload[label] = {
-            collection: picked.collection,
-            instrument_id: picked.instrument_id,
-          };
+          // Send the full SeriesRef discriminated union. The backend
+          // /api/indicators/compute accepts:
+          //   { type: 'spot', collection, instrument_id }
+          //   { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+          // Legacy entries without a type field (stored before this change)
+          // are treated as spot — add the type defensively.
+          seriesPayload[label] = picked.type
+            ? picked
+            : { type: 'spot', collection: picked.collection, instrument_id: picked.instrument_id };
         }
       }
       let res;
@@ -528,7 +538,11 @@ function IndicatorsPage() {
     && seriesLabels.length > 0
     && seriesLabels.every((lbl) => {
       const picked = selectedIndicator.seriesMap?.[lbl];
-      return picked && picked.collection && picked.instrument_id;
+      if (!picked || !picked.collection) return false;
+      // Continuous series are identified by collection alone — no instrument_id.
+      if (picked.type === 'continuous') return true;
+      // Spot (and legacy entries without a type field) require instrument_id.
+      return !!picked.instrument_id;
     });
 
   const canRun = !!selectedIndicator
@@ -543,7 +557,9 @@ function IndicatorsPage() {
     if (!selectedIndicator.code || !selectedIndicator.code.trim()) return 'Add code before running';
     const emptyLabel = seriesLabels.find((lbl) => {
       const picked = selectedIndicator.seriesMap?.[lbl];
-      return !picked || !picked.collection || !picked.instrument_id;
+      if (!picked || !picked.collection) return true;
+      if (picked.type === 'continuous') return false;
+      return !picked.instrument_id;
     });
     if (emptyLabel) return `Fill series slot: ${emptyLabel}`;
     return 'Cannot run';

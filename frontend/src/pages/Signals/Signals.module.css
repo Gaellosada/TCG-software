@@ -197,6 +197,17 @@
   font-weight: 400;
 }
 
+.directionTabSpacer {
+  flex: 1;
+}
+
+.docViewWrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 180px;
+}
+
 .directionHint {
   font-size: 0.7rem;
   color: var(--text-secondary);
@@ -249,6 +260,44 @@
   font-size: 0.78rem;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.blockDirectionLabel {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.blockEditNameBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.blockEditNameBtn:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.blockNameInput {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  outline: none;
+  width: 120px;
+  height: var(--signal-control-height);
 }
 
 .blockEmpty {
@@ -762,6 +811,15 @@
   flex: 0 0 auto;
 }
 
+.blockWeightMax {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  opacity: 0.6;
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
 .blockWeightInput {
   width: 64px;
   height: var(--signal-control-height);
@@ -792,16 +850,9 @@
   border-color: #ef4444;
 }
 
-.blockStatusDotRow {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: flex;
-  align-items: center;
-}
-
 .blockStatusDot {
   display: inline-block;
+  flex-shrink: 0;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -816,31 +867,6 @@
 }
 
 /* ---------- Clip banner (iter-3) ---------- */
-
-.clipBanner {
-  margin: 6px 6px 6px;
-  padding: 8px 12px;
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid rgba(245, 158, 11, 0.5);
-  color: #92400e;
-  border-radius: var(--radius-sm);
-  font-size: 0.82rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  line-height: 1.4;
-}
-
-:global(.dark) .clipBanner,
-[data-theme='dark'] .clipBanner {
-  color: #fbbf24;
-  background: rgba(245, 158, 11, 0.12);
-}
-
-.clipBannerIcon {
-  font-size: 1rem;
-  flex-shrink: 0;
-}
 
 /* ---------- OperandPicker (legacy — kept for back-compat) ---------- */
 
@@ -1000,20 +1026,54 @@
   line-height: 1.3;
 }
 
-/* ---------- Results (iter-5 ask #6) ---------- */
-
-/*
- * ``chartPanelBody`` kept for the iter-4 single-plot view (retired in
- * iter-5) and potential future callers. ``resultsViewBody`` is the new
- * 2-plot container — splits the Results card vertically 50/50 between
- * the top and bottom Plotly instances.
- */
-.chartPanelBody {
+.capitalRow {
   display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
 }
+
+.capitalLabel {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.capitalInput {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  padding: 3px 6px;
+  text-align: right;
+}
+
+.noRepeatRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+.noRepeatLabel {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.noRepeatInfo {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  opacity: 0.6;
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* ---------- Results (iter-5 ask #6) ---------- */
 
 .resultsViewBody {
   display: flex;
@@ -1023,9 +1083,8 @@
   gap: 8px;
 }
 
-.resultsPlotTop,
-.resultsPlotBottom {
-  flex: 1 1 50%;
+.resultsPlotUnified {
+  flex: 1;
   min-height: 0;
   position: relative;
 }
@@ -1034,12 +1093,6 @@
   padding: 18px;
   color: var(--text-secondary);
   font-size: 0.85rem;
-}
-
-.chartWrap {
-  flex: 1;
-  min-height: 0;
-  position: relative;
 }
 
 .chart {

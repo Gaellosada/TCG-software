@@ -16,11 +16,12 @@ second, divergent discovery code path here.
 from __future__ import annotations
 
 from datetime import date
+from typing import Annotated, Literal
 
 import numpy as np
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tcg.core.api.data import get_market_data
 from tcg.data._utils import int_to_iso
@@ -31,6 +32,7 @@ from tcg.engine.indicator_exec import (
     run_indicator,
 )
 from tcg.types.errors import DataNotFoundError, ValidationError
+from tcg.types.market import AdjustmentMethod, ContinuousRollConfig, RollStrategy
 
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
 
@@ -59,9 +61,33 @@ def _error_response(
 # ---------------------------------------------------------------------------
 
 
-class SeriesRef(BaseModel):
+class SpotSeriesRef(BaseModel):
+    type: Literal["spot"]
     collection: str
     instrument_id: str
+
+
+class ContinuousSeriesRef(BaseModel):
+    type: Literal["continuous"]
+    collection: str
+    adjustment: Literal["none", "proportional", "difference"] = "none"
+    cycle: str | None = None
+    # Accept camelCase from the frontend (matches signals.py convention).
+    rollOffset: int = 0
+    strategy: Literal["front_month"] = "front_month"
+
+
+SeriesRef = Annotated[
+    SpotSeriesRef | ContinuousSeriesRef, Field(discriminator="type")
+]
+
+# Map frontend adjustment strings to the domain enum — same mapping as
+# signals.py but kept local to avoid coupling the two routers.
+_ADJ_MAP: dict[str, AdjustmentMethod] = {
+    "none": AdjustmentMethod.NONE,
+    "proportional": AdjustmentMethod.PROPORTIONAL,
+    "difference": AdjustmentMethod.DIFFERENCE,
+}
 
 
 class IndicatorComputeRequest(BaseModel):
@@ -126,41 +152,86 @@ async def compute_indicator(
 
     # Preserve the user's insertion order so the response matches the
     # request — Python dicts preserve insertion order (3.7+).
-    fetched: list[tuple[str, SeriesRef, np.ndarray, np.ndarray]] = []
+    fetched: list[
+        tuple[str, SpotSeriesRef | ContinuousSeriesRef, np.ndarray, np.ndarray]
+    ] = []
     for label, ref in body.series.items():
         try:
-            series = await svc.get_prices(
-                ref.collection,
-                ref.instrument_id,
-                start=start_date,
-                end=end_date,
-            )
+            match ref.type:
+                case "spot":
+                    series = await svc.get_prices(
+                        ref.collection,
+                        ref.instrument_id,
+                        start=start_date,
+                        end=end_date,
+                    )
+                    if series is None:
+                        return _error_response(
+                            "data",
+                            (
+                                f"Series label {label!r}: instrument "
+                                f"'{ref.instrument_id}' not found in "
+                                f"collection '{ref.collection}'"
+                            ),
+                        )
+                    dates, closes = series.dates, series.close
+
+                case "continuous":
+                    adj = _ADJ_MAP.get(ref.adjustment)
+                    if adj is None:
+                        return _error_response(
+                            "validation",
+                            (
+                                f"Series label {label!r}: unknown adjustment "
+                                f"method {ref.adjustment!r}"
+                            ),
+                        )
+                    roll_config = ContinuousRollConfig(
+                        strategy=RollStrategy.FRONT_MONTH,
+                        adjustment=adj,
+                        cycle=ref.cycle or None,
+                        roll_offset_days=int(ref.rollOffset),
+                    )
+                    cseries = await svc.get_continuous(
+                        ref.collection,
+                        roll_config,
+                        start=start_date,
+                        end=end_date,
+                    )
+                    if cseries is None:
+                        return _error_response(
+                            "data",
+                            (
+                                f"Series label {label!r}: continuous series "
+                                f"unavailable for collection "
+                                f"'{ref.collection}'"
+                            ),
+                        )
+                    dates, closes = cseries.prices.dates, cseries.prices.close
+
+                case _:
+                    return _error_response(
+                        "validation",
+                        f"Series label {label!r}: unhandled series type {ref.type!r}",
+                    )
+
         except DataNotFoundError as exc:
             return _error_response(
                 "data", f"Series label {label!r}: {exc}"
-            )
-        if series is None:
-            return _error_response(
-                "data",
-                (
-                    f"Series label {label!r}: instrument "
-                    f"'{ref.instrument_id}' not found in collection "
-                    f"'{ref.collection}'"
-                ),
             )
         # Reject malformed series up front: each series' dates must be
         # strictly monotonically increasing (no duplicates, no unsorted
         # input). Otherwise ``np.intersect1d`` + ``np.isin`` alignment
         # below silently produces differing lengths, which later fails
         # with a confusing sandbox-level error.
-        if series.dates.size >= 2 and not bool(
-            np.all(np.diff(series.dates) > 0)
+        if dates.size >= 2 and not bool(
+            np.all(np.diff(dates) > 0)
         ):
             return _error_response(
                 "validation",
                 f"Series {label!r} has non-monotonic or duplicate dates",
             )
-        fetched.append((label, ref, series.dates, series.close))
+        fetched.append((label, ref, dates, closes))
 
     # ── 3. Inner-join on the intersection of dates ──
 
@@ -190,14 +261,28 @@ async def compute_indicator(
             None if (v != v) else float(v)
             for v in aligned_closes_sorted.tolist()
         ]
-        series_response.append(
-            {
-                "label": label,
-                "collection": ref.collection,
-                "instrument_id": ref.instrument_id,
-                "close": close_list,
-            }
-        )
+        # Build the response entry — shape differs by instrument type so
+        # the frontend can reconstruct the ref for follow-up requests.
+        entry: dict = {"label": label, "close": close_list}
+        match ref.type:
+            case "spot":
+                entry["type"] = "spot"
+                entry["collection"] = ref.collection
+                entry["instrument_id"] = ref.instrument_id
+            case "continuous":
+                entry["type"] = "continuous"
+                entry["collection"] = ref.collection
+                entry["adjustment"] = ref.adjustment
+                entry["cycle"] = ref.cycle
+                entry["rollOffset"] = ref.rollOffset
+                entry["strategy"] = ref.strategy
+            case _:
+                return _error_response(
+                    "validation",
+                    f"Series label {label!r}: unhandled series type {ref.type!r} in response builder",
+                    status=500,
+                )
+        series_response.append(entry)
 
     # Also sort the common_dates array ascending for the response.
     common_dates_sorted = np.sort(common_dates)

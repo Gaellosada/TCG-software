@@ -15,7 +15,7 @@
    * vertical stack (top: inputs + realized P&L; bottom: inputs +
    * indicators + entry/exit markers). Was ``minmax(486px, 2.7fr)``.
    */
-  grid-template-rows: minmax(504px, 1.4fr) minmax(972px, 5.4fr);
+  grid-template-rows: minmax(504px, 1fr) var(--results-row-min, 972px);
   min-height: 100%;
   position: relative;
 }
@@ -92,10 +92,8 @@
   grid-row: 2;
   border-top: 1px solid var(--border-primary);
   padding: 14px 16px;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
-  min-height: 0;
 }
 
 .resultsCard {

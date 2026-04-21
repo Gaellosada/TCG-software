@@ -1,9 +1,23 @@
 import { useState, useMemo } from 'react';
-import InstrumentPicker from '../../components/InstrumentPicker/InstrumentPicker';
+import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import { nextInputId } from './storage';
 import { isInputConfigured } from './blockShape';
 import styles from './InputsPanel.module.css';
+
+/**
+ * Format an instrument value as a human-readable label for the trigger button.
+ */
+function instrumentLabel(instrument) {
+  if (!instrument) return null;
+  if (instrument.type === 'continuous' && instrument.collection) {
+    return instrument.collection;
+  }
+  if (instrument.type === 'spot' && instrument.collection && instrument.instrument_id) {
+    return `${instrument.collection} / ${instrument.instrument_id}`;
+  }
+  return null;
+}
 
 /**
  * Top-of-page Inputs panel (iter-4). Signals declare first-class named
@@ -16,7 +30,7 @@ import styles from './InputsPanel.module.css';
  *     the initial `open` default keys off emptiness.
  *
  * Each row renders:
- *   [ id input | InstrumentPicker | × ]
+ *   [ id input | instrument button | × ]
  *
  * Props:
  *   inputs    {Array}     [{id, instrument}]
@@ -26,6 +40,8 @@ function InputsPanel({ inputs, onChange }) {
   const list = Array.isArray(inputs) ? inputs : [];
   const [open, setOpen] = useState(list.length === 0);
   const [pendingDeleteIdx, setPendingDeleteIdx] = useState(null);
+  // Index of the input row whose picker modal is open (null = closed).
+  const [pickerIdx, setPickerIdx] = useState(null);
 
   const configuredCount = useMemo(
     () => list.filter(isInputConfigured).length,
@@ -34,9 +50,6 @@ function InputsPanel({ inputs, onChange }) {
 
   function handleAdd() {
     const id = nextInputId(list);
-    // Default to an unset spot instrument — user must pick collection +
-    // instrument_id. Until that happens, ``isInputConfigured`` is false
-    // and the input doesn't flow into the Run gate.
     onChange([...list, { id, instrument: { type: 'spot', collection: '', instrument_id: '' } }]);
     setOpen(true);
   }
@@ -44,13 +57,15 @@ function InputsPanel({ inputs, onChange }) {
   function handleRenameId(idx, rawId) {
     const trimmed = (rawId || '').trim();
     if (!trimmed) return;
-    // Reject duplicate ids (case-sensitive to match backend).
     if (list.some((x, i) => i !== idx && x.id === trimmed)) return;
     onChange(list.map((x, i) => (i !== idx ? x : { ...x, id: trimmed })));
   }
 
-  function handleInstrumentChange(idx, nextInstrument) {
-    onChange(list.map((x, i) => (i !== idx ? x : { ...x, instrument: nextInstrument })));
+  function handlePickerSelect(instrument) {
+    if (pickerIdx !== null) {
+      onChange(list.map((x, i) => (i !== pickerIdx ? x : { ...x, instrument })));
+    }
+    setPickerIdx(null);
   }
 
   function handleDelete(idx) {
@@ -89,12 +104,8 @@ function InputsPanel({ inputs, onChange }) {
           )}
           {list.map((input, idx) => {
             const ok = isInputConfigured(input);
+            const label = instrumentLabel(input.instrument);
             return (
-              // Key by idx (not `${idx}-${input.id}`) so renaming the id
-              // doesn't remount the row and kill focus on the id <input>.
-              // Rows are append-only (handleAdd pushes to end) and deletes
-              // are confirmed via dialog, so index-based keys are stable
-              // per-row identity while the user is editing.
               <div
                 key={idx}
                 className={styles.row}
@@ -116,12 +127,15 @@ function InputsPanel({ inputs, onChange }) {
                   maxLength={16}
                 />
                 <div className={styles.pickerCell}>
-                  <InstrumentPicker
-                    value={input.instrument}
-                    onChange={(next) => handleInstrumentChange(idx, next)}
-                    ariaLabel={`Instrument for input ${input.id || idx + 1}`}
-                    testId={`input-picker-${idx}`}
-                  />
+                  <button
+                    type="button"
+                    className={styles.pickBtn}
+                    onClick={() => setPickerIdx(idx)}
+                    aria-label={`Instrument for input ${input.id || idx + 1}`}
+                    data-testid={`input-picker-${idx}`}
+                  >
+                    {label || 'Select instrument'}
+                  </button>
                 </div>
                 <button
                   type="button"
@@ -159,6 +173,12 @@ function InputsPanel({ inputs, onChange }) {
         destructive
         onConfirm={() => handleDelete(pendingDeleteIdx)}
         onCancel={() => setPendingDeleteIdx(null)}
+      />
+      <InstrumentPickerModal
+        isOpen={pickerIdx !== null}
+        onClose={() => setPickerIdx(null)}
+        onSelect={handlePickerSelect}
+        title="Select Instrument"
       />
     </div>
   );

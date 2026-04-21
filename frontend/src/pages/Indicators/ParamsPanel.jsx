@@ -1,7 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
-import SeriesPicker from './SeriesPicker';
+import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 import { getSeriesSummary } from '../../api/seriesSummary';
 import styles from './ParamsPanel.module.css';
+
+/**
+ * Convert InstrumentPickerModal selection to internal seriesMap entry.
+ * Passes through the full discriminated-union SeriesRef so the backend
+ * receives the correct type tag.
+ *
+ * Spot:       { type: 'spot', collection, instrument_id }
+ * Continuous: { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+ *
+ * Extensibility: any future pickerValue.type (e.g. 'options') passes through
+ * unchanged — add explicit handling only when special-casing is needed.
+ */
+export function fromPickerValue(pickerValue) {
+  if (!pickerValue) return null;
+  // Pass through the full discriminated union — the type field is authoritative.
+  return { ...pickerValue };
+}
 
 /**
  * Right panel — parameters, time-series slots, and Run button.
@@ -22,12 +39,8 @@ import styles from './ParamsPanel.module.css';
  *   onRun            {Function}     () => void
  *   running          {boolean}
  *   canRun           {boolean}
- *   defaultCollection {string|null} hint for SeriesPicker mounts
  *   ownPanel         {boolean}      render indicator in a separate chart below
  *   onOwnPanelChange {Function}     (nextBool) => void — noop when readonly
- *
- *   Note: run errors are rendered in the chart panel (IndicatorChart)
- *   — this panel no longer shows a duplicate banner.
  */
 function ParamsPanel({
   indicator,
@@ -39,30 +52,22 @@ function ParamsPanel({
   running,
   canRun,
   runDisabledReason,
-  defaultCollection,
   ownPanel,
   onOwnPanelChange,
 }) {
-  // Labels currently in inline-edit mode. Also tracks "add" slots for
-  // empty labels (in which case value=null).
-  const [editingLabels, setEditingLabels] = useState(() => new Set());
-
   // Per-input raw string drafts for numeric fields. Keyed by param name.
-  // Allows the user to type "-", "1.", "-0." etc. without snapping to 0.
-  // A draft is removed when the user blurs and a valid number is committed.
   const [numericDrafts, setNumericDrafts] = useState({});
-  // Track previous indicator id to reset drafts on indicator switch.
   const prevIndicatorIdRef = useRef(indicator?.id);
   // Series rows with their details panel expanded, keyed by label.
   const [expandedLabels, setExpandedLabels] = useState(() => new Set());
   // Async summaries keyed by label — { loading, error, data }.
   const [summaries, setSummaries] = useState({});
+  // Which series label currently has the picker modal open (null = closed).
+  const [pickerLabel, setPickerLabel] = useState(null);
 
   useEffect(() => {
-    setEditingLabels(new Set());
     setExpandedLabels(new Set());
     setSummaries({});
-    // Reset numeric drafts when switching indicator so stale drafts don't leak.
     if (prevIndicatorIdRef.current !== indicator?.id) {
       prevIndicatorIdRef.current = indicator?.id;
       setNumericDrafts({});
@@ -79,9 +84,11 @@ function ParamsPanel({
       next.add(label);
       return next;
     });
-    if (!picked || !picked.collection || !picked.instrument_id) return;
-    // Mark loading and fetch. Subsequent toggles are no-ops until state
-    // clears because the cache in seriesSummary returns the same promise.
+    // Continuous series have no instrument_id — the series is identified by
+    // collection alone. getSeriesSummary requires instrument_id so skip the
+    // preview for continuous entries (they show no details panel).
+    if (!picked || !picked.collection) return;
+    if (picked.type === 'continuous' || !picked.instrument_id) return;
     setSummaries((prev) => ({
       ...prev,
       [label]: { loading: true, error: null, data: null, ref: picked },
@@ -94,9 +101,6 @@ function ParamsPanel({
         }));
       })
       .catch((err) => {
-        // ``err`` is a FetchError with {kind, title, message}. Surface both
-        // title and message so the details pane reads as "Could not reach
-        // the server — Failed to fetch" instead of a single blurb.
         const title = err?.title || 'Could not load preview';
         const message = err?.message || String(err) || 'Failed to load preview';
         setSummaries((prev) => ({
@@ -111,30 +115,16 @@ function ParamsPanel({
       });
   }
 
+  function handlePickerSelect(instrument) {
+    if (pickerLabel) {
+      onSeriesSave(pickerLabel, fromPickerValue(instrument));
+    }
+    setPickerLabel(null);
+  }
+
   const disabled = !indicator;
   const params = indicator?.params || {};
   const seriesMap = indicator?.seriesMap || {};
-
-  function startEdit(label) {
-    setEditingLabels((prev) => {
-      const next = new Set(prev);
-      next.add(label);
-      return next;
-    });
-  }
-
-  function stopEdit(label) {
-    setEditingLabels((prev) => {
-      const next = new Set(prev);
-      next.delete(label);
-      return next;
-    });
-  }
-
-  function handlePickerSave(label, entry) {
-    onSeriesSave(label, entry);
-    stopEdit(label);
-  }
 
   return (
     <div className={styles.panel}>
@@ -173,38 +163,30 @@ function ParamsPanel({
                   </div>
                 );
               }
-              // Display: draft string if mid-edit, else committed numeric value.
               const committed = Number.isFinite(raw) ? raw : (Number.isFinite(spec.default) ? spec.default : 0);
               const hasDraft = Object.prototype.hasOwnProperty.call(numericDrafts, spec.name);
               const displayValue = hasDraft ? numericDrafts[spec.name] : String(committed);
 
               function handleNumericChange(e) {
                 const text = e.target.value;
-                // Keep the raw string in local draft state so intermediate
-                // inputs ("-", "1.", "-0.") are preserved without snapping.
                 setNumericDrafts((prev) => ({ ...prev, [spec.name]: text }));
-                // Only propagate if the current text parses to a finite number.
                 const n = parseFloat(text);
                 if (Number.isFinite(n)) {
                   onParamChange(spec.name, n);
                 }
-                // Otherwise: hold the draft, do not commit 0 or NaN upstream.
               }
 
               function handleNumericBlur() {
-                // On blur: if draft is empty or non-numeric, reset to committed value.
                 const draft = numericDrafts[spec.name];
                 if (draft !== undefined) {
                   const n = parseFloat(draft);
                   if (!Number.isFinite(n)) {
-                    // Revert display to the last committed value; don't mutate params.
                     setNumericDrafts((prev) => {
                       const next = { ...prev };
                       delete next[spec.name];
                       return next;
                     });
                   } else {
-                    // Commit valid parsed value and clear draft.
                     onParamChange(spec.name, n);
                     setNumericDrafts((prev) => {
                       const next = { ...prev };
@@ -253,51 +235,55 @@ function ParamsPanel({
           <div className={styles.seriesList}>
             {seriesLabels.map((label) => {
               const picked = seriesMap[label] || null;
-              const isEditing = editingLabels.has(label);
-              if (isEditing || !picked) {
-                return (
-                  <div key={label} className={styles.seriesRow}>
-                    <div className={styles.seriesLabelWrap}>
-                      <span className={`${styles.seriesLabelText} codeRefLabel`}>{label}</span>
-                      <SeriesPicker
-                        value={picked}
-                        onSave={(entry) => handlePickerSave(label, entry)}
-                        onCancel={() => stopEdit(label)}
-                        defaultCollection={defaultCollection}
-                        saveLabel="Save"
-                      />
-                    </div>
-                  </div>
-                );
-              }
               const isExpanded = expandedLabels.has(label);
               const summary = summaries[label];
               return (
                 <div key={label} className={styles.seriesRowGroup}>
                   <div className={styles.seriesRow}>
                     <span className={`${styles.seriesLabelText} codeRefLabel`}>{label}</span>
-                    <span className={styles.seriesChip}>
-                      {picked.collection} / {picked.instrument_id}
-                    </span>
-                    <button
-                      className={styles.iconBtn}
-                      onClick={() => toggleDetails(label, picked)}
-                      title={isExpanded ? 'Hide details' : 'Show details'}
-                      aria-label={`${isExpanded ? 'Hide' : 'Show'} details for ${label}`}
-                      aria-expanded={isExpanded}
-                      disabled={disabled}
-                    >
-                      ⓘ
-                    </button>
-                    <button
-                      className={styles.iconBtn}
-                      onClick={() => startEdit(label)}
-                      title="Edit series"
-                      aria-label={`Edit series ${label}`}
-                      disabled={disabled}
-                    >
-                      ✎
-                    </button>
+                    {picked ? (
+                      <span className={styles.seriesChip}>
+                        {picked.type === 'continuous'
+                          ? `${picked.collection} (continuous)`
+                          : `${picked.collection} / ${picked.instrument_id}`}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className={styles.selectChipBtn}
+                        onClick={() => setPickerLabel(label)}
+                        disabled={disabled}
+                        data-testid={`instrument-picker-${label}`}
+                        aria-label={`Select instrument for ${label}`}
+                      >
+                        Select instrument
+                      </button>
+                    )}
+                    {picked && (
+                      <button
+                        className={styles.iconBtn}
+                        onClick={() => toggleDetails(label, picked)}
+                        title={isExpanded ? 'Hide details' : 'Show details'}
+                        aria-label={`${isExpanded ? 'Hide' : 'Show'} details for ${label}`}
+                        aria-expanded={isExpanded}
+                        disabled={disabled}
+                      >
+                        ⓘ
+                      </button>
+                    )}
+                    {picked && (
+                      <button
+                        type="button"
+                        className={styles.iconBtn}
+                        onClick={() => setPickerLabel(label)}
+                        disabled={disabled}
+                        data-testid={`instrument-picker-${label}`}
+                        title="Change instrument"
+                        aria-label={`Change instrument for ${label}`}
+                      >
+                        ✎
+                      </button>
+                    )}
                   </div>
                   {isExpanded && (
                     <div className={styles.detailsPane} role="region" aria-label={`Details for ${label}`}>
@@ -334,13 +320,6 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
       {/* Run section */}
       <div className={styles.section}>
         <div className={styles.sectionLabel}>Run</div>
-        {/*
-          "Show in separate panel below" toggle — per-indicator flag that
-          drives IndicatorChart to split into two stacked charts (price on
-          top, indicator on bottom) instead of overlaying. Disabled for
-          defaults (readonly) and when no indicator is selected; the
-          default's authored flag still shows through via ``checked``.
-        */}
         <label
           className={styles.ownPanelRow}
           title={
@@ -373,6 +352,14 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
           {running ? 'Computing...' : 'Run'}
         </button>
       </div>
+
+      {/* Shared instrument picker modal */}
+      <InstrumentPickerModal
+        isOpen={pickerLabel !== null}
+        onClose={() => setPickerLabel(null)}
+        onSelect={handlePickerSelect}
+        title="Select Instrument"
+      />
     </div>
   );
 }

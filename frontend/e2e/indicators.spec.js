@@ -242,8 +242,8 @@ test.describe('Indicators page', () => {
     await expect(page.locator('text=price').first()).toBeVisible();
     await expect(page.locator('text=vix').first()).toBeVisible();
 
-    // Two SeriesPicker mounts → two collection selects inside the panel.
-    const pickerSelects = page.locator('[aria-label="collection"]');
-    await expect(pickerSelects).toHaveCount(2);
+    // Two instrument picker buttons mount — one per series label.
+    const pickers = page.locator('[data-testid^="instrument-picker-"]');
+    await expect(pickers).toHaveCount(2);
   });
 });

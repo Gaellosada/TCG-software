@@ -1,12 +1,22 @@
 // @vitest-environment jsdom
 //
-// Focused tests for the "Show in separate panel below" toggle added
-// in the ownPanel feature. We don't re-cover the full ParamsPanel
-// behaviour here — just the new checkbox and its readonly/empty guards.
+// Tests for ParamsPanel: ownPanel checkbox and value mapping adapter
+// (fromPickerValue) used to bridge InstrumentPickerModal's discriminated-union
+// output with the internal { collection, instrument_id } series map.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import ParamsPanel from './ParamsPanel';
+import ParamsPanel, { fromPickerValue } from './ParamsPanel';
+
+// InstrumentPickerModal loads collections/instruments on mount — mock the API
+// so the component doesn't throw during rendering.
+vi.mock('../../api/data', () => ({
+  listCollections: vi.fn(async () => ['INDEX', 'FUT_ES']),
+  listInstruments: vi.fn(async () => ({
+    items: [{ symbol: 'SPX' }], total: 1, skip: 0, limit: 500,
+  })),
+  getAvailableCycles: vi.fn(async () => []),
+}));
 
 afterEach(() => {
   cleanup();
@@ -74,7 +84,6 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
     );
     const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     expect(cb.disabled).toBe(true);
-    // Even if the click somehow fires, our onChange handler must early-return.
     fireEvent.click(cb);
     expect(onOwnPanelChange).not.toHaveBeenCalled();
   });
@@ -83,5 +92,57 @@ describe('<ParamsPanel> — ownPanel checkbox', () => {
     render(<ParamsPanel {...baseProps({ indicator: null })} />);
     const cb = screen.getByRole('checkbox', { name: /show in separate panel below/i });
     expect(cb.disabled).toBe(true);
+  });
+});
+
+describe('value mapping — fromPickerValue', () => {
+  it('passes through spot type with all fields', () => {
+    expect(fromPickerValue({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' }))
+      .toEqual({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' });
+  });
+
+  it('passes through continuous type with all fields', () => {
+    const input = {
+      type: 'continuous',
+      collection: 'FUT_ES',
+      adjustment: 'proportional',
+      cycle: 'H',
+      rollOffset: 2,
+      strategy: 'front_month',
+    };
+    expect(fromPickerValue(input)).toEqual(input);
+  });
+
+  it('returns null for null input', () => {
+    expect(fromPickerValue(null)).toBeNull();
+  });
+});
+
+describe('<ParamsPanel> — instrument picker button', () => {
+  it('renders a picker trigger button for each series label', () => {
+    render(<ParamsPanel {...baseProps({ seriesLabels: ['close', 'volume'] })} />);
+    expect(screen.getByTestId('instrument-picker-close')).toBeTruthy();
+    expect(screen.getByTestId('instrument-picker-volume')).toBeTruthy();
+  });
+
+  it('shows "Select instrument" when no instrument is picked', () => {
+    render(<ParamsPanel {...baseProps({ seriesLabels: ['close'] })} />);
+    const btn = screen.getByTestId('instrument-picker-close');
+    expect(btn.textContent).toBe('Select instrument');
+  });
+
+  it('shows change icon and chip when an instrument is already picked', () => {
+    render(<ParamsPanel {...baseProps({
+      seriesLabels: ['close'],
+      indicator: {
+        ...baseProps().indicator,
+        seriesMap: { close: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
+      },
+    })} />);
+    // When picked, the edit button (✎) carries the testid; the chip shows the label.
+    const btn = screen.getByTestId('instrument-picker-close');
+    expect(btn.title).toBe('Change instrument');
+    // Chip label: "INDEX / SPX"
+    expect(screen.getByText('INDEX / SPX')).toBeTruthy();
   });
 });

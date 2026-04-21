@@ -6,7 +6,7 @@ afterEach(() => { cleanup(); });
 
 import InputsPanel from './InputsPanel';
 
-// InstrumentPicker (child) pulls from /api/data/*; stub the network
+// InstrumentPickerModal (child) pulls from /api/data/*; stub the network
 // layer so its useEffect doesn't blow up in jsdom.
 vi.mock('../../api/data', () => ({
   listCollections: vi.fn(async () => ['INDEX', 'FUT_ES']),
