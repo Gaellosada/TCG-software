@@ -122,7 +122,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
         <span className={styles.indicatorOverrideChevron} aria-hidden="true">
           {expanded ? '▾' : '▸'}
         </span>
-        <span className={styles.indicatorOverrideName}>params</span>
+        <span className={styles.indicatorOverrideName}>Parameters</span>
         {hasAnyOverride && (
           <span className={styles.indicatorOverrideBadge} title="Has overrides">
             {overrideCount}
