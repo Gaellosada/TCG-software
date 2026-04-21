@@ -19,6 +19,7 @@ import numpy as np
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
     ContinuousInstrumentRef,
@@ -26,7 +27,7 @@ from tcg.core.api._models import (
     SpotInstrumentRef,
 )
 from tcg.core.api._serializers import nan_safe_floats
-from tcg.core.api.common import ADJUSTMENT_MAP, error_response, get_market_data
+from tcg.core.api.common import error_response, get_market_data
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.indicator_exec import (
@@ -34,8 +35,7 @@ from tcg.engine.indicator_exec import (
     IndicatorValidationError,
     run_indicator,
 )
-from tcg.types.errors import DataNotFoundError, ValidationError
-from tcg.types.market import ContinuousRollConfig, RollStrategy
+from tcg.types.errors import DataNotFoundError
 
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
 
@@ -131,21 +131,15 @@ async def compute_indicator(
                     dates, closes = series.dates, series.close
 
                 case "continuous":
-                    adj = ADJUSTMENT_MAP.get(ref.adjustment)
-                    if adj is None:
+                    try:
+                        roll_config = build_roll_config(
+                            ref.adjustment, ref.cycle, ref.rollOffset
+                        )
+                    except ValueError as exc:
                         return error_response(
                             "validation",
-                            (
-                                f"Series label {label!r}: unknown adjustment "
-                                f"method {ref.adjustment!r}"
-                            ),
+                            f"Series label {label!r}: {exc}",
                         )
-                    roll_config = ContinuousRollConfig(
-                        strategy=RollStrategy.FRONT_MONTH,
-                        adjustment=adj,
-                        cycle=ref.cycle or None,
-                        roll_offset_days=int(ref.rollOffset),
-                    )
                     cseries = await svc.get_continuous(
                         ref.collection,
                         roll_config,

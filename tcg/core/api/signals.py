@@ -66,13 +66,14 @@ import numpy.typing as npt
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
     ContinuousInstrumentRef,
     SpotInstrumentRef,
 )
 from tcg.core.api._serializers import nan_safe_floats
-from tcg.core.api.common import ADJUSTMENT_MAP, error_response, get_market_data
+from tcg.core.api.common import error_response, get_market_data
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import (
@@ -83,7 +84,6 @@ from tcg.engine.signal_exec import (
     evaluate_signal,
 )
 from tcg.types.errors import DataNotFoundError
-from tcg.types.market import ContinuousRollConfig, RollStrategy
 from tcg.types.signal import (
     Block,
     CompareCondition,
@@ -378,18 +378,16 @@ async def compute_input_overlap(
                     ) from exc
                 date_arrays.append(series.dates)
             case "InstrumentContinuous":
-                adj = ADJUSTMENT_MAP.get(inst.adjustment)  # type: ignore[union-attr]
-                if adj is None:
-                    raise SignalDataError(
-                        f"input {inp.id!r}: unknown adjustment "
-                        f"{inst.adjustment!r}"  # type: ignore[union-attr]
+                try:
+                    roll_config = build_roll_config(
+                        inst.adjustment,  # type: ignore[union-attr]
+                        inst.cycle,  # type: ignore[union-attr]
+                        inst.roll_offset,  # type: ignore[union-attr]
                     )
-                roll_config = ContinuousRollConfig(
-                    strategy=RollStrategy.FRONT_MONTH,
-                    adjustment=adj,
-                    cycle=inst.cycle or None,  # type: ignore[union-attr]
-                    roll_offset_days=int(inst.roll_offset),  # type: ignore[union-attr]
-                )
+                except ValueError as exc:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: {exc}"
+                    ) from exc
                 try:
                     cseries = await svc.get_continuous(
                         inst.collection,  # type: ignore[union-attr]
@@ -479,18 +477,16 @@ def make_signal_fetcher(
             return series.dates, values
 
         # continuous
-        strategy = RollStrategy.FRONT_MONTH
-        adj = ADJUSTMENT_MAP.get(instrument.adjustment)
-        if adj is None:
-            raise SignalValidationError(
-                f"continuous input: unknown adjustment {instrument.adjustment!r}"
+        try:
+            roll_config = build_roll_config(
+                instrument.adjustment,
+                instrument.cycle,
+                instrument.roll_offset,
             )
-        roll_config = ContinuousRollConfig(
-            strategy=strategy,
-            adjustment=adj,
-            cycle=instrument.cycle or None,
-            roll_offset_days=int(instrument.roll_offset),
-        )
+        except ValueError as exc:
+            raise SignalValidationError(
+                f"continuous input: {exc}"
+            ) from exc
         try:
             cseries = await svc.get_continuous(
                 instrument.collection,
