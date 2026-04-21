@@ -134,10 +134,11 @@ function sanitiseWeight(raw) {
 function sanitiseBlock(raw) {
   const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
   const weight = sanitiseWeight(raw.weight);
+  const name = typeof raw.name === 'string' ? raw.name : '';
   const conditions = Array.isArray(raw.conditions)
     ? raw.conditions.filter((c) => c && typeof c === 'object' && typeof c.op === 'string')
     : [];
-  return { input_id, weight, conditions };
+  return { input_id, weight, name, conditions };
 }
 
 function sanitiseSignal(raw) {

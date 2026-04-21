@@ -232,25 +232,6 @@ export function partitionIndicators(indicators) {
   return { overlay, ownPanel };
 }
 
-/**
- * Compute the clip summary banner rows, mirroring the iter-4 behaviour.
- * Extracted so the shell component can show it above both plots.
- */
-export function buildClipSummary(result) {
-  if (!result || !result.clipped) return null;
-  const positions = Array.isArray(result.positions) ? result.positions : [];
-  const rows = [];
-  for (const p of positions) {
-    const mask = Array.isArray(p.clipped_mask) ? p.clipped_mask : [];
-    let count = 0;
-    for (const b of mask) { if (b) count += 1; }
-    if (count > 0) {
-      rows.push({ instrument: `${p.input_id || '?'}`, count });
-    }
-  }
-  return { rows };
-}
-
 /* ------------------------------------------------------------------ */
 /*  Unified subplot builder — single Chart, stacked vertically         */
 /* ------------------------------------------------------------------ */
@@ -351,7 +332,7 @@ export function buildResultsPlot(result, opts = {}) {
 
   const pnlRaw = aggregateRealizedPnl(result.realized_pnl, result.timestamps.length);
   if (pnlRaw) {
-    const capital = opts.capital || 1;
+    const capital = opts.capital ?? 1;
     const pnlScaled = capital === 1 ? pnlRaw : pnlRaw.map((v) => v * capital);
     traces.push({
       x: dates,

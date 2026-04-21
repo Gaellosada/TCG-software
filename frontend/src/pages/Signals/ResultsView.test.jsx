@@ -108,23 +108,6 @@ describe('<ResultsView>', () => {
     expect(priceTraces.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('shows the clip banner when result.clipped is true', () => {
-    const result = makeResult({
-      clipped: true,
-      positions: [
-        {
-          input_id: 'X',
-          instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' },
-          values: [0, 1, 0.5],
-          clipped_mask: [false, true, true],
-          price: { label: 'SPX.close', values: [100, 101, 102] },
-        },
-      ],
-    });
-    render(<ResultsView result={result} loading={false} error={null} />);
-    expect(screen.getByTestId('signal-chart-clip-banner')).toBeDefined();
-  });
-
   it('uses the unified download filename', () => {
     render(<ResultsView result={makeResult()} loading={false} error={null} />);
     expect(chartCalls[0].downloadFilename).toBe('signal-results');

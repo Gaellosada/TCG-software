@@ -49,8 +49,7 @@ contract P5-6):
       "indicators": [                         // reserved slot now populated
         {"input_id", "indicator_id", "series": (float|null)[]}
       ],
-      "entries_skipped_budget": int,          // diagnostic counter
-      "clipped":     bool,
+      "clipped":     bool,                    // always false (leverage allowed)
       "diagnostics": { ... }
     }
 
@@ -698,7 +697,6 @@ async def compute_signal(
         "realized_pnl": realized_pnl_out,
         "events": events_out,
         "indicators": indicators_out,
-        "entries_skipped_budget": int(result.entries_skipped_budget),
         "clipped": bool(result.clipped),
         "diagnostics": dict(result.diagnostics),
     }

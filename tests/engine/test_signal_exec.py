@@ -224,7 +224,6 @@ async def test_budget_skip_two_long_entries():
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
     # Leverage allowed: both blocks latch, 0.8 + 0.8 = 1.6.
     assert list(result.positions[0].values) == pytest.approx([1.6] * 5)
-    assert result.entries_skipped_budget == 0
 
 
 @pytest.mark.asyncio
@@ -408,7 +407,6 @@ async def test_global_budget_across_inputs():
     assert list(by_id["Y"].values) == pytest.approx(
         [0.0, -0.8, -0.8, -0.8, -0.8]
     )
-    assert result.entries_skipped_budget == 0
 
 
 @pytest.mark.asyncio

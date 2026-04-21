@@ -868,31 +868,6 @@
 
 /* ---------- Clip banner (iter-3) ---------- */
 
-.clipBanner {
-  margin: 6px 6px 6px;
-  padding: 8px 12px;
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid rgba(245, 158, 11, 0.5);
-  color: #92400e;
-  border-radius: var(--radius-sm);
-  font-size: 0.82rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  line-height: 1.4;
-}
-
-:global(.dark) .clipBanner,
-[data-theme='dark'] .clipBanner {
-  color: #fbbf24;
-  background: rgba(245, 158, 11, 0.12);
-}
-
-.clipBannerIcon {
-  font-size: 1rem;
-  flex-shrink: 0;
-}
-
 /* ---------- OperandPicker (legacy — kept for back-compat) ---------- */
 
 .operandPicker {

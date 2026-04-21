@@ -279,7 +279,6 @@ test.describe('Signals Results 2-plot (iter-5)', () => {
             },
           ],
           realized_pnl: [[0, 50, 75]],
-          entries_skipped_budget: 0,
           clipped: false,
           diagnostics: {},
         }),

@@ -376,25 +376,20 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
         "realized_pnl",
         "events",
         "indicators",
-        "entries_skipped_budget",
         "clipped",
         "diagnostics",
     }
     assert isinstance(data["realized_pnl"], list)
     assert isinstance(data["events"], list)
     assert isinstance(data["indicators"], list)
-    assert isinstance(data["entries_skipped_budget"], int)
 
     # ---- Position path (P5-3..P5-5) ----
     by_id = {p["input_id"]: p for p in data["positions"]}
     vals = by_id["X"]["values"]
     # (a) latch persists at t=2; (b) same-side exit clears at t=3;
     # (c) cross-side exit at t=6 does NOT clear the long;
-    # (d) t=7 C's entry fires (leverage allowed) → position = 0.6 + 0.5 = 1.1.
+    # (d) leverage allowed — t=7 block C w=0.5 latches on top of A w=0.6 → 1.1.
     assert vals == pytest.approx([0.0, 0.6, 0.6, 0.0, -0.4, 0.2, 0.6, 1.1])
-
-    # Budget skip surface — leverage allowed, so no entries skipped.
-    assert data["entries_skipped_budget"] == 0
 
     # ---- Events payload ----
     ev_by = {

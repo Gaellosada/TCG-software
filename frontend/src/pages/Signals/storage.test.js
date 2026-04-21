@@ -98,6 +98,7 @@ describe('Signals storage (v3)', () => {
               {
                 input_id: 'X',
                 weight: 0.4,
+                name: '',
                 conditions: [
                   {
                     op: 'gt',
@@ -111,6 +112,7 @@ describe('Signals storage (v3)', () => {
               {
                 input_id: 'X',
                 weight: 0,
+                name: '',
                 conditions: [
                   {
                     op: 'cross_below',
@@ -125,6 +127,7 @@ describe('Signals storage (v3)', () => {
               {
                 input_id: 'Y',
                 weight: 0,
+                name: '',
                 conditions: [
                   {
                     op: 'rolling_gt',

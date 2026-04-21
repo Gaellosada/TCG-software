@@ -12,7 +12,6 @@ import {
   partitionIndicators,
   buildEventMarkerTraces,
   buildIndicatorTraces,
-  buildClipSummary,
   EVENT_MARKER,
 } from './resultsPlotTraces';
 
@@ -209,28 +208,6 @@ describe('buildIndicatorTraces', () => {
   it('skips entries without a series array', () => {
     const inds = [{ indicator_id: 'x', series: null }];
     expect(buildIndicatorTraces(inds, dates)).toHaveLength(0);
-  });
-});
-
-describe('buildClipSummary', () => {
-  it('returns null when result.clipped is false', () => {
-    expect(buildClipSummary({ clipped: false, positions: [] })).toBeNull();
-  });
-
-  it('lists each position with a positive clip count', () => {
-    const result = {
-      clipped: true,
-      positions: [
-        { input_id: 'X', clipped_mask: [true, false, true] },
-        { input_id: 'Y', clipped_mask: [false, false, false] },
-        { input_id: 'Z', clipped_mask: [true] },
-      ],
-    };
-    const sum = buildClipSummary(result);
-    expect(sum.rows).toEqual([
-      { instrument: 'X', count: 2 },
-      { instrument: 'Z', count: 1 },
-    ]);
   });
 });
 

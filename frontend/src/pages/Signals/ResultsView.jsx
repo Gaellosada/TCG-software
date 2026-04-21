@@ -1,10 +1,7 @@
 import { useMemo, useState } from 'react';
 import Chart from '../../components/Chart';
 import styles from './Signals.module.css';
-import {
-  buildResultsPlot,
-  buildClipSummary,
-} from './resultsPlotTraces';
+import { buildResultsPlot } from './resultsPlotTraces';
 
 /**
  * Results section — unified subplot chart.
@@ -19,8 +16,8 @@ import {
  * ``--results-row-min``, which grows when ownPanel indicators are present.
  * This component fills that space via ``flex: 1``.
  *
- * Loading / empty / error / clip-banner states are owned by this shell
- * and shown ABOVE the chart.
+ * Loading / empty / error states are owned by this shell and shown
+ * ABOVE the chart.
  */
 
 const ERROR_HEADINGS = {
@@ -73,7 +70,6 @@ function ErrorCard({ error }) {
 
 function ResultsView({ result, loading, error, capital = 1000, noRepeat = false }) {
   const plot = useMemo(() => buildResultsPlot(result, { capital, noRepeat }), [result, capital, noRepeat]);
-  const clipSummary = useMemo(() => buildClipSummary(result), [result]);
 
   if (loading) {
     return (
@@ -103,25 +99,6 @@ function ResultsView({ result, loading, error, capital = 1000, noRepeat = false 
 
   return (
     <div className={styles.resultsViewBody} data-testid="results-view">
-      {clipSummary && clipSummary.rows.length > 0 && (
-        <div
-          className={styles.clipBanner}
-          role="alert"
-          data-testid="signal-chart-clip-banner"
-        >
-          <span className={styles.clipBannerIcon} aria-hidden="true">⚠</span>
-          <span>
-            <strong>Position clipped</strong> to [-1, +1] on{' '}
-            {clipSummary.rows.map((r, i) => (
-              <span key={r.instrument}>
-                {i > 0 && ', '}
-                <code>{r.instrument}</code> ({r.count} bar{r.count === 1 ? '' : 's'})
-              </span>
-            ))}
-            . Raw long/short weight sums exceed 1.0 at those timestamps.
-          </span>
-        </div>
-      )}
       <div
         className={styles.resultsPlotUnified}
         data-testid="results-plot-unified"

@@ -674,7 +674,6 @@ class SignalEvalResult:
     clipped: bool
     events: tuple[BlockEvent, ...]
     indicator_series: tuple[IndicatorSeriesResult, ...]
-    entries_skipped_budget: int
     diagnostics: dict[str, object]
 
 
@@ -746,7 +745,6 @@ async def evaluate_signal(
             clipped=False,
             events=(),
             indicator_series=(),
-            entries_skipped_budget=0,
             diagnostics={"T": 0, "inputs": len(referenced_ids)},
         )
 
@@ -843,8 +841,6 @@ async def evaluate_signal(
             event_fired[key] = []
             event_latched[key] = []
             event_meta[key] = (blk.input_id, kind)
-
-    entries_skipped_budget = 0
 
     # Fast weight lookups keyed by (input_id, block_id).
     _weight_lookup_long: dict[tuple[str, str], float] = {
@@ -1007,7 +1003,6 @@ async def evaluate_signal(
     diagnostics: dict[str, object] = {
         "T": int(T),
         "inputs": len(referenced_ids),
-        "entries_skipped_budget": int(entries_skipped_budget),
     }
 
     return SignalEvalResult(
@@ -1016,7 +1011,6 @@ async def evaluate_signal(
         clipped=False,
         events=tuple(events),
         indicator_series=tuple(indicator_series),
-        entries_skipped_budget=int(entries_skipped_budget),
         diagnostics=diagnostics,
     )
 
