@@ -7,6 +7,34 @@
 
 import { listCollections, listInstruments } from './data';
 
+/**
+ * POST an indicator-compute request and return the parsed response.
+ *
+ * Mirrors ``computeSignal`` in ``api/signals.js``: on a non-2xx, the
+ * parsed JSON body is attached to the thrown Error as ``err.body`` and
+ * the HTTP status as ``err.status``. Network errors propagate untouched
+ * so the caller can classify via ``utils/fetchError``.
+ *
+ * Wire format unchanged — body is ``{code, params, series}`` posted to
+ * ``/api/indicators/compute``.
+ */
+export async function computeIndicator({ code, params, series }, { signal } = {}) {
+  const res = await fetch('/api/indicators/compute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, params, series }),
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const err = new Error((body && body.message) || res.statusText || 'Request failed');
+    err.body = body;
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
 // Case-insensitive loose matcher for S&P 500 spot-index symbols across
 // vendors. Known variants seen in the wild / in our own DB:
 //   ^GSPC, .GSPC, GSPC, SPX, .SPX, SP500, S&P500, S&P 500, SP_500,

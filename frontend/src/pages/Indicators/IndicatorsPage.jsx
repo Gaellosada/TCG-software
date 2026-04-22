@@ -3,7 +3,7 @@ import IndicatorsList from './IndicatorsList';
 import EditorPanel from './EditorPanel';
 import ParamsPanel from './ParamsPanel';
 import IndicatorChart from './IndicatorChart';
-import { resolveDefaultIndexInstrument } from '../../api/indicators';
+import { resolveDefaultIndexInstrument, computeIndicator } from '../../api/indicators';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { loadState, saveState } from './storage';
@@ -422,54 +422,43 @@ function IndicatorsPage() {
             : { type: 'spot', collection: picked.collection, instrument_id: picked.instrument_id };
         }
       }
-      let res;
       try {
-        res = await fetch('/api/indicators/compute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const data = await computeIndicator(
+          {
             code: selectedIndicator.code,
             params: selectedIndicator.params,
             series: seriesPayload,
-          }),
-          signal: controller.signal,
-        });
-      } catch (networkErr) {
-        if (controller.signal.aborted) {
-          return;
-        }
-        // Classify so offline/network surfaces an accurate heading in the
-        // error card rather than the misleading "Data error" label.
-        const classified = classifyFetchError(networkErr);
-        const error_type = fetchKindToErrorType(classified.kind);
-        if (error_type === ABORTED) {
-          // Silently suppress cancelled requests — don't render an error card.
-          setLastResult(null);
-          return;
-        }
-        setError({
-          error_type,
-          message: `${classified.title} — ${classified.message}`,
-        });
-        setLastResult(null);
-        return;
-      }
-      if (controller.signal.aborted) return;
-      if (!res.ok) {
-        // Parse the structured error envelope:
-        //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
-        // Legacy shapes ({detail: "..."} or {message: "..."}) fall back to
-        // error_type='validation'.
-        const body = await res.json().catch(() => null);
+          },
+          { signal: controller.signal },
+        );
         if (controller.signal.aborted) return;
-        const structured = normalizeErrorEnvelope(body, res.statusText);
-        setError(structured);
-        setLastResult(null);
-        return;
+        setLastResult(data);
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        if (e && typeof e === 'object' && 'status' in e) {
+          // Structured error envelope:
+          //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
+          // Legacy shapes ({detail: "..."} or {message: "..."}) fall back to
+          // error_type='validation'.
+          setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
+          setLastResult(null);
+        } else {
+          // Classify so offline/network surfaces an accurate heading in the
+          // error card rather than the misleading "Data error" label.
+          const classified = classifyFetchError(e);
+          const error_type = fetchKindToErrorType(classified.kind);
+          if (error_type === ABORTED) {
+            // Silently suppress cancelled requests — don't render an error card.
+            setLastResult(null);
+          } else {
+            setError({
+              error_type,
+              message: `${classified.title} — ${classified.message}`,
+            });
+            setLastResult(null);
+          }
+        }
       }
-      const data = await res.json();
-      if (controller.signal.aborted) return;
-      setLastResult(data);
     } finally {
       if (!controller.signal.aborted) setRunning(false);
       if (runAbortRef.current === controller) runAbortRef.current = null;
