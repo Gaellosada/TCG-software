@@ -1,8 +1,3 @@
-// Persistable-payload helpers for the Indicators page. Pure — no
-// side-effects. Extracted from IndicatorsPage.jsx.
-
-// Build the storage-shaped payload (same shape the old persistence
-// effect wrote).
 export function buildPersistablePayload(indicators) {
   const userIndicators = indicators
     .filter((ind) => !ind.readonly)

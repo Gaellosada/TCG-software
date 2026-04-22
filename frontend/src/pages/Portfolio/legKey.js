@@ -1,11 +1,7 @@
-// Pure stringification of a portfolio leg list into a stable key used
-// to gate the date-range refetch effect in usePortfolio. Only
-// data-affecting fields contribute — label/weight changes must NOT
-// retrigger the fetch.
-//
-// Extracted from ``usePortfolio.js``. Keeping the format byte-identical
-// is important: any change to how the key is built would invalidate
-// the cache heuristic and trigger spurious refetches.
+// Pure stringification of a leg list into a stable key used to gate
+// the date-range refetch effect in usePortfolio. Only data-affecting
+// fields contribute — label/weight changes must NOT retrigger the
+// fetch. Changing the key format invalidates the cache heuristic.
 export function legsToRangesKey(legs) {
   return legs.map((l) => {
     if (l.type === 'signal') {

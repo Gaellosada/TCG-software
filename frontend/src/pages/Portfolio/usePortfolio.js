@@ -19,6 +19,15 @@ const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
 
 let nextId = 1;
 
+// Pick a label that doesn't collide with any existing leg — API dict keys would collapse on duplicates.
+function uniqueLegLabel(desired, existingLegs) {
+  const existing = new Set(existingLegs.map((l) => l.label));
+  if (!existing.has(desired)) return desired;
+  let n = 2;
+  while (existing.has(`${desired} (${n})`)) n++;
+  return `${desired} (${n})`;
+}
+
 /**
  * Custom hook managing all portfolio state: legs, config, API calls, save/load.
  *
@@ -133,14 +142,7 @@ export default function usePortfolio() {
   const addLeg = useCallback((leg) => {
     const id = nextId++;
     setLegs((prev) => {
-      // Auto-suffix to avoid duplicate labels (keys would collapse in the API dict).
-      let label = leg.label || `Leg ${id}`;
-      const existing = new Set(prev.map((l) => l.label));
-      if (existing.has(label)) {
-        let n = 2;
-        while (existing.has(`${label} (${n})`)) n++;
-        label = `${label} (${n})`;
-      }
+      const label = uniqueLegLabel(leg.label || `Leg ${id}`, prev);
       return [
         ...prev,
         {
@@ -163,14 +165,7 @@ export default function usePortfolio() {
   const addSignalLeg = useCallback((signal) => {
     const id = nextId++;
     setLegs((prev) => {
-      // Auto-suffix to avoid duplicate labels (keys would collapse in the API dict).
-      let label = signal.name || `Signal ${id}`;
-      const existing = new Set(prev.map((l) => l.label));
-      if (existing.has(label)) {
-        let n = 2;
-        while (existing.has(`${label} (${n})`)) n++;
-        label = `${label} (${n})`;
-      }
+      const label = uniqueLegLabel(signal.name || `Signal ${id}`, prev);
       return [
         ...prev,
         {

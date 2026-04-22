@@ -1,11 +1,5 @@
-// Fetch the date range for a signal leg by fetching each input's
-// instrument range and computing the overlap (latest start, earliest
-// end).
-//
-// Extracted from ``usePortfolio.js`` as a standalone pure-ish helper
-// (closes over nothing in the hook). The data-layer getters
-// (``getInstrumentPrices`` / ``getContinuousSeries``) are imported
-// directly so the call-site stays a straight module function.
+// Fetch the date range for a signal leg: for each input, resolve the
+// instrument range; return the overlap (latest start, earliest end).
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { formatDateInt } from '../../utils/format';
 

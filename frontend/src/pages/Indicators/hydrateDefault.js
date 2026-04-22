@@ -1,6 +1,3 @@
-// Hydration helpers for the Indicators page — extracted from
-// IndicatorsPage.jsx to shrink the page. Both helpers are pure.
-
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 
 // Hydrate a default indicator from the registry + persisted per-session

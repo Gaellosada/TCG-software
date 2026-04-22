@@ -2,9 +2,6 @@
 // chart / results panels render. New envelope: {error_type, message, traceback?}.
 // Legacy shapes ({detail: "..."} or {message: "..."}) default to
 // error_type='validation' — same meaning as HTTP 400.
-//
-// Extracted from byte-identical copies previously inlined in
-// IndicatorsPage.jsx and SignalsPage.jsx.
 import { coerceErrorType } from '../pages/Indicators/errorTaxonomy';
 
 export function normalizeErrorEnvelope(body, fallbackStatusText) {

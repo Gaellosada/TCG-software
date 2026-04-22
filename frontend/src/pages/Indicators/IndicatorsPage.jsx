@@ -71,8 +71,7 @@ function IndicatorsPage() {
   // Code/Documentation tab state for the middle panel. Page-level only —
   // NOT persisted (always resets to 'code' on reload).
   const [viewMode, setViewMode] = useState('code');
-  // iter-4: replaced window.confirm with shared ConfirmDialog.
-  // pendingDeleteId holds the indicator id awaiting confirmation (null = closed).
+  // null = confirm dialog closed; otherwise the id awaiting confirmation.
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
 
   const indicatorsRef = useRef(indicators);
@@ -229,7 +228,6 @@ function IndicatorsPage() {
   const handleDelete = useCallback((id) => {
     const target = indicatorsRef.current.find((i) => i.id === id);
     if (!target || target.readonly) return;
-    // iter-4: open shared ConfirmDialog instead of synchronous window.confirm.
     setPendingDeleteId(id);
   }, []);
 
@@ -434,14 +432,6 @@ function IndicatorsPage() {
         />
       </div>
       <div className={styles.paramsPanel}>
-        {/*
-          Iter-8: the indicator's name input + Save + Auto save now live
-          at the TOP of the params (right) column, just above the
-          Parameters section. The editor panel no longer carries a
-          header. SaveControls still reuses its ``leftSlot`` prop — the
-          Portfolio call site is untouched because ``leftSlot`` defaults
-          to undefined there.
-        */}
         <div className={styles.paramsTopBar}>
           <SaveControls
             className={styles.paramsSaveControls}
@@ -496,7 +486,6 @@ function IndicatorsPage() {
           />
         </Card>
       </div>
-      {/* iter-4: shared ConfirmDialog replaces the previous window.confirm. */}
       <ConfirmDialog
         open={pendingDeleteId !== null}
         title="Delete indicator?"

@@ -1,6 +1,5 @@
-// Saved-portfolio persistence — localStorage-backed. Extracted from
-// usePortfolio.js. Storage key is UNCHANGED ('tcg-saved-portfolios')
-// so existing user data keeps loading.
+// Saved-portfolio persistence — localStorage-backed. Storage key is
+// 'tcg-saved-portfolios'; do not rename without a user-state migration.
 //
 // Each save overwrites the entry under ``name``. The in-memory shape
 // persisted per entry is:
@@ -20,7 +19,8 @@ function readAll() {
 }
 
 function writeAll(saved) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(saved)); }
+  catch { /* quota exceeded or sandboxed storage — the in-memory save still succeeds */ }
 }
 
 export function savePortfolio(name, { legs, rebalance }) {

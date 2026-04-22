@@ -1,16 +1,15 @@
-// Pure validation: returns the Run-button gate state for a given
-// signal + available-indicators set. Extracted from SignalsPage.jsx —
-// the 90-LOC useMemo body that decides whether the Run button is
-// enabled and, when disabled, the tooltip explaining why.
+// Pure Run-button gate for the Signals page.
 //
 // Returns ``{runDisabledReason, missingIds}`` where:
 //   - ``runDisabledReason`` is null when the signal is runnable, or
 //     a user-visible string (verbatim — any edit is a UX change).
 //   - ``missingIds`` is the list of indicator_ids referenced by the
-//     signal that don't have a spec in ``availableIndicators`` — used
-//     to highlight the referenced operands in the block editor.
+//     signal that don't have a spec in ``availableIndicators``.
 import { buildComputeRequestBody } from './requestBuilder';
 import { isBlockRunnable, isInputConfigured } from './blockShape';
+import { DIRECTIONS } from './storage';
+
+const ENTRY_DIRECTIONS = new Set(DIRECTIONS.filter((d) => d.endsWith('_entry')));
 
 export function computeRunGate(selectedSignal, availableIndicators) {
   if (!selectedSignal) return { runDisabledReason: 'Select a signal first', missingIds: [] };
@@ -76,7 +75,7 @@ export function computeRunGate(selectedSignal, availableIndicators) {
         missingIds: [],
       };
     }
-    const isEntry = direction === 'long_entry' || direction === 'short_entry';
+    const isEntry = ENTRY_DIRECTIONS.has(direction);
     if (isEntry && (!Number.isFinite(b.weight) || b.weight <= 0)) {
       return {
         runDisabledReason: 'Every entry block needs a positive weight — '

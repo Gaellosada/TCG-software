@@ -1,7 +1,4 @@
-// Banner-copy derivation for the Indicators page top banner. Pure
-// function extracted from the IIFE previously inlined in
-// IndicatorsPage.jsx. Strings preserved verbatim.
-
+// User-visible banner copy — strings preserved verbatim.
 export function computeDefaultSeriesBannerText({
   defaultSeriesLoaded,
   defaultSeries,

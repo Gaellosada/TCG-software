@@ -143,7 +143,6 @@ function SignalsPage() {
     setLastResult(null);
   }, []);
 
-  // Iter-3 (guardrail 11): replace window.confirm with ConfirmDialog.
   const handleDelete = useCallback((id) => {
     setConfirmDeleteId(id);
   }, []);

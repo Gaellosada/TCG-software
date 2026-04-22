@@ -1,9 +1,4 @@
-// Run-gate derivation for the Indicators page. Returns whether all
-// series slots of the selected indicator are filled, plus the
-// Run-disabled tooltip reason (or null when the gate is clear).
-//
-// Extracted from IndicatorsPage.jsx. Strings preserved verbatim.
-
+// User-visible Run-disabled tooltip strings are preserved verbatim.
 export function areAllSlotsFilled(selectedIndicator, seriesLabels) {
   return !!selectedIndicator
     && seriesLabels.length > 0
