@@ -12,7 +12,8 @@ import { buildComputeRequestBody } from './requestBuilder';
 import { isBlockRunnable, isInputConfigured } from './blockShape';
 import { countOwnPanelIndicators } from './resultsPlotTraces';
 import { classifyFetchError } from '../../utils/fetchError';
-import { coerceErrorType, fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
+import { fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
+import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
@@ -28,22 +29,6 @@ function nextSignalName(existing) {
     }
   }
   return `Signal ${maxN + 1}`;
-}
-
-function normalizeErrorEnvelope(body, fallbackStatusText) {
-  if (!body || typeof body !== 'object') {
-    return { error_type: 'validation', message: fallbackStatusText || 'Request failed' };
-  }
-  const error_type = coerceErrorType(body.error_type);
-  const message = (typeof body.message === 'string' && body.message)
-    || (typeof body.detail === 'string' && body.detail)
-    || fallbackStatusText
-    || 'Request failed';
-  const out = { error_type, message };
-  if (typeof body.traceback === 'string' && body.traceback) {
-    out.traceback = body.traceback;
-  }
-  return out;
 }
 
 // Stable serialisation for dirty comparison — JSON.stringify over the

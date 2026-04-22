@@ -12,7 +12,8 @@ import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import { classifyFetchError } from '../../utils/fetchError';
-import { ABORTED, coerceErrorType, fetchKindToErrorType } from './errorTaxonomy';
+import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
+import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import styles from './IndicatorsPage.module.css';
 
 /**
@@ -122,26 +123,6 @@ export function hydrateDefault(def, savedEntry) {
     hydrated.chartMode = def.chartMode;
   }
   return hydrated;
-}
-
-// Normalize a backend error response into the structured shape the
-// chart panel renders. New envelope: {error_type, message, traceback?}.
-// Legacy shapes ({detail: "..."} or {message: "..."}) default to
-// error_type='validation' — same meaning as HTTP 400.
-function normalizeErrorEnvelope(body, fallbackStatusText) {
-  if (!body || typeof body !== 'object') {
-    return { error_type: 'validation', message: fallbackStatusText || 'Request failed' };
-  }
-  const error_type = coerceErrorType(body.error_type);
-  const message = (typeof body.message === 'string' && body.message)
-    || (typeof body.detail === 'string' && body.detail)
-    || fallbackStatusText
-    || 'Request failed';
-  const out = { error_type, message };
-  if (typeof body.traceback === 'string' && body.traceback) {
-    out.traceback = body.traceback;
-  }
-  return out;
 }
 
 // Build the storage-shaped payload (same shape the old persistence
