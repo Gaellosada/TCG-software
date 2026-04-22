@@ -238,21 +238,50 @@
   outline: none;
 }
 
+.weightInputWrap {
+  display: flex;
+  align-items: stretch;
+}
+
 .weightInput {
   width: 70px;
   padding: 4px 8px;
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
+  border-right: none;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
   color: var(--text-primary);
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.85rem;
   text-align: right;
+  -moz-appearance: textfield;
+}
+
+.weightInput::-webkit-outer-spin-button,
+.weightInput::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .weightInput:focus {
   border-color: var(--accent);
+  border-right: none;
   outline: none;
+}
+
+.weightSuffix {
+  display: flex;
+  align-items: center;
+  padding: 0 5px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-left: none;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1;
+  user-select: none;
+  pointer-events: none;
 }
 
 .removeBtn {

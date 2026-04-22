@@ -180,8 +180,9 @@ class _BlockIn(BaseModel):
     input_id: str = ""
     weight: float = 0.0
     target_entry_block_name: str | None = None
-    # DEPRECATED: kept so Pydantic does not silently drop it; API
-    # validation rejects any request that sets this field.
+    # DEPRECATED (v4): kept so Pydantic does not silently drop it; API
+    # validation rejects any request that sets this field. Remove once
+    # no legacy clients remain (target: v5 or 2026-Q3).
     target_entry_block_id: str | None = None
 
 

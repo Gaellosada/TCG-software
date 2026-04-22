@@ -135,8 +135,8 @@ export function indexInputs(inputs) {
 }
 
 /**
- * Build the set of entry block ids declared on a signal. Used for exit-
- * block target resolution.
+ * Build the set of entry block ids declared on a signal. Used for
+ * entry-side runnability checks in isBlockRunnable.
  */
 export function collectEntryIds(entryBlocks) {
   const out = new Set();
@@ -204,28 +204,15 @@ export function isBlockRunnable(block, section, inputs, entryIdsOrBlocks) {
   } else if (section === 'exits') {
     const tgt = block.target_entry_block_name;
     if (typeof tgt !== 'string' || !tgt) return false;
-    // Resolve by name: need entry blocks array
-    let targetEntry = null;
-    if (Array.isArray(entryIdsOrBlocks)
-        && entryIdsOrBlocks.length > 0
-        && typeof entryIdsOrBlocks[0] === 'object') {
-      // Name-based resolution: find exactly one entry with this name
-      const matches = entryIdsOrBlocks.filter((b) => b && b.name === tgt);
-      if (matches.length !== 1) return false; // 0 = dangling, >1 = ambiguous
-      targetEntry = matches[0];
-    } else {
-      // Legacy id-based fallback (shouldn't happen in v4, but defensive)
-      const ids = entryIdsOrBlocks instanceof Set
-        ? entryIdsOrBlocks
-        : new Set(entryIdsOrBlocks || []);
-      if (!ids.has(tgt)) return false;
-    }
-    if (targetEntry) {
-      if (typeof targetEntry.input_id !== 'string' || !targetEntry.input_id) return false;
-      const boundInput = byId[targetEntry.input_id];
-      if (!boundInput) return false;
-      if (!isInputConfigured(boundInput)) return false;
-    }
+    // Resolve by name: find exactly one entry with this name
+    const matches = (Array.isArray(entryIdsOrBlocks) ? entryIdsOrBlocks : [])
+      .filter((b) => b && b.name === tgt);
+    if (matches.length !== 1) return false; // 0 = dangling, >1 = ambiguous
+    const targetEntry = matches[0];
+    if (typeof targetEntry.input_id !== 'string' || !targetEntry.input_id) return false;
+    const boundInput = byId[targetEntry.input_id];
+    if (!boundInput) return false;
+    if (!isInputConfigured(boundInput)) return false;
   }
   return true;
 }

@@ -129,20 +129,23 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                         {legDateRanges?.[leg.id]?.end || '\u2014'}
                       </td>
                       <td>
-                        <input
-                          className={styles.weightInput}
-                          type="number"
-                          min="-100"
-                          max="100"
-                          step="0.1"
-                          value={leg.weight}
-                          onChange={(e) =>
-                            onUpdateLeg(index, {
-                              weight: e.target.value === '' ? '' : Number(e.target.value),
-                            })
-                          }
-                          aria-label={`Weight for ${leg.label}`}
-                        />
+                        <div className={styles.weightInputWrap}>
+                          <input
+                            className={styles.weightInput}
+                            type="number"
+                            min="-100"
+                            max="100"
+                            step="0.1"
+                            value={leg.weight}
+                            onChange={(e) =>
+                              onUpdateLeg(index, {
+                                weight: e.target.value === '' ? '' : Number(e.target.value),
+                              })
+                            }
+                            aria-label={`Weight for ${leg.label}`}
+                          />
+                          <span className={styles.weightSuffix}>%</span>
+                        </div>
                       </td>
                       <td>
                         <button
@@ -190,7 +193,7 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
             <span className={styles.weightSummaryLabel}>
               Total absolute weight:
             </span>
-            <span className={styles.weightSummaryValue}>{totalAbs.toFixed(1)}</span>
+            <span className={styles.weightSummaryValue}>{totalAbs.toFixed(1)}%</span>
             <span className={styles.weightSummaryHint}>
               (sum of |weights|; negative = short position)
             </span>

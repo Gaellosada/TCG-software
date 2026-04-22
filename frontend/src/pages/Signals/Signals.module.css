@@ -193,41 +193,6 @@
   gap: 6px;
 }
 
-.directionTabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--border-primary);
-  padding-bottom: 6px;
-}
-
-.directionTab {
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 0.8rem;
-  padding: 4px 10px;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.directionTab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.directionTabActive {
-  background: var(--bg-tertiary);
-  border-color: var(--border-primary);
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.directionTabCount {
-  color: var(--text-secondary);
-  font-weight: 400;
-}
-
 .directionTabSpacer {
   flex: 1;
 }
@@ -317,13 +282,6 @@
   font-weight: 600;
   padding: 0 6px;
   letter-spacing: 0.08em;
-}
-
-.blockHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
 }
 
 .blockLabel {
@@ -1021,55 +979,6 @@
 
 .blockStatusDotWarn {
   background: #f59e0b;
-}
-
-/* ---------- Clip banner (iter-3) ---------- */
-
-/* ---------- OperandPicker (legacy — kept for back-compat) ---------- */
-
-.operandPicker {
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.operandTabs {
-  display: flex;
-  gap: 2px;
-}
-
-.operandTab {
-  flex: 1;
-  min-width: 0;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 0.68rem;
-  padding: 2px 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.operandTab:hover {
-  background: var(--bg-hover);
-}
-
-.operandTabActive {
-  background: var(--bg-primary);
-  border-color: var(--border-primary);
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.operandBody {
-  padding: 4px;
 }
 
 .operandEmpty {

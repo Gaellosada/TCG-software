@@ -105,7 +105,7 @@ Contracts are filtered by `expirationCycle` if specified in the config (e.g., `"
 `tests/unit/test_rolling.py` covers:
 - Single contract (no rolling needed)
 - Multi-contract concatenation (no adjustment)
-- Proportional and difference adjustment
+- Ratio and difference adjustment
 - Roll offset behavior
 - Zero-close row stripping
 - Empty contract handling

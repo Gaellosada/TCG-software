@@ -25,8 +25,8 @@ incompatible with prior versions, and no migration code is provided.
   `short` (red) / neutral badge driven by the weight sign. The weight
   input now has a `%` suffix glyph.
 - **Exits target a specific entry block.** Each exit block carries a
-  `target_entry_block_id` and only closes positions opened by that
-  entry block. The exit editor has a picker listing existing entries.
+  `target_entry_block_name` referencing an entry by its user-editable
+  name. The exit editor has a picker listing existing entries.
   Entries and exits now have stable UUID ids, generated on creation
   and persisted through save/load. When an entry is deleted, every
   referencing exit is cascade-deleted (not flagged).
@@ -55,8 +55,8 @@ incompatible with prior versions, and no migration code is provided.
 - **BREAKING — API:** `POST /api/signals/compute` now takes
   `rules: { entries: [...], exits: [...] }` (not the four direction
   keys). Each entry carries a signed `weight`, and each exit carries a
-  `target_entry_block_id` referencing an existing entry id in the same
-  signal. Dangling references, weight outside `[-100, +100]`, or
+  `target_entry_block_name` referencing an existing entry name in the
+  same signal. Dangling references, weight outside `[-100, +100]`, or
   `weight == 0` on entries are rejected with HTTP 400.
 - **BREAKING — Exit blocks no longer carry `input_id` at the block
   level.** The operating input is derived from the target entry's
