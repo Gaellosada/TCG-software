@@ -5,8 +5,15 @@ import { formatDateInt } from '../../utils/format';
 import { useAutosave } from '../../components/SaveControls';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
+import { fetchSignalLegRange } from './signalLegRange';
+import { legsToRangesKey } from './legKey';
+import {
+  savePortfolio as persistPortfolio,
+  loadPortfolio as loadPortfolioEntry,
+  deleteSavedPortfolio as removeSavedPortfolio,
+  getSavedPortfolios as listSavedPortfolios,
+} from './storage';
 
-const STORAGE_KEY = 'tcg-saved-portfolios';
 const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
 
 let nextId = 1;
@@ -36,87 +43,10 @@ export default function usePortfolio() {
 
   const abortRef = useRef(null);
 
-  /* ── Helpers ── */
-
-  /**
-   * Fetch the date range for a signal leg by fetching each input's instrument
-   * range and computing the overlap (latest start, earliest end).
-   */
-  async function fetchSignalLegRange(leg) {
-    const inputs = leg.signalSpec?.inputs || [];
-    const configured = inputs.filter((inp) => inp.instrument);
-    if (configured.length === 0) {
-      return { id: leg.id, start: null, end: null };
-    }
-
-    const inputRanges = await Promise.all(
-      configured.map(async (inp) => {
-        try {
-          let dates;
-          const inst = inp.instrument;
-          if (inst.type === 'continuous') {
-            const res = await getContinuousSeries(inst.collection, {
-              strategy: inst.strategy || 'front_month',
-              adjustment: inst.adjustment || 'none',
-              cycle: inst.cycle || undefined,
-              rollOffset: inst.rollOffset || 0,
-            });
-            dates = res?.dates;
-          } else {
-            const res = await getInstrumentPrices(
-              inst.collection,
-              inst.instrument_id || inst.symbol,
-            );
-            dates = res?.dates;
-          }
-          if (dates && dates.length > 0) {
-            return {
-              start: formatDateInt(dates[0]),
-              end: formatDateInt(dates[dates.length - 1]),
-            };
-          }
-          return null;
-        } catch {
-          return null;
-        }
-      }),
-    );
-
-    const valid = inputRanges.filter(Boolean);
-    if (valid.length === 0) {
-      return { id: leg.id, start: null, end: null };
-    }
-
-    // Overlap = latest start, earliest end
-    const start = valid.reduce((a, b) => (a.start > b.start ? a : b)).start;
-    const end = valid.reduce((a, b) => (a.end < b.end ? a : b)).end;
-
-    if (start <= end) {
-      return { id: leg.id, start, end };
-    }
-    return { id: leg.id, start: null, end: null };
-  }
-
   /* ── Fetch date ranges when legs change ── */
 
   // Stable key: only data-affecting fields (not label/weight) trigger re-fetch
-  const rangesKey = useMemo(
-    () => legs.map((l) => {
-      if (l.type === 'signal') {
-        // Include input instruments so re-binding triggers a refetch
-        const inputKeys = (l.signalSpec?.inputs || []).map((inp) => {
-          const inst = inp.instrument;
-          if (!inst) return 'null';
-          if (inst.type === 'continuous') return `c:${inst.collection}:${inst.strategy}:${inst.adjustment}:${inst.cycle}:${inst.rollOffset}`;
-          return `i:${inst.collection}:${inst.instrument_id}`;
-        }).join(',');
-        return `s:${l.signalId}:[${inputKeys}]`;
-      }
-      if (l.type === 'continuous') return `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`;
-      return `i:${l.collection}:${l.symbol}`;
-    }).join('|'),
-    [legs],
-  );
+  const rangesKey = useMemo(() => legsToRangesKey(legs), [legs]);
 
   useEffect(() => {
     if (legs.length === 0) {
@@ -387,32 +317,7 @@ export default function usePortfolio() {
 
   const savePortfolio = useCallback(
     (name) => {
-      let saved;
-      try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-      catch { saved = {}; }
-      const weightsDict = {};
-      for (const l of legs) weightsDict[l.label] = Number(l.weight) || 0;
-      saved[name] = {
-        legs: legs.map((l) => ({
-          label: l.label,
-          type: l.type,
-          collection: l.collection,
-          symbol: l.symbol,
-          strategy: l.strategy,
-          adjustment: l.adjustment,
-          cycle: l.cycle,
-          rollOffset: l.rollOffset,
-          weight: l.weight,
-          // Signal-specific fields (null for non-signal legs).
-          signalId: l.signalId || null,
-          signalName: l.signalName || null,
-          signalSpec: l.signalSpec || null,
-        })),
-        weights: weightsDict,
-        rebalance,
-        savedAt: new Date().toISOString(),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+      persistPortfolio(name, { legs, rebalance });
       setPortfolioName(name);
       setDirty(false);
     },
@@ -420,10 +325,7 @@ export default function usePortfolio() {
   );
 
   const loadPortfolio = useCallback((name) => {
-    let saved;
-    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-    catch { saved = {}; }
-    const entry = saved[name];
+    const entry = loadPortfolioEntry(name);
     if (!entry) return false;
 
     const restoredLegs = (entry.legs || []).map((l) => ({
@@ -443,19 +345,10 @@ export default function usePortfolio() {
   }, []);
 
   const deleteSavedPortfolio = useCallback((name) => {
-    let saved;
-    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-    catch { saved = {}; }
-    delete saved[name];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+    removeSavedPortfolio(name);
   }, []);
 
-  const getSavedPortfolios = useCallback(() => {
-    let saved;
-    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-    catch { saved = {}; }
-    return Object.keys(saved);
-  }, []);
+  const getSavedPortfolios = useCallback(() => listSavedPortfolios(), []);
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
