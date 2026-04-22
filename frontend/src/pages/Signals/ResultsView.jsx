@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import Chart from '../../components/Chart';
+import ErrorCard from '../../components/ErrorCard/ErrorCard';
 import styles from './Signals.module.css';
 import { buildResultsPlot } from './resultsPlotTraces';
 
@@ -28,46 +29,6 @@ const ERROR_HEADINGS = {
   offline: "You're offline",
 };
 
-function ErrorCard({ error }) {
-  const heading = ERROR_HEADINGS[error.error_type] || 'Error running signal';
-  const [copied, setCopied] = useState(false);
-  function handleCopy() {
-    const blob = error.traceback
-      ? `${error.error_type}: ${error.message}\n\n${error.traceback}`
-      : error.message;
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(blob).then(
-          () => { setCopied(true); setTimeout(() => setCopied(false), 1600); },
-          () => { /* clipboard blocked */ },
-        );
-      }
-    } catch { /* ignore */ }
-  }
-  return (
-    <div className={styles.errorCard} data-error-type={error.error_type} role="alert">
-      <div className={styles.errorHeader}>
-        <h3 className={styles.errorHeading}>{heading}</h3>
-        <button
-          type="button"
-          className={styles.copyBtn}
-          onClick={handleCopy}
-          aria-label="Copy error details"
-        >
-          {copied ? 'Copied!' : 'Copy'}
-        </button>
-      </div>
-      <p className={styles.errorMessage}>{error.message}</p>
-      {error.traceback && (
-        <details className={styles.tracebackDetails}>
-          <summary>Show traceback</summary>
-          <pre className={styles.tracebackPre}>{error.traceback}</pre>
-        </details>
-      )}
-    </div>
-  );
-}
-
 function ResultsView({ result, loading, error, capital = 1000, noRepeat = false }) {
   const plot = useMemo(() => buildResultsPlot(result, { capital, noRepeat }), [result, capital, noRepeat]);
 
@@ -82,7 +43,12 @@ function ResultsView({ result, loading, error, capital = 1000, noRepeat = false 
   if (error) {
     return (
       <div className={styles.resultsViewBody}>
-        <ErrorCard error={error} />
+        <ErrorCard
+          error={error}
+          headings={ERROR_HEADINGS}
+          fallbackHeading="Error running signal"
+          styles={styles}
+        />
       </div>
     );
   }

@@ -3,77 +3,24 @@ import IndicatorsList from './IndicatorsList';
 import EditorPanel from './EditorPanel';
 import ParamsPanel from './ParamsPanel';
 import IndicatorChart from './IndicatorChart';
-import { resolveDefaultIndexInstrument } from '../../api/indicators';
+import { resolveDefaultIndexInstrument, computeIndicator } from '../../api/indicators';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { loadState, saveState } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
+import { hydrateDefault, applyDefaultSeries } from './hydrateDefault';
+import { buildPersistablePayload, serializePersistablePayload } from './persistablePayload';
+import { computeDefaultSeriesBannerText } from './defaultSeriesBanner';
+import { areAllSlotsFilled, computeRunDisabledReason } from './runGate';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import InlineNameInput from '../../components/InlineNameInput';
+import useAbortableAction from '../../hooks/useAbortableAction';
 import { classifyFetchError } from '../../utils/fetchError';
-import { ABORTED, coerceErrorType, fetchKindToErrorType } from './errorTaxonomy';
+import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
+import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import styles from './IndicatorsPage.module.css';
-
-/**
- * Inline name input that lives in the editor-panel header.
- * Uses a local draft so typing does not rerun the whole page on each
- * keystroke — the committed name propagates to the parent on blur or
- * Enter. Mirrors the previous ParamsPanel name-field semantics.
- */
-function IndicatorNameInput({ indicator, onRename }) {
-  const [draft, setDraft] = useState(indicator?.name || '');
-  const prevIdRef = useRef(indicator?.id);
-  // Tracks whether the input currently has focus. We flip it in the
-  // focus/blur handlers and consult it in the reset effect so external
-  // renames (e.g. switching indicator) don't stomp a user's in-progress
-  // edit. A ref (not state) — toggling it must not trigger a rerender.
-  const focusedRef = useRef(false);
-  // Reset draft whenever the selected indicator changes.
-  useEffect(() => {
-    if (prevIdRef.current !== indicator?.id) {
-      prevIdRef.current = indicator?.id;
-      setDraft(indicator?.name || '');
-    } else if ((indicator?.name || '') !== draft && !focusedRef.current) {
-      // External rename (e.g. defaults) — sync when the input is not focused.
-      setDraft(indicator?.name || '');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indicator?.id, indicator?.name]);
-
-  const readonly = !indicator || !!indicator?.readonly;
-  function commit() {
-    focusedRef.current = false;
-    if (!indicator || readonly) {
-      setDraft(indicator?.name || '');
-      return;
-    }
-    const next = draft.trim();
-    if (!next || next === indicator.name) {
-      setDraft(indicator.name);
-      return;
-    }
-    if (onRename) onRename(indicator.id, next);
-  }
-
-  return (
-    <input
-      className={styles.nameInput}
-      type="text"
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onFocus={() => { focusedRef.current = true; }}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); }
-      }}
-      disabled={readonly}
-      placeholder={indicator ? 'Indicator name' : 'Select an indicator'}
-      aria-label="Indicator name"
-      title={readonly ? 'Default indicator — name is fixed' : 'Indicator name'}
-    />
-  );
-}
 
 const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
     s = series['price']
@@ -93,114 +40,14 @@ function nextIndicatorName(existing) {
   return `Indicator ${maxN + 1}`;
 }
 
-// Hydrate a default indicator from the registry + persisted per-session
-// state. Returns the merged shape the rest of the page works with.
-//
-// Exported for unit tests. ``chartMode`` is a registry-only author hint
-// (no user-editable counterpart in localStorage) — it flows straight
-// from ``def`` into the hydrated object and is NEVER overridden by the
-// ``defaultState`` overlay, which only carries ``params`` / ``seriesMap``.
-export function hydrateDefault(def, savedEntry) {
-  const spec = parseIndicatorSpec(def.code);
-  const params = reconcileParams(savedEntry?.params || {}, spec.params);
-  const seriesMap = reconcileSeriesMap(savedEntry?.seriesMap || {}, spec.seriesLabels);
-  const hydrated = {
-    id: def.id,
-    name: def.name,
-    code: def.code,
-    doc: typeof def.doc === 'string' ? def.doc : '',
-    readonly: true,
-    params,
-    seriesMap,
-    // ownPanel is locked at the registry — users cannot override it for defaults.
-    ownPanel: !!def.ownPanel,
-  };
-  // chartMode is optional — only propagate when the registry entry sets
-  // it, so hydrated objects for entries without the hint stay clean
-  // (chart falls back to 'lines' via ``IndicatorChart.jsx``).
-  if (typeof def.chartMode === 'string' && def.chartMode) {
-    hydrated.chartMode = def.chartMode;
-  }
-  return hydrated;
-}
-
-// Normalize a backend error response into the structured shape the
-// chart panel renders. New envelope: {error_type, message, traceback?}.
-// Legacy shapes ({detail: "..."} or {message: "..."}) default to
-// error_type='validation' — same meaning as HTTP 400.
-function normalizeErrorEnvelope(body, fallbackStatusText) {
-  if (!body || typeof body !== 'object') {
-    return { error_type: 'validation', message: fallbackStatusText || 'Request failed' };
-  }
-  const error_type = coerceErrorType(body.error_type);
-  const message = (typeof body.message === 'string' && body.message)
-    || (typeof body.detail === 'string' && body.detail)
-    || fallbackStatusText
-    || 'Request failed';
-  const out = { error_type, message };
-  if (typeof body.traceback === 'string' && body.traceback) {
-    out.traceback = body.traceback;
-  }
-  return out;
-}
-
-// Build the storage-shaped payload (same shape the old persistence
-// effect wrote). Pure — no side-effects.
-function buildPersistablePayload(indicators) {
-  const userIndicators = indicators
-    .filter((ind) => !ind.readonly)
-    .map((ind) => ({
-      id: ind.id,
-      name: ind.name,
-      code: ind.code,
-      doc: typeof ind.doc === 'string' ? ind.doc : '',
-      params: ind.params,
-      seriesMap: ind.seriesMap,
-      // ``ownPanel`` is persisted for customs only — defaults source it
-      // from the registry (see ``hydrateDefault``), so we intentionally
-      // do NOT include it in ``defaultState`` below.
-      ownPanel: !!ind.ownPanel,
-    }));
-  const defaultState = {};
-  for (const ind of indicators) {
-    if (!ind.readonly) continue;
-    defaultState[ind.id] = { params: ind.params, seriesMap: ind.seriesMap };
-  }
-  return { indicators: userIndicators, defaultState };
-}
-
-// Stable-ish serialization for dirty comparison. JSON.stringify of a
-// plain object built from sorted entries is stable across re-renders
-// so long as the underlying data is the same.
-function serializePersistablePayload(indicators) {
-  return JSON.stringify(buildPersistablePayload(indicators));
-}
-
-// Auto-populate a default's SPX slot once the resolver returns, but
-// only if the slot is still empty (user may already have picked).
-function applyDefaultSeries(ind, defaultSeries) {
-  if (!defaultSeries) return ind;
-  const updated = { ...ind.seriesMap };
-  let touched = false;
-  for (const [label, picked] of Object.entries(updated)) {
-    if (picked === null) {
-      updated[label] = {
-        type: 'spot',
-        collection: defaultSeries.collection,
-        instrument_id: defaultSeries.instrument_id,
-      };
-      touched = true;
-    }
-  }
-  if (!touched) return ind;
-  return { ...ind, seriesMap: updated };
-}
+// Re-export hydrateDefault for tests that import from this module.
+export { hydrateDefault };
 
 function IndicatorsPage() {
   const [indicators, setIndicators] = useState([]); // merged list (defaults + user)
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
-  const [running, setRunning] = useState(false);
+  const { run: runAbortable, running, abort: abortRun } = useAbortableAction();
   const [error, setError] = useState(null); // structured: { error_type, message, traceback? }
   const [lastResult, setLastResult] = useState(null);
   const [defaultSeries, setDefaultSeries] = useState(null);
@@ -224,20 +71,11 @@ function IndicatorsPage() {
   // Code/Documentation tab state for the middle panel. Page-level only —
   // NOT persisted (always resets to 'code' on reload).
   const [viewMode, setViewMode] = useState('code');
-  // iter-4: replaced window.confirm with shared ConfirmDialog.
-  // pendingDeleteId holds the indicator id awaiting confirmation (null = closed).
+  // null = confirm dialog closed; otherwise the id awaiting confirmation.
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
 
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
-
-  // Abort controller for the in-flight /api/indicators/compute request.
-  // Ensures switching indicators or unmounting cancels stale work so its
-  // result can't overwrite the current selection's state.
-  const runAbortRef = useRef(null);
-  useEffect(() => () => {
-    if (runAbortRef.current) runAbortRef.current.abort();
-  }, []);
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
@@ -390,7 +228,6 @@ function IndicatorsPage() {
   const handleDelete = useCallback((id) => {
     const target = indicatorsRef.current.find((i) => i.id === id);
     if (!target || target.readonly) return;
-    // iter-4: open shared ConfirmDialog instead of synchronous window.confirm.
     setPendingDeleteId(id);
   }, []);
 
@@ -478,14 +315,8 @@ function IndicatorsPage() {
 
   const runIndicator = useCallback(async () => {
     if (!selectedIndicator) return;
-    // Cancel any still-running compute so a stale response can't clobber
-    // the state after the user switched indicators or hit Run again.
-    if (runAbortRef.current) runAbortRef.current.abort();
-    const controller = new AbortController();
-    runAbortRef.current = controller;
-    setRunning(true);
     setError(null);
-    try {
+    await runAbortable(async ({ signal }) => {
       const seriesPayload = {};
       for (const [label, picked] of Object.entries(selectedIndicator.seriesMap || {})) {
         if (picked) {
@@ -500,83 +331,54 @@ function IndicatorsPage() {
             : { type: 'spot', collection: picked.collection, instrument_id: picked.instrument_id };
         }
       }
-      let res;
       try {
-        res = await fetch('/api/indicators/compute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const data = await computeIndicator(
+          {
             code: selectedIndicator.code,
             params: selectedIndicator.params,
             series: seriesPayload,
-          }),
-          signal: controller.signal,
-        });
-      } catch (networkErr) {
-        if (controller.signal.aborted) {
-          return;
-        }
-        // Classify so offline/network surfaces an accurate heading in the
-        // error card rather than the misleading "Data error" label.
-        const classified = classifyFetchError(networkErr);
-        const error_type = fetchKindToErrorType(classified.kind);
-        if (error_type === ABORTED) {
-          // Silently suppress cancelled requests — don't render an error card.
+          },
+          { signal },
+        );
+        if (signal.aborted) return;
+        setLastResult(data);
+      } catch (e) {
+        if (signal.aborted) return;
+        if (e && typeof e === 'object' && 'status' in e) {
+          // Structured error envelope:
+          //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
+          // Legacy shapes ({detail: "..."} or {message: "..."}) fall back to
+          // error_type='validation'.
+          setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
           setLastResult(null);
-          return;
+        } else {
+          // Classify so offline/network surfaces an accurate heading in the
+          // error card rather than the misleading "Data error" label.
+          const classified = classifyFetchError(e);
+          const error_type = fetchKindToErrorType(classified.kind);
+          if (error_type === ABORTED) {
+            // Silently suppress cancelled requests — don't render an error card.
+            setLastResult(null);
+          } else {
+            setError({
+              error_type,
+              message: `${classified.title} — ${classified.message}`,
+            });
+            setLastResult(null);
+          }
         }
-        setError({
-          error_type,
-          message: `${classified.title} — ${classified.message}`,
-        });
-        setLastResult(null);
-        return;
       }
-      if (controller.signal.aborted) return;
-      if (!res.ok) {
-        // Parse the structured error envelope:
-        //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
-        // Legacy shapes ({detail: "..."} or {message: "..."}) fall back to
-        // error_type='validation'.
-        const body = await res.json().catch(() => null);
-        if (controller.signal.aborted) return;
-        const structured = normalizeErrorEnvelope(body, res.statusText);
-        setError(structured);
-        setLastResult(null);
-        return;
-      }
-      const data = await res.json();
-      if (controller.signal.aborted) return;
-      setLastResult(data);
-    } finally {
-      if (!controller.signal.aborted) setRunning(false);
-      if (runAbortRef.current === controller) runAbortRef.current = null;
-    }
-  }, [selectedIndicator]);
+    });
+  }, [selectedIndicator, runAbortable]);
 
   // Cancel any in-flight run when the user switches indicators —
   // otherwise a stale response could overwrite state for the new one.
   useEffect(() => {
-    return () => {
-      if (runAbortRef.current) {
-        runAbortRef.current.abort();
-        runAbortRef.current = null;
-        setRunning(false);
-      }
-    };
-  }, [selectedId]);
+    return () => abortRun();
+  }, [selectedId, abortRun]);
 
   const seriesLabels = parsedSpec.seriesLabels;
-  const allSlotsFilled = selectedIndicator
-    && seriesLabels.length > 0
-    && seriesLabels.every((lbl) => {
-      const picked = selectedIndicator.seriesMap?.[lbl];
-      if (!picked || !picked.collection) return false;
-      // Continuous series are identified by collection alone — no instrument_id.
-      if (picked.type === 'continuous') return true;
-      // Spot (and legacy entries without a type field) require instrument_id.
-      return !!picked.instrument_id;
-    });
+  const allSlotsFilled = areAllSlotsFilled(selectedIndicator, seriesLabels);
 
   const canRun = !!selectedIndicator
     && !running
@@ -585,36 +387,18 @@ function IndicatorsPage() {
 
   // Tooltip shown on the disabled Run button so keyboard and mouse users
   // can tell what's blocking execution. Priority: most-specific first.
-  const runDisabledReason = canRun || running ? null : (() => {
-    if (!selectedIndicator) return 'Select an indicator first';
-    if (!selectedIndicator.code || !selectedIndicator.code.trim()) return 'Add code before running';
-    const emptyLabel = seriesLabels.find((lbl) => {
-      const picked = selectedIndicator.seriesMap?.[lbl];
-      if (!picked || !picked.collection) return true;
-      if (picked.type === 'continuous') return false;
-      return !picked.instrument_id;
-    });
-    if (emptyLabel) return `Fill series slot: ${emptyLabel}`;
-    return 'Cannot run';
-  })();
+  const runDisabledReason = canRun || running
+    ? null
+    : computeRunDisabledReason(selectedIndicator, seriesLabels);
 
   // Banner copy driven by the classified resolver result. If we never
   // got a classified error (just no match), fall back to the original
   // "pick a series manually" message.
-  const bannerText = (() => {
-    if (!defaultSeriesLoaded) return null;
-    if (defaultSeries) return null;
-    if (defaultSeriesError) {
-      const k = defaultSeriesError.kind;
-      if (k === 'offline') return "You're offline — series list unavailable";
-      if (k === 'network') return "Can't reach the data server";
-      if (k === 'server' || k === 'client') {
-        return `Data server error: ${defaultSeriesError.message || 'unknown'}`;
-      }
-      // 'not-found' / 'unknown' → fall through to classic copy.
-    }
-    return 'S\u0026P 500 not found in DB — pick a series manually.';
-  })();
+  const bannerText = computeDefaultSeriesBannerText({
+    defaultSeriesLoaded,
+    defaultSeries,
+    defaultSeriesError,
+  });
 
   return (
     <div className={`${styles.page} ${selectedIndicator?.ownPanel ? styles.pageSplit : ''}`}>
@@ -648,14 +432,6 @@ function IndicatorsPage() {
         />
       </div>
       <div className={styles.paramsPanel}>
-        {/*
-          Iter-8: the indicator's name input + Save + Auto save now live
-          at the TOP of the params (right) column, just above the
-          Parameters section. The editor panel no longer carries a
-          header. SaveControls still reuses its ``leftSlot`` prop — the
-          Portfolio call site is untouched because ``leftSlot`` defaults
-          to undefined there.
-        */}
         <div className={styles.paramsTopBar}>
           <SaveControls
             className={styles.paramsSaveControls}
@@ -664,9 +440,18 @@ function IndicatorsPage() {
             onSave={commitSave}
             onToggleAutosave={setAutosave}
             leftSlot={
-              <IndicatorNameInput
-                indicator={selectedIndicator}
+              <InlineNameInput
+                entity={selectedIndicator}
                 onRename={handleRename}
+                className={styles.nameInput}
+                placeholder="Select an indicator"
+                selectedPlaceholder="Indicator name"
+                ariaLabel="Indicator name"
+                title={(ent) => (
+                  !ent || ent.readonly
+                    ? 'Default indicator — name is fixed'
+                    : 'Indicator name'
+                )}
               />
             }
           />
@@ -701,7 +486,6 @@ function IndicatorsPage() {
           />
         </Card>
       </div>
-      {/* iter-4: shared ConfirmDialog replaces the previous window.confirm. */}
       <ConfirmDialog
         open={pendingDeleteId !== null}
         title="Delete indicator?"

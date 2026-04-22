@@ -1,15 +1,32 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { formatDateInt } from '../../utils/format';
 import { useAutosave } from '../../components/SaveControls';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
+import { fetchSignalLegRange } from './signalLegRange';
+import { legsToRangesKey } from './legKey';
+import {
+  savePortfolio as persistPortfolio,
+  loadPortfolio as loadPortfolioEntry,
+  deleteSavedPortfolio as removeSavedPortfolio,
+  getSavedPortfolios as listSavedPortfolios,
+} from './storage';
+import useAbortableAction from '../../hooks/useAbortableAction';
 
-const STORAGE_KEY = 'tcg-saved-portfolios';
 const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
 
 let nextId = 1;
+
+// Pick a label that doesn't collide with any existing leg — API dict keys would collapse on duplicates.
+function uniqueLegLabel(desired, existingLegs) {
+  const existing = new Set(existingLegs.map((l) => l.label));
+  if (!existing.has(desired)) return desired;
+  let n = 2;
+  while (existing.has(`${desired} (${n})`)) n++;
+  return `${desired} (${n})`;
+}
 
 /**
  * Custom hook managing all portfolio state: legs, config, API calls, save/load.
@@ -23,7 +40,7 @@ export default function usePortfolio() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [results, setResults] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const { run: runAbortable, running: loading, abort: abortCalculate } = useAbortableAction();
   const [error, setError] = useState(null);
   const [legDateRanges, setLegDateRanges] = useState({});
   const [overlapRange, setOverlapRange] = useState(null);
@@ -34,89 +51,10 @@ export default function usePortfolio() {
     () => localStorage.getItem(AUTOSAVE_KEY) === 'true',
   );
 
-  const abortRef = useRef(null);
-
-  /* ── Helpers ── */
-
-  /**
-   * Fetch the date range for a signal leg by fetching each input's instrument
-   * range and computing the overlap (latest start, earliest end).
-   */
-  async function fetchSignalLegRange(leg) {
-    const inputs = leg.signalSpec?.inputs || [];
-    const configured = inputs.filter((inp) => inp.instrument);
-    if (configured.length === 0) {
-      return { id: leg.id, start: null, end: null };
-    }
-
-    const inputRanges = await Promise.all(
-      configured.map(async (inp) => {
-        try {
-          let dates;
-          const inst = inp.instrument;
-          if (inst.type === 'continuous') {
-            const res = await getContinuousSeries(inst.collection, {
-              strategy: inst.strategy || 'front_month',
-              adjustment: inst.adjustment || 'none',
-              cycle: inst.cycle || undefined,
-              rollOffset: inst.rollOffset || 0,
-            });
-            dates = res?.dates;
-          } else {
-            const res = await getInstrumentPrices(
-              inst.collection,
-              inst.instrument_id || inst.symbol,
-            );
-            dates = res?.dates;
-          }
-          if (dates && dates.length > 0) {
-            return {
-              start: formatDateInt(dates[0]),
-              end: formatDateInt(dates[dates.length - 1]),
-            };
-          }
-          return null;
-        } catch {
-          return null;
-        }
-      }),
-    );
-
-    const valid = inputRanges.filter(Boolean);
-    if (valid.length === 0) {
-      return { id: leg.id, start: null, end: null };
-    }
-
-    // Overlap = latest start, earliest end
-    const start = valid.reduce((a, b) => (a.start > b.start ? a : b)).start;
-    const end = valid.reduce((a, b) => (a.end < b.end ? a : b)).end;
-
-    if (start <= end) {
-      return { id: leg.id, start, end };
-    }
-    return { id: leg.id, start: null, end: null };
-  }
-
   /* ── Fetch date ranges when legs change ── */
 
   // Stable key: only data-affecting fields (not label/weight) trigger re-fetch
-  const rangesKey = useMemo(
-    () => legs.map((l) => {
-      if (l.type === 'signal') {
-        // Include input instruments so re-binding triggers a refetch
-        const inputKeys = (l.signalSpec?.inputs || []).map((inp) => {
-          const inst = inp.instrument;
-          if (!inst) return 'null';
-          if (inst.type === 'continuous') return `c:${inst.collection}:${inst.strategy}:${inst.adjustment}:${inst.cycle}:${inst.rollOffset}`;
-          return `i:${inst.collection}:${inst.instrument_id}`;
-        }).join(',');
-        return `s:${l.signalId}:[${inputKeys}]`;
-      }
-      if (l.type === 'continuous') return `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`;
-      return `i:${l.collection}:${l.symbol}`;
-    }).join('|'),
-    [legs],
-  );
+  const rangesKey = useMemo(() => legsToRangesKey(legs), [legs]);
 
   useEffect(() => {
     if (legs.length === 0) {
@@ -204,14 +142,7 @@ export default function usePortfolio() {
   const addLeg = useCallback((leg) => {
     const id = nextId++;
     setLegs((prev) => {
-      // Auto-suffix to avoid duplicate labels (keys would collapse in the API dict).
-      let label = leg.label || `Leg ${id}`;
-      const existing = new Set(prev.map((l) => l.label));
-      if (existing.has(label)) {
-        let n = 2;
-        while (existing.has(`${label} (${n})`)) n++;
-        label = `${label} (${n})`;
-      }
+      const label = uniqueLegLabel(leg.label || `Leg ${id}`, prev);
       return [
         ...prev,
         {
@@ -234,14 +165,7 @@ export default function usePortfolio() {
   const addSignalLeg = useCallback((signal) => {
     const id = nextId++;
     setLegs((prev) => {
-      // Auto-suffix to avoid duplicate labels (keys would collapse in the API dict).
-      let label = signal.name || `Signal ${id}`;
-      const existing = new Set(prev.map((l) => l.label));
-      if (existing.has(label)) {
-        let n = 2;
-        while (existing.has(`${label} (${n})`)) n++;
-        label = `${label} (${n})`;
-      }
+      const label = uniqueLegLabel(signal.name || `Signal ${id}`, prev);
       return [
         ...prev,
         {
@@ -282,21 +206,17 @@ export default function usePortfolio() {
   }, []);
 
   const clearAll = useCallback(() => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
+    abortCalculate();
     setLegs([]);
     setResults(null);
     setError(null);
-    setLoading(false);
     setLegDateRanges({});
     setOverlapRange(null);
     setStartDate('');
     setEndDate('');
     setPortfolioName('');
     setDirty(false);
-  }, []);
+  }, [abortCalculate]);
 
   /* ── Calculate ── */
 
@@ -352,34 +272,27 @@ export default function usePortfolio() {
       apiWeights[leg.label] = Number(leg.weight) || 0;
     }
 
-    // Abort previous request
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setLoading(true);
     setError(null);
-
-    try {
-      const res = await computePortfolio({
-        legs: apiLegs,
-        weights: apiWeights,
-        rebalance,
-        returnType: 'normal',
-        start: startDate || undefined,
-        end: endDate || undefined,
-        signal: controller.signal,
-      });
-      if (!controller.signal.aborted) {
-        setResults(res);
-        setLoading(false);
+    await runAbortable(async ({ signal }) => {
+      try {
+        const res = await computePortfolio({
+          legs: apiLegs,
+          weights: apiWeights,
+          rebalance,
+          returnType: 'normal',
+          start: startDate || undefined,
+          end: endDate || undefined,
+          signal,
+        });
+        if (!signal.aborted) {
+          setResults(res);
+        }
+      } catch (err) {
+        if (signal.aborted) return;
+        setError(err.message || 'Computation failed');
       }
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      setError(err.message || 'Computation failed');
-      setLoading(false);
-    }
-  }, [legs, rebalance, startDate, endDate]);
+    });
+  }, [legs, rebalance, startDate, endDate, runAbortable]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -387,32 +300,7 @@ export default function usePortfolio() {
 
   const savePortfolio = useCallback(
     (name) => {
-      let saved;
-      try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-      catch { saved = {}; }
-      const weightsDict = {};
-      for (const l of legs) weightsDict[l.label] = Number(l.weight) || 0;
-      saved[name] = {
-        legs: legs.map((l) => ({
-          label: l.label,
-          type: l.type,
-          collection: l.collection,
-          symbol: l.symbol,
-          strategy: l.strategy,
-          adjustment: l.adjustment,
-          cycle: l.cycle,
-          rollOffset: l.rollOffset,
-          weight: l.weight,
-          // Signal-specific fields (null for non-signal legs).
-          signalId: l.signalId || null,
-          signalName: l.signalName || null,
-          signalSpec: l.signalSpec || null,
-        })),
-        weights: weightsDict,
-        rebalance,
-        savedAt: new Date().toISOString(),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+      persistPortfolio(name, { legs, rebalance });
       setPortfolioName(name);
       setDirty(false);
     },
@@ -420,10 +308,7 @@ export default function usePortfolio() {
   );
 
   const loadPortfolio = useCallback((name) => {
-    let saved;
-    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-    catch { saved = {}; }
-    const entry = saved[name];
+    const entry = loadPortfolioEntry(name);
     if (!entry) return false;
 
     const restoredLegs = (entry.legs || []).map((l) => ({
@@ -443,19 +328,10 @@ export default function usePortfolio() {
   }, []);
 
   const deleteSavedPortfolio = useCallback((name) => {
-    let saved;
-    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-    catch { saved = {}; }
-    delete saved[name];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+    removeSavedPortfolio(name);
   }, []);
 
-  const getSavedPortfolios = useCallback(() => {
-    let saved;
-    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-    catch { saved = {}; }
-    return Object.keys(saved);
-  }, []);
+  const getSavedPortfolios = useCallback(() => listSavedPortfolios(), []);
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);

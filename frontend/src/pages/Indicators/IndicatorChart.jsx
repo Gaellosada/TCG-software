@@ -1,8 +1,26 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import Chart from '../../components/Chart';
 import { TRACE_COLORS } from '../../utils/chartTheme';
 import { HEADINGS } from './errorTaxonomy';
+import ErrorCard from '../../components/ErrorCard/ErrorCard';
 import styles from './IndicatorChart.module.css';
+
+// Icon SVG paths per error kind for the indicator chart's error card.
+// Preserved byte-for-byte from the pre-refactor inline implementation.
+const INDICATOR_ERROR_ICONS = {
+  validation: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
+  runtime: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
+  data: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
+  network: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
+  offline: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
+  generic: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
+};
+
+// Reconcile unknown error_type values to the 'generic' styling bucket
+// so the data-error-type attribute reflects the applied CSS variant.
+function coerceIndicatorErrorType(errorType) {
+  return HEADINGS[errorType] ? errorType : 'generic';
+}
 
 /**
  * Bottom panel — one Plotly chart (overlay or stacked-subplot) or an
@@ -151,7 +169,14 @@ function IndicatorChart({ indicator, result, loading, error }) {
   if (error) {
     return (
       <div className={styles.panel}>
-        <ErrorCard error={error} />
+        <ErrorCard
+          error={error}
+          headings={HEADINGS}
+          fallbackHeading="Error running indicator"
+          icons={INDICATOR_ERROR_ICONS}
+          styles={styles}
+          coerceErrorType={coerceIndicatorErrorType}
+        />
       </div>
     );
   }
@@ -181,72 +206,6 @@ function IndicatorChart({ indicator, result, loading, error }) {
           downloadFilename={`indicator-${indicator?.name || 'result'}`}
         />
       </div>
-    </div>
-  );
-}
-
-function ErrorCard({ error }) {
-  const kind = HEADINGS[error.error_type] ? error.error_type : 'generic';
-  const heading = HEADINGS[kind] || 'Error running indicator';
-  const iconPath = {
-    validation: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
-    runtime: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
-    data: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
-    network: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
-    offline: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
-    generic: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
-  }[kind];
-
-  const [copied, setCopied] = useState(false);
-
-  function handleCopy() {
-    const blob = error.traceback
-      ? `${error.error_type}: ${error.message}\n\n${error.traceback}`
-      : error.message;
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(blob).then(
-          () => { setCopied(true); setTimeout(() => setCopied(false), 1600); },
-          () => { /* clipboard blocked — swallow silently */ },
-        );
-      }
-    } catch { /* ignore */ }
-  }
-
-  return (
-    <div className={styles.errorCard} data-error-type={kind} role="alert">
-      <div className={styles.errorHeader}>
-        <svg
-          viewBox="0 0 24 24"
-          className={styles.errorIcon}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          width="22"
-          height="22"
-          aria-hidden="true"
-        >
-          <path d={iconPath} />
-        </svg>
-        <h3 className={styles.errorHeading}>{heading}</h3>
-        <button
-          type="button"
-          className={styles.copyBtn}
-          onClick={handleCopy}
-          aria-label="Copy error details"
-        >
-          {copied ? 'Copied!' : 'Copy'}
-        </button>
-      </div>
-      <p className={styles.errorMessage}>{error.message}</p>
-      {error.traceback && (
-        <details className={styles.tracebackDetails}>
-          <summary>Show traceback</summary>
-          <pre className={styles.tracebackPre}>{error.traceback}</pre>
-        </details>
-      )}
     </div>
   );
 }
