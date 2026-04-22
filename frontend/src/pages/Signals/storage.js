@@ -21,13 +21,15 @@
 //
 // Entry Block = {
 //   id: <uuid>,                      // stable, generated on creation
+//   name: <string>,                  // editable display name
 //   input_id: <string>,
 //   weight: <float in [-100, +100]>, // SIGNED percentage; sign decides long/short
 //   conditions: Condition[],         // unchanged from v3
 // }
 // Exit Block = {
 //   id: <uuid>,                      // stable, generated on creation
-//   target_entry_block_id: <uuid>,   // MUST match an existing entry block id
+//   name: <string>,                  // editable display name
+//   target_entry_block_name: <string>, // matches an entry's editable `name`
 //   conditions: Condition[],
 // }
 // Exit blocks do NOT carry block-level input_id or weight; the
@@ -127,7 +129,7 @@ function sanitiseSpotInstrument(raw) {
 function sanitiseContinuousInstrument(raw) {
   const collection = typeof raw.collection === 'string' ? raw.collection : '';
   if (!collection) return null;
-  const adjustment = ['none', 'proportional', 'difference'].includes(raw.adjustment)
+  const adjustment = ['none', 'ratio', 'difference'].includes(raw.adjustment)
     ? raw.adjustment : 'none';
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
   const rollOffset = Number.isFinite(raw.rollOffset) ? raw.rollOffset : 0;
@@ -178,12 +180,14 @@ function sanitiseBlock(raw, section) {
     // Exit blocks carry no block-level input_id or weight — the
     // operating input is derived from the target entry. Legacy
     // payloads may include these fields; strip them.
+    // Legacy target_entry_block_id is also stripped — exits now
+    // reference entries by their editable name string.
     return {
       id,
       name,
       conditions,
-      target_entry_block_id: typeof raw.target_entry_block_id === 'string'
-        ? raw.target_entry_block_id
+      target_entry_block_name: typeof raw.target_entry_block_name === 'string'
+        ? raw.target_entry_block_name
         : '',
     };
   }
@@ -278,7 +282,7 @@ export function saveState(state) {
 
 /**
  * Return a new signal with the entry block ``entryId`` removed, and every
- * exit referencing that entry also removed (cascade delete per PLAN.md).
+ * exit referencing that entry's name also removed (cascade delete per PLAN.md).
  * Pure — does not mutate the input.
  *
  * If ``entryId`` does not match any existing entry, the signal is
@@ -290,8 +294,12 @@ export function cascadeDeleteEntry(signal, entryId) {
   const rules = signal.rules || emptyRules();
   const entries = Array.isArray(rules.entries) ? rules.entries : [];
   const exits = Array.isArray(rules.exits) ? rules.exits : [];
+  const deleted = entries.find((b) => b && b.id === entryId);
   const nextEntries = entries.filter((b) => b && b.id !== entryId);
-  const nextExits = exits.filter((b) => b && b.target_entry_block_id !== entryId);
+  const deletedName = deleted && typeof deleted.name === 'string' ? deleted.name : '';
+  const nextExits = deletedName
+    ? exits.filter((b) => b && b.target_entry_block_name !== deletedName)
+    : exits;
   return {
     ...signal,
     rules: { entries: nextEntries, exits: nextExits },

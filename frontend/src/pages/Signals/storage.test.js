@@ -104,7 +104,7 @@ describe('Signals storage (v4)', () => {
               instrument: {
                 type: 'continuous',
                 collection: 'FUT_ES',
-                adjustment: 'proportional',
+                adjustment: 'ratio',
                 cycle: 'H',
                 rollOffset: 2,
                 strategy: 'front_month',
@@ -131,7 +131,7 @@ describe('Signals storage (v4)', () => {
               {
                 id: 'exit-uuid-1',
                 name: '',
-                target_entry_block_id: entryId,
+                target_entry_block_name: '',
                 conditions: [
                   {
                     op: 'cross_below',
@@ -201,7 +201,7 @@ describe('Signals storage (v4)', () => {
                 id: 'exit-1',
                 input_id: 'X',        // legacy — must be stripped
                 weight: 42,           // legacy — must be stripped
-                target_entry_block_id: 'entry-1',
+                target_entry_block_name: 'MyEntry',
                 conditions: [],
               },
             ],
@@ -211,7 +211,7 @@ describe('Signals storage (v4)', () => {
     }));
     const out = loadState();
     const ex = out.signals[0].rules.exits[0];
-    expect(ex.target_entry_block_id).toBe('entry-1');
+    expect(ex.target_entry_block_name).toBe('MyEntry');
     expect('input_id' in ex).toBe(false);
     expect('weight' in ex).toBe(false);
   });
@@ -385,7 +385,7 @@ describe('Signals storage (v4)', () => {
     expect(out.signals[0].rules.entries[0].conditions).toHaveLength(1);
   });
 
-  it('preserves target_entry_block_id on exit blocks', () => {
+  it('preserves target_entry_block_name on exit blocks', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
@@ -393,17 +393,17 @@ describe('Signals storage (v4)', () => {
           id: 's1', name: 's1', inputs: [],
           rules: {
             entries: [{ id: 'entry-1', input_id: 'X', weight: 50, conditions: [] }],
-            exits: [{ id: 'exit-1', input_id: 'X', weight: 0, target_entry_block_id: 'entry-1', conditions: [] }],
+            exits: [{ id: 'exit-1', target_entry_block_name: 'MyEntry', conditions: [] }],
           },
         },
       ],
     }));
     const out = loadState();
     const exit = out.signals[0].rules.exits[0];
-    expect(exit.target_entry_block_id).toBe('entry-1');
+    expect(exit.target_entry_block_name).toBe('MyEntry');
   });
 
-  it('defaults a missing target_entry_block_id on an exit block to ""', () => {
+  it('defaults a missing target_entry_block_name on an exit block to ""', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
@@ -411,16 +411,16 @@ describe('Signals storage (v4)', () => {
           id: 's1', name: 's1', inputs: [],
           rules: {
             entries: [],
-            exits: [{ id: 'exit-1', input_id: 'X', weight: 0, conditions: [] }],
+            exits: [{ id: 'exit-1', conditions: [] }],
           },
         },
       ],
     }));
     const out = loadState();
-    expect(out.signals[0].rules.exits[0].target_entry_block_id).toBe('');
+    expect(out.signals[0].rules.exits[0].target_entry_block_name).toBe('');
   });
 
-  it('does NOT add target_entry_block_id to entry blocks', () => {
+  it('does NOT add target_entry_block_name to entry blocks', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
@@ -434,7 +434,33 @@ describe('Signals storage (v4)', () => {
       ],
     }));
     const entry = loadState().signals[0].rules.entries[0];
-    expect('target_entry_block_id' in entry).toBe(false);
+    expect('target_entry_block_name' in entry).toBe(false);
+  });
+
+  it('sanitiser strips legacy target_entry_block_id on exits and preserves target_entry_block_name', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [],
+            exits: [
+              {
+                id: 'exit-1',
+                target_entry_block_id: 'old-entry-id',   // legacy — must be stripped
+                target_entry_block_name: 'Momentum',      // new field — must survive
+                conditions: [],
+              },
+            ],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    const ex = out.signals[0].rules.exits[0];
+    expect(ex.target_entry_block_name).toBe('Momentum');
+    expect('target_entry_block_id' in ex).toBe(false);
   });
 
   it('tolerates setItem throwing on save', () => {
@@ -496,19 +522,19 @@ describe('cascadeDeleteEntry', () => {
     inputs: [],
     rules: {
       entries: [
-        { id: 'e1', input_id: 'X', weight: 50, conditions: [] },
-        { id: 'e2', input_id: 'X', weight: -30, conditions: [] },
+        { id: 'e1', input_id: 'X', weight: 50, name: 'Alpha', conditions: [] },
+        { id: 'e2', input_id: 'X', weight: -30, name: 'Beta', conditions: [] },
       ],
       exits: [
-        { id: 'x1', input_id: 'X', weight: 0, target_entry_block_id: 'e1', conditions: [] },
-        { id: 'x2', input_id: 'X', weight: 0, target_entry_block_id: 'e2', conditions: [] },
-        { id: 'x3', input_id: 'X', weight: 0, target_entry_block_id: 'e1', conditions: [] },
+        { id: 'x1', target_entry_block_name: 'Alpha', conditions: [] },
+        { id: 'x2', target_entry_block_name: 'Beta', conditions: [] },
+        { id: 'x3', target_entry_block_name: 'Alpha', conditions: [] },
       ],
     },
     settings: { dont_repeat: true },
   };
 
-  it('removes the entry and every exit referencing it', () => {
+  it('removes the entry and every exit referencing its name', () => {
     const next = cascadeDeleteEntry(sig, 'e1');
     expect(next.rules.entries.map((b) => b.id)).toEqual(['e2']);
     expect(next.rules.exits.map((b) => b.id)).toEqual(['x2']);
@@ -528,5 +554,24 @@ describe('cascadeDeleteEntry', () => {
     const originalExitsLen = sig.rules.exits.length;
     cascadeDeleteEntry(sig, 'e1');
     expect(sig.rules.exits.length).toBe(originalExitsLen);
+  });
+  it('does not cascade exits when deleted entry has no name', () => {
+    const sigNoName = {
+      ...sig,
+      rules: {
+        entries: [
+          { id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [] },
+          { id: 'e2', input_id: 'X', weight: -30, name: 'Beta', conditions: [] },
+        ],
+        exits: [
+          { id: 'x1', target_entry_block_name: '', conditions: [] },
+          { id: 'x2', target_entry_block_name: 'Beta', conditions: [] },
+        ],
+      },
+    };
+    const next = cascadeDeleteEntry(sigNoName, 'e1');
+    // Entry removed, but exits untouched because deleted name is empty
+    expect(next.rules.entries.map((b) => b.id)).toEqual(['e2']);
+    expect(next.rules.exits).toHaveLength(2);
   });
 });

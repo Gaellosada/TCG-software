@@ -12,7 +12,7 @@ function entryBlock(weight = 50) {
 
 // Exit block fixture
 function exitBlock() {
-  return { id: 'blk-2', input_id: '', weight: 0, conditions: [], target_entry_block_id: '' };
+  return { id: 'blk-2', conditions: [], target_entry_block_name: '' };
 }
 
 const NO_INPUTS = [];
@@ -54,6 +54,7 @@ describe('BlockHeader — % suffix', () => {
         block={exitBlock()}
         section="exits"
         inputs={NO_INPUTS}
+        entryBlocks={[]}
         onChange={noop}
         onDelete={noop}
         blockIndex={1}
@@ -130,6 +131,7 @@ describe('BlockHeader — badge (no badge on exits)', () => {
         block={exitBlock()}
         section="exits"
         inputs={NO_INPUTS}
+        entryBlocks={[]}
         onChange={noop}
         onDelete={noop}
         blockIndex={1}
@@ -209,18 +211,19 @@ describe('BlockHeader — section label', () => {
     expect(screen.getByText('entry on')).toBeDefined();
   });
 
-  it('shows "exit" for exits section', () => {
+  it('shows "exit on" for exits section', () => {
     render(
       <BlockHeader
         block={exitBlock()}
         section="exits"
         inputs={NO_INPUTS}
+        entryBlocks={[]}
         onChange={noop}
         onDelete={noop}
         blockIndex={1}
       />,
     );
-    expect(screen.getByText('exit')).toBeDefined();
+    expect(screen.getByText('exit on')).toBeDefined();
   });
 });
 

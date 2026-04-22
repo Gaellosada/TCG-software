@@ -287,7 +287,7 @@ async def test_exit_reentry_same_bar_relatches():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", input_id="X", weight=100.0, conditions=(entry,)),
+                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(entry,)),
             ),
             exits=(
                 Block(
@@ -295,7 +295,7 @@ async def test_exit_reentry_same_bar_relatches():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_c,),
-                    target_entry_block_id="E",
+                    target_entry_block_name="Entry",
                 ),
             ),
         ),
@@ -353,17 +353,17 @@ async def test_exit_clears_only_target_entry():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E1", input_id="X", weight=50.0, conditions=(always,)),
-                Block(id="E2", input_id="X", weight=30.0, conditions=(always,)),
+                Block(id="E1", name="Entry1", input_id="X", weight=50.0, conditions=(always,)),
+                Block(id="E2", name="Entry2", input_id="X", weight=30.0, conditions=(always,)),
             ),
             exits=(
-                # Exit targets E1 only.
+                # Exit targets Entry1 only.
                 Block(
                     id="XE1",
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_at_t3,),
-                    target_entry_block_id="E1",
+                    target_entry_block_name="Entry1",
                 ),
             ),
         ),
@@ -405,8 +405,8 @@ async def test_exit_clears_only_target_entry_not_other():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E1", input_id="X", weight=50.0, conditions=(e1_cond,)),
-                Block(id="E2", input_id="X", weight=30.0, conditions=(e2_cond,)),
+                Block(id="E1", name="Entry1", input_id="X", weight=50.0, conditions=(e1_cond,)),
+                Block(id="E2", name="Entry2", input_id="X", weight=30.0, conditions=(e2_cond,)),
             ),
             exits=(
                 Block(
@@ -414,7 +414,7 @@ async def test_exit_clears_only_target_entry_not_other():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_id="E1",
+                    target_entry_block_name="Entry1",
                 ),
             ),
         ),
@@ -463,8 +463,8 @@ async def test_exit_does_not_clear_opposite_side_entry():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="EL", input_id="X", weight=50.0, conditions=(e_l_cond,)),
-                Block(id="ES", input_id="X", weight=-50.0, conditions=(always,)),
+                Block(id="EL", name="EntryLong", input_id="X", weight=50.0, conditions=(e_l_cond,)),
+                Block(id="ES", name="EntryShort", input_id="X", weight=-50.0, conditions=(always,)),
             ),
             exits=(
                 Block(
@@ -472,7 +472,7 @@ async def test_exit_does_not_clear_opposite_side_entry():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_id="EL",
+                    target_entry_block_name="EntryLong",
                 ),
             ),
         ),
@@ -597,10 +597,10 @@ async def test_duplicate_input_ids_rejected():
 
 @pytest.mark.asyncio
 async def test_exit_with_dangling_target_is_noop():
-    """A usable exit whose target_entry_block_id does not match any
-    usable entry is silently skipped (the API validation layer rejects
-    such payloads before they reach the engine; the engine tolerates
-    latent bad state gracefully)."""
+    """A usable exit whose target_entry_block_name does not match any
+    usable entry name is silently skipped (the API validation layer
+    rejects such payloads before they reach the engine; the engine
+    tolerates latent bad state gracefully)."""
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = CompareCondition(
@@ -619,7 +619,7 @@ async def test_exit_with_dangling_target_is_noop():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", input_id="X", weight=50.0, conditions=(entry,)),
+                Block(id="E", name="Entry", input_id="X", weight=50.0, conditions=(entry,)),
             ),
             exits=(
                 Block(
@@ -627,7 +627,7 @@ async def test_exit_with_dangling_target_is_noop():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_c,),
-                    target_entry_block_id="DOES_NOT_EXIST",
+                    target_entry_block_name="DOES_NOT_EXIST",
                 ),
             ),
         ),
@@ -642,7 +642,7 @@ async def test_exit_with_dangling_target_is_noop():
 @pytest.mark.asyncio
 async def test_events_schema_entry_and_exit():
     """Verify event records carry id, kind, fired/latched/active and
-    target_entry_block_id per the v4 trace schema."""
+    target_entry_block_name per the v4 trace schema."""
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     e_cond = CompareCondition(
@@ -661,7 +661,7 @@ async def test_events_schema_entry_and_exit():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", input_id="X", weight=100.0, conditions=(e_cond,)),
+                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(e_cond,)),
             ),
             exits=(
                 Block(
@@ -669,7 +669,7 @@ async def test_events_schema_entry_and_exit():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_id="E",
+                    target_entry_block_name="Entry",
                 ),
             ),
         ),
@@ -681,14 +681,14 @@ async def test_events_schema_entry_and_exit():
     assert e.latched_indices == (1,)
     # Active at t=1, 2 (latch held until cleared at t=3 by the exit).
     assert e.active_indices == (1, 2)
-    assert e.target_entry_block_id is None
+    assert e.target_entry_block_name is None
 
     x = events_by[("X1", "exit")]
     assert x.fired_indices == (3,)
     # Effective exit: t=3, since E was open.
     assert x.latched_indices == (3,)
     assert x.active_indices == ()
-    assert x.target_entry_block_id == "E"
+    assert x.target_entry_block_name == "Entry"
 
 
 @pytest.mark.asyncio
@@ -713,7 +713,7 @@ async def test_exit_firing_on_closed_entry_is_not_effective():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", input_id="X", weight=100.0, conditions=(never,)),
+                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(never,)),
             ),
             exits=(
                 Block(
@@ -721,7 +721,7 @@ async def test_exit_firing_on_closed_entry_is_not_effective():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_id="E",
+                    target_entry_block_name="Entry",
                 ),
             ),
         ),

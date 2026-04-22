@@ -20,12 +20,13 @@ Request::
       "indicators": IndicatorSpec[]
     }
 
-Where ``Block = {id, input_id, weight, conditions,
-target_entry_block_id?}``. ``weight`` is a signed percentage in
+Where ``Block = {id, name, input_id, weight, conditions,
+target_entry_block_name?}``. ``weight`` is a signed percentage in
 ``[-100, +100]``; sign decides long/short. ``id`` is a stable
-frontend-generated UUID. ``target_entry_block_id`` is REQUIRED on
+frontend-generated UUID. ``name`` is a user-editable string used by
+exits to reference entries. ``target_entry_block_name`` is REQUIRED on
 exits and FORBIDDEN on entries, and must reference an existing entry
-block id within the same signal. ``input_id`` is REQUIRED on entries
+block name within the same signal. ``input_id`` is REQUIRED on entries
 and FORBIDDEN on exits — an exit's operating input is derived from its
 target entry's ``input_id`` at validation time.
 
@@ -51,7 +52,7 @@ Response — per-input positions + per-block events::
           "fired_indices":   int[],           // bars where AND-condition fired
           "latched_indices": int[],           // "effective" bars (see below)
           "active_indices":  int[],           // entries only: bars with latch open
-          "target_entry_block_id": str | null
+          "target_entry_block_name": str | null
         }
       ],
       "indicators": [
@@ -166,16 +167,21 @@ class _ConditionIn(BaseModel):
 
 
 class _BlockIn(BaseModel):
-    """v4 block: stable ``id`` + ``input_id`` + signed ``weight``.
+    """v4 block: stable ``id`` + ``name`` + ``input_id`` + signed ``weight``.
 
-    On exit blocks ``target_entry_block_id`` references the entry
-    block whose latch this exit clears. Entries must leave it unset.
+    On exit blocks ``target_entry_block_name`` references the entry
+    block (by name) whose latch this exit clears. Entries must leave
+    it unset.
     """
 
     id: str = ""
+    name: str = ""
     conditions: list[_ConditionIn] = Field(default_factory=list)
     input_id: str = ""
     weight: float = 0.0
+    target_entry_block_name: str | None = None
+    # DEPRECATED: kept so Pydantic does not silently drop it; API
+    # validation rejects any request that sets this field.
     target_entry_block_id: str | None = None
 
 
@@ -332,15 +338,16 @@ def _parse_blocks(
     *,
     section: str,
     is_entry: bool,
-    entry_ids: set[str] | None = None,
+    entry_names: set[str] | None = None,
 ) -> tuple[Block, ...]:
     """Parse request-shape blocks into typed :class:`Block` tuples.
 
     Validates v4 invariants:
-      * entries: ``target_entry_block_id`` must be unset; ``weight`` is
-        a signed percentage in ``[-100, +100]`` and ``!= 0``.
-      * exits: ``target_entry_block_id`` is required and must reference
-        an id in ``entry_ids``.
+      * entries: ``target_entry_block_name`` must be unset; ``weight``
+        is a signed percentage in ``[-100, +100]`` and ``!= 0``.
+        Non-empty ``name`` values must be unique across entries.
+      * exits: ``target_entry_block_name`` is required and must
+        reference a name in ``entry_names``.
       * both: ``id`` is required (non-empty) on any block that has at
         least one condition. Empty-id + empty-conditions blocks are
         the "placeholder" state from the UI and are passed through as
@@ -350,6 +357,7 @@ def _parse_blocks(
     """
     out: list[Block] = []
     seen_entry_ids: set[str] = set()
+    seen_entry_names: set[str] = set()
     for i, blk in enumerate(blocks):
         path = f"rules.{section}[{i}]"
         conds = tuple(
@@ -357,15 +365,17 @@ def _parse_blocks(
             for j, c in enumerate(blk.conditions)
         )
         bid = blk.id or ""
+        name = blk.name or ""
         iid = blk.input_id or ""
         weight = float(blk.weight)
-        tgt = blk.target_entry_block_id or None
+        tgt_name = blk.target_entry_block_name or None
+        legacy_tgt = blk.target_entry_block_id or None
 
         # Placeholder blocks (no conditions + no input) are accepted
         # as sentinels; they skip evaluation. Otherwise full validation.
         placeholder = (
             not conds and not iid and not bid
-            and weight == 0.0 and tgt is None
+            and weight == 0.0 and tgt_name is None
         )
         if not placeholder:
             if not bid:
@@ -373,10 +383,15 @@ def _parse_blocks(
                     f"{path}: block id is required"
                 )
             if is_entry:
-                if tgt is not None:
+                if tgt_name is not None:
                     raise SignalValidationError(
                         f"{path}: entry blocks must not set "
-                        f"'target_entry_block_id'"
+                        f"'target_entry_block_name'"
+                    )
+                if legacy_tgt is not None:
+                    raise SignalValidationError(
+                        f"{path}: entry blocks must not set "
+                        f"'target_entry_block_id' (legacy field removed)"
                     )
                 if weight == 0.0:
                     raise SignalValidationError(
@@ -393,6 +408,13 @@ def _parse_blocks(
                         f"{path}: duplicate entry block id {bid!r}"
                     )
                 seen_entry_ids.add(bid)
+                if name:
+                    if name in seen_entry_names:
+                        raise SignalValidationError(
+                            f"{path}: duplicate entry block name {name!r} "
+                            f"— entry names must be unique within a signal"
+                        )
+                    seen_entry_names.add(name)
             else:
                 # Exit blocks must NOT carry a block-level input_id: the
                 # operating input is derived from the target entry.
@@ -404,27 +426,34 @@ def _parse_blocks(
                         f"the operating input is derived from the target "
                         f"entry's input_id"
                     )
-                if not tgt:
+                if legacy_tgt is not None:
+                    raise SignalValidationError(
+                        f"{path}: exit blocks must use "
+                        f"'target_entry_block_name' (string), not the "
+                        f"removed 'target_entry_block_id' (uuid)"
+                    )
+                if not tgt_name:
                     raise SignalValidationError(
                         f"{path}: exit blocks require "
-                        f"'target_entry_block_id'"
+                        f"'target_entry_block_name'"
                     )
-                assert entry_ids is not None
-                if tgt not in entry_ids:
+                assert entry_names is not None
+                if tgt_name not in entry_names:
                     raise SignalValidationError(
-                        f"{path}: target_entry_block_id {tgt!r} does not "
-                        f"reference any entry block id in this signal's "
-                        f"rules; declared entry ids: "
-                        f"{sorted(entry_ids)!r}"
+                        f"{path}: target_entry_block_name {tgt_name!r} "
+                        f"does not match any entry block name in this "
+                        f"signal's rules; declared entry names: "
+                        f"{sorted(entry_names)!r}"
                     )
 
         out.append(
             Block(
                 id=bid,
+                name=name,
                 conditions=conds,
                 input_id=iid,
                 weight=weight,
-                target_entry_block_id=tgt,
+                target_entry_block_name=tgt_name,
             )
         )
     return tuple(out)
@@ -435,12 +464,12 @@ def parse_signal(raw: SignalIn) -> Signal:
     entries = _parse_blocks(
         raw.rules.entries, section="entries", is_entry=True,
     )
-    entry_ids: set[str] = {b.id for b in entries if b.id}
+    entry_names: set[str] = {b.name for b in entries if b.name}
     exits = _parse_blocks(
         raw.rules.exits,
         section="exits",
         is_entry=False,
-        entry_ids=entry_ids,
+        entry_names=entry_names,
     )
     rules = SignalRules(entries=entries, exits=exits)
     return Signal(id=raw.id, name=raw.name, inputs=inputs, rules=rules)
@@ -734,7 +763,7 @@ async def compute_signal(
                 "fired_indices": [int(i) for i in ev.fired_indices],
                 "latched_indices": [int(i) for i in ev.latched_indices],
                 "active_indices": [int(i) for i in ev.active_indices],
-                "target_entry_block_id": ev.target_entry_block_id,
+                "target_entry_block_name": ev.target_entry_block_name,
             }
         )
 
@@ -743,14 +772,15 @@ async def compute_signal(
     }
     indicators_out: list[dict] = []
     for ind in result.indicator_series:
-        indicators_out.append(
-            {
-                "input_id": ind.input_id,
-                "indicator_id": ind.indicator_id,
-                "series": nan_safe_floats(ind.series),
-                "ownPanel": indicator_own_panel.get(ind.indicator_id, False),
-            }
-        )
+        entry: dict = {
+            "input_id": ind.input_id,
+            "indicator_id": ind.indicator_id,
+            "series": nan_safe_floats(ind.series),
+            "ownPanel": indicator_own_panel.get(ind.indicator_id, False),
+        }
+        if ind.params_override:
+            entry["params_override"] = ind.params_override
+        indicators_out.append(entry)
 
     return {
         "timestamps": timestamps,

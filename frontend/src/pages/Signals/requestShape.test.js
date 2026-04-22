@@ -51,12 +51,13 @@ describe('computeSignal request body shape (v4)', () => {
     expect(body.spec.settings).toEqual({ dont_repeat: true });
   });
 
-  it('block id, input_id, signed weight and target_entry_block_id flow through verbatim', () => {
+  it('block id, name, input_id, signed weight and target_entry_block_name flow through verbatim', () => {
     const signal = {
       id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
         entries: [{
           id: 'entry-42',
+          name: 'Alpha',
           input_id: 'X',
           weight: -30,
           conditions: [
@@ -67,11 +68,12 @@ describe('computeSignal request body shape (v4)', () => {
         }],
         exits: [{
           id: 'exit-9',
+          name: 'Exit1',
           // Legacy stored values that the request builder must drop so
           // the wire payload never carries block-level input_id on exits.
           input_id: 'X',
           weight: 0,
-          target_entry_block_id: 'entry-42',
+          target_entry_block_name: 'Alpha',
           conditions: [
             { op: 'gt',
               lhs: { kind: 'constant', value: 1 },
@@ -83,13 +85,18 @@ describe('computeSignal request body shape (v4)', () => {
     const { body } = buildComputeRequestBody(signal, []);
     const entry = body.spec.rules.entries[0];
     expect(entry.id).toBe('entry-42');
+    expect(entry.name).toBe('Alpha');
     expect(entry.input_id).toBe('X');
     expect(entry.weight).toBe(-30);
-    // Entry blocks do NOT carry target_entry_block_id.
+    // Entry blocks do NOT carry target_entry_block_name or target_entry_block_id.
+    expect('target_entry_block_name' in entry).toBe(false);
     expect('target_entry_block_id' in entry).toBe(false);
     const exit = body.spec.rules.exits[0];
     expect(exit.id).toBe('exit-9');
-    expect(exit.target_entry_block_id).toBe('entry-42');
+    expect(exit.name).toBe('Exit1');
+    expect(exit.target_entry_block_name).toBe('Alpha');
+    // Exit blocks must NOT carry legacy target_entry_block_id.
+    expect('target_entry_block_id' in exit).toBe(false);
     // Exit blocks must NOT carry block-level input_id or weight on the
     // wire — the backend rejects payloads with non-empty input_id.
     expect('input_id' in exit).toBe(false);
@@ -254,13 +261,13 @@ describe('computeSignal request body shape (v4)', () => {
           ] },
         ],
         exits: [
-          { id: 'x1', input_id: 'X', weight: 0, target_entry_block_id: 'e1', conditions: [
+          { id: 'x1', input_id: 'X', weight: 0, target_entry_block_name: 'e1', conditions: [
             { op: 'in_range',
               operand: { kind: 'indicator', indicator_id: 'b', input_id: 'X', output: 'default' },
               min:     { kind: 'indicator', indicator_id: 'c', input_id: 'X', output: 'default' },
               max:     { kind: 'constant', value: 1 } },
           ] },
-          { id: 'x2', input_id: 'X', weight: 0, target_entry_block_id: 'e2', conditions: [
+          { id: 'x2', input_id: 'X', weight: 0, target_entry_block_name: 'e2', conditions: [
             { op: 'cross_below',
               lhs: { kind: 'indicator', indicator_id: 'e', input_id: 'X', output: 'default' },
               rhs: { kind: 'instrument', input_id: 'X', field: 'close' } },

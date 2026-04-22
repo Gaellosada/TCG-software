@@ -2,7 +2,7 @@
 
 Submits a full v4 signal through the ASGI stack and asserts the
 response-shape contract: top-level keys, per-position shape, per-event
-schema (id/kind/fired/latched/active/target_entry_block_id), and
+schema (id/kind/fired/latched/active/target_entry_block_name), and
 latching semantics (per-target-entry clearing).
 """
 
@@ -119,6 +119,7 @@ async def test_http_roundtrip_v4_two_inputs_indicator_operand(
                 "entries": [
                     {
                         "id": "EX",
+                        "name": "EntryX",
                         "input_id": "X",
                         "weight": 60.0,
                         "conditions": [
@@ -139,6 +140,7 @@ async def test_http_roundtrip_v4_two_inputs_indicator_operand(
                     },
                     {
                         "id": "EY",
+                        "name": "EntryY",
                         "input_id": "Y",
                         "weight": -40.0,
                         "conditions": [
@@ -218,7 +220,7 @@ async def test_http_roundtrip_v4_two_inputs_indicator_operand(
     # Events carry the new v4 schema.
     ev_by_id = {ev["block_id"]: ev for ev in data["events"]}
     assert ev_by_id["EX"]["kind"] == "entry"
-    assert ev_by_id["EX"]["target_entry_block_id"] is None
+    assert ev_by_id["EX"]["target_entry_block_name"] is None
     assert "active_indices" in ev_by_id["EX"]
 
 
@@ -275,6 +277,7 @@ def _eq_block(
     weight: float,
     threshold: float,
     target: str | None = None,
+    name: str = "",
 ) -> dict:
     """Build an eq-block fixture.
 
@@ -282,6 +285,9 @@ def _eq_block(
     on entries only, the block-level input_id. Exit blocks (``target``
     supplied) omit block-level ``input_id`` + ``weight`` per the v4
     contract — the operating input is derived from the target entry.
+
+    ``name`` is set on entry blocks (the user-editable display name).
+    ``target`` is the ``target_entry_block_name`` for exit blocks.
     """
     blk: dict = {
         "id": bid,
@@ -298,10 +304,12 @@ def _eq_block(
         ],
     }
     if target is not None:
-        blk["target_entry_block_id"] = target
+        blk["target_entry_block_name"] = target
     else:
         blk["input_id"] = input_id
         blk["weight"] = weight
+        if name:
+            blk["name"] = name
     return blk
 
 
@@ -332,13 +340,13 @@ async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
             ],
             "rules": {
                 "entries": [
-                    _eq_block("A", "X", 60.0, 11.0),   # long, close=11 → t=1,5
-                    _eq_block("B", "X", -40.0, 44.0),  # short, close=44 → t=4
-                    _eq_block("C", "X", 50.0, 22.0),   # long, close=22 → t=7
+                    _eq_block("A", "X", 60.0, 11.0, name="EntryA"),   # long, close=11 → t=1,5
+                    _eq_block("B", "X", -40.0, 44.0, name="EntryB"),  # short, close=44 → t=4
+                    _eq_block("C", "X", 50.0, 22.0, name="EntryC"),   # long, close=22 → t=7
                 ],
                 "exits": [
-                    # Targets A only; fires at close=33 → t=3.
-                    _eq_block("XA", "X", 0.0, 33.0, target="A"),
+                    # Targets entry named "EntryA"; fires at close=33 → t=3.
+                    _eq_block("XA", "X", 0.0, 33.0, target="EntryA"),
                 ],
             },
         },
@@ -369,7 +377,7 @@ async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
     assert ev_by["A"]["latched_indices"] == [1, 5]
     # Active = bars where A's latch held at emission.
     assert ev_by["A"]["active_indices"] == [1, 2, 5, 6, 7]
-    assert ev_by["A"]["target_entry_block_id"] is None
+    assert ev_by["A"]["target_entry_block_name"] is None
 
     assert ev_by["B"]["fired_indices"] == [4]
     assert ev_by["B"]["latched_indices"] == [4]
@@ -383,7 +391,7 @@ async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
     assert ev_by["XA"]["fired_indices"] == [3]
     # Effective exit: A was open at t=3 → actually cleared.
     assert ev_by["XA"]["latched_indices"] == [3]
-    assert ev_by["XA"]["target_entry_block_id"] == "A"
+    assert ev_by["XA"]["target_entry_block_name"] == "EntryA"
     assert ev_by["XA"]["active_indices"] == []
 
     # realized_pnl exposed as list of lists.

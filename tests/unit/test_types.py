@@ -98,7 +98,7 @@ class TestEnums:
 
     def test_adjustment_method_values(self):
         assert AdjustmentMethod.NONE == "none"
-        assert AdjustmentMethod.PROPORTIONAL == "proportional"
+        assert AdjustmentMethod.RATIO == "ratio"
         assert AdjustmentMethod.DIFFERENCE == "difference"
         assert len(AdjustmentMethod) == 3
 
@@ -174,7 +174,7 @@ class TestMarketTypes:
         ps = _make_price_series(5)
         roll_cfg = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
             cycle="HMUZ",
         )
         cs = ContinuousSeries(

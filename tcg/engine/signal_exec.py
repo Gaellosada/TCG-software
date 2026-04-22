@@ -5,17 +5,18 @@ v4 — unified Entries/Exits with signed weights
 The v3 four-direction model is gone. Each signal declares two block
 lists:
 
-  * ``rules.entries`` -- blocks with stable ``id`` and signed
-    ``weight`` in ``[-100, +100]``; ``sign(weight)`` decides long/short.
+  * ``rules.entries`` -- blocks with stable ``id``, user-editable
+    ``name``, and signed ``weight`` in ``[-100, +100]``;
+    ``sign(weight)`` decides long/short.
   * ``rules.exits`` -- blocks that each target *exactly one* entry via
-    ``target_entry_block_id``. When an exit's AND-condition fires at
+    ``target_entry_block_name``. When an exit's AND-condition fires at
     bar ``t``, the referenced entry block's latch is cleared; no other
     latches are touched (no "same-side-under-input" blanket clear).
 
 Per-bar execution (declaration order within each list):
 
   1. **Clear pass.** For every usable exit block whose condition fires
-     at ``t``: look up the entry latch by id, if True set False.
+     at ``t``: look up the entry latch by name → id, if True set False.
   2. **Entry pass.** For every usable entry block whose condition
      fires at ``t`` AND whose latch is currently False: set latch True.
      Leverage is allowed — no budget cap, no same-bar conflict logic
@@ -34,12 +35,13 @@ A block is "usable" iff
   * ``id`` is non-empty (required for stable tracking / exit targeting);
   * entry blocks require ``input_id`` resolves to a declared Input,
     ``weight != 0`` AND ``|weight| <= 100``;
-  * exit blocks require ``target_entry_block_id`` referencing a usable
-    entry block in the same signal's rules (a dangling target makes
-    the exit a no-op — the engine tolerates this so latent bad state
-    degrades gracefully; the API layer rejects it with HTTP 400). Exit
-    blocks do NOT carry their own ``input_id``; the operating input is
-    always derived from the target entry's ``input_id``.
+  * exit blocks require ``target_entry_block_name`` referencing a
+    usable entry block's name in the same signal's rules (a dangling
+    target makes the exit a no-op — the engine tolerates this so
+    latent bad state degrades gracefully; the API layer rejects it
+    with HTTP 400). Exit blocks do NOT carry their own ``input_id``;
+    the operating input is always derived from the target entry's
+    ``input_id``.
   * every operand's ``input_id`` resolves;
   * the bound Input's instrument is fully configured.
 
@@ -577,10 +579,10 @@ def _usable_entry(block: Block, inputs: dict[str, Input]) -> bool:
 
 
 def _usable_exit(
-    block: Block, inputs: dict[str, Input], entry_ids: set[str]
+    block: Block, inputs: dict[str, Input], entry_names: set[str]
 ) -> bool:
     """Exit block is usable iff it has id + conditions AND
-    target_entry_block_id references a usable entry.
+    target_entry_block_name references a usable entry's name.
 
     Exit blocks do not carry their own ``input_id``; the operating input
     is derived from the target entry at execution time.
@@ -589,27 +591,27 @@ def _usable_exit(
         return False
     if not block.conditions:
         return False
-    if not block.target_entry_block_id:
+    if not block.target_entry_block_name:
         return False
-    if block.target_entry_block_id not in entry_ids:
+    if block.target_entry_block_name not in entry_names:
         return False
     return True
 
 
 def _exit_input_id(
-    exit_block: Block, entries_by_id: dict[str, Block]
+    exit_block: Block, entries_by_name: dict[str, Block]
 ) -> str:
     """Return the operating input id for an exit block, derived from its
     target entry.
 
     Callers must only pass exit blocks that are already known to be
-    usable (i.e. ``target_entry_block_id`` resolves in ``entries_by_id``);
-    this helper does not re-validate. Returns the target entry's
-    ``input_id``.
+    usable (i.e. ``target_entry_block_name`` resolves in
+    ``entries_by_name``); this helper does not re-validate. Returns
+    the target entry's ``input_id``.
     """
-    target = exit_block.target_entry_block_id
-    assert target is not None, "exit_block must have target_entry_block_id"
-    entry = entries_by_id[target]
+    target = exit_block.target_entry_block_name
+    assert target is not None, "exit_block must have target_entry_block_name"
+    entry = entries_by_name[target]
     return entry.input_id
 
 
@@ -664,8 +666,8 @@ class BlockEvent:
     * ``active_indices``: entries only — bars where this entry's latch
       was True *at emission time* (i.e. contributed to position[t]).
       Empty for exit blocks.
-    * ``target_entry_block_id``: exits only — the id of the entry this
-      exit targets. ``None`` on entries.
+    * ``target_entry_block_name``: exits only — the name of the entry
+      this exit targets. ``None`` on entries.
 
     The frontend computes the "don't repeat" effective filter directly
     from these: effective entry bars = ``latched_indices`` on entry
@@ -678,7 +680,7 @@ class BlockEvent:
     fired_indices: tuple[int, ...]
     latched_indices: tuple[int, ...]
     active_indices: tuple[int, ...] = ()
-    target_entry_block_id: str | None = None
+    target_entry_block_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -686,6 +688,7 @@ class IndicatorSeriesResult:
     input_id: str
     indicator_id: str
     series: npt.NDArray[np.float64]
+    params_override: dict[str, float | int | bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -719,12 +722,19 @@ async def evaluate_signal(
             "duplicate entry block id within signal.rules.entries"
         )
 
-    # Index usable entries by id once; exits derive their operating
+    # Index usable entries by name once; exits derive their operating
     # input from their target entry via this map.
-    entries_by_id: dict[str, Block] = {b.id: b for b in entry_blocks}
+    entry_names: set[str] = {b.name for b in entry_blocks if b.name}
+    if len(entry_names) != len([b for b in entry_blocks if b.name]):
+        raise SignalValidationError(
+            "duplicate entry block name within signal.rules.entries"
+        )
+    entries_by_name: dict[str, Block] = {
+        b.name: b for b in entry_blocks if b.name
+    }
 
     exit_blocks: list[Block] = [
-        b for b in signal.rules.exits if _usable_exit(b, inputs, entry_ids)
+        b for b in signal.rules.exits if _usable_exit(b, inputs, entry_names)
     ]
     # Exits may have duplicate ids across entries; but distinct ids from
     # each other are preferred for trace clarity — not enforced here.
@@ -740,7 +750,7 @@ async def evaluate_signal(
         seen_ids.add(blk.input_id)
         referenced_ids.append(blk.input_id)
     for blk in exit_blocks:
-        iid = _exit_input_id(blk, entries_by_id)
+        iid = _exit_input_id(blk, entries_by_name)
         if iid in seen_ids:
             continue
         seen_ids.add(iid)
@@ -819,7 +829,7 @@ async def evaluate_signal(
         if blk.input_id in nan_poison:
             nan_poison[blk.input_id] = nan_poison[blk.input_id] | entry_nan[blk.id]
     for blk in exit_blocks:
-        iid = _exit_input_id(blk, entries_by_id)
+        iid = _exit_input_id(blk, entries_by_name)
         if iid in nan_poison:
             nan_poison[iid] = nan_poison[iid] | exit_nan[blk.id]
 
@@ -834,9 +844,8 @@ async def evaluate_signal(
         for b in entry_blocks
     }
 
-    # Entry block by id (for position summation). Re-bind the earlier
-    # ``entries_by_id`` under a local name for readability below.
-    entry_by_id: dict[str, Block] = entries_by_id
+    # Entry block by id (for position summation).
+    entry_by_id: dict[str, Block] = {b.id: b for b in entry_blocks}
 
     # Output buffer: per-input net position.
     position: dict[str, npt.NDArray[np.float64]] = {
@@ -863,10 +872,11 @@ async def evaluate_signal(
         for b in exit_blocks:
             if not bool(exit_truth[b.id][t]):
                 continue
-            target = b.target_entry_block_id  # validated usable above
+            target_name = b.target_entry_block_name
+            target_entry = entries_by_name.get(target_name)
             # Effective exit = only when the target was actually open.
-            if latched.get(target, False):
-                latched[target] = False
+            if target_entry and latched.get(target_entry.id, False):
+                latched[target_entry.id] = False
                 exit_latched[b.id].append(t)
 
         # --- (c) entry pass: declaration order; leverage allowed ---
@@ -952,39 +962,46 @@ async def evaluate_signal(
                 fired_indices=tuple(entry_fired[b.id]),
                 latched_indices=tuple(entry_latched[b.id]),
                 active_indices=tuple(entry_active[b.id]),
-                target_entry_block_id=None,
+                target_entry_block_name=None,
             )
         )
     for b in exit_blocks:
         events.append(
             BlockEvent(
-                input_id=_exit_input_id(b, entries_by_id),
+                input_id=_exit_input_id(b, entries_by_name),
                 block_id=b.id,
                 kind="exit",
                 fired_indices=tuple(exit_fired[b.id]),
                 latched_indices=tuple(exit_latched[b.id]),
                 active_indices=(),
-                target_entry_block_id=b.target_entry_block_id,
+                target_entry_block_name=b.target_entry_block_name,
             )
         )
 
-    # ── 8. Indicator series (expose every indicator operand value) ──
+    # ── 8. Indicator series (expose every unique indicator operand) ──
+    # Dedup by full operand key (includes params_override, series_override,
+    # and output), so the same indicator used with different parameters on
+    # the same input produces separate series in the response.
     indicator_series: list[IndicatorSeriesResult] = []
-    seen_pairs: set[tuple[str, str]] = set()
+    seen_keys: set[tuple] = set()
     for op in _walk_operands(signal):
         if not isinstance(op, IndicatorOperand):
             continue
-        pair = (op.input_id, op.indicator_id)
-        if pair in seen_pairs:
-            continue
-        seen_pairs.add(pair)
         k = _operand_key(op, indicators, inputs)
+        if k in seen_keys:
+            continue
+        seen_keys.add(k)
         if k in values_by_key:
             indicator_series.append(
                 IndicatorSeriesResult(
                     input_id=op.input_id,
                     indicator_id=op.indicator_id,
                     series=values_by_key[k],
+                    params_override=(
+                        dict(op.params_override)
+                        if op.params_override
+                        else None
+                    ),
                 )
             )
 

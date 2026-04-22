@@ -1,7 +1,7 @@
 """API tests for /api/signals/compute -- v4 shape.
 
 v4 unifies long/short into signed-weight entries and exits targeting a
-specific entry block via ``target_entry_block_id``. Weights are signed
+specific entry block via ``target_entry_block_name``. Weights are signed
 percentages in ``[-100, +100]``.
 """
 
@@ -97,6 +97,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 100.0,
                             "conditions": [
@@ -173,6 +174,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "ShortEntry",
                             "input_id": "X",
                             "weight": -50.0,
                             "conditions": [
@@ -209,6 +211,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 100.0,
                             "conditions": [
@@ -227,7 +230,7 @@ class TestComputeEndpointV4:
                     "exits": [
                         {
                             "id": "X1",
-                            "target_entry_block_id": "E1",
+                            "target_entry_block_name": "Entry1",
                             "conditions": [
                                 {
                                     "op": "eq",
@@ -256,7 +259,7 @@ class TestComputeEndpointV4:
         assert vals[5] == pytest.approx(0.0)
         assert vals[-1] == pytest.approx(0.0)
 
-    async def test_unknown_target_entry_block_id_rejected(
+    async def test_unknown_target_entry_block_name_rejected(
         self, client: AsyncClient
     ):
         body = {
@@ -268,6 +271,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 100.0,
                             "conditions": [
@@ -285,7 +289,7 @@ class TestComputeEndpointV4:
                     "exits": [
                         {
                             "id": "X1",
-                            "target_entry_block_id": "NOPE",
+                            "target_entry_block_name": "NOPE",
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -307,6 +311,7 @@ class TestComputeEndpointV4:
         assert resp.status_code == 400
         data = resp.json()
         assert data["error_type"] == "validation"
+        assert "target_entry_block_name" in data["message"]
         assert "NOPE" in data["message"]
         assert "rules.exits[0]" in data["message"]
 
@@ -320,6 +325,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 100.0,
                             "conditions": [
@@ -358,9 +364,9 @@ class TestComputeEndpointV4:
         assert resp.status_code == 400
         data = resp.json()
         assert data["error_type"] == "validation"
-        assert "target_entry_block_id" in data["message"]
+        assert "target_entry_block_name" in data["message"]
 
-    async def test_entry_with_target_rejected(self, client: AsyncClient):
+    async def test_entry_with_target_name_rejected(self, client: AsyncClient):
         body = {
             "spec": {
                 "id": "sig",
@@ -370,9 +376,10 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 100.0,
-                            "target_entry_block_id": "E1",  # not allowed
+                            "target_entry_block_name": "Entry1",  # not allowed
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -395,7 +402,7 @@ class TestComputeEndpointV4:
         assert resp.status_code == 400
         data = resp.json()
         assert data["error_type"] == "validation"
-        assert "target_entry_block_id" in data["message"]
+        assert "target_entry_block_name" in data["message"]
 
     async def test_exit_with_input_id_rejected(self, client: AsyncClient):
         """Invariant: exit blocks must NOT carry a block-level input_id.
@@ -412,6 +419,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 100.0,
                             "conditions": [
@@ -431,7 +439,7 @@ class TestComputeEndpointV4:
                             "id": "X1",
                             # Forbidden: exits must not carry input_id.
                             "input_id": "X",
-                            "target_entry_block_id": "E1",
+                            "target_entry_block_name": "Entry1",
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -469,6 +477,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 100.0,
                             "conditions": [
@@ -487,7 +496,7 @@ class TestComputeEndpointV4:
                         {
                             "id": "X1",
                             "input_id": "",  # empty = treated as absent
-                            "target_entry_block_id": "E1",
+                            "target_entry_block_name": "Entry1",
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -518,6 +527,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 0.0,
                             "conditions": [
@@ -556,6 +566,7 @@ class TestComputeEndpointV4:
                     "entries": [
                         {
                             "id": "E1",
+                            "name": "Entry1",
                             "input_id": "X",
                             "weight": 150.0,  # out of [-100, 100]
                             "conditions": [
@@ -757,3 +768,169 @@ class TestComputeEndpointV4:
         assert data["positions"] == []
         assert data["timestamps"] == []
         assert data["clipped"] is False
+
+    async def test_exit_with_legacy_target_entry_block_id_rejected(
+        self, client: AsyncClient
+    ):
+        """Exit sending target_entry_block_id (legacy) is rejected."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "name": "Entry1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "target_entry_block_id": "E1",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "target_entry_block_id" in data["message"]
+
+    async def test_duplicate_entry_names_rejected(self, client: AsyncClient):
+        """Two entries with the same non-empty name are rejected."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "name": "SameName",
+                            "input_id": "X",
+                            "weight": 50.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        },
+                        {
+                            "id": "E2",
+                            "name": "SameName",
+                            "input_id": "X",
+                            "weight": 50.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        },
+                    ],
+                    "exits": [],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "duplicate" in data["message"].lower()
+        assert "SameName" in data["message"]
+
+    async def test_exit_with_dangling_target_entry_block_name_rejected(
+        self, client: AsyncClient
+    ):
+        """Exit's target_entry_block_name matches no entry name."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "name": "Entry1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "target_entry_block_name": "DoesNotExist",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "target_entry_block_name" in data["message"]
+        assert "DoesNotExist" in data["message"]

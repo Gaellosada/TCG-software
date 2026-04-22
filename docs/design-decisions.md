@@ -102,10 +102,10 @@
 
 ## Backward Processing for Roll Adjustments
 
-**Decision:** Roll adjustments (proportional and difference) process backward from the last roll to the first.
+**Decision:** Roll adjustments (ratio and difference) process backward from the last roll to the first.
 
 **Rationale:**
-- When adjusting proportionally, earlier prices must accumulate ALL subsequent adjustment ratios. Processing forward would require tracking cumulative factors; processing backward naturally cascades: each adjustment multiplies everything before the current roll date, which already includes prior adjustments.
+- When adjusting by ratio, earlier prices must accumulate ALL subsequent adjustment ratios. Processing forward would require tracking cumulative factors; processing backward naturally cascades: each adjustment multiplies everything before the current roll date, which already includes prior adjustments.
 - Same logic applies to additive (difference) adjustment.
 
 **Locations:** `tcg/data/_rolling/adjustment.py`.

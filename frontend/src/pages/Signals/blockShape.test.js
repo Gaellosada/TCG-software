@@ -46,15 +46,17 @@ describe('defaultBlock (v4)', () => {
     expect('target_entry_block_id' in b).toBe(false);
   });
 
-  it('exit block adds target_entry_block_id: "" and omits block-level input_id/weight', () => {
+  it('exit block adds target_entry_block_name: "" and omits block-level input_id/weight', () => {
     const b = defaultBlock('exits');
-    expect(b.target_entry_block_id).toBe('');
+    expect(b.target_entry_block_name).toBe('');
+    expect('target_entry_block_id' in b).toBe(false);
     expect('input_id' in b).toBe(false);
     expect('weight' in b).toBe(false);
   });
 
   it('defaults to entries when no section given', () => {
     const b = defaultBlock();
+    expect('target_entry_block_name' in b).toBe(false);
     expect('target_entry_block_id' in b).toBe(false);
   });
 
@@ -310,53 +312,56 @@ describe('isBlockRunnable (v4 — exits)', () => {
   const runnableCondition = { op: 'gt', lhs: CONST_OK, rhs: CONST_OK };
   const exitBlock = (over = {}) => ({
     id: 'x1',
-    input_id: 'X',
-    weight: 0,
     conditions: [runnableCondition],
-    target_entry_block_id: 'entry-1',
+    target_entry_block_name: 'Alpha',
     ...over,
   });
-  const entryIds = new Set(['entry-1']);
+  // Entry blocks array with names for name-based resolution
+  const entryBlocks = [{ id: 'entry-1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] }];
 
-  it('happy path: exit with valid target → true (weight ignored)', () => {
-    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryIds)).toBe(true);
+  it('happy path: exit with valid target name → true (weight ignored)', () => {
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(true);
   });
 
-  it('missing target_entry_block_id → false', () => {
-    expect(isBlockRunnable(exitBlock({ target_entry_block_id: '' }), 'exits', INPUTS, entryIds)).toBe(false);
+  it('missing target_entry_block_name → false', () => {
+    expect(isBlockRunnable(exitBlock({ target_entry_block_name: '' }), 'exits', INPUTS, entryBlocks)).toBe(false);
   });
 
-  it('target does not match any entry → false', () => {
-    expect(isBlockRunnable(exitBlock({ target_entry_block_id: 'orphan' }), 'exits', INPUTS, entryIds)).toBe(false);
-  });
-
-  it('accepts entryIds as a plain array (tolerant signature)', () => {
-    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, ['entry-1'])).toBe(true);
+  it('target does not match any entry name → false', () => {
+    expect(isBlockRunnable(exitBlock({ target_entry_block_name: 'orphan' }), 'exits', INPUTS, entryBlocks)).toBe(false);
   });
 
   it('exit + weight=0 → true (exit blocks don\'t participate in position sizing)', () => {
-    expect(isBlockRunnable(exitBlock({ weight: 0 }), 'exits', INPUTS, entryIds)).toBe(true);
+    expect(isBlockRunnable(exitBlock({ weight: 0 }), 'exits', INPUTS, entryBlocks)).toBe(true);
   });
 
   it('exit + nonzero weight → still runnable (weight unused on exits)', () => {
-    expect(isBlockRunnable(exitBlock({ weight: 999 }), 'exits', INPUTS, entryIds)).toBe(true);
+    expect(isBlockRunnable(exitBlock({ weight: 999 }), 'exits', INPUTS, entryBlocks)).toBe(true);
   });
 
   // When callers pass an array of entry Block objects (rich check), the
   // exit's runnability additionally requires the target entry's input_id
   // to resolve to a configured input — exits inherit that input.
   it('rich check: target entry has no input_id → false', () => {
-    const entryBlocks = [{ id: 'entry-1', input_id: '', weight: 10, conditions: [] }];
-    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(false);
+    const blocks = [{ id: 'entry-1', name: 'Alpha', input_id: '', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, blocks)).toBe(false);
   });
 
   it('rich check: target entry has unknown input_id → false', () => {
-    const entryBlocks = [{ id: 'entry-1', input_id: 'NOPE', weight: 10, conditions: [] }];
-    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(false);
+    const blocks = [{ id: 'entry-1', name: 'Alpha', input_id: 'NOPE', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, blocks)).toBe(false);
   });
 
   it('rich check: target entry has configured input → true', () => {
-    const entryBlocks = [{ id: 'entry-1', input_id: 'X', weight: 10, conditions: [] }];
-    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(true);
+    const blocks = [{ id: 'entry-1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, blocks)).toBe(true);
+  });
+
+  it('ambiguous: two entries share the same name → false', () => {
+    const blocks = [
+      { id: 'entry-1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] },
+      { id: 'entry-2', name: 'Alpha', input_id: 'X', weight: 20, conditions: [] },
+    ];
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, blocks)).toBe(false);
   });
 });

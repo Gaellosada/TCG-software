@@ -93,7 +93,7 @@ describe('<SignalPickerModal>', () => {
           { id: 'e2', input_id: 'X', weight: -25, conditions: [] },
         ],
         exits: [
-          { id: 'x1', input_id: 'Y', weight: 0, target_entry_block_id: 'e1', conditions: [] },
+          { id: 'x1', input_id: 'Y', weight: 0, target_entry_block_name: 'e1', conditions: [] },
         ],
       },
     });

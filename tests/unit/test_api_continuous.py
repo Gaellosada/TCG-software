@@ -119,14 +119,14 @@ async def test_continuous_series_success(client: AsyncClient, mock_svc):
 async def test_continuous_series_with_params(client: AsyncClient, mock_svc):
     """Explicit query parameters are parsed and forwarded correctly."""
     mock_svc.get_continuous.return_value = _make_continuous_series(
-        cycle="HMUZ", adjustment=AdjustmentMethod.PROPORTIONAL
+        cycle="HMUZ", adjustment=AdjustmentMethod.RATIO
     )
 
     resp = await client.get(
         "/api/data/continuous/FUT_VIX",
         params={
             "strategy": "front_month",
-            "adjustment": "proportional",
+            "adjustment": "ratio",
             "cycle": "HMUZ",
             "start": "2015-01-01",
             "end": "2015-12-31",
@@ -136,7 +136,7 @@ async def test_continuous_series_with_params(client: AsyncClient, mock_svc):
 
     call_args = mock_svc.get_continuous.call_args
     config = call_args[0][1]
-    assert config.adjustment == AdjustmentMethod.PROPORTIONAL
+    assert config.adjustment == AdjustmentMethod.RATIO
     assert config.cycle == "HMUZ"
     # Date args are keyword
     from datetime import date

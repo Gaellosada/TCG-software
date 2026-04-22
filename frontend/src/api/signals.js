@@ -31,7 +31,7 @@
  * @param {Object} spec
  *   the v4 Signal to evaluate — ``{id, name, inputs, rules: {entries,
  *   exits}}`` where each section is a list of Blocks
- *   ``{id, input_id, weight, conditions, target_entry_block_id?}``. See
+ *   ``{id, input_id, weight, conditions, target_entry_block_name?}``. See
  *   PLAN.md § "Wire contract (v4)".
  * @param {Array<{id: string, name: string, code: string, params: object, seriesMap: object}>} indicators
  *   list of every IndicatorSpec referenced by any operand in ``spec`` —

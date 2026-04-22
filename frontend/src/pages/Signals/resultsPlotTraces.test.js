@@ -93,16 +93,16 @@ describe('buildBlockWeightSignMap', () => {
     expect(map.e3).toBe(0);
   });
 
-  it('maps exit block ids to sign(weight) of the target entry', () => {
+  it('maps exit block ids to sign(weight) of the target entry (by name)', () => {
     const rules = {
       entries: [
-        { id: 'e1', input_id: 'X', weight: 75, conditions: [] },
-        { id: 'e2', input_id: 'X', weight: -25, conditions: [] },
+        { id: 'e1', name: 'Alpha', input_id: 'X', weight: 75, conditions: [] },
+        { id: 'e2', name: 'Beta', input_id: 'X', weight: -25, conditions: [] },
       ],
       exits: [
-        { id: 'x1', input_id: 'X', weight: 0, target_entry_block_id: 'e1', conditions: [] },
-        { id: 'x2', input_id: 'X', weight: 0, target_entry_block_id: 'e2', conditions: [] },
-        { id: 'x3', input_id: 'X', weight: 0, target_entry_block_id: 'unknown', conditions: [] },
+        { id: 'x1', input_id: 'X', weight: 0, target_entry_block_name: 'Alpha', conditions: [] },
+        { id: 'x2', input_id: 'X', weight: 0, target_entry_block_name: 'Beta', conditions: [] },
+        { id: 'x3', input_id: 'X', weight: 0, target_entry_block_name: 'unknown', conditions: [] },
       ],
     };
     const map = buildBlockWeightSignMap(rules);
@@ -147,7 +147,7 @@ describe('buildEventMarkerTraces', () => {
     const events = [
       {
         input_id: 'X', block_id: 'x1', kind: 'exit',
-        fired_indices: [1], latched_indices: [1], target_entry_block_id: 'e1',
+        fired_indices: [1], latched_indices: [1], target_entry_block_name: 'e1',
       },
     ];
     // Exit targets a LONG entry (positive weight) → green open triangle-down
@@ -166,7 +166,7 @@ describe('buildEventMarkerTraces', () => {
     );
     // Short exit: kind=exit + targets a negative-weight entry → red OPEN triangle-up
     const exit = buildEventMarkerTraces(
-      [{ input_id: 'X', block_id: 'b3', kind: 'exit', fired_indices: [2], latched_indices: [2], target_entry_block_id: 'b2' }],
+      [{ input_id: 'X', block_id: 'b3', kind: 'exit', fired_indices: [2], latched_indices: [2], target_entry_block_name: 'b2' }],
       positions, dates, undefined, { blockWeightSigns: { b3: -1 } },
     );
     expect(entry[0].marker.color).toBe('#ef4444');

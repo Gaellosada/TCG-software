@@ -214,8 +214,8 @@ async def test_get_continuous_has_roll_dates(market_data):
 
 
 @pytest.mark.integration
-async def test_get_continuous_proportional_returns_continuity(market_data):
-    """PROPORTIONAL adjustment should preserve returns continuity at rolls."""
+async def test_get_continuous_ratio_returns_continuity(market_data):
+    """RATIO adjustment should preserve returns continuity at rolls."""
     collections = await market_data.list_collections()
     if FUTURES_COLLECTION not in collections:
         pytest.skip(f"{FUTURES_COLLECTION} not in registry")
@@ -224,27 +224,27 @@ async def test_get_continuous_proportional_returns_continuity(market_data):
         strategy=RollStrategy.FRONT_MONTH,
         adjustment=AdjustmentMethod.NONE,
     )
-    config_prop = ContinuousRollConfig(
+    config_ratio = ContinuousRollConfig(
         strategy=RollStrategy.FRONT_MONTH,
-        adjustment=AdjustmentMethod.PROPORTIONAL,
+        adjustment=AdjustmentMethod.RATIO,
     )
 
     series_none = await market_data.get_continuous(FUTURES_COLLECTION, config_none)
-    series_prop = await market_data.get_continuous(FUTURES_COLLECTION, config_prop)
+    series_ratio = await market_data.get_continuous(FUTURES_COLLECTION, config_ratio)
 
-    if series_none is None or series_prop is None:
+    if series_none is None or series_ratio is None:
         pytest.skip("Could not build both adjustment types")
 
-    assert isinstance(series_prop, ContinuousSeries)
-    assert len(series_prop.prices) > 0
+    assert isinstance(series_ratio, ContinuousSeries)
+    assert len(series_ratio.prices) > 0
 
     # Both should span similar date ranges
-    assert series_prop.prices.dates[0] == series_none.prices.dates[0]
-    assert series_prop.prices.dates[-1] == series_none.prices.dates[-1]
+    assert series_ratio.prices.dates[0] == series_none.prices.dates[0]
+    assert series_ratio.prices.dates[-1] == series_none.prices.dates[-1]
 
-    # Proportional adjustment should have no NaN
-    assert not np.any(np.isnan(series_prop.prices.close)), (
-        "NaN in proportionally adjusted close prices"
+    # Ratio adjustment should have no NaN
+    assert not np.any(np.isnan(series_ratio.prices.close)), (
+        "NaN in ratio-adjusted close prices"
     )
 
 

@@ -66,6 +66,17 @@ incompatible with prior versions, and no migration code is provided.
   `input_id`/`weight` from exit blocks on load, and the frontend UI
   hides the input picker on exit blocks (showing a read-only derived
   label instead).
+- **BREAKING — Exit blocks now reference their target entry by name
+  instead of by stable id.** Field renamed from `target_entry_block_id`
+  to `target_entry_block_name`. The reference is by value: renaming an
+  entry breaks any exit that still references the old name (no automatic
+  cascade). Two entries sharing a name invalidate the run until
+  disambiguated. Backend rejects dangling names, duplicate entry names,
+  and legacy `target_entry_block_id` payloads with HTTP 400.
+- **BREAKING — Rolling adjustment method renamed from "proportional" to
+  "ratio".** The API parameter, stored schema value, and UI label all
+  change from `proportional` to `ratio`. Existing saved instruments
+  using the old value will need their adjustment field updated.
 - **BREAKING — portfolio-leg math / signal-as-holding scaling.** Signal
   block `weight` is now a **signed fractional position contribution**:
   `+100` means a full-long unleveraged position (1.0× the underlying

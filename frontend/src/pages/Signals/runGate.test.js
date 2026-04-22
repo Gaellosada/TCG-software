@@ -22,14 +22,14 @@ function emptyRules() {
   return { entries: [], exits: [] };
 }
 
-function entryBlock({ id = 'e1', input_id = 'X', weight = 50, conditions = [GT_COND] } = {}) {
-  return { id, input_id, weight, conditions };
+function entryBlock({ id = 'e1', input_id = 'X', weight = 50, name = 'Alpha', conditions = [GT_COND] } = {}) {
+  return { id, input_id, weight, name, conditions };
 }
 
 function exitBlock({
-  id = 'x1', input_id = 'X', weight = 0, target_entry_block_id = 'e1', conditions = [GT_COND],
+  id = 'x1', target_entry_block_name = 'Alpha', conditions = [GT_COND],
 } = {}) {
-  return { id, input_id, weight, target_entry_block_id, conditions };
+  return { id, target_entry_block_name, conditions };
 }
 
 describe('computeRunGate (v4)', () => {
@@ -101,7 +101,7 @@ describe('computeRunGate (v4)', () => {
       rules: {
         ...emptyRules(),
         entries: [entryBlock({ input_id: '' })],
-        exits: [exitBlock({ target_entry_block_id: 'e1' })],
+        exits: [exitBlock({ target_entry_block_name: 'Alpha' })],
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toBe(
@@ -140,14 +140,14 @@ describe('computeRunGate (v4)', () => {
     );
   });
 
-  it('rejects an exit that has no target_entry_block_id', () => {
+  it('rejects an exit that has no target_entry_block_name', () => {
     const sig = {
       id: 's1',
       inputs: [SPOT_INPUT],
       rules: {
         ...emptyRules(),
         entries: [entryBlock()],
-        exits: [exitBlock({ target_entry_block_id: '' })],
+        exits: [exitBlock({ target_entry_block_name: '' })],
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toBe(
@@ -155,19 +155,46 @@ describe('computeRunGate (v4)', () => {
     );
   });
 
-  it('rejects an exit whose target does not match any entry', () => {
+  it('rejects an exit whose target name does not match any entry', () => {
     const sig = {
       id: 's1',
       inputs: [SPOT_INPUT],
       rules: {
         ...emptyRules(),
-        entries: [entryBlock({ id: 'e1' })],
-        exits: [exitBlock({ target_entry_block_id: 'orphan' })],
+        entries: [entryBlock({ id: 'e1', name: 'Alpha' })],
+        exits: [exitBlock({ target_entry_block_name: 'orphan' })],
       },
     };
-    expect(computeRunGate(sig, []).runDisabledReason).toBe(
-      'An exit block references an entry that no longer exists — remove it or pick a new target.',
-    );
+    expect(computeRunGate(sig, []).runDisabledReason).toContain('exit-target-not-found');
+  });
+
+  it('rejects signal with duplicate entry names', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        ...emptyRules(),
+        entries: [
+          entryBlock({ id: 'e1', name: 'Dup' }),
+          entryBlock({ id: 'e2', name: 'Dup' }),
+        ],
+        exits: [exitBlock({ target_entry_block_name: 'Dup' })],
+      },
+    };
+    expect(computeRunGate(sig, []).runDisabledReason).toContain('duplicate-entry-names');
+  });
+
+  it('rejects exit with dangling target name', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        ...emptyRules(),
+        entries: [entryBlock({ id: 'e1', name: 'Alpha' })],
+        exits: [exitBlock({ target_entry_block_name: 'NonExistent' })],
+      },
+    };
+    expect(computeRunGate(sig, []).runDisabledReason).toContain('exit-target-not-found');
   });
 
   it('returns the missing-indicator reason with the ids in missingIds', () => {
@@ -263,7 +290,7 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
         },
         {
           input_id: 'X', block_id: 'x1', kind: 'exit',
-          target_entry_block_id: 'b1',
+          target_entry_block_name: 'b1',
           fired_indices: [1, 3],
           latched_indices: [3],
         },
@@ -277,7 +304,7 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
     // Other event fields preserved.
     expect(out.events[0].latched_indices).toEqual([0, 2]);
     expect(out.events[0].active_indices).toEqual([0, 1, 2]);
-    expect(out.events[1].target_entry_block_id).toBe('b1');
+    expect(out.events[1].target_entry_block_name).toBe('b1');
     // Top-level passthrough.
     expect(out.timestamps).toBe(raw.timestamps);
   });
@@ -309,7 +336,7 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
     const raw = {
       events: [
         {
-          input_id: 'X', kind: 'exit', block_id: 'x1', target_entry_block_id: 'e1',
+          input_id: 'X', kind: 'exit', block_id: 'x1', target_entry_block_name: 'e1',
           fired_indices: [1, 2, 3, 4],   // exit condition fired on these bars
           latched_indices: [2, 4],       // only bars 2 and 4 actually closed a position
         },

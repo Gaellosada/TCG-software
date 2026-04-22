@@ -7,7 +7,7 @@
 //     signal that don't have a spec in ``availableIndicators``.
 //
 // v4 section model: ``rules = { entries, exits }``. Exits target a
-// specific entry by ``target_entry_block_id``; an exit whose target has
+// specific entry by ``target_entry_block_name``; an exit whose target has
 // been deleted is not runnable.
 import { buildComputeRequestBody } from './requestBuilder';
 import {
@@ -43,6 +43,19 @@ export function computeRunGate(selectedSignal, availableIndicators) {
 
   const entryIds = collectEntryIds(entries);
 
+  // Duplicate entry names invalidate the run: ambiguous exit targets.
+  const seenNames = new Set();
+  for (const e of entries) {
+    const n = e && typeof e.name === 'string' ? e.name : '';
+    if (n && seenNames.has(n)) {
+      return {
+        runDisabledReason: `duplicate-entry-names: "${n}" — two entry blocks share the same name. Rename one so exits can target them unambiguously.`,
+        missingIds: [],
+      };
+    }
+    if (n) seenNames.add(n);
+  }
+
   // Flatten to a tagged list we can walk uniformly.
   const blocksWithSection = [
     ...entries.map((b) => ({ block: b, section: 'entries' })),
@@ -55,7 +68,7 @@ export function computeRunGate(selectedSignal, availableIndicators) {
     if (!b) return false;
     const hasCond = (b.conditions || []).length > 0;
     if (section === 'entries') return hasCond || !!b.input_id;
-    return hasCond || !!b.target_entry_block_id;
+    return hasCond || !!b.target_entry_block_name;
   });
   if (nonEmpty.length === 0) {
     return {
@@ -108,19 +121,21 @@ export function computeRunGate(selectedSignal, availableIndicators) {
       }
     }
     if (section === 'exits') {
-      const tgt = b.target_entry_block_id;
+      const tgt = b.target_entry_block_name;
       if (typeof tgt !== 'string' || !tgt) {
         return {
           runDisabledReason: 'Every exit block must target an entry block — pick one in the block header.',
           missingIds: [],
         };
       }
-      if (!entryIds.has(tgt)) {
+      const matchingEntries = entries.filter((e) => e && e.name === tgt);
+      if (matchingEntries.length === 0) {
         return {
-          runDisabledReason: 'An exit block references an entry that no longer exists — remove it or pick a new target.',
+          runDisabledReason: `exit-target-not-found: "${tgt}" — this exit references an entry name that doesn't exist. Pick a valid target.`,
           missingIds: [],
         };
       }
+      // matchingEntries.length > 1 is already caught by the duplicate-name check above
     }
     // For exits we pass the entry blocks themselves so isBlockRunnable
     // can additionally verify the resolved target entry has a configured
@@ -154,7 +169,7 @@ export function computeRunGate(selectedSignal, availableIndicators) {
  *   - ``latched_indices``: the *effective* subset — for entries, bars where
  *                          the block actually opened a position; for exits,
  *                          bars where the exit actually closed something on
- *                          its ``target_entry_block_id``.
+ *                          its ``target_entry_block_name``.
  *
  * When ``dontRepeat`` is true the UI should present ``latched_indices`` as
  * the canonical trigger set (no accidental repeats on already-open

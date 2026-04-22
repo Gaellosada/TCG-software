@@ -105,7 +105,7 @@ describe('value mapping — fromPickerValue', () => {
     const input = {
       type: 'continuous',
       collection: 'FUT_ES',
-      adjustment: 'proportional',
+      adjustment: 'ratio',
       cycle: 'H',
       rollOffset: 2,
       strategy: 'front_month',

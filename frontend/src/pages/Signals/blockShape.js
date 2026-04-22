@@ -15,7 +15,7 @@
 //     id: <uuid>,
 //     weight: <ignored>,
 //     conditions: Condition[],
-//     target_entry_block_id: <uuid>,    // resolves in same signal's entries
+//     target_entry_block_name: <string>,  // matches an entry's editable name
 //   }
 // Exit blocks do NOT carry a block-level input_id — the operating
 // input is derived from the target entry's input_id. The backend
@@ -30,7 +30,7 @@
 // Runnability additionally requires every referenced input_id to resolve
 // against the signal's ``inputs`` list AND every such input's instrument
 // to be fully configured. Exit blocks additionally require their
-// ``target_entry_block_id`` to resolve against the signal's entry blocks.
+// ``target_entry_block_name`` to resolve against the signal's entry blocks.
 
 import { operandSlots } from './conditionOps';
 import { newBlockId, MAX_ABS_WEIGHT } from './storage';
@@ -40,7 +40,7 @@ import { newBlockId, MAX_ABS_WEIGHT } from './storage';
  *   - id: fresh uuid.
  *   - conditions: []
  *   - entries: input_id: '' (user must pick), weight: 0 (user must set signed value).
- *   - exits:   target_entry_block_id: '' (user must pick);
+ *   - exits:   target_entry_block_name: '' (user must pick);
  *              NO input_id (derived from target entry).
  *
  * @param {'entries'|'exits'} section
@@ -48,7 +48,7 @@ import { newBlockId, MAX_ABS_WEIGHT } from './storage';
 export function defaultBlock(section = 'entries') {
   const base = { id: newBlockId(), conditions: [] };
   if (section === 'exits') {
-    base.target_entry_block_id = '';
+    base.target_entry_block_name = '';
   } else {
     base.input_id = '';
     base.weight = 0;
@@ -72,7 +72,7 @@ export function isInputConfigured(input) {
   }
   if (inst.type === 'continuous') {
     return typeof inst.collection === 'string' && inst.collection.length > 0
-      && ['none', 'proportional', 'difference'].includes(inst.adjustment)
+      && ['none', 'ratio', 'difference'].includes(inst.adjustment)
       && (inst.cycle == null || typeof inst.cycle === 'string')
       && Number.isFinite(inst.rollOffset)
       && inst.strategy === 'front_month';
@@ -148,11 +148,30 @@ export function collectEntryIds(entryBlocks) {
 }
 
 /**
+ * Build a map of entry name -> entry block for name-based lookups.
+ * Only non-empty names are included. Duplicate names map to null (ambiguous).
+ */
+export function indexEntryNames(entryBlocks) {
+  const out = {};
+  if (!Array.isArray(entryBlocks)) return out;
+  for (const b of entryBlocks) {
+    if (b && typeof b.name === 'string' && b.name) {
+      if (b.name in out) {
+        out[b.name] = null; // duplicate — ambiguous
+      } else {
+        out[b.name] = b;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * True iff the block can be submitted to the backend.
  *   - entries: ``input_id`` resolves to a declared Input that is fully
  *     configured (isInputConfigured); signed weight with |weight| in
  *     (0, MAX_ABS_WEIGHT].
- *   - exits: ``target_entry_block_id`` resolves against ``entryBlocks``
+ *   - exits: ``target_entry_block_name`` resolves against ``entryBlocks``
  *     AND the resolved target entry itself has an ``input_id`` set (the
  *     exit inherits it).
  *   - both: at least one condition; every condition complete (every
@@ -183,28 +202,26 @@ export function isBlockRunnable(block, section, inputs, entryIdsOrBlocks) {
     if (block.weight === 0) return false;
     if (Math.abs(block.weight) > MAX_ABS_WEIGHT) return false;
   } else if (section === 'exits') {
-    const tgt = block.target_entry_block_id;
+    const tgt = block.target_entry_block_name;
     if (typeof tgt !== 'string' || !tgt) return false;
-    // Target resolution: accept both a Set/Array of ids AND an Array of
-    // entry Block objects. In the latter case we also verify the target
-    // entry's input_id resolves to a configured input — the exit
-    // inherits its operating input from that entry.
+    // Resolve by name: need entry blocks array
     let targetEntry = null;
     if (Array.isArray(entryIdsOrBlocks)
         && entryIdsOrBlocks.length > 0
         && typeof entryIdsOrBlocks[0] === 'object') {
-      targetEntry = entryIdsOrBlocks.find((b) => b && b.id === tgt) || null;
-      if (!targetEntry) return false;
+      // Name-based resolution: find exactly one entry with this name
+      const matches = entryIdsOrBlocks.filter((b) => b && b.name === tgt);
+      if (matches.length !== 1) return false; // 0 = dangling, >1 = ambiguous
+      targetEntry = matches[0];
     } else {
+      // Legacy id-based fallback (shouldn't happen in v4, but defensive)
       const ids = entryIdsOrBlocks instanceof Set
         ? entryIdsOrBlocks
         : new Set(entryIdsOrBlocks || []);
       if (!ids.has(tgt)) return false;
     }
     if (targetEntry) {
-      if (typeof targetEntry.input_id !== 'string' || !targetEntry.input_id) {
-        return false;
-      }
+      if (typeof targetEntry.input_id !== 'string' || !targetEntry.input_id) return false;
       const boundInput = byId[targetEntry.input_id];
       if (!boundInput) return false;
       if (!isInputConfigured(boundInput)) return false;

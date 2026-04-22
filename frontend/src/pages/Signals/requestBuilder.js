@@ -10,8 +10,8 @@
 //   - Input = { id, instrument: InputInstrument }
 //   - rules = { entries: Block[], exits: Block[] }
 //   - Block = {
-//       id, input_id, weight (signed, [-100, +100]),
-//       conditions, [exits only] target_entry_block_id
+//       id, name, input_id, weight (signed, [-100, +100]),
+//       conditions, [exits only] target_entry_block_name
 //     }
 //   - settings = { dont_repeat: boolean }
 //   - IndicatorSpec = { id, name, code, params, seriesMap }
@@ -37,7 +37,7 @@ import { MAX_ABS_WEIGHT, SECTIONS } from './storage';
  * preserved verbatim.
  *
  * Weights are clamped to [-MAX_ABS_WEIGHT, +MAX_ABS_WEIGHT]. Block ids
- * and exit ``target_entry_block_id`` are carried through verbatim.
+ * and exit ``target_entry_block_name`` are carried through verbatim.
  *
  * Returns a NEW object graph — the caller's ``signal`` is not mutated.
  */
@@ -80,14 +80,16 @@ function normaliseBlock(block, section) {
     // Weight is meaningless on exits and also omitted.
     return {
       id: typeof block.id === 'string' ? block.id : '',
+      name: typeof block.name === 'string' ? block.name : '',
       conditions,
-      target_entry_block_id: typeof block.target_entry_block_id === 'string'
-        ? block.target_entry_block_id
+      target_entry_block_name: typeof block.target_entry_block_name === 'string'
+        ? block.target_entry_block_name
         : '',
     };
   }
   return {
     id: typeof block.id === 'string' ? block.id : '',
+    name: typeof block.name === 'string' ? block.name : '',
     input_id: typeof block.input_id === 'string' ? block.input_id : '',
     weight: clampWeight(block.weight),
     conditions,

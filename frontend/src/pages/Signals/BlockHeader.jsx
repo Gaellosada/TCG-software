@@ -6,25 +6,23 @@ import styles from './Signals.module.css';
 /**
  * Per-block controls (v4): for entries, input dropdown (references one
  * of the signal's declared inputs), signed weight input with % suffix
- * and direction badge; for exits, the input picker and weight column
- * are hidden (the operating input is derived from the target entry
- * picked elsewhere in the block editor). Delete-block button is gated
- * by ConfirmDialog.
+ * and direction badge; for exits, a target entry name picker is shown
+ * in the same position as the input dropdown. Delete-block button is
+ * gated by ConfirmDialog.
  *
  * Props:
  *   block       {Object}   { id, [input_id, weight on entries,
- *                            target_entry_block_id on exits] }
+ *                            target_entry_block_name on exits] }
  *   section     {string}   'entries' | 'exits'
  *   inputs      {Array}    the signal's declared inputs
+ *   entryBlocks {Array}    the signal's entry blocks (used by exits to list targets)
  *   onChange    {Function} (nextBlock) => void
  *   onDelete    {Function} () => void
  *   blockIndex  {number}   1-based index shown in the label
  *   status      {string}   'ok' | 'warn' (optional)
  *   blockIdx    {number}   0-based index for data-testid (optional)
- *   derivedInputLabel {string?} exits only: a read-only display hint
- *     (e.g. "(input from target: X)") rendered in place of the picker.
  */
-function BlockHeader({ block, section, inputs, onChange, onDelete, blockIndex, status, blockIdx, derivedInputLabel }) {
+function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, blockIndex, status, blockIdx }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
   // Local draft for the weight input so the user can type freely before blur
@@ -146,7 +144,7 @@ function BlockHeader({ block, section, inputs, onChange, onDelete, blockIndex, s
       )}
 
       <span className={styles.blockDirectionLabel}>
-        {isEntry ? 'entry on' : 'exit'}
+        {isEntry ? 'entry on' : 'exit on'}
       </span>
       {isEntry ? (
         <div className={styles.blockInstrumentCell}>
@@ -175,14 +173,46 @@ function BlockHeader({ block, section, inputs, onChange, onDelete, blockIndex, s
           )}
         </div>
       ) : (
-        derivedInputLabel ? (
-          <span
-            className={styles.blockDerivedInputLabel}
-            data-testid={`block-derived-input-${blockIndex - 1}`}
-          >
-            {derivedInputLabel}
-          </span>
-        ) : null
+        (() => {
+          const entryList = Array.isArray(entryBlocks) ? entryBlocks : [];
+          const empty = entryList.length === 0;
+          return (
+            <div className={styles.blockInstrumentCell}>
+              <select
+                className={styles.blockInputSelect}
+                value={block.target_entry_block_name || ''}
+                disabled={empty}
+                onChange={(e) => onChange({ ...block, target_entry_block_name: e.target.value })}
+                aria-label={`Target entry for exit block ${blockIndex}`}
+                data-testid={`target-entry-select-${blockIndex - 1}`}
+              >
+                {empty ? (
+                  <option value="">No entries yet — create an entry block first</option>
+                ) : (
+                  <>
+                    <option value="">Pick an entry…</option>
+                    {entryList.map((entry, i) => {
+                      const eName = entry.name || `Block ${i + 1}`;
+                      const isDuplicate = entryList.filter((e) => e.name && e.name === entry.name).length > 1;
+                      return (
+                        <option
+                          key={entry.id || i}
+                          value={entry.name || ''}
+                          disabled={!entry.name || isDuplicate}
+                        >
+                          {eName}{isDuplicate ? ' (duplicate)' : ''}{!entry.name ? ' (unnamed)' : ''}
+                        </option>
+                      );
+                    })}
+                  </>
+                )}
+              </select>
+              {block.target_entry_block_name && !entryList.some((e) => e.name === block.target_entry_block_name) && (
+                <span className={styles.blockInputWarn} title={`Target "${block.target_entry_block_name}" no longer exists`}>!</span>
+              )}
+            </div>
+          );
+        })()
       )}
 
       {isEntry && (

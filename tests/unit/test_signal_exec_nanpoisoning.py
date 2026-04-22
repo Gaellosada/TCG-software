@@ -156,7 +156,7 @@ async def test_rolling_warmup_does_not_generate_false_negative_signals():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", input_id="X", weight=100.0, conditions=(entry_cond,)),
+                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(entry_cond,)),
             ),
             exits=(
                 Block(
@@ -164,7 +164,7 @@ async def test_rolling_warmup_does_not_generate_false_negative_signals():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_id="E",
+                    target_entry_block_name="Entry",
                 ),
             ),
         ),

@@ -52,7 +52,7 @@ Configuration for building a continuous futures series:
 @dataclass(frozen=True)
 class ContinuousRollConfig:
     strategy: RollStrategy          # Currently only FRONT_MONTH
-    adjustment: AdjustmentMethod    # none, proportional, difference
+    adjustment: AdjustmentMethod    # none, ratio, difference
     cycle: str | None               # e.g., "HMUZ" for quarterly
     roll_offset_days: int           # Days before expiration to roll
 ```

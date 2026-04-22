@@ -51,14 +51,14 @@ class TestContinuousInstrumentRef:
         data = {
             "type": "continuous",
             "collection": "FUT_VX",
-            "adjustment": "proportional",
+            "adjustment": "ratio",
             "cycle": "HMUZ",
             "rollOffset": 2,
             "strategy": "front_month",
         }
         ref = _adapter.validate_python(data)
         assert isinstance(ref, ContinuousInstrumentRef)
-        assert ref.adjustment == "proportional"
+        assert ref.adjustment == "ratio"
         assert ref.cycle == "HMUZ"
         assert ref.rollOffset == 2
 
@@ -115,7 +115,7 @@ class TestSeriesRefDiscriminator:
         data = {
             "type": "continuous",
             "collection": "FUT_VX",
-            "adjustment": "proportional",
+            "adjustment": "ratio",
             "cycle": "HMUZ",
             "rollOffset": 3,
         }

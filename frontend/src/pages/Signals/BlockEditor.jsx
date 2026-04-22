@@ -24,7 +24,7 @@ const SECTION_LABELS = {
  * Middle panel — block/condition editor (v4 / signals-refactor-v4).
  *
  * Two-section model: `entries` and `exits`. A block in the exits section
- * additionally picks a `target_entry_block_id` from the signal's entry
+ * additionally picks a `target_entry_block_name` from the signal's entry
  * blocks. Entry deletion cascades through `cascadeDeleteEntry` from
  * storage.js so referencing exits are removed and a brief inline banner
  * surfaces above the Exits list.
@@ -81,7 +81,7 @@ function BlockEditor({
 
   function handleAddBlock() {
     // v4: defaults come from blockShape.defaultBlock(section), which stamps
-    // a stable id and adds target_entry_block_id on exits.
+    // a stable id and adds target_entry_block_name on exits.
     updateBlocks([...blocks, defaultBlock(section)]);
   }
 
@@ -278,17 +278,6 @@ function Block({
     section === 'exits' ? entryBlocks : entryIds,
   );
 
-  let derivedInputLabel = null;
-  if (section === 'exits') {
-    const targetId = block.target_entry_block_id;
-    const targetEntry = targetId
-      ? (entryBlocks || []).find((b) => b && b.id === targetId)
-      : null;
-    if (targetEntry && targetEntry.input_id) {
-      derivedInputLabel = `(input from target: ${targetEntry.input_id})`;
-    }
-  }
-
   return (
     <div
       className={styles.block}
@@ -301,21 +290,13 @@ function Block({
         block={block}
         section={section}
         inputs={inputs}
+        entryBlocks={entryBlocks}
         onChange={onUpdateBlock}
         onDelete={onRemoveBlock}
         blockIndex={blockIdx + 1}
         status={runnable ? 'ok' : 'warn'}
         blockIdx={blockIdx}
-        derivedInputLabel={derivedInputLabel}
       />
-      {section === 'exits' && (
-        <TargetEntryPicker
-          value={block.target_entry_block_id || ''}
-          entryBlocks={entryBlocks}
-          blockIdx={blockIdx}
-          onChange={(nextId) => onUpdateBlock({ ...block, target_entry_block_id: nextId })}
-        />
-      )}
       {conditions.length === 0 ? (
         <div className={styles.blockEmpty}>
           Empty block — add a condition below.
@@ -343,54 +324,6 @@ function Block({
       >
         + Add condition (AND)
       </button>
-    </div>
-  );
-}
-
-/**
- * Picker rendered on every exit block: select one of the signal's entry
- * blocks by id. Label each option with the entry's `name` if set, otherwise
- * "Entry #<index>".
- */
-function TargetEntryPicker({ value, entryBlocks, blockIdx, onChange }) {
-  const list = Array.isArray(entryBlocks) ? entryBlocks : [];
-  const empty = list.length === 0;
-  return (
-    <div className={styles.targetEntryRow}>
-      <label
-        className={styles.conditionInlineLabel}
-        htmlFor={`target-entry-${blockIdx}`}
-      >
-        Target entry
-      </label>
-      <select
-        id={`target-entry-${blockIdx}`}
-        className={styles.targetEntrySelect}
-        value={value || ''}
-        disabled={empty}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={`Target entry block for exit block ${blockIdx + 1}`}
-        data-testid={`target-entry-select-${blockIdx}`}
-      >
-        {empty ? (
-          <option value="">No entries yet — create an entry block first</option>
-        ) : (
-          <>
-            <option value="">Pick an entry…</option>
-            {list.map((entry, i) => {
-              const label = entry.name
-                ? entry.name
-                : `Entry #${i + 1}`;
-              const shortId = entry.id ? ` (${entry.id.slice(0, 6)})` : '';
-              return (
-                <option key={entry.id || i} value={entry.id || ''}>
-                  {label}{shortId}
-                </option>
-              );
-            })}
-          </>
-        )}
-      </select>
     </div>
   );
 }

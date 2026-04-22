@@ -13,7 +13,7 @@
  *   - ``realized_pnl: number[][]`` — one array per input (order matches
  *     ``positions``).
  *   - ``events: [{input_id, block_id, kind, fired_indices,
- *     latched_indices, active_indices, target_entry_block_id}]`` —
+ *     latched_indices, active_indices, target_entry_block_name}]`` —
  *     ``kind`` is ``"entry"`` or ``"exit"``. Color/direction comes from
  *     the sign of the originating block's signed weight (for entries) or
  *     the targeted entry's weight (for exits). That mapping lives in the
@@ -99,10 +99,17 @@ export function buildBlockWeightSignMap(rules) {
   }
   for (const x of exits) {
     if (!x || !x.id) continue;
-    const tgt = x.target_entry_block_id;
-    const s = (tgt && Object.prototype.hasOwnProperty.call(entrySignById, tgt))
-      ? entrySignById[tgt]
-      : 0;
+    const tgt = x.target_entry_block_name;
+    // Resolve by name: find the entry whose name matches.
+    let s = 0;
+    if (tgt) {
+      for (const e of entries) {
+        if (e && e.name === tgt && Object.prototype.hasOwnProperty.call(entrySignById, e.id)) {
+          s = entrySignById[e.id];
+          break;
+        }
+      }
+    }
     map[x.id] = s;
   }
   return map;
@@ -250,9 +257,24 @@ export function buildEventMarkerTraces(
 }
 
 /**
+ * Format a short params suffix for an indicator trace label.
+ * E.g. ``{ window: 3 }`` → ``" (window=3)"``, ``null`` → ``""``.
+ */
+function paramsLabel(paramsOverride) {
+  if (!paramsOverride || typeof paramsOverride !== 'object') return '';
+  const entries = Object.entries(paramsOverride);
+  if (entries.length === 0) return '';
+  const inner = entries.map(([k, v]) => `${k}=${v}`).join(', ');
+  return ` (${inner})`;
+}
+
+/**
  * Build indicator traces for a plot. One line per indicator entry.
  * Colours cycle through TRACE_COLORS starting from the index AFTER the
  * input traces to avoid colour collisions.
+ *
+ * When the same indicator_id appears more than once (different params),
+ * each instance gets its own trace with params in the label.
  *
  * @param {string} [yaxis]  Plotly yaxis ref (e.g. 'y2'). Defaults to 'y2'
  *                           for backward compat with the old bottom-plot
@@ -267,7 +289,7 @@ export function buildIndicatorTraces(indicators, dates, colorOffset = 0, yaxis =
       y: ind.series,
       type: 'scatter',
       mode: 'lines',
-      name: `ind: ${ind.indicator_id}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
+      name: `ind: ${ind.indicator_id}${paramsLabel(ind.params_override)}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
       line: {
         color: TRACE_COLORS[(colorOffset + i) % TRACE_COLORS.length],
         width: 1,
@@ -276,7 +298,7 @@ export function buildIndicatorTraces(indicators, dates, colorOffset = 0, yaxis =
       yaxis,
       connectgaps: false,
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
-      legendgroup: `ind-${ind.indicator_id}`,
+      legendgroup: `ind-${ind.indicator_id}-${i}`,
     }));
 }
 
@@ -458,7 +480,7 @@ export function buildResultsPlot(result, opts = {}) {
       y: ind.series,
       type: 'scatter',
       mode: 'lines',
-      name: `ind: ${ind.indicator_id}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
+      name: `ind: ${ind.indicator_id}${paramsLabel(ind.params_override)}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
       line: { color: TRACE_COLORS[(ownPanelColorOffset + i) % TRACE_COLORS.length], width: 1.5 },
       yaxis: axisRef,
       connectgaps: false,
