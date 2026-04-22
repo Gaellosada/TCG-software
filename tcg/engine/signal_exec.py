@@ -472,6 +472,11 @@ def _union_align(
             values_by_key[key] = np.full(index.size, scalar, dtype=np.float64)
             continue
         assert dates is not None and vals is not None
+        if dates.size == 0:
+            # Empty series — every output bar is NaN. Skip the searchsorted
+            # dance, which would dereference dates[-1] on a zero-length array.
+            values_by_key[key] = np.full(index.size, np.nan, dtype=np.float64)
+            continue
         pos = np.searchsorted(dates, index)
         safe_pos = np.clip(pos, 0, dates.size - 1)
         match = dates[safe_pos] == index
@@ -555,6 +560,11 @@ def _eval_condition(
             )
         truth = np.zeros(T, dtype=np.bool_)
         nan_at_t = np.isnan(x).copy()
+        # The first kk positions lack a full lookback window — poison them
+        # so block latching treats them as unknown instead of a hard False
+        # (which would let a block claim "exit satisfied" before any data
+        # existed).
+        nan_at_t[: min(kk, T)] = True
         if T > kk:
             cur = x[kk:]
             prev = x[:-kk]

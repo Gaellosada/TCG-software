@@ -5,7 +5,12 @@
  */
 export function formatDate(date) {
   const d = typeof date === 'string' ? new Date(date) : date;
-  return d.toISOString().slice(0, 10);
+  // Format from local components so a Date built from local midnight
+  // doesn't slip to the previous day in positive-offset timezones.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 /**
@@ -27,7 +32,7 @@ export function formatDateInt(dateInt) {
  * @returns {string}
  */
 export function formatNumber(value, decimals = 2) {
-  if (value == null || Number.isNaN(value)) return '--';
+  if (value == null || !Number.isFinite(value)) return '--';
   return value.toLocaleString('en-US', {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
@@ -41,7 +46,7 @@ export function formatNumber(value, decimals = 2) {
  * @returns {string}
  */
 export function formatPercent(value, decimals = 2) {
-  if (value == null || Number.isNaN(value)) return '--';
+  if (value == null || !Number.isFinite(value)) return '--';
   return `${(value * 100).toFixed(decimals)}%`;
 }
 
@@ -52,7 +57,7 @@ export function formatPercent(value, decimals = 2) {
  * @returns {string}
  */
 export function formatCurrency(value, currency = 'USD') {
-  if (value == null || Number.isNaN(value)) return '--';
+  if (value == null || !Number.isFinite(value)) return '--';
   return value.toLocaleString('en-US', {
     style: 'currency',
     currency,

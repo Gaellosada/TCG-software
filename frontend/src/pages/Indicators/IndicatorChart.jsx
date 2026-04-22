@@ -96,19 +96,24 @@ function IndicatorChart({ indicator, result, loading, error }) {
     }
 
     // Overlay mode — retain the Y2 heuristic so small-magnitude
-    // indicators get a right-side axis overlaying price.
-    const priceAbsMax = Math.max(
-      0,
-      ...((result.series || []).flatMap((s) =>
-        (s.close || []).filter((v) => v !== null && Number.isFinite(v)).map((v) => Math.abs(v)),
-      )),
-    );
-    const indAbsMax = Math.max(
-      0,
-      ...((result.indicator || [])
-        .filter((v) => v !== null && Number.isFinite(v))
-        .map((v) => Math.abs(v))),
-    );
+    // indicators get a right-side axis overlaying price. Reduce-based
+    // max avoids the spread-into-Math.max stack overflow on long series.
+    const absMax = (arr) => {
+      let m = 0;
+      for (const v of arr) {
+        if (v !== null && Number.isFinite(v)) {
+          const a = Math.abs(v);
+          if (a > m) m = a;
+        }
+      }
+      return m;
+    };
+    let priceAbsMax = 0;
+    for (const s of result.series || []) {
+      const m = absMax(s.close || []);
+      if (m > priceAbsMax) priceAbsMax = m;
+    }
+    const indAbsMax = absMax(result.indicator || []);
     const useY2 = indAbsMax < 10 && priceAbsMax > 100;
 
     const overlayIndTrace = useY2 ? { ...baseIndTrace, yaxis: 'y2' } : baseIndTrace;

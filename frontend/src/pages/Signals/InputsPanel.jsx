@@ -42,6 +42,10 @@ function InputsPanel({ inputs, onChange }) {
   const [pendingDeleteIdx, setPendingDeleteIdx] = useState(null);
   // Index of the input row whose picker modal is open (null = closed).
   const [pickerIdx, setPickerIdx] = useState(null);
+  // Per-row text drafts for in-progress id edits. We keep the user's raw
+  // keystrokes here so that empty or duplicate values are visible (and
+  // flagged) rather than silently reverting the input.
+  const [idDrafts, setIdDrafts] = useState({});
 
   const configuredCount = useMemo(
     () => list.filter(isInputConfigured).length,
@@ -54,11 +58,29 @@ function InputsPanel({ inputs, onChange }) {
     setOpen(true);
   }
 
-  function handleRenameId(idx, rawId) {
+  function idDraftError(idx, draft) {
+    const trimmed = draft.trim();
+    if (!trimmed) return 'Input id cannot be empty';
+    if (list.some((x, i) => i !== idx && x.id === trimmed)) {
+      return `Another input already uses "${trimmed}"`;
+    }
+    return null;
+  }
+
+  function handleIdDraftChange(idx, rawId) {
+    setIdDrafts((d) => ({ ...d, [idx]: rawId }));
     const trimmed = (rawId || '').trim();
     if (!trimmed) return;
     if (list.some((x, i) => i !== idx && x.id === trimmed)) return;
     onChange(list.map((x, i) => (i !== idx ? x : { ...x, id: trimmed })));
+  }
+
+  function handleIdDraftCommit(idx) {
+    setIdDrafts((d) => {
+      if (!(idx in d)) return d;
+      const { [idx]: _discard, ...rest } = d;
+      return rest;
+    });
   }
 
   function handlePickerSelect(instrument) {
@@ -116,16 +138,26 @@ function InputsPanel({ inputs, onChange }) {
                   title={ok ? 'Input configured' : 'Input needs instrument'}
                   aria-hidden="true"
                 />
-                <input
-                  type="text"
-                  className={styles.idInput}
-                  value={input.id || ''}
-                  onChange={(e) => handleRenameId(idx, e.target.value)}
-                  aria-label={`Input ${idx + 1} id`}
-                  data-testid={`input-id-${idx}`}
-                  spellCheck={false}
-                  maxLength={16}
-                />
+                {(() => {
+                  const draft = idDrafts[idx];
+                  const displayed = draft !== undefined ? draft : (input.id || '');
+                  const err = draft !== undefined ? idDraftError(idx, draft) : null;
+                  return (
+                    <input
+                      type="text"
+                      className={styles.idInput}
+                      value={displayed}
+                      onChange={(e) => handleIdDraftChange(idx, e.target.value)}
+                      onBlur={() => handleIdDraftCommit(idx)}
+                      aria-label={`Input ${idx + 1} id`}
+                      aria-invalid={err ? 'true' : 'false'}
+                      title={err || undefined}
+                      data-testid={`input-id-${idx}`}
+                      spellCheck={false}
+                      maxLength={16}
+                    />
+                  );
+                })()}
                 <div className={styles.pickerCell}>
                   <button
                     type="button"

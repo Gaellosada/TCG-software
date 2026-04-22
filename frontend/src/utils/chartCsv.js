@@ -27,6 +27,9 @@ const INJECTION_PREFIX = /^[=+@\t\r]/;
 
 function escapeCsv(val) {
   if (val == null) return '';
+  // Non-finite numbers (NaN, Infinity) export as empty so downstream
+  // parsers don't have to strip the literal string "NaN".
+  if (typeof val === 'number' && !Number.isFinite(val)) return '';
   let s = String(val);
   if (INJECTION_PREFIX.test(s)) s = "'" + s;
   if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';

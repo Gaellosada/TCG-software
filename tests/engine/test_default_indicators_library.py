@@ -110,7 +110,15 @@ if len(_INDICATOR_FILES) != 24:
 
 @pytest.fixture(scope="module")
 def series_dict() -> dict[str, np.ndarray]:
-    return {"close": _make_series()}
+    close = _make_series()
+    # Derive OHLC + entry from close so indicators that need other fields
+    # (atr, engulfment-*) can run. Offsets are small and deterministic;
+    # the test is a smoke test, not a correctness check.
+    high = close + 0.5
+    low = close - 0.5
+    opn = np.concatenate(([close[0]], close[:-1]))
+    entry = close.copy()
+    return {"close": close, "open": opn, "high": high, "low": low, "entry": entry}
 
 
 @pytest.mark.parametrize(

@@ -268,10 +268,15 @@ function ConstantEditor({ operand, onChange }) {
   const current = Number.isFinite(operand.value) ? operand.value : 0;
   const [draft, setDraft] = useState(String(current));
   // Sync draft when the underlying operand value changes (e.g. parent
-  // swaps the operand object via direction tab switch or undo).
+  // swaps the operand object via direction tab switch or undo), but
+  // preserve in-progress edits like "1." or "-" whose parsed value
+  // already matches `current`.
   useEffect(() => {
-    setDraft(String(current));
-  }, [current]);
+    const parsed = parseFloat(draft);
+    if (!Number.isFinite(parsed) || parsed !== current) {
+      setDraft(String(current));
+    }
+  }, [current, draft]);
   return (
     <input
       className={styles.operandConstant}

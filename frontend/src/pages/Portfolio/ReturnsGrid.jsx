@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import PillToggle from '../../components/PillToggle';
 import { formatReturn, cellBgStyle, toLogReturn } from '../../utils/portfolioMath';
 import styles from './ReturnsGrid.module.css';
@@ -21,6 +21,16 @@ export default function ReturnsGrid({ monthlyReturns, yearlyReturns }) {
     const keys = Object.keys(monthlyReturns[0]).filter((k) => k !== 'period');
     return keys.map((k) => ({ value: k, label: k === 'portfolio' ? 'Portfolio' : k }));
   }, [monthlyReturns]);
+
+  // Reset selectedView if the previously-selected column is no longer
+  // present (e.g. the user recomputed a different portfolio whose legs
+  // don't include the same labels).
+  useEffect(() => {
+    if (viewOptions.length === 0) return;
+    if (!viewOptions.some((o) => o.value === selectedView)) {
+      setSelectedView('portfolio');
+    }
+  }, [viewOptions, selectedView]);
 
   const applyMode = useCallback((val) => returnMode === 'log' ? toLogReturn(val) : val, [returnMode]);
 

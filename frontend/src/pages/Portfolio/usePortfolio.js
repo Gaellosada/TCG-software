@@ -46,7 +46,7 @@ export default function usePortfolio() {
     const inputs = leg.signalSpec?.inputs || [];
     const configured = inputs.filter((inp) => inp.instrument);
     if (configured.length === 0) {
-      return { label: leg.label, start: null, end: null };
+      return { id: leg.id, start: null, end: null };
     }
 
     const inputRanges = await Promise.all(
@@ -84,7 +84,7 @@ export default function usePortfolio() {
 
     const valid = inputRanges.filter(Boolean);
     if (valid.length === 0) {
-      return { label: leg.label, start: null, end: null };
+      return { id: leg.id, start: null, end: null };
     }
 
     // Overlap = latest start, earliest end
@@ -92,9 +92,9 @@ export default function usePortfolio() {
     const end = valid.reduce((a, b) => (a.end < b.end ? a : b)).end;
 
     if (start <= end) {
-      return { label: leg.label, start, end };
+      return { id: leg.id, start, end };
     }
-    return { label: leg.label, start: null, end: null };
+    return { id: leg.id, start: null, end: null };
   }
 
   /* ── Fetch date ranges when legs change ── */
@@ -150,14 +150,14 @@ export default function usePortfolio() {
         }
         if (dates && dates.length > 0) {
           return {
-            label: leg.label,
+            id: leg.id,
             start: formatDateInt(dates[0]),
             end: formatDateInt(dates[dates.length - 1]),
           };
         }
-        return { label: leg.label, start: null, end: null };
+        return { id: leg.id, start: null, end: null };
       } catch {
-        return { label: leg.label, start: null, end: null };
+        return { id: leg.id, start: null, end: null };
       }
     });
 
@@ -169,7 +169,7 @@ export default function usePortfolio() {
       const validEnds = [];
 
       for (const r of results) {
-        ranges[r.label] = { start: r.start, end: r.end };
+        ranges[r.id] = { start: r.start, end: r.end };
         if (r.start) {
           validStarts.push(r.start);
           validEnds.push(r.end);
@@ -203,21 +203,31 @@ export default function usePortfolio() {
 
   const addLeg = useCallback((leg) => {
     const id = nextId++;
-    setLegs((prev) => [
-      ...prev,
-      {
-        id,
-        label: leg.label || `Leg ${id}`,
-        type: leg.type,           // "instrument" or "continuous"
-        collection: leg.collection,
-        symbol: leg.symbol || null,
-        strategy: leg.strategy || null,
-        adjustment: leg.adjustment || null,
-        cycle: leg.cycle || null,
-        rollOffset: leg.rollOffset ?? 0,
-        weight: leg.weight ?? 100,
-      },
-    ]);
+    setLegs((prev) => {
+      // Auto-suffix to avoid duplicate labels (keys would collapse in the API dict).
+      let label = leg.label || `Leg ${id}`;
+      const existing = new Set(prev.map((l) => l.label));
+      if (existing.has(label)) {
+        let n = 2;
+        while (existing.has(`${label} (${n})`)) n++;
+        label = `${label} (${n})`;
+      }
+      return [
+        ...prev,
+        {
+          id,
+          label,
+          type: leg.type,           // "instrument" or "continuous"
+          collection: leg.collection,
+          symbol: leg.symbol || null,
+          strategy: leg.strategy || null,
+          adjustment: leg.adjustment || null,
+          cycle: leg.cycle || null,
+          rollOffset: leg.rollOffset ?? 0,
+          weight: leg.weight ?? 100,
+        },
+      ];
+    });
     setDirty(true);
   }, []);
 

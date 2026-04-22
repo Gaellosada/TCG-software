@@ -103,6 +103,10 @@
   border-color: var(--border-accent);
 }
 
+.idInput[aria-invalid='true'] {
+  border-color: var(--color-danger, #e53e3e);
+}
+
 .pickerCell {
   flex: 1 1 auto;
   min-width: 0;

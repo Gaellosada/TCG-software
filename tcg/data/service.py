@@ -94,6 +94,12 @@ class DefaultMarketDataService:
         end: date | None = None,
         provider: str | None = None,
     ) -> PriceSeries | None:
+        # Reject unknown collections up-front so unvalidated user input
+        # from API routes can't reach into Mongo system collections.
+        if collection not in self._registry:
+            raise DataNotFoundError(
+                f"Collection '{collection}' not found in registry"
+            )
         cache_key = self._make_key(
             collection, instrument_id, provider, start, end
         )

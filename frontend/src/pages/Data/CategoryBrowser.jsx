@@ -270,7 +270,9 @@ function CategoryBrowser({ selected, onSelect }) {
                       <button
                         key={inst.symbol}
                         className={`${styles.instrument} ${
-                          selected?.symbol === inst.symbol ? styles.instrumentActive : ''
+                          isSelected(selected, 'instrument', inst.symbol, group.collection)
+                            ? styles.instrumentActive
+                            : ''
                         }`}
                         onClick={() => onSelect({ symbol: inst.symbol, collection: group.collection })}
                       >

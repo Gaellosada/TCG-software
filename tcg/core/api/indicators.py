@@ -20,9 +20,9 @@ from typing import Annotated, Literal
 
 import numpy as np
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from tcg.core.api.common import ADJUSTMENT_MAP, error_response
 from tcg.core.api.data import get_market_data
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
@@ -32,28 +32,9 @@ from tcg.engine.indicator_exec import (
     run_indicator,
 )
 from tcg.types.errors import DataNotFoundError, ValidationError
-from tcg.types.market import AdjustmentMethod, ContinuousRollConfig, RollStrategy
+from tcg.types.market import ContinuousRollConfig, RollStrategy
 
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
-
-
-def _error_response(
-    error_type: str,
-    message: str,
-    *,
-    status: int = 400,
-    traceback: str | None = None,
-) -> JSONResponse:
-    """Single source of truth for the error envelope shape.
-
-    All error responses from this router share the same JSON body shape:
-    ``{"error_type": str, "message": str, "traceback"?: str}``. Keeping
-    that shape in one place avoids drift between the 10+ error sites.
-    """
-    content: dict = {"error_type": error_type, "message": message}
-    if traceback:
-        content["traceback"] = traceback
-    return JSONResponse(status_code=status, content=content)
 
 
 # ---------------------------------------------------------------------------
@@ -81,15 +62,6 @@ SeriesRef = Annotated[
     SpotSeriesRef | ContinuousSeriesRef, Field(discriminator="type")
 ]
 
-# Map frontend adjustment strings to the domain enum — same mapping as
-# signals.py but kept local to avoid coupling the two routers.
-_ADJ_MAP: dict[str, AdjustmentMethod] = {
-    "none": AdjustmentMethod.NONE,
-    "proportional": AdjustmentMethod.PROPORTIONAL,
-    "difference": AdjustmentMethod.DIFFERENCE,
-}
-
-
 class IndicatorComputeRequest(BaseModel):
     code: str
     params: dict[str, int | float | bool] = {}
@@ -115,7 +87,7 @@ async def compute_indicator(
     # ── 1. Basic request validation ──
 
     if not body.series:
-        return _error_response(
+        return error_response(
             "validation", "'series' must contain at least one entry"
         )
 
@@ -123,7 +95,7 @@ async def compute_indicator(
         start_date = date.fromisoformat(body.start) if body.start else None
         end_date = date.fromisoformat(body.end) if body.end else None
     except ValueError as exc:
-        return _error_response("validation", f"Invalid date format: {exc}")
+        return error_response("validation", f"Invalid date format: {exc}")
 
     # Param validation (pydantic accepts int/float/bool; we still guard NaN
     # for the numeric path and forward bools unchanged).
@@ -133,7 +105,7 @@ async def compute_indicator(
             params[name] = value
             continue
         if not isinstance(value, (int, float)):
-            return _error_response(
+            return error_response(
                 "validation",
                 (
                     f"param {name!r} must be numeric or bool, got "
@@ -142,7 +114,7 @@ async def compute_indicator(
             )
         fvalue = float(value)
         if fvalue != fvalue:  # NaN guard
-            return _error_response(
+            return error_response(
                 "validation", f"param {name!r} must not be NaN"
             )
         # Preserve int vs float so the sandbox can type-check properly.
@@ -166,7 +138,7 @@ async def compute_indicator(
                         end=end_date,
                     )
                     if series is None:
-                        return _error_response(
+                        return error_response(
                             "data",
                             (
                                 f"Series label {label!r}: instrument "
@@ -177,9 +149,9 @@ async def compute_indicator(
                     dates, closes = series.dates, series.close
 
                 case "continuous":
-                    adj = _ADJ_MAP.get(ref.adjustment)
+                    adj = ADJUSTMENT_MAP.get(ref.adjustment)
                     if adj is None:
-                        return _error_response(
+                        return error_response(
                             "validation",
                             (
                                 f"Series label {label!r}: unknown adjustment "
@@ -199,7 +171,7 @@ async def compute_indicator(
                         end=end_date,
                     )
                     if cseries is None:
-                        return _error_response(
+                        return error_response(
                             "data",
                             (
                                 f"Series label {label!r}: continuous series "
@@ -210,13 +182,13 @@ async def compute_indicator(
                     dates, closes = cseries.prices.dates, cseries.prices.close
 
                 case _:
-                    return _error_response(
+                    return error_response(
                         "validation",
                         f"Series label {label!r}: unhandled series type {ref.type!r}",
                     )
 
         except DataNotFoundError as exc:
-            return _error_response(
+            return error_response(
                 "data", f"Series label {label!r}: {exc}"
             )
         # Reject malformed series up front: each series' dates must be
@@ -227,7 +199,7 @@ async def compute_indicator(
         if dates.size >= 2 and not bool(
             np.all(np.diff(dates) > 0)
         ):
-            return _error_response(
+            return error_response(
                 "validation",
                 f"Series {label!r} has non-monotonic or duplicate dates",
             )
@@ -240,7 +212,7 @@ async def compute_indicator(
         common_dates = np.intersect1d(common_dates, dates, assume_unique=False)
 
     if common_dates.size == 0:
-        return _error_response(
+        return error_response(
             "validation", "No overlapping dates across requested series"
         )
 
@@ -277,7 +249,7 @@ async def compute_indicator(
                 entry["rollOffset"] = ref.rollOffset
                 entry["strategy"] = ref.strategy
             case _:
-                return _error_response(
+                return error_response(
                     "validation",
                     f"Series label {label!r}: unhandled series type {ref.type!r} in response builder",
                     status=500,
@@ -298,9 +270,9 @@ async def compute_indicator(
     try:
         indicator = run_indicator(body.code, params, aligned_closes)
     except IndicatorValidationError as exc:
-        return _error_response("validation", str(exc))
+        return error_response("validation", str(exc))
     except IndicatorRuntimeError as exc:
-        return _error_response(
+        return error_response(
             "runtime", str(exc), traceback=exc.user_traceback or None
         )
 

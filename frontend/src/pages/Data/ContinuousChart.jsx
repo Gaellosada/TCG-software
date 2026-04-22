@@ -24,6 +24,12 @@ function ContinuousChart({ collection }) {
     setChartType(preference);
   }, [preference]);
 
+  // Reset cycle when collection changes — a cycle selected for one
+  // futures product is rarely valid for another.
+  useEffect(() => {
+    setCycle('');
+  }, [collection]);
+
   const { data: cyclesData } = useAsync(
     () => getAvailableCycles(collection),
     [collection]

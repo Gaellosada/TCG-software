@@ -18,7 +18,7 @@ from tcg.core.api.signals import (
     parse_signal,
 )
 from tcg.data._mongo.registry import CollectionRegistry
-from tcg.data._utils import int_to_iso
+from tcg.data._utils import date_to_int, int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine import (
     aggregate_returns,
@@ -367,8 +367,8 @@ async def compute_portfolio(
 
         # Apply optional date filter
         if start_date or end_date:
-            lo = int(start_date.strftime("%Y%m%d")) if start_date else 0
-            hi = int(end_date.strftime("%Y%m%d")) if end_date else 99999999
+            lo = date_to_int(start_date) if start_date else 0
+            hi = date_to_int(end_date) if end_date else 99999999
             mask = (full_common_dates >= lo) & (full_common_dates <= hi)
             common_dates = full_common_dates[mask]
             aligned_series = {

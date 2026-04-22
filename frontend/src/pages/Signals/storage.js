@@ -103,8 +103,9 @@ function sanitiseContinuousInstrument(raw) {
     ? raw.adjustment : 'none';
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
   const rollOffset = Number.isFinite(raw.rollOffset) ? raw.rollOffset : 0;
-  const strategy = raw.strategy === 'front_month' ? 'front_month' : 'front_month';
-  return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy };
+  // Only one strategy is supported today — the sanitiser hard-codes it so
+  // a tampered payload can't smuggle in a rogue value.
+  return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy: 'front_month' };
 }
 
 function sanitiseInstrument(raw) {

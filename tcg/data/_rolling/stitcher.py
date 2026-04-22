@@ -62,12 +62,21 @@ class ContinuousSeriesBuilder:
             )
 
         if len(contracts) == 1:
+            cleaned = trim_overlaps(contracts, [])
+            if not cleaned:
+                return ContinuousSeries(
+                    collection=collection,
+                    roll_config=config,
+                    prices=PriceSeries.empty(),
+                    roll_dates=(),
+                    contracts=(),
+                )
             return ContinuousSeries(
                 collection=collection,
                 roll_config=config,
-                prices=contracts[0].prices,
+                prices=cleaned[0].prices,
                 roll_dates=(),
-                contracts=(contracts[0].contract_id,),
+                contracts=(cleaned[0].contract_id,),
             )
 
         # 1. Compute roll dates
