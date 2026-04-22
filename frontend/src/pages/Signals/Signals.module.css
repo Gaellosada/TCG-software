@@ -167,7 +167,9 @@
 }
 
 .row:hover .deleteBtn,
-.row:focus-within .deleteBtn {
+.row:focus-within .deleteBtn,
+.conditionRow:hover .deleteBtn,
+.conditionRow:focus-within .deleteBtn {
   opacity: 1;
 }
 

@@ -90,7 +90,7 @@ test.describe('Continuous Rolling - Data Section', () => {
       fullPage: true,
     });
 
-    // Switch to proportional adjustment
+    // Switch to ratio adjustment
     const adjustmentSelect = page.locator('select').first();
     await adjustmentSelect.selectOption('ratio');
     await page.waitForTimeout(5000);
