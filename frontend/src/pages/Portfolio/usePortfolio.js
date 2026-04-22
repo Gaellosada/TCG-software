@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { formatDateInt } from '../../utils/format';
@@ -13,6 +13,7 @@ import {
   deleteSavedPortfolio as removeSavedPortfolio,
   getSavedPortfolios as listSavedPortfolios,
 } from './storage';
+import useAbortableAction from '../../hooks/useAbortableAction';
 
 const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
 
@@ -30,7 +31,7 @@ export default function usePortfolio() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [results, setResults] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const { run: runAbortable, running: loading, abort: abortCalculate } = useAbortableAction();
   const [error, setError] = useState(null);
   const [legDateRanges, setLegDateRanges] = useState({});
   const [overlapRange, setOverlapRange] = useState(null);
@@ -40,8 +41,6 @@ export default function usePortfolio() {
   const [autosave, setAutosaveState] = useState(
     () => localStorage.getItem(AUTOSAVE_KEY) === 'true',
   );
-
-  const abortRef = useRef(null);
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -212,21 +211,17 @@ export default function usePortfolio() {
   }, []);
 
   const clearAll = useCallback(() => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
+    abortCalculate();
     setLegs([]);
     setResults(null);
     setError(null);
-    setLoading(false);
     setLegDateRanges({});
     setOverlapRange(null);
     setStartDate('');
     setEndDate('');
     setPortfolioName('');
     setDirty(false);
-  }, []);
+  }, [abortCalculate]);
 
   /* ── Calculate ── */
 
@@ -282,34 +277,27 @@ export default function usePortfolio() {
       apiWeights[leg.label] = Number(leg.weight) || 0;
     }
 
-    // Abort previous request
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setLoading(true);
     setError(null);
-
-    try {
-      const res = await computePortfolio({
-        legs: apiLegs,
-        weights: apiWeights,
-        rebalance,
-        returnType: 'normal',
-        start: startDate || undefined,
-        end: endDate || undefined,
-        signal: controller.signal,
-      });
-      if (!controller.signal.aborted) {
-        setResults(res);
-        setLoading(false);
+    await runAbortable(async ({ signal }) => {
+      try {
+        const res = await computePortfolio({
+          legs: apiLegs,
+          weights: apiWeights,
+          rebalance,
+          returnType: 'normal',
+          start: startDate || undefined,
+          end: endDate || undefined,
+          signal,
+        });
+        if (!signal.aborted) {
+          setResults(res);
+        }
+      } catch (err) {
+        if (signal.aborted) return;
+        setError(err.message || 'Computation failed');
       }
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      setError(err.message || 'Computation failed');
-      setLoading(false);
-    }
-  }, [legs, rebalance, startDate, endDate]);
+    });
+  }, [legs, rebalance, startDate, endDate, runAbortable]);
 
   const clearError = useCallback(() => setError(null), []);
 

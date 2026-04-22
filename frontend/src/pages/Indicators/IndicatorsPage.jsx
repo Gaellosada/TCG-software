@@ -12,6 +12,7 @@ import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InlineNameInput from '../../components/InlineNameInput';
+import useAbortableAction from '../../hooks/useAbortableAction';
 import { classifyFetchError } from '../../utils/fetchError';
 import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
@@ -122,7 +123,7 @@ function IndicatorsPage() {
   const [indicators, setIndicators] = useState([]); // merged list (defaults + user)
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
-  const [running, setRunning] = useState(false);
+  const { run: runAbortable, running, abort: abortRun } = useAbortableAction();
   const [error, setError] = useState(null); // structured: { error_type, message, traceback? }
   const [lastResult, setLastResult] = useState(null);
   const [defaultSeries, setDefaultSeries] = useState(null);
@@ -152,14 +153,6 @@ function IndicatorsPage() {
 
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
-
-  // Abort controller for the in-flight /api/indicators/compute request.
-  // Ensures switching indicators or unmounting cancels stale work so its
-  // result can't overwrite the current selection's state.
-  const runAbortRef = useRef(null);
-  useEffect(() => () => {
-    if (runAbortRef.current) runAbortRef.current.abort();
-  }, []);
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
@@ -400,14 +393,8 @@ function IndicatorsPage() {
 
   const runIndicator = useCallback(async () => {
     if (!selectedIndicator) return;
-    // Cancel any still-running compute so a stale response can't clobber
-    // the state after the user switched indicators or hit Run again.
-    if (runAbortRef.current) runAbortRef.current.abort();
-    const controller = new AbortController();
-    runAbortRef.current = controller;
-    setRunning(true);
     setError(null);
-    try {
+    await runAbortable(async ({ signal }) => {
       const seriesPayload = {};
       for (const [label, picked] of Object.entries(selectedIndicator.seriesMap || {})) {
         if (picked) {
@@ -429,12 +416,12 @@ function IndicatorsPage() {
             params: selectedIndicator.params,
             series: seriesPayload,
           },
-          { signal: controller.signal },
+          { signal },
         );
-        if (controller.signal.aborted) return;
+        if (signal.aborted) return;
         setLastResult(data);
       } catch (e) {
-        if (controller.signal.aborted) return;
+        if (signal.aborted) return;
         if (e && typeof e === 'object' && 'status' in e) {
           // Structured error envelope:
           //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
@@ -459,23 +446,14 @@ function IndicatorsPage() {
           }
         }
       }
-    } finally {
-      if (!controller.signal.aborted) setRunning(false);
-      if (runAbortRef.current === controller) runAbortRef.current = null;
-    }
-  }, [selectedIndicator]);
+    });
+  }, [selectedIndicator, runAbortable]);
 
   // Cancel any in-flight run when the user switches indicators —
   // otherwise a stale response could overwrite state for the new one.
   useEffect(() => {
-    return () => {
-      if (runAbortRef.current) {
-        runAbortRef.current.abort();
-        runAbortRef.current = null;
-        setRunning(false);
-      }
-    };
-  }, [selectedId]);
+    return () => abortRun();
+  }, [selectedId, abortRun]);
 
   const seriesLabels = parsedSpec.seriesLabels;
   const allSlotsFilled = selectedIndicator

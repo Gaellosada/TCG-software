@@ -18,6 +18,7 @@ import { hydrateAvailableIndicators } from './hydrateIndicators';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import InlineNameInput from '../../components/InlineNameInput';
+import useAbortableAction from '../../hooks/useAbortableAction';
 import styles from './SignalsPage.module.css';
 
 function nextSignalName(existing) {
@@ -45,7 +46,7 @@ function SignalsPage() {
   const [signals, setSignals] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
-  const [running, setRunning] = useState(false);
+  const { run: runAbortable, running, abort: abortRun } = useAbortableAction();
   const [error, setError] = useState(null);
   const [lastResult, setLastResult] = useState(null);
   const [capital, setCapital] = useState(1000);
@@ -65,13 +66,6 @@ function SignalsPage() {
 
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
-
-  // Abort controller for the in-flight /api/signals/compute request.
-  // Switching signals or unmounting aborts any stale work.
-  const runAbortRef = useRef(null);
-  useEffect(() => () => {
-    if (runAbortRef.current) runAbortRef.current.abort();
-  }, []);
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
@@ -209,49 +203,38 @@ function SignalsPage() {
       setLastResult(null);
       return;
     }
-    if (runAbortRef.current) runAbortRef.current.abort();
-    const controller = new AbortController();
-    runAbortRef.current = controller;
-    setRunning(true);
     setError(null);
-    try {
-      const data = await computeSignal(body.spec, body.indicators, { signal: controller.signal });
-      if (controller.signal.aborted) return;
-      setLastResult(data);
-    } catch (e) {
-      if (controller.signal.aborted) return;
-      if (e && typeof e === 'object' && 'status' in e) {
-        setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
-        setLastResult(null);
-      } else {
-        const classified = classifyFetchError(e);
-        const error_type = fetchKindToErrorType(classified.kind);
-        if (error_type === ABORTED) {
+    await runAbortable(async ({ signal }) => {
+      try {
+        const data = await computeSignal(body.spec, body.indicators, { signal });
+        if (signal.aborted) return;
+        setLastResult(data);
+      } catch (e) {
+        if (signal.aborted) return;
+        if (e && typeof e === 'object' && 'status' in e) {
+          setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
           setLastResult(null);
         } else {
-          setError({
-            error_type,
-            message: `${classified.title} — ${classified.message}`,
-          });
-          setLastResult(null);
+          const classified = classifyFetchError(e);
+          const error_type = fetchKindToErrorType(classified.kind);
+          if (error_type === ABORTED) {
+            setLastResult(null);
+          } else {
+            setError({
+              error_type,
+              message: `${classified.title} — ${classified.message}`,
+            });
+            setLastResult(null);
+          }
         }
       }
-    } finally {
-      if (!controller.signal.aborted) setRunning(false);
-      if (runAbortRef.current === controller) runAbortRef.current = null;
-    }
-  }, [selectedSignal, availableIndicators]);
+    });
+  }, [selectedSignal, availableIndicators, runAbortable]);
 
   // Cancel any in-flight signal run when the user switches signals.
   useEffect(() => {
-    return () => {
-      if (runAbortRef.current) {
-        runAbortRef.current.abort();
-        runAbortRef.current = null;
-        setRunning(false);
-      }
-    };
-  }, [selectedId]);
+    return () => abortRun();
+  }, [selectedId, abortRun]);
 
   // Drive the grid results-row height from the number of ownPanel indicators
   // so the row grows and the flex chain inside fills it naturally.
