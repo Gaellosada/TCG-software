@@ -8,6 +8,10 @@ import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './param
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { loadState, saveState } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
+import { hydrateDefault, applyDefaultSeries } from './hydrateDefault';
+import { buildPersistablePayload, serializePersistablePayload } from './persistablePayload';
+import { computeDefaultSeriesBannerText } from './defaultSeriesBanner';
+import { areAllSlotsFilled, computeRunDisabledReason } from './runGate';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -36,88 +40,8 @@ function nextIndicatorName(existing) {
   return `Indicator ${maxN + 1}`;
 }
 
-// Hydrate a default indicator from the registry + persisted per-session
-// state. Returns the merged shape the rest of the page works with.
-//
-// Exported for unit tests. ``chartMode`` is a registry-only author hint
-// (no user-editable counterpart in localStorage) — it flows straight
-// from ``def`` into the hydrated object and is NEVER overridden by the
-// ``defaultState`` overlay, which only carries ``params`` / ``seriesMap``.
-export function hydrateDefault(def, savedEntry) {
-  const spec = parseIndicatorSpec(def.code);
-  const params = reconcileParams(savedEntry?.params || {}, spec.params);
-  const seriesMap = reconcileSeriesMap(savedEntry?.seriesMap || {}, spec.seriesLabels);
-  const hydrated = {
-    id: def.id,
-    name: def.name,
-    code: def.code,
-    doc: typeof def.doc === 'string' ? def.doc : '',
-    readonly: true,
-    params,
-    seriesMap,
-    // ownPanel is locked at the registry — users cannot override it for defaults.
-    ownPanel: !!def.ownPanel,
-  };
-  // chartMode is optional — only propagate when the registry entry sets
-  // it, so hydrated objects for entries without the hint stay clean
-  // (chart falls back to 'lines' via ``IndicatorChart.jsx``).
-  if (typeof def.chartMode === 'string' && def.chartMode) {
-    hydrated.chartMode = def.chartMode;
-  }
-  return hydrated;
-}
-
-// Build the storage-shaped payload (same shape the old persistence
-// effect wrote). Pure — no side-effects.
-function buildPersistablePayload(indicators) {
-  const userIndicators = indicators
-    .filter((ind) => !ind.readonly)
-    .map((ind) => ({
-      id: ind.id,
-      name: ind.name,
-      code: ind.code,
-      doc: typeof ind.doc === 'string' ? ind.doc : '',
-      params: ind.params,
-      seriesMap: ind.seriesMap,
-      // ``ownPanel`` is persisted for customs only — defaults source it
-      // from the registry (see ``hydrateDefault``), so we intentionally
-      // do NOT include it in ``defaultState`` below.
-      ownPanel: !!ind.ownPanel,
-    }));
-  const defaultState = {};
-  for (const ind of indicators) {
-    if (!ind.readonly) continue;
-    defaultState[ind.id] = { params: ind.params, seriesMap: ind.seriesMap };
-  }
-  return { indicators: userIndicators, defaultState };
-}
-
-// Stable-ish serialization for dirty comparison. JSON.stringify of a
-// plain object built from sorted entries is stable across re-renders
-// so long as the underlying data is the same.
-function serializePersistablePayload(indicators) {
-  return JSON.stringify(buildPersistablePayload(indicators));
-}
-
-// Auto-populate a default's SPX slot once the resolver returns, but
-// only if the slot is still empty (user may already have picked).
-function applyDefaultSeries(ind, defaultSeries) {
-  if (!defaultSeries) return ind;
-  const updated = { ...ind.seriesMap };
-  let touched = false;
-  for (const [label, picked] of Object.entries(updated)) {
-    if (picked === null) {
-      updated[label] = {
-        type: 'spot',
-        collection: defaultSeries.collection,
-        instrument_id: defaultSeries.instrument_id,
-      };
-      touched = true;
-    }
-  }
-  if (!touched) return ind;
-  return { ...ind, seriesMap: updated };
-}
+// Re-export hydrateDefault for tests that import from this module.
+export { hydrateDefault };
 
 function IndicatorsPage() {
   const [indicators, setIndicators] = useState([]); // merged list (defaults + user)
@@ -456,16 +380,7 @@ function IndicatorsPage() {
   }, [selectedId, abortRun]);
 
   const seriesLabels = parsedSpec.seriesLabels;
-  const allSlotsFilled = selectedIndicator
-    && seriesLabels.length > 0
-    && seriesLabels.every((lbl) => {
-      const picked = selectedIndicator.seriesMap?.[lbl];
-      if (!picked || !picked.collection) return false;
-      // Continuous series are identified by collection alone — no instrument_id.
-      if (picked.type === 'continuous') return true;
-      // Spot (and legacy entries without a type field) require instrument_id.
-      return !!picked.instrument_id;
-    });
+  const allSlotsFilled = areAllSlotsFilled(selectedIndicator, seriesLabels);
 
   const canRun = !!selectedIndicator
     && !running
@@ -474,36 +389,18 @@ function IndicatorsPage() {
 
   // Tooltip shown on the disabled Run button so keyboard and mouse users
   // can tell what's blocking execution. Priority: most-specific first.
-  const runDisabledReason = canRun || running ? null : (() => {
-    if (!selectedIndicator) return 'Select an indicator first';
-    if (!selectedIndicator.code || !selectedIndicator.code.trim()) return 'Add code before running';
-    const emptyLabel = seriesLabels.find((lbl) => {
-      const picked = selectedIndicator.seriesMap?.[lbl];
-      if (!picked || !picked.collection) return true;
-      if (picked.type === 'continuous') return false;
-      return !picked.instrument_id;
-    });
-    if (emptyLabel) return `Fill series slot: ${emptyLabel}`;
-    return 'Cannot run';
-  })();
+  const runDisabledReason = canRun || running
+    ? null
+    : computeRunDisabledReason(selectedIndicator, seriesLabels);
 
   // Banner copy driven by the classified resolver result. If we never
   // got a classified error (just no match), fall back to the original
   // "pick a series manually" message.
-  const bannerText = (() => {
-    if (!defaultSeriesLoaded) return null;
-    if (defaultSeries) return null;
-    if (defaultSeriesError) {
-      const k = defaultSeriesError.kind;
-      if (k === 'offline') return "You're offline — series list unavailable";
-      if (k === 'network') return "Can't reach the data server";
-      if (k === 'server' || k === 'client') {
-        return `Data server error: ${defaultSeriesError.message || 'unknown'}`;
-      }
-      // 'not-found' / 'unknown' → fall through to classic copy.
-    }
-    return 'S\u0026P 500 not found in DB — pick a series manually.';
-  })();
+  const bannerText = computeDefaultSeriesBannerText({
+    defaultSeriesLoaded,
+    defaultSeries,
+    defaultSeriesError,
+  });
 
   return (
     <div className={`${styles.page} ${selectedIndicator?.ownPanel ? styles.pageSplit : ''}`}>
