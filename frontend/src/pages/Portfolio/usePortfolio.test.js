@@ -181,3 +181,100 @@ describe('usePortfolio — signal leg support', () => {
     expect(range.end).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// addLeg auto-suffix tests (item 4 in review-nits spec)
+// ---------------------------------------------------------------------------
+
+describe('usePortfolio — addLeg auto-suffix on duplicate labels', () => {
+  const baseLeg = {
+    label: 'SPX',
+    type: 'instrument',
+    collection: 'INDEX',
+    symbol: 'SPX',
+    weight: 100,
+  };
+
+  it('first leg gets the label unchanged', () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(baseLeg);
+    });
+
+    expect(result.current.legs).toHaveLength(1);
+    expect(result.current.legs[0].label).toBe('SPX');
+  });
+
+  it('duplicate label is suffixed with " (2)"', () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(baseLeg);
+      result.current.addLeg(baseLeg);
+    });
+
+    const labels = result.current.legs.map((l) => l.label);
+    expect(labels).toContain('SPX');
+    expect(labels).toContain('SPX (2)');
+  });
+
+  it('third duplicate gets suffix " (3)"', () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(baseLeg);
+      result.current.addLeg(baseLeg);
+      result.current.addLeg(baseLeg);
+    });
+
+    const labels = result.current.legs.map((l) => l.label);
+    expect(labels).toContain('SPX');
+    expect(labels).toContain('SPX (2)');
+    expect(labels).toContain('SPX (3)');
+  });
+
+  it('API-dict keys never collide after auto-suffix', () => {
+    // When handleCalculate sends { legs: { label: payload } }, each key must be unique.
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(baseLeg);
+      result.current.addLeg(baseLeg);
+    });
+
+    const labels = result.current.legs.map((l) => l.label);
+    const uniqueLabels = new Set(labels);
+    expect(uniqueLabels.size).toBe(labels.length);
+  });
+
+  it('UI-facing label reflects the renamed version', () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(baseLeg);
+      result.current.addLeg(baseLeg);
+    });
+
+    // The second leg's label must differ from the first.
+    const [first, second] = result.current.legs;
+    expect(first.label).toBe('SPX');
+    expect(second.label).not.toBe('SPX');
+    expect(second.label).toBe('SPX (2)');
+  });
+
+  it('addSignalLeg also auto-suffixes on duplicate signal names', () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addSignalLeg(fakeSignal);
+      result.current.addSignalLeg(fakeSignal);
+    });
+
+    const labels = result.current.legs.map((l) => l.label);
+    expect(labels).toContain('Test Signal');
+    expect(labels).toContain('Test Signal (2)');
+    // API dict keys must not collide.
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+});
