@@ -66,8 +66,14 @@ import numpy.typing as npt
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from tcg.core.api.common import ADJUSTMENT_MAP, error_response
-from tcg.core.api.data import get_market_data
+from tcg.core.api._adapters import build_roll_config
+from tcg.core.api._dates import parse_iso_range
+from tcg.core.api._models import (
+    ContinuousInstrumentRef,
+    SpotInstrumentRef,
+)
+from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api.common import error_response, get_market_data
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import (
@@ -78,7 +84,6 @@ from tcg.engine.signal_exec import (
     evaluate_signal,
 )
 from tcg.types.errors import DataNotFoundError
-from tcg.types.market import ContinuousRollConfig, RollStrategy
 from tcg.types.signal import (
     Block,
     CompareCondition,
@@ -111,26 +116,10 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 # ---------------------------------------------------------------------------
 
 
-class _SpotInstrumentIn(BaseModel):
-    type: Literal["spot"]
-    collection: str
-    instrument_id: str
-
-
-class _ContinuousInstrumentIn(BaseModel):
-    type: Literal["continuous"]
-    collection: str
-    adjustment: Literal["none", "proportional", "difference"] = "none"
-    cycle: str | None = None
-    # Accept camelCase from the frontend.
-    rollOffset: int = 0
-    strategy: Literal["front_month"] = "front_month"
-
-
 class _InputIn(BaseModel):
     id: str
     # Pydantic v2 discriminated union on ``type``.
-    instrument: _SpotInstrumentIn | _ContinuousInstrumentIn = Field(
+    instrument: SpotInstrumentRef | ContinuousInstrumentRef = Field(
         discriminator="type"
     )
 
@@ -220,7 +209,7 @@ def _parse_input(inp_in: _InputIn) -> Input:
     if not iid:
         raise SignalValidationError("input id must be non-empty")
     inst_in = inp_in.instrument
-    if isinstance(inst_in, _SpotInstrumentIn):
+    if isinstance(inst_in, SpotInstrumentRef):
         if not inst_in.collection or not inst_in.instrument_id:
             raise SignalValidationError(
                 f"input {iid!r}: spot instrument requires collection + instrument_id"
@@ -389,18 +378,16 @@ async def compute_input_overlap(
                     ) from exc
                 date_arrays.append(series.dates)
             case "InstrumentContinuous":
-                adj = ADJUSTMENT_MAP.get(inst.adjustment)  # type: ignore[union-attr]
-                if adj is None:
-                    raise SignalDataError(
-                        f"input {inp.id!r}: unknown adjustment "
-                        f"{inst.adjustment!r}"  # type: ignore[union-attr]
+                try:
+                    roll_config = build_roll_config(
+                        inst.adjustment,  # type: ignore[union-attr]
+                        inst.cycle,  # type: ignore[union-attr]
+                        inst.roll_offset,  # type: ignore[union-attr]
                     )
-                roll_config = ContinuousRollConfig(
-                    strategy=RollStrategy.FRONT_MONTH,
-                    adjustment=adj,
-                    cycle=inst.cycle or None,  # type: ignore[union-attr]
-                    roll_offset_days=int(inst.roll_offset),  # type: ignore[union-attr]
-                )
+                except ValueError as exc:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: {exc}"
+                    ) from exc
                 try:
                     cseries = await svc.get_continuous(
                         inst.collection,  # type: ignore[union-attr]
@@ -490,18 +477,16 @@ def make_signal_fetcher(
             return series.dates, values
 
         # continuous
-        strategy = RollStrategy.FRONT_MONTH
-        adj = ADJUSTMENT_MAP.get(instrument.adjustment)
-        if adj is None:
-            raise SignalValidationError(
-                f"continuous input: unknown adjustment {instrument.adjustment!r}"
+        try:
+            roll_config = build_roll_config(
+                instrument.adjustment,
+                instrument.cycle,
+                instrument.roll_offset,
             )
-        roll_config = ContinuousRollConfig(
-            strategy=strategy,
-            adjustment=adj,
-            cycle=instrument.cycle or None,
-            roll_offset_days=int(instrument.roll_offset),
-        )
+        except ValueError as exc:
+            raise SignalValidationError(
+                f"continuous input: {exc}"
+            ) from exc
         try:
             cseries = await svc.get_continuous(
                 instrument.collection,
@@ -534,12 +519,6 @@ def _int_yyyymmdd_to_unix_ms(d: int) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def _nan_safe(arr: npt.NDArray[np.float64] | None) -> list[float | None]:
-    if arr is None:
-        return []
-    return [None if (v != v) else float(v) for v in arr.tolist()]
-
-
 def _instrument_payload(inst: InputInstrument) -> dict:
     if isinstance(inst, InstrumentSpot):
         return {
@@ -565,10 +544,9 @@ async def compute_signal(
     """Evaluate a v3 Signal and return per-input positions + clip flag."""
 
     try:
-        start_date = date.fromisoformat(body.start) if body.start else None
-        end_date = date.fromisoformat(body.end) if body.end else None
+        start_date, end_date = parse_iso_range(body.start, body.end)
     except ValueError as exc:
-        return error_response("validation", f"Invalid date format: {exc}")
+        return error_response("validation", str(exc))
 
     try:
         signal = parse_signal(body.spec)
@@ -626,13 +604,13 @@ async def compute_signal(
         else:
             price_payload = {
                 "label": p.price_label,
-                "values": _nan_safe(p.price_values),
+                "values": nan_safe_floats(p.price_values),
             }
         positions_out.append(
             {
                 "input_id": p.input_id,
                 "instrument": _instrument_payload(p.instrument),
-                "values": _nan_safe(p.values),
+                "values": nan_safe_floats(p.values),
                 "clipped_mask": [bool(x) for x in p.clipped_mask.tolist()],
                 "price": price_payload,
             }
@@ -661,7 +639,7 @@ async def compute_signal(
             {
                 "input_id": ind.input_id,
                 "indicator_id": ind.indicator_id,
-                "series": _nan_safe(ind.series),
+                "series": nan_safe_floats(ind.series),
                 "ownPanel": indicator_own_panel.get(ind.indicator_id, False),
             }
         )

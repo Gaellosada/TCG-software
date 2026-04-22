@@ -7,9 +7,16 @@ drift apart.
 
 from __future__ import annotations
 
+from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from tcg.data.protocols import MarketDataService
 from tcg.types.market import AdjustmentMethod
+
+
+def get_market_data(request: Request) -> MarketDataService:
+    """Dependency: retrieve the MarketDataService from app state."""
+    return request.app.state.market_data
 
 
 def error_response(
