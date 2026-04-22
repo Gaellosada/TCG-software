@@ -46,9 +46,11 @@ describe('defaultBlock (v4)', () => {
     expect('target_entry_block_id' in b).toBe(false);
   });
 
-  it('exit block adds target_entry_block_id: ""', () => {
+  it('exit block adds target_entry_block_id: "" and omits block-level input_id/weight', () => {
     const b = defaultBlock('exits');
     expect(b.target_entry_block_id).toBe('');
+    expect('input_id' in b).toBe(false);
+    expect('weight' in b).toBe(false);
   });
 
   it('defaults to entries when no section given', () => {
@@ -338,5 +340,23 @@ describe('isBlockRunnable (v4 — exits)', () => {
 
   it('exit + nonzero weight → still runnable (weight unused on exits)', () => {
     expect(isBlockRunnable(exitBlock({ weight: 999 }), 'exits', INPUTS, entryIds)).toBe(true);
+  });
+
+  // When callers pass an array of entry Block objects (rich check), the
+  // exit's runnability additionally requires the target entry's input_id
+  // to resolve to a configured input — exits inherit that input.
+  it('rich check: target entry has no input_id → false', () => {
+    const entryBlocks = [{ id: 'entry-1', input_id: '', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(false);
+  });
+
+  it('rich check: target entry has unknown input_id → false', () => {
+    const entryBlocks = [{ id: 'entry-1', input_id: 'NOPE', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(false);
+  });
+
+  it('rich check: target entry has configured input → true', () => {
+    const entryBlocks = [{ id: 'entry-1', input_id: 'X', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(true);
   });
 });

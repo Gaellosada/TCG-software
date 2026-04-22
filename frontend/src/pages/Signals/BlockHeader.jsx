@@ -4,13 +4,16 @@ import { isInputConfigured } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
- * Per-block controls (v4): input dropdown (references one of the signal's
- * declared inputs), signed weight input with % suffix and direction badge
- * (entries only — weight column hidden on exits), delete-block button
- * gated by ConfirmDialog.
+ * Per-block controls (v4): for entries, input dropdown (references one
+ * of the signal's declared inputs), signed weight input with % suffix
+ * and direction badge; for exits, the input picker and weight column
+ * are hidden (the operating input is derived from the target entry
+ * picked elsewhere in the block editor). Delete-block button is gated
+ * by ConfirmDialog.
  *
  * Props:
- *   block       {Object}   { id, input_id, weight, conditions, [target_entry_block_id] }
+ *   block       {Object}   { id, [input_id, weight on entries,
+ *                            target_entry_block_id on exits] }
  *   section     {string}   'entries' | 'exits'
  *   inputs      {Array}    the signal's declared inputs
  *   onChange    {Function} (nextBlock) => void
@@ -18,8 +21,10 @@ import styles from './Signals.module.css';
  *   blockIndex  {number}   1-based index shown in the label
  *   status      {string}   'ok' | 'warn' (optional)
  *   blockIdx    {number}   0-based index for data-testid (optional)
+ *   derivedInputLabel {string?} exits only: a read-only display hint
+ *     (e.g. "(input from target: X)") rendered in place of the picker.
  */
-function BlockHeader({ block, section, inputs, onChange, onDelete, blockIndex, status, blockIdx }) {
+function BlockHeader({ block, section, inputs, onChange, onDelete, blockIndex, status, blockIdx, derivedInputLabel }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
   // Local draft for the weight input so the user can type freely before blur
@@ -141,33 +146,44 @@ function BlockHeader({ block, section, inputs, onChange, onDelete, blockIndex, s
       )}
 
       <span className={styles.blockDirectionLabel}>
-        {isEntry ? 'entry on' : 'exit on'}
+        {isEntry ? 'entry on' : 'exit'}
       </span>
-      <div className={styles.blockInstrumentCell}>
-        <select
-          className={styles.blockInputSelect}
-          value={selectedId}
-          onChange={(e) => setInputId(e.target.value)}
-          aria-label={`Input for block ${blockIndex}`}
-          data-testid={`block-input-select-${blockIndex - 1}`}
-        >
-          <option value="">…</option>
-          {list.map((input) => {
-            const ok = isInputConfigured(input);
-            return (
-              <option key={input.id} value={input.id}>
-                {input.id}{!ok ? ' (needs instrument)' : ''}
-              </option>
-            );
-          })}
-        </select>
-        {showUnconfiguredWarning && (
-          <span className={styles.blockInputWarn} title="This input has no instrument yet">!</span>
-        )}
-        {showUnknownWarning && (
-          <span className={styles.blockInputWarn} title={`Unknown input id "${selectedId}"`}>?</span>
-        )}
-      </div>
+      {isEntry ? (
+        <div className={styles.blockInstrumentCell}>
+          <select
+            className={styles.blockInputSelect}
+            value={selectedId}
+            onChange={(e) => setInputId(e.target.value)}
+            aria-label={`Input for block ${blockIndex}`}
+            data-testid={`block-input-select-${blockIndex - 1}`}
+          >
+            <option value="">…</option>
+            {list.map((input) => {
+              const ok = isInputConfigured(input);
+              return (
+                <option key={input.id} value={input.id}>
+                  {input.id}{!ok ? ' (needs instrument)' : ''}
+                </option>
+              );
+            })}
+          </select>
+          {showUnconfiguredWarning && (
+            <span className={styles.blockInputWarn} title="This input has no instrument yet">!</span>
+          )}
+          {showUnknownWarning && (
+            <span className={styles.blockInputWarn} title={`Unknown input id "${selectedId}"`}>?</span>
+          )}
+        </div>
+      ) : (
+        derivedInputLabel ? (
+          <span
+            className={styles.blockDerivedInputLabel}
+            data-testid={`block-derived-input-${blockIndex - 1}`}
+          >
+            {derivedInputLabel}
+          </span>
+        ) : null
+      )}
 
       {isEntry && (
         <div className={styles.blockWeightCell}>

@@ -48,9 +48,15 @@ export function computeRunGate(selectedSignal, availableIndicators) {
     ...entries.map((b) => ({ block: b, section: 'entries' })),
     ...exits.map((b) => ({ block: b, section: 'exits' })),
   ];
-  const nonEmpty = blocksWithSection.filter(({ block: b }) => (
-    (b && ((b.conditions || []).length > 0 || b.input_id))
-  ));
+  // A block is "non-empty" if the user has interacted with it at all.
+  // For entries that means any condition or picked input; for exits it
+  // means any condition or picked target (exits no longer carry input_id).
+  const nonEmpty = blocksWithSection.filter(({ block: b, section }) => {
+    if (!b) return false;
+    const hasCond = (b.conditions || []).length > 0;
+    if (section === 'entries') return hasCond || !!b.input_id;
+    return hasCond || !!b.target_entry_block_id;
+  });
   if (nonEmpty.length === 0) {
     return {
       runDisabledReason: 'Add at least one block with an input + condition',
@@ -74,12 +80,6 @@ export function computeRunGate(selectedSignal, availableIndicators) {
   }
 
   for (const { block: b, section } of nonEmpty) {
-    if (!b.input_id) {
-      return {
-        runDisabledReason: 'Every block needs an input — pick one in the block header.',
-        missingIds: [],
-      };
-    }
     if (!(b.conditions || []).length) {
       return {
         runDisabledReason: 'Every block needs at least one condition.',
@@ -87,6 +87,12 @@ export function computeRunGate(selectedSignal, availableIndicators) {
       };
     }
     if (section === 'entries') {
+      if (!b.input_id) {
+        return {
+          runDisabledReason: 'Every entry block needs an input — pick one in the block header.',
+          missingIds: [],
+        };
+      }
       if (!Number.isFinite(b.weight) || b.weight === 0) {
         return {
           runDisabledReason: 'Every entry block needs a non-zero weight — '
@@ -116,7 +122,11 @@ export function computeRunGate(selectedSignal, availableIndicators) {
         };
       }
     }
-    if (!isBlockRunnable(b, section, inputs, entryIds)) {
+    // For exits we pass the entry blocks themselves so isBlockRunnable
+    // can additionally verify the resolved target entry has a configured
+    // input (exits inherit their input from the target entry).
+    const entryArg = section === 'exits' ? entries : entryIds;
+    if (!isBlockRunnable(b, section, inputs, entryArg)) {
       return {
         runDisabledReason: 'Every operand must be set — pick an input, '
           + 'indicator or constant for each slot.',

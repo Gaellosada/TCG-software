@@ -227,8 +227,6 @@ class TestComputeEndpointV4:
                     "exits": [
                         {
                             "id": "X1",
-                            "input_id": "X",
-                            "weight": 0.0,
                             "target_entry_block_id": "E1",
                             "conditions": [
                                 {
@@ -287,8 +285,6 @@ class TestComputeEndpointV4:
                     "exits": [
                         {
                             "id": "X1",
-                            "input_id": "X",
-                            "weight": 0.0,
                             "target_entry_block_id": "NOPE",
                             "conditions": [
                                 {
@@ -341,8 +337,6 @@ class TestComputeEndpointV4:
                     "exits": [
                         {
                             "id": "X1",
-                            "input_id": "X",
-                            "weight": 0.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -402,6 +396,117 @@ class TestComputeEndpointV4:
         data = resp.json()
         assert data["error_type"] == "validation"
         assert "target_entry_block_id" in data["message"]
+
+    async def test_exit_with_input_id_rejected(self, client: AsyncClient):
+        """Invariant: exit blocks must NOT carry a block-level input_id.
+
+        The operating input is derived from the target entry; accepting
+        a redundant value would permit two sources that could disagree.
+        """
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            # Forbidden: exits must not carry input_id.
+                            "input_id": "X",
+                            "target_entry_block_id": "E1",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        # Path-qualified error message mentions the exit and the field.
+        assert "rules.exits[0]" in data["message"]
+        assert "input_id" in data["message"]
+
+    async def test_exit_with_empty_input_id_accepted(self, client: AsyncClient):
+        """An empty-string input_id on an exit is treated the same as
+        absent — the invariant rejects only non-empty values."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "input_id": "",  # empty = treated as absent
+                            "target_entry_block_id": "E1",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 200, resp.text
 
     async def test_entry_weight_zero_rejected(self, client: AsyncClient):
         body = {

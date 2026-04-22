@@ -268,7 +268,27 @@ function Block({
   indicators,
 }) {
   const conditions = block.conditions || [];
-  const runnable = isBlockRunnable(block, section, inputs, entryIds);
+  // For exits we pass the entry blocks themselves to isBlockRunnable so
+  // it can verify the target entry's input is configured (exits inherit
+  // the input from their target entry).
+  const runnable = isBlockRunnable(
+    block,
+    section,
+    inputs,
+    section === 'exits' ? entryBlocks : entryIds,
+  );
+
+  let derivedInputLabel = null;
+  if (section === 'exits') {
+    const targetId = block.target_entry_block_id;
+    const targetEntry = targetId
+      ? (entryBlocks || []).find((b) => b && b.id === targetId)
+      : null;
+    if (targetEntry && targetEntry.input_id) {
+      derivedInputLabel = `(input from target: ${targetEntry.input_id})`;
+    }
+  }
+
   return (
     <div
       className={styles.block}
@@ -286,6 +306,7 @@ function Block({
         blockIndex={blockIdx + 1}
         status={runnable ? 'ok' : 'warn'}
         blockIdx={blockIdx}
+        derivedInputLabel={derivedInputLabel}
       />
       {section === 'exits' && (
         <TargetEntryPicker

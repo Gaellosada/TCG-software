@@ -209,7 +209,7 @@ describe('BlockHeader — section label', () => {
     expect(screen.getByText('entry on')).toBeDefined();
   });
 
-  it('shows "exit on" for exits section', () => {
+  it('shows "exit" for exits section', () => {
     render(
       <BlockHeader
         block={exitBlock()}
@@ -220,7 +220,7 @@ describe('BlockHeader — section label', () => {
         blockIndex={1}
       />,
     );
-    expect(screen.getByText('exit on')).toBeDefined();
+    expect(screen.getByText('exit')).toBeDefined();
   });
 });
 

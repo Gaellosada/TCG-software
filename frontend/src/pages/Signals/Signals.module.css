@@ -337,6 +337,16 @@
   flex-shrink: 0;
 }
 
+/* Read-only display of the derived input on exit blocks (exits inherit
+   their operating input from the target entry). */
+.blockDerivedInputLabel {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .blockEditNameBtn {
   background: none;
   border: none;

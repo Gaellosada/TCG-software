@@ -74,18 +74,24 @@ function normaliseBlock(block, section) {
   const conditions = Array.isArray(block.conditions)
     ? block.conditions.map(normaliseCondition)
     : [];
-  const out = {
+  if (section === 'exits') {
+    // Exit blocks omit block-level input_id entirely (not empty-string)
+    // so the backend invariant "exits must not carry input_id" is met.
+    // Weight is meaningless on exits and also omitted.
+    return {
+      id: typeof block.id === 'string' ? block.id : '',
+      conditions,
+      target_entry_block_id: typeof block.target_entry_block_id === 'string'
+        ? block.target_entry_block_id
+        : '',
+    };
+  }
+  return {
     id: typeof block.id === 'string' ? block.id : '',
     input_id: typeof block.input_id === 'string' ? block.input_id : '',
     weight: clampWeight(block.weight),
     conditions,
   };
-  if (section === 'exits') {
-    out.target_entry_block_id = typeof block.target_entry_block_id === 'string'
-      ? block.target_entry_block_id
-      : '';
-  }
-  return out;
 }
 
 function normaliseCondition(condition) {

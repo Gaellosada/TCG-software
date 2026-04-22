@@ -67,6 +67,8 @@ describe('computeSignal request body shape (v4)', () => {
         }],
         exits: [{
           id: 'exit-9',
+          // Legacy stored values that the request builder must drop so
+          // the wire payload never carries block-level input_id on exits.
           input_id: 'X',
           weight: 0,
           target_entry_block_id: 'entry-42',
@@ -88,6 +90,10 @@ describe('computeSignal request body shape (v4)', () => {
     const exit = body.spec.rules.exits[0];
     expect(exit.id).toBe('exit-9');
     expect(exit.target_entry_block_id).toBe('entry-42');
+    // Exit blocks must NOT carry block-level input_id or weight on the
+    // wire — the backend rejects payloads with non-empty input_id.
+    expect('input_id' in exit).toBe(false);
+    expect('weight' in exit).toBe(false);
     // No more instrument key on blocks.
     expect('instrument' in entry).toBe(false);
   });

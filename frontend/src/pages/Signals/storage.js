@@ -19,14 +19,20 @@
 //     ]
 //   }
 //
-// Block = {
+// Entry Block = {
 //   id: <uuid>,                      // stable, generated on creation
 //   input_id: <string>,
 //   weight: <float in [-100, +100]>, // SIGNED percentage; sign decides long/short
 //   conditions: Condition[],         // unchanged from v3
-//   // Exit blocks additionally carry:
-//   target_entry_block_id: <uuid>    // MUST match an existing entry block id
 // }
+// Exit Block = {
+//   id: <uuid>,                      // stable, generated on creation
+//   target_entry_block_id: <uuid>,   // MUST match an existing entry block id
+//   conditions: Condition[],
+// }
+// Exit blocks do NOT carry block-level input_id or weight; the
+// operating input is derived from the target entry's input_id. The
+// sanitiser strips any such legacy fields on load.
 //
 // InputInstrument is a discriminated union:
 //   - Spot:        { type: 'spot',       collection, instrument_id }
@@ -164,19 +170,26 @@ function sanitiseWeight(raw) {
 
 function sanitiseBlock(raw, section) {
   const id = (typeof raw.id === 'string' && raw.id) ? raw.id : newBlockId();
-  const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
-  const weight = sanitiseWeight(raw.weight);
   const name = typeof raw.name === 'string' ? raw.name : '';
   const conditions = Array.isArray(raw.conditions)
     ? raw.conditions.filter((c) => c && typeof c === 'object' && typeof c.op === 'string')
     : [];
-  const block = { id, input_id, weight, name, conditions };
   if (section === 'exits') {
-    block.target_entry_block_id = typeof raw.target_entry_block_id === 'string'
-      ? raw.target_entry_block_id
-      : '';
+    // Exit blocks carry no block-level input_id or weight — the
+    // operating input is derived from the target entry. Legacy
+    // payloads may include these fields; strip them.
+    return {
+      id,
+      name,
+      conditions,
+      target_entry_block_id: typeof raw.target_entry_block_id === 'string'
+        ? raw.target_entry_block_id
+        : '',
+    };
   }
-  return block;
+  const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
+  const weight = sanitiseWeight(raw.weight);
+  return { id, input_id, weight, name, conditions };
 }
 
 function sanitiseSettings(raw) {

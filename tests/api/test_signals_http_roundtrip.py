@@ -276,10 +276,15 @@ def _eq_block(
     threshold: float,
     target: str | None = None,
 ) -> dict:
+    """Build an eq-block fixture.
+
+    The ``input_id`` parameter is used for both the operand binding AND,
+    on entries only, the block-level input_id. Exit blocks (``target``
+    supplied) omit block-level ``input_id`` + ``weight`` per the v4
+    contract — the operating input is derived from the target entry.
+    """
     blk: dict = {
         "id": bid,
-        "input_id": input_id,
-        "weight": weight,
         "conditions": [
             {
                 "op": "eq",
@@ -294,6 +299,9 @@ def _eq_block(
     }
     if target is not None:
         blk["target_entry_block_id"] = target
+    else:
+        blk["input_id"] = input_id
+        blk["weight"] = weight
     return blk
 
 

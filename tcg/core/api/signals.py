@@ -25,7 +25,9 @@ target_entry_block_id?}``. ``weight`` is a signed percentage in
 ``[-100, +100]``; sign decides long/short. ``id`` is a stable
 frontend-generated UUID. ``target_entry_block_id`` is REQUIRED on
 exits and FORBIDDEN on entries, and must reference an existing entry
-block id within the same signal.
+block id within the same signal. ``input_id`` is REQUIRED on entries
+and FORBIDDEN on exits — an exit's operating input is derived from its
+target entry's ``input_id`` at validation time.
 
 Response — per-input positions + per-block events::
 
@@ -392,6 +394,16 @@ def _parse_blocks(
                     )
                 seen_entry_ids.add(bid)
             else:
+                # Exit blocks must NOT carry a block-level input_id: the
+                # operating input is derived from the target entry.
+                # Rejecting non-empty values enforces the "one source of
+                # truth" invariant; silently stripping would hide bugs.
+                if iid:
+                    raise SignalValidationError(
+                        f"{path}: exit blocks must not set 'input_id' — "
+                        f"the operating input is derived from the target "
+                        f"entry's input_id"
+                    )
                 if not tgt:
                     raise SignalValidationError(
                         f"{path}: exit blocks require "

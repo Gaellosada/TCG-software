@@ -31,13 +31,15 @@ Block usability
 ---------------
 A block is "usable" iff
   * it has ≥1 condition;
-  * ``input_id`` resolves to a declared Input;
   * ``id`` is non-empty (required for stable tracking / exit targeting);
-  * entry blocks require ``weight != 0`` AND ``|weight| <= 100``;
+  * entry blocks require ``input_id`` resolves to a declared Input,
+    ``weight != 0`` AND ``|weight| <= 100``;
   * exit blocks require ``target_entry_block_id`` referencing a usable
     entry block in the same signal's rules (a dangling target makes
     the exit a no-op — the engine tolerates this so latent bad state
-    degrades gracefully; the API layer rejects it with HTTP 400);
+    degrades gracefully; the API layer rejects it with HTTP 400). Exit
+    blocks do NOT carry their own ``input_id``; the operating input is
+    always derived from the target entry's ``input_id``.
   * every operand's ``input_id`` resolves;
   * the bound Input's instrument is fully configured.
 
@@ -577,19 +579,38 @@ def _usable_entry(block: Block, inputs: dict[str, Input]) -> bool:
 def _usable_exit(
     block: Block, inputs: dict[str, Input], entry_ids: set[str]
 ) -> bool:
-    """Exit block is usable iff it has id + input_id + conditions AND
-    target_entry_block_id references a usable entry."""
+    """Exit block is usable iff it has id + conditions AND
+    target_entry_block_id references a usable entry.
+
+    Exit blocks do not carry their own ``input_id``; the operating input
+    is derived from the target entry at execution time.
+    """
     if not block.id:
         return False
     if not block.conditions:
-        return False
-    if not block.input_id or block.input_id not in inputs:
         return False
     if not block.target_entry_block_id:
         return False
     if block.target_entry_block_id not in entry_ids:
         return False
     return True
+
+
+def _exit_input_id(
+    exit_block: Block, entries_by_id: dict[str, Block]
+) -> str:
+    """Return the operating input id for an exit block, derived from its
+    target entry.
+
+    Callers must only pass exit blocks that are already known to be
+    usable (i.e. ``target_entry_block_id`` resolves in ``entries_by_id``);
+    this helper does not re-validate. Returns the target entry's
+    ``input_id``.
+    """
+    target = exit_block.target_entry_block_id
+    assert target is not None, "exit_block must have target_entry_block_id"
+    entry = entries_by_id[target]
+    return entry.input_id
 
 
 def _eval_block_activity(
@@ -698,6 +719,10 @@ async def evaluate_signal(
             "duplicate entry block id within signal.rules.entries"
         )
 
+    # Index usable entries by id once; exits derive their operating
+    # input from their target entry via this map.
+    entries_by_id: dict[str, Block] = {b.id: b for b in entry_blocks}
+
     exit_blocks: list[Block] = [
         b for b in signal.rules.exits if _usable_exit(b, inputs, entry_ids)
     ]
@@ -705,14 +730,21 @@ async def evaluate_signal(
     # each other are preferred for trace clarity — not enforced here.
 
     # Referenced inputs = union of usable blocks' input_ids, in
-    # declaration order (entries then exits).
+    # declaration order (entries then exits). Exits contribute the
+    # target entry's input_id (there is no block-level input_id on exits).
     referenced_ids: list[str] = []
     seen_ids: set[str] = set()
-    for blk in (*entry_blocks, *exit_blocks):
+    for blk in entry_blocks:
         if blk.input_id in seen_ids:
             continue
         seen_ids.add(blk.input_id)
         referenced_ids.append(blk.input_id)
+    for blk in exit_blocks:
+        iid = _exit_input_id(blk, entries_by_id)
+        if iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        referenced_ids.append(iid)
 
     # ── 3. Collect operands + implicit close-price operands per input ──
     operands: list[Operand] = list(_walk_operands(signal))
@@ -787,8 +819,9 @@ async def evaluate_signal(
         if blk.input_id in nan_poison:
             nan_poison[blk.input_id] = nan_poison[blk.input_id] | entry_nan[blk.id]
     for blk in exit_blocks:
-        if blk.input_id in nan_poison:
-            nan_poison[blk.input_id] = nan_poison[blk.input_id] | exit_nan[blk.id]
+        iid = _exit_input_id(blk, entries_by_id)
+        if iid in nan_poison:
+            nan_poison[iid] = nan_poison[iid] | exit_nan[blk.id]
 
     # ── 5. Latch state + per-bar positions (sequential) ──
     #
@@ -801,8 +834,9 @@ async def evaluate_signal(
         for b in entry_blocks
     }
 
-    # Entry block by id (for position summation).
-    entry_by_id: dict[str, Block] = {b.id: b for b in entry_blocks}
+    # Entry block by id (for position summation). Re-bind the earlier
+    # ``entries_by_id`` under a local name for readability below.
+    entry_by_id: dict[str, Block] = entries_by_id
 
     # Output buffer: per-input net position.
     position: dict[str, npt.NDArray[np.float64]] = {
@@ -924,7 +958,7 @@ async def evaluate_signal(
     for b in exit_blocks:
         events.append(
             BlockEvent(
-                input_id=b.input_id,
+                input_id=_exit_input_id(b, entries_by_id),
                 block_id=b.id,
                 kind="exit",
                 fired_indices=tuple(exit_fired[b.id]),

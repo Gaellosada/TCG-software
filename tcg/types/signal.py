@@ -183,9 +183,13 @@ class Block:
         entries this id is targeted by exits; on exits this id is used
         only for trace/event identification. ``""`` is the sentinel
         "not yet picked" (evaluator skips the block).
-      * ``input_id`` -- id of the declared :class:`Input` whose
-        instrument this block's position contributes to. ``""`` is the
-        sentinel "not yet picked".
+      * ``input_id`` -- **entry blocks only**: id of the declared
+        :class:`Input` whose instrument this block's position
+        contributes to. ``""`` is the sentinel "not yet picked".
+        MUST be empty (``""``) on exit blocks — the exit's operating
+        input is derived from the target entry's ``input_id`` at
+        validation/execution time. API validation rejects exit blocks
+        with a non-empty ``input_id``.
       * ``weight`` -- signed percentage in ``[-100, +100]``. For entry
         blocks the latched contribution is ``sign(weight) * |weight| /
         100``; ``0.0`` is the sentinel "not yet picked" (rejected by

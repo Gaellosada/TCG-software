@@ -5,14 +5,21 @@
 // builder. No React imports — unit-testable in isolation.
 //
 // v4 Block shape:
-//   {
+//   entry: {
 //     id: <uuid>,
 //     input_id: <string>,
-//     weight: <float in [-100, +100]>,  // signed; nonzero for entries
+//     weight: <float in [-100, +100]>,  // signed; nonzero
 //     conditions: Condition[],
-//     // only on exit blocks:
-//     target_entry_block_id: <uuid>,
 //   }
+//   exit:  {
+//     id: <uuid>,
+//     weight: <ignored>,
+//     conditions: Condition[],
+//     target_entry_block_id: <uuid>,    // resolves in same signal's entries
+//   }
+// Exit blocks do NOT carry a block-level input_id — the operating
+// input is derived from the target entry's input_id. The backend
+// rejects exit payloads containing input_id with HTTP 400.
 //
 // v4 Operand shapes (unchanged from v3):
 //   - indicator:  { kind:'indicator', indicator_id, input_id, output,
@@ -31,16 +38,21 @@ import { newBlockId, MAX_ABS_WEIGHT } from './storage';
 /**
  * Build a brand-new empty block.
  *   - id: fresh uuid.
- *   - input_id: ''  — user must pick.
- *   - weight:    0  — user must set a signed value.
  *   - conditions: []
- *   - target_entry_block_id: '' (exits only)
+ *   - entries: input_id: '' (user must pick), weight: 0 (user must set signed value).
+ *   - exits:   target_entry_block_id: '' (user must pick);
+ *              NO input_id (derived from target entry).
  *
  * @param {'entries'|'exits'} section
  */
 export function defaultBlock(section = 'entries') {
-  const base = { id: newBlockId(), input_id: '', weight: 0, conditions: [] };
-  if (section === 'exits') base.target_entry_block_id = '';
+  const base = { id: newBlockId(), conditions: [] };
+  if (section === 'exits') {
+    base.target_entry_block_id = '';
+  } else {
+    base.input_id = '';
+    base.weight = 0;
+  }
   return base;
 }
 
@@ -137,42 +149,66 @@ export function collectEntryIds(entryBlocks) {
 
 /**
  * True iff the block can be submitted to the backend.
- *   - input_id resolves to a declared Input that is itself fully
- *     configured (isInputConfigured);
- *   - at least one condition;
- *   - every condition complete (every operand complete and every
- *     referenced input_id resolves);
- *   - entry blocks additionally require a signed weight with
- *     |weight| in (0, MAX_ABS_WEIGHT] (nonzero; no leverage);
- *   - exit blocks additionally require a target_entry_block_id that
- *     resolves against ``entryIds``.
+ *   - entries: ``input_id`` resolves to a declared Input that is fully
+ *     configured (isInputConfigured); signed weight with |weight| in
+ *     (0, MAX_ABS_WEIGHT].
+ *   - exits: ``target_entry_block_id`` resolves against ``entryBlocks``
+ *     AND the resolved target entry itself has an ``input_id`` set (the
+ *     exit inherits it).
+ *   - both: at least one condition; every condition complete (every
+ *     operand complete and every referenced input_id resolves).
  *
  * @param {Object} block
  * @param {'entries'|'exits'} section
  * @param {Array<Input>} inputs  the signal's declared inputs.
- * @param {Set<string>} [entryIds] ids of entry blocks on the same signal.
- *        Required when section === 'exits'; ignored otherwise.
+ * @param {Set<string>|Array<Object>} [entryIdsOrBlocks]
+ *   For legacy callers: a Set or Array of entry ids (strings) — the
+ *   target id resolution still works but we can't check whether the
+ *   target's input is set. For the richer check, pass an Array of entry
+ *   Block objects. Required when section === 'exits'; ignored otherwise.
  */
-export function isBlockRunnable(block, section, inputs, entryIds) {
+export function isBlockRunnable(block, section, inputs, entryIdsOrBlocks) {
   if (!block || typeof block !== 'object') return false;
-  if (typeof block.input_id !== 'string' || !block.input_id) return false;
   const byId = indexInputs(inputs);
-  const bound = byId[block.input_id];
-  if (!bound) return false;
-  if (!isInputConfigured(bound)) return false;
   if (!Array.isArray(block.conditions) || block.conditions.length === 0) return false;
   for (const c of block.conditions) {
     if (!isConditionComplete(c, byId)) return false;
   }
   if (section === 'entries') {
+    if (typeof block.input_id !== 'string' || !block.input_id) return false;
+    const bound = byId[block.input_id];
+    if (!bound) return false;
+    if (!isInputConfigured(bound)) return false;
     if (!Number.isFinite(block.weight)) return false;
     if (block.weight === 0) return false;
     if (Math.abs(block.weight) > MAX_ABS_WEIGHT) return false;
   } else if (section === 'exits') {
-    const ids = entryIds instanceof Set ? entryIds : new Set(entryIds || []);
     const tgt = block.target_entry_block_id;
     if (typeof tgt !== 'string' || !tgt) return false;
-    if (!ids.has(tgt)) return false;
+    // Target resolution: accept both a Set/Array of ids AND an Array of
+    // entry Block objects. In the latter case we also verify the target
+    // entry's input_id resolves to a configured input — the exit
+    // inherits its operating input from that entry.
+    let targetEntry = null;
+    if (Array.isArray(entryIdsOrBlocks)
+        && entryIdsOrBlocks.length > 0
+        && typeof entryIdsOrBlocks[0] === 'object') {
+      targetEntry = entryIdsOrBlocks.find((b) => b && b.id === tgt) || null;
+      if (!targetEntry) return false;
+    } else {
+      const ids = entryIdsOrBlocks instanceof Set
+        ? entryIdsOrBlocks
+        : new Set(entryIdsOrBlocks || []);
+      if (!ids.has(tgt)) return false;
+    }
+    if (targetEntry) {
+      if (typeof targetEntry.input_id !== 'string' || !targetEntry.input_id) {
+        return false;
+      }
+      const boundInput = byId[targetEntry.input_id];
+      if (!boundInput) return false;
+      if (!isInputConfigured(boundInput)) return false;
+    }
   }
   return true;
 }

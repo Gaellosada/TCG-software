@@ -58,6 +58,14 @@ incompatible with prior versions, and no migration code is provided.
   `target_entry_block_id` referencing an existing entry id in the same
   signal. Dangling references, weight outside `[-100, +100]`, or
   `weight == 0` on entries are rejected with HTTP 400.
+- **BREAKING — Exit blocks no longer carry `input_id` at the block
+  level.** The operating input is derived from the target entry's
+  `input_id` (single source of truth). Payloads that include a non-empty
+  `input_id` on an exit block are rejected with HTTP 400 at validation
+  time; empty strings are treated as absent. The stored schema drops
+  `input_id`/`weight` from exit blocks on load, and the frontend UI
+  hides the input picker on exit blocks (showing a read-only derived
+  label instead).
 - **BREAKING — portfolio-leg math / signal-as-holding scaling.** Signal
   block `weight` is now a **signed fractional position contribution**:
   `+100` means a full-long unleveraged position (1.0× the underlying

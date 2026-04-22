@@ -130,8 +130,6 @@ describe('Signals storage (v4)', () => {
             exits: [
               {
                 id: 'exit-uuid-1',
-                input_id: 'X',
-                weight: 0,
                 name: '',
                 target_entry_block_id: entryId,
                 conditions: [
@@ -186,6 +184,36 @@ describe('Signals storage (v4)', () => {
     for (const s of SECTIONS) {
       expect(out.signals[0].rules[s]).toEqual([]);
     }
+  });
+
+  it('strips legacy block-level input_id + weight from exit blocks on load', () => {
+    // Pre-v4.1 payloads may persist input_id/weight on exits; sanitiser
+    // drops them so the wire payload can't violate the backend invariant.
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [],
+            exits: [
+              {
+                id: 'exit-1',
+                input_id: 'X',        // legacy — must be stripped
+                weight: 42,           // legacy — must be stripped
+                target_entry_block_id: 'entry-1',
+                conditions: [],
+              },
+            ],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    const ex = out.signals[0].rules.exits[0];
+    expect(ex.target_entry_block_id).toBe('entry-1');
+    expect('input_id' in ex).toBe(false);
+    expect('weight' in ex).toBe(false);
   });
 
   it('drops malformed signals without id', () => {

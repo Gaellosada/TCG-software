@@ -94,7 +94,7 @@ describe('computeRunGate (v4)', () => {
     );
   });
 
-  it('returns the block-needs-input reason when a non-empty block has no input_id', () => {
+  it('returns the entry-needs-input reason when a non-empty entry has no input_id', () => {
     const sig = {
       id: 's1',
       inputs: [SPOT_INPUT],
@@ -105,7 +105,7 @@ describe('computeRunGate (v4)', () => {
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toBe(
-      'Every block needs an input — pick one in the block header.',
+      'Every entry block needs an input — pick one in the block header.',
     );
   });
 
