@@ -2,32 +2,34 @@ import { describe, it, expect } from 'vitest';
 import { buildComputeRequestBody, normaliseSpecForRequest } from './requestBuilder';
 import { collectIndicatorIds } from '../../api/signals';
 
-// Request body shape pinned by PLAN.md § v3 contract. Guards against drift
-// between frontend producer and backend consumer.
+// Request body shape pinned by PLAN.md § Wire contract (v4).
+// Guards against drift between frontend producer and backend consumer.
 
-const V3_INPUTS = [
+const V4_INPUTS = [
   { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
   { id: 'Y', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'NDX' } },
 ];
 
-describe('computeSignal request body shape (v3)', () => {
-  it('top level has exactly {spec, indicators}', () => {
+describe('computeSignal request body shape (v4)', () => {
+  it('top level has exactly {spec, indicators}; rules carry entries/exits only', () => {
     const signal = {
       id: 's1',
       name: 'S1',
-      inputs: V3_INPUTS,
+      inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
+        entries: [{
+          id: 'e1',
           input_id: 'X',
-          weight: 0.5,
+          weight: 50,
           conditions: [
             { op: 'gt',
               lhs: { kind: 'indicator', indicator_id: 'sma-20', input_id: 'X', output: 'default' },
               rhs: { kind: 'constant', value: 0 } },
           ],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [],
       },
+      settings: { dont_repeat: true },
     };
     const indicators = [
       { id: 'sma-20', name: '20-day SMA',
@@ -41,48 +43,84 @@ describe('computeSignal request body shape (v3)', () => {
     expect(body.spec.id).toBe('s1');
     expect(body.spec.name).toBe('S1');
     expect(Array.isArray(body.indicators)).toBe(true);
-    // v3: inputs are part of the spec.
     expect(Array.isArray(body.spec.inputs)).toBe(true);
-    expect(body.spec.inputs).toEqual(V3_INPUTS);
+    expect(body.spec.inputs).toEqual(V4_INPUTS);
+    // Rules keys are exactly entries+exits — no legacy direction keys.
+    expect(Object.keys(body.spec.rules).sort()).toEqual(['entries', 'exits']);
+    // Settings flow through.
+    expect(body.spec.settings).toEqual({ dont_repeat: true });
   });
 
-  it('block input_id and weight flow through verbatim', () => {
+  it('block id, input_id, signed weight and target_entry_block_id flow through verbatim', () => {
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
+        entries: [{
+          id: 'entry-42',
           input_id: 'X',
-          weight: 0.4,
+          weight: -30,
           conditions: [
             { op: 'gt',
               lhs: { kind: 'constant', value: 1 },
               rhs: { kind: 'constant', value: 0 } },
           ],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [{
+          id: 'exit-9',
+          input_id: 'X',
+          weight: 0,
+          target_entry_block_id: 'entry-42',
+          conditions: [
+            { op: 'gt',
+              lhs: { kind: 'constant', value: 1 },
+              rhs: { kind: 'constant', value: 0 } },
+          ],
+        }],
       },
     };
     const { body } = buildComputeRequestBody(signal, []);
-    const block = body.spec.rules.long_entry[0];
-    expect(block.input_id).toBe('X');
-    expect(block.weight).toBe(0.4);
+    const entry = body.spec.rules.entries[0];
+    expect(entry.id).toBe('entry-42');
+    expect(entry.input_id).toBe('X');
+    expect(entry.weight).toBe(-30);
+    // Entry blocks do NOT carry target_entry_block_id.
+    expect('target_entry_block_id' in entry).toBe(false);
+    const exit = body.spec.rules.exits[0];
+    expect(exit.id).toBe('exit-9');
+    expect(exit.target_entry_block_id).toBe('entry-42');
     // No more instrument key on blocks.
-    expect('instrument' in block).toBe(false);
+    expect('instrument' in entry).toBe(false);
+  });
+
+  it('clamps |weight| > 100 at normalisation (no leverage escapes the wire)', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: {
+        entries: [
+          { id: 'e1', input_id: 'X', weight: 250, conditions: [] },
+          { id: 'e2', input_id: 'X', weight: -250, conditions: [] },
+        ],
+        exits: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    const weights = body.spec.rules.entries.map((b) => b.weight);
+    expect(weights).toEqual([100, -100]);
   });
 
   it('ships indicator specs as an array with {id,name,code,params,seriesMap}', () => {
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
-          input_id: 'X', weight: 0,
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 10,
           conditions: [
             { op: 'cross_above',
               lhs: { kind: 'indicator', indicator_id: 'sma-20', input_id: 'X', output: 'default' },
               rhs: { kind: 'indicator', indicator_id: 'rsi-14', input_id: 'X', output: 'default' } },
           ],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [],
       },
     };
     const indicators = [
@@ -98,39 +136,39 @@ describe('computeSignal request body shape (v3)', () => {
 
   it('always emits params_override + series_override keys on indicator operands', () => {
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
-          input_id: 'X', weight: 0,
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 10,
           conditions: [
             { op: 'gt',
               lhs: { kind: 'indicator', indicator_id: 'sma', input_id: 'X', output: 'default' },
               rhs: { kind: 'constant', value: 0 } },
           ],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [],
       },
     };
     const { body } = buildComputeRequestBody(signal, [
       { id: 'sma', name: 'sma', code: 'X', params: {}, seriesMap: {} },
     ]);
-    const lhs = body.spec.rules.long_entry[0].conditions[0].lhs;
+    const lhs = body.spec.rules.entries[0].conditions[0].lhs;
     expect('params_override' in lhs).toBe(true);
     expect('series_override' in lhs).toBe(true);
     expect(lhs.params_override).toBe(null);
     expect(lhs.series_override).toBe(null);
     const rt = JSON.parse(JSON.stringify(body));
-    const rtLhs = rt.spec.rules.long_entry[0].conditions[0].lhs;
+    const rtLhs = rt.spec.rules.entries[0].conditions[0].lhs;
     expect('params_override' in rtLhs).toBe(true);
     expect('series_override' in rtLhs).toBe(true);
   });
 
   it('passes non-null override payloads through verbatim (series_override maps label → input_id)', () => {
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
-          input_id: 'X', weight: 0,
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 10,
           conditions: [
             { op: 'gt',
               lhs: {
@@ -141,51 +179,51 @@ describe('computeSignal request body shape (v3)', () => {
               rhs: { kind: 'constant', value: 0 } },
           ],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [],
       },
     };
     const { body } = buildComputeRequestBody(signal, [
       { id: 'sma', name: 'sma', code: 'X', params: { window: 20 }, seriesMap: { price: null } },
     ]);
-    const lhs = body.spec.rules.long_entry[0].conditions[0].lhs;
+    const lhs = body.spec.rules.entries[0].conditions[0].lhs;
     expect(lhs.params_override).toEqual({ window: 50 });
     expect(lhs.series_override).toEqual({ secondary: 'Y' });
   });
 
   it('does NOT add override keys to non-indicator operands', () => {
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
-          input_id: 'X', weight: 0,
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 10,
           conditions: [
             { op: 'gt',
               lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
               rhs: { kind: 'constant', value: 100 } },
           ],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [],
       },
     };
     const { body } = buildComputeRequestBody(signal, []);
-    const cond = body.spec.rules.long_entry[0].conditions[0];
+    const cond = body.spec.rules.entries[0].conditions[0];
     expect(cond.lhs.params_override).toBeUndefined();
     expect(cond.rhs.params_override).toBeUndefined();
   });
 
   it('returns missing indicator ids if any reference is unresolved', () => {
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
-          input_id: 'X', weight: 0,
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 10,
           conditions: [
             { op: 'gt',
               lhs: { kind: 'indicator', indicator_id: 'does-not-exist', input_id: 'X', output: 'default' },
               rhs: { kind: 'constant', value: 0 } },
           ],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [],
       },
     };
     const { body, missing } = buildComputeRequestBody(signal, []);
@@ -193,31 +231,35 @@ describe('computeSignal request body shape (v3)', () => {
     expect(body.indicators).toEqual([]);
   });
 
-  it('collects indicator ids across all four directions and condition variants', () => {
+  it('collects indicator ids across both sections and every condition variant', () => {
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{ input_id: 'X', weight: 0, conditions: [
-          { op: 'gt',
-            lhs: { kind: 'indicator', indicator_id: 'a', input_id: 'X', output: 'default' },
-            rhs: { kind: 'constant', value: 0 } },
-        ] }],
-        long_exit: [{ input_id: 'X', weight: 0, conditions: [
-          { op: 'in_range',
-            operand: { kind: 'indicator', indicator_id: 'b', input_id: 'X', output: 'default' },
-            min:     { kind: 'indicator', indicator_id: 'c', input_id: 'X', output: 'default' },
-            max:     { kind: 'constant', value: 1 } },
-        ] }],
-        short_entry: [{ input_id: 'X', weight: 0, conditions: [
-          { op: 'rolling_lt',
-            operand: { kind: 'indicator', indicator_id: 'd', input_id: 'X', output: 'default' },
-            lookback: 5 },
-        ] }],
-        short_exit: [{ input_id: 'X', weight: 0, conditions: [
-          { op: 'cross_below',
-            lhs: { kind: 'indicator', indicator_id: 'e', input_id: 'X', output: 'default' },
-            rhs: { kind: 'instrument', input_id: 'X', field: 'close' } },
-        ] }],
+        entries: [
+          { id: 'e1', input_id: 'X', weight: 10, conditions: [
+            { op: 'gt',
+              lhs: { kind: 'indicator', indicator_id: 'a', input_id: 'X', output: 'default' },
+              rhs: { kind: 'constant', value: 0 } },
+          ] },
+          { id: 'e2', input_id: 'X', weight: -5, conditions: [
+            { op: 'rolling_lt',
+              operand: { kind: 'indicator', indicator_id: 'd', input_id: 'X', output: 'default' },
+              lookback: 5 },
+          ] },
+        ],
+        exits: [
+          { id: 'x1', input_id: 'X', weight: 0, target_entry_block_id: 'e1', conditions: [
+            { op: 'in_range',
+              operand: { kind: 'indicator', indicator_id: 'b', input_id: 'X', output: 'default' },
+              min:     { kind: 'indicator', indicator_id: 'c', input_id: 'X', output: 'default' },
+              max:     { kind: 'constant', value: 1 } },
+          ] },
+          { id: 'x2', input_id: 'X', weight: 0, target_entry_block_id: 'e2', conditions: [
+            { op: 'cross_below',
+              lhs: { kind: 'indicator', indicator_id: 'e', input_id: 'X', output: 'default' },
+              rhs: { kind: 'instrument', input_id: 'X', field: 'close' } },
+          ] },
+        ],
       },
     };
     const ids = collectIndicatorIds(signal);
@@ -229,19 +271,19 @@ describe('normaliseSpecForRequest does not mutate caller data', () => {
   it('produces a new rules object without touching the original operand shape', () => {
     const operand = { kind: 'indicator', indicator_id: 'sma', input_id: 'X', output: 'default' };
     const signal = {
-      id: 's1', name: 'S1', inputs: V3_INPUTS,
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
-        long_entry: [{
-          input_id: 'X', weight: 0,
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 10,
           conditions: [{ op: 'gt', lhs: operand, rhs: { kind: 'constant', value: 0 } }],
         }],
-        long_exit: [], short_entry: [], short_exit: [],
+        exits: [],
       },
     };
     const normalised = normaliseSpecForRequest(signal);
     expect(operand.params_override).toBeUndefined();
     expect(operand.series_override).toBeUndefined();
-    const normLhs = normalised.rules.long_entry[0].conditions[0].lhs;
+    const normLhs = normalised.rules.entries[0].conditions[0].lhs;
     expect(normLhs.params_override).toBe(null);
     expect(normLhs.series_override).toBe(null);
   });

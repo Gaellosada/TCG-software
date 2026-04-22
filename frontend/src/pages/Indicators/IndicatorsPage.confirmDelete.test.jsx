@@ -66,12 +66,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * The CUSTOM section is collapsed by default (bullet #6 of the v4
+ * refactor). User indicator rows — and their delete buttons — only
+ * render when the section is expanded. Each test below expands CUSTOM
+ * by clicking its header the way a user would, rather than pre-priming
+ * localStorage (which bypasses the UI contract).
+ */
+function expandCustomSection() {
+  const header = screen.getByTestId('category-custom');
+  if (header.getAttribute('data-collapsed') === 'true') {
+    fireEvent.click(header);
+  }
+}
+
 describe('<IndicatorsPage> delete confirmation flow', () => {
   it('clicking Delete on a user indicator opens ConfirmDialog (not window.confirm)', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm');
     await act(async () => {
       render(<IndicatorsPage />);
     });
+    expandCustomSection();
     const deleteBtn = screen.getByLabelText('Delete My Test Indicator');
     fireEvent.click(deleteBtn);
     expect(screen.getByTestId('confirm-dialog')).toBeDefined();
@@ -82,6 +97,7 @@ describe('<IndicatorsPage> delete confirmation flow', () => {
     await act(async () => {
       render(<IndicatorsPage />);
     });
+    expandCustomSection();
     const deleteBtn = screen.getByLabelText('Delete My Test Indicator');
     fireEvent.click(deleteBtn);
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -94,6 +110,7 @@ describe('<IndicatorsPage> delete confirmation flow', () => {
     await act(async () => {
       render(<IndicatorsPage />);
     });
+    expandCustomSection();
     const deleteBtn = screen.getByLabelText('Delete My Test Indicator');
     fireEvent.click(deleteBtn);
     expect(screen.getByTestId('confirm-dialog')).toBeDefined();

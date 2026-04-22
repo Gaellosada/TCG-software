@@ -37,17 +37,15 @@ def _price_series(dates: list[int], close_vals: list[float]) -> PriceSeries:
 
 
 def _minimal_signal_spec() -> dict:
-    """Return a minimal valid signal_spec dict for portfolio requests."""
+    """Return a minimal valid signal_spec dict for portfolio requests (v4)."""
     return {
         "spec": {
             "id": "s1",
             "name": "Test Signal",
             "inputs": [],
             "rules": {
-                "long_entry": [],
-                "long_exit": [],
-                "short_entry": [],
-                "short_exit": [],
+                "entries": [],
+                "exits": [],
             },
         },
         "indicators": [],

@@ -1,57 +1,48 @@
-"""Signal evaluator -- pure NumPy + per-bar stateful latching (iter-5).
+"""Signal evaluator -- pure NumPy + per-bar stateful latching (v4).
 
-v3 (iter-4) — inputs replace block/operand instruments
-------------------------------------------------------
-Every signal declares a top-level ``inputs`` list; blocks reference an
-input by id, and operands (instrument + indicator) bind through an input.
-This means rebinding an input swaps the instrument for every block and
-every operand referencing it — the single code-path is now the bound
-input.
+v4 — unified Entries/Exits with signed weights
+----------------------------------------------
+The v3 four-direction model is gone. Each signal declares two block
+lists:
 
-iter-5 semantics — latched positions with leverage
----------------------------------------------------
-Positions are no longer stateless per-bar sums. Each entry block owns a
-boolean latch keyed by (input_id, block_id, side). Per bar ``t``, in
-declaration order of blocks:
+  * ``rules.entries`` -- blocks with stable ``id`` and signed
+    ``weight`` in ``[-100, +100]``; ``sign(weight)`` decides long/short.
+  * ``rules.exits`` -- blocks that each target *exactly one* entry via
+    ``target_entry_block_id``. When an exit's AND-condition fires at
+    bar ``t``, the referenced entry block's latch is cleared; no other
+    latches are touched (no "same-side-under-input" blanket clear).
 
-  1. **Clear pass (same-side only).** For each long_exit block whose
-     AND-condition fires at ``t`` and whose ``input_id`` matches, clear
-     every long latch under the same input. Same for short_exit/short.
-     Cross-side clearing is forbidden.
-  2. **Entry pass.** For each entry block in declaration order whose
-     condition fires at ``t`` AND whose latch is currently False:
-     set latch True. No budget cap — leverage is allowed (total weight
-     across all inputs and both sides may exceed 1.0).
+Per-bar execution (declaration order within each list):
 
-After both passes at bar ``t``:
+  1. **Clear pass.** For every usable exit block whose condition fires
+     at ``t``: look up the entry latch by id, if True set False.
+  2. **Entry pass.** For every usable entry block whose condition
+     fires at ``t`` AND whose latch is currently False: set latch True.
+     Leverage is allowed — no budget cap, no same-bar conflict logic
+     beyond per-block latch state.
 
-    long_pos_I(t)  = Σ latched long weights for input I
-    short_pos_I(t) = Σ latched short weights for input I
-    position_I(t)  = long_pos_I(t) − short_pos_I(t)   # unbounded
-    position_I(t)  = 0 if any-nan-poison at t (preserved from iter-4)
+After both passes at ``t``::
 
-Latch state is per-(input, block); exit clearing is per-input-per-side
-(never cross-side, guardrail N6).
+    position_I(t) = sum over entry-blocks B with input_id == I and B
+                    currently latched of (sign(B.weight) * |B.weight|/100)
+    position_I(t) = 0 if any-nan-poison at t (preserved from v3).
 
+Block usability
+---------------
 A block is "usable" iff
   * it has ≥1 condition;
   * ``input_id`` resolves to a declared Input;
-  * entry tabs additionally require ``weight > 0``;
+  * ``id`` is non-empty (required for stable tracking / exit targeting);
+  * entry blocks require ``weight != 0`` AND ``|weight| <= 100``;
+  * exit blocks require ``target_entry_block_id`` referencing a usable
+    entry block in the same signal's rules (a dangling target makes
+    the exit a no-op — the engine tolerates this so latent bad state
+    degrades gracefully; the API layer rejects it with HTTP 400);
   * every operand's ``input_id`` resolves;
   * the bound Input's instrument is fully configured.
 
-Indicator operand resolution (v3)
----------------------------------
-For each :class:`IndicatorOperand`:
-  * the primary series-map label (first by declaration order) receives the
-    instrument of ``inputs[operand.input_id]``;
-  * ``series_override[label] = some_input_id`` remaps ``label`` to that
-    input's instrument;
-  * ``params_override`` is merged on top of the indicator's base params.
-
-Instruments that cannot be fetched (unsupported ``InstrumentContinuous``
-when the fetcher protocol doesn't support it) surface as
-:class:`SignalDataError`.
+Indicator operand resolution is unchanged from v3 (input-bound primary
+label, optional label → input_id overrides, params_override merge).
 """
 
 from __future__ import annotations
@@ -188,7 +179,7 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Indicator override merge (v3)
+# Indicator override merge (unchanged from v3)
 # ---------------------------------------------------------------------------
 
 
@@ -200,18 +191,6 @@ def _merge_indicator_effective(
     dict[str, float | int | bool],
     dict[str, InputInstrument],
 ]:
-    """Compute effective (params, per-label-instrument) after v3 merge.
-
-    Resolution:
-      * ``params_override`` merged on top of ``base.params``.
-      * Each label in ``base.series_labels`` gets an instrument:
-          * If ``series_override[label]`` is set → its input's instrument.
-          * Else if label is the PRIMARY (index 0) → operand's input.
-          * Else → fallback: a synthetic :class:`InstrumentSpot` from
-            the base ``series_map[label]`` (preserves v2 multi-label
-            indicators where only the primary was ever a user-facing
-            input).
-    """
     eff_params: dict[str, float | int | bool] = dict(base.params)
     if op.params_override:
         for k, v in op.params_override.items():
@@ -316,12 +295,7 @@ def _operand_key(
 
 def _walk_operands(signal: Signal) -> list[Operand]:
     out: list[Operand] = []
-    for rules in (
-        signal.rules.long_entry,
-        signal.rules.long_exit,
-        signal.rules.short_entry,
-        signal.rules.short_exit,
-    ):
+    for rules in (signal.rules.entries, signal.rules.exits):
         for block in rules:
             for cond in block.conditions:
                 if isinstance(cond, (CompareCondition, CrossCondition)):
@@ -473,8 +447,6 @@ def _union_align(
             continue
         assert dates is not None and vals is not None
         if dates.size == 0:
-            # Empty series — every output bar is NaN. Skip the searchsorted
-            # dance, which would dereference dates[-1] on a zero-length array.
             values_by_key[key] = np.full(index.size, np.nan, dtype=np.float64)
             continue
         pos = np.searchsorted(dates, index)
@@ -488,7 +460,7 @@ def _union_align(
 
 
 # ---------------------------------------------------------------------------
-# Condition evaluation (vectorised)
+# Condition evaluation (vectorised) -- unchanged from v3
 # ---------------------------------------------------------------------------
 
 
@@ -560,10 +532,6 @@ def _eval_condition(
             )
         truth = np.zeros(T, dtype=np.bool_)
         nan_at_t = np.isnan(x).copy()
-        # The first kk positions lack a full lookback window — poison them
-        # so block latching treats them as unknown instead of a hard False
-        # (which would let a block claim "exit satisfied" before any data
-        # existed).
         nan_at_t[: min(kk, T)] = True
         if T > kk:
             cur = x[kk:]
@@ -589,20 +557,37 @@ def _eval_condition(
 # ---------------------------------------------------------------------------
 
 
-def _is_usable_block(
-    block: Block,
-    *,
-    is_entry: bool,
-    inputs: dict[str, Input],
-) -> bool:
-    """A block participates iff it has ≥1 condition, a valid input_id,
-    and (for entry tabs) a strictly positive weight.
-    """
+def _usable_entry(block: Block, inputs: dict[str, Input]) -> bool:
+    """Entry block is usable iff it has id + input_id + conditions +
+    signed weight in (−100..0) ∪ (0..100]."""
+    if not block.id:
+        return False
     if not block.conditions:
         return False
     if not block.input_id or block.input_id not in inputs:
         return False
-    if is_entry and not (block.weight > 0.0):
+    w = float(block.weight)
+    if w == 0.0:
+        return False
+    if abs(w) > 100.0:
+        return False
+    return True
+
+
+def _usable_exit(
+    block: Block, inputs: dict[str, Input], entry_ids: set[str]
+) -> bool:
+    """Exit block is usable iff it has id + input_id + conditions AND
+    target_entry_block_id references a usable entry."""
+    if not block.id:
+        return False
+    if not block.conditions:
+        return False
+    if not block.input_id or block.input_id not in inputs:
+        return False
+    if not block.target_entry_block_id:
+        return False
+    if block.target_entry_block_id not in entry_ids:
         return False
     return True
 
@@ -632,18 +617,9 @@ def _eval_block_activity(
 class InstrumentPositionResult:
     """Per-(referenced) input output returned by :func:`evaluate_signal`.
 
-    iter-5:
-      * ``values`` is now the latched net position (sum of latched long
-        weights − sum of latched short weights).
-      * ``clipped_mask`` is always False (leverage is allowed; retained
-        for API contract compatibility).
-      * ``realized_pnl`` is a per-bar cumulative return contribution for
-        this input:
-            pnl(0)   = 0
-            pnl(t)   = pnl(t-1) + position(t-1) * (price(t) − price(t-1))
-                       / price(t-1)   (when price(t-1) finite & non-zero)
-        NaN prices produce a 0-step for that bar (no drift on missing
-        data).
+    ``values`` is the latched net position (sum over latched entries of
+    ``sign(weight) * |weight|/100``). ``clipped_mask`` is always False
+    (leverage is allowed; retained for API shape compatibility).
     """
 
     input_id: str
@@ -657,19 +633,35 @@ class InstrumentPositionResult:
 
 @dataclass(frozen=True)
 class BlockEvent:
-    """Per-block firing/latching record emitted in the response (P5-6)."""
+    """Per-block firing / latching / active record (v4 trace schema).
+
+    * ``kind``: ``"entry"`` or ``"exit"``.
+    * ``fired_indices``: bars where the block's AND-condition was True.
+    * ``latched_indices``: for entries, bars where the latch transitioned
+      False→True ("effective entry"); for exits, bars where the exit
+      actually cleared a previously-open entry latch ("effective exit").
+    * ``active_indices``: entries only — bars where this entry's latch
+      was True *at emission time* (i.e. contributed to position[t]).
+      Empty for exit blocks.
+    * ``target_entry_block_id``: exits only — the id of the entry this
+      exit targets. ``None`` on entries.
+
+    The frontend computes the "don't repeat" effective filter directly
+    from these: effective entry bars = ``latched_indices`` on entry
+    blocks, effective exit bars = ``latched_indices`` on exit blocks.
+    """
 
     input_id: str
     block_id: str
-    kind: Literal["long_entry", "long_exit", "short_entry", "short_exit"]
+    kind: Literal["entry", "exit"]
     fired_indices: tuple[int, ...]
     latched_indices: tuple[int, ...]
+    active_indices: tuple[int, ...] = ()
+    target_entry_block_id: str | None = None
 
 
 @dataclass(frozen=True)
 class IndicatorSeriesResult:
-    """Resolved indicator operand series exposed alongside positions."""
-
     input_id: str
     indicator_id: str
     series: npt.NDArray[np.float64]
@@ -677,8 +669,6 @@ class IndicatorSeriesResult:
 
 @dataclass(frozen=True)
 class SignalEvalResult:
-    """Top-level evaluation result (v3 + iter-5 extensions)."""
-
     index: npt.NDArray[np.int64]
     positions: tuple[InstrumentPositionResult, ...]
     clipped: bool
@@ -692,27 +682,37 @@ async def evaluate_signal(
     indicators: dict[str, IndicatorSpecInput],
     fetcher: PriceFetcher,
 ) -> SignalEvalResult:
-    """Evaluate a v3 ``Signal`` and return per-input positions + clip flag."""
+    """Evaluate a v4 ``Signal`` and return per-input positions + events."""
 
     # ── 1. Input table ──
     inputs = _input_table(signal)
 
-    # ── 2. Identify referenced inputs (via USABLE blocks only) ──
+    # ── 2. Identify usable entry / exit blocks ──
+    entry_blocks: list[Block] = [
+        b for b in signal.rules.entries if _usable_entry(b, inputs)
+    ]
+    entry_ids: set[str] = {b.id for b in entry_blocks}
+    # Duplicate ids within entries are an invariant break.
+    if len(entry_ids) != len(entry_blocks):
+        raise SignalValidationError(
+            "duplicate entry block id within signal.rules.entries"
+        )
+
+    exit_blocks: list[Block] = [
+        b for b in signal.rules.exits if _usable_exit(b, inputs, entry_ids)
+    ]
+    # Exits may have duplicate ids across entries; but distinct ids from
+    # each other are preferred for trace clarity — not enforced here.
+
+    # Referenced inputs = union of usable blocks' input_ids, in
+    # declaration order (entries then exits).
     referenced_ids: list[str] = []
     seen_ids: set[str] = set()
-    for rules_tuple, is_entry_tab in (
-        (signal.rules.long_entry, True),
-        (signal.rules.long_exit, False),
-        (signal.rules.short_entry, True),
-        (signal.rules.short_exit, False),
-    ):
-        for blk in rules_tuple:
-            if not _is_usable_block(blk, is_entry=is_entry_tab, inputs=inputs):
-                continue
-            if blk.input_id in seen_ids:
-                continue
-            seen_ids.add(blk.input_id)
-            referenced_ids.append(blk.input_id)
+    for blk in (*entry_blocks, *exit_blocks):
+        if blk.input_id in seen_ids:
+            continue
+        seen_ids.add(blk.input_id)
+        referenced_ids.append(blk.input_id)
 
     # ── 3. Collect operands + implicit close-price operands per input ──
     operands: list[Operand] = list(_walk_operands(signal))
@@ -758,180 +758,114 @@ async def evaluate_signal(
             diagnostics={"T": 0, "inputs": len(referenced_ids)},
         )
 
-    # ── 4. Build per-(input, side, block_index) tables of usable blocks ──
-    #
-    # Each usable block is assigned a stable declaration-order id within
-    # its side ("{kind}#{idx}" where idx is zero-based declaration order
-    # in the side's tuple). Entries are processed in declaration order
-    # so latching order is deterministic.
-    BlockRec = tuple[
-        str,  # block_id
-        Literal[
-            "long_entry", "long_exit", "short_entry", "short_exit"
-        ],  # kind
-        Block,
-        npt.NDArray[np.bool_],  # condition truth (T-vector)
-        npt.NDArray[np.bool_],  # condition nan mask (T-vector)
-    ]
+    # ── 4. Per-block condition truth + nan-poison ──
+    entry_truth: dict[str, npt.NDArray[np.bool_]] = {}
+    entry_nan: dict[str, npt.NDArray[np.bool_]] = {}
+    for blk in entry_blocks:
+        active, blk_nan = _eval_block_activity(
+            blk, indicators, inputs, values_by_key, T
+        )
+        entry_truth[blk.id] = active
+        entry_nan[blk.id] = blk_nan
 
-    def _side_records(
-        rules_tuple: tuple[Block, ...],
-        *,
-        is_entry: bool,
-        kind: Literal[
-            "long_entry", "long_exit", "short_entry", "short_exit"
-        ],
-    ) -> list[BlockRec]:
-        recs: list[BlockRec] = []
-        for idx, blk in enumerate(rules_tuple):
-            if not _is_usable_block(blk, is_entry=is_entry, inputs=inputs):
-                continue
-            active, blk_nan = _eval_block_activity(
-                blk, indicators, inputs, values_by_key, T
-            )
-            recs.append((f"{kind}#{idx}", kind, blk, active, blk_nan))
-        return recs
+    exit_truth: dict[str, npt.NDArray[np.bool_]] = {}
+    exit_nan: dict[str, npt.NDArray[np.bool_]] = {}
+    for blk in exit_blocks:
+        active, blk_nan = _eval_block_activity(
+            blk, indicators, inputs, values_by_key, T
+        )
+        exit_truth[blk.id] = active
+        exit_nan[blk.id] = blk_nan
 
-    long_entry_recs = _side_records(
-        signal.rules.long_entry, is_entry=True, kind="long_entry"
-    )
-    short_entry_recs = _side_records(
-        signal.rules.short_entry, is_entry=True, kind="short_entry"
-    )
-    long_exit_recs = _side_records(
-        signal.rules.long_exit, is_entry=False, kind="long_exit"
-    )
-    short_exit_recs = _side_records(
-        signal.rules.short_exit, is_entry=False, kind="short_exit"
-    )
-
-    # Per-input nan-poison mask: union of every usable block's condition
-    # nan mask for blocks bound to that input (preserves iter-4
-    # semantics — nan bar zeroes output but does NOT clear latches).
+    # Per-input nan-poison mask: union of every usable block's nan mask
+    # bound to that input (preserves v3 semantics — nan bar zeroes output
+    # but does NOT clear latches).
     nan_poison: dict[str, npt.NDArray[np.bool_]] = {
         rid: np.zeros(T, dtype=np.bool_) for rid in referenced_ids
     }
-    for recs in (
-        long_entry_recs, short_entry_recs, long_exit_recs, short_exit_recs
-    ):
-        for _bid, _kind, blk, _truth, blk_nan in recs:
-            if blk.input_id in nan_poison:
-                nan_poison[blk.input_id] = nan_poison[blk.input_id] | blk_nan
+    for blk in entry_blocks:
+        if blk.input_id in nan_poison:
+            nan_poison[blk.input_id] = nan_poison[blk.input_id] | entry_nan[blk.id]
+    for blk in exit_blocks:
+        if blk.input_id in nan_poison:
+            nan_poison[blk.input_id] = nan_poison[blk.input_id] | exit_nan[blk.id]
 
     # ── 5. Latch state + per-bar positions (sequential) ──
     #
-    # latches[(input_id, block_id, side)] = bool. Only entry blocks
-    # carry latches; exits CLEAR latches.
-    latches_long: dict[tuple[str, str], bool] = {}
-    latches_short: dict[tuple[str, str], bool] = {}
-    for bid, _kind, blk, _truth, _nan in long_entry_recs:
-        latches_long[(blk.input_id, bid)] = False
-    for bid, _kind, blk, _truth, _nan in short_entry_recs:
-        latches_short[(blk.input_id, bid)] = False
+    # latches[entry_block_id] = bool.
+    latched: dict[str, bool] = {b.id: False for b in entry_blocks}
 
-    # Output buffers.
-    long_pos: dict[str, npt.NDArray[np.float64]] = {
+    # Signed contribution of each latched entry block (sign * |w|/100).
+    signed_weight: dict[str, float] = {
+        b.id: (1.0 if b.weight > 0 else -1.0) * abs(float(b.weight)) / 100.0
+        for b in entry_blocks
+    }
+
+    # Entry block by id (for position summation).
+    entry_by_id: dict[str, Block] = {b.id: b for b in entry_blocks}
+
+    # Output buffer: per-input net position.
+    position: dict[str, npt.NDArray[np.float64]] = {
         rid: np.zeros(T, dtype=np.float64) for rid in referenced_ids
     }
-    short_pos: dict[str, npt.NDArray[np.float64]] = {
-        rid: np.zeros(T, dtype=np.float64) for rid in referenced_ids
-    }
-    # Event accumulators (fired + latched indices per block).
-    event_fired: dict[tuple[str, str], list[int]] = {}
-    event_latched: dict[tuple[str, str], list[int]] = {}
-    event_meta: dict[
-        tuple[str, str],
-        tuple[str, Literal["long_entry", "long_exit", "short_entry", "short_exit"]],
-    ] = {}
-    for recs in (
-        long_entry_recs, short_entry_recs, long_exit_recs, short_exit_recs
-    ):
-        for bid, kind, blk, _truth, _nan in recs:
-            key = (blk.input_id, bid)
-            event_fired[key] = []
-            event_latched[key] = []
-            event_meta[key] = (blk.input_id, kind)
 
-    # Fast weight lookups keyed by (input_id, block_id).
-    _weight_lookup_long: dict[tuple[str, str], float] = {
-        (blk.input_id, bid): float(blk.weight)
-        for bid, _kind, blk, _truth, _nan in long_entry_recs
-    }
-    _weight_lookup_short: dict[tuple[str, str], float] = {
-        (blk.input_id, bid): float(blk.weight)
-        for bid, _kind, blk, _truth, _nan in short_entry_recs
-    }
+    # Event accumulators.
+    entry_fired: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
+    entry_latched: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
+    entry_active: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
+    exit_fired: dict[str, list[int]] = {b.id: [] for b in exit_blocks}
+    exit_latched: dict[str, list[int]] = {b.id: [] for b in exit_blocks}
+
     for t in range(T):
-        # --- (a) record fired-indices for ALL usable blocks at t ---
-        for recs in (
-            long_entry_recs,
-            short_entry_recs,
-            long_exit_recs,
-            short_exit_recs,
-        ):
-            for bid, _kind, blk, truth, _nan in recs:
-                if bool(truth[t]):
-                    event_fired[(blk.input_id, bid)].append(t)
+        # --- (a) record fired-indices ---
+        for b in entry_blocks:
+            if bool(entry_truth[b.id][t]):
+                entry_fired[b.id].append(t)
+        for b in exit_blocks:
+            if bool(exit_truth[b.id][t]):
+                exit_fired[b.id].append(t)
 
-        # --- (b) clear-pass: same-side exits clear same-side latches ---
-        for bid, _kind, blk, truth, _nan in long_exit_recs:
-            if bool(truth[t]):
-                # Record the exit's "latched index" = same as fired.
-                event_latched[(blk.input_id, bid)].append(t)
-                for (lkey_in, lkey_b), v in list(latches_long.items()):
-                    if lkey_in == blk.input_id and v:
-                        latches_long[(lkey_in, lkey_b)] = False
-        for bid, _kind, blk, truth, _nan in short_exit_recs:
-            if bool(truth[t]):
-                event_latched[(blk.input_id, bid)].append(t)
-                for (lkey_in, lkey_b), v in list(latches_short.items()):
-                    if lkey_in == blk.input_id and v:
-                        latches_short[(lkey_in, lkey_b)] = False
+        # --- (b) clear pass: exits clear their target-entry latch only ---
+        for b in exit_blocks:
+            if not bool(exit_truth[b.id][t]):
+                continue
+            target = b.target_entry_block_id  # validated usable above
+            # Effective exit = only when the target was actually open.
+            if latched.get(target, False):
+                latched[target] = False
+                exit_latched[b.id].append(t)
 
-        # --- (c) entry-pass (declaration order; leverage allowed) ---
-        for bid, _kind, blk, truth, _nan in long_entry_recs:
-            if not bool(truth[t]):
+        # --- (c) entry pass: declaration order; leverage allowed ---
+        for b in entry_blocks:
+            if not bool(entry_truth[b.id][t]):
                 continue
-            if latches_long[(blk.input_id, bid)]:
+            if latched[b.id]:
                 continue
-            # Leverage is allowed — no budget cap.
-            latches_long[(blk.input_id, bid)] = True
-            event_latched[(blk.input_id, bid)].append(t)
-
-        for bid, _kind, blk, truth, _nan in short_entry_recs:
-            if not bool(truth[t]):
-                continue
-            if latches_short[(blk.input_id, bid)]:
-                continue
-            # Leverage is allowed — no budget cap.
-            latches_short[(blk.input_id, bid)] = True
-            event_latched[(blk.input_id, bid)].append(t)
+            latched[b.id] = True
+            entry_latched[b.id].append(t)
 
         # --- (d) emit per-input net position at t ---
         for rid in referenced_ids:
-            lsum = 0.0
-            ssum = 0.0
-            for (in_id, bid), latched in latches_long.items():
-                if in_id == rid and latched:
-                    lsum += _weight_lookup_long[(in_id, bid)]
-            for (in_id, bid), latched in latches_short.items():
-                if in_id == rid and latched:
-                    ssum += _weight_lookup_short[(in_id, bid)]
-            long_pos[rid][t] = lsum
-            short_pos[rid][t] = ssum
+            acc = 0.0
+            for bid, open_ in latched.items():
+                if not open_:
+                    continue
+                blk = entry_by_id[bid]
+                if blk.input_id == rid:
+                    acc += signed_weight[bid]
+                    entry_active[bid].append(t)
+            position[rid][t] = acc
 
     # ── 6. Assemble per-input results (prices, pnl, clipped mask) ──
     results: list[InstrumentPositionResult] = []
-
     for ref_id in referenced_ids:
         inp = inputs[ref_id]
 
-        position = long_pos[ref_id] - short_pos[ref_id]
-        position = np.where(nan_poison[ref_id], 0.0, position)
+        pos = position[ref_id]
+        pos = np.where(nan_poison[ref_id], 0.0, pos)
 
         clipped_mask = np.zeros(T, dtype=np.bool_)
 
-        # Price series overlay — the input's instrument close price.
         price_label: str | None = None
         price_values: npt.NDArray[np.float64] | None = None
         key = (
@@ -942,12 +876,10 @@ async def evaluate_signal(
         if key in values_by_key:
             if isinstance(inp.instrument, InstrumentSpot):
                 price_label = f"{inp.instrument.instrument_id}.close"
-            else:  # continuous
+            else:
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]
 
-        # Realized PnL: cumulative of position[t-1] * pct_return[t].
-        # NaN-safe: zero contribution when either price is nan/zero.
         realized_pnl = np.zeros(T, dtype=np.float64)
         if price_values is not None and T >= 2:
             prev_price = price_values[:-1]
@@ -959,7 +891,7 @@ async def evaluate_signal(
             )
             step = np.zeros(T - 1, dtype=np.float64)
             with np.errstate(invalid="ignore", divide="ignore"):
-                raw = position[:-1] * (cur_price - prev_price) / prev_price
+                raw = pos[:-1] * (cur_price - prev_price) / prev_price
             step[valid] = raw[valid]
             realized_pnl[1:] = np.cumsum(step)
 
@@ -967,7 +899,7 @@ async def evaluate_signal(
             InstrumentPositionResult(
                 input_id=ref_id,
                 instrument=inp.instrument,
-                values=position,
+                values=pos,
                 clipped_mask=clipped_mask,
                 realized_pnl=realized_pnl,
                 price_label=price_label,
@@ -977,16 +909,28 @@ async def evaluate_signal(
 
     # ── 7. Events payload ──
     events: list[BlockEvent] = []
-    for key, fired_list in event_fired.items():
-        in_id, kind = event_meta[key]
-        latched_list = event_latched[key]
+    for b in entry_blocks:
         events.append(
             BlockEvent(
-                input_id=in_id,
-                block_id=key[1],
-                kind=kind,
-                fired_indices=tuple(fired_list),
-                latched_indices=tuple(latched_list),
+                input_id=b.input_id,
+                block_id=b.id,
+                kind="entry",
+                fired_indices=tuple(entry_fired[b.id]),
+                latched_indices=tuple(entry_latched[b.id]),
+                active_indices=tuple(entry_active[b.id]),
+                target_entry_block_id=None,
+            )
+        )
+    for b in exit_blocks:
+        events.append(
+            BlockEvent(
+                input_id=b.input_id,
+                block_id=b.id,
+                kind="exit",
+                fired_indices=tuple(exit_fired[b.id]),
+                latched_indices=tuple(exit_latched[b.id]),
+                active_indices=(),
+                target_entry_block_id=b.target_entry_block_id,
             )
         )
 

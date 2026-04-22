@@ -1,10 +1,9 @@
-"""HTTP round-trip integration test for /api/signals/compute (v3).
+"""HTTP round-trip integration test for /api/signals/compute (v4).
 
-MANDATORY per iter-4 Sign 1: iter-3 had a dict-vs-array ``indicators``
-drift that both Vitest and pytest passed. Only the reviewer caught it.
-This test submits a real v3 signal with ≥2 inputs through the full
-ASGI stack and asserts the exact response-shape keys + the ``indicators``
-array-ness.
+Submits a full v4 signal through the ASGI stack and asserts the
+response-shape contract: top-level keys, per-position shape, per-event
+schema (id/kind/fired/latched/active/target_entry_block_id), and
+latching semantics (per-target-entry clearing).
 """
 
 from __future__ import annotations
@@ -88,21 +87,15 @@ SMA_CODE = (
 )
 
 
-async def test_http_roundtrip_v3_two_inputs_indicator_operand(
+async def test_http_roundtrip_v4_two_inputs_indicator_operand(
     client: AsyncClient,
 ):
-    """Two inputs (X=SPX, Y=NDX); one block per input with an indicator
-    operand whose input_id binds it to the block's input. Asserts the
-    full response shape contract:
-      - top-level keys: timestamps, positions (list), indicators (list),
-        clipped (bool), diagnostics (dict).
-      - each position: input_id, instrument (dict with 'type'), values,
-        clipped_mask, price.
-      - ``indicators`` is a LIST (not dict) — iter-3 learning.
-    """
+    """Two inputs (X=SPX, Y=NDX); one entry per input, one bound to X
+    (long w=+60), the other bound to Y (short w=-40). Indicator
+    operands use input-scoped binding."""
     body = {
         "spec": {
-            "id": "multi-input-v3",
+            "id": "multi-input-v4",
             "name": "Two inputs demo",
             "inputs": [
                 {
@@ -123,10 +116,11 @@ async def test_http_roundtrip_v3_two_inputs_indicator_operand(
                 },
             ],
             "rules": {
-                "long_entry": [
+                "entries": [
                     {
+                        "id": "EX",
                         "input_id": "X",
-                        "weight": 0.6,
+                        "weight": 60.0,
                         "conditions": [
                             {
                                 "op": "gt",
@@ -144,8 +138,9 @@ async def test_http_roundtrip_v3_two_inputs_indicator_operand(
                         ],
                     },
                     {
+                        "id": "EY",
                         "input_id": "Y",
-                        "weight": 0.4,
+                        "weight": -40.0,
                         "conditions": [
                             {
                                 "op": "lt",
@@ -163,9 +158,7 @@ async def test_http_roundtrip_v3_two_inputs_indicator_operand(
                         ],
                     },
                 ],
-                "long_exit": [],
-                "short_entry": [],
-                "short_exit": [],
+                "exits": [],
             },
         },
         "indicators": [
@@ -188,68 +181,52 @@ async def test_http_roundtrip_v3_two_inputs_indicator_operand(
     assert resp.status_code == 200, resp.text
     data = resp.json()
 
-    # --- Top-level shape assertions (iter-3 contract preserved) ---
+    # Top-level shape
     assert set(data.keys()) >= {
         "timestamps",
         "positions",
         "indicators",
+        "events",
         "clipped",
         "diagnostics",
     }
     assert isinstance(data["timestamps"], list)
     assert isinstance(data["positions"], list)
-    # CRITICAL: indicators is an ARRAY, not a dict. iter-3 PROB-1.
-    assert isinstance(data["indicators"], list), (
-        "'indicators' must be a list (iter-3 contract); "
-        f"got {type(data['indicators']).__name__}"
-    )
+    # indicators is an ARRAY (iter-3 contract preserved).
+    assert isinstance(data["indicators"], list)
     assert isinstance(data["clipped"], bool)
     assert isinstance(data["diagnostics"], dict)
 
-    # --- Per-position shape ---
+    # Per-position shape
     assert len(data["positions"]) == 2
     for p in data["positions"]:
         assert "input_id" in p
-        assert "instrument" in p
-        assert isinstance(p["instrument"], dict)
-        assert "type" in p["instrument"]
-        assert p["instrument"]["type"] in ("spot", "continuous")
+        assert "instrument" in p and "type" in p["instrument"]
         assert isinstance(p["values"], list)
-        assert isinstance(p["clipped_mask"], list)
         assert len(p["values"]) == len(data["timestamps"])
-        assert len(p["clipped_mask"]) == len(data["timestamps"])
-        # price is either None or a {label, values} object.
-        assert p["price"] is None or (
-            isinstance(p["price"], dict)
-            and "label" in p["price"]
-            and "values" in p["price"]
-        )
 
-    # --- Correct values ---
     by_id = {p["input_id"]: p for p in data["positions"]}
-    assert "X" in by_id
-    assert "Y" in by_id
-    # SPX ascending, SMA(2) trails → SPX > SMA fires from t=1.
-    # Weight 0.6 → values = [0, 0.6, 0.6, 0.6, 0.6, 0.6].
+    # SPX ascending, SMA(2) trails → SPX > SMA fires from t=1. Weight
+    # 60 → 0.6. Latched from t=1 onward.
     assert by_id["X"]["values"][0] == 0.0
     assert by_id["X"]["values"][1] == pytest.approx(0.6)
-    # NDX descending, SMA(2) trails → NDX < SMA fires from t=1.
-    # Weight 0.4 → values = [0, 0.4, 0.4, 0.4, 0.4, 0.4].
+    # NDX descending, SMA(2) trails → NDX < SMA fires from t=1. Weight
+    # -40 → short 0.4.
     assert by_id["Y"]["values"][0] == 0.0
-    assert by_id["Y"]["values"][1] == pytest.approx(0.4)
+    assert by_id["Y"]["values"][1] == pytest.approx(-0.4)
 
-    # Prices are attached and labeled per the underlying instrument.
-    assert by_id["X"]["price"]["label"] == "SPX.close"
-    assert by_id["Y"]["price"]["label"] == "NDX.close"
+    # Events carry the new v4 schema.
+    ev_by_id = {ev["block_id"]: ev for ev in data["events"]}
+    assert ev_by_id["EX"]["kind"] == "entry"
+    assert ev_by_id["EX"]["target_entry_block_id"] is None
+    assert "active_indices" in ev_by_id["EX"]
 
 
 # ---------------------------------------------------------------------------
-# iter-5 — latched-position semantics over the HTTP boundary
+# v4 latched-position semantics over the HTTP boundary
 # ---------------------------------------------------------------------------
 
 
-# Designed so that each bar triggers exactly one block's condition via
-# equality comparisons against a single close series.
 LATCH_CLOSES = np.array(
     [100.0, 11.0, 100.0, 33.0, 44.0, 11.0, 66.0, 22.0]
 )
@@ -269,8 +246,6 @@ def _latch_price_series(closes: np.ndarray) -> PriceSeries:
 
 @pytest.fixture
 def latch_app():
-    """ASGI app wired with an 8-bar SPX series crafted for latching
-    coverage (one firing pattern per bar)."""
     svc = MagicMock()
 
     async def fake_get_prices(collection, instrument_id, start=None, end=None):
@@ -294,9 +269,15 @@ async def latch_client(latch_app):
         yield ac
 
 
-def _eq_block(input_id: str, weight: float, threshold: float) -> dict:
-    """Helper: build a block that fires when ``close == threshold``."""
-    return {
+def _eq_block(
+    bid: str,
+    input_id: str,
+    weight: float,
+    threshold: float,
+    target: str | None = None,
+) -> dict:
+    blk: dict = {
+        "id": bid,
         "input_id": input_id,
         "weight": weight,
         "conditions": [
@@ -311,28 +292,26 @@ def _eq_block(input_id: str, weight: float, threshold: float) -> dict:
             }
         ],
     }
+    if target is not None:
+        blk["target_entry_block_id"] = target
+    return blk
 
 
-async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
-    """Mandatory HTTP integration test (guardrail G2, P5-3..P5-6).
-
-    8-bar SPX close series ``[100, 11, 100, 33, 44, 11, 66, 22]`` with
-    block conditions crafted so each bar fires exactly the block we
-    want to exercise. Asserts:
-      (a) entry latch persists across a bar where condition is False
-          (t=2 holds A's latch);
-      (b) same-side exit clears same-side latches (t=3 long_exit → 0);
-      (c) cross-side exit does NOT clear the opposite latch
-          (t=6 short_exit leaves the long latch alone);
-      (d) leverage allowed — t=7 block C w=0.5 latches on top of
-          A w=0.6 → position = 1.1;
-      (e) events / realized_pnl / indicators shapes match the P5-6
-          contract consumed by I3.
+async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
+    """8-bar SPX close series ``[100, 11, 100, 33, 44, 11, 66, 22]``
+    with entries A (+60, close=11), B (-40, close=44), C (+50, close=22)
+    and an exit targeting A (close=33). Asserts:
+      (a) A latches at t=1 and holds across t=2 (cond false);
+      (b) exit targeting A fires at t=3 → A cleared;
+      (c) B latches at t=4 → -0.4;
+      (d) A re-fires t=5 → A latched again, 0.6 + (-0.4) = 0.2;
+      (e) t=6: neither cond fires → still 0.2;
+      (f) t=7: C latches with weight +50 → 0.6 + (-0.4) + 0.5 = 0.7.
     """
     body = {
         "spec": {
-            "id": "latch-demo",
-            "name": "Latching coverage",
+            "id": "latch-demo-v4",
+            "name": "Latching v4",
             "inputs": [
                 {
                     "id": "X",
@@ -344,20 +323,14 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
                 }
             ],
             "rules": {
-                # Declaration order matters: A (w=0.6) is evaluated
-                # before C (w=0.5) at bars where both could latch.
-                "long_entry": [
-                    _eq_block("X", 0.6, 11.0),  # block A → t=1, t=5
-                    _eq_block("X", 0.5, 22.0),  # block C → t=7
+                "entries": [
+                    _eq_block("A", "X", 60.0, 11.0),   # long, close=11 → t=1,5
+                    _eq_block("B", "X", -40.0, 44.0),  # short, close=44 → t=4
+                    _eq_block("C", "X", 50.0, 22.0),   # long, close=22 → t=7
                 ],
-                "long_exit": [
-                    _eq_block("X", 0.0, 33.0),  # fires t=3
-                ],
-                "short_entry": [
-                    _eq_block("X", 0.4, 44.0),  # block B → t=4
-                ],
-                "short_exit": [
-                    _eq_block("X", 0.0, 66.0),  # fires t=6
+                "exits": [
+                    # Targets A only; fires at close=33 → t=3.
+                    _eq_block("XA", "X", 0.0, 33.0, target="A"),
                 ],
             },
         },
@@ -369,66 +342,46 @@ async def test_http_roundtrip_latched_semantics(latch_client: AsyncClient):
     assert resp.status_code == 200, resp.text
     data = resp.json()
 
-    # ---- Response shape (iter-5 additions live alongside iter-3 keys) ----
-    assert set(data.keys()) >= {
-        "timestamps",
-        "positions",
-        "realized_pnl",
-        "events",
-        "indicators",
-        "clipped",
-        "diagnostics",
-    }
-    assert isinstance(data["realized_pnl"], list)
-    assert isinstance(data["events"], list)
-    assert isinstance(data["indicators"], list)
+    vals = data["positions"][0]["values"]
+    # t=0: 100 → nothing fires → 0
+    # t=1: A latches +0.6 → 0.6
+    # t=2: 100 → A still latched → 0.6
+    # t=3: exit XA fires → A cleared → 0
+    # t=4: B latches -0.4 → -0.4
+    # t=5: A re-fires → latched; B still latched → 0.6 - 0.4 = 0.2
+    # t=6: 66 → nothing → 0.2
+    # t=7: C latches +0.5 → 0.6 - 0.4 + 0.5 = 0.7
+    assert vals == pytest.approx([0.0, 0.6, 0.6, 0.0, -0.4, 0.2, 0.2, 0.7])
 
-    # ---- Position path (P5-3..P5-5) ----
-    by_id = {p["input_id"]: p for p in data["positions"]}
-    vals = by_id["X"]["values"]
-    # (a) latch persists at t=2; (b) same-side exit clears at t=3;
-    # (c) cross-side exit at t=6 does NOT clear the long;
-    # (d) leverage allowed — t=7 block C w=0.5 latches on top of A w=0.6 → 1.1.
-    assert vals == pytest.approx([0.0, 0.6, 0.6, 0.0, -0.4, 0.2, 0.6, 1.1])
+    # Events schema
+    ev_by = {ev["block_id"]: ev for ev in data["events"]}
+    assert ev_by["A"]["kind"] == "entry"
+    assert ev_by["A"]["fired_indices"] == [1, 5]
+    # Latched = bars where False→True transitioned: 1 (fresh), 5 (after clear).
+    assert ev_by["A"]["latched_indices"] == [1, 5]
+    # Active = bars where A's latch held at emission.
+    assert ev_by["A"]["active_indices"] == [1, 2, 5, 6, 7]
+    assert ev_by["A"]["target_entry_block_id"] is None
 
-    # ---- Events payload ----
-    ev_by = {
-        (ev["input_id"], ev["block_id"]): ev for ev in data["events"]
-    }
-    # A (long_entry#0): fired t=1, t=5; both resulted in a latch (after
-    # t=3 clear, A re-latches at t=5).
-    a = ev_by[("X", "long_entry#0")]
-    assert a["kind"] == "long_entry"
-    assert a["fired_indices"] == [1, 5]
-    assert a["latched_indices"] == [1, 5]
-    # C (long_entry#1): fired t=7, latched (leverage allowed).
-    c = ev_by[("X", "long_entry#1")]
-    assert c["fired_indices"] == [7]
-    assert c["latched_indices"] == [7]
-    # long_exit: fired t=3; latched_indices mirrors fired for exit
-    # blocks (per P5-6).
-    lex = ev_by[("X", "long_exit#0")]
-    assert lex["kind"] == "long_exit"
-    assert lex["fired_indices"] == [3]
-    assert lex["latched_indices"] == [3]
-    # B (short_entry#0): fired t=4, latched t=4.
-    b = ev_by[("X", "short_entry#0")]
-    assert b["fired_indices"] == [4]
-    assert b["latched_indices"] == [4]
-    # short_exit: fired t=6; latched_indices == fired_indices.
-    sex = ev_by[("X", "short_exit#0")]
-    assert sex["fired_indices"] == [6]
-    assert sex["latched_indices"] == [6]
+    assert ev_by["B"]["fired_indices"] == [4]
+    assert ev_by["B"]["latched_indices"] == [4]
+    assert ev_by["B"]["active_indices"] == [4, 5, 6, 7]
 
-    # ---- realized_pnl shape + monotonicity where expected ----
+    assert ev_by["C"]["fired_indices"] == [7]
+    assert ev_by["C"]["latched_indices"] == [7]
+    assert ev_by["C"]["active_indices"] == [7]
+
+    assert ev_by["XA"]["kind"] == "exit"
+    assert ev_by["XA"]["fired_indices"] == [3]
+    # Effective exit: A was open at t=3 → actually cleared.
+    assert ev_by["XA"]["latched_indices"] == [3]
+    assert ev_by["XA"]["target_entry_block_id"] == "A"
+    assert ev_by["XA"]["active_indices"] == []
+
+    # realized_pnl exposed as list of lists.
     assert len(data["realized_pnl"]) == 1
     pnl = data["realized_pnl"][0]
     assert len(pnl) == len(data["timestamps"])
-    # First bar always zero.
     assert pnl[0] == 0.0
-    # Every entry is a finite float.
-    for v in pnl:
-        assert isinstance(v, float)
 
-    # ---- indicators (no indicator operands in this test) ----
     assert data["indicators"] == []

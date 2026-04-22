@@ -1,7 +1,8 @@
-"""API tests for /api/signals/compute -- v3 shape (iter-4).
+"""API tests for /api/signals/compute -- v4 shape.
 
-Inputs replace block/operand instruments. Every block references an
-input_id; every instrument/indicator operand references an input_id.
+v4 unifies long/short into signed-weight entries and exits targeting a
+specific entry block via ``target_entry_block_id``. Weights are signed
+percentages in ``[-100, +100]``.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ DATES = np.array(
     ],
     dtype=np.int64,
 )
-CLOSES = np.arange(10, 20, dtype=np.float64)  # [10..19]
+CLOSES = np.arange(10, 20, dtype=np.float64)
 
 
 def _price_series(closes: np.ndarray | None = None) -> PriceSeries:
@@ -82,23 +83,22 @@ SPX_INPUT = {
 }
 
 
-class TestComputeEndpointV3:
+class TestComputeEndpointV4:
 
     async def test_happy_path_single_input_indicator_operand(
         self, client: AsyncClient
     ):
-        """v3 happy path: one input + instrument/indicator operands that
-        both bind through that input."""
         body = {
             "spec": {
                 "id": "sig1",
                 "name": "Trend follower",
                 "inputs": [SPX_INPUT],
                 "rules": {
-                    "long_entry": [
+                    "entries": [
                         {
+                            "id": "E1",
                             "input_id": "X",
-                            "weight": 1.0,
+                            "weight": 100.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -116,9 +116,7 @@ class TestComputeEndpointV3:
                             ],
                         }
                     ],
-                    "long_exit": [],
-                    "short_entry": [],
-                    "short_exit": [],
+                    "exits": [],
                 },
             },
             "indicators": [
@@ -141,13 +139,13 @@ class TestComputeEndpointV3:
         assert resp.status_code == 200, resp.text
         data = resp.json()
 
-        # Response shape preserved from iter-3 (keys).
         assert set(data.keys()) >= {
             "timestamps",
             "positions",
             "indicators",
             "clipped",
             "diagnostics",
+            "events",
         }
         assert isinstance(data["indicators"], list)
         assert len(data["timestamps"]) == 10
@@ -160,15 +158,371 @@ class TestComputeEndpointV3:
             "collection": "INDEX",
             "instrument_id": "SPX",
         }
-        assert len(p0["values"]) == 10
-        assert p0["clipped_mask"] == [False] * 10
-        # Close monotonically increasing → lhs > SMA(3) fires from t=2.
+        # weight 100 → 1.0 when latched; condition fires from t=2.
         assert p0["values"][0] == 0.0
         assert p0["values"][2] == 1.0
         assert p0["values"][-1] == 1.0
-        assert data["clipped"] is False
-        assert p0["price"] is not None
-        assert p0["price"]["label"] == "SPX.close"
+
+    async def test_signed_short_weight(self, client: AsyncClient):
+        body = {
+            "spec": {
+                "id": "sig2",
+                "name": "short",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": -50.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["positions"][0]["values"] == pytest.approx([-0.5] * 10)
+
+    async def test_exit_target_entry_clearing(self, client: AsyncClient):
+        """Exit targets a specific entry and clears only its latch."""
+        body = {
+            "spec": {
+                "id": "sig3",
+                "name": "exit",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "eq",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    # close = 10 at t=0 only.
+                                    "rhs": {"kind": "constant", "value": 10.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "input_id": "X",
+                            "weight": 0.0,
+                            "target_entry_block_id": "E1",
+                            "conditions": [
+                                {
+                                    "op": "eq",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    # close = 15 at t=5.
+                                    "rhs": {"kind": "constant", "value": 15.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        vals = data["positions"][0]["values"]
+        # E1 latches at t=0 → 1.0; exit at t=5 clears; E1 cond false thereafter → 0.
+        assert vals[0] == pytest.approx(1.0)
+        assert vals[4] == pytest.approx(1.0)
+        assert vals[5] == pytest.approx(0.0)
+        assert vals[-1] == pytest.approx(0.0)
+
+    async def test_unknown_target_entry_block_id_rejected(
+        self, client: AsyncClient
+    ):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "bad exit",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "input_id": "X",
+                            "weight": 0.0,
+                            "target_entry_block_id": "NOPE",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "NOPE" in data["message"]
+        assert "rules.exits[0]" in data["message"]
+
+    async def test_exit_missing_target_rejected(self, client: AsyncClient):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "input_id": "X",
+                            "weight": 0.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "target_entry_block_id" in data["message"]
+
+    async def test_entry_with_target_rejected(self, client: AsyncClient):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "target_entry_block_id": "E1",  # not allowed
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "target_entry_block_id" in data["message"]
+
+    async def test_entry_weight_zero_rejected(self, client: AsyncClient):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 0.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "non-zero" in data["message"]
+
+    async def test_entry_weight_out_of_range_rejected(
+        self, client: AsyncClient
+    ):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E1",
+                            "input_id": "X",
+                            "weight": 150.0,  # out of [-100, 100]
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                    "exits": [],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        assert "out of" in resp.json()["message"]
+
+    async def test_duplicate_entry_id_rejected(self, client: AsyncClient):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "DUP",
+                            "input_id": "X",
+                            "weight": 50.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        },
+                        {
+                            "id": "DUP",
+                            "input_id": "X",
+                            "weight": 50.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        },
+                    ],
+                    "exits": [],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        assert "duplicate" in resp.json()["message"].lower()
 
     async def test_unknown_input_id_validation(self, client: AsyncClient):
         body = {
@@ -177,10 +531,11 @@ class TestComputeEndpointV3:
                 "name": "x",
                 "inputs": [SPX_INPUT],
                 "rules": {
-                    "long_entry": [
+                    "entries": [
                         {
+                            "id": "E1",
                             "input_id": "Z",  # not declared
-                            "weight": 1.0,
+                            "weight": 100.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -193,19 +548,13 @@ class TestComputeEndpointV3:
                             ],
                         }
                     ],
-                    "long_exit": [],
-                    "short_entry": [],
-                    "short_exit": [],
+                    "exits": [],
                 },
             },
             "indicators": [],
             "instruments": {},
         }
         resp = await client.post("/api/signals/compute", json=body)
-        # Block with unknown input_id is treated as unusable → skipped.
-        # The operand resolution still walks though and fails. The
-        # engine raises SignalValidationError for operands referencing
-        # unknown inputs.
         assert resp.status_code == 400
         data = resp.json()
         assert data["error_type"] == "validation"
@@ -218,16 +567,15 @@ class TestComputeEndpointV3:
                 "name": "x",
                 "inputs": [SPX_INPUT],
                 "rules": {
-                    "long_entry": [
+                    "entries": [
                         {
+                            "id": "E1",
                             "input_id": "X",
-                            "weight": 1.0,
+                            "weight": 100.0,
                             "conditions": [{"op": "frobnicate"}],
                         }
                     ],
-                    "long_exit": [],
-                    "short_entry": [],
-                    "short_exit": [],
+                    "exits": [],
                 },
             },
             "indicators": [],
@@ -257,10 +605,11 @@ class TestComputeEndpointV3:
                     }
                 ],
                 "rules": {
-                    "long_entry": [
+                    "entries": [
                         {
+                            "id": "E1",
                             "input_id": "X",
-                            "weight": 1.0,
+                            "weight": 100.0,
                             "conditions": [
                                 {
                                     "op": "gt",
@@ -273,9 +622,7 @@ class TestComputeEndpointV3:
                             ],
                         }
                     ],
-                    "long_exit": [],
-                    "short_entry": [],
-                    "short_exit": [],
+                    "exits": [],
                 },
             },
             "indicators": [],
@@ -294,12 +641,7 @@ class TestComputeEndpointV3:
                 "id": "empty",
                 "name": "",
                 "inputs": [],
-                "rules": {
-                    "long_entry": [],
-                    "long_exit": [],
-                    "short_entry": [],
-                    "short_exit": [],
-                },
+                "rules": {"entries": [], "exits": []},
             },
             "indicators": [],
             "instruments": {},

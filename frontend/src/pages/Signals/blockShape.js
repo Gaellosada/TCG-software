@@ -1,12 +1,20 @@
-// Pure data helpers for Block-level validation — v3 (iter-4).
+// Pure data helpers for Block-level validation — v4.
 //
 // Single source of truth for "is this block complete enough to Run?".
 // Used by the UI (Run gate, per-block status dot) and the request
 // builder. No React imports — unit-testable in isolation.
 //
-// v3 Block shape:
-//   { input_id: string, weight: number, conditions: Condition[] }
-// v3 Operand shapes:
+// v4 Block shape:
+//   {
+//     id: <uuid>,
+//     input_id: <string>,
+//     weight: <float in [-100, +100]>,  // signed; nonzero for entries
+//     conditions: Condition[],
+//     // only on exit blocks:
+//     target_entry_block_id: <uuid>,
+//   }
+//
+// v4 Operand shapes (unchanged from v3):
 //   - indicator:  { kind:'indicator', indicator_id, input_id, output,
 //                   params_override, series_override }
 //   - instrument: { kind:'instrument', input_id, field }
@@ -14,18 +22,26 @@
 //
 // Runnability additionally requires every referenced input_id to resolve
 // against the signal's ``inputs`` list AND every such input's instrument
-// to be fully configured.
+// to be fully configured. Exit blocks additionally require their
+// ``target_entry_block_id`` to resolve against the signal's entry blocks.
 
 import { operandSlots } from './conditionOps';
+import { newBlockId, MAX_ABS_WEIGHT } from './storage';
 
 /**
  * Build a brand-new empty block.
- * - input_id: ''  — user must pick.
- * - weight:    0  — no pre-filled contribution.
- * - conditions: []
+ *   - id: fresh uuid.
+ *   - input_id: ''  — user must pick.
+ *   - weight:    0  — user must set a signed value.
+ *   - conditions: []
+ *   - target_entry_block_id: '' (exits only)
+ *
+ * @param {'entries'|'exits'} section
  */
-export function defaultBlock() {
-  return { input_id: '', weight: 0, conditions: [] };
+export function defaultBlock(section = 'entries') {
+  const base = { id: newBlockId(), input_id: '', weight: 0, conditions: [] };
+  if (section === 'exits') base.target_entry_block_id = '';
+  return base;
 }
 
 /**
@@ -107,19 +123,37 @@ export function indexInputs(inputs) {
 }
 
 /**
+ * Build the set of entry block ids declared on a signal. Used for exit-
+ * block target resolution.
+ */
+export function collectEntryIds(entryBlocks) {
+  const out = new Set();
+  if (!Array.isArray(entryBlocks)) return out;
+  for (const b of entryBlocks) {
+    if (b && typeof b.id === 'string' && b.id) out.add(b.id);
+  }
+  return out;
+}
+
+/**
  * True iff the block can be submitted to the backend.
  *   - input_id resolves to a declared Input that is itself fully
  *     configured (isInputConfigured);
  *   - at least one condition;
  *   - every condition complete (every operand complete and every
  *     referenced input_id resolves);
- *   - entry directions additionally require weight > 0.
+ *   - entry blocks additionally require a signed weight with
+ *     |weight| in (0, MAX_ABS_WEIGHT] (nonzero; no leverage);
+ *   - exit blocks additionally require a target_entry_block_id that
+ *     resolves against ``entryIds``.
  *
  * @param {Object} block
- * @param {string} direction — long_entry / long_exit / short_entry / short_exit
- * @param {Array<Input>} inputs — the signal's declared inputs array.
+ * @param {'entries'|'exits'} section
+ * @param {Array<Input>} inputs  the signal's declared inputs.
+ * @param {Set<string>} [entryIds] ids of entry blocks on the same signal.
+ *        Required when section === 'exits'; ignored otherwise.
  */
-export function isBlockRunnable(block, direction, inputs) {
+export function isBlockRunnable(block, section, inputs, entryIds) {
   if (!block || typeof block !== 'object') return false;
   if (typeof block.input_id !== 'string' || !block.input_id) return false;
   const byId = indexInputs(inputs);
@@ -130,8 +164,15 @@ export function isBlockRunnable(block, direction, inputs) {
   for (const c of block.conditions) {
     if (!isConditionComplete(c, byId)) return false;
   }
-  if (direction === 'long_entry' || direction === 'short_entry') {
-    if (!Number.isFinite(block.weight) || block.weight <= 0) return false;
+  if (section === 'entries') {
+    if (!Number.isFinite(block.weight)) return false;
+    if (block.weight === 0) return false;
+    if (Math.abs(block.weight) > MAX_ABS_WEIGHT) return false;
+  } else if (section === 'exits') {
+    const ids = entryIds instanceof Set ? entryIds : new Set(entryIds || []);
+    const tgt = block.target_entry_block_id;
+    if (typeof tgt !== 'string' || !tgt) return false;
+    if (!ids.has(tgt)) return false;
   }
   return true;
 }

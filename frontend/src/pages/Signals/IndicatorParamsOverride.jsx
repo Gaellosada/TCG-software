@@ -4,16 +4,22 @@ import { isInputConfigured } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
- * Per-operand override controls for an Indicator reference (v3 / iter-4).
+ * Per-operand override controls for an Indicator reference (v4).
+ *
+ * v4 behaviour (ORDERS bullet #4):
+ *   - 0 params & 0 non-primary series → non-clickable "No parameters" tag.
+ *   - 1 param (and no other series) → inline `<paramName>: <value>` editor,
+ *     no dropdown.
+ *   - 2+ editable controls → collapsible "Parameters" dropdown (unchanged
+ *     from v3).
+ *
+ * All three branches write to the SAME storage fields (`params_override`
+ * and `series_override`) via the shared `writeOverrides` helper exported
+ * below. Flipping an indicator from 1 → 2 params does NOT orphan state:
+ * the storage shape is identical in every branch.
  *
  * Reads the indicator's base ``params`` / ``seriesMap`` (the Indicators-
- * page defaults, already reconciled against the parsed spec), and renders
- * one editor per param and per series label.
- *
- * v3 change: ``series_override`` is now ``{ label -> input_id }`` — labels
- * are rebound to one of the signal's declared inputs (by id). Non-primary
- * labels default to the indicator's baseSeriesMap instrument; the primary
- * label is already replaced by the operand's ``input_id``.
+ * page defaults, already reconciled against the parsed spec).
  *
  * Props:
  *   indicator         {Object|null}  {id, name, code, params, seriesMap}
@@ -21,6 +27,47 @@ import styles from './Signals.module.css';
  *   inputs            {Array}        the signal's declared inputs
  *   onOperandChange   {Function}     (nextOperand) => void
  */
+
+/**
+ * Pure — merge the shallow-cloned override maps back onto the operand.
+ * Collapses empty maps to `null` so a no-edit round-trip is a structural
+ * no-op. This is the SINGLE place that writes params_override /
+ * series_override. Every UI branch (tag / inline / dropdown) calls this.
+ */
+export function writeOverrides(operand, nextParams, nextSeries) {
+  const p = nextParams && Object.keys(nextParams).length > 0 ? nextParams : null;
+  const s = nextSeries && Object.keys(nextSeries).length > 0 ? nextSeries : null;
+  return { ...operand, params_override: p, series_override: s };
+}
+
+/**
+ * Pure — compute the param value that should be displayed right now
+ * (override wins over the indicator default wins over the parser default).
+ */
+export function effectiveParamValue(spec, baseParams, paramsOverride) {
+  if (paramsOverride && spec.name in paramsOverride) return paramsOverride[spec.name];
+  if (baseParams && spec.name in baseParams) return baseParams[spec.name];
+  return spec.default;
+}
+
+/** Parse `rawValue` as the declared param type and return the coerced value,
+ *  or `undefined` if the value should be removed from the override map. */
+export function coerceParamInput(type, rawValue) {
+  if (rawValue === '' || rawValue === null || rawValue === undefined) return undefined;
+  if (type === 'int') {
+    const n = parseInt(rawValue, 10);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  if (type === 'float') {
+    const n = parseFloat(rawValue);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  if (type === 'bool') {
+    return !!rawValue;
+  }
+  return rawValue;
+}
+
 function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -40,72 +87,109 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
   const hasAnyOverride = Object.keys(paramsOverride).length > 0
     || Object.keys(seriesOverride).length > 0;
 
-  function writeOperand(nextParams, nextSeries) {
-    // Empty overrides collapse to null so a round-trip with no edits
-    // matches the untouched operand.
-    const p = Object.keys(nextParams).length === 0 ? null : nextParams;
-    const s = Object.keys(nextSeries).length === 0 ? null : nextSeries;
-    onOperandChange({
-      ...operand,
-      params_override: p,
-      series_override: s,
-    });
-  }
+  // Non-primary series labels are the only ones editable here (primary
+  // label is bound to the operand's input_id). Factoring that out lets us
+  // decide 0 / 1 / 2+ tiers honestly.
+  const editableSeriesLabels = (spec.seriesLabels || []).slice(1);
+  const totalEditableControls = (spec.params?.length || 0) + editableSeriesLabels.length;
 
   function setParam(name, type, rawValue) {
-    const nextParams = { ...paramsOverride };
-    if (rawValue === '' || rawValue === null || rawValue === undefined) {
-      delete nextParams[name];
-    } else if (type === 'int') {
-      const n = parseInt(rawValue, 10);
-      if (!Number.isFinite(n)) { delete nextParams[name]; } else { nextParams[name] = n; }
-    } else if (type === 'float') {
-      const n = parseFloat(rawValue);
-      if (!Number.isFinite(n)) { delete nextParams[name]; } else { nextParams[name] = n; }
-    } else if (type === 'bool') {
-      nextParams[name] = !!rawValue;
+    const next = { ...paramsOverride };
+    const coerced = coerceParamInput(type, rawValue);
+    if (coerced === undefined) {
+      delete next[name];
     } else {
-      nextParams[name] = rawValue;
+      next[name] = coerced;
     }
-    writeOperand(nextParams, seriesOverride);
+    onOperandChange(writeOverrides(operand, next, seriesOverride));
   }
 
   function resetParam(name) {
-    const nextParams = { ...paramsOverride };
-    delete nextParams[name];
-    writeOperand(nextParams, seriesOverride);
+    const next = { ...paramsOverride };
+    delete next[name];
+    onOperandChange(writeOverrides(operand, next, seriesOverride));
   }
 
   function setSeries(label, inputId) {
-    // v3: each series override is the string id of one of the signal's
-    // declared inputs (or absent = use the base series_map from the
-    // indicator defaults).
-    const nextSeries = { ...seriesOverride };
+    const next = { ...seriesOverride };
     if (!inputId) {
-      delete nextSeries[label];
+      delete next[label];
     } else {
-      nextSeries[label] = inputId;
+      next[label] = inputId;
     }
-    writeOperand(paramsOverride, nextSeries);
+    onOperandChange(writeOverrides(operand, paramsOverride, next));
   }
 
   function resetSeries(label) {
-    const nextSeries = { ...seriesOverride };
-    delete nextSeries[label];
-    writeOperand(paramsOverride, nextSeries);
+    const next = { ...seriesOverride };
+    delete next[label];
+    onOperandChange(writeOverrides(operand, paramsOverride, next));
   }
 
   function resetAll() {
-    onOperandChange({
-      ...operand,
-      params_override: null,
-      series_override: null,
-    });
+    onOperandChange(writeOverrides(operand, {}, {}));
   }
 
-  // iter-5 ask #3: the indicator name is already shown by the <select> to
-  // the left of this panel — keep the summary compact ("params") so the
-  // row stays short. The override badge communicates "this has edits".
+  // ── Tier 1: no editable controls at all → non-clickable tag. ──────────
+  if (totalEditableControls === 0) {
+    return (
+      <span
+        className={styles.indicatorOverrideNoParams}
+        data-testid="indicator-override-no-params"
+        title={indicator ? `${indicator.name || indicator.id} has no parameters` : 'No parameters'}
+      >
+        No parameters
+      </span>
+    );
+  }
+
+  // ── Tier 2: exactly one param, no editable series → inline editor. ────
+  if (spec.params?.length === 1 && editableSeriesLabels.length === 0) {
+    const p = spec.params[0];
+    const displayV = effectiveParamValue(p, baseParams, paramsOverride);
+    const isOverridden = p.name in paramsOverride;
+    return (
+      <span
+        className={styles.indicatorOverrideInline}
+        data-testid="indicator-override-inline"
+      >
+        <span className={styles.indicatorOverrideInlineLabel}>{p.name}:</span>
+        {p.type === 'bool' ? (
+          <input
+            type="checkbox"
+            className={styles.indicatorOverrideInlineCheck}
+            checked={!!displayV}
+            onChange={(e) => setParam(p.name, p.type, e.target.checked)}
+            aria-label={`${p.name} override`}
+            data-testid={`indicator-override-inline-${p.name}`}
+          />
+        ) : (
+          <input
+            type="number"
+            className={styles.indicatorOverrideInlineInput}
+            step={p.type === 'int' ? '1' : 'any'}
+            value={displayV === null || displayV === undefined ? '' : displayV}
+            onChange={(e) => setParam(p.name, p.type, e.target.value)}
+            aria-label={`${p.name} override`}
+            data-testid={`indicator-override-inline-${p.name}`}
+          />
+        )}
+        {isOverridden && (
+          <button
+            type="button"
+            className={styles.indicatorOverrideReset}
+            onClick={() => resetParam(p.name)}
+            title={`Reset ${p.name} to default`}
+            aria-label={`Reset ${p.name}`}
+          >
+            ↺
+          </button>
+        )}
+      </span>
+    );
+  }
+
+  // ── Tier 3: 2+ editable controls → existing collapsible dropdown. ─────
   const overrideCount = Object.keys(paramsOverride).length
     + Object.keys(seriesOverride).length;
 
@@ -131,9 +215,6 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
       </button>
       {expanded && indicator && (
         <div className={styles.indicatorOverrideGrid}>
-          {spec.params.length === 0 && spec.seriesLabels.length === 0 && (
-            <div className={styles.operandEmpty}>No params or series in this indicator.</div>
-          )}
           {spec.params.map((p) => {
             const baseV = (p.name in baseParams) ? baseParams[p.name] : p.default;
             const overrideV = paramsOverride[p.name];
@@ -179,9 +260,6 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
           {spec.seriesLabels.map((label, idx) => {
             const overrideInputId = seriesOverride[label];
             const isOverridden = label in seriesOverride;
-            // The primary label (idx=0) is implicitly bound via the
-            // operand's ``input_id`` — show a hint so the user doesn't
-            // try to "also" override it here.
             const isPrimary = idx === 0;
             const baseS = baseSeries[label] || null;
             const baseStr = baseS

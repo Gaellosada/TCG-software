@@ -29,9 +29,10 @@
  * untouched so the caller can classify via ``utils/fetchError``.
  *
  * @param {Object} spec
- *   the v3 Signal to evaluate — ``{id, name, inputs, rules: {long_entry,
- *   long_exit, short_entry, short_exit}}`` where each rule is a list of
- *   Blocks ``{input_id, weight, conditions}``. See PLAN.md § v3 contract.
+ *   the v4 Signal to evaluate — ``{id, name, inputs, rules: {entries,
+ *   exits}}`` where each section is a list of Blocks
+ *   ``{id, input_id, weight, conditions, target_entry_block_id?}``. See
+ *   PLAN.md § "Wire contract (v4)".
  * @param {Array<{id: string, name: string, code: string, params: object, seriesMap: object}>} indicators
  *   list of every IndicatorSpec referenced by any operand in ``spec`` —
  *   always an array (iter-3 PROB-1).
