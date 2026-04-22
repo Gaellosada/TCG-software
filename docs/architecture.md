@@ -36,7 +36,7 @@ Encapsulates all MongoDB complexity. Public interface is three protocols (`Marke
 #### `tcg/data/_rolling/` -- Continuous futures rolling
 
 - `calendar.py` -- `compute_roll_dates()` (FRONT_MONTH: roll at expiration minus offset), `trim_overlaps()` (truncate each contract at its roll boundary, strip zero-close rows).
-- `adjustment.py` -- `adjust_proportional()` (ratio at each roll, cascading backward), `adjust_difference()` (additive, cascading backward). Both skip zero-price contracts with a warning.
+- `adjustment.py` -- `adjust_ratio()` (ratio at each roll, cascading backward), `adjust_difference()` (additive, cascading backward). Both skip zero-price contracts with a warning.
 - `stitcher.py` -- `ContinuousSeriesBuilder.build()`: orchestrates the three-phase pipeline (compute roll dates, trim overlaps, apply adjustment). Handles deduplication (later contract wins on date conflicts).
 
 ### `tcg/engine/` -- Computation engine

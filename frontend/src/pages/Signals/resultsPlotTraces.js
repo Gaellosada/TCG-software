@@ -1,42 +1,119 @@
 /**
  * Pure helpers for the Results subplot view.
  *
- * These helpers translate the v3 + iter-5 signals compute response into
- * Plotly trace arrays. The primary public API is ``buildResultsPlot()``
- * which returns a single ``{ traces, layoutOverrides }`` for ONE Chart
- * using Plotly's domain-based subplot system (stacked vertically, shared
+ * These helpers translate the v4 signals compute response into Plotly
+ * trace arrays. The primary public API is ``buildResultsPlot()`` which
+ * returns a single ``{ traces, layoutOverrides }`` for ONE Chart using
+ * Plotly's domain-based subplot system (stacked vertically, shared
  * x-axis).
  *
- * Response fields consumed (payload contract P5-6):
+ * Response fields consumed (v4):
  *   - ``timestamps: number[]`` (unix ms)
  *   - ``positions: [{input_id, instrument, values, clipped_mask, price}]``
  *   - ``realized_pnl: number[][]`` — one array per input (order matches
- *     ``positions``). Optional in payload while I1 work catches up;
- *     when absent we skip the P&L trace.
+ *     ``positions``).
  *   - ``events: [{input_id, block_id, kind, fired_indices,
- *     latched_indices}]`` — entry/exit markers.
+ *     latched_indices, active_indices, target_entry_block_name}]`` —
+ *     ``kind`` is ``"entry"`` or ``"exit"``. Color/direction comes from
+ *     the sign of the originating block's signed weight (for entries) or
+ *     the targeted entry's weight (for exits). That mapping lives in the
+ *     caller — we receive it via ``blockWeightSigns``.
  *   - ``indicators: [{input_id, indicator_id, series}]`` — indicator
  *     traces to overlay on the bottom plot.
  *
- * Constraints:
- *   - Use TRACE_COLORS from chartTheme so colours match the rest of
- *     the app.
- *   - Don't synthesize data — if a field is missing, skip its trace.
- *   - Entry/exit marker convention (R1 brief):
- *       long_entry  → green ▲  (symbol 'triangle-up',   #10b981)
- *       long_exit   → green ▼  (symbol 'triangle-down', #10b981, open)
- *       short_entry → red   ▼  (symbol 'triangle-down', #ef4444)
- *       short_exit  → red   ▲  (symbol 'triangle-up',   #ef4444, open)
+ * Marker convention (v4):
+ *   entry + positive weight → green ▲  filled (long entry)
+ *   entry + negative weight → red   ▼  filled (short entry)
+ *   entry + zero weight     → grey ■  filled (defensive — backend rejects weight=0)
+ *   exit  + positive target → green ▼  open (closes a long)
+ *   exit  + negative target → red   ▲  open (closes a short)
+ *   exit  + zero/unknown    → grey ▼  open (defensive)
  */
 import { TRACE_COLORS } from '../../utils/chartTheme';
 
-/** Marker style per event kind. Kept exported for test assertions. */
+const COLOR_LONG = '#10b981';
+const COLOR_SHORT = '#ef4444';
+const COLOR_NEUTRAL = '#9ca3af';
+
+/**
+ * Marker style per ``(kind, weightSign)``. Exported for test assertions.
+ *
+ * ``weightSign`` is ``1`` (positive weight), ``-1`` (negative weight),
+ * or ``0`` (zero / unknown — defensive fallback only; backend rejects
+ * zero-weight entries and exits with dangling targets).
+ */
 export const EVENT_MARKER = {
-  long_entry:  { symbol: 'triangle-up',   color: '#10b981', open: false, label: 'long entry'  },
-  long_exit:   { symbol: 'triangle-down', color: '#10b981', open: true,  label: 'long exit'   },
-  short_entry: { symbol: 'triangle-down', color: '#ef4444', open: false, label: 'short entry' },
-  short_exit:  { symbol: 'triangle-up',   color: '#ef4444', open: true,  label: 'short exit'  },
+  entry: {
+    1: { symbol: 'triangle-up',   color: COLOR_LONG,    open: false, label: 'long entry'  },
+    '-1': { symbol: 'triangle-down', color: COLOR_SHORT, open: false, label: 'short entry' },
+    0: { symbol: 'square',        color: COLOR_NEUTRAL, open: false, label: 'entry'       },
+  },
+  exit: {
+    1: { symbol: 'triangle-down', color: COLOR_LONG,    open: true, label: 'long exit'   },
+    '-1': { symbol: 'triangle-up',   color: COLOR_SHORT, open: true, label: 'short exit'  },
+    0: { symbol: 'triangle-down', color: COLOR_NEUTRAL, open: true, label: 'exit'        },
+  },
 };
+
+/**
+ * Resolve the marker style for an event, given a sign-lookup map.
+ *
+ * ``blockWeightSigns`` keys every known block id (entries AND exits) to
+ * the *effective* weight sign for colouring purposes:
+ *   - entry block → sign(weight) of that entry
+ *   - exit block  → sign(weight) of the entry it targets
+ *
+ * Returns ``null`` if the event's kind is unknown.
+ */
+function resolveMarker(ev, blockWeightSigns) {
+  const kindTable = EVENT_MARKER[ev.kind];
+  if (!kindTable) return null;
+  const signRaw = blockWeightSigns ? blockWeightSigns[ev.block_id] : undefined;
+  // Default to 0 (neutral) when the caller doesn't provide a map or the
+  // block id is missing. This keeps the function robust for test
+  // fixtures that only care about mode='markers'.
+  const sign = (signRaw === 1 || signRaw === -1) ? signRaw : 0;
+  return kindTable[sign] || kindTable[0];
+}
+
+/**
+ * Build a block-id → weight-sign map from a v4 signal's rules.
+ *
+ * For entry blocks the sign is ``sign(weight)``; for exit blocks the
+ * sign is ``sign(weight)`` of the *targeted* entry. Blocks whose target
+ * is missing or whose weight is zero map to ``0`` (neutral) — a
+ * defensive value the marker table falls back on.
+ */
+export function buildBlockWeightSignMap(rules) {
+  const map = {};
+  if (!rules || typeof rules !== 'object') return map;
+  const entries = Array.isArray(rules.entries) ? rules.entries : [];
+  const exits = Array.isArray(rules.exits) ? rules.exits : [];
+  const entrySignById = {};
+  for (const e of entries) {
+    if (!e || !e.id) continue;
+    const w = typeof e.weight === 'number' ? e.weight : 0;
+    const s = w > 0 ? 1 : (w < 0 ? -1 : 0);
+    entrySignById[e.id] = s;
+    map[e.id] = s;
+  }
+  for (const x of exits) {
+    if (!x || !x.id) continue;
+    const tgt = x.target_entry_block_name;
+    // Resolve by name: find the entry whose name matches.
+    let s = 0;
+    if (tgt) {
+      for (const e of entries) {
+        if (e && e.name === tgt && Object.prototype.hasOwnProperty.call(entrySignById, e.id)) {
+          s = entrySignById[e.id];
+          break;
+        }
+      }
+    }
+    map[x.id] = s;
+  }
+  return map;
+}
 
 function toDates(timestamps) {
   return timestamps.map((ms) => new Date(ms));
@@ -46,7 +123,7 @@ function toDates(timestamps) {
  * Build the per-input price traces shared by both plots. Skips inputs
  * without a price payload rather than synthesizing dummy data.
  *
- * @param {Array} positions   v3 ``positions`` array
+ * @param {Array} positions   v4 ``positions`` array
  * @param {Date[]} dates      pre-built Date array, length == timestamps.length
  * @param {object} [opts]     options
  * @param {string} [opts.yaxis]  Plotly yaxis ref (e.g. 'y2') for subplot targeting
@@ -104,55 +181,48 @@ export function aggregateRealizedPnl(realizedPnl, len) {
 }
 
 /**
- * Convert an events entry into a scatter-marker trace. Uses
- * ``latched_indices`` preferentially (R1 convention) — these are bars
- * where a block's latching action took effect. Falls back to
- * ``fired_indices`` if ``latched_indices`` is absent.
+ * Convert an events entry into a scatter-marker trace.
  *
  * y values are pinned to the associated input's price at that bar, so
  * markers sit on the price line. If the input has no price, the
  * marker trace is skipped (don't synthesize).
  *
+ * Bars are taken from ``fired_indices``. The "don't repeat" filter is
+ * applied upstream by ``computeEffectiveTrace`` (runGate.js), which
+ * rewrites ``fired_indices`` to the backend-authoritative
+ * ``latched_indices`` when the flag is on. This function is therefore
+ * kind-agnostic: it trusts the event payload.
+ *
+ * @param {Array}  events
+ * @param {Array}  positions
+ * @param {Date[]} dates
  * @param {string} [yaxis]  Plotly yaxis ref for subplot targeting
+ * @param {object} [opts]
+ * @param {Object<string, number>} [opts.blockWeightSigns]  block-id → sign
+ *        map used to pick the marker style per (kind, sign). Omit or
+ *        pass ``{}`` and every event falls back to the neutral style.
  */
-export function buildEventMarkerTraces(events, positions, dates, yaxis, { noRepeat = false } = {}) {
+export function buildEventMarkerTraces(
+  events,
+  positions,
+  dates,
+  yaxis,
+  { blockWeightSigns } = {},
+) {
   if (!Array.isArray(events) || events.length === 0) return [];
   const byInput = new Map();
   for (const p of positions) {
     if (p && p.input_id) byInput.set(p.input_id, p);
   }
-  // Group by (block_id, kind) so each block gets a coherent legend entry.
   const traces = [];
   for (const ev of events) {
-    if (!ev || !ev.kind || !EVENT_MARKER[ev.kind]) continue;
+    if (!ev || !ev.kind) continue;
+    const style = resolveMarker(ev, blockWeightSigns);
+    if (!style) continue; // unknown kind — skip gracefully
     const position = byInput.get(ev.input_id);
     if (!position || !position.price || !Array.isArray(position.price.values)) continue;
-    // noRepeat=true: effective events only (no consecutive duplicates).
-    //   - entries: use latched_indices (backend tracks state-change).
-    //   - exits: backend mirrors fired for exits, so we filter fired_indices
-    //     to bars where the position actually changed (exit had something to close).
-    // noRepeat=false (default): all fired_indices (every bar the condition is true).
-    let indices;
-    if (noRepeat) {
-      const isExit = ev.kind === 'long_exit' || ev.kind === 'short_exit';
-      if (isExit) {
-        const fired = Array.isArray(ev.fired_indices) ? ev.fired_indices : [];
-        const posVals = Array.isArray(position.values) ? position.values : [];
-        indices = fired.filter((i) => {
-          if (i <= 0 || i >= posVals.length) return false;
-          // Effective exit: position changed at this bar compared to previous.
-          const prev = posVals[i - 1];
-          const cur = posVals[i];
-          return (typeof prev === 'number' && typeof cur === 'number' && prev !== cur);
-        });
-      } else {
-        indices = Array.isArray(ev.latched_indices) ? ev.latched_indices : [];
-      }
-    } else {
-      indices = Array.isArray(ev.fired_indices) ? ev.fired_indices : [];
-    }
+    const indices = Array.isArray(ev.fired_indices) ? ev.fired_indices : [];
     if (indices.length === 0) continue;
-    const style = EVENT_MARKER[ev.kind];
     const xs = [];
     const ys = [];
     for (const i of indices) {
@@ -187,9 +257,24 @@ export function buildEventMarkerTraces(events, positions, dates, yaxis, { noRepe
 }
 
 /**
+ * Format a short params suffix for an indicator trace label.
+ * E.g. ``{ window: 3 }`` → ``" (window=3)"``, ``null`` → ``""``.
+ */
+function paramsLabel(paramsOverride) {
+  if (!paramsOverride || typeof paramsOverride !== 'object') return '';
+  const entries = Object.entries(paramsOverride);
+  if (entries.length === 0) return '';
+  const inner = entries.map(([k, v]) => `${k}=${v}`).join(', ');
+  return ` (${inner})`;
+}
+
+/**
  * Build indicator traces for a plot. One line per indicator entry.
  * Colours cycle through TRACE_COLORS starting from the index AFTER the
  * input traces to avoid colour collisions.
+ *
+ * When the same indicator_id appears more than once (different params),
+ * each instance gets its own trace with params in the label.
  *
  * @param {string} [yaxis]  Plotly yaxis ref (e.g. 'y2'). Defaults to 'y2'
  *                           for backward compat with the old bottom-plot
@@ -204,7 +289,7 @@ export function buildIndicatorTraces(indicators, dates, colorOffset = 0, yaxis =
       y: ind.series,
       type: 'scatter',
       mode: 'lines',
-      name: `ind: ${ind.indicator_id}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
+      name: `ind: ${ind.indicator_id}${paramsLabel(ind.params_override)}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
       line: {
         color: TRACE_COLORS[(colorOffset + i) % TRACE_COLORS.length],
         width: 1,
@@ -213,7 +298,7 @@ export function buildIndicatorTraces(indicators, dates, colorOffset = 0, yaxis =
       yaxis,
       connectgaps: false,
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
-      legendgroup: `ind-${ind.indicator_id}`,
+      legendgroup: `ind-${ind.indicator_id}-${i}`,
     }));
 }
 
@@ -308,6 +393,13 @@ export function computeSubplotDomains(ownPanelCount) {
  *
  * All subplots share a single x-axis for linked zoom/pan.
  * No right-axis (yaxis with side:'right') is used anywhere.
+ *
+ * @param {object} result  compute-signal response payload
+ * @param {object} [opts]
+ * @param {number}  [opts.capital=1]   equity-curve scaling
+ * @param {object}  [opts.signalRules] v4 ``rules`` ({entries, exits}) used to
+ *        resolve per-block weight signs for marker colouring. If omitted
+ *        every marker falls back to the neutral style.
  */
 export function buildResultsPlot(result, opts = {}) {
   if (!result || !Array.isArray(result.timestamps) || result.timestamps.length === 0) {
@@ -370,8 +462,12 @@ export function buildResultsPlot(result, opts = {}) {
   traces.push(...overlayTraces);
 
   const events = Array.isArray(result.events) ? result.events : [];
-  const noRepeat = opts.noRepeat || false;
-  const eventTraces = buildEventMarkerTraces(events, positions, dates, 'y2', { noRepeat });
+  const blockWeightSigns = opts.signalRules
+    ? buildBlockWeightSignMap(opts.signalRules)
+    : undefined;
+  const eventTraces = buildEventMarkerTraces(events, positions, dates, 'y2', {
+    blockWeightSigns,
+  });
   traces.push(...eventTraces);
 
   // --- Subplots 3..N: one per ownPanel indicator ---
@@ -384,7 +480,7 @@ export function buildResultsPlot(result, opts = {}) {
       y: ind.series,
       type: 'scatter',
       mode: 'lines',
-      name: `ind: ${ind.indicator_id}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
+      name: `ind: ${ind.indicator_id}${paramsLabel(ind.params_override)}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
       line: { color: TRACE_COLORS[(ownPanelColorOffset + i) % TRACE_COLORS.length], width: 1.5 },
       yaxis: axisRef,
       connectgaps: false,

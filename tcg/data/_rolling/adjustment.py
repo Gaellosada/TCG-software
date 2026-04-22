@@ -46,17 +46,17 @@ def _get_close_at_roll(
     return float(contract.prices.close[idx])
 
 
-def adjust_proportional(
+def adjust_ratio(
     prices: PriceSeries,
     roll_dates: list[int],
     contracts: list[ContractPriceData],
 ) -> PriceSeries:
     """Multiply all prior prices by (new_close / old_close) at each roll boundary.
 
-    Process backwards from the last roll to the first.
-    At each roll date, find the close prices of both contracts on that date,
-    compute the ratio, and multiply all OHLC prices before that date.
-    Volume is left unchanged.
+    Ratio adjustment (formerly called "proportional"). Process backwards
+    from the last roll to the first. At each roll date, find the close
+    prices of both contracts on that date, compute the ratio, and
+    multiply all OHLC prices before that date. Volume is left unchanged.
 
     Parameters
     ----------
@@ -92,7 +92,7 @@ def adjust_proportional(
 
         if old_close == 0.0 or new_close == 0.0:
             logger.warning(
-                "Proportional roll skipped at %d: old_close=%.4f, new_close=%.4f "
+                "Ratio roll skipped at %d: old_close=%.4f, new_close=%.4f "
                 "(contracts %s → %s). Unadjusted gap remains.",
                 rd, old_close, new_close,
                 old_contract.contract_id, new_contract.contract_id,
@@ -125,7 +125,7 @@ def adjust_difference(
 ) -> PriceSeries:
     """Add (new_close - old_close) to all prior prices at each roll boundary.
 
-    Same backward processing as proportional, but additive instead of
+    Same backward processing as ratio adjustment, but additive instead of
     multiplicative. Volume is left unchanged.
 
     Parameters

@@ -1,20 +1,25 @@
-// Pure helpers for building a signal-compute request body — v3 (iter-4).
+// Pure helpers for building a signal-compute request body — v4.
 //
 // Kept separate from ``SignalsPage.jsx`` so unit tests can import them
 // without pulling the Plotly/CodeMirror dependency tree into the test env.
 //
-// iter-4 contract:
+// v4 wire contract (PLAN.md § Wire contract):
 //   body = { spec: Signal, indicators: IndicatorSpec[] }
 // where:
-//   - Signal = { id, name, inputs: Input[], rules }
+//   - Signal = { id, name, inputs: Input[], rules, settings, doc? }
 //   - Input = { id, instrument: InputInstrument }
-//   - Block = { input_id, weight, conditions }
-//   - Operand kinds:
-//       indicator:   { kind, indicator_id, input_id, output,
-//                      params_override, series_override }
-//       instrument:  { kind, input_id, field }
-//       constant:    { kind, value }
+//   - rules = { entries: Block[], exits: Block[] }
+//   - Block = {
+//       id, name, input_id, weight (signed, [-100, +100]),
+//       conditions, [exits only] target_entry_block_name
+//     }
+//   - settings = { dont_repeat: boolean }
 //   - IndicatorSpec = { id, name, code, params, seriesMap }
+//
+// The wire shape mirrors the stored shape exactly — no translation
+// anywhere. Weights are normalised to the signed percentage domain
+// [-100, +100]; values outside that range are clamped defensively here
+// so the backend never sees leverage.
 //
 // Every indicator operand in ``spec`` is normalised so that
 // ``params_override`` and ``series_override`` are always present as
@@ -22,6 +27,7 @@
 // there to run its override-merge step with a deterministic shape.
 
 import { collectIndicatorIds } from '../../api/signals';
+import { MAX_ABS_WEIGHT, SECTIONS } from './storage';
 
 /**
  * Normalise every indicator operand inside a signal spec so that
@@ -30,15 +36,18 @@ import { collectIndicatorIds } from '../../api/signals';
  * pass through unchanged. Non-operand fields (lookback, op, …) are
  * preserved verbatim.
  *
+ * Weights are clamped to [-MAX_ABS_WEIGHT, +MAX_ABS_WEIGHT]. Block ids
+ * and exit ``target_entry_block_name`` are carried through verbatim.
+ *
  * Returns a NEW object graph — the caller's ``signal`` is not mutated.
  */
 export function normaliseSpecForRequest(signal) {
   if (!signal || typeof signal !== 'object') return signal;
   const rules = signal.rules || {};
-  const outRules = {};
-  for (const dir of Object.keys(rules)) {
-    const blocks = Array.isArray(rules[dir]) ? rules[dir] : [];
-    outRules[dir] = blocks.map(normaliseBlock);
+  const outRules = { entries: [], exits: [] };
+  for (const section of SECTIONS) {
+    const blocks = Array.isArray(rules[section]) ? rules[section] : [];
+    outRules[section] = blocks.map((b) => normaliseBlock(b, section));
   }
   const inputs = Array.isArray(signal.inputs) ? signal.inputs.map(normaliseInput) : [];
   return { ...signal, inputs, rules: outRules };
@@ -52,14 +61,37 @@ function normaliseInput(input) {
   };
 }
 
-function normaliseBlock(block) {
+function clampWeight(w) {
+  const n = typeof w === 'number' ? w : Number(w);
+  if (!Number.isFinite(n)) return 0;
+  if (n > MAX_ABS_WEIGHT) return MAX_ABS_WEIGHT;
+  if (n < -MAX_ABS_WEIGHT) return -MAX_ABS_WEIGHT;
+  return n;
+}
+
+function normaliseBlock(block, section) {
   if (!block || typeof block !== 'object') return block;
   const conditions = Array.isArray(block.conditions)
     ? block.conditions.map(normaliseCondition)
     : [];
+  if (section === 'exits') {
+    // Exit blocks omit block-level input_id entirely (not empty-string)
+    // so the backend invariant "exits must not carry input_id" is met.
+    // Weight is meaningless on exits and also omitted.
+    return {
+      id: typeof block.id === 'string' ? block.id : '',
+      name: typeof block.name === 'string' ? block.name : '',
+      conditions,
+      target_entry_block_name: typeof block.target_entry_block_name === 'string'
+        ? block.target_entry_block_name
+        : '',
+    };
+  }
   return {
+    id: typeof block.id === 'string' ? block.id : '',
+    name: typeof block.name === 'string' ? block.name : '',
     input_id: typeof block.input_id === 'string' ? block.input_id : '',
-    weight: typeof block.weight === 'number' ? block.weight : 0,
+    weight: clampWeight(block.weight),
     conditions,
   };
 }
@@ -79,8 +111,7 @@ function normaliseOperand(operand) {
   if (!operand || typeof operand !== 'object') return operand;
   if (operand.kind !== 'indicator') return operand;
   // ALWAYS emit both override keys — null if absent — so the backend
-  // sees a deterministic shape. series_override is { label -> input_id }
-  // in v3.
+  // sees a deterministic shape. series_override is { label -> input_id }.
   return {
     ...operand,
     params_override: operand.params_override ?? null,

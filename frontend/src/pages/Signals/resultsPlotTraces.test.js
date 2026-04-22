@@ -12,6 +12,7 @@ import {
   partitionIndicators,
   buildEventMarkerTraces,
   buildIndicatorTraces,
+  buildBlockWeightSignMap,
   EVENT_MARKER,
 } from './resultsPlotTraces';
 
@@ -76,67 +77,97 @@ describe('aggregateRealizedPnl', () => {
   });
 });
 
+describe('buildBlockWeightSignMap', () => {
+  it('maps entry block ids to sign(weight)', () => {
+    const rules = {
+      entries: [
+        { id: 'e1', input_id: 'X', weight: 50, conditions: [] },
+        { id: 'e2', input_id: 'Y', weight: -30, conditions: [] },
+        { id: 'e3', input_id: 'Z', weight: 0, conditions: [] },
+      ],
+      exits: [],
+    };
+    const map = buildBlockWeightSignMap(rules);
+    expect(map.e1).toBe(1);
+    expect(map.e2).toBe(-1);
+    expect(map.e3).toBe(0);
+  });
+
+  it('maps exit block ids to sign(weight) of the target entry (by name)', () => {
+    const rules = {
+      entries: [
+        { id: 'e1', name: 'Alpha', input_id: 'X', weight: 75, conditions: [] },
+        { id: 'e2', name: 'Beta', input_id: 'X', weight: -25, conditions: [] },
+      ],
+      exits: [
+        { id: 'x1', input_id: 'X', weight: 0, target_entry_block_name: 'Alpha', conditions: [] },
+        { id: 'x2', input_id: 'X', weight: 0, target_entry_block_name: 'Beta', conditions: [] },
+        { id: 'x3', input_id: 'X', weight: 0, target_entry_block_name: 'unknown', conditions: [] },
+      ],
+    };
+    const map = buildBlockWeightSignMap(rules);
+    expect(map.x1).toBe(1);
+    expect(map.x2).toBe(-1);
+    expect(map.x3).toBe(0); // dangling target → neutral fallback
+  });
+
+  it('returns {} for null / malformed rules', () => {
+    expect(buildBlockWeightSignMap(null)).toEqual({});
+    expect(buildBlockWeightSignMap(undefined)).toEqual({});
+    expect(buildBlockWeightSignMap({})).toEqual({});
+  });
+});
+
 describe('buildEventMarkerTraces', () => {
   const positions = [positionWithPrice('X', [100, 101, 102])];
-  it('emits markers at fired_indices by default', () => {
+
+  it('emits markers at fired_indices by default (long entry w/ positive weight)', () => {
     const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [0, 2], latched_indices: [0] },
+      {
+        input_id: 'X',
+        block_id: 'b1',
+        kind: 'entry',
+        fired_indices: [0, 2],
+        latched_indices: [0],
+        active_indices: [0, 1, 2],
+      },
     ];
-    const traces = buildEventMarkerTraces(events, positions, dates);
+    const blockWeightSigns = { b1: 1 };
+    const traces = buildEventMarkerTraces(events, positions, dates, undefined, { blockWeightSigns });
     expect(traces).toHaveLength(1);
     expect(traces[0].mode).toBe('markers');
     expect(traces[0].x).toHaveLength(2);
     expect(traces[0].y).toEqual([100, 102]);
-    expect(traces[0].marker.symbol).toBe(EVENT_MARKER.long_entry.symbol);
-    expect(traces[0].marker.color).toBe(EVENT_MARKER.long_entry.color);
-  });
-
-  it('emits entry markers at latched_indices when noRepeat is true', () => {
-    const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [0, 1, 2], latched_indices: [0, 2] },
-    ];
-    const traces = buildEventMarkerTraces(events, positions, dates, undefined, { noRepeat: true });
-    expect(traces).toHaveLength(1);
-    expect(traces[0].x).toHaveLength(2);
-    expect(traces[0].y).toEqual([100, 102]);
-  });
-
-  it('filters exit markers to effective exits when noRepeat is true', () => {
-    // Position goes: 0.5, 0.5, 0.0 — exit fires at t=1 and t=2, but only
-    // t=2 actually changes the position (0.5→0.0).
-    const pos = [{
-      input_id: 'X',
-      instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'X' },
-      values: [0.5, 0.5, 0.0],
-      clipped_mask: [false, false, false],
-      price: { label: 'X.close', values: [100, 101, 102] },
-    }];
-    const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_exit', fired_indices: [1, 2], latched_indices: [1, 2] },
-    ];
-    const traces = buildEventMarkerTraces(events, pos, dates, undefined, { noRepeat: true });
-    expect(traces).toHaveLength(1);
-    // Only bar 2 is effective (position changed from 0.5 to 0.0).
-    expect(traces[0].x).toHaveLength(1);
-    expect(traces[0].y).toEqual([102]);
+    // Long entry → green filled triangle-up
+    expect(traces[0].marker.symbol).toBe(EVENT_MARKER.entry[1].symbol);
+    expect(traces[0].marker.color).toBe(EVENT_MARKER.entry[1].color);
   });
 
   it('uses open variants for exit kinds', () => {
     const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_exit', fired_indices: [1], latched_indices: [1] },
+      {
+        input_id: 'X', block_id: 'x1', kind: 'exit',
+        fired_indices: [1], latched_indices: [1], target_entry_block_name: 'e1',
+      },
     ];
-    const [trace] = buildEventMarkerTraces(events, positions, dates);
+    // Exit targets a LONG entry (positive weight) → green open triangle-down
+    const [trace] = buildEventMarkerTraces(
+      events, positions, dates, undefined, { blockWeightSigns: { x1: 1 } },
+    );
     expect(trace.marker.symbol).toBe('triangle-down-open');
+    expect(trace.marker.color).toBe(EVENT_MARKER.exit[1].color);
   });
 
-  it('applies the short_entry / short_exit colour convention', () => {
+  it('applies the short entry / short exit colour convention via weight sign', () => {
+    // Short entry: kind=entry + negative-weight block → red filled triangle-down
     const entry = buildEventMarkerTraces(
-      [{ input_id: 'X', block_id: 'b2', kind: 'short_entry', fired_indices: [1], latched_indices: [1] }],
-      positions, dates,
+      [{ input_id: 'X', block_id: 'b2', kind: 'entry', fired_indices: [1], latched_indices: [1] }],
+      positions, dates, undefined, { blockWeightSigns: { b2: -1 } },
     );
+    // Short exit: kind=exit + targets a negative-weight entry → red OPEN triangle-up
     const exit = buildEventMarkerTraces(
-      [{ input_id: 'X', block_id: 'b3', kind: 'short_exit', fired_indices: [2], latched_indices: [2] }],
-      positions, dates,
+      [{ input_id: 'X', block_id: 'b3', kind: 'exit', fired_indices: [2], latched_indices: [2], target_entry_block_name: 'b2' }],
+      positions, dates, undefined, { blockWeightSigns: { b3: -1 } },
     );
     expect(entry[0].marker.color).toBe('#ef4444');
     expect(entry[0].marker.symbol).toBe('triangle-down');
@@ -144,32 +175,65 @@ describe('buildEventMarkerTraces', () => {
     expect(exit[0].marker.symbol).toBe('triangle-up-open');
   });
 
+  it('falls back to neutral grey square for entries with zero weight', () => {
+    // Backend rejects weight==0 entries, but the defensive fallback
+    // must render a neutral square rather than crash.
+    const events = [
+      { input_id: 'X', block_id: 'b0', kind: 'entry', fired_indices: [1], latched_indices: [1] },
+    ];
+    const [trace] = buildEventMarkerTraces(
+      events, positions, dates, undefined, { blockWeightSigns: { b0: 0 } },
+    );
+    expect(trace.marker.symbol).toBe('square');
+    expect(trace.marker.color).toBe(EVENT_MARKER.entry[0].color);
+  });
+
+  it('falls back to neutral for events whose block_id is missing from the sign map', () => {
+    // Omitting the sign for a block should not throw — render neutral.
+    const events = [
+      { input_id: 'X', block_id: 'unknown', kind: 'entry', fired_indices: [1] },
+    ];
+    const [trace] = buildEventMarkerTraces(
+      events, positions, dates, undefined, { blockWeightSigns: {} },
+    );
+    expect(trace.marker.symbol).toBe('square'); // neutral entry symbol
+    expect(trace.marker.color).toBe(EVENT_MARKER.entry[0].color);
+  });
+
   it('uses fired_indices by default even when latched_indices is absent', () => {
     const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [1] },
+      { input_id: 'X', block_id: 'b1', kind: 'entry', fired_indices: [1] },
     ];
-    const [trace] = buildEventMarkerTraces(events, positions, dates);
+    const [trace] = buildEventMarkerTraces(
+      events, positions, dates, undefined, { blockWeightSigns: { b1: 1 } },
+    );
     expect(trace.x).toHaveLength(1);
     expect(trace.y).toEqual([101]);
   });
 
   it('skips events whose input has no price (no synthesis)', () => {
     const pos = [{ input_id: 'X', price: null }];
-    const events = [{ input_id: 'X', kind: 'long_entry', fired_indices: [0] }];
-    expect(buildEventMarkerTraces(events, pos, dates)).toHaveLength(0);
+    const events = [{ input_id: 'X', block_id: 'b1', kind: 'entry', fired_indices: [0] }];
+    expect(buildEventMarkerTraces(
+      events, pos, dates, undefined, { blockWeightSigns: { b1: 1 } },
+    )).toHaveLength(0);
   });
 
   it('drops bars where the price is null (no synthesis)', () => {
     const pos = [positionWithPrice('X', [100, null, 102])];
-    const events = [{ input_id: 'X', kind: 'long_entry', fired_indices: [0, 1, 2] }];
-    const [trace] = buildEventMarkerTraces(events, pos, dates);
+    const events = [{ input_id: 'X', block_id: 'b1', kind: 'entry', fired_indices: [0, 1, 2] }];
+    const [trace] = buildEventMarkerTraces(
+      events, pos, dates, undefined, { blockWeightSigns: { b1: 1 } },
+    );
     expect(trace.x).toHaveLength(2);
     expect(trace.y).toEqual([100, 102]);
   });
 
   it('ignores unknown kinds gracefully', () => {
-    const events = [{ input_id: 'X', kind: 'not_a_kind', fired_indices: [0] }];
-    expect(buildEventMarkerTraces(events, positions, dates)).toHaveLength(0);
+    const events = [{ input_id: 'X', block_id: 'b1', kind: 'not_a_kind', fired_indices: [0] }];
+    expect(buildEventMarkerTraces(
+      events, positions, dates, undefined, { blockWeightSigns: { b1: 1 } },
+    )).toHaveLength(0);
   });
 
   it('returns [] for empty inputs', () => {
@@ -179,9 +243,11 @@ describe('buildEventMarkerTraces', () => {
 
   it('sets yaxis on traces when yaxis parameter is provided', () => {
     const events = [
-      { input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [0] },
+      { input_id: 'X', block_id: 'b1', kind: 'entry', fired_indices: [0] },
     ];
-    const traces = buildEventMarkerTraces(events, positions, dates, 'y2');
+    const traces = buildEventMarkerTraces(
+      events, positions, dates, 'y2', { blockWeightSigns: { b1: 1 } },
+    );
     expect(traces[0].yaxis).toBe('y2');
   });
 });
@@ -325,6 +391,9 @@ describe('buildResultsPlot', () => {
     expect(hasData).toBe(true);
     // Top subplot: P&L + capital. Bottom subplot: 1 price.
     expect(traces.length).toBeGreaterThanOrEqual(3);
+    // layoutOverrides should at least have yaxis + yaxis2
+    expect(layoutOverrides.yaxis).toBeDefined();
+    expect(layoutOverrides.yaxis2).toBeDefined();
   });
 
   it('all traces share the same x-axis (no xaxis2/xaxis3)', () => {
@@ -392,14 +461,21 @@ describe('buildResultsPlot', () => {
     expect(cap.yaxis).toBeUndefined();
   });
 
-  it('assigns bottom subplot traces to y2', () => {
+  it('assigns bottom subplot traces (including event markers) to y2', () => {
     const result = {
       timestamps: ts,
       positions: [positionWithPrice('X', [1, 2, 3])],
       indicators: [{ input_id: 'X', indicator_id: 'sma', series: [1, 2, 3] }],
-      events: [{ input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [1], latched_indices: [1] }],
+      events: [{
+        input_id: 'X', block_id: 'b1', kind: 'entry',
+        fired_indices: [1], latched_indices: [1], active_indices: [1],
+      }],
     };
-    const { traces } = buildResultsPlot(result);
+    const signalRules = {
+      entries: [{ id: 'b1', input_id: 'X', weight: 50, conditions: [] }],
+      exits: [],
+    };
+    const { traces } = buildResultsPlot(result, { signalRules });
     // Bottom subplot price traces should be on y2
     const bottomPrices = traces.filter((t) => t.name.includes('X') && t.yaxis === 'y2');
     expect(bottomPrices.length).toBeGreaterThanOrEqual(1);
@@ -409,12 +485,38 @@ describe('buildResultsPlot', () => {
     for (const t of indTraces) {
       expect(t.yaxis).toBe('y2');
     }
-    // Event marker traces on y2
+    // Event marker traces on y2 — positive-weight entry → "long entry" label
     const eventTraces = traces.filter((t) => t.name && t.name.includes('long entry'));
     expect(eventTraces.length).toBeGreaterThanOrEqual(1);
     for (const t of eventTraces) {
       expect(t.yaxis).toBe('y2');
     }
+  });
+
+  it('picks long vs short markers via signalRules passed through opts', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [],
+      events: [
+        { input_id: 'X', block_id: 'b1', kind: 'entry', fired_indices: [0], latched_indices: [0] },
+        { input_id: 'X', block_id: 'b2', kind: 'entry', fired_indices: [1], latched_indices: [1] },
+      ],
+    };
+    const signalRules = {
+      entries: [
+        { id: 'b1', input_id: 'X', weight: 40, conditions: [] },   // long
+        { id: 'b2', input_id: 'X', weight: -60, conditions: [] },  // short
+      ],
+      exits: [],
+    };
+    const { traces } = buildResultsPlot(result, { signalRules });
+    const longTrace = traces.find((t) => t.name && t.name.startsWith('long entry'));
+    const shortTrace = traces.find((t) => t.name && t.name.startsWith('short entry'));
+    expect(longTrace).toBeDefined();
+    expect(shortTrace).toBeDefined();
+    expect(longTrace.marker.color).toBe('#10b981');
+    expect(shortTrace.marker.color).toBe('#ef4444');
   });
 
   it('assigns ownPanel indicators to y3, y4, etc.', () => {

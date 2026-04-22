@@ -39,6 +39,6 @@ def error_response(
 
 ADJUSTMENT_MAP: dict[str, AdjustmentMethod] = {
     "none": AdjustmentMethod.NONE,
-    "proportional": AdjustmentMethod.PROPORTIONAL,
+    "ratio": AdjustmentMethod.RATIO,
     "difference": AdjustmentMethod.DIFFERENCE,
 }

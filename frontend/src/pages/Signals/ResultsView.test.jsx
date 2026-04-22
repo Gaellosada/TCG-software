@@ -91,9 +91,16 @@ describe('<ResultsView>', () => {
   it('includes indicators and event markers in the unified chart', () => {
     const result = makeResult({
       indicators: [{ input_id: 'X', indicator_id: 'sma', series: [100, 101, 102] }],
-      events: [{ input_id: 'X', block_id: 'b1', kind: 'long_entry', fired_indices: [1], latched_indices: [1] }],
+      events: [{
+        input_id: 'X', block_id: 'b1', kind: 'entry',
+        fired_indices: [1], latched_indices: [1], active_indices: [1],
+      }],
     });
-    render(<ResultsView result={result} loading={false} error={null} />);
+    const signalRules = {
+      entries: [{ id: 'b1', input_id: 'X', weight: 50, conditions: [] }],
+      exits: [],
+    };
+    render(<ResultsView result={result} loading={false} error={null} signalRules={signalRules} />);
     expect(chartCalls).toHaveLength(1);
     const names = chartCalls[0].traces.map((t) => t.name);
     expect(names.some((n) => n.startsWith('ind:'))).toBe(true);
@@ -148,6 +155,60 @@ describe('<ResultsView>', () => {
     render(<ResultsView result={makeResult()} loading={false} error={null} />);
     expect(chartCalls).toHaveLength(1);
     expect(chartCalls[0].style).toEqual({ width: '100%', height: '100%' });
+  });
+
+  // --- dont_repeat toggle (bullet #8) ------------------------------------
+  // When `noRepeat` is true, ResultsView should route `result` through
+  // `computeEffectiveTrace` before rendering. The effective set is
+  // `latched_indices`; the raw set is `fired_indices`. Per the backend
+  // contract, events already carry both arrays — the view just picks one.
+  describe('dont_repeat toggle (noRepeat prop)', () => {
+    function resultWithEvent(firedIndices, latchedIndices) {
+      return makeResult({
+        // v4 schema: kind is ``entry`` or ``exit``. The filter logic
+        // under test is kind-agnostic — entries use latched_indices
+        // in both modes tested here.
+        events: [{
+          input_id: 'X',
+          block_id: 'b1',
+          kind: 'entry',
+          fired_indices: firedIndices,
+          latched_indices: latchedIndices,
+          active_indices: firedIndices,
+        }],
+      });
+    }
+
+    function eventMarkerTrace(traces) {
+      return traces.find((t) => t.mode === 'markers');
+    }
+
+    it('noRepeat=false renders one marker per fired_indices bar', () => {
+      const result = resultWithEvent([0, 1, 2], [1]);
+      render(<ResultsView result={result} loading={false} error={null} noRepeat={false} />);
+      expect(chartCalls).toHaveLength(1);
+      const markers = eventMarkerTrace(chartCalls[0].traces);
+      expect(markers).toBeDefined();
+      expect(markers.x).toHaveLength(3);
+    });
+
+    it('noRepeat=true renders one marker per latched_indices bar (effective-only)', () => {
+      const result = resultWithEvent([0, 1, 2], [1]);
+      render(<ResultsView result={result} loading={false} error={null} noRepeat />);
+      expect(chartCalls).toHaveLength(1);
+      const markers = eventMarkerTrace(chartCalls[0].traces);
+      expect(markers).toBeDefined();
+      expect(markers.x).toHaveLength(1);
+    });
+
+    it('noRepeat=true with empty latched_indices renders zero markers', () => {
+      const result = resultWithEvent([0, 1, 2], []);
+      render(<ResultsView result={result} loading={false} error={null} noRepeat />);
+      expect(chartCalls).toHaveLength(1);
+      // With no valid marker indices, the event-marker trace is dropped.
+      const markers = eventMarkerTrace(chartCalls[0].traces);
+      expect(markers).toBeUndefined();
+    });
   });
 
   it('renders multiple ownPanel indicators in the same single chart', () => {

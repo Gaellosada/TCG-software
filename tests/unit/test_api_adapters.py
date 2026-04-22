@@ -17,9 +17,9 @@ class TestBuildRollConfigHappyPath:
         assert config.cycle is None
         assert config.roll_offset_days == 0
 
-    def test_proportional_adjustment(self):
-        config = build_roll_config("proportional", None, 0)
-        assert config.adjustment == AdjustmentMethod.PROPORTIONAL
+    def test_ratio_adjustment(self):
+        config = build_roll_config("ratio", None, 0)
+        assert config.adjustment == AdjustmentMethod.RATIO
 
     def test_difference_adjustment(self):
         config = build_roll_config("difference", None, 0)
@@ -30,7 +30,7 @@ class TestBuildRollConfigHappyPath:
         assert config.cycle == "HMUZ"
 
     def test_with_roll_offset(self):
-        config = build_roll_config("proportional", None, 3)
+        config = build_roll_config("ratio", None, 3)
         assert config.roll_offset_days == 3
 
     def test_with_all_params(self):
@@ -45,7 +45,7 @@ class TestBuildRollConfigHappyPath:
         assert config.cycle is None
 
     def test_strategy_always_front_month(self):
-        for adj in ("none", "proportional", "difference"):
+        for adj in ("none", "ratio", "difference"):
             config = build_roll_config(adj, None, 0)
             assert config.strategy == RollStrategy.FRONT_MONTH
 

@@ -25,7 +25,7 @@ class SpotInstrumentRef(BaseModel):
 class ContinuousInstrumentRef(BaseModel):
     type: Literal["continuous"]
     collection: str
-    adjustment: Literal["none", "proportional", "difference"] = "none"
+    adjustment: Literal["none", "ratio", "difference"] = "none"
     cycle: str | None = None
     # Accept camelCase from the frontend.
     rollOffset: int = 0

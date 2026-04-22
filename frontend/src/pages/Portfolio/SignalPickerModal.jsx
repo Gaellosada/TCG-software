@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { loadState, DIRECTIONS } from '../Signals/storage';
+import { loadState } from '../Signals/storage';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 import { formatInstrument } from './formatInstrument';
 import styles from './SignalPickerModal.module.css';
@@ -162,11 +162,9 @@ export default function SignalPickerModal({ isOpen, onClose, onSelect }) {
                 <div className={styles.list}>
                   {signals.map((signal) => {
                     const inputCount = signal.inputs ? signal.inputs.length : 0;
-                    const blockCount = DIRECTIONS.reduce(
-                      (sum, dir) =>
-                        sum + (Array.isArray(signal.rules?.[dir]) ? signal.rules[dir].length : 0),
-                      0,
-                    );
+                    const blockCount =
+                      (signal.rules?.entries?.length || 0) +
+                      (signal.rules?.exits?.length || 0);
                     return (
                       <div key={signal.id} className={styles.signalRow}>
                         <div className={styles.signalInfo}>

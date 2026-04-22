@@ -14,7 +14,7 @@ from tcg.types.market import (
 )
 from tcg.data._rolling.calendar import compute_roll_dates, trim_overlaps
 from tcg.data._rolling.adjustment import (
-    adjust_proportional,
+    adjust_ratio,
     adjust_difference,
     _find_closest_date_idx,
     _get_close_at_roll,
@@ -172,7 +172,7 @@ class TestTrimOverlaps:
 # ── Adjustment tests ────────────────────────────────────────────────
 
 
-class TestAdjustProportional:
+class TestAdjustRatio:
     def test_no_roll_dates(self):
         """With no roll dates, returns unchanged series."""
         ps = PriceSeries(
@@ -183,10 +183,10 @@ class TestAdjustProportional:
             close=np.array([101.0, 102.0]),
             volume=np.array([1000.0, 1100.0]),
         )
-        result = adjust_proportional(ps, [], [])
+        result = adjust_ratio(ps, [], [])
         np.testing.assert_array_equal(result.close, ps.close)
 
-    def test_single_roll_proportional(self):
+    def test_single_roll_ratio(self):
         """Two contracts: verify ratio applied to pre-roll prices."""
         # Roll date = 20240117 (first date of new contract segment in concat)
         # _get_close_at_roll(c1, 20240117) → closest date 20240115 → close=100
@@ -216,7 +216,7 @@ class TestAdjustProportional:
         # Roll date = first date of new contract segment
         roll_dates = [20240117]
 
-        result = adjust_proportional(raw_ps, roll_dates, [c1, c2])
+        result = adjust_ratio(raw_ps, roll_dates, [c1, c2])
 
         ratio = 107.0 / 100.0  # = 1.07
         # Dates before 20240117 should be multiplied by ratio
@@ -227,7 +227,7 @@ class TestAdjustProportional:
         np.testing.assert_array_equal(result.volume, raw_ps.volume)
 
     def test_volume_unchanged(self):
-        """Proportional adjustment must not modify volume."""
+        """Ratio adjustment must not modify volume."""
         c1 = _make_contract("A", 20240115, [20240110, 20240115], [100.0, 100.0])
         c2 = _make_contract("B", 20240215, [20240115, 20240120], [110.0, 115.0])
         raw_ps = PriceSeries(
@@ -238,7 +238,7 @@ class TestAdjustProportional:
             close=np.array([100.0, 100.0, 115.0]),
             volume=np.array([500.0, 600.0, 700.0]),
         )
-        result = adjust_proportional(raw_ps, [20240120], [c1, c2])
+        result = adjust_ratio(raw_ps, [20240120], [c1, c2])
         np.testing.assert_array_equal(result.volume, [500.0, 600.0, 700.0])
 
 
@@ -356,8 +356,8 @@ class TestContinuousSeriesBuilder:
             result.prices.close, [20.0, 20.5, 21.0, 22.0, 22.5, 23.0]
         )
 
-    def test_three_contracts_proportional_continuous_returns(self):
-        """Three contracts with proportional adjustment: returns should be continuous.
+    def test_three_contracts_ratio_continuous_returns(self):
+        """Three contracts with ratio adjustment: returns should be continuous.
 
         This is THE key validation from the architecture doc — no return spikes
         at roll boundaries.
@@ -390,7 +390,7 @@ class TestContinuousSeriesBuilder:
 
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
         )
         result = self.builder.build([c1, c2, c3], config)
 
@@ -538,7 +538,7 @@ class TestContinuousSeriesBuilder:
         idx_113 = dates.index(20240113)
         assert result.prices.close[idx_113] == 22.0  # c2's price, not c1's 19.5
 
-    def test_proportional_cascading_three_rolls(self):
+    def test_ratio_cascading_three_rolls(self):
         """Verify backward cascading: adjustment at roll 1 includes roll 2's factor."""
         # 3 contracts, 2 rolls
         # Roll 2: ratio_2 = c3_close / c2_close at c2 expiration
@@ -551,7 +551,7 @@ class TestContinuousSeriesBuilder:
 
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
         )
         result = self.builder.build([c1, c2, c3], config)
 
@@ -633,7 +633,7 @@ class TestContinuousSeriesBuilder:
 
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
         )
         result = self.builder.build([c1, c2, c3], config)
 
@@ -659,7 +659,7 @@ class TestContinuousSeriesBuilder:
         c1 = _make_contract("VXF24", 20240115, [20240101], [20.0])
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
             cycle="HMUZ",
         )
         result = self.builder.build([c1], config)
@@ -678,7 +678,7 @@ class TestContinuousSeriesBuilder:
         c2 = _make_contract("VXG24", 20240120, [20240110, 20240115, 20240120], [22.0, 23.0, 24.0])
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
         )
         result = self.builder.build([c1, c2], config)
 
@@ -697,7 +697,7 @@ class TestContinuousSeriesBuilder:
         c3 = _make_contract("VXH24", 20240120, [20240110, 20240115, 20240120], [30.0, 31.0, 32.0])
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
         )
         result = self.builder.build([c1, c2, c3], config)
 
@@ -760,8 +760,8 @@ class TestGetCloseAtRoll:
 class TestNewCloseZero:
     """Verify adjustment handles new_close == 0 gracefully."""
 
-    def test_proportional_new_close_zero_skips_roll(self):
-        """Proportional adjustment skips roll when new_close == 0."""
+    def test_ratio_new_close_zero_skips_roll(self):
+        """Ratio adjustment skips roll when new_close == 0."""
         # Contract A: closes [100, 110]
         # Contract B: close on roll date is 0 (shouldn't zero out history)
         c1 = _make_contract("A", 20240110, [20240101, 20240110], [100.0, 110.0])
@@ -776,7 +776,7 @@ class TestNewCloseZero:
             close=np.array([100.0, 110.0, 50.0], dtype=np.float64),
             volume=np.array([1000.0, 1000.0, 1000.0], dtype=np.float64),
         )
-        result = adjust_proportional(prices, [20240110], [c1, c2])
+        result = adjust_ratio(prices, [20240110], [c1, c2])
 
         # Roll should be skipped (new_close=0), so prices unchanged
         np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])
@@ -824,7 +824,7 @@ class TestUnsortedContractsRejected:
 
 
 class TestDifferenceCascadingThreeRolls:
-    """Mirror of test_proportional_cascading_three_rolls for difference adjustment."""
+    """Mirror of test_ratio_cascading_three_rolls for difference adjustment."""
 
     def test_cascading_three_rolls(self):
         c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 50.0])
@@ -886,15 +886,15 @@ class TestDateGapBetweenContracts:
             result.prices.close, [50.0, 52.0, 55.0, 60.0, 62.0, 65.0]
         )
 
-    def test_gap_proportional_adjustment(self):
-        """Proportional adjustment across a date gap uses closest-date matching."""
+    def test_gap_ratio_adjustment(self):
+        """Ratio adjustment across a date gap uses closest-date matching."""
         c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0])
         c2 = _make_contract("B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0])
 
         builder = ContinuousSeriesBuilder()
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
         )
         result = builder.build([c1, c2], config)
 
@@ -910,8 +910,8 @@ class TestDateGapBetweenContracts:
 class TestManyRolls:
     """Test with 10+ rolls to verify accumulation and performance."""
 
-    def test_ten_rolls_proportional(self):
-        """10 contracts with proportional adjustment: no NaN, finite results."""
+    def test_ten_rolls_ratio(self):
+        """10 contracts with ratio adjustment: no NaN, finite results."""
         contracts = []
         for i in range(10):
             base_date = 20240101 + i * 100  # Spread contracts across months
@@ -924,13 +924,13 @@ class TestManyRolls:
         builder = ContinuousSeriesBuilder()
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.PROPORTIONAL,
+            adjustment=AdjustmentMethod.RATIO,
         )
         result = builder.build(contracts, config)
 
         assert len(result.roll_dates) > 0
         assert np.all(np.isfinite(result.prices.close))
-        assert np.all(result.prices.close > 0)  # No negative prices from proportional
+        assert np.all(result.prices.close > 0)  # No negative prices from ratio
 
     def test_ten_rolls_difference(self):
         """10 contracts with difference adjustment: no NaN, finite results."""

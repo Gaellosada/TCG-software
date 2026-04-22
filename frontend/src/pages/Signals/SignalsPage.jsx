@@ -5,7 +5,7 @@ import ParamsPanel from './ParamsPanel';
 import ResultsView from './ResultsView';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
-import { loadState, saveState, emptyRules } from './storage';
+import { loadState, saveState, emptyRules, defaultSettings, SECTIONS } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import { buildComputeRequestBody } from './requestBuilder';
@@ -46,11 +46,15 @@ function SignalsPage() {
   const [signals, setSignals] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
+  // v4 bullet #1: two section tabs — 'entries' | 'exits'. The active tab
+  // drives which section of blocks BlockEditor renders. Tab state lives
+  // here (not in BlockEditor) so it persists across block edits and maps
+  // one-to-one to the v4 rules shape.
+  const [activeTab, setActiveTab] = useState(SECTIONS[0]);
   const { run: runAbortable, running, abort: abortRun } = useAbortableAction();
   const [error, setError] = useState(null);
   const [lastResult, setLastResult] = useState(null);
   const [capital, setCapital] = useState(1000);
-  const [noRepeat, setNoRepeat] = useState(false);
   const [availableIndicators, setAvailableIndicators] = useState([]);
   const [autosave, setAutosaveState] = useState(() => {
     try {
@@ -80,6 +84,12 @@ function SignalsPage() {
       name: s.name || 'Untitled',
       inputs: Array.isArray(s.inputs) ? s.inputs : [],
       rules: { ...emptyRules(), ...(s.rules || {}) },
+      // v4 bullet #7: preserve stored dont_repeat verbatim. Sanitiser
+      // already defaulted missing settings to {dont_repeat:true} at load
+      // time. We do NOT override the stored value on hydrate.
+      settings: (s.settings && typeof s.settings === 'object')
+        ? { ...defaultSettings(), ...s.settings }
+        : defaultSettings(),
       doc: typeof s.doc === 'string' ? s.doc : '',
     }));
     setSignals(initial);
@@ -134,6 +144,8 @@ function SignalsPage() {
         name: nextSignalName(prev),
         inputs: [],
         rules: emptyRules(),
+        // v4 bullet #7: new signals get dont_repeat=true by default.
+        settings: defaultSettings(),
         doc: '',
       };
       setSelectedId(id);
@@ -179,8 +191,20 @@ function SignalsPage() {
     setSignals((prev) => prev.map((s) => (s.id !== selectedId ? s : { ...s, doc: nextDoc })));
   }, [selectedId]);
 
+  // v4 bullet #7/#8: toggling dont_repeat mutates the selected signal's
+  // persisted settings, so the choice round-trips through localStorage
+  // and drives the Results-view effective-only filter.
+  const handleDontRepeatChange = useCallback((next) => {
+    setSignals((prev) => prev.map((s) => (
+      s.id !== selectedId ? s : {
+        ...s,
+        settings: { ...defaultSettings(), ...(s.settings || {}), dont_repeat: !!next },
+      }
+    )));
+  }, [selectedId]);
+
   // --- Validation + run ----------------------------------------------------
-  // v3: Run gate checks inputs too — every input must be configured
+  // Run gate checks inputs too — every input must be configured
   // (instrument picked), every block's input_id must resolve to one of
   // them, every operand's input_id must resolve, every condition must
   // be complete.
@@ -261,7 +285,13 @@ function SignalsPage() {
               inputs={selectedSignal.inputs || []}
               onChange={handleInputsChange}
             />
+            {/* v4 bullet #1: BlockEditor renders the two section tabs
+                (Entries / Exits) itself. SignalsPage owns the active-tab
+                state and passes it down so the tab choice survives block
+                edits and cross-signal navigation. */}
             <BlockEditor
+              section={activeTab}
+              onSectionChange={setActiveTab}
               rules={selectedSignal.rules}
               onRulesChange={handleRulesChange}
               inputs={selectedSignal.inputs || []}
@@ -303,8 +333,8 @@ function SignalsPage() {
           runDisabledReason={runDisabledReason}
           capital={capital}
           onCapitalChange={setCapital}
-          noRepeat={noRepeat}
-          onNoRepeatChange={setNoRepeat}
+          noRepeat={selectedSignal?.settings?.dont_repeat ?? true}
+          onNoRepeatChange={handleDontRepeatChange}
         />
       </div>
       <div className={styles.chartPanel}>
@@ -314,7 +344,14 @@ function SignalsPage() {
           bodyClassName={styles.resultsCardBody}
           data-testid="signal-results-card"
         >
-          <ResultsView result={lastResult} loading={running} error={error} capital={capital} noRepeat={noRepeat} />
+          <ResultsView
+            result={lastResult}
+            loading={running}
+            error={error}
+            capital={capital}
+            noRepeat={selectedSignal?.settings?.dont_repeat ?? true}
+            signalRules={selectedSignal?.rules ?? null}
+          />
         </Card>
       </div>
       <ConfirmDialog

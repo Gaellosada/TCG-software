@@ -129,10 +129,25 @@
   cursor: pointer;
   font-size: 0.85rem;
   padding: 2px 4px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.row:hover .iconBtn,
+.row:focus-within .iconBtn {
+  opacity: 1;
 }
 
 .iconBtn:hover {
   color: var(--accent);
+}
+
+.iconBtn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 .deleteBtn {
@@ -147,11 +162,27 @@
   height: var(--signal-control-height);
   border-radius: var(--radius-sm);
   flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.row:hover .deleteBtn,
+.row:focus-within .deleteBtn,
+.conditionRow:hover .deleteBtn,
+.conditionRow:focus-within .deleteBtn {
+  opacity: 1;
 }
 
 .deleteBtn:hover {
   color: var(--error-text, #ef4444);
   border-color: var(--error-text, #ef4444);
+}
+
+.deleteBtn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 /* ---------- BlockEditor ---------- */
@@ -160,41 +191,6 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-.directionTabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--border-primary);
-  padding-bottom: 6px;
-}
-
-.directionTab {
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 0.8rem;
-  padding: 4px 10px;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.directionTab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.directionTabActive {
-  background: var(--bg-tertiary);
-  border-color: var(--border-primary);
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.directionTabCount {
-  color: var(--text-secondary);
-  font-weight: 400;
 }
 
 .directionTabSpacer {
@@ -206,6 +202,45 @@
   display: flex;
   flex-direction: column;
   min-height: 180px;
+}
+
+/* v4 bullet #1: two section tabs (Entries / Exits) replace the four direction tabs.
+   Tab row is rendered at SignalsPage level, above BlockEditor.
+*/
+.sectionTabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-primary);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+}
+
+.sectionTab {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 4px 12px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.sectionTab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sectionTabActive {
+  background: var(--bg-tertiary);
+  border-color: var(--border-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.sectionTabCount {
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 
 .directionHint {
@@ -247,13 +282,6 @@
   font-weight: 600;
   padding: 0 6px;
   letter-spacing: 0.08em;
-}
-
-.blockHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
 }
 
 .blockLabel {
@@ -784,8 +812,7 @@
   min-width: 240px;
 }
 
-/* v3: replaces blockInstrumentBtn — a simple select bound to the
-   signal's declared inputs. */
+/* A simple select bound to the signal's declared inputs. */
 .blockInputSelect {
   width: 100%;
   background: var(--bg-tertiary);
@@ -824,15 +851,99 @@
   text-underline-offset: 2px;
 }
 
-.blockWeightInput {
-  width: 64px;
+/* v4: weight input with % suffix glyph.
+   .weightInputWrap is the flex container that holds the <input> + suffix.
+   .weightInput is the number <input> itself (no right border-radius so the
+   suffix pill butts up against it).
+   .weightSuffix is the non-interactive % label. */
+.weightInputWrap {
+  display: flex;
+  align-items: stretch;
+  height: var(--signal-control-height);
+}
+
+.weightInput {
+  width: 52px;
   height: var(--signal-control-height);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
+  border-right: none;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
   color: var(--text-primary);
   font-size: 0.82rem;
-  padding: 2px 6px;
+  padding: 2px 4px;
+  box-sizing: border-box;
+  /* Remove browser-default number spinners */
+  -moz-appearance: textfield;
+}
+
+.weightInput::-webkit-outer-spin-button,
+.weightInput::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.weightInput:focus {
+  outline: none;
+  border-color: var(--border-accent, var(--accent, #2563eb));
+  border-right: none;
+}
+
+.weightSuffix {
+  display: flex;
+  align-items: center;
+  padding: 0 5px;
+  height: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-left: none;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* v4: direction badges shown next to the weight input.
+   Use --success token for green (defined in index.css).
+   --error-text is the dark-mode red token already in use in the stylesheet. */
+.badgeLong,
+.badgeShort,
+.badgeNeutral {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  line-height: 1.4;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.badgeLong {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success, #22c55e);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.badgeShort {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error-text, #ef4444);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.badgeNeutral {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0;
 }
 
 .blockDeleteBtn {
@@ -868,55 +979,6 @@
 
 .blockStatusDotWarn {
   background: #f59e0b;
-}
-
-/* ---------- Clip banner (iter-3) ---------- */
-
-/* ---------- OperandPicker (legacy — kept for back-compat) ---------- */
-
-.operandPicker {
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.operandTabs {
-  display: flex;
-  gap: 2px;
-}
-
-.operandTab {
-  flex: 1;
-  min-width: 0;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 0.68rem;
-  padding: 2px 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.operandTab:hover {
-  background: var(--bg-hover);
-}
-
-.operandTabActive {
-  background: var(--bg-primary);
-  border-color: var(--border-primary);
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.operandBody {
-  padding: 4px;
 }
 
 .operandEmpty {
@@ -1155,3 +1217,64 @@
   overflow: auto;
   max-height: 240px;
 }
+
+/* ── Cascade notice, inline params */
+.cascadeNotice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev-1);
+  border-left: 3px solid var(--color-warn, #c97e00);
+  color: var(--text-primary);
+  padding: 6px 10px;
+  margin: 4px 0 8px 0;
+  font-size: 0.78rem;
+  border-radius: var(--radius-sm);
+}
+.cascadeNoticeDismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+.cascadeNoticeDismiss:hover {
+  color: var(--text-primary);
+}
+.indicatorOverrideNoParams {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  background: var(--bg-elev-1);
+  border-radius: var(--radius-sm);
+  user-select: none;
+  cursor: default;
+}
+.indicatorOverrideInline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+}
+.indicatorOverrideInlineLabel {
+  color: var(--text-muted);
+}
+.indicatorOverrideInlineInput {
+  width: 64px;
+  padding: 2px 4px;
+  font-size: 0.78rem;
+  background: var(--bg-elev-1);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.indicatorOverrideInlineCheck {
+  margin: 0 2px;
+}
+

@@ -224,7 +224,7 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
                     onChange={(e) => setAdjustment(e.target.value)}
                   >
                     <option value="none">None</option>
-                    <option value="proportional">Proportional</option>
+                    <option value="ratio">Ratio</option>
                     <option value="difference">Difference</option>
                   </select>
                 </label>

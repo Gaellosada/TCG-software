@@ -8,7 +8,7 @@ test.describe('Continuous Rolling - Data Section', () => {
     const rollingHeading = page.locator('h2:has-text("Continuous Futures Rolling")');
     await expect(rollingHeading).toBeVisible({ timeout: 10000 });
 
-    await expect(page.locator('h3:has-text("Proportional")')).toBeVisible();
+    await expect(page.locator('h3:has-text("Ratio")')).toBeVisible();
     await expect(page.locator('h3:has-text("Difference")')).toBeVisible();
     await expect(page.locator('h3:has-text("None")')).toBeVisible();
     await expect(page.locator('h3:has-text("Roll Dates")')).toBeVisible();
@@ -90,13 +90,13 @@ test.describe('Continuous Rolling - Data Section', () => {
       fullPage: true,
     });
 
-    // Switch to proportional adjustment
+    // Switch to ratio adjustment
     const adjustmentSelect = page.locator('select').first();
-    await adjustmentSelect.selectOption('proportional');
+    await adjustmentSelect.selectOption('ratio');
     await page.waitForTimeout(5000);
 
     await page.screenshot({
-      path: 'e2e/screenshots/continuous-series-proportional.png',
+      path: 'e2e/screenshots/continuous-series-ratio.png',
       fullPage: true,
     });
   });

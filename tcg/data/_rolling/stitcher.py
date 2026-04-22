@@ -12,7 +12,7 @@ from tcg.types.market import (
     PriceSeries,
 )
 
-from tcg.data._rolling.adjustment import adjust_difference, adjust_proportional
+from tcg.data._rolling.adjustment import adjust_difference, adjust_ratio
 from tcg.data._rolling.calendar import compute_roll_dates, trim_overlaps
 
 
@@ -104,8 +104,8 @@ class ContinuousSeriesBuilder:
 
         # 4. Apply adjustment (surviving contracts aligned with actual_roll_dates)
         match config.adjustment:
-            case AdjustmentMethod.PROPORTIONAL:
-                adjusted = adjust_proportional(
+            case AdjustmentMethod.RATIO:
+                adjusted = adjust_ratio(
                     raw_series, actual_roll_dates, surviving
                 )
             case AdjustmentMethod.DIFFERENCE:

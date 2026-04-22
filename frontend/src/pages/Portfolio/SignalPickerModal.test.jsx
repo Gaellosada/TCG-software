@@ -9,7 +9,6 @@ import SignalPickerModal from './SignalPickerModal';
 // Mock the Signals storage module so we control what signals are "saved".
 vi.mock('../Signals/storage', () => ({
   loadState: vi.fn(() => ({ signals: [] })),
-  DIRECTIONS: ['long_entry', 'long_exit', 'short_entry', 'short_exit'],
 }));
 
 // Mock InstrumentPickerModal to a simple stub — we test interaction, not its internals.
@@ -45,12 +44,15 @@ function makeFakeSignal(overrides = {}) {
       { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
     ],
     rules: {
-      long_entry: [
-        { input_id: 'X', weight: 0.5, conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }] },
+      entries: [
+        {
+          id: 'e1',
+          input_id: 'X',
+          weight: 50,
+          conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
+        },
       ],
-      long_exit: [],
-      short_entry: [],
-      short_exit: [],
+      exits: [],
     },
     ...overrides,
   };
@@ -85,10 +87,14 @@ describe('<SignalPickerModal>', () => {
         { id: 'Y', instrument: null },
       ],
       rules: {
-        long_entry: [{ input_id: 'X', weight: 0, conditions: [] }],
-        long_exit: [{ input_id: 'Y', weight: 0, conditions: [] }],
-        short_entry: [{ input_id: 'X', weight: 0, conditions: [] }],
-        short_exit: [],
+        // 2 entries + 1 exit → 3 blocks total (test checks count only).
+        entries: [
+          { id: 'e1', input_id: 'X', weight: 25, conditions: [] },
+          { id: 'e2', input_id: 'X', weight: -25, conditions: [] },
+        ],
+        exits: [
+          { id: 'x1', input_id: 'Y', weight: 0, target_entry_block_name: 'e1', conditions: [] },
+        ],
       },
     });
     loadState.mockReturnValue({ signals: [sig1, sig2] });

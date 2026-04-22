@@ -1,30 +1,45 @@
-// Local persistence for the Signals page state — schema v3 (iter-4).
+// Local persistence for the Signals page state — schema v4.
 //
 // All direct ``localStorage`` access for signals lives in this module —
 // other modules MUST go through load/save here.
 //
-// Schema v3 (iter-4):
+// Schema v4 (signals-refactor-v4):
 //   {
-//     "version": 3,
+//     "version": 4,
 //     "signals": [
 //       {
-//         "id", "name",
-//         "inputs": [
-//           { "id": "X", "instrument": InputInstrument }
-//         ],
-//         "rules": { long_entry, long_exit, short_entry, short_exit }
+//         "id", "name", "doc",
+//         "inputs": [ { "id": "X", "instrument": InputInstrument } ],
+//         "rules": {
+//           "entries": [ Block ],
+//           "exits":   [ Block ]
+//         },
+//         "settings": { "dont_repeat": true }
 //       }
 //     ]
 //   }
+//
+// Entry Block = {
+//   id: <uuid>,                      // stable, generated on creation
+//   name: <string>,                  // editable display name
+//   input_id: <string>,
+//   weight: <float in [-100, +100]>, // SIGNED percentage; sign decides long/short
+//   conditions: Condition[],         // unchanged from v3
+// }
+// Exit Block = {
+//   id: <uuid>,                      // stable, generated on creation
+//   name: <string>,                  // editable display name
+//   target_entry_block_name: <string>, // matches an entry's editable `name`
+//   conditions: Condition[],
+// }
+// Exit blocks do NOT carry block-level input_id or weight; the
+// operating input is derived from the target entry's input_id. The
+// sanitiser strips any such legacy fields on load.
 //
 // InputInstrument is a discriminated union:
 //   - Spot:        { type: 'spot',       collection, instrument_id }
 //   - Continuous:  { type: 'continuous', collection, adjustment, cycle,
 //                    rollOffset, strategy }
-//
-// A block is
-//   { input_id: string, weight: number, conditions: Condition[] }
-// where ``input_id`` is '' on brand-new blocks (user must pick).
 //
 // Operand shapes (stored verbatim):
 //   - indicator:   { kind:'indicator', indicator_id, input_id, output,
@@ -32,26 +47,27 @@
 //   - instrument:  { kind:'instrument', input_id, field }
 //   - constant:    { kind:'constant', value }
 //
-// Migration policy (iter-4): v2 payloads are DROPPED on load (warn once).
-// Inputs were a new architectural feature; no safe migration exists.
+// Migration policy (v4): ANY payload with version !== 4 is DROPPED on load
+// (single console.warn per page load). No v3→v4 or v2→drop code.
 
 import { SIGNALS_STORAGE_KEY } from './storageKeys';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
-/** Canonical list of direction tab keys. */
-export const DIRECTIONS = Object.freeze([
-  'long_entry',
-  'long_exit',
-  'short_entry',
-  'short_exit',
-]);
+/** Canonical list of rule sections. */
+export const SECTIONS = Object.freeze(['entries', 'exits']);
 
-/** Produce an empty rules map with all four direction keys present. */
+/** Max absolute percentage weight — no leverage. */
+export const MAX_ABS_WEIGHT = 100;
+
+/** Produce an empty rules map with both sections present. */
 export function emptyRules() {
-  const out = {};
-  for (const d of DIRECTIONS) out[d] = [];
-  return out;
+  return { entries: [], exits: [] };
+}
+
+/** Default settings applied to a brand-new signal. */
+export function defaultSettings() {
+  return { dont_repeat: true };
 }
 
 /** Alphabet used for auto-assigning input ids on creation. */
@@ -70,6 +86,20 @@ export function nextInputId(existing) {
   let n = 1;
   while (taken.has(`I${n}`)) n += 1;
   return `I${n}`;
+}
+
+/** Generate a stable block id. Uses crypto.randomUUID when available. */
+export function newBlockId() {
+  try {
+    if (typeof globalThis !== 'undefined'
+        && globalThis.crypto
+        && typeof globalThis.crypto.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID();
+    }
+  } catch {
+    // fall through to fallback
+  }
+  return `blk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function getStorage() {
@@ -99,7 +129,7 @@ function sanitiseSpotInstrument(raw) {
 function sanitiseContinuousInstrument(raw) {
   const collection = typeof raw.collection === 'string' ? raw.collection : '';
   if (!collection) return null;
-  const adjustment = ['none', 'proportional', 'difference'].includes(raw.adjustment)
+  const adjustment = ['none', 'ratio', 'difference'].includes(raw.adjustment)
     ? raw.adjustment : 'none';
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
   const rollOffset = Number.isFinite(raw.rollOffset) ? raw.rollOffset : 0;
@@ -126,20 +156,56 @@ function sanitiseInput(raw) {
   return { id, instrument };
 }
 
+/**
+ * Sanitise a weight value.
+ *   - Non-finite → 0.
+ *   - Clamped to [-MAX_ABS_WEIGHT, +MAX_ABS_WEIGHT] (no leverage).
+ *   - Sign preserved.
+ */
 function sanitiseWeight(raw) {
   const n = typeof raw === 'number' ? raw : Number(raw);
-  if (!Number.isFinite(n) || n < 0) return 0;
+  if (!Number.isFinite(n)) return 0;
+  if (n > MAX_ABS_WEIGHT) return MAX_ABS_WEIGHT;
+  if (n < -MAX_ABS_WEIGHT) return -MAX_ABS_WEIGHT;
   return n;
 }
 
-function sanitiseBlock(raw) {
-  const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
-  const weight = sanitiseWeight(raw.weight);
+function sanitiseBlock(raw, section) {
+  const id = (typeof raw.id === 'string' && raw.id) ? raw.id : newBlockId();
   const name = typeof raw.name === 'string' ? raw.name : '';
   const conditions = Array.isArray(raw.conditions)
     ? raw.conditions.filter((c) => c && typeof c === 'object' && typeof c.op === 'string')
     : [];
-  return { input_id, weight, name, conditions };
+  if (section === 'exits') {
+    // Exit blocks carry no block-level input_id or weight — the
+    // operating input is derived from the target entry. Legacy
+    // payloads may include these fields; strip them.
+    // Legacy target_entry_block_id is also stripped — exits now
+    // reference entries by their editable name string.
+    return {
+      id,
+      name,
+      conditions,
+      target_entry_block_name: typeof raw.target_entry_block_name === 'string'
+        ? raw.target_entry_block_name
+        : '',
+    };
+  }
+  const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
+  const weight = sanitiseWeight(raw.weight);
+  return { id, input_id, weight, name, conditions };
+}
+
+function sanitiseSettings(raw) {
+  const out = defaultSettings();
+  if (raw && typeof raw === 'object') {
+    // Preserve stored value if explicitly present (honouring user's prior
+    // choice on v4-saved signals). Default applies only when absent.
+    if (typeof raw.dont_repeat === 'boolean') {
+      out.dont_repeat = raw.dont_repeat;
+    }
+  }
+  return out;
 }
 
 function sanitiseSignal(raw) {
@@ -150,14 +216,15 @@ function sanitiseSignal(raw) {
   const inputs = rawInputs.map(sanitiseInput).filter((x) => x !== null);
   const rules = emptyRules();
   const rawRules = (raw.rules && typeof raw.rules === 'object') ? raw.rules : {};
-  for (const dir of DIRECTIONS) {
-    const blocks = Array.isArray(rawRules[dir]) ? rawRules[dir] : [];
-    rules[dir] = blocks
+  for (const section of SECTIONS) {
+    const blocks = Array.isArray(rawRules[section]) ? rawRules[section] : [];
+    rules[section] = blocks
       .filter((b) => b && typeof b === 'object')
-      .map(sanitiseBlock);
+      .map((b) => sanitiseBlock(b, section));
   }
+  const settings = sanitiseSettings(raw.settings);
   const doc = typeof raw.doc === 'string' ? raw.doc : '';
-  return { id: raw.id, name, inputs, rules, doc };
+  return { id: raw.id, name, inputs, rules, settings, doc };
 }
 
 export function loadState() {
@@ -211,4 +278,30 @@ export function saveState(state) {
   } catch {
     // quota
   }
+}
+
+/**
+ * Return a new signal with the entry block ``entryId`` removed, and every
+ * exit referencing that entry's name also removed (cascade delete per PLAN.md).
+ * Pure — does not mutate the input.
+ *
+ * If ``entryId`` does not match any existing entry, the signal is
+ * returned unchanged (structurally equal — still a new shallow clone for
+ * safety).
+ */
+export function cascadeDeleteEntry(signal, entryId) {
+  if (!signal || typeof signal !== 'object') return signal;
+  const rules = signal.rules || emptyRules();
+  const entries = Array.isArray(rules.entries) ? rules.entries : [];
+  const exits = Array.isArray(rules.exits) ? rules.exits : [];
+  const deleted = entries.find((b) => b && b.id === entryId);
+  const nextEntries = entries.filter((b) => b && b.id !== entryId);
+  const deletedName = deleted && typeof deleted.name === 'string' ? deleted.name : '';
+  const nextExits = deletedName
+    ? exits.filter((b) => b && b.target_entry_block_name !== deletedName)
+    : exits;
+  return {
+    ...signal,
+    rules: { entries: nextEntries, exits: nextExits },
+  };
 }

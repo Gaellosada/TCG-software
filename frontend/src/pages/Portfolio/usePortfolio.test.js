@@ -69,10 +69,8 @@ const fakeSignal = {
   name: 'Test Signal',
   inputs: [{ id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } }],
   rules: {
-    long_entry: [{ input_id: 'X', weight: 0.5, conditions: [] }],
-    long_exit: [],
-    short_entry: [],
-    short_exit: [],
+    entries: [{ id: 'e1', input_id: 'X', weight: 50, conditions: [] }],
+    exits: [],
   },
 };
 

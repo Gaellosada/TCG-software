@@ -3,6 +3,7 @@ import Chart from '../../components/Chart';
 import ErrorCard from '../../components/ErrorCard/ErrorCard';
 import styles from './Signals.module.css';
 import { buildResultsPlot } from './resultsPlotTraces';
+import { computeEffectiveTrace } from './runGate';
 
 /**
  * Results section — unified subplot chart.
@@ -29,8 +30,26 @@ const ERROR_HEADINGS = {
   offline: "You're offline",
 };
 
-function ResultsView({ result, loading, error, capital = 1000, noRepeat = false }) {
-  const plot = useMemo(() => buildResultsPlot(result, { capital, noRepeat }), [result, capital, noRepeat]);
+function ResultsView({ result, loading, error, capital = 1000, noRepeat = false, signalRules = null }) {
+  // Effective-only display: when dont_repeat is active we rewrite each
+  // event's ``fired_indices`` to its ``latched_indices`` (the
+  // backend-authoritative effective set) via ``computeEffectiveTrace``,
+  // then pass the trace to ``buildResultsPlot`` which renders markers
+  // from ``fired_indices``. Downstream no longer needs to branch on the
+  // flag — there is a single source of truth for "effective" semantics.
+  const effectiveResult = useMemo(
+    () => computeEffectiveTrace(result, { dontRepeat: noRepeat }),
+    [result, noRepeat],
+  );
+  // signalRules is the v4 ``{entries, exits}`` rules object for the
+  // currently-selected signal; buildResultsPlot uses it to resolve each
+  // event's marker colour from the originating block's signed weight
+  // (exits colour by their target-entry's weight). When omitted all
+  // markers fall back to neutral styling.
+  const plot = useMemo(
+    () => buildResultsPlot(effectiveResult, { capital, signalRules }),
+    [effectiveResult, capital, signalRules],
+  );
 
   if (loading) {
     return (

@@ -21,7 +21,7 @@ class RollStrategy(StrEnum):
 class AdjustmentMethod(StrEnum):
     """Back-adjustment method for continuous futures series."""
     NONE = "none"                  # Raw concatenation (prototype default)
-    PROPORTIONAL = "proportional"  # Ratio adjustment at roll points
+    RATIO = "ratio"               # Ratio adjustment at roll points
     DIFFERENCE = "difference"      # Additive adjustment at roll points
 
 

@@ -13,12 +13,12 @@ import styles from './Signals.module.css';
  *   onCapitalChange    {Function}     (number) => void
  */
 function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange, noRepeat, onNoRepeatChange }) {
+  // v4: rules shape is now `{ entries, exits }` (section model); weight sign
+  // carries long/short on each entry block.
   const rules = signal?.rules || {};
   const counts = {
-    long_entry: (rules.long_entry || []).length,
-    long_exit: (rules.long_exit || []).length,
-    short_entry: (rules.short_entry || []).length,
-    short_exit: (rules.short_exit || []).length,
+    entries: (rules.entries || []).length,
+    exits: (rules.exits || []).length,
   };
 
   function handleCapitalChange(e) {
@@ -34,10 +34,8 @@ function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capita
           <div className={styles.paramsPlaceholder}>No signal selected.</div>
         ) : (
           <ul className={styles.summaryList}>
-            <li><span>Long entry blocks</span><strong>{counts.long_entry}</strong></li>
-            <li><span>Long exit blocks</span><strong>{counts.long_exit}</strong></li>
-            <li><span>Short entry blocks</span><strong>{counts.short_entry}</strong></li>
-            <li><span>Short exit blocks</span><strong>{counts.short_exit}</strong></li>
+            <li><span>Entry blocks</span><strong>{counts.entries}</strong></li>
+            <li><span>Exit blocks</span><strong>{counts.exits}</strong></li>
           </ul>
         )}
       </div>

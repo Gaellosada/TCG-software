@@ -3,9 +3,13 @@ import {
   loadState,
   saveState,
   SCHEMA_VERSION,
-  DIRECTIONS,
+  SECTIONS,
+  MAX_ABS_WEIGHT,
   emptyRules,
+  defaultSettings,
   nextInputId,
+  newBlockId,
+  cascadeDeleteEntry,
   __resetIncompatibleVersionWarnedForTests,
 } from './storage';
 import { SIGNALS_STORAGE_KEY } from './storageKeys';
@@ -36,13 +40,17 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-describe('Signals storage (v3)', () => {
-  it('SCHEMA_VERSION is 3', () => {
-    expect(SCHEMA_VERSION).toBe(3);
+describe('Signals storage (v4)', () => {
+  it('SCHEMA_VERSION is 4', () => {
+    expect(SCHEMA_VERSION).toBe(4);
   });
 
-  it('storage key is tcg.signals.v3', () => {
-    expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v3');
+  it('storage key is tcg.signals.v4', () => {
+    expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v4');
+  });
+
+  it('SECTIONS are exactly ["entries", "exits"]', () => {
+    expect([...SECTIONS]).toEqual(['entries', 'exits']);
   });
 
   it('returns empty signals when nothing persisted', () => {
@@ -54,16 +62,25 @@ describe('Signals storage (v3)', () => {
     expect(loadState()).toEqual({ signals: [] });
   });
 
-  it('discards a v2 payload and emits exactly one console.warn per page load (iter-4 hard reset)', () => {
+  it('discards any pre-v4 payload (no migration) and warns exactly once per page load', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
-      version: 2,
-      signals: [{ id: 'old', name: 'Old', rules: emptyRules() }],
+      version: 3,
+      signals: [{ id: 'old', name: 'Old', rules: { entries: [], exits: [] } }],
     }));
     expect(loadState()).toEqual({ signals: [] });
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy).toHaveBeenCalledWith('[signals] discarding incompatible v2 state');
+    expect(warnSpy).toHaveBeenCalledWith('[signals] discarding incompatible v3 state');
     expect(loadState()).toEqual({ signals: [] });
     expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards a v2 payload the same way (no special migration code)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: 2,
+      signals: [{ id: 'old', name: 'Old' }],
+    }));
+    expect(loadState()).toEqual({ signals: [] });
+    expect(warnSpy).toHaveBeenCalledWith('[signals] discarding incompatible v2 state');
   });
 
   it('does NOT write to the Indicators localStorage key', () => {
@@ -72,7 +89,8 @@ describe('Signals storage (v3)', () => {
     expect(storage.getItem(SIGNALS_STORAGE_KEY)).not.toBe(null);
   });
 
-  it('round-trips a v3 signal with inputs + blocks referencing them', () => {
+  it('round-trips a v4 signal with entries + exits referencing them', () => {
+    const entryId = 'entry-uuid-1';
     const state = {
       signals: [
         {
@@ -86,7 +104,7 @@ describe('Signals storage (v3)', () => {
               instrument: {
                 type: 'continuous',
                 collection: 'FUT_ES',
-                adjustment: 'proportional',
+                adjustment: 'ratio',
                 cycle: 'H',
                 rollOffset: 2,
                 strategy: 'front_month',
@@ -94,10 +112,11 @@ describe('Signals storage (v3)', () => {
             },
           ],
           rules: {
-            long_entry: [
+            entries: [
               {
+                id: entryId,
                 input_id: 'X',
-                weight: 0.4,
+                weight: 40,
                 name: '',
                 conditions: [
                   {
@@ -108,11 +127,11 @@ describe('Signals storage (v3)', () => {
                 ],
               },
             ],
-            long_exit: [
+            exits: [
               {
-                input_id: 'X',
-                weight: 0,
+                id: 'exit-uuid-1',
                 name: '',
+                target_entry_block_name: '',
                 conditions: [
                   {
                     op: 'cross_below',
@@ -122,22 +141,8 @@ describe('Signals storage (v3)', () => {
                 ],
               },
             ],
-            short_entry: [],
-            short_exit: [
-              {
-                input_id: 'Y',
-                weight: 0,
-                name: '',
-                conditions: [
-                  {
-                    op: 'rolling_gt',
-                    operand: { kind: 'indicator', indicator_id: 'rsi-14', input_id: 'Y', output: 'default' },
-                    lookback: 3,
-                  },
-                ],
-              },
-            ],
           },
+          settings: { dont_repeat: true },
         },
       ],
     };
@@ -146,18 +151,69 @@ describe('Signals storage (v3)', () => {
     expect(loaded).toEqual(state);
   });
 
-  it('ensures all four direction keys are present after load even if persisted payload omits some', () => {
+  it('preserves a stored dont_repeat=false even when the default is true', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 's1', inputs: [], rules: emptyRules(),
+        settings: { dont_repeat: false },
+      }],
+    }));
+    const out = loadState();
+    expect(out.signals[0].settings).toEqual({ dont_repeat: false });
+  });
+
+  it('applies dont_repeat=true default when settings are missing', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{ id: 's1', name: 's1', inputs: [], rules: emptyRules() }],
+    }));
+    const out = loadState();
+    expect(out.signals[0].settings).toEqual({ dont_repeat: true });
+  });
+
+  it('ensures both section keys are present after load even if persisted payload omits some', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
-        { id: 's1', name: 'Partial', inputs: [], rules: { long_entry: [] } },
+        { id: 's1', name: 'Partial', inputs: [], rules: { entries: [] } },
       ],
     }));
     const out = loadState();
     expect(out.signals).toHaveLength(1);
-    for (const d of DIRECTIONS) {
-      expect(out.signals[0].rules[d]).toEqual([]);
+    for (const s of SECTIONS) {
+      expect(out.signals[0].rules[s]).toEqual([]);
     }
+  });
+
+  it('strips legacy block-level input_id + weight from exit blocks on load', () => {
+    // Pre-v4.1 payloads may persist input_id/weight on exits; sanitiser
+    // drops them so the wire payload can't violate the backend invariant.
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [],
+            exits: [
+              {
+                id: 'exit-1',
+                input_id: 'X',        // legacy — must be stripped
+                weight: 42,           // legacy — must be stripped
+                target_entry_block_name: 'MyEntry',
+                conditions: [],
+              },
+            ],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    const ex = out.signals[0].rules.exits[0];
+    expect(ex.target_entry_block_name).toBe('MyEntry');
+    expect('input_id' in ex).toBe(false);
+    expect('weight' in ex).toBe(false);
   });
 
   it('drops malformed signals without id', () => {
@@ -172,6 +228,25 @@ describe('Signals storage (v3)', () => {
     expect(out.signals.map((s) => s.id)).toEqual(['ok']);
   });
 
+  it('generates a fresh id for any block that has none on load', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [{ input_id: 'X', weight: 50, conditions: [] }],
+            exits: [],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    const b = out.signals[0].rules.entries[0];
+    expect(typeof b.id).toBe('string');
+    expect(b.id.length).toBeGreaterThan(0);
+  });
+
   it('defaults missing input_id to "" and missing weight to 0', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
@@ -179,43 +254,64 @@ describe('Signals storage (v3)', () => {
         {
           id: 's1', name: 's1', inputs: [],
           rules: {
-            long_entry: [{ conditions: [
+            entries: [{ id: 'b1', conditions: [
               { op: 'gt',
                 lhs: { kind: 'constant', value: 1 },
                 rhs: { kind: 'constant', value: 0 } },
             ] }],
-            long_exit: [], short_entry: [], short_exit: [],
+            exits: [],
           },
         },
       ],
     }));
     const out = loadState();
-    const block = out.signals[0].rules.long_entry[0];
+    const block = out.signals[0].rules.entries[0];
     expect(block.input_id).toBe('');
     expect(block.weight).toBe(0);
     expect(block.conditions).toHaveLength(1);
   });
 
-  it('coerces bogus weights to 0 and rejects negatives', () => {
+  it('preserves signed weights in [-MAX_ABS_WEIGHT, +MAX_ABS_WEIGHT]', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
         {
           id: 's1', name: 's1', inputs: [],
           rules: {
-            long_entry: [
-              { input_id: '', weight: 'not-a-number', conditions: [] },
-              { input_id: '', weight: -0.5, conditions: [] },
-              { input_id: '', weight: 1.5, conditions: [] },
-              { input_id: '', weight: Number.POSITIVE_INFINITY, conditions: [] },
+            entries: [
+              { id: 'a', input_id: '', weight: 50, conditions: [] },
+              { id: 'b', input_id: '', weight: -75, conditions: [] },
+              { id: 'c', input_id: '', weight: 0, conditions: [] },
             ],
-            long_exit: [], short_entry: [], short_exit: [],
+            exits: [],
           },
         },
       ],
     }));
-    const weights = loadState().signals[0].rules.long_entry.map((b) => b.weight);
-    expect(weights).toEqual([0, 0, 1.5, 0]);
+    const weights = loadState().signals[0].rules.entries.map((b) => b.weight);
+    expect(weights).toEqual([50, -75, 0]);
+  });
+
+  it('clamps weights outside [-100, +100] and coerces non-finite values to 0', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [
+              { id: 'a', input_id: '', weight: 'not-a-number', conditions: [] },
+              { id: 'b', input_id: '', weight: 150, conditions: [] },
+              { id: 'c', input_id: '', weight: -200, conditions: [] },
+              { id: 'd', input_id: '', weight: Number.POSITIVE_INFINITY, conditions: [] },
+            ],
+            exits: [],
+          },
+        },
+      ],
+    }));
+    const weights = loadState().signals[0].rules.entries.map((b) => b.weight);
+    expect(weights).toEqual([0, MAX_ABS_WEIGHT, -MAX_ABS_WEIGHT, 0]);
   });
 
   it('keeps inputs with null instrument (user still picking)', () => {
@@ -248,22 +344,22 @@ describe('Signals storage (v3)', () => {
         {
           id: 's1', name: 's1', inputs: [],
           rules: {
-            long_entry: [
+            entries: [
               null,
               'garbage',
-              { input_id: 'X', weight: 0, conditions: [] },
+              { id: 'a', input_id: 'X', weight: 0, conditions: [] },
               42,
-              { input_id: 'Y', weight: 0.3, conditions: [] },
+              { id: 'b', input_id: 'Y', weight: 30, conditions: [] },
             ],
-            long_exit: [], short_entry: [], short_exit: [],
+            exits: [],
           },
         },
       ],
     }));
-    const blocks = loadState().signals[0].rules.long_entry;
+    const blocks = loadState().signals[0].rules.entries;
     expect(blocks).toHaveLength(2);
     expect(blocks[0].input_id).toBe('X');
-    expect(blocks[1].weight).toBe(0.3);
+    expect(blocks[1].weight).toBe(30);
   });
 
   it('drops conditions without a string op', () => {
@@ -273,20 +369,98 @@ describe('Signals storage (v3)', () => {
         {
           id: 's1', name: 'weird', inputs: [],
           rules: {
-            long_entry: [
-              { input_id: '', weight: 0, conditions: [
+            entries: [
+              { id: 'b1', input_id: '', weight: 0, conditions: [
                 { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
                 { op: 42 },
                 null,
               ] },
             ],
-            long_exit: [], short_entry: [], short_exit: [],
+            exits: [],
           },
         },
       ],
     }));
     const out = loadState();
-    expect(out.signals[0].rules.long_entry[0].conditions).toHaveLength(1);
+    expect(out.signals[0].rules.entries[0].conditions).toHaveLength(1);
+  });
+
+  it('preserves target_entry_block_name on exit blocks', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [{ id: 'entry-1', input_id: 'X', weight: 50, conditions: [] }],
+            exits: [{ id: 'exit-1', target_entry_block_name: 'MyEntry', conditions: [] }],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    const exit = out.signals[0].rules.exits[0];
+    expect(exit.target_entry_block_name).toBe('MyEntry');
+  });
+
+  it('defaults a missing target_entry_block_name on an exit block to ""', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [],
+            exits: [{ id: 'exit-1', conditions: [] }],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    expect(out.signals[0].rules.exits[0].target_entry_block_name).toBe('');
+  });
+
+  it('does NOT add target_entry_block_name to entry blocks', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [{ id: 'e1', input_id: 'X', weight: 50, conditions: [] }],
+            exits: [],
+          },
+        },
+      ],
+    }));
+    const entry = loadState().signals[0].rules.entries[0];
+    expect('target_entry_block_name' in entry).toBe(false);
+  });
+
+  it('sanitiser strips legacy target_entry_block_id on exits and preserves target_entry_block_name', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [],
+            exits: [
+              {
+                id: 'exit-1',
+                target_entry_block_id: 'old-entry-id',   // legacy — must be stripped
+                target_entry_block_name: 'Momentum',      // new field — must survive
+                conditions: [],
+              },
+            ],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    const ex = out.signals[0].rules.exits[0];
+    expect(ex.target_entry_block_name).toBe('Momentum');
+    expect('target_entry_block_id' in ex).toBe(false);
   });
 
   it('tolerates setItem throwing on save', () => {
@@ -298,6 +472,30 @@ describe('Signals storage (v3)', () => {
     vi.unstubAllGlobals();
     vi.stubGlobal('localStorage', undefined);
     expect(loadState()).toEqual({ signals: [] });
+  });
+});
+
+describe('defaultSettings', () => {
+  it('returns { dont_repeat: true } — new signals opt into the filter by default', () => {
+    expect(defaultSettings()).toEqual({ dont_repeat: true });
+  });
+  it('returns a fresh object each call', () => {
+    const a = defaultSettings();
+    const b = defaultSettings();
+    expect(a).not.toBe(b);
+  });
+});
+
+describe('newBlockId', () => {
+  it('returns a non-empty string', () => {
+    const id = newBlockId();
+    expect(typeof id).toBe('string');
+    expect(id.length).toBeGreaterThan(0);
+  });
+  it('returns distinct ids on consecutive calls', () => {
+    const a = newBlockId();
+    const b = newBlockId();
+    expect(a).not.toBe(b);
   });
 });
 
@@ -315,5 +513,65 @@ describe('nextInputId', () => {
     const taken = ['X', 'Y', 'Z', 'W', 'U', 'V', 'A', 'B', 'C', 'D'].map((id) => ({ id }));
     expect(nextInputId(taken)).toBe('I1');
     expect(nextInputId([...taken, { id: 'I1' }])).toBe('I2');
+  });
+});
+
+describe('cascadeDeleteEntry', () => {
+  const sig = {
+    id: 's1', name: 's1',
+    inputs: [],
+    rules: {
+      entries: [
+        { id: 'e1', input_id: 'X', weight: 50, name: 'Alpha', conditions: [] },
+        { id: 'e2', input_id: 'X', weight: -30, name: 'Beta', conditions: [] },
+      ],
+      exits: [
+        { id: 'x1', target_entry_block_name: 'Alpha', conditions: [] },
+        { id: 'x2', target_entry_block_name: 'Beta', conditions: [] },
+        { id: 'x3', target_entry_block_name: 'Alpha', conditions: [] },
+      ],
+    },
+    settings: { dont_repeat: true },
+  };
+
+  it('removes the entry and every exit referencing its name', () => {
+    const next = cascadeDeleteEntry(sig, 'e1');
+    expect(next.rules.entries.map((b) => b.id)).toEqual(['e2']);
+    expect(next.rules.exits.map((b) => b.id)).toEqual(['x2']);
+  });
+  it('leaves untouched entries and unrelated exits alone', () => {
+    const next = cascadeDeleteEntry(sig, 'e2');
+    expect(next.rules.entries.map((b) => b.id)).toEqual(['e1']);
+    expect(next.rules.exits.map((b) => b.id)).toEqual(['x1', 'x3']);
+  });
+  it('is a no-op (but still a new object) when the entryId is unknown', () => {
+    const next = cascadeDeleteEntry(sig, 'missing');
+    expect(next).not.toBe(sig);
+    expect(next.rules.entries).toHaveLength(2);
+    expect(next.rules.exits).toHaveLength(3);
+  });
+  it('does not mutate the original signal', () => {
+    const originalExitsLen = sig.rules.exits.length;
+    cascadeDeleteEntry(sig, 'e1');
+    expect(sig.rules.exits.length).toBe(originalExitsLen);
+  });
+  it('does not cascade exits when deleted entry has no name', () => {
+    const sigNoName = {
+      ...sig,
+      rules: {
+        entries: [
+          { id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [] },
+          { id: 'e2', input_id: 'X', weight: -30, name: 'Beta', conditions: [] },
+        ],
+        exits: [
+          { id: 'x1', target_entry_block_name: '', conditions: [] },
+          { id: 'x2', target_entry_block_name: 'Beta', conditions: [] },
+        ],
+      },
+    };
+    const next = cascadeDeleteEntry(sigNoName, 'e1');
+    // Entry removed, but exits untouched because deleted name is empty
+    expect(next.rules.entries.map((b) => b.id)).toEqual(['e2']);
+    expect(next.rules.exits).toHaveLength(2);
   });
 });

@@ -4,26 +4,32 @@ import { isInputConfigured } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
- * Per-block controls (v3 / iter-4): input dropdown (references one of
- * the signal's declared inputs), weight input (entry tabs only —
- * hidden on exit tabs), delete-block button gated by ConfirmDialog.
- *
- * No more inline instrument popover — the user picks instruments once
- * in the InputsPanel at the top of the page, then references them here.
+ * Per-block controls (v4): for entries, input dropdown (references one
+ * of the signal's declared inputs), signed weight input with % suffix
+ * and direction badge; for exits, a target entry name picker is shown
+ * in the same position as the input dropdown. Delete-block button is
+ * gated by ConfirmDialog.
  *
  * Props:
- *   block       {Object}   { input_id, weight, conditions }
- *   direction   {string}   long_entry | long_exit | short_entry | short_exit
+ *   block       {Object}   { id, [input_id, weight on entries,
+ *                            target_entry_block_name on exits] }
+ *   section     {string}   'entries' | 'exits'
  *   inputs      {Array}    the signal's declared inputs
+ *   entryBlocks {Array}    the signal's entry blocks (used by exits to list targets)
  *   onChange    {Function} (nextBlock) => void
  *   onDelete    {Function} () => void
  *   blockIndex  {number}   1-based index shown in the label
+ *   status      {string}   'ok' | 'warn' (optional)
+ *   blockIdx    {number}   0-based index for data-testid (optional)
  */
-function BlockHeader({ block, direction, inputs, onChange, onDelete, blockIndex, status, blockIdx }) {
+function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, blockIndex, status, blockIdx }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
+  // Local draft for the weight input so the user can type freely before blur
+  const [weightDraft, setWeightDraft] = useState(null);
   const nameRef = useRef(null);
-  const isEntry = direction === 'long_entry' || direction === 'short_entry';
+
+  const isEntry = section === 'entries';
 
   const list = Array.isArray(inputs) ? inputs : [];
   const selectedId = typeof block.input_id === 'string' ? block.input_id : '';
@@ -32,6 +38,9 @@ function BlockHeader({ block, direction, inputs, onChange, onDelete, blockIndex,
 
   const displayName = block.name || `Block ${blockIndex}`;
 
+  // Committed weight (number, clamped by storage / parent) used for badge
+  const committedWeight = Number.isFinite(block.weight) ? block.weight : 0;
+
   useEffect(() => {
     if (editing && nameRef.current) {
       nameRef.current.focus();
@@ -39,11 +48,15 @@ function BlockHeader({ block, direction, inputs, onChange, onDelete, blockIndex,
     }
   }, [editing]);
 
+  // Sync weightDraft when block.weight changes from outside (e.g. load)
+  useEffect(() => {
+    setWeightDraft(null);
+  }, [block.weight]);
+
   function commitName() {
     if (!nameRef.current) return;
     const trimmed = nameRef.current.value.trim();
     setEditing(false);
-    // Empty or same as default → clear name field (reverts to "Block N")
     if (!trimmed || trimmed === `Block ${blockIndex}`) {
       onChange({ ...block, name: '' });
     } else {
@@ -55,14 +68,42 @@ function BlockHeader({ block, direction, inputs, onChange, onDelete, blockIndex,
     onChange({ ...block, input_id: id });
   }
 
-  function setWeight(raw) {
-    const n = raw === '' ? 0 : parseFloat(raw);
-    if (!Number.isFinite(n) || n < 0) return;
-    onChange({ ...block, weight: n });
+  /**
+   * Clamp weight to [-100, +100] on blur or on explicit commit.
+   * Intermediate string (e.g. "-") is left in draft while editing.
+   */
+  function commitWeight(raw) {
+    setWeightDraft(null);
+    const n = raw === '' || raw === '-' ? 0 : parseFloat(raw);
+    if (!Number.isFinite(n)) {
+      onChange({ ...block, weight: 0 });
+      return;
+    }
+    const clamped = Math.max(-100, Math.min(100, n));
+    onChange({ ...block, weight: clamped });
   }
 
   const showUnconfiguredWarning = resolved && !resolvedConfigured;
   const showUnknownWarning = !!selectedId && !resolved;
+
+  // Determine badge
+  function badgeProps() {
+    if (committedWeight > 0) {
+      return { className: styles.badgeLong, text: 'long', ariaLabel: 'direction: long' };
+    }
+    if (committedWeight < 0) {
+      return { className: styles.badgeShort, text: 'short', ariaLabel: 'direction: short' };
+    }
+    return { className: styles.badgeNeutral, text: '—', ariaLabel: 'direction: neutral' };
+  }
+
+  const badge = isEntry ? badgeProps() : null;
+
+  // Display value in the weight input: use the draft string if mid-edit,
+  // otherwise the committed numeric value
+  const weightDisplayValue = weightDraft !== null
+    ? weightDraft
+    : committedWeight;
 
   return (
     <div className={styles.blockHeaderRow} data-testid={`block-header-${blockIndex - 1}`}>
@@ -103,58 +144,106 @@ function BlockHeader({ block, direction, inputs, onChange, onDelete, blockIndex,
       )}
 
       <span className={styles.blockDirectionLabel}>
-        {direction === 'long_entry' ? 'Long entry on'
-          : direction === 'long_exit' ? 'Long exit on'
-          : direction === 'short_entry' ? 'Short entry on'
-          : 'Short exit on'}
+        {isEntry ? 'entry on' : 'exit on'}
       </span>
-      <div className={styles.blockInstrumentCell}>
-        <select
-          className={styles.blockInputSelect}
-          value={selectedId}
-          onChange={(e) => setInputId(e.target.value)}
-          aria-label={`Input for block ${blockIndex}`}
-          data-testid={`block-input-select-${blockIndex - 1}`}
-        >
-          <option value="">…</option>
-          {list.map((input) => {
-            const ok = isInputConfigured(input);
-            return (
-              <option key={input.id} value={input.id}>
-                {input.id}{!ok ? ' (needs instrument)' : ''}
-              </option>
-            );
-          })}
-        </select>
-        {showUnconfiguredWarning && (
-          <span className={styles.blockInputWarn} title="This input has no instrument yet">!</span>
-        )}
-        {showUnknownWarning && (
-          <span className={styles.blockInputWarn} title={`Unknown input id "${selectedId}"`}>?</span>
-        )}
-      </div>
+      {isEntry ? (
+        <div className={styles.blockInstrumentCell}>
+          <select
+            className={styles.blockInputSelect}
+            value={selectedId}
+            onChange={(e) => setInputId(e.target.value)}
+            aria-label={`Input for block ${blockIndex}`}
+            data-testid={`block-input-select-${blockIndex - 1}`}
+          >
+            <option value="">…</option>
+            {list.map((input) => {
+              const ok = isInputConfigured(input);
+              return (
+                <option key={input.id} value={input.id}>
+                  {input.id}{!ok ? ' (needs instrument)' : ''}
+                </option>
+              );
+            })}
+          </select>
+          {showUnconfiguredWarning && (
+            <span className={styles.blockInputWarn} title="This input has no instrument yet">!</span>
+          )}
+          {showUnknownWarning && (
+            <span className={styles.blockInputWarn} title={`Unknown input id "${selectedId}"`}>?</span>
+          )}
+        </div>
+      ) : (
+        (() => {
+          const entryList = Array.isArray(entryBlocks) ? entryBlocks : [];
+          const empty = entryList.length === 0;
+          return (
+            <div className={styles.blockInstrumentCell}>
+              <select
+                className={styles.blockInputSelect}
+                value={block.target_entry_block_name || ''}
+                disabled={empty}
+                onChange={(e) => onChange({ ...block, target_entry_block_name: e.target.value })}
+                aria-label={`Target entry for exit block ${blockIndex}`}
+                data-testid={`target-entry-select-${blockIndex - 1}`}
+              >
+                {empty ? (
+                  <option value="">No entries yet — create an entry block first</option>
+                ) : (
+                  <>
+                    <option value="">Pick an entry…</option>
+                    {entryList.map((entry, i) => {
+                      const eName = entry.name || `Block ${i + 1}`;
+                      const isDuplicate = entryList.filter((e) => e.name && e.name === entry.name).length > 1;
+                      return (
+                        <option
+                          key={entry.id || i}
+                          value={entry.name || ''}
+                          disabled={!entry.name || isDuplicate}
+                        >
+                          {eName}{isDuplicate ? ' (duplicate)' : ''}{!entry.name ? ' (unnamed)' : ''}
+                        </option>
+                      );
+                    })}
+                  </>
+                )}
+              </select>
+              {block.target_entry_block_name && !entryList.some((e) => e.name === block.target_entry_block_name) && (
+                <span className={styles.blockInputWarn} title={`Target "${block.target_entry_block_name}" no longer exists`}>!</span>
+              )}
+            </div>
+          );
+        })()
+      )}
 
       {isEntry && (
         <div className={styles.blockWeightCell}>
           <label className={styles.conditionInlineLabel} htmlFor={`weight-${blockIndex}`}>weight</label>
-          <input
-            id={`weight-${blockIndex}`}
-            type="number"
-            step="0.1"
-            min="0"
-            className={styles.blockWeightInput}
-            value={Number.isFinite(block.weight) ? block.weight : 0}
-            onChange={(e) => setWeight(e.target.value)}
-            aria-label={`Weight for block ${blockIndex}`}
-            data-testid={`block-weight-${blockIndex - 1}`}
-          />
-          <span
-            className={styles.blockWeightMax}
-            title="Weight > 1 applies leverage"
-            aria-label="Weight info: values above 1 apply leverage"
-          >
-            / 1
-          </span>
+          <div className={styles.weightInputWrap}>
+            <input
+              id={`weight-${blockIndex}`}
+              type="number"
+              step="1"
+              min="-100"
+              max="100"
+              className={styles.weightInput}
+              value={weightDisplayValue}
+              onChange={(e) => setWeightDraft(e.target.value)}
+              onBlur={(e) => commitWeight(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') commitWeight(e.target.value); }}
+              aria-label={`Weight for block ${blockIndex}`}
+              data-testid={`block-weight-${blockIndex - 1}`}
+            />
+            <span className={styles.weightSuffix} aria-hidden="true">%</span>
+          </div>
+          {badge && (
+            <span
+              className={badge.className}
+              aria-label={badge.ariaLabel}
+              data-testid={`block-badge-${blockIndex - 1}`}
+            >
+              {badge.text}
+            </span>
+          )}
         </div>
       )}
 

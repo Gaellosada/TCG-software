@@ -107,7 +107,7 @@ function ContinuousChart({ collection }) {
     return { traces: t, layoutOverrides: lo, hasOHLC: prepared.hasOHLC };
   }, [data, rollDates, chartType, colors]);
 
-  const adjustmentLabels = { none: 'None', proportional: 'Proportional', difference: 'Difference' };
+  const adjustmentLabels = { none: 'None', ratio: 'Ratio', difference: 'Difference' };
 
   if (loading) {
     return (

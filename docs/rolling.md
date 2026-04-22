@@ -48,7 +48,7 @@ Applied after concatenation, processing **backward** from the last roll to the f
 **NONE** (`AdjustmentMethod.NONE`):
 - Raw concatenation. No price adjustment. Gaps appear at roll boundaries.
 
-**PROPORTIONAL** (`adjust_proportional` in `adjustment.py`):
+**RATIO** (`adjust_ratio` in `adjustment.py`):
 - At each roll date, compute `ratio = new_close / old_close`.
 - Multiply all OHLC prices **before** the roll date by this ratio.
 - Processing backward means earlier prices accumulate all subsequent ratios.
@@ -93,7 +93,7 @@ Contracts are filtered by `expirationCycle` if specified in the config (e.g., `"
 |------|---------|
 | `tcg/data/_rolling/__init__.py` | Re-exports `ContinuousSeriesBuilder` |
 | `tcg/data/_rolling/calendar.py` | `compute_roll_dates()`, `trim_overlaps()` |
-| `tcg/data/_rolling/adjustment.py` | `adjust_proportional()`, `adjust_difference()` |
+| `tcg/data/_rolling/adjustment.py` | `adjust_ratio()`, `adjust_difference()` |
 | `tcg/data/_rolling/stitcher.py` | `ContinuousSeriesBuilder` (orchestrator) |
 | `tcg/data/_mongo/instruments.py` | `fetch_futures_contracts()`, `fetch_available_cycles()` |
 | `tcg/data/service.py` | `get_continuous()`, `get_available_cycles()` |
@@ -105,7 +105,7 @@ Contracts are filtered by `expirationCycle` if specified in the config (e.g., `"
 `tests/unit/test_rolling.py` covers:
 - Single contract (no rolling needed)
 - Multi-contract concatenation (no adjustment)
-- Proportional and difference adjustment
+- Ratio and difference adjustment
 - Roll offset behavior
 - Zero-close row stripping
 - Empty contract handling

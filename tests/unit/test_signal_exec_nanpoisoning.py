@@ -70,7 +70,9 @@ async def test_rolling_warmup_no_signal_during_warmup_window():
         name="s",
         inputs=(INPUT_X,),
         rules=SignalRules(
-            long_entry=(Block(input_id="X", weight=1.0, conditions=(cond,)),),
+            entries=(
+                Block(id="E", input_id="X", weight=100.0, conditions=(cond,)),
+            ),
         ),
     )
 
@@ -104,7 +106,9 @@ async def test_rolling_warmup_kk1_only_first_position_suppressed():
         name="s",
         inputs=(INPUT_X,),
         rules=SignalRules(
-            long_entry=(Block(input_id="X", weight=1.0, conditions=(cond,)),),
+            entries=(
+                Block(id="E", input_id="X", weight=100.0, conditions=(cond,)),
+            ),
         ),
     )
 
@@ -122,7 +126,7 @@ async def test_rolling_warmup_kk1_only_first_position_suppressed():
 async def test_rolling_warmup_does_not_generate_false_negative_signals():
     """Warmup-poisoned positions must not generate false negative (exit) signals.
 
-    If warmup positions were False rather than NaN, a long_exit block
+    If warmup positions were False rather than NaN, an exit block
     would see the exit condition as True (exit fires) during warmup,
     which could spuriously clear a latch that was set by another block.
     Here we verify that an exit block using a RollingCondition does NOT
@@ -151,8 +155,18 @@ async def test_rolling_warmup_does_not_generate_false_negative_signals():
         name="s",
         inputs=(INPUT_X,),
         rules=SignalRules(
-            long_entry=(Block(input_id="X", weight=1.0, conditions=(entry_cond,)),),
-            long_exit=(Block(input_id="X", weight=0.0, conditions=(exit_cond,)),),
+            entries=(
+                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(entry_cond,)),
+            ),
+            exits=(
+                Block(
+                    id="X1",
+                    input_id="X",
+                    weight=0.0,
+                    conditions=(exit_cond,),
+                    target_entry_block_name="Entry",
+                ),
+            ),
         ),
     )
 
@@ -184,7 +198,9 @@ async def test_rolling_warmup_full_window_larger_than_data():
         name="s",
         inputs=(INPUT_X,),
         rules=SignalRules(
-            long_entry=(Block(input_id="X", weight=1.0, conditions=(cond,)),),
+            entries=(
+                Block(id="E", input_id="X", weight=100.0, conditions=(cond,)),
+            ),
         ),
     )
 
@@ -206,7 +222,9 @@ async def test_rolling_invalid_lookback_zero_raises():
         name="s",
         inputs=(INPUT_X,),
         rules=SignalRules(
-            long_entry=(Block(input_id="X", weight=1.0, conditions=(cond,)),),
+            entries=(
+                Block(id="E", input_id="X", weight=100.0, conditions=(cond,)),
+            ),
         ),
     )
 

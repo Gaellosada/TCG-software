@@ -41,7 +41,7 @@ async def list_collections(
 async def get_continuous_series(
     collection: str,
     strategy: str = Query("front_month", description="Roll strategy"),
-    adjustment: str = Query("none", description="Adjustment method: none, proportional, difference"),
+    adjustment: str = Query("none", description="Adjustment method: none, ratio, difference"),
     cycle: str | None = Query(None, description="Expiration cycle filter (e.g. HMUZ)"),
     roll_offset: int = Query(0, ge=0, le=30, description="Days before expiration to roll"),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),

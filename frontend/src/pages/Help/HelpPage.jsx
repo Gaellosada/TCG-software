@@ -132,7 +132,7 @@ function HelpPage() {
           </p>
         </div>
         <div className={styles.card}>
-          <h3>Proportional</h3>
+          <h3>Ratio</h3>
           <p>
             Prior prices multiplied by the new/old contract price ratio at each roll.
             Preserves percentage returns. Standard for most futures backtesting.
