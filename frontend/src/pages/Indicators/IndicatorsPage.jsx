@@ -11,70 +11,11 @@ import { AUTOSAVE_KEY } from './storageKeys';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import InlineNameInput from '../../components/InlineNameInput';
 import { classifyFetchError } from '../../utils/fetchError';
 import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import styles from './IndicatorsPage.module.css';
-
-/**
- * Inline name input that lives in the editor-panel header.
- * Uses a local draft so typing does not rerun the whole page on each
- * keystroke — the committed name propagates to the parent on blur or
- * Enter. Mirrors the previous ParamsPanel name-field semantics.
- */
-function IndicatorNameInput({ indicator, onRename }) {
-  const [draft, setDraft] = useState(indicator?.name || '');
-  const prevIdRef = useRef(indicator?.id);
-  // Tracks whether the input currently has focus. We flip it in the
-  // focus/blur handlers and consult it in the reset effect so external
-  // renames (e.g. switching indicator) don't stomp a user's in-progress
-  // edit. A ref (not state) — toggling it must not trigger a rerender.
-  const focusedRef = useRef(false);
-  // Reset draft whenever the selected indicator changes.
-  useEffect(() => {
-    if (prevIdRef.current !== indicator?.id) {
-      prevIdRef.current = indicator?.id;
-      setDraft(indicator?.name || '');
-    } else if ((indicator?.name || '') !== draft && !focusedRef.current) {
-      // External rename (e.g. defaults) — sync when the input is not focused.
-      setDraft(indicator?.name || '');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indicator?.id, indicator?.name]);
-
-  const readonly = !indicator || !!indicator?.readonly;
-  function commit() {
-    focusedRef.current = false;
-    if (!indicator || readonly) {
-      setDraft(indicator?.name || '');
-      return;
-    }
-    const next = draft.trim();
-    if (!next || next === indicator.name) {
-      setDraft(indicator.name);
-      return;
-    }
-    if (onRename) onRename(indicator.id, next);
-  }
-
-  return (
-    <input
-      className={styles.nameInput}
-      type="text"
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onFocus={() => { focusedRef.current = true; }}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); }
-      }}
-      disabled={readonly}
-      placeholder={indicator ? 'Indicator name' : 'Select an indicator'}
-      aria-label="Indicator name"
-      title={readonly ? 'Default indicator — name is fixed' : 'Indicator name'}
-    />
-  );
-}
 
 const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
     s = series['price']
@@ -645,9 +586,18 @@ function IndicatorsPage() {
             onSave={commitSave}
             onToggleAutosave={setAutosave}
             leftSlot={
-              <IndicatorNameInput
-                indicator={selectedIndicator}
+              <InlineNameInput
+                entity={selectedIndicator}
                 onRename={handleRename}
+                className={styles.nameInput}
+                placeholder="Select an indicator"
+                selectedPlaceholder="Indicator name"
+                ariaLabel="Indicator name"
+                title={(ent) => (
+                  !ent || ent.readonly
+                    ? 'Default indicator — name is fixed'
+                    : 'Indicator name'
+                )}
               />
             }
           />

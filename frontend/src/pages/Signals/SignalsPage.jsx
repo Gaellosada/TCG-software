@@ -17,6 +17,7 @@ import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
+import InlineNameInput from '../../components/InlineNameInput';
 import styles from './SignalsPage.module.css';
 
 function nextSignalName(existing) {
@@ -387,7 +388,14 @@ function SignalsPage() {
             onSave={commitSave}
             onToggleAutosave={setAutosave}
             leftSlot={
-              <SignalNameInput signal={selectedSignal} onRename={handleRename} />
+              <InlineNameInput
+                entity={selectedSignal}
+                onRename={handleRename}
+                className={styles.nameInput}
+                placeholder="Select a signal"
+                selectedPlaceholder="Signal name"
+                ariaLabel="Signal name"
+              />
             }
           />
         </div>
@@ -424,47 +432,6 @@ function SignalsPage() {
         onCancel={() => setConfirmDeleteId(null)}
       />
     </div>
-  );
-}
-
-function SignalNameInput({ signal, onRename }) {
-  const [draft, setDraft] = useState(signal?.name || '');
-  const prevIdRef = useRef(signal?.id);
-  const focusedRef = useRef(false);
-
-  useEffect(() => {
-    if (prevIdRef.current !== signal?.id) {
-      prevIdRef.current = signal?.id;
-      setDraft(signal?.name || '');
-    } else if ((signal?.name || '') !== draft && !focusedRef.current) {
-      setDraft(signal?.name || '');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signal?.id, signal?.name]);
-
-  function commit() {
-    focusedRef.current = false;
-    if (!signal) { setDraft(''); return; }
-    const next = draft.trim();
-    if (!next || next === signal.name) { setDraft(signal.name); return; }
-    if (onRename) onRename(signal.id, next);
-  }
-
-  return (
-    <input
-      className={styles.nameInput}
-      type="text"
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onFocus={() => { focusedRef.current = true; }}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); }
-      }}
-      disabled={!signal}
-      placeholder={signal ? 'Signal name' : 'Select a signal'}
-      aria-label="Signal name"
-    />
   );
 }
 
