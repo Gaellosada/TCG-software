@@ -243,6 +243,7 @@
  * consistency. */
 .colExp {
   border-right: 2px solid var(--text-muted);
+  white-space: nowrap;
 }
 
 .colStrike {
@@ -294,4 +295,22 @@
 .table td.askQuote,
 .table th.askQuote {
   color: #fca5a5;
+}
+
+/* Cycle chip — inline 1-letter indicator after the expiration date.
+ * Rendered only when the chain mixes multiple cycle types (hasMultipleCycles).
+ * Dot separator + muted color keeps it unobtrusive; white-space:nowrap on
+ * .colExp prevents the date+chip from wrapping at narrow widths. */
+.cycleChip {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 0.65em;
+  color: var(--text-muted);
+  opacity: 0.8;
+  cursor: default;
+}
+
+.cycleChip::before {
+  content: '·';
+  margin-right: 1px;
 }
