@@ -186,6 +186,22 @@
     inset 0 0 0 9999px var(--bg-hover);
 }
 
+/* Persistent selection: when a contract is open in the detail panel, keep
+ * its (call|put) cells visually highlighted in the same style as the hover
+ * tint, so the user can see at a glance which row the panel below
+ * corresponds to.  Mirrors the hover rules above but driven by the
+ * data-selected-side attribute (set in MergedChainTable) instead of :hover. */
+.row.rowSelected {
+  background: var(--bg-hover);
+}
+
+.row[data-selected-side="call"] td[data-side="call"],
+.row[data-selected-side="put"] td[data-side="put"] {
+  box-shadow:
+    inset 0 0 0 9999px var(--bg-hover),
+    inset 0 0 0 9999px var(--bg-hover);
+}
+
 .computed {
   font-style: italic;
   color: var(--text-muted);

@@ -241,6 +241,27 @@ describe('DataPage — option dispatch: contract detail split view', () => {
     expect(screen.getByTestId('option-chain-table')).toBeTruthy();
     expect(screen.getByTestId('contract-detail-panel')).toBeTruthy();
   });
+
+  it('scrolls the contract-detail panel into view on contract click', () => {
+    // jsdom does not implement scrollIntoView; install a spy on the
+    // prototype before render so the effect can call it.  The DataPage
+    // already feature-tests for the function so production users on
+    // browsers without scrollIntoView (none in practice) silently no-op.
+    const spy = vi.fn();
+    Element.prototype.scrollIntoView = spy;
+
+    renderDataPage();
+    selectOption('OPT_SP_500');
+
+    act(() => {
+      capturedOnRowClick({
+        collection: 'OPT_SP_500',
+        instrument_id: 'SPX|2024-12-20|4500|C',
+      });
+    });
+
+    expect(spy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+  });
 });
 
 describe('DataPage — ContractDetailPanel close', () => {

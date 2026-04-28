@@ -344,6 +344,81 @@ describe('<OptionChainTable> row click', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Persistent selection highlight — when a contract is open in the detail
+// panel, its (call|put) row stays in the hover-tinted state so the user
+// can see at a glance which row the panel below corresponds to.
+// ---------------------------------------------------------------------------
+
+describe('<OptionChainTable> persistent selection', () => {
+  it('flags the selected row + side via data-selected-side', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C-CALL', expiration: '2024-04-19', strike: 5000, type: 'C' }),
+        makeRow({ contract_id: 'C-PUT', expiration: '2024-04-19', strike: 5000, type: 'P' }),
+      ],
+      notes: [],
+    };
+    const selectedContract = {
+      collection: 'OPT_SP_500',
+      instrument_id: 'C-PUT',
+    };
+    const { container } = render(
+      <OptionChainTable
+        root="OPT_SP_500"
+        onRowClick={() => {}}
+        selectedContract={selectedContract}
+      />,
+    );
+    const selected = container.querySelectorAll('tr[data-selected-side]');
+    expect(selected.length).toBe(1);
+    expect(selected[0].getAttribute('data-selected-side')).toBe('put');
+  });
+
+  it('renders no data-selected-side when no contract is selected', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C-CALL', expiration: '2024-04-19', strike: 5000, type: 'C' }),
+      ],
+      notes: [],
+    };
+    const { container } = render(
+      <OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />,
+    );
+    expect(container.querySelectorAll('tr[data-selected-side]').length).toBe(0);
+  });
+
+  it('ignores selectedContract from a different collection (cross-root safety)', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C-CALL', expiration: '2024-04-19', strike: 5000, type: 'C' }),
+      ],
+      notes: [],
+    };
+    const selectedContract = {
+      collection: 'OPT_NDX',  // different root
+      instrument_id: 'C-CALL',
+    };
+    const { container } = render(
+      <OptionChainTable
+        root="OPT_SP_500"
+        onRowClick={() => {}}
+        selectedContract={selectedContract}
+      />,
+    );
+    expect(container.querySelectorAll('tr[data-selected-side]').length).toBe(0);
+  });
+});
+
 describe('<OptionChainTable> verification-pending banner', () => {
   it('is intentionally suppressed even on unverified roots', () => {
     // The strike-factor banner was removed from the chain table; even
