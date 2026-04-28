@@ -3,7 +3,14 @@
   flex-direction: column;
   gap: 12px;
   padding: 16px 20px;
-  flex: 1;
+  /* Cap the chain table at one viewport height regardless of whether a
+     contract-detail sibling renders below it.  flex-shrink: 0 stops it
+     compressing when the panel appears; height: 100% caps growth so the
+     internal .tableWrapper actually scrolls long chains rather than
+     letting the rows push the page down. */
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  height: 100%;
   overflow: auto;
 }
 
@@ -251,6 +258,13 @@
   border-right: 2px solid var(--text-muted);
 }
 
+/* Center the "Strike" header in its own column.  The body cells keep the
+ * default right-alignment so the numerical strike values still line up on
+ * the decimal. */
+.table th.colStrike {
+  text-align: center;
+}
+
 /* Horizontal separator between the column-name header row and the data
  * rows. Targets the last thead tr (the field-name row) plus the Exp /
  * Strike rowSpan=2 ths whose visual bottom edge sits in the same line.
@@ -298,9 +312,9 @@
 }
 
 /* Cycle chip — inline 1-letter indicator after the expiration date.
- * Rendered only when the chain mixes multiple cycle types (hasMultipleCycles).
- * Dot separator + muted color keeps it unobtrusive; white-space:nowrap on
- * .colExp prevents the date+chip from wrapping at narrow widths. */
+ * Always rendered when the row has a non-empty cycle.  Dot separator +
+ * muted color keeps it unobtrusive; white-space:nowrap on .colExp
+ * prevents the date+chip from wrapping at narrow widths. */
 .cycleChip {
   display: inline-block;
   margin-left: 4px;
