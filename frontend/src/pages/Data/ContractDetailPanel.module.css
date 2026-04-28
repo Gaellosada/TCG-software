@@ -87,7 +87,7 @@
   flex: 1;
   background: var(--bg-surface);
   border-radius: 6px;
-  min-height: 280px;
+  min-height: 420px;
   overflow: hidden;
 }
 
