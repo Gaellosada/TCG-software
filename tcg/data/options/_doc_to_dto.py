@@ -145,7 +145,7 @@ def doc_to_contract(
     if isinstance(raw_id, dict):
         cycle_val = raw_id.get("expirationCycle")
         if isinstance(cycle_val, str):
-            cycle = cycle_val
+            cycle = cycle_val.strip()
 
     root_underlying_raw = doc.get("rootUnderlying")
     root_underlying: str = (

@@ -620,6 +620,40 @@ async def test_chain_snapshot_filters_by_expiration_cycle(
     assert pts[0]["expiration_cycle"] == "M"
 
 
+async def test_chain_snapshot_blank_cycle_treated_as_no_filter(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """?expiration_cycle= (empty string) must be coerced to None by the
+    validator and behave identically to omitting the param (backend.md H1)."""
+    options_reader.query_chain_result = [
+        (make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
+         make_row(iv_stored=0.16)),
+    ]
+    base_params = [
+        ("root", "OPT_SP_500"),
+        ("date", "2024-03-15"),
+        ("type", "C"),
+        ("expirations", "2024-04-19"),
+        ("field", "iv"),
+    ]
+    # No cycle param — baseline.
+    resp_no_cycle = await client.get(
+        "/api/options/chain-snapshot", params=base_params
+    )
+    assert resp_no_cycle.status_code == 200
+    pts_no_cycle = resp_no_cycle.json()["series"][0]["points"]
+
+    # Explicit empty-string cycle — must return the same number of points.
+    resp_blank = await client.get(
+        "/api/options/chain-snapshot",
+        params=base_params + [("expiration_cycle", "")],
+    )
+    assert resp_blank.status_code == 200
+    pts_blank = resp_blank.json()["series"][0]["points"]
+
+    assert len(pts_blank) == len(pts_no_cycle)
+
+
 async def test_chain_snapshot_max_eight_expirations(client: AsyncClient):
     params: list[tuple[str, str]] = [
         ("root", "OPT_SP_500"),

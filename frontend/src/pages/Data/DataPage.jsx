@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
 import ContinuousChart from './ContinuousChart';
@@ -100,7 +100,13 @@ function DataPage() {
   // distinct cycles present in the points. Auto-select the most-populated
   // cycle the first time we see >1 cycle in a response — that yields
   // one trace per strike on roots like OPT_SP_500 by default.
-  function handleSnapshotData(response) {
+  // Memoized: the function only writes through stable setter refs
+  // (setAvailableCycles, setOptionsCycle) — no closure state is read,
+  // so the dep array is empty. Without useCallback the prop identity
+  // changes on every parent render, which re-fires the useEffect in
+  // ChainSnapshotPanel that lists onSnapshotData in its deps
+  // (frontend.md H1).
+  const handleSnapshotData = useCallback(function handleSnapshotData(response) {
     if (!response || !Array.isArray(response.series)) return;
     const counts = new Map();
     for (const s of response.series) {
@@ -137,7 +143,7 @@ function DataPage() {
       }
       return best;
     });
-  }
+  }, []);
 
   function renderRight() {
     if (!selected) {

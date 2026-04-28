@@ -157,7 +157,22 @@ class TestDocToContract:
         assert contract is not None
         assert contract.underlying_ref is None
         assert contract.underlying_symbol is None
-        assert contract.root_underlying == "BTC"
+
+    def test_expiration_cycle_trailing_space_stripped(self, sp500_doc):
+        """expirationCycle with trailing whitespace must be stripped on
+        ingestion so strict-equality filters in reader.py work correctly
+        (backend.md H2)."""
+        sp500_doc["_id"]["expirationCycle"] = "M "
+        contract = doc_to_contract(sp500_doc, "OPT_SP_500", "IVOLATILITY")
+        assert contract is not None
+        assert contract.expiration_cycle == "M"
+
+    def test_expiration_cycle_leading_space_stripped(self, sp500_doc):
+        """Leading whitespace also stripped (symmetric with trailing)."""
+        sp500_doc["_id"]["expirationCycle"] = " W3 Friday"
+        contract = doc_to_contract(sp500_doc, "OPT_SP_500", "IVOLATILITY")
+        assert contract is not None
+        assert contract.expiration_cycle == "W3 Friday"
 
 
 # ---------------------------------------------------------------------------

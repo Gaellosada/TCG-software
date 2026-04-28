@@ -446,6 +446,20 @@ class ChainSnapshotQuery(BaseModel):
     field: Literal["iv", "delta"] = "iv"
     expiration_cycle: str | None = None
 
+    @field_validator("expiration_cycle", mode="before")
+    @classmethod
+    def blank_cycle_to_none(cls, v: object) -> object:
+        """Coerce blank/whitespace-only strings to ``None``.
+
+        FastAPI passes ``?expiration_cycle=`` as the literal empty string
+        ``""`` rather than ``None`` for ``str | None`` fields.  A blank cycle
+        propagates into ``_materialize_chain_row`` as an empty-string filter
+        and silently returns an empty smile (backend.md H1).
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @field_validator("expirations")
     @classmethod
     def max_eight_expirations(cls, v: list[date]) -> list[date]:
