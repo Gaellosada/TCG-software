@@ -251,6 +251,13 @@
   border-right: 2px solid var(--text-muted);
 }
 
+/* Center the "Strike" header in its own column.  The body cells keep the
+ * default right-alignment so the numerical strike values still line up on
+ * the decimal. */
+.table th.colStrike {
+  text-align: center;
+}
+
 /* Horizontal separator between the column-name header row and the data
  * rows. Targets the last thead tr (the field-name row) plus the Exp /
  * Strike rowSpan=2 ths whose visual bottom edge sits in the same line.
