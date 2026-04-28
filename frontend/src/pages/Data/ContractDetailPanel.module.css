@@ -1,8 +1,11 @@
 .container {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  overflow: hidden;
+  /* Render at natural content height beneath the chain table; the parent
+     .optionsContainer scrolls to reveal this panel rather than splitting
+     vertical space with the table. */
+  flex: 0 0 auto;
+  flex-shrink: 0;
   gap: 12px;
   padding: 16px 20px;
 }

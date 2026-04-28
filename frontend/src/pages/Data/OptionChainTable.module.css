@@ -3,7 +3,14 @@
   flex-direction: column;
   gap: 12px;
   padding: 16px 20px;
-  flex: 1;
+  /* Hold the chain table at its full parent (viewport) height regardless of
+     whether a contract-detail sibling renders below it; flex-shrink: 0 stops
+     it from compressing when the panel appears, and min-height: 100% gives
+     it the same screen-fit it has when it's alone in the container. The
+     internal .tableWrapper still scrolls rows. */
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  min-height: 100%;
   overflow: auto;
 }
 
