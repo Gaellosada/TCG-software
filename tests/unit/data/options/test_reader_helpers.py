@@ -266,3 +266,136 @@ class TestCollectionRegistryOptions:
     def test_empty(self):
         registry = CollectionRegistry([])
         assert registry.all_options == []
+
+
+# ---------------------------------------------------------------------------
+# _peek_last_trade_date — surfaces ingestion cutoff for default-date UX
+# ---------------------------------------------------------------------------
+
+
+class _StubCollection:
+    """Minimal Motor-collection stub for ``_peek_last_trade_date`` tests.
+
+    ``find_one`` accepts a query + projection + sort; the stub picks the
+    first doc matching the ``expiration`` predicate, sorted as requested.
+    """
+
+    def __init__(self, docs: list[dict]) -> None:
+        self._docs = docs
+
+    async def find_one(self, query, projection=None, sort=None):
+        cands = [d for d in self._docs if _matches(d, query)]
+        if sort:
+            field, direction = sort[0]
+            cands.sort(key=lambda d: _get_path(d, field) or 0, reverse=(direction == -1))
+        return cands[0] if cands else None
+
+
+def _matches(doc, query):
+    for k, v in query.items():
+        if k == "expiration" and isinstance(v, dict):
+            ev = doc.get("expiration")
+            if "$gte" in v and (ev is None or ev < v["$gte"]):
+                return False
+            if "$ne" in v and ev == v["$ne"]:
+                return False
+        elif isinstance(v, dict) and "$exists" in v:
+            if v["$exists"] and k not in doc:
+                return False
+            if not v["$exists"] and k in doc:
+                return False
+        else:
+            if doc.get(k) != v:
+                return False
+    return True
+
+
+def _get_path(doc, path):
+    cur = doc
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+class TestPeekLastTradeDate:
+    """Regression (2026-04-28): defaulting the chain-query date to "today"
+    returns zero rows because Mongo bar dates end at the ingestion cutoff
+    (typically weeks behind real time). ``OptionRootInfo.last_trade_date``
+    surfaces the cutoff so the frontend can default to a date that has
+    data.
+
+    Single-path strategy: pick the live contract with smallest expiration
+    >= today, scan its ``eodDatas`` bars across all providers, return max
+    bar date. None when no live contract has bars — caller surfaces that
+    loudly rather than guessing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_picks_max_bar_date_from_live_contract(self):
+        from tcg.data.options.reader import _peek_last_trade_date
+
+        docs = [
+            {
+                "expiration": 20260428,  # live contract
+                "eodDatas": {"IVOLATILITY": [
+                    {"date": 20260101, "bid": 1, "ask": 2},
+                    {"date": 20260427, "bid": 1, "ask": 2},  # latest
+                    {"date": 20260315, "bid": 1, "ask": 2},
+                ]},
+            },
+            {
+                "expiration": 20231215,  # already-expired — must be ignored
+                "eodDatas": {"IVOLATILITY": [{"date": 20231215, "bid": 1, "ask": 1}]},
+            },
+        ]
+        coll = _StubCollection(docs)
+        assert await _peek_last_trade_date(coll) == date(2026, 4, 27)
+
+    @pytest.mark.asyncio
+    async def test_scans_all_providers_on_live_doc(self):
+        """Regression — OPT_BTC is heterogeneous: docs vary in which
+        provider key they use. The scan must traverse all provider keys
+        on the live doc, not require a specific provider.
+        """
+        from tcg.data.options.reader import _peek_last_trade_date
+
+        docs = [
+            {
+                "expiration": 20260428,
+                "eodDatas": {"DERIBIT": [
+                    {"date": 20260425, "bid": 1, "ask": 2},
+                    {"date": 20260427, "bid": 1, "ask": 2},
+                ]},
+            },
+        ]
+        coll = _StubCollection(docs)
+        assert await _peek_last_trade_date(coll) == date(2026, 4, 27)
+
+    @pytest.mark.asyncio
+    async def test_no_live_contract_returns_none(self):
+        """When there is no live contract, return None loudly. The
+        frontend will surface "no data available" rather than guess a
+        default and silently mislead the user.
+        """
+        from tcg.data.options.reader import _peek_last_trade_date
+
+        docs = [
+            {"expiration": 20231215, "eodDatas": {"IVOLATILITY": [{"date": 20231215}]}},
+        ]
+        coll = _StubCollection(docs)
+        assert await _peek_last_trade_date(coll) is None
+
+    @pytest.mark.asyncio
+    async def test_live_contract_without_eod_datas_returns_none(self):
+        from tcg.data.options.reader import _peek_last_trade_date
+
+        coll = _StubCollection([{"expiration": 20260428}])  # no eodDatas
+        assert await _peek_last_trade_date(coll) is None
+
+    @pytest.mark.asyncio
+    async def test_empty_collection_returns_none(self):
+        from tcg.data.options.reader import _peek_last_trade_date
+
+        assert await _peek_last_trade_date(_StubCollection([])) is None

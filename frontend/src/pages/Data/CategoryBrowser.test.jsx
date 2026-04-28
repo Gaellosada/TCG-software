@@ -33,6 +33,7 @@ const MOCK_ROOTS = [
     providers: ['IVOLATILITY'],
     expiration_first: '2020-01-01',
     expiration_last: '2025-12-31',
+    last_trade_date: '2024-12-31',
     doc_count_estimated: 50000,
     strike_factor_verified: true,
   },
@@ -43,6 +44,7 @@ const MOCK_ROOTS = [
     providers: ['IVOLATILITY'],
     expiration_first: '2020-01-01',
     expiration_last: '2025-12-31',
+    last_trade_date: '2024-12-31',
     doc_count_estimated: 10000,
     strike_factor_verified: true,
   },
@@ -53,6 +55,7 @@ const MOCK_ROOTS = [
     providers: ['IVOLATILITY'],
     expiration_first: '2020-01-01',
     expiration_last: '2025-12-31',
+    last_trade_date: '2024-12-31',
     doc_count_estimated: 5000,
     strike_factor_verified: false,
   },
@@ -221,6 +224,8 @@ describe('Root click emits selection', () => {
       expiry: null,
       strike: null,
       optionType: null,
+      last_trade_date: '2024-12-31',
+      expiration_last: '2025-12-31',
     });
   });
 
@@ -244,6 +249,8 @@ describe('Root click emits selection', () => {
       expiry: null,
       strike: null,
       optionType: null,
+      last_trade_date: '2024-12-31',
+      expiration_last: '2025-12-31',
     });
   });
 

@@ -35,10 +35,12 @@ vi.mock('./ContinuousChart', () => ({
 // independent of C2.2 landing time.
 // ---------------------------------------------------------------------------
 let capturedOnRowClick = null;
+let capturedChainTableProps = null;
 vi.mock('./OptionChainTable', () => ({
-  default: vi.fn(({ root, onRowClick }) => {
-    capturedOnRowClick = onRowClick;
-    return <div data-testid="option-chain-table" data-root={root} />;
+  default: vi.fn((props) => {
+    capturedOnRowClick = props.onRowClick;
+    capturedChainTableProps = props;
+    return <div data-testid="option-chain-table" data-root={props.root} />;
   }),
 }));
 
@@ -100,6 +102,7 @@ beforeEach(() => {
   capturedOnClose = null;
   capturedSnapshotProps = null;
   capturedMultiProps = null;
+  capturedChainTableProps = null;
 });
 
 afterEach(() => {
@@ -114,7 +117,17 @@ function renderDataPage() {
   return render(<DataPage />);
 }
 
-function selectOption(collection = 'OPT_SP_500') {
+function typeSnapshotExpiration(value = '2024-12-20') {
+  // The Snapshot / Multi-smile tabs gate panel rendering on a non-empty
+  // expiration input. Tests that need the panel to render must call this
+  // after switching to the Smile tab (or the Add button on Multi-smile).
+  const input = screen.getByPlaceholderText('e.g. 2024-12-20');
+  act(() => {
+    fireEvent.change(input, { target: { value } });
+  });
+}
+
+function selectOption(collection = 'OPT_SP_500', overrides = {}) {
   act(() => {
     capturedOnSelect({
       type: 'option',
@@ -123,6 +136,13 @@ function selectOption(collection = 'OPT_SP_500') {
       expiry: null,
       strike: null,
       optionType: null,
+      // CategoryBrowser threads the root's metadata through the emit
+      // (used by DataPage to default the chain query date / window).
+      // Tests that don't care still get a sensible value here so the
+      // chain UI renders.
+      last_trade_date: '2026-04-27',
+      expiration_last: '2030-12-20',
+      ...overrides,
     });
   });
 }
@@ -271,6 +291,8 @@ describe('DataPage — root switch resets selectedContract', () => {
         expiry: null,
         strike: null,
         optionType: null,
+        last_trade_date: '2026-04-27',
+        expiration_last: '2030-12-20',
       });
     });
 
@@ -334,13 +356,14 @@ describe('DataPage — Tier-2 tab strip initial state', () => {
 });
 
 describe('DataPage — switching to Smile tab', () => {
-  it('renders ChainSnapshotPanel and hides OptionChainTable', () => {
+  it('renders ChainSnapshotPanel (after expiration typed) and hides OptionChainTable', () => {
     renderDataPage();
     selectOption('OPT_SP_500');
 
     act(() => {
       fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
     });
+    typeSnapshotExpiration();
 
     expect(screen.getByTestId('chain-snapshot-panel')).toBeTruthy();
     expect(screen.queryByTestId('option-chain-table')).toBeNull();
@@ -354,6 +377,7 @@ describe('DataPage — switching to Smile tab', () => {
     act(() => {
       fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
     });
+    typeSnapshotExpiration();
 
     const panel = screen.getByTestId('chain-snapshot-panel');
     expect(panel.dataset.root).toBe('OPT_GOLD');
@@ -373,12 +397,16 @@ describe('DataPage — switching to Smile tab', () => {
 });
 
 describe('DataPage — switching to Multi-smile tab', () => {
-  it('renders MultiExpirationSmilePanel and hides OptionChainTable', () => {
+  it('renders MultiExpirationSmilePanel (after Add) and hides OptionChainTable', () => {
     renderDataPage();
     selectOption('OPT_SP_500');
 
     act(() => {
       fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
+    });
+    typeSnapshotExpiration();
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     });
 
     expect(screen.getByTestId('multi-expiration-smile-panel')).toBeTruthy();
@@ -392,6 +420,10 @@ describe('DataPage — switching to Multi-smile tab', () => {
 
     act(() => {
       fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
+    });
+    typeSnapshotExpiration();
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     });
 
     const panel = screen.getByTestId('multi-expiration-smile-panel');
@@ -443,6 +475,7 @@ describe('DataPage — ChainSnapshotPanel close button returns to Chain tab', ()
     act(() => {
       fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
     });
+    typeSnapshotExpiration();
 
     expect(screen.getByTestId('chain-snapshot-panel')).toBeTruthy();
 
@@ -465,13 +498,12 @@ describe('DataPage — Snapshot tab filter inputs', () => {
     act(() => {
       fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
     });
+    typeSnapshotExpiration();  // gating
 
     const panel = screen.getByTestId('chain-snapshot-panel');
     const initialDate = panel.dataset.date;
 
-    // Find the date input in the filter strip and change it
     const dateInputs = screen.getAllByDisplayValue(initialDate);
-    // The filter strip date input and the panel prop should share the same date
     expect(dateInputs.length).toBeGreaterThan(0);
 
     const newDate = '2024-06-15';
@@ -479,7 +511,6 @@ describe('DataPage — Snapshot tab filter inputs', () => {
       fireEvent.change(dateInputs[0], { target: { value: newDate } });
     });
 
-    // After state update, ChainSnapshotPanel should receive new date prop
     expect(capturedSnapshotProps.date).toBe(newDate);
   });
 
@@ -562,12 +593,17 @@ describe('DataPage — Multi-smile expiration management', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     });
 
+    // Confirm panel rendered with the expiration
+    expect(capturedMultiProps.expirations).toContain('2024-12-20');
+
     // Remove via × button
     act(() => {
       fireEvent.click(screen.getByRole('button', { name: 'Remove 2024-12-20' }));
     });
 
-    expect(capturedMultiProps.expirations).not.toContain('2024-12-20');
+    // Empty list → panel gated again (× removed the only expiration)
+    expect(screen.queryByTestId('multi-expiration-smile-panel')).toBeNull();
+    expect(screen.getByTestId('multi-empty')).toBeTruthy();
   });
 
   it('resets expirations when switching to a new options root', () => {
@@ -595,11 +631,128 @@ describe('DataPage — Multi-smile expiration management', () => {
         expiry: null,
         strike: null,
         optionType: null,
+        last_trade_date: '2026-04-27',
+        expiration_last: '2030-12-20',
       });
     });
 
     // Should be back on chain tab (root reset)
     expect(screen.getByRole('tab', { name: 'Chain' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByTestId('option-chain-table')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: zero-contracts and smile errors (2026-04-28)
+// ---------------------------------------------------------------------------
+
+describe('DataPage — last_trade_date defaults (zero-contracts regression)', () => {
+  it('seeds OptionChainTable.initialFilters from selected.last_trade_date', () => {
+    render(<DataPage />);
+    act(() => {
+      capturedOnSelect({
+        type: 'option',
+        collection: 'OPT_SP_500',
+        instrument_id: null,
+        expiry: null, strike: null, optionType: null,
+        last_trade_date: '2026-04-27',
+        expiration_last: '2030-12-20',
+      });
+    });
+    expect(capturedChainTableProps).toBeTruthy();
+    expect(capturedChainTableProps.initialFilters).toMatchObject({
+      date: '2026-04-27',
+      expirationMin: '2026-04-27',
+    });
+  });
+
+  it('renders a "no data" message when last_trade_date is null', () => {
+    render(<DataPage />);
+    act(() => {
+      capturedOnSelect({
+        type: 'option',
+        collection: 'OPT_BROKEN',
+        instrument_id: null,
+        expiry: null, strike: null, optionType: null,
+        last_trade_date: null,
+        expiration_last: null,
+      });
+    });
+    // Loud failure: chain table must NOT render; "no data" copy must.
+    expect(screen.queryByTestId('option-chain-table')).toBeNull();
+    expect(screen.getByText(/no data available/i)).toBeTruthy();
+  });
+});
+
+describe('DataPage — smile/multi-smile gating (ApiError regression)', () => {
+  function pickRoot() {
+    act(() => {
+      capturedOnSelect({
+        type: 'option',
+        collection: 'OPT_SP_500',
+        instrument_id: null,
+        expiry: null, strike: null, optionType: null,
+        last_trade_date: '2026-04-27',
+        expiration_last: '2030-12-20',
+      });
+    });
+  }
+
+  it('does NOT render ChainSnapshotPanel until expiration is non-empty', () => {
+    render(<DataPage />);
+    pickRoot();
+    fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
+
+    // Empty expiration → panel must be gated; show empty-state instead.
+    expect(screen.queryByTestId('chain-snapshot-panel')).toBeNull();
+    expect(screen.getByTestId('snapshot-empty')).toBeTruthy();
+    expect(capturedSnapshotProps).toBeNull();
+  });
+
+  it('renders ChainSnapshotPanel once a non-empty expiration is typed', () => {
+    render(<DataPage />);
+    pickRoot();
+    fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
+    const expInput = screen.getByPlaceholderText(/2024-12-20/i);
+    fireEvent.change(expInput, { target: { value: '2026-05-15' } });
+
+    expect(screen.queryByTestId('snapshot-empty')).toBeNull();
+    expect(screen.getByTestId('chain-snapshot-panel')).toBeTruthy();
+    expect(capturedSnapshotProps.expiration).toBe('2026-05-15');
+    expect(capturedSnapshotProps.date).toBe('2026-04-27');
+  });
+
+  it('treats whitespace-only expiration as empty (still gated)', () => {
+    render(<DataPage />);
+    pickRoot();
+    fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
+    const expInput = screen.getByPlaceholderText(/2024-12-20/i);
+    fireEvent.change(expInput, { target: { value: '   ' } });
+
+    expect(screen.queryByTestId('chain-snapshot-panel')).toBeNull();
+    expect(screen.getByTestId('snapshot-empty')).toBeTruthy();
+  });
+
+  it('does NOT render MultiExpirationSmilePanel with empty expirations list', () => {
+    render(<DataPage />);
+    pickRoot();
+    fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
+
+    expect(screen.queryByTestId('multi-expiration-smile-panel')).toBeNull();
+    expect(screen.getByTestId('multi-empty')).toBeTruthy();
+    expect(capturedMultiProps).toBeNull();
+  });
+
+  it('renders MultiExpirationSmilePanel after the user adds an expiration', () => {
+    render(<DataPage />);
+    pickRoot();
+    fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
+    const stagingInput = screen.getByPlaceholderText(/2024-12-20/i);
+    fireEvent.change(stagingInput, { target: { value: '2026-05-15' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(screen.queryByTestId('multi-empty')).toBeNull();
+    expect(screen.getByTestId('multi-expiration-smile-panel')).toBeTruthy();
+    expect(capturedMultiProps.expirations).toEqual(['2026-05-15']);
   });
 });

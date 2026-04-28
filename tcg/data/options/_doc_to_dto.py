@@ -103,6 +103,18 @@ def _compute_mid(bid: float | None, ask: float | None) -> float | None:
     return (bid + ask) / 2.0
 
 
+def _sanitize_iv(value: float | None) -> float | None:
+    """IV must be strictly positive. IVolatility uses ``-1.0`` as a
+    "no IV" sentinel for deep-OTM rows where the solver does not converge;
+    surface those as missing rather than as a stored negative value.
+    """
+    if value is None:
+        return None
+    if value <= 0.0:
+        return None
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Contract metadata (one per option document)
 # ---------------------------------------------------------------------------
@@ -199,7 +211,7 @@ def bar_and_greek_to_row(
     bid = _to_float(bar.get("bid"))
     ask = _to_float(bar.get("ask"))
 
-    iv_stored = _to_float(greek.get("impliedVolatility")) if greek else None
+    iv_stored = _sanitize_iv(_to_float(greek.get("impliedVolatility"))) if greek else None
     delta_stored = _to_float(greek.get("delta")) if greek else None
     gamma_stored = _to_float(greek.get("gamma")) if greek else None
     theta_stored = _to_float(greek.get("theta")) if greek else None

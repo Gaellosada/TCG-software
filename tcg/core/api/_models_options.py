@@ -115,6 +115,7 @@ class OptionRootInfo(BaseModel):
     expiration_last: date | None
     doc_count_estimated: int
     strike_factor_verified: bool
+    last_trade_date: date | None = None
 
 
 # ---------------------------------------------------------------------------

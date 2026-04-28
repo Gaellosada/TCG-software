@@ -214,6 +214,12 @@ function CategoryBrowser({ selected, onSelect }) {
                           expiry: null,
                           strike: null,
                           optionType: null,
+                          // Surface the root's last bar date so DataPage / the
+                          // chain hook can default the query date to a value
+                          // the data actually covers (today is typically past
+                          // the ingestion cutoff and returns zero rows).
+                          last_trade_date: root.last_trade_date ?? null,
+                          expiration_last: root.expiration_last ?? null,
                         })
                       }
                     >

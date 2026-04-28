@@ -206,6 +206,7 @@ class MongoOptionsDataReader:
         )
 
         providers = tuple(await _peek_providers(coll))
+        last_trade_date = await _peek_last_trade_date(coll)
 
         return OptionRootInfo(
             collection=collection,
@@ -216,6 +217,7 @@ class MongoOptionsDataReader:
             expiration_last=expiration_last,
             doc_count_estimated=int(doc_count),
             strike_factor_verified=STRIKE_FACTOR_VERIFIED.get(collection, False),
+            last_trade_date=last_trade_date,
         )
 
     async def _find_document(
@@ -393,3 +395,45 @@ async def _peek_providers(coll: Any) -> tuple[str, ...]:
     if not isinstance(eod, Mapping):
         return ()
     return tuple(sorted(eod.keys()))
+
+
+async def _peek_last_trade_date(coll: Any) -> date | None:
+    """Return the latest bar date for a live contract in this collection.
+
+    Single direct path:
+      1. Pick the contract with the smallest ``expiration >= today``.
+      2. Scan its ``eodDatas`` bars (across whatever providers are on
+         the doc — collections like OPT_BTC are heterogeneous).
+      3. Return the max ``date`` field.
+
+    Returns None only when there is no live contract or no bars; the
+    caller surfaces that as "no data available" rather than guessing.
+    """
+    today_yyyymmdd = (
+        date.today().year * 10000 + date.today().month * 100 + date.today().day
+    )
+    try:
+        doc = await coll.find_one(
+            {"expiration": {"$gte": today_yyyymmdd}, "eodDatas": {"$exists": True}},
+            projection={"eodDatas": 1},
+            sort=[("expiration", ASCENDING)],
+        )
+    except PyMongoError:
+        return None
+    if not doc:
+        return None
+    eod = doc.get("eodDatas")
+    if not isinstance(eod, Mapping):
+        return None
+
+    best: date | None = None
+    for bars in eod.values():
+        if not isinstance(bars, list):
+            continue
+        for bar in bars:
+            if not isinstance(bar, Mapping):
+                continue
+            d = _int_to_date(bar.get("date"))
+            if d is not None and (best is None or d > best):
+                best = d
+    return best

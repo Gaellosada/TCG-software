@@ -124,6 +124,11 @@ class OptionRootInfo:
     expiration_last: date | None
     doc_count_estimated: int
     strike_factor_verified: bool
+    # Latest trade date with bar data. Used by the frontend to default the
+    # chain-query date to a value the data actually covers (the ingestion
+    # cutoff is typically weeks behind "today"; defaulting to today returns
+    # zero rows).
+    last_trade_date: date | None = None
 
 
 # ---------------------------------------------------------------------------

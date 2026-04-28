@@ -25,18 +25,27 @@ function addDays(isoDate, days) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function buildDefaultFilters(initialRoot) {
-  const today = todayISO();
+function buildDefaultFilters(initialRoot, overrides = {}) {
+  // Anchor the chain query around the root's actual last trade date when
+  // the caller supplies one (typical path — DataPage threads it through
+  // from /api/options/roots). Falls through to today only when nothing
+  // is supplied; in production the caller almost always supplies an
+  // explicit anchor and the today-default is just for tests / standalone
+  // usage. Note: today usually falls past the ingestion cutoff and
+  // returns zero rows, which is why DataPage gates on ``last_trade_date``
+  // upfront rather than letting this default mask the missing-data case.
+  const anchor = overrides.date ?? todayISO();
   return {
     root: initialRoot,
-    date: today,
+    date: anchor,
     type: 'both',
-    expirationMin: today,
-    expirationMax: addDays(today, 90),
+    expirationMin: anchor,
+    expirationMax: overrides.expirationMax ?? addDays(anchor, 90),
     strikeMin: null,
     strikeMax: null,
     // Decision C: computeMissing defaults to false; never persisted to localStorage.
     computeMissing: false,
+    ...overrides,
   };
 }
 
@@ -70,8 +79,10 @@ function buildDefaultFilters(initialRoot) {
  *   abort: () => void,
  * }}
  */
-export function useOptionsChain(initialRoot = null) {
-  const [filters, setFilters] = useState(() => buildDefaultFilters(initialRoot));
+export function useOptionsChain(initialRoot = null, initialFilters = {}) {
+  const [filters, setFilters] = useState(() =>
+    buildDefaultFilters(initialRoot, initialFilters),
+  );
   const [chainData, setChainData] = useState(null);
 
   const { run, running, abort } = useAbortableAction();

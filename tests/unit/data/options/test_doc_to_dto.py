@@ -195,6 +195,45 @@ class TestBarAndGreekToRow:
         # mid still computed from quotes:
         assert row.mid == pytest.approx(2.05)
 
+    def test_iv_minus_one_sentinel_treated_as_missing(self, make_bar):
+        """Regression (2026-04-28): IVolatility uses ``-1.0`` as a "no IV"
+        sentinel for deep-OTM rows where its solver did not converge.
+
+        Without this guard, ~45% of OPT_SP_500 chain rows render as a
+        spurious ``-1.0000`` IV in the UI. IV must be strictly positive;
+        anything <= 0 surfaces as ``None`` so Module 6 can wrap it as
+        ``source="missing"`` (or compute it on demand).
+        """
+        bar = make_bar(20240315, bid=0.0, ask=0.05)
+        greek = {
+            "date": 20240315,
+            "impliedVolatility": -1.0,  # IVolatility sentinel
+            "delta": 0.0,
+            "gamma": 0.0,
+            "theta": 0.0,
+            "vega": 0.0,
+            "underlyingPrice": 5100.0,
+        }
+        row = bar_and_greek_to_row(bar, greek)
+        assert row is not None
+        assert row.iv_stored is None, "IV=-1.0 sentinel must surface as None"
+
+    def test_iv_zero_treated_as_missing(self, make_bar):
+        """IV = 0 is also unphysical. Treat as missing."""
+        bar = make_bar(20240315, bid=1.0, ask=1.5)
+        greek = {"date": 20240315, "impliedVolatility": 0.0}
+        row = bar_and_greek_to_row(bar, greek)
+        assert row is not None
+        assert row.iv_stored is None
+
+    def test_iv_positive_passes_through(self, make_bar):
+        """Sanity: a real positive IV is preserved."""
+        bar = make_bar(20240315, bid=1.0, ask=1.5)
+        greek = {"date": 20240315, "impliedVolatility": 0.18}
+        row = bar_and_greek_to_row(bar, greek)
+        assert row is not None
+        assert row.iv_stored == 0.18
+
     def test_missing_greek_field_stays_none_not_zero(self, make_bar, make_greek_sparse):
         """Sparse IVOLATILITY entry: delta missing → None, not 0."""
         bar = make_bar(20240301, bid=2.0, ask=2.1)

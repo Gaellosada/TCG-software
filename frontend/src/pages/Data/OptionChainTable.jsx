@@ -100,8 +100,11 @@ export function ComputeResultCell({ result, decimals = 4 }) {
 // Main table component
 // ---------------------------------------------------------------------------
 
-export default function OptionChainTable({ root, onRowClick }) {
-  const { filters, chainData, loading, fetchChain, updateFilters } = useOptionsChain(root);
+export default function OptionChainTable({ root, onRowClick, initialFilters }) {
+  const { filters, chainData, loading, fetchChain, updateFilters } = useOptionsChain(
+    root,
+    initialFilters,
+  );
 
   // Trigger initial fetch when root changes (mount or root prop update).
   useEffect(() => {

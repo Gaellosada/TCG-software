@@ -43,12 +43,18 @@ function DataPage() {
   const [optionsExpirations, setOptionsExpirations] = useState([]);
   const [multiExpirationInput, setMultiExpirationInput] = useState('');
 
-  // Reset selectedContract and view whenever the user picks a different options root.
+  // Reset selectedContract and view whenever the user picks a different
+  // options root. Re-anchor the date controls on the root's last trade
+  // date so Snapshot / Multi-smile tabs default to a date with data.
   useEffect(() => {
     setSelectedContract(null);
     setOptionsView('chain');
     setOptionsExpirations([]);
     setMultiExpirationInput('');
+    setOptionsExpiration('');
+    if (selected?.type === 'option' && selected.last_trade_date) {
+      setOptionsDate(selected.last_trade_date);
+    }
   }, [selected?.collection]);
 
   // ---------------------------------------------------------------------------
@@ -80,8 +86,27 @@ function DataPage() {
     }
 
     if (selected.type === 'option') {
+      // No bar data for this root — surface loudly and stop. This is a
+      // production / VPN problem, not a UI fallback decision.
+      if (!selected.last_trade_date) {
+        return (
+          <div className={styles.welcome}>
+            <div className={styles.welcomeInner}>
+              <h2>{selected.collection}: no data available</h2>
+              <p>
+                The backend reports no recent bars for this root. Check
+                that the ingestion pipeline is current; the API
+                <code> /api/options/roots </code>
+                response carries <code>last_trade_date: null</code> for
+                this collection.
+              </p>
+            </div>
+          </div>
+        );
+      }
       return (
         <div className={styles.optionsWrapper}>
+          {/* shared initialFilters anchored on the root's last trade date */}
           {/* Tab strip */}
           <div className={styles.optionsTabs} role="tablist">
             {OPTIONS_TABS.map(({ key, label }) => (
@@ -106,6 +131,10 @@ function DataPage() {
                 <OptionChainTable
                   root={selected.collection}
                   onRowClick={(contract) => setSelectedContract(contract)}
+                  initialFilters={{
+                    date: selected.last_trade_date,
+                    expirationMin: selected.last_trade_date,
+                  }}
                 />
                 {selectedContract && (
                   <ContractDetailPanel
@@ -152,13 +181,19 @@ function DataPage() {
                     />
                   </label>
                 </div>
-                <ChainSnapshotPanel
-                  root={selected.collection}
-                  date={optionsDate}
-                  type={optionsType}
-                  expiration={optionsExpiration}
-                  onClose={() => setOptionsView('chain')}
-                />
+                {optionsExpiration.trim() ? (
+                  <ChainSnapshotPanel
+                    root={selected.collection}
+                    date={optionsDate}
+                    type={optionsType}
+                    expiration={optionsExpiration.trim()}
+                    onClose={() => setOptionsView('chain')}
+                  />
+                ) : (
+                  <div className={styles.snapshotEmpty} data-testid="snapshot-empty">
+                    Enter an expiration date above (YYYY-MM-DD) to load the smile.
+                  </div>
+                )}
               </div>
             )}
 
@@ -227,13 +262,19 @@ function DataPage() {
                     )}
                   </div>
                 </div>
-                <MultiExpirationSmilePanel
-                  root={selected.collection}
-                  date={optionsDate}
-                  type={optionsType}
-                  expirations={optionsExpirations}
-                  onClose={() => setOptionsView('chain')}
-                />
+                {optionsExpirations.length > 0 ? (
+                  <MultiExpirationSmilePanel
+                    root={selected.collection}
+                    date={optionsDate}
+                    type={optionsType}
+                    expirations={optionsExpirations}
+                    onClose={() => setOptionsView('chain')}
+                  />
+                ) : (
+                  <div className={styles.snapshotEmpty} data-testid="multi-empty">
+                    Add at least one expiration date above to load the smile.
+                  </div>
+                )}
               </div>
             )}
           </div>
