@@ -182,6 +182,32 @@ class MongoOptionsDataReader:
         return out
 
     # ------------------------------------------------------------------
+    # list_expirations
+    # ------------------------------------------------------------------
+
+    async def list_expirations(self, root: str) -> list[date]:
+        """Distinct expirations on *root* — sorted ascending.
+
+        Backs the chain / smile UIs so users can only pick dates that
+        actually have contracts. Uses Mongo's ``distinct`` against the
+        existing ``expiration_1`` index, so the cost is ~O(unique dates).
+        """
+        try:
+            coll = self._db[root]
+            raw = await coll.distinct("expiration")
+        except PyMongoError as exc:
+            raise OptionsDataAccessError(
+                f"MongoDB error listing expirations on '{root}': {exc}"
+            ) from exc
+        out: list[date] = []
+        for value in raw:
+            d = _int_to_date(value)
+            if d is not None:
+                out.append(d)
+        out.sort()
+        return out
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

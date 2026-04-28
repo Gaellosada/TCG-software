@@ -82,3 +82,11 @@ class OptionsDataReader(Protocol):
         chosen provider for the root (None for OPT_VIX / OPT_ETH).
         """
         ...
+
+    async def list_expirations(self, root: str) -> list[date]:
+        """Distinct expirations available on *root*, sorted ascending.
+
+        Used by the chain / smile UIs to constrain the user-facing date
+        pickers to dates that actually have contracts.
+        """
+        ...

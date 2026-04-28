@@ -234,6 +234,28 @@ async def list_roots(
 
 
 # ---------------------------------------------------------------------------
+# Endpoint 1b — GET /api/options/expirations
+# ---------------------------------------------------------------------------
+
+
+@router.get("/expirations")
+async def list_expirations(
+    root: str = Query(..., description="OPT_* collection name"),
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict:
+    """Distinct expirations available on *root*, sorted ascending.
+
+    Backs the chain / smile date pickers so users can only choose dates
+    that actually have contracts.
+
+    Errors:
+        ``OptionsDataAccessError`` from the reader → 502.
+    """
+    dates_ = await svc.list_option_expirations(root)
+    return {"root": root, "expirations": [d.isoformat() for d in dates_]}
+
+
+# ---------------------------------------------------------------------------
 # Endpoint 2 — GET /api/options/chain
 # ---------------------------------------------------------------------------
 

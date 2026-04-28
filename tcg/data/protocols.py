@@ -116,6 +116,8 @@ class MarketDataService(Protocol):
 
     async def list_option_roots(self) -> list[OptionRootInfo]: ...
 
+    async def list_option_expirations(self, root: str) -> list[date]: ...
+
 
 class StrategyStore(Protocol):
     """CRUD for strategy definitions."""

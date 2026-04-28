@@ -70,6 +70,49 @@ async def test_roots_data_access_error_502(
 
 
 # ---------------------------------------------------------------------------
+# /expirations
+# ---------------------------------------------------------------------------
+
+
+async def test_expirations_happy_path(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Returns the distinct expirations the reader surfaced, sorted ascending,
+    serialised as ISO strings. Backs the chain / smile date pickers."""
+    options_reader.list_expirations_result = [
+        date(2024, 4, 19),
+        date(2024, 5, 17),
+        date(2024, 6, 21),
+    ]
+    resp = await client.get("/api/options/expirations", params={"root": "OPT_SP_500"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["root"] == "OPT_SP_500"
+    assert body["expirations"] == ["2024-04-19", "2024-05-17", "2024-06-21"]
+
+
+async def test_expirations_empty_collection_is_empty_list(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    options_reader.list_expirations_result = []
+    resp = await client.get("/api/options/expirations", params={"root": "OPT_BTC"})
+    assert resp.status_code == 200
+    assert resp.json() == {"root": "OPT_BTC", "expirations": []}
+
+
+async def test_expirations_data_access_error_502(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    options_reader.list_expirations_side_effect = OptionsDataAccessError(
+        "Mongo down"
+    )
+    resp = await client.get("/api/options/expirations", params={"root": "OPT_SP_500"})
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["error_type"] == "options_data_access_error"
+
+
+# ---------------------------------------------------------------------------
 # /chain
 # ---------------------------------------------------------------------------
 
@@ -282,6 +325,65 @@ async def test_contract_not_found_404(
     assert body["error_type"] == "options_contract_not_found"
 
 
+async def test_contract_compute_missing_fills_greeks(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """When stored Greeks are None and compute_missing=true, the contract
+    endpoint must invert IV from mid via BS76 and fill every Greek with
+    source='computed'. Mirrors the chain-side test, but for /contract."""
+    contract = make_contract()
+    row = make_row(
+        row_date=date(2024, 3, 15),
+        iv_stored=None,
+        delta_stored=None,
+        gamma_stored=None,
+        theta_stored=None,
+        vega_stored=None,
+    )
+    options_reader.get_contract_result = OptionContractSeries(
+        contract=contract, rows=(row,)
+    )
+    resp = await client.get(
+        "/api/options/contract/OPT_SP_500/SPX_C_5100_20240419%7CM",
+        params={"compute_missing": "true"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["rows"]) == 1
+    row_out = body["rows"][0]
+    assert row_out["iv"]["source"] == "computed"
+    assert row_out["iv"]["value"] is not None
+    for greek in ("delta", "gamma", "theta", "vega"):
+        assert row_out[greek]["source"] == "computed", greek
+        assert row_out[greek]["value"] is not None, greek
+
+
+async def test_contract_compute_missing_false_keeps_missing(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Without compute_missing=true, missing stored Greeks stay missing."""
+    contract = make_contract()
+    row = make_row(
+        row_date=date(2024, 3, 15),
+        iv_stored=None,
+        delta_stored=None,
+        gamma_stored=None,
+        theta_stored=None,
+        vega_stored=None,
+    )
+    options_reader.get_contract_result = OptionContractSeries(
+        contract=contract, rows=(row,)
+    )
+    resp = await client.get(
+        "/api/options/contract/OPT_SP_500/SPX_C_5100_20240419%7CM",
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    row_out = body["rows"][0]
+    for greek in ("iv", "delta", "gamma", "theta", "vega"):
+        assert row_out[greek]["source"] == "missing", greek
+
+
 async def test_contract_date_filter(
     client: AsyncClient, options_reader: StubOptionsReader
 ):
@@ -463,8 +565,8 @@ async def test_chain_snapshot_data_access_error_502(
 # ---------------------------------------------------------------------------
 
 
-async def test_app_registers_five_options_paths(client: AsyncClient):
-    """OpenAPI exposes the 5 options endpoints."""
+async def test_app_registers_six_options_paths(client: AsyncClient):
+    """OpenAPI exposes the 6 options endpoints."""
     resp = await client.get("/openapi.json")
     assert resp.status_code == 200
     paths = resp.json()["paths"]
@@ -473,6 +575,7 @@ async def test_app_registers_five_options_paths(client: AsyncClient):
         "/api/options/chain",
         "/api/options/chain-snapshot",
         "/api/options/contract/{coll}/{contract_id}",
+        "/api/options/expirations",
         "/api/options/roots",
         "/api/options/select",
     ]

@@ -321,6 +321,9 @@ class DefaultMarketDataService:
     async def list_option_roots(self) -> list[OptionRootInfo]:
         return await self._options.list_roots()
 
+    async def list_option_expirations(self, root: str) -> list[date]:
+        return await self._options.list_expirations(root)
+
     # --- Internal ---
 
     @staticmethod

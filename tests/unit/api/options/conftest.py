@@ -151,10 +151,12 @@ class StubOptionsReader:
         ] = []
         self.get_contract_result: OptionContractSeries | None = None
         self.list_roots_result: list[OptionRootInfo] = []
+        self.list_expirations_result: list[date] = []
         self.query_chain_calls: list[dict[str, Any]] = []
         self.query_chain_side_effect: BaseException | None = None
         self.get_contract_side_effect: BaseException | None = None
         self.list_roots_side_effect: BaseException | None = None
+        self.list_expirations_side_effect: BaseException | None = None
 
     async def query_chain(
         self,
@@ -200,6 +202,11 @@ class StubOptionsReader:
             raise self.list_roots_side_effect
         return self.list_roots_result
 
+    async def list_expirations(self, root: str) -> list[date]:
+        if self.list_expirations_side_effect is not None:
+            raise self.list_expirations_side_effect
+        return self.list_expirations_result
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -226,6 +233,9 @@ async def client(options_reader: StubOptionsReader):
     async def _list_option_roots() -> list[OptionRootInfo]:
         return await options_reader.list_roots()
 
+    async def _list_option_expirations(root: str) -> list[date]:
+        return await options_reader.list_expirations(root)
+
     async def _get_option_contract(
         collection: str, contract_id: str
     ) -> OptionContractSeries:
@@ -235,6 +245,7 @@ async def client(options_reader: StubOptionsReader):
         return await options_reader.query_chain(*args, **kwargs)
 
     mock_svc.list_option_roots = AsyncMock(side_effect=_list_option_roots)
+    mock_svc.list_option_expirations = AsyncMock(side_effect=_list_option_expirations)
     mock_svc.get_option_contract = AsyncMock(side_effect=_get_option_contract)
     mock_svc.query_options_chain = AsyncMock(side_effect=_query_options_chain)
 
