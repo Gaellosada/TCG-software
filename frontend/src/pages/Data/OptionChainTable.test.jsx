@@ -390,7 +390,7 @@ describe('<OptionChainTable> error / empty states', () => {
 // ---------------------------------------------------------------------------
 
 describe('<OptionChainTable> cycle chip', () => {
-  it('single-cycle chain: no chip rendered', () => {
+  it('single-cycle chain: chip is still rendered (always-on policy)', () => {
     hookState.chainData = {
       root: 'OPT_SP_500',
       date: '2024-03-15',
@@ -402,7 +402,12 @@ describe('<OptionChainTable> cycle chip', () => {
       notes: [],
     };
     const { container } = render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
-    expect(container.querySelector('[data-testid="cycle-chip"]')).toBeNull();
+    const chips = container.querySelectorAll('[data-testid="cycle-chip"]');
+    expect(chips.length).toBe(2);
+    chips.forEach((chip) => {
+      expect(chip.getAttribute('title')).toBe('Monthly');
+      expect(chip.textContent).toBe('M');
+    });
   });
 
   it('multi-cycle chain: chip rendered with 1-letter abbreviation and full title', () => {

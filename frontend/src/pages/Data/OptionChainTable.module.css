@@ -298,9 +298,9 @@
 }
 
 /* Cycle chip — inline 1-letter indicator after the expiration date.
- * Rendered only when the chain mixes multiple cycle types (hasMultipleCycles).
- * Dot separator + muted color keeps it unobtrusive; white-space:nowrap on
- * .colExp prevents the date+chip from wrapping at narrow widths. */
+ * Always rendered when the row has a non-empty cycle.  Dot separator +
+ * muted color keeps it unobtrusive; white-space:nowrap on .colExp
+ * prevents the date+chip from wrapping at narrow widths. */
 .cycleChip {
   display: inline-block;
   margin-left: 4px;

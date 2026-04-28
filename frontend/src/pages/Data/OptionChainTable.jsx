@@ -123,13 +123,6 @@ function mergeRows(rows) {
 function MergedChainTable({ rows, collection, onRowClick }) {
   const merged = useMemo(() => mergeRows(rows), [rows]);
 
-  // Render cycle chips only when the visible chain mixes 2+ distinct non-empty
-  // cycles — single-cycle ETFs / clean roots stay clutter-free.
-  const hasMultipleCycles = useMemo(
-    () => new Set(rows.map((r) => r.expiration_cycle).filter(Boolean)).size >= 2,
-    [rows],
-  );
-
   const handleRowClick = (e, entry) => {
     if (!onRowClick) return;
     const td = e.target.closest('td');
@@ -189,7 +182,7 @@ function MergedChainTable({ rows, collection, onRowClick }) {
               >
                 <td className={styles.colExp}>
                   {entry.expiration}
-                  {hasMultipleCycles && entry.expiration_cycle && (
+                  {entry.expiration_cycle && (
                     <span
                       className={styles.cycleChip}
                       title={entry.expiration_cycle}
