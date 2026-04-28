@@ -399,3 +399,99 @@ class TestPeekLastTradeDate:
         from tcg.data.options.reader import _peek_last_trade_date
 
         assert await _peek_last_trade_date(_StubCollection([])) is None
+
+
+# ---------------------------------------------------------------------------
+# _find_document — compound `_id` lookup must be field-order independent
+# ---------------------------------------------------------------------------
+
+
+class _IdLookupStubCollection:
+    """Mimics MongoDB's two `_id` lookup modes:
+
+    * ``find_one({"_id": <dict>})`` — byte-wise BSON equality, so
+      ``{"a": 1, "b": 2}`` only matches a stored ``_id`` whose fields were
+      written in the same order. We model that as ordered-pair equality.
+    * ``find_one({"_id.<field>": v, ...})`` — sub-field equality, which is
+      order-independent and relies on the dotted field-path index.
+    """
+
+    def __init__(self, doc: dict) -> None:
+        self._doc = doc
+
+    async def find_one(self, query):
+        if "_id" in query and len(query) == 1:
+            target = query["_id"]
+            stored = self._doc["_id"]
+            if isinstance(target, dict) and isinstance(stored, dict):
+                if list(target.items()) == list(stored.items()):
+                    return self._doc
+                return None
+            if target == stored:
+                return self._doc
+            return None
+
+        if all(k.startswith("_id.") for k in query):
+            stored_id = self._doc.get("_id")
+            if not isinstance(stored_id, dict):
+                return None
+            for k, v in query.items():
+                sub = k[len("_id.") :]
+                if stored_id.get(sub) != v:
+                    return None
+            return self._doc
+
+        return None
+
+
+class TestFindDocumentCompoundId:
+    """Regression: serialize_doc_id sorts keys alphabetically, but the
+    stored `_id` is often in a different field order. Looking up via
+    ``{"_id": <reconstructed_dict>}`` therefore misses the doc because
+    Mongo's BSON equality is byte-wise. ``_find_document`` must use
+    sub-field queries when the candidate is a dict.
+    """
+
+    @pytest.mark.asyncio
+    async def test_compound_id_in_non_alphabetical_order_is_found(self):
+        from tcg.data.options.reader import MongoOptionsDataReader
+        from tcg.data._mongo.helpers import serialize_doc_id
+
+        # Stored _id has internalSymbol BEFORE expirationCycle (matches the
+        # live OPT_SP_500 layout we observed). serialize_doc_id will sort
+        # to alphabetical order, so a naive `{"_id": <round-tripped dict>}`
+        # query reconstructs the dict in the wrong order and would miss.
+        stored_id = {
+            "internalSymbol": "OPT_FUT_SP_500_EMINI_20240315_5000_C",
+            "expirationCycle": "M",
+        }
+        doc = {"_id": stored_id, "expiration": 20240315, "strike": 5000.0}
+        coll = _IdLookupStubCollection(doc)
+
+        contract_id = serialize_doc_id(stored_id)
+        # Sanity: alphabetical order means expirationCycle comes first in
+        # the serialized form, opposite to how the doc was stored.
+        assert contract_id.startswith("expirationCycle=")
+
+        reader = MongoOptionsDataReader.__new__(MongoOptionsDataReader)
+        result = await reader._find_document(coll, contract_id)
+        assert result is not None
+        assert result["_id"] is stored_id
+
+    @pytest.mark.asyncio
+    async def test_unknown_contract_id_returns_none(self):
+        from tcg.data.options.reader import MongoOptionsDataReader
+
+        doc = {
+            "_id": {
+                "internalSymbol": "OPT_FUT_SP_500_EMINI_20240315_5000_C",
+                "expirationCycle": "M",
+            },
+        }
+        coll = _IdLookupStubCollection(doc)
+
+        reader = MongoOptionsDataReader.__new__(MongoOptionsDataReader)
+        result = await reader._find_document(
+            coll, "expirationCycle=M|internalSymbol=DOES_NOT_EXIST"
+        )
+        assert result is None

@@ -226,7 +226,20 @@ class MongoOptionsDataReader:
         contract_id: str,
     ) -> dict[str, Any] | None:
         for candidate in deserialize_doc_id(contract_id):
-            doc = await coll.find_one({"_id": candidate})
+            if isinstance(candidate, dict):
+                # MongoDB compound `_id` equality is byte-wise on BSON, so
+                # `{a:x, b:y}` does not equal `{b:y, a:x}` when looked up
+                # via `{"_id": <dict>}`. `serialize_doc_id` sorts keys
+                # alphabetically and `deserialize_doc_id` reconstructs the
+                # dict in that same order, but the stored _id is in
+                # whatever field order the document was written with —
+                # often not alphabetical. Querying by sub-fields is
+                # order-independent and uses the `_id.<field>` index path
+                # when present.
+                query = {f"_id.{k}": v for k, v in candidate.items()}
+                doc = await coll.find_one(query)
+            else:
+                doc = await coll.find_one({"_id": candidate})
             if doc is not None:
                 return doc
         return None
