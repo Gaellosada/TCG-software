@@ -35,6 +35,10 @@ vi.mock('./useOptionsChain', () => ({
 vi.mock('../../api/options', () => ({
   getOptionChain: vi.fn(),
   getOptionContract: vi.fn(),
+  getOptionExpirations: vi.fn().mockResolvedValue({
+    root: 'OPT_SP_500',
+    expirations: ['2024-04-19', '2024-05-17', '2024-06-21'],
+  }),
 }));
 
 // Import AFTER vi.mock so the stub is wired.
@@ -339,7 +343,10 @@ describe('<OptionChainTable> row click', () => {
 });
 
 describe('<OptionChainTable> verification-pending banner', () => {
-  it('appears for OPT_T_NOTE_10_Y root', () => {
+  it('is intentionally suppressed even on unverified roots', () => {
+    // The strike-factor banner was removed from the chain table; even
+    // for the historically-unverified roots (OPT_T_NOTE_10_Y, etc.) we
+    // should NOT surface the warning.
     hookState.filters = buildFilters({ root: 'OPT_T_NOTE_10_Y' });
     hookState.chainData = {
       root: 'OPT_T_NOTE_10_Y',
@@ -350,20 +357,8 @@ describe('<OptionChainTable> verification-pending banner', () => {
     };
     render(<OptionChainTable root="OPT_T_NOTE_10_Y" onRowClick={() => {}} />);
     expect(
-      screen.getByText(/strike factor verification pending/i),
-    ).toBeTruthy();
-  });
-
-  it('does not appear for OPT_SP_500 root', () => {
-    hookState.chainData = {
-      root: 'OPT_SP_500',
-      date: '2024-03-15',
-      underlying_price: stored(5500),
-      rows: [makeRow()],
-      notes: [],
-    };
-    render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
-    expect(screen.queryByText(/strike factor verification pending/i)).toBeNull();
+      screen.queryByText(/strike factor verification pending/i),
+    ).toBeNull();
   });
 });
 

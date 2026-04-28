@@ -228,14 +228,6 @@ function CategoryBrowser({ selected, onSelect }) {
                         {root.has_greeks && (
                           <span className={styles.greeksBadge}>Greeks</span>
                         )}
-                        {root.strike_factor_verified === false && (
-                          <span
-                            className={styles.verificationBadge}
-                            title="Strike factor verification pending; some bond/rate option strikes may display at the wrong scale until verified."
-                          >
-                            Verification pending
-                          </span>
-                        )}
                       </span>
                     </button>
                   ))

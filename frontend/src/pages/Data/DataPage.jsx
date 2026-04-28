@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
 import ContinuousChart from './ContinuousChart';
 import OptionChainTable from './OptionChainTable';
 import ContractDetailPanel from './ContractDetailPanel';
 import ChainSnapshotPanel from './ChainSnapshotPanel';
-import MultiExpirationSmilePanel from './MultiExpirationSmilePanel';
+import { useOptionExpirations } from './useOptionExpirations';
 import styles from './DataPage.module.css';
 
 /**
@@ -20,9 +20,9 @@ function todayISO() {
 }
 
 const OPTIONS_TABS = [
-  { key: 'chain', label: 'Chain' },
+  { key: 'chain', label: 'Contracts' },
+  { key: 'continuous', label: 'Continuous' },
   { key: 'snapshot', label: 'Smile' },
-  { key: 'multi', label: 'Multi-smile' },
 ];
 
 function DataPage() {
@@ -36,42 +36,47 @@ function DataPage() {
   const [optionsView, setOptionsView] = useState('chain');
   const [optionsDate, setOptionsDate] = useState(todayISO);
   const [optionsType, setOptionsType] = useState('C');
-  // snapshot tab — single expiration text input
+  // snapshot tab — single expiration date input
   const [optionsExpiration, setOptionsExpiration] = useState('');
-  // multi-smile tab — list of up to 8 expiration strings; user types one at a
-  // time into a staging input, then clicks "Add".
-  const [optionsExpirations, setOptionsExpirations] = useState([]);
-  const [multiExpirationInput, setMultiExpirationInput] = useState('');
+
+  // Distinct expirations for the picked option root — drives the Smile
+  // tab's expiration <select> so users can only pick days that actually
+  // have contracts. Null root → empty list.
+  const optionRoot =
+    selected && selected.type === 'option' ? selected.collection : null;
+  const { expirations: rootExpirations, loading: rootExpirationsLoading } =
+    useOptionExpirations(optionRoot);
+
+  // Latest expiration on top of the dropdown.
+  const rootExpirationOptions = useMemo(
+    () => [...rootExpirations].reverse(),
+    [rootExpirations],
+  );
+
+  // Default the Smile expiration to the LATEST available date once the
+  // list loads (or when the user picks a different root). User can change
+  // it via the dropdown.
+  useEffect(() => {
+    if (rootExpirations.length === 0) return;
+    if (
+      !optionsExpiration ||
+      !rootExpirations.includes(optionsExpiration)
+    ) {
+      setOptionsExpiration(rootExpirations[rootExpirations.length - 1]);
+    }
+  }, [rootExpirations, optionsExpiration]);
 
   // Reset selectedContract and view whenever the user picks a different
   // options root. Re-anchor the date controls on the root's last trade
-  // date so Snapshot / Multi-smile tabs default to a date with data.
+  // date so the Snapshot tab defaults to a date with data.
   useEffect(() => {
     setSelectedContract(null);
     setOptionsView('chain');
-    setOptionsExpirations([]);
-    setMultiExpirationInput('');
     setOptionsExpiration('');
     if (selected?.type === 'option' && selected.last_trade_date) {
       setOptionsDate(selected.last_trade_date);
     }
   }, [selected?.collection]);
-
-  // ---------------------------------------------------------------------------
-  // Multi-smile expiration helpers
-  // ---------------------------------------------------------------------------
-  function addMultiExpiration() {
-    const val = multiExpirationInput.trim();
-    if (!val) return;
-    if (optionsExpirations.length >= 8) return;
-    if (optionsExpirations.includes(val)) return;
-    setOptionsExpirations((prev) => [...prev, val]);
-    setMultiExpirationInput('');
-  }
-
-  function removeMultiExpiration(exp) {
-    setOptionsExpirations((prev) => prev.filter((e) => e !== exp));
-  }
 
   function renderRight() {
     if (!selected) {
@@ -128,7 +133,13 @@ function DataPage() {
             {/* -------- Chain tab (default) -------- */}
             {optionsView === 'chain' && (
               <div className={styles.optionsContainer}>
+                {/* Keyed by collection so switching roots remounts the
+                    component: old chain rows wiped immediately, new
+                    initialFilters applied (last_trade_date differs per
+                    root), and the loading state is visible from the first
+                    render — no stale rows from the previous root. */}
                 <OptionChainTable
+                  key={selected.collection}
                   root={selected.collection}
                   onRowClick={(contract) => setSelectedContract(contract)}
                   initialFilters={{
@@ -171,17 +182,27 @@ function DataPage() {
                     </select>
                   </label>
                   <label className={styles.filterLabel}>
-                    Expiration (YYYY-MM-DD)
-                    <input
-                      type="text"
+                    Expiration
+                    <select
                       className={styles.filterInput}
-                      placeholder="e.g. 2024-12-20"
-                      value={optionsExpiration}
+                      value={
+                        optionsExpiration && rootExpirations.includes(optionsExpiration)
+                          ? optionsExpiration
+                          : ''
+                      }
                       onChange={(e) => setOptionsExpiration(e.target.value)}
-                    />
+                      disabled={rootExpirationsLoading || rootExpirations.length === 0}
+                    >
+                      <option value="">
+                        {rootExpirationsLoading ? 'Loading…' : 'Pick an expiration'}
+                      </option>
+                      {rootExpirationOptions.map((exp) => (
+                        <option key={exp} value={exp}>{exp}</option>
+                      ))}
+                    </select>
                   </label>
                 </div>
-                {optionsExpiration.trim() ? (
+                {optionsExpiration.trim() && rootExpirations.includes(optionsExpiration.trim()) ? (
                   <ChainSnapshotPanel
                     root={selected.collection}
                     date={optionsDate}
@@ -191,90 +212,30 @@ function DataPage() {
                   />
                 ) : (
                   <div className={styles.snapshotEmpty} data-testid="snapshot-empty">
-                    Enter an expiration date above (YYYY-MM-DD) to load the smile.
+                    {rootExpirationsLoading
+                      ? 'Loading available expirations…'
+                      : rootExpirations.length === 0
+                      ? 'No expirations available for this root.'
+                      : 'Pick an expiration above to load the smile.'}
                   </div>
                 )}
               </div>
             )}
 
-            {/* -------- Multi-smile tab -------- */}
-            {optionsView === 'multi' && (
+            {/* -------- Continuous tab (placeholder — coming soon) -------- */}
+            {optionsView === 'continuous' && (
               <div className={styles.snapshotView}>
-                <div className={styles.snapshotFilters}>
-                  <label className={styles.filterLabel}>
-                    Date
-                    <input
-                      type="date"
-                      className={styles.filterInput}
-                      value={optionsDate}
-                      onChange={(e) => setOptionsDate(e.target.value)}
-                    />
-                  </label>
-                  <label className={styles.filterLabel}>
-                    Type
-                    <select
-                      className={styles.filterInput}
-                      value={optionsType}
-                      onChange={(e) => setOptionsType(e.target.value)}
-                    >
-                      <option value="C">Calls</option>
-                      <option value="P">Puts</option>
-                    </select>
-                  </label>
-                  <div className={styles.filterLabel}>
-                    Add expiration (YYYY-MM-DD)
-                    <div className={styles.expirationInputRow}>
-                      <input
-                        type="text"
-                        className={styles.filterInput}
-                        placeholder="e.g. 2024-12-20"
-                        value={multiExpirationInput}
-                        onChange={(e) => setMultiExpirationInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') addMultiExpiration();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className={styles.addButton}
-                        onClick={addMultiExpiration}
-                        disabled={optionsExpirations.length >= 8}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    {optionsExpirations.length > 0 && (
-                      <ul className={styles.expirationList}>
-                        {optionsExpirations.map((exp) => (
-                          <li key={exp} className={styles.expirationTag}>
-                            {exp}
-                            <button
-                              type="button"
-                              className={styles.removeButton}
-                              onClick={() => removeMultiExpiration(exp)}
-                              aria-label={`Remove ${exp}`}
-                            >
-                              ×
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                <div className={styles.snapshotEmpty} data-testid="continuous-empty">
+                  <div>
+                    <strong>Continuous options series — coming soon</strong>
+                    <p style={{ marginTop: 8, fontStyle: 'normal', maxWidth: 480 }}>
+                      Stitch successive expirations into a single continuous
+                      price series by rolling at chosen criteria (DTE,
+                      |Δ| target, or calendar) — same idea as the futures
+                      continuous chart, applied to options.
+                    </p>
                   </div>
                 </div>
-                {optionsExpirations.length > 0 ? (
-                  <MultiExpirationSmilePanel
-                    root={selected.collection}
-                    date={optionsDate}
-                    type={optionsType}
-                    expirations={optionsExpirations}
-                    onClose={() => setOptionsView('chain')}
-                  />
-                ) : (
-                  <div className={styles.snapshotEmpty} data-testid="multi-empty">
-                    Add at least one expiration date above to load the smile.
-                  </div>
-                )}
               </div>
             )}
           </div>

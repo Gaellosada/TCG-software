@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import useAsync from '../../hooks/useAsync';
 import Chart from '../../components/Chart';
 import { getChainSnapshot } from '../../api/options';
+import { createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
 import styles from './ChainSnapshotPanel.module.css';
 
 // ---------------------------------------------------------------------------
@@ -62,20 +63,22 @@ export default function ChainSnapshotPanel({
     [root, date, type, expiration, field],
   );
 
-  const traces = useMemo(() => {
+  const { traces, hasAtmLine } = useMemo(() => {
     if (!data || !Array.isArray(data.series) || data.series.length === 0) {
-      return [];
+      return { traces: [], hasAtmLine: false };
     }
     // Single expiration: take the first (and only) series entry.
     const series = data.series[0];
-    if (!series || !Array.isArray(series.points)) return [];
+    if (!series || !Array.isArray(series.points)) {
+      return { traces: [], hasAtmLine: false };
+    }
 
     const { xs, ys } = buildXY(series.points, xAxis);
 
     const xLabel = xAxis === 'K_over_S' ? 'K/S' : 'Strike';
     const yLabel = field === 'delta' ? 'Delta' : 'IV';
 
-    return [
+    const traceList = [
       {
         x: xs,
         y: ys,
@@ -83,11 +86,46 @@ export default function ChainSnapshotPanel({
         mode: 'lines+markers',
         name: yLabel,
         connectgaps: false,
-        line: { width: 1.5 },
-        marker: { size: 5 },
+        // Line drawn at 0.5 alpha so the markers (actual data points)
+        // dominate visually and the smile curve reads as a guide rather
+        // than the primary content.
+        line: { width: 1.5, color: 'rgba(14, 165, 233, 0.5)' },
+        marker: { size: 5, color: '#0ea5e9' },
         hovertemplate: `${xLabel}: %{x}<br>${yLabel}: %{y:.4f}<extra></extra>`,
       },
     ];
+
+    // ATM marker — vertical line where the option is exactly ATM.
+    //   K/S axis: K = S → x = 1.
+    //   Strike axis: x = S (the underlying price for that day).
+    const underlyingValue =
+      data.underlying_price && data.underlying_price.value != null
+        ? Number(data.underlying_price.value)
+        : null;
+    let atmX = null;
+    if (xAxis === 'K_over_S') {
+      atmX = 1;
+    } else if (underlyingValue != null) {
+      atmX = underlyingValue;
+    }
+    let atmAdded = false;
+    if (atmX != null) {
+      const atmLabel =
+        xAxis === 'K_over_S'
+          ? 'ATM (K = S)'
+          : `ATM (S = ${atmX.toFixed(2)})`;
+      traceList.push(
+        createVerticalLineTrace([atmX], {
+          name: atmLabel,
+          color: '#f59e0b',
+          dash: 'dash',
+          yaxisKey: 'y2',
+        }),
+      );
+      atmAdded = true;
+    }
+
+    return { traces: traceList, hasAtmLine: atmAdded };
   }, [data, xAxis, field]);
 
   const layoutOverrides = useMemo(() => ({
@@ -97,9 +135,16 @@ export default function ChainSnapshotPanel({
         : '',
       font: { size: 13 },
     },
-    xaxis: { title: { text: xAxis === 'K_over_S' ? 'K / S' : 'Strike', font: { size: 11 } } },
+    xaxis: {
+      title: { text: xAxis === 'K_over_S' ? 'K / S' : 'Strike', font: { size: 11 } },
+      // Override the global default (type='date' in chartTheme.buildBaseLayout)
+      // — this chart's x-axis is numeric (strike or K/S), and on K/S the
+      // small fractional values look nonsensical as dates.
+      type: 'linear',
+    },
     yaxis: { title: { text: field === 'delta' ? 'Delta' : 'IV', font: { size: 11 } } },
-  }), [root, date, expiration, field, xAxis]);
+    ...(hasAtmLine ? { yaxis2: hiddenOverlayAxis() } : {}),
+  }), [root, date, expiration, field, xAxis, hasAtmLine]);
 
   return (
     <div className={styles.container}>
@@ -107,9 +152,6 @@ export default function ChainSnapshotPanel({
         <h2 className={styles.title}>
           Smile Snapshot
         </h2>
-        <button type="button" className={styles.closeButton} onClick={onClose}>
-          Close
-        </button>
       </div>
 
       <div className={styles.controls}>

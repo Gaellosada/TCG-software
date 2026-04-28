@@ -47,14 +47,18 @@
 
 .optionsContainer {
   display: flex;
-  gap: 16px;
+  flex-direction: column;
+  gap: 12px;
   flex: 1;
-  min-height: 0; /* prevent flex overflow */
+  min-height: 0; /* allow children to shrink below content size */
+  overflow: hidden; /* belt-and-braces: each child has its own scroll */
 }
 
-/* OptionChainTable takes remaining space; when ContractDetailPanel is present
-   it is constrained to 40% of the container via ContractDetailPanel's own CSS.
-   OptionChainTable should fill the remainder by default (flex: 1). */
+/* Stacked layout: OptionChainTable on top, ContractDetailPanel underneath
+   when a contract is selected. Each pane has its own internal scrolling
+   (chain via .tableWrapper, detail via .sidebar + .chartCol), so the
+   table and the contract chart scroll independently. Both children carry
+   flex: 1 so they split the vertical space evenly. */
 
 /* ---------------------------------------------------------------------------
    Tier-2 view switcher (tab strip + body)
@@ -122,8 +126,7 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Snapshot / multi-smile filter strip
-   Phase-1 ergonomics: plain text inputs for expiration dates.
+   Snapshot tab — filter strip + chart container.
    --------------------------------------------------------------------------- */
 
 .snapshotView {
@@ -145,95 +148,41 @@
   text-align: center;
 }
 
+/* Filter strip on the Smile tab — visually the same "card" shape as the
+ * Contracts page filter block (see OptionChainTable.module.css `.filters`).
+ * Card sits in a small outer margin so it gets breathing room from the
+ * panel below; ChainSnapshotPanel keeps its own internal padding. */
 .snapshotFilters {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-primary);
+  align-items: center;
+  padding: 10px 12px;
+  margin: 16px 20px 0;
+  background: var(--bg-surface);
+  border-radius: 6px;
   flex-shrink: 0;
-  background: var(--bg-secondary);
-  align-items: flex-start;
 }
 
+/* Mirror OptionChainTable.module.css's filter label / input so the two
+ * pages look identical at the control level. */
 .filterLabel {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.7rem;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--text-muted, var(--text-secondary));
 }
 
 .filterInput {
-  font: inherit;
+  font-family: inherit;
   font-size: 0.8rem;
   padding: 4px 8px;
   border: 1px solid var(--border-primary);
   border-radius: 4px;
-  background: var(--bg-primary, #fff);
+  background: var(--bg-primary);
   color: var(--text-primary);
-  min-width: 130px;
 }
 
-.expirationInputRow {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.addButton {
-  appearance: none;
-  font: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 4px 10px;
-  border: 1px solid var(--border-accent, var(--text-secondary));
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.addButton:hover:not(:disabled) {
-  background: var(--bg-hover, rgba(0, 0, 0, 0.06));
-}
-
-.addButton:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.expirationList {
-  list-style: none;
-  margin: 6px 0 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.expirationTag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.75rem;
-  padding: 2px 6px;
-  background: var(--bg-hover, rgba(0, 0, 0, 0.06));
-  border: 1px solid var(--border-primary);
-  border-radius: 12px;
-  color: var(--text-secondary);
-}
-
-.removeButton {
-  appearance: none;
-  background: none;
-  border: none;
-  padding: 0 2px;
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--text-muted);
-}

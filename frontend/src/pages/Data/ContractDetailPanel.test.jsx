@@ -80,7 +80,9 @@ function missingCR() {
 function makeContract(overrides = {}) {
   return {
     collection: 'OPT_SP_500',
-    contract_id: 'SPY_240419C00500000|M',
+    // Default matches the `instrumentId` most tests pass — needed because
+    // the panel now hides data whose contract_id doesn't equal the prop.
+    contract_id: 'X|M',
     root_underlying: 'OPT_SP_500',
     underlying_ref: 'SPY',
     underlying_symbol: 'SPY',
@@ -147,7 +149,12 @@ afterEach(() => {
 describe('<ContractDetailPanel> metadata sidebar', () => {
   it('populates strike, type, expiration, root, provider from contract', () => {
     seriesState.data = {
-      contract: makeContract({ strike: 5000, type: 'P', expiration: '2024-04-19' }),
+      contract: makeContract({
+        contract_id: 'SPY_240419C00500000|M',
+        strike: 5000,
+        type: 'P',
+        expiration: '2024-04-19',
+      }),
       rows: [makeRow('2024-03-01'), makeRow('2024-03-15')],
     };
     render(
@@ -164,27 +171,17 @@ describe('<ContractDetailPanel> metadata sidebar', () => {
     expect(screen.getByText('OPT_SP_500')).toBeTruthy();
     expect(screen.getByText('IVOLATILITY')).toBeTruthy();
     expect(screen.getByText(/2024-03-01.*2024-03-15/)).toBeTruthy();
-    expect(screen.getByText('Verified')).toBeTruthy();
   });
 
-  it('shows pending badge when strike_factor_verified is false', () => {
+  it('does not surface the strike-factor verification banner or badge', () => {
+    // Verification UI was intentionally removed from the right panel; the
+    // sidebar should not carry "Verified" / "Pending" labels and the
+    // banner should not render even for unverified roots.
     seriesState.data = {
-      contract: makeContract({ strike_factor_verified: false }),
-      rows: [makeRow('2024-03-01')],
-    };
-    render(
-      <ContractDetailPanel
-        collection="OPT_SP_500"
-        instrumentId="X|M"
-        onClose={() => {}}
-      />,
-    );
-    expect(screen.getByText('Pending')).toBeTruthy();
-  });
-
-  it('shows the verification-pending banner for OPT_T_NOTE_10_Y root', () => {
-    seriesState.data = {
-      contract: makeContract({ root_underlying: 'OPT_T_NOTE_10_Y' }),
+      contract: makeContract({
+        root_underlying: 'OPT_T_NOTE_10_Y',
+        strike_factor_verified: false,
+      }),
       rows: [makeRow('2024-03-01')],
     };
     render(
@@ -194,7 +191,9 @@ describe('<ContractDetailPanel> metadata sidebar', () => {
         onClose={() => {}}
       />,
     );
-    expect(screen.getByText(/strike factor verification pending/i)).toBeTruthy();
+    expect(screen.queryByText('Verified')).toBeNull();
+    expect(screen.queryByText('Pending')).toBeNull();
+    expect(screen.queryByText(/strike factor verification pending/i)).toBeNull();
   });
 });
 
@@ -334,6 +333,28 @@ describe('<ContractDetailPanel> loading / error states', () => {
     );
     expect(screen.getByText(/failed to load contract/i)).toBeTruthy();
     expect(screen.getByText(/boom/)).toBeTruthy();
+  });
+
+  it('hides stale data when instrumentId changed before the new fetch lands', () => {
+    // Simulate the transient frame between clicking a new contract and the
+    // hook's useEffect-based reset firing: data still belongs to the old
+    // contract while instrumentId already points at the new one. The panel
+    // must hide the body and surface the loading state so the user does
+    // not see the previous chart while they're already on the new one.
+    seriesState.data = {
+      contract: makeContract({ contract_id: 'OLD|M' }),
+      rows: [makeRow('2024-03-01')],
+    };
+    seriesState.loading = false;
+    render(
+      <ContractDetailPanel
+        collection="OPT_SP_500"
+        instrumentId="NEW|M"
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText(/loading contract series/i)).toBeTruthy();
+    expect(chartProps.length).toBe(0);
   });
 });
 

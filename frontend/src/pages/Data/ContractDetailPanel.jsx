@@ -4,13 +4,6 @@ import { useContractSeries } from './useContractSeries';
 import { TRACE_COLORS, createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
 import styles from './ContractDetailPanel.module.css';
 
-const VERIFICATION_PENDING_ROOTS = new Set([
-  'OPT_T_NOTE_10_Y',
-  'OPT_T_BOND',
-  'OPT_EURUSD',
-  'OPT_JPYUSD',
-]);
-
 const AMERICAN_EXERCISE_ROOTS = new Set(['OPT_T_NOTE_10_Y', 'OPT_T_BOND']);
 
 const GREEK_DEFS = [
@@ -192,8 +185,18 @@ export default function ContractDetailPanel({ collection, instrumentId, onClose 
     computeMissing,
   });
 
-  const contract = data && data.contract ? data.contract : null;
-  const rows = data && Array.isArray(data.rows) ? data.rows : [];
+  // useAsync resets state inside useEffect, which runs AFTER render — so the
+  // first render after `instrumentId` changes still carries the old data and
+  // would briefly paint the previous contract's chart. Detect that mismatch
+  // here and treat the panel as loading until the new fetch lands. Without
+  // this guard, switching contracts shows the old chart for one frame, which
+  // is confusing when the user has already moved on.
+  const dataIsStale =
+    data && data.contract && data.contract.contract_id !== instrumentId;
+
+  const contract = !dataIsStale && data && data.contract ? data.contract : null;
+  const rows = !dataIsStale && data && Array.isArray(data.rows) ? data.rows : [];
+  const showLoading = loading || dataIsStale;
 
   const { traces, layoutOverrides } = useMemo(() => {
     if (!rows || rows.length === 0) {
@@ -305,9 +308,6 @@ export default function ContractDetailPanel({ collection, instrumentId, onClose 
 
   const dte = contract ? daysBetween(contract.expiration, todayISO()) : null;
 
-  const showVerificationBanner =
-    contract && VERIFICATION_PENDING_ROOTS.has(contract.root_underlying || collection);
-
   const showAmericanNote =
     contract && AMERICAN_EXERCISE_ROOTS.has(contract.root_underlying || collection);
 
@@ -324,13 +324,6 @@ export default function ContractDetailPanel({ collection, instrumentId, onClose 
           Close
         </button>
       </div>
-
-      {showVerificationBanner && (
-        <div className={styles.banner} role="alert">
-          Strike factor verification pending for {contract.root_underlying || collection}.
-          Contract data may be displayed at the wrong scale until verified.
-        </div>
-      )}
 
       <div className={styles.controls}>
         <label
@@ -369,14 +362,14 @@ export default function ContractDetailPanel({ collection, instrumentId, onClose 
         </label>
       </div>
 
-      {loading && <div className={styles.loading}>Loading contract series…</div>}
+      {showLoading && <div className={styles.loading}>Loading contract series…</div>}
       {error && (
         <div className={styles.error}>
           Failed to load contract: {error.message || String(error)}
         </div>
       )}
 
-      {!loading && !error && data && (
+      {!showLoading && !error && data && (
         <div className={styles.body}>
           <div className={styles.chartCol}>
             <div className={styles.chartCard}>
@@ -438,21 +431,6 @@ export default function ContractDetailPanel({ collection, instrumentId, onClose 
             <div className={styles.metaRow}>
               <span className={styles.metaKey}>Data range</span>
               <span className={styles.metaValue}>{dataRange}</span>
-            </div>
-            <div className={styles.metaRow}>
-              <span className={styles.metaKey}>Strike factor</span>
-              <span className={styles.metaValue}>
-                {contract && contract.strike_factor_verified ? (
-                  <span className={styles.badgeOk}>Verified</span>
-                ) : (
-                  <span
-                    className={styles.badgeWarn}
-                    title="Strike factor verification pending — values may be at wrong scale."
-                  >
-                    Pending
-                  </span>
-                )}
-              </span>
             </div>
             {showAmericanNote && (
               <div className={styles.metaRow}>

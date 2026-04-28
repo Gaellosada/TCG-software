@@ -40,6 +40,17 @@ export async function getOptionRoots() {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. List distinct expirations for a root
+//     GET /api/options/expirations?root=OPT_SP_500
+//     Returns: { root, expirations: ['YYYY-MM-DD', ...] }
+// ---------------------------------------------------------------------------
+
+export async function getOptionExpirations(root) {
+  const qp = new URLSearchParams({ root: String(root) });
+  return fetchClassified(`/options/expirations?${qp}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2. Chain query
 //    GET /api/options/chain
 //    Returns: ChainResponse

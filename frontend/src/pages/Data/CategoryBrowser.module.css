@@ -216,14 +216,3 @@
   white-space: nowrap;
 }
 
-.verificationBadge {
-  font-size: 0.65rem;
-  font-weight: 500;
-  color: #f59e0b;
-  background: rgba(245, 158, 11, 0.12);
-  border-radius: 3px;
-  padding: 1px 5px;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-  cursor: help;
-}

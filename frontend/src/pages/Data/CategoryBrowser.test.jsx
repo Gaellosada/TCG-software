@@ -151,49 +151,23 @@ describe('Options expansion', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Verification-pending badge for strike_factor_verified=false
+// 3. Verification-pending badge — intentionally suppressed
 // ---------------------------------------------------------------------------
 
 describe('Verification-pending badge', () => {
-  it('shows badge only for roots with strike_factor_verified=false', async () => {
+  it('is never rendered, even when a root has strike_factor_verified=false', async () => {
     await renderAndWait();
 
     const optionsBtn = screen.getByRole('button', { name: /options/i });
     fireEvent.click(optionsBtn);
 
     await waitFor(() => {
-      const badges = screen.getAllByText('Verification pending');
-      // Only OPT_T_NOTE_10_Y has strike_factor_verified=false
-      expect(badges.length).toBe(1);
-    });
-  });
-
-  it('badge carries correct title attribute for hover tooltip', async () => {
-    await renderAndWait();
-
-    const optionsBtn = screen.getByRole('button', { name: /options/i });
-    fireEvent.click(optionsBtn);
-
-    await waitFor(() => {
-      const badge = screen.getByText('Verification pending');
-      expect(badge.getAttribute('title')).toContain('Strike factor verification pending');
-      expect(badge.getAttribute('title')).toContain('bond/rate option strikes');
-    });
-  });
-
-  it('does NOT show badge for roots with strike_factor_verified=true', async () => {
-    await renderAndWait();
-
-    const optionsBtn = screen.getByRole('button', { name: /options/i });
-    fireEvent.click(optionsBtn);
-
-    await waitFor(() => {
-      expect(screen.getByText('SP 500')).toBeDefined();
+      // OPT_T_NOTE_10_Y in MOCK_ROOTS has strike_factor_verified=false but
+      // we no longer surface the warning badge.
+      expect(screen.getByText('T-Note 10Y')).toBeDefined();
     });
 
-    // One badge only (for T-Note, not SP500 or Gold)
-    const badges = screen.queryAllByText('Verification pending');
-    expect(badges.length).toBe(1);
+    expect(screen.queryAllByText('Verification pending').length).toBe(0);
   });
 });
 

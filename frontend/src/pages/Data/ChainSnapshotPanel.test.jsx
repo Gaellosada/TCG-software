@@ -132,7 +132,7 @@ describe('<ChainSnapshotPanel> basic render', () => {
     expect(screen.getByText(/network down/)).toBeTruthy();
   });
 
-  it('renders the Chart with one trace on successful response', async () => {
+  it('renders the Chart with the smile trace and an ATM marker', async () => {
     mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
     await act(async () => {
       render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
@@ -141,8 +141,10 @@ describe('<ChainSnapshotPanel> basic render', () => {
     expect(chartCalls.length).toBeGreaterThan(0);
     const last = chartCalls[chartCalls.length - 1];
     expect(Array.isArray(last.traces)).toBe(true);
-    expect(last.traces).toHaveLength(1);
+    // 1 smile trace + 1 ATM vertical-line trace.
+    expect(last.traces).toHaveLength(2);
     expect(last.traces[0].name).toBe('IV');
+    expect(last.traces[1].name).toMatch(/^ATM/);
   });
 
   it('trace has mode lines+markers and connectgaps false', async () => {
@@ -247,6 +249,31 @@ describe('<ChainSnapshotPanel> xAxis toggle (strike → K/S)', () => {
     const last = chartCalls[chartCalls.length - 1];
     expect(last.traces[0].x).toEqual([0.89, 0.91, 0.93]);
   });
+
+  it('ATM marker tracks underlying price on Strike axis, snaps to 1 on K/S', async () => {
+    mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
+    await act(async () => {
+      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
+    });
+
+    // Strike axis (default): ATM marker x sits at the underlying price.
+    // makeResponse fixture sets underlying_price.value = 5500.
+    let last = chartCalls[chartCalls.length - 1];
+    let atm = last.traces[1];
+    expect(atm.name).toMatch(/^ATM/);
+    expect(atm.x[0]).toBe(5500);
+    expect(atm.x[1]).toBe(5500);
+
+    // Toggle to K/S — ATM marker collapses to x=1 regardless of S.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /K\/S/i }));
+    });
+    last = chartCalls[chartCalls.length - 1];
+    atm = last.traces[1];
+    expect(atm.name).toMatch(/^ATM/);
+    expect(atm.x[0]).toBe(1);
+    expect(atm.x[1]).toBe(1);
+  });
 });
 
 describe('<ChainSnapshotPanel> missing values (connectgaps)', () => {
@@ -269,14 +296,3 @@ describe('<ChainSnapshotPanel> missing values (connectgaps)', () => {
   });
 });
 
-describe('<ChainSnapshotPanel> close button', () => {
-  it('clicking Close calls onClose', async () => {
-    mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
-    const onClose = vi.fn();
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} onClose={onClose} />);
-    });
-    fireEvent.click(screen.getByRole('button', { name: /close/i }));
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-});

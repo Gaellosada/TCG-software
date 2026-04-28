@@ -1,16 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import { useOptionsChain } from './useOptionsChain';
+import { useOptionExpirations } from './useOptionExpirations';
 import styles from './OptionChainTable.module.css';
-
-// Roots whose strike-factor convention is still pending verification
-// per Phase 1A investigation. The chain may be displayed at the wrong scale
-// until a sample-verified factor is committed in `_strike_factor.py`.
-const VERIFICATION_PENDING_ROOTS = new Set([
-  'OPT_T_NOTE_10_Y',
-  'OPT_T_BOND',
-  'OPT_EURUSD',
-  'OPT_JPYUSD',
-]);
 
 // ---------------------------------------------------------------------------
 // Number formatters
@@ -164,32 +155,34 @@ function MergedChainTable({ rows, collection, onRowClick }) {
           <tr>
             <th className={styles.bidQuote}>Bid</th>
             <th>Mid</th>
-            <th className={`${styles.askQuote} ${styles.quoteSepRight}`}>Ask</th>
+            <th className={styles.askQuote}>Ask</th>
             <th>IV</th>
             <th>Δ</th><th>Γ</th><th>Θ</th><th>ν</th><th>OI</th>
             <th className={styles.typeCol} aria-label="Call marker"></th>
             <th className={styles.typeCol} aria-label="Put marker"></th>
             <th className={styles.bidQuote}>Bid</th>
             <th>Mid</th>
-            <th className={`${styles.askQuote} ${styles.quoteSepRight}`}>Ask</th>
+            <th className={styles.askQuote}>Ask</th>
             <th>IV</th>
             <th>Δ</th><th>Γ</th><th>Θ</th><th>ν</th><th>OI</th>
           </tr>
         </thead>
         <tbody>
-          {merged.map((entry) => {
+          {merged.map((entry, idx) => {
             const c = entry.call;
             const p = entry.put;
+            const expChanged =
+              idx > 0 && merged[idx - 1].expiration !== entry.expiration;
             return (
               <tr
                 key={`${entry.expiration}|${entry.strike}`}
-                className={styles.row}
+                className={`${styles.row} ${expChanged ? styles.expChange : ''}`}
                 onClick={(e) => handleRowClick(e, entry)}
               >
                 <td className={styles.colExp}>{entry.expiration}</td>
                 <td data-side="call" className={styles.bidQuote}>{c ? fmt(c.bid, 2) : ''}</td>
                 <td data-side="call">{c ? fmt(c.mid, 2) : ''}</td>
-                <td data-side="call" className={`${styles.askQuote} ${styles.quoteSepRight}`}>{c ? fmt(c.ask, 2) : ''}</td>
+                <td data-side="call" className={`${styles.askQuote} ${styles.thinSepRight}`}>{c ? fmt(c.ask, 2) : ''}</td>
                 <td data-side="call">{c ? <ComputeResultCell result={c.iv} decimals={4} /> : ''}</td>
                 <td data-side="call">{c ? <ComputeResultCell result={c.delta} decimals={4} /> : ''}</td>
                 <td data-side="call">{c ? <ComputeResultCell result={c.gamma} decimals={4} /> : ''}</td>
@@ -198,20 +191,20 @@ function MergedChainTable({ rows, collection, onRowClick }) {
                 <td data-side="call">{c ? fmtInt(c.open_interest) : ''}</td>
                 <td
                   data-side="call"
-                  className={`${styles.typeCol} ${c ? styles.typeCall : ''}`}
+                  className={`${styles.typeCol} ${styles.thinSepLeft} ${c ? styles.typeCall : ''}`}
                 >
                   {c ? 'C' : ''}
                 </td>
                 <td className={styles.colStrike}>{fmt(entry.strike, 2)}</td>
                 <td
                   data-side="put"
-                  className={`${styles.typeCol} ${p ? styles.typePut : ''}`}
+                  className={`${styles.typeCol} ${styles.thinSepRight} ${p ? styles.typePut : ''}`}
                 >
                   {p ? 'P' : ''}
                 </td>
                 <td data-side="put" className={styles.bidQuote}>{p ? fmt(p.bid, 2) : ''}</td>
                 <td data-side="put">{p ? fmt(p.mid, 2) : ''}</td>
-                <td data-side="put" className={`${styles.askQuote} ${styles.quoteSepRight}`}>{p ? fmt(p.ask, 2) : ''}</td>
+                <td data-side="put" className={`${styles.askQuote} ${styles.thinSepRight}`}>{p ? fmt(p.ask, 2) : ''}</td>
                 <td data-side="put">{p ? <ComputeResultCell result={p.iv} decimals={4} /> : ''}</td>
                 <td data-side="put">{p ? <ComputeResultCell result={p.delta} decimals={4} /> : ''}</td>
                 <td data-side="put">{p ? <ComputeResultCell result={p.gamma} decimals={4} /> : ''}</td>
@@ -236,6 +229,7 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
     root,
     initialFilters,
   );
+  const { expirations, loading: expirationsLoading } = useOptionExpirations(root);
 
   // Trigger initial fetch when root changes (mount or root prop update).
   useEffect(() => {
@@ -243,6 +237,32 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
       updateFilters({ root });
     }
   }, [root, filters.root, updateFilters]);
+
+  // Snap min/max to valid contract expirations once the list loads. Without
+  // this, the seeded defaults (last_trade_date for min, last_trade_date+90d
+  // for max) almost never coincide with actual expiration days. Both
+  // default to the LATEST available so the chain opens on the most recent
+  // expiration; the user can broaden the window from there.
+  useEffect(() => {
+    if (!expirations || expirations.length === 0) return;
+    const latest = expirations[expirations.length - 1];
+    const updates = {};
+    if (!filters.expirationMin || !expirations.includes(filters.expirationMin)) {
+      updates.expirationMin = latest;
+    }
+    if (!filters.expirationMax || !expirations.includes(filters.expirationMax)) {
+      updates.expirationMax = latest;
+    }
+    if (Object.keys(updates).length > 0) {
+      updateFilters(updates);
+    }
+  }, [expirations, filters.expirationMin, filters.expirationMax, updateFilters]);
+
+  // Display order: latest expiration on top of the dropdown.
+  const expirationOptions = useMemo(
+    () => [...expirations].reverse(),
+    [expirations],
+  );
 
   // Auto-fetch on mount or filter changes (debounced 200ms).
   useEffect(() => {
@@ -256,12 +276,6 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
   const error = chainData && chainData.error ? chainData.error : null;
   const rows = chainData && !chainData.error && chainData.rows ? chainData.rows : null;
 
-  const showVerificationBanner = useMemo(() => {
-    if (filters.root && VERIFICATION_PENDING_ROOTS.has(filters.root)) return true;
-    if (rows && rows.some((r) => r && r.strike_factor_verified === false)) return true;
-    return false;
-  }, [filters.root, rows]);
-
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -270,16 +284,12 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
           <span className={styles.meta}>
             {(rows || []).length.toLocaleString()} contracts
             {chainData.date ? ` · as of ${chainData.date}` : ''}
+            {chainData.underlying_price &&
+              chainData.underlying_price.value != null &&
+              ` · Underlying price (S) on ${chainData.date}: ${Number(chainData.underlying_price.value).toFixed(2)}`}
           </span>
         )}
       </div>
-
-      {showVerificationBanner && (
-        <div className={styles.banner} role="alert">
-          Strike factor verification pending for {filters.root}. Contract data may be
-          displayed at the wrong scale until verified.
-        </div>
-      )}
 
       <div className={styles.filters}>
         <label className={styles.filterLabel}>
@@ -292,34 +302,46 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
           />
         </label>
         <label className={styles.filterLabel}>
-          Type
+          Expiration min
           <select
             className={styles.filterSelect}
-            value={filters.type}
-            onChange={(e) => updateFilters({ type: e.target.value })}
+            value={
+              filters.expirationMin && expirations.includes(filters.expirationMin)
+                ? filters.expirationMin
+                : ''
+            }
+            onChange={(e) => updateFilters({ expirationMin: e.target.value || null })}
+            disabled={expirationsLoading || expirations.length === 0}
           >
-            <option value="both">Both</option>
-            <option value="C">Calls</option>
-            <option value="P">Puts</option>
+            {expirationsLoading && <option value="">Loading…</option>}
+            {!expirationsLoading && expirations.length === 0 && (
+              <option value="">No expirations</option>
+            )}
+            {expirationOptions.map((exp) => (
+              <option key={exp} value={exp}>{exp}</option>
+            ))}
           </select>
         </label>
         <label className={styles.filterLabel}>
-          Expiration min
-          <input
-            type="date"
-            className={styles.filterInput}
-            value={filters.expirationMin || ''}
-            onChange={(e) => updateFilters({ expirationMin: e.target.value || null })}
-          />
-        </label>
-        <label className={styles.filterLabel}>
           Expiration max
-          <input
-            type="date"
-            className={styles.filterInput}
-            value={filters.expirationMax || ''}
+          <select
+            className={styles.filterSelect}
+            value={
+              filters.expirationMax && expirations.includes(filters.expirationMax)
+                ? filters.expirationMax
+                : ''
+            }
             onChange={(e) => updateFilters({ expirationMax: e.target.value || null })}
-          />
+            disabled={expirationsLoading || expirations.length === 0}
+          >
+            {expirationsLoading && <option value="">Loading…</option>}
+            {!expirationsLoading && expirations.length === 0 && (
+              <option value="">No expirations</option>
+            )}
+            {expirationOptions.map((exp) => (
+              <option key={exp} value={exp}>{exp}</option>
+            ))}
+          </select>
         </label>
         <label className={styles.filterLabel}>
           Strike min

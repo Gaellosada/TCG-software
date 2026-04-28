@@ -59,8 +59,21 @@ vi.mock('./ContractDetailPanel', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock C3.1 / C3.2 deliverables — ChainSnapshotPanel and
-// MultiExpirationSmilePanel. Capture onClose so tests can invoke it.
+// Mock useOptionExpirations — drives the Smile tab's expiration <select>.
+// Tests that need a specific expiration to be selectable should re-stub
+// `mockExpirations` to include that value before render.
+// ---------------------------------------------------------------------------
+let mockExpirations = ['2024-12-20', '2026-04-27', '2026-05-15', '2030-12-20'];
+vi.mock('./useOptionExpirations', () => ({
+  useOptionExpirations: vi.fn(() => ({
+    expirations: mockExpirations,
+    loading: false,
+    error: null,
+  })),
+}));
+
+// ---------------------------------------------------------------------------
+// Mock ChainSnapshotPanel — captures props so tests can invoke onClose.
 // ---------------------------------------------------------------------------
 let capturedSnapshotProps = null;
 vi.mock('./ChainSnapshotPanel', () => ({
@@ -78,21 +91,6 @@ vi.mock('./ChainSnapshotPanel', () => ({
   }),
 }));
 
-let capturedMultiProps = null;
-vi.mock('./MultiExpirationSmilePanel', () => ({
-  default: vi.fn((props) => {
-    capturedMultiProps = props;
-    return (
-      <div
-        data-testid="multi-expiration-smile-panel"
-        data-root={props.root}
-        data-date={props.date}
-        data-type={props.type}
-      />
-    );
-  }),
-}));
-
 // ---------------------------------------------------------------------------
 // Lifecycle — clean up DOM between each test.
 // ---------------------------------------------------------------------------
@@ -101,7 +99,6 @@ beforeEach(() => {
   capturedOnRowClick = null;
   capturedOnClose = null;
   capturedSnapshotProps = null;
-  capturedMultiProps = null;
   capturedChainTableProps = null;
 });
 
@@ -118,10 +115,8 @@ function renderDataPage() {
 }
 
 function typeSnapshotExpiration(value = '2024-12-20') {
-  // The Snapshot / Multi-smile tabs gate panel rendering on a non-empty
-  // expiration input. Tests that need the panel to render must call this
-  // after switching to the Smile tab (or the Add button on Multi-smile).
-  const input = screen.getByPlaceholderText('e.g. 2024-12-20');
+  // Snapshot tab gates panel rendering on a non-empty expiration input.
+  const input = screen.getByLabelText('Expiration');
   act(() => {
     fireEvent.change(input, { target: { value } });
   });
@@ -335,23 +330,35 @@ describe('DataPage — Tier-2 tab strip initial state', () => {
     selectOption('OPT_SP_500');
 
     // Chain tab active (aria-selected)
-    const chainTab = screen.getByRole('tab', { name: 'Chain' });
+    const chainTab = screen.getByRole('tab', { name: 'Contracts' });
     expect(chainTab.getAttribute('aria-selected')).toBe('true');
 
     // OptionChainTable present
     expect(screen.getByTestId('option-chain-table')).toBeTruthy();
-    // Tier-2 panels absent
+    // Tier-2 panel absent
     expect(screen.queryByTestId('chain-snapshot-panel')).toBeNull();
-    expect(screen.queryByTestId('multi-expiration-smile-panel')).toBeNull();
   });
 
   it('shows all three tab buttons', () => {
     renderDataPage();
     selectOption('OPT_SP_500');
 
-    expect(screen.getByRole('tab', { name: 'Chain' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Contracts' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Continuous' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Smile' })).toBeTruthy();
-    expect(screen.getByRole('tab', { name: 'Multi-smile' })).toBeTruthy();
+  });
+
+  it('Continuous tab shows the coming-soon placeholder when selected', () => {
+    renderDataPage();
+    selectOption('OPT_SP_500');
+
+    act(() => {
+      fireEvent.click(screen.getByRole('tab', { name: 'Continuous' }));
+    });
+
+    expect(screen.getByTestId('continuous-empty')).toBeTruthy();
+    expect(screen.getByText(/coming soon/i)).toBeTruthy();
+    expect(screen.queryByTestId('option-chain-table')).toBeNull();
   });
 });
 
@@ -367,7 +374,6 @@ describe('DataPage — switching to Smile tab', () => {
 
     expect(screen.getByTestId('chain-snapshot-panel')).toBeTruthy();
     expect(screen.queryByTestId('option-chain-table')).toBeNull();
-    expect(screen.queryByTestId('multi-expiration-smile-panel')).toBeNull();
   });
 
   it('passes root from selected.collection to ChainSnapshotPanel', () => {
@@ -392,42 +398,7 @@ describe('DataPage — switching to Smile tab', () => {
     });
 
     expect(screen.getByRole('tab', { name: 'Smile' }).getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByRole('tab', { name: 'Chain' }).getAttribute('aria-selected')).toBe('false');
-  });
-});
-
-describe('DataPage — switching to Multi-smile tab', () => {
-  it('renders MultiExpirationSmilePanel (after Add) and hides OptionChainTable', () => {
-    renderDataPage();
-    selectOption('OPT_SP_500');
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    });
-    typeSnapshotExpiration();
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    });
-
-    expect(screen.getByTestId('multi-expiration-smile-panel')).toBeTruthy();
-    expect(screen.queryByTestId('option-chain-table')).toBeNull();
-    expect(screen.queryByTestId('chain-snapshot-panel')).toBeNull();
-  });
-
-  it('passes root from selected.collection to MultiExpirationSmilePanel', () => {
-    renderDataPage();
-    selectOption('OPT_NASDAQ_100');
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    });
-    typeSnapshotExpiration();
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    });
-
-    const panel = screen.getByTestId('multi-expiration-smile-panel');
-    expect(panel.dataset.root).toBe('OPT_NASDAQ_100');
+    expect(screen.getByRole('tab', { name: 'Contracts' }).getAttribute('aria-selected')).toBe('false');
   });
 });
 
@@ -442,28 +413,12 @@ describe('DataPage — switching back to Chain tab', () => {
     });
     expect(screen.queryByTestId('option-chain-table')).toBeNull();
 
-    // Switch back to Chain
+    // Switch back to Contracts
     act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Chain' }));
+      fireEvent.click(screen.getByRole('tab', { name: 'Contracts' }));
     });
     expect(screen.getByTestId('option-chain-table')).toBeTruthy();
     expect(screen.queryByTestId('chain-snapshot-panel')).toBeNull();
-  });
-
-  it('restores OptionChainTable after switching from Multi-smile back to Chain', () => {
-    renderDataPage();
-    selectOption('OPT_SP_500');
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    });
-    expect(screen.queryByTestId('option-chain-table')).toBeNull();
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Chain' }));
-    });
-    expect(screen.getByTestId('option-chain-table')).toBeTruthy();
-    expect(screen.queryByTestId('multi-expiration-smile-panel')).toBeNull();
   });
 });
 
@@ -486,7 +441,7 @@ describe('DataPage — ChainSnapshotPanel close button returns to Chain tab', ()
 
     expect(screen.queryByTestId('chain-snapshot-panel')).toBeNull();
     expect(screen.getByTestId('option-chain-table')).toBeTruthy();
-    expect(screen.getByRole('tab', { name: 'Chain' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'Contracts' }).getAttribute('aria-selected')).toBe('true');
   });
 });
 
@@ -522,123 +477,12 @@ describe('DataPage — Snapshot tab filter inputs', () => {
       fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
     });
 
-    const expirationInput = screen.getByPlaceholderText('e.g. 2024-12-20');
+    const expirationInput = screen.getByLabelText('Expiration');
     act(() => {
       fireEvent.change(expirationInput, { target: { value: '2024-12-20' } });
     });
 
     expect(capturedSnapshotProps.expiration).toBe('2024-12-20');
-  });
-});
-
-describe('DataPage — Multi-smile expiration management', () => {
-  it('adds an expiration when Add button is clicked', () => {
-    renderDataPage();
-    selectOption('OPT_SP_500');
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    });
-
-    const expirationInput = screen.getByPlaceholderText('e.g. 2024-12-20');
-    act(() => {
-      fireEvent.change(expirationInput, { target: { value: '2024-12-20' } });
-    });
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    });
-
-    expect(capturedMultiProps.expirations).toContain('2024-12-20');
-  });
-
-  it('does not add duplicate expirations', () => {
-    renderDataPage();
-    selectOption('OPT_SP_500');
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    });
-
-    const expirationInput = screen.getByPlaceholderText('e.g. 2024-12-20');
-
-    act(() => {
-      fireEvent.change(expirationInput, { target: { value: '2024-12-20' } });
-    });
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    });
-    act(() => {
-      fireEvent.change(expirationInput, { target: { value: '2024-12-20' } });
-    });
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    });
-
-    expect(capturedMultiProps.expirations.filter((e) => e === '2024-12-20').length).toBe(1);
-  });
-
-  it('removes an expiration when × button is clicked', () => {
-    renderDataPage();
-    selectOption('OPT_SP_500');
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    });
-
-    const expirationInput = screen.getByPlaceholderText('e.g. 2024-12-20');
-    act(() => {
-      fireEvent.change(expirationInput, { target: { value: '2024-12-20' } });
-    });
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    });
-
-    // Confirm panel rendered with the expiration
-    expect(capturedMultiProps.expirations).toContain('2024-12-20');
-
-    // Remove via × button
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Remove 2024-12-20' }));
-    });
-
-    // Empty list → panel gated again (× removed the only expiration)
-    expect(screen.queryByTestId('multi-expiration-smile-panel')).toBeNull();
-    expect(screen.getByTestId('multi-empty')).toBeTruthy();
-  });
-
-  it('resets expirations when switching to a new options root', () => {
-    renderDataPage();
-    selectOption('OPT_SP_500');
-
-    act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    });
-
-    const expirationInput = screen.getByPlaceholderText('e.g. 2024-12-20');
-    act(() => {
-      fireEvent.change(expirationInput, { target: { value: '2024-12-20' } });
-    });
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    });
-
-    // Switch root
-    act(() => {
-      capturedOnSelect({
-        type: 'option',
-        collection: 'OPT_GOLD',
-        instrument_id: null,
-        expiry: null,
-        strike: null,
-        optionType: null,
-        last_trade_date: '2026-04-27',
-        expiration_last: '2030-12-20',
-      });
-    });
-
-    // Should be back on chain tab (root reset)
-    expect(screen.getByRole('tab', { name: 'Chain' }).getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByTestId('option-chain-table')).toBeTruthy();
   });
 });
 
@@ -684,7 +528,7 @@ describe('DataPage — last_trade_date defaults (zero-contracts regression)', ()
   });
 });
 
-describe('DataPage — smile/multi-smile gating (ApiError regression)', () => {
+describe('DataPage — smile gating (ApiError regression)', () => {
   function pickRoot() {
     act(() => {
       capturedOnSelect({
@@ -713,7 +557,7 @@ describe('DataPage — smile/multi-smile gating (ApiError regression)', () => {
     render(<DataPage />);
     pickRoot();
     fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
-    const expInput = screen.getByPlaceholderText(/2024-12-20/i);
+    const expInput = screen.getByLabelText('Expiration');
     fireEvent.change(expInput, { target: { value: '2026-05-15' } });
 
     expect(screen.queryByTestId('snapshot-empty')).toBeNull();
@@ -726,33 +570,11 @@ describe('DataPage — smile/multi-smile gating (ApiError regression)', () => {
     render(<DataPage />);
     pickRoot();
     fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
-    const expInput = screen.getByPlaceholderText(/2024-12-20/i);
+    const expInput = screen.getByLabelText('Expiration');
     fireEvent.change(expInput, { target: { value: '   ' } });
 
     expect(screen.queryByTestId('chain-snapshot-panel')).toBeNull();
     expect(screen.getByTestId('snapshot-empty')).toBeTruthy();
   });
 
-  it('does NOT render MultiExpirationSmilePanel with empty expirations list', () => {
-    render(<DataPage />);
-    pickRoot();
-    fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-
-    expect(screen.queryByTestId('multi-expiration-smile-panel')).toBeNull();
-    expect(screen.getByTestId('multi-empty')).toBeTruthy();
-    expect(capturedMultiProps).toBeNull();
-  });
-
-  it('renders MultiExpirationSmilePanel after the user adds an expiration', () => {
-    render(<DataPage />);
-    pickRoot();
-    fireEvent.click(screen.getByRole('tab', { name: 'Multi-smile' }));
-    const stagingInput = screen.getByPlaceholderText(/2024-12-20/i);
-    fireEvent.change(stagingInput, { target: { value: '2026-05-15' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-
-    expect(screen.queryByTestId('multi-empty')).toBeNull();
-    expect(screen.getByTestId('multi-expiration-smile-panel')).toBeTruthy();
-    expect(capturedMultiProps.expirations).toEqual(['2026-05-15']);
-  });
 });
