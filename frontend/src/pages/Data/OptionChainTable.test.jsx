@@ -451,3 +451,85 @@ describe('<OptionChainTable> cycle chip', () => {
     expect(emptyTitleChip).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cycle dropdown — opt-in filter on the chain filter row
+// ---------------------------------------------------------------------------
+
+describe('<OptionChainTable> cycle dropdown', () => {
+  it('renders the dropdown with "All cycles" sentinel + one option per distinct cycle', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C1', expiration: '2024-04-19', expiration_cycle: 'M' }),
+        makeRow({ contract_id: 'C2', expiration: '2024-04-26', expiration_cycle: 'W' }),
+        makeRow({ contract_id: 'C3', expiration: '2024-05-17', expiration_cycle: 'M' }),
+      ],
+      notes: [],
+    };
+    render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
+
+    const select = screen.getByLabelText(/^cycle$/i);
+    const optionValues = [...select.querySelectorAll('option')].map((o) => o.value);
+    // "" sentinel = All cycles, then deduped + sorted distinct cycles.
+    expect(optionValues).toEqual(['', 'M', 'W']);
+    // Default selection is the "All cycles" sentinel — chain table is opt-in,
+    // unlike the smile dropdown which auto-picks the most-populated cycle.
+    expect(select.value).toBe('');
+  });
+
+  it('changing the dropdown calls updateFilters({ expirationCycle })', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C1', expiration: '2024-04-19', expiration_cycle: 'M' }),
+        makeRow({ contract_id: 'C2', expiration: '2024-04-26', expiration_cycle: 'W' }),
+      ],
+      notes: [],
+    };
+    render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
+
+    const select = screen.getByLabelText(/^cycle$/i);
+    fireEvent.change(select, { target: { value: 'W' } });
+    expect(hookState.updateFilters).toHaveBeenCalledWith({ expirationCycle: 'W' });
+  });
+
+  it('selecting "All cycles" sends null (clears the filter, no empty-string leak)', () => {
+    hookState.filters = buildFilters({ expirationCycle: 'M' });
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C1', expiration: '2024-04-19', expiration_cycle: 'M' }),
+        makeRow({ contract_id: 'C2', expiration: '2024-04-26', expiration_cycle: 'W' }),
+      ],
+      notes: [],
+    };
+    render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
+
+    const select = screen.getByLabelText(/^cycle$/i);
+    fireEvent.change(select, { target: { value: '' } });
+    expect(hookState.updateFilters).toHaveBeenCalledWith({ expirationCycle: null });
+  });
+
+  it('single-cycle chain: dropdown still renders (with one cycle option)', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C1', expiration: '2024-04-19', expiration_cycle: 'M' }),
+      ],
+      notes: [],
+    };
+    render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
+    const select = screen.getByLabelText(/^cycle$/i);
+    const optionValues = [...select.querySelectorAll('option')].map((o) => o.value);
+    expect(optionValues).toEqual(['', 'M']);
+  });
+});

@@ -56,13 +56,19 @@ export async function getOptionExpirations(root) {
 //    Returns: ChainResponse
 //
 // params:
-//   date          YYYY-MM-DD string (required)
-//   type          'C' | 'P' | 'both' (default 'both')
-//   expirationMin YYYY-MM-DD string (required)
-//   expirationMax YYYY-MM-DD string (required)
-//   strikeMin     number (optional)
-//   strikeMax     number (optional)
-//   computeMissing boolean (optional, default false)
+//   date            YYYY-MM-DD string (required)
+//   type            'C' | 'P' | 'both' (default 'both')
+//   expirationMin   YYYY-MM-DD string (required)
+//   expirationMax   YYYY-MM-DD string (required)
+//   strikeMin       number (optional)
+//   strikeMax       number (optional)
+//   computeMissing  boolean (optional, default false)
+//   expirationCycle optional string ('M' / 'W' / 'D' / ...) — restricts the
+//                   chain to one contract cycle (for the SPX-monthly +
+//                   SPXW-weekly overlap on OPT_SP_500). Omit / null to keep
+//                   all cycles. Empty strings are NOT sent on the wire —
+//                   the backend coerces them anyway, but we drop them here
+//                   for cleaner URLs and to mirror the smile-dropdown contract.
 //
 // Note: callers must pass date strings in YYYY-MM-DD format. If you have a
 // Date object, use: date.toISOString().slice(0, 10)
@@ -77,6 +83,7 @@ export async function getOptionChain(root, params) {
     strikeMin,
     strikeMax,
     computeMissing,
+    expirationCycle,
   } = params;
 
   const qp = new URLSearchParams();
@@ -88,6 +95,9 @@ export async function getOptionChain(root, params) {
   if (strikeMin != null) qp.set('strike_min', String(strikeMin));
   if (strikeMax != null) qp.set('strike_max', String(strikeMax));
   if (computeMissing != null) qp.set('compute_missing', String(computeMissing));
+  if (expirationCycle != null && String(expirationCycle).trim() !== '') {
+    qp.set('expiration_cycle', String(expirationCycle));
+  }
 
   return fetchClassified(`/options/chain?${qp}`);
 }

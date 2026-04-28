@@ -185,6 +185,47 @@ describe('useOptionsChain — updateFilters', () => {
   });
 });
 
+describe('useOptionsChain — expiration_cycle filter', () => {
+  it('exposes expirationCycle in default filters as null (no filter)', () => {
+    const { result } = renderHook(() => useOptionsChain());
+    expect(result.current.filters.expirationCycle).toBeNull();
+  });
+
+  it('plumbs expirationCycle into getOptionChain when set', async () => {
+    vi.mocked(getOptionChain).mockResolvedValueOnce({ root: 'OPT_SP_500', rows: [] });
+
+    const { result } = renderHook(() => useOptionsChain('OPT_SP_500'));
+
+    act(() => {
+      result.current.updateFilters({ expirationCycle: 'M' });
+    });
+
+    await act(async () => {
+      await result.current.fetchChain();
+    });
+
+    expect(getOptionChain).toHaveBeenCalledWith(
+      'OPT_SP_500',
+      expect.objectContaining({ expirationCycle: 'M' }),
+    );
+  });
+
+  it('passes expirationCycle: null when not set (preserves no-filter default)', async () => {
+    vi.mocked(getOptionChain).mockResolvedValueOnce({ root: 'OPT_SP_500', rows: [] });
+
+    const { result } = renderHook(() => useOptionsChain('OPT_SP_500'));
+
+    await act(async () => {
+      await result.current.fetchChain();
+    });
+
+    expect(getOptionChain).toHaveBeenCalledWith(
+      'OPT_SP_500',
+      expect.objectContaining({ expirationCycle: null }),
+    );
+  });
+});
+
 describe('useOptionsChain — computeMissing toggle is transient (Decision C)', () => {
   it('computeMissing defaults to false', () => {
     const { result } = renderHook(() => useOptionsChain());

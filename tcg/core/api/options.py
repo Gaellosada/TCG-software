@@ -268,6 +268,14 @@ async def get_chain(
             "stored-only per guardrail #2."
         ),
     ),
+    expiration_cycle: str | None = Query(
+        None,
+        description=(
+            "Optional ``OptionContractDoc.expiration_cycle`` filter — "
+            "scopes the chain to a single cycle (e.g. ``M`` / ``W``).  "
+            "Empty string is coerced to ``None`` (no filter)."
+        ),
+    ),
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
     """Return the chain snapshot for ``(root, date, type, ...)``.
@@ -294,6 +302,7 @@ async def get_chain(
                 "strike_min": strike_min,
                 "strike_max": strike_max,
                 "compute_missing": compute_missing,
+                "expiration_cycle": expiration_cycle,
             }
         )
     except PydanticValidationError as exc:
@@ -315,6 +324,7 @@ async def get_chain(
         compute_missing=query.compute_missing,
         strike_min=query.strike_min,
         strike_max=query.strike_max,
+        expiration_cycle=query.expiration_cycle,
     )
 
     # Wrap underlying_price (Decision B) and serialize rows.

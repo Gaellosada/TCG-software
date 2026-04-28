@@ -398,8 +398,32 @@ class ListRootsRequest(BaseModel):
     pass
 
 
+def _blank_cycle_to_none(v: object) -> object:
+    """Coerce blank/whitespace-only strings on an ``expiration_cycle``
+    query parameter to ``None``.
+
+    FastAPI passes ``?expiration_cycle=`` as the literal empty string
+    ``""`` rather than ``None`` for ``str | None`` fields.  A blank cycle
+    propagates into ``_materialize_chain_row`` as an empty-string filter
+    and silently returns an empty result (backend.md H1).  Shared by
+    ``ChainQuery`` and ``ChainSnapshotQuery`` so both endpoints handle
+    the empty-string case identically.
+    """
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
 class ChainQuery(BaseModel):
-    """Request model for GET /api/options/chain."""
+    """Request model for GET /api/options/chain.
+
+    ``expiration_cycle`` (optional) restricts the chain to a single
+    contract cycle — e.g. SPX monthlies only — so users browsing
+    multi-cycle roots (notably OPT_SP_500: SPX-monthly + SPXW-weekly)
+    can scope the table to one cycle.  Defaults to ``None`` (all
+    cycles); the chain-table cycle chip already disambiguates rows
+    visually when the filter is off.
+    """
     root: str
     date: date
     type: Literal["C", "P", "both"] = "both"
@@ -408,6 +432,12 @@ class ChainQuery(BaseModel):
     strike_min: float | None = None
     strike_max: float | None = None
     compute_missing: bool = False
+    expiration_cycle: str | None = None
+
+    @field_validator("expiration_cycle", mode="before")
+    @classmethod
+    def _blank_cycle_to_none(cls, v: object) -> object:
+        return _blank_cycle_to_none(v)
 
 
 class ContractQuery(BaseModel):
@@ -451,14 +481,11 @@ class ChainSnapshotQuery(BaseModel):
     def blank_cycle_to_none(cls, v: object) -> object:
         """Coerce blank/whitespace-only strings to ``None``.
 
-        FastAPI passes ``?expiration_cycle=`` as the literal empty string
-        ``""`` rather than ``None`` for ``str | None`` fields.  A blank cycle
-        propagates into ``_materialize_chain_row`` as an empty-string filter
-        and silently returns an empty smile (backend.md H1).
+        Delegates to module-level ``_blank_cycle_to_none`` so that
+        ``ChainQuery`` and ``ChainSnapshotQuery`` share one definition
+        (backend.md H1 — same fix needed on /chain).
         """
-        if isinstance(v, str) and not v.strip():
-            return None
-        return v
+        return _blank_cycle_to_none(v)
 
     @field_validator("expirations")
     @classmethod

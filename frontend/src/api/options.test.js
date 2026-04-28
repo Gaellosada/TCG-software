@@ -119,6 +119,45 @@ describe('getOptionChain', () => {
     expect(url).toContain('strike_min=450');
     expect(url).toContain('strike_max=550');
   });
+
+  it('includes expiration_cycle when provided', async () => {
+    mockSuccess(CHAIN_RESP);
+    await getOptionChain('OPT_SP_500', {
+      date: '2024-03-15',
+      type: 'both',
+      expirationMin: '2024-03-15',
+      expirationMax: '2024-06-15',
+      expirationCycle: 'M',
+    });
+
+    const url = vi.mocked(fetchApi).mock.calls[0][0];
+    expect(url).toContain('expiration_cycle=M');
+  });
+
+  it('omits expiration_cycle when null/undefined', async () => {
+    mockSuccess(CHAIN_RESP);
+    await getOptionChain('OPT_SP_500', {
+      date: '2024-03-15',
+      type: 'both',
+      expirationMin: '2024-03-15',
+      expirationMax: '2024-06-15',
+      expirationCycle: null,
+    });
+    const url = vi.mocked(fetchApi).mock.calls[0][0];
+    expect(url).not.toContain('expiration_cycle');
+
+    vi.mocked(fetchApi).mockClear();
+    mockSuccess(CHAIN_RESP);
+    await getOptionChain('OPT_SP_500', {
+      date: '2024-03-15',
+      type: 'both',
+      expirationMin: '2024-03-15',
+      expirationMax: '2024-06-15',
+      // expirationCycle not supplied at all
+    });
+    const url2 = vi.mocked(fetchApi).mock.calls[0][0];
+    expect(url2).not.toContain('expiration_cycle');
+  });
 });
 
 // ---------------------------------------------------------------------------

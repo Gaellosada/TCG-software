@@ -295,6 +295,15 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
   const error = chainData && chainData.error ? chainData.error : null;
   const rows = chainData && !chainData.error && chainData.rows ? chainData.rows : null;
 
+  // Distinct, non-empty, sorted cycles observed in the current chain.
+  // Drives the cycle dropdown options. Empty chain → empty list (the
+  // dropdown still renders the "All cycles" sentinel option for the
+  // user's current selection but no cycle options yet).
+  const cycleOptions = useMemo(() => {
+    if (!rows) return [];
+    return [...new Set(rows.map((r) => r.expiration_cycle).filter(Boolean))].sort();
+  }, [rows]);
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -387,6 +396,23 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
               })
             }
           />
+        </label>
+        <label className={styles.filterLabel}>
+          Cycle
+          <select
+            className={styles.filterSelect}
+            value={filters.expirationCycle ?? ''}
+            onChange={(e) =>
+              updateFilters({
+                expirationCycle: e.target.value === '' ? null : e.target.value,
+              })
+            }
+          >
+            <option value="">All cycles</option>
+            {cycleOptions.map((cyc) => (
+              <option key={cyc} value={cyc}>{cyc}</option>
+            ))}
+          </select>
         </label>
         <label
           className={styles.toggle}
