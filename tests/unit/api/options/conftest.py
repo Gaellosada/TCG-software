@@ -167,6 +167,7 @@ class StubOptionsReader:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         self.query_chain_calls.append(
             {
@@ -177,10 +178,22 @@ class StubOptionsReader:
                 "expiration_max": expiration_max,
                 "strike_min": strike_min,
                 "strike_max": strike_max,
+                "expiration_cycle": expiration_cycle,
             }
         )
         if self.query_chain_side_effect is not None:
             raise self.query_chain_side_effect
+        # When the test sets `query_chain_result` to a fixed list and the
+        # router supplies an expiration_cycle filter, mimic the
+        # production behaviour by filtering the canned result. This lets
+        # the router test exercise the full plumbing end-to-end while
+        # keeping existing tests untouched.
+        if expiration_cycle is not None:
+            return [
+                (c, r)
+                for (c, r) in self.query_chain_result
+                if c.expiration_cycle == expiration_cycle
+            ]
         return self.query_chain_result
 
     async def get_contract(

@@ -26,7 +26,7 @@ import pytest
 from httpx import AsyncClient
 
 from tcg.types.errors import OptionsDataAccessError, OptionsContractNotFound
-from tcg.types.options import OptionContractSeries
+from tcg.types.options import OptionContractDoc, OptionContractSeries
 
 from conftest import (  # type: ignore[import-not-found]
     StubOptionsReader,
@@ -280,6 +280,149 @@ async def test_chain_data_access_error_502(
     assert "Mongo down" in body["message"]
 
 
+async def test_chain_filters_by_expiration_cycle(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """``/chain?expiration_cycle=M`` returns only rows whose contract
+    cycle matches.
+
+    Mirrors the SP_500 SPX-monthly + SPXW-weekly overlap that motivated
+    the cycle filter on the smile (see commit 22fe8f4).  The chain table
+    needs the same opt-in filter for users who want to scope the table
+    to a single cycle.
+    """
+    monthly = make_contract(
+        contract_id="SPX_C_5000_20240419|M",
+        strike=5000.0,
+    )
+    weekly = OptionContractDoc(
+        collection=monthly.collection,
+        contract_id="SPXW_C_5000_20240419|W",
+        root_underlying=monthly.root_underlying,
+        underlying_ref=monthly.underlying_ref,
+        underlying_symbol=monthly.underlying_symbol,
+        expiration=monthly.expiration,
+        expiration_cycle="W",
+        strike=monthly.strike,
+        type=monthly.type,
+        contract_size=monthly.contract_size,
+        currency=monthly.currency,
+        provider=monthly.provider,
+        strike_factor_verified=monthly.strike_factor_verified,
+    )
+    options_reader.query_chain_result = [
+        (monthly, make_row()),
+        (weekly, make_row()),
+    ]
+
+    # No filter — both rows present (current behaviour preserved).
+    resp_all = await client.get(
+        "/api/options/chain",
+        params={
+            "root": "OPT_SP_500",
+            "date": "2024-03-15",
+            "type": "C",
+            "expiration_min": "2024-03-15",
+            "expiration_max": "2024-06-30",
+        },
+    )
+    assert resp_all.status_code == 200
+    assert len(resp_all.json()["rows"]) == 2
+
+    # With the filter — only the monthly survives.
+    resp_m = await client.get(
+        "/api/options/chain",
+        params={
+            "root": "OPT_SP_500",
+            "date": "2024-03-15",
+            "type": "C",
+            "expiration_min": "2024-03-15",
+            "expiration_max": "2024-06-30",
+            "expiration_cycle": "M",
+        },
+    )
+    assert resp_m.status_code == 200
+    rows = resp_m.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["expiration_cycle"] == "M"
+
+
+async def test_chain_blank_cycle_treated_as_no_filter(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """``/chain?expiration_cycle=`` (empty string) must be coerced to
+    ``None`` by the validator and behave identically to omitting the
+    param (mirrors backend.md H1 fix on ``ChainSnapshotQuery``)."""
+    options_reader.query_chain_result = [
+        (make_contract(), make_row()),
+    ]
+    base_params = [
+        ("root", "OPT_SP_500"),
+        ("date", "2024-03-15"),
+        ("type", "both"),
+        ("expiration_min", "2024-03-15"),
+        ("expiration_max", "2024-06-30"),
+    ]
+    resp_no_cycle = await client.get("/api/options/chain", params=base_params)
+    assert resp_no_cycle.status_code == 200
+    rows_no_cycle = resp_no_cycle.json()["rows"]
+
+    resp_blank = await client.get(
+        "/api/options/chain",
+        params=base_params + [("expiration_cycle", "")],
+    )
+    assert resp_blank.status_code == 200
+    rows_blank = resp_blank.json()["rows"]
+
+    # Identical row count — blank must NOT degrade into a literal-""
+    # filter that drops every row whose contract cycle is non-empty.
+    assert len(rows_blank) == len(rows_no_cycle)
+    assert len(rows_blank) == 1
+
+
+async def test_chain_no_cycle_param_returns_all_cycles(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Default behaviour — no ``expiration_cycle`` query parameter at
+    all returns every cycle present in the chain (back-compat guard)."""
+    monthly = make_contract(
+        contract_id="SPX_C_5000_20240419|M",
+        strike=5000.0,
+    )
+    weekly = OptionContractDoc(
+        collection=monthly.collection,
+        contract_id="SPXW_C_5000_20240419|W",
+        root_underlying=monthly.root_underlying,
+        underlying_ref=monthly.underlying_ref,
+        underlying_symbol=monthly.underlying_symbol,
+        expiration=monthly.expiration,
+        expiration_cycle="W",
+        strike=monthly.strike,
+        type=monthly.type,
+        contract_size=monthly.contract_size,
+        currency=monthly.currency,
+        provider=monthly.provider,
+        strike_factor_verified=monthly.strike_factor_verified,
+    )
+    options_reader.query_chain_result = [
+        (monthly, make_row()),
+        (weekly, make_row()),
+    ]
+    resp = await client.get(
+        "/api/options/chain",
+        params={
+            "root": "OPT_SP_500",
+            "date": "2024-03-15",
+            "type": "C",
+            "expiration_min": "2024-03-15",
+            "expiration_max": "2024-06-30",
+        },
+    )
+    assert resp.status_code == 200
+    cycles = sorted({r["expiration_cycle"] for r in resp.json()["rows"]})
+    assert cycles == ["M", "W"]
+
+
 # ---------------------------------------------------------------------------
 # /contract/{coll}/{id}
 # ---------------------------------------------------------------------------
@@ -523,6 +666,135 @@ async def test_chain_snapshot_happy_path(
     assert "strike" in p
     assert "value" in p
     assert p["value"]["source"] == "stored"
+
+
+async def test_chain_snapshot_smile_point_carries_expiration_cycle(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Each SmilePoint exposes the contract's expirationCycle, so the
+    frontend can populate the cycle dropdown from the unfiltered
+    response."""
+    options_reader.query_chain_result = [
+        (make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
+         make_row(iv_stored=0.16)),
+    ]
+    resp = await client.get(
+        "/api/options/chain-snapshot",
+        params=[
+            ("root", "OPT_SP_500"),
+            ("date", "2024-03-15"),
+            ("type", "C"),
+            ("expirations", "2024-04-19"),
+            ("field", "iv"),
+        ],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    point = body["series"][0]["points"][0]
+    # make_contract() defaults expiration_cycle to "M".
+    assert point["expiration_cycle"] == "M"
+
+
+async def test_chain_snapshot_filters_by_expiration_cycle(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """When expiration_cycle is supplied, only contracts of that cycle
+    flow into the response. Cycle mismatches must be filtered out before
+    the SmilePoint is built."""
+
+    # Two contracts at the same strike, same expiration date, different
+    # cycles. This is the SP_500 weekly-vs-monthly overlap that produces
+    # duplicate strike markers on the smile.
+    monthly_contract = make_contract(
+        contract_id="SPX_C_5000_20240419|M",
+        strike=5000.0,
+    )
+    # Override cycle by reconstructing the contract — make_contract
+    # hard-codes "M".
+    weekly_contract = OptionContractDoc(
+        collection=monthly_contract.collection,
+        contract_id="SPXW_C_5000_20240419|W",
+        root_underlying=monthly_contract.root_underlying,
+        underlying_ref=monthly_contract.underlying_ref,
+        underlying_symbol=monthly_contract.underlying_symbol,
+        expiration=monthly_contract.expiration,
+        expiration_cycle="W",
+        strike=monthly_contract.strike,
+        type=monthly_contract.type,
+        contract_size=monthly_contract.contract_size,
+        currency=monthly_contract.currency,
+        provider=monthly_contract.provider,
+        strike_factor_verified=monthly_contract.strike_factor_verified,
+    )
+    options_reader.query_chain_result = [
+        (monthly_contract, make_row(iv_stored=0.16)),
+        (weekly_contract, make_row(iv_stored=0.18)),
+    ]
+
+    # Without the filter — both points present (current behaviour).
+    resp_all = await client.get(
+        "/api/options/chain-snapshot",
+        params=[
+            ("root", "OPT_SP_500"),
+            ("date", "2024-03-15"),
+            ("type", "C"),
+            ("expirations", "2024-04-19"),
+            ("field", "iv"),
+        ],
+    )
+    assert resp_all.status_code == 200
+    assert len(resp_all.json()["series"][0]["points"]) == 2
+
+    # With expiration_cycle=M — only the monthly survives.
+    resp_m = await client.get(
+        "/api/options/chain-snapshot",
+        params=[
+            ("root", "OPT_SP_500"),
+            ("date", "2024-03-15"),
+            ("type", "C"),
+            ("expirations", "2024-04-19"),
+            ("field", "iv"),
+            ("expiration_cycle", "M"),
+        ],
+    )
+    assert resp_m.status_code == 200
+    pts = resp_m.json()["series"][0]["points"]
+    assert len(pts) == 1
+    assert pts[0]["expiration_cycle"] == "M"
+
+
+async def test_chain_snapshot_blank_cycle_treated_as_no_filter(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """?expiration_cycle= (empty string) must be coerced to None by the
+    validator and behave identically to omitting the param (backend.md H1)."""
+    options_reader.query_chain_result = [
+        (make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
+         make_row(iv_stored=0.16)),
+    ]
+    base_params = [
+        ("root", "OPT_SP_500"),
+        ("date", "2024-03-15"),
+        ("type", "C"),
+        ("expirations", "2024-04-19"),
+        ("field", "iv"),
+    ]
+    # No cycle param — baseline.
+    resp_no_cycle = await client.get(
+        "/api/options/chain-snapshot", params=base_params
+    )
+    assert resp_no_cycle.status_code == 200
+    pts_no_cycle = resp_no_cycle.json()["series"][0]["points"]
+
+    # Explicit empty-string cycle — must return the same number of points.
+    resp_blank = await client.get(
+        "/api/options/chain-snapshot",
+        params=base_params + [("expiration_cycle", "")],
+    )
+    assert resp_blank.status_code == 200
+    pts_blank = resp_blank.json()["series"][0]["points"]
+
+    assert len(pts_blank) == len(pts_no_cycle)
 
 
 async def test_chain_snapshot_max_eight_expirations(client: AsyncClient):

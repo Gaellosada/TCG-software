@@ -102,6 +102,7 @@ function mergeRows(rows) {
     if (!map.has(key)) {
       map.set(key, {
         expiration: r.expiration,
+        expiration_cycle: r.expiration_cycle ?? '',
         strike: r.strike,
         call: null,
         put: null,
@@ -121,6 +122,13 @@ function mergeRows(rows) {
 
 function MergedChainTable({ rows, collection, onRowClick }) {
   const merged = useMemo(() => mergeRows(rows), [rows]);
+
+  // Render cycle chips only when the visible chain mixes 2+ distinct non-empty
+  // cycles — single-cycle ETFs / clean roots stay clutter-free.
+  const hasMultipleCycles = useMemo(
+    () => new Set(rows.map((r) => r.expiration_cycle).filter(Boolean)).size >= 2,
+    [rows],
+  );
 
   const handleRowClick = (e, entry) => {
     if (!onRowClick) return;
@@ -179,7 +187,18 @@ function MergedChainTable({ rows, collection, onRowClick }) {
                 className={`${styles.row} ${expChanged ? styles.expChange : ''}`}
                 onClick={(e) => handleRowClick(e, entry)}
               >
-                <td className={styles.colExp}>{entry.expiration}</td>
+                <td className={styles.colExp}>
+                  {entry.expiration}
+                  {hasMultipleCycles && entry.expiration_cycle && (
+                    <span
+                      className={styles.cycleChip}
+                      title={entry.expiration_cycle}
+                      data-testid="cycle-chip"
+                    >
+                      {entry.expiration_cycle.trim()[0]}
+                    </span>
+                  )}
+                </td>
                 <td data-side="call" className={styles.bidQuote}>{c ? fmt(c.bid, 2) : ''}</td>
                 <td data-side="call">{c ? fmt(c.mid, 2) : ''}</td>
                 <td data-side="call" className={`${styles.askQuote} ${styles.thinSepRight}`}>{c ? fmt(c.ask, 2) : ''}</td>
@@ -276,6 +295,15 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
   const error = chainData && chainData.error ? chainData.error : null;
   const rows = chainData && !chainData.error && chainData.rows ? chainData.rows : null;
 
+  // Distinct, non-empty, sorted cycles observed in the current chain.
+  // Drives the cycle dropdown options. Empty chain → empty list (the
+  // dropdown still renders the "All cycles" sentinel option for the
+  // user's current selection but no cycle options yet).
+  const cycleOptions = useMemo(() => {
+    if (!rows) return [];
+    return [...new Set(rows.map((r) => r.expiration_cycle).filter(Boolean))].sort();
+  }, [rows]);
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -368,6 +396,23 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
               })
             }
           />
+        </label>
+        <label className={styles.filterLabel}>
+          Cycle
+          <select
+            className={styles.filterSelect}
+            value={filters.expirationCycle ?? ''}
+            onChange={(e) =>
+              updateFilters({
+                expirationCycle: e.target.value === '' ? null : e.target.value,
+              })
+            }
+          >
+            <option value="">All cycles</option>
+            {cycleOptions.map((cyc) => (
+              <option key={cyc} value={cyc}>{cyc}</option>
+            ))}
+          </select>
         </label>
         <label
           className={styles.toggle}

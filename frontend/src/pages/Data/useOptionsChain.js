@@ -45,6 +45,11 @@ function buildDefaultFilters(initialRoot, overrides = {}) {
     strikeMax: null,
     // Decision C: computeMissing defaults to false; never persisted to localStorage.
     computeMissing: false,
+    // Default null → no cycle filter. Multi-cycle chains rely on the
+    // cycle chip (commit 42b39da) to disambiguate visually; the dropdown
+    // is opt-in. Contrast with the smile dropdown, which auto-picks the
+    // most-populated cycle because a single-line smile is the goal there.
+    expirationCycle: null,
     ...overrides,
   };
 }
@@ -104,6 +109,7 @@ export function useOptionsChain(initialRoot = null, initialFilters = {}) {
           strikeMin: filters.strikeMin,
           strikeMax: filters.strikeMax,
           computeMissing: filters.computeMissing,
+          expirationCycle: filters.expirationCycle,
           signal,
         }),
       );

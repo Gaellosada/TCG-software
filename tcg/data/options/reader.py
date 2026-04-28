@@ -165,6 +165,7 @@ class MongoOptionsDataReader:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         try:
             coll = self._db[root]
@@ -190,6 +191,7 @@ class MongoOptionsDataReader:
                     type_filter=type_filter,
                     strike_min=strike_min,
                     strike_max=strike_max,
+                    expiration_cycle=expiration_cycle,
                 )
                 if pair is not None:
                     results.append(pair)
@@ -335,11 +337,17 @@ def _materialize_chain_row(
     type_filter: str,
     strike_min: float | None,
     strike_max: float | None,
+    expiration_cycle: str | None = None,
 ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
     """Apply client-side filters and merge bar+greek for a single doc.
 
     Returns ``None`` when the doc is filtered out, has no usable data, or
     misses the target date.
+
+    ``expiration_cycle`` filters on ``OptionContractDoc.expiration_cycle``
+    when non-None — used by the smile UI to disambiguate roots like
+    OPT_SP_500 where multiple cycles (regular SPX monthly, SPXW weeklies,
+    end-of-month, quarterly) settle on the same calendar date.
     """
     eod_datas: Mapping[str, Any] | None = doc.get("eodDatas")
     provider = select_provider(collection, eod_datas)
@@ -355,6 +363,11 @@ def _materialize_chain_row(
     if strike_min is not None and contract.strike < strike_min:
         return None
     if strike_max is not None and contract.strike > strike_max:
+        return None
+    if (
+        expiration_cycle is not None
+        and contract.expiration_cycle != expiration_cycle
+    ):
         return None
 
     bars = eod_datas.get(provider) if isinstance(eod_datas, Mapping) else None

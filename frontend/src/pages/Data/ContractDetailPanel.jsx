@@ -423,6 +423,14 @@ export default function ContractDetailPanel({ collection, instrumentId, onClose 
               </span>
             </div>
             <div className={styles.metaRow}>
+              <span className={styles.metaKey}>Cycle</span>
+              <span className={styles.metaValue}>
+                {contract && contract.expiration_cycle
+                  ? contract.expiration_cycle
+                  : '—'}
+              </span>
+            </div>
+            <div className={styles.metaRow}>
               <span className={styles.metaKey}>Provider</span>
               <span className={styles.metaValue}>
                 {contract ? contract.provider : '—'}

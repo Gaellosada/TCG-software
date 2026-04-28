@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
 import ContinuousChart from './ContinuousChart';
@@ -38,6 +38,12 @@ function DataPage() {
   const [optionsType, setOptionsType] = useState('C');
   // snapshot tab — single expiration date input
   const [optionsExpiration, setOptionsExpiration] = useState('');
+  // Smile cycle filter — null means "All cycles" (no filter).
+  // The list of available cycles and the auto-selected default are
+  // populated client-side from each smile response (a SmilePoint now
+  // carries `expiration_cycle`).
+  const [optionsCycle, setOptionsCycle] = useState(null);
+  const [availableCycles, setAvailableCycles] = useState([]);
 
   // Distinct expirations for the picked option root — drives the Smile
   // tab's expiration <select> so users can only pick days that actually
@@ -73,10 +79,71 @@ function DataPage() {
     setSelectedContract(null);
     setOptionsView('chain');
     setOptionsExpiration('');
+    setOptionsCycle(null);
+    setAvailableCycles([]);
     if (selected?.type === 'option' && selected.last_trade_date) {
       setOptionsDate(selected.last_trade_date);
     }
   }, [selected?.collection]);
+
+  // Whenever the smile re-keys (different expiration / type / date) the
+  // available cycles may differ — reset and let the next response
+  // repopulate them. The cycle filter is intentionally cleared here so
+  // the first fetch returns the full population, from which we
+  // auto-select the most-populated cycle.
+  useEffect(() => {
+    setOptionsCycle(null);
+    setAvailableCycles([]);
+  }, [optionsExpiration, optionsType, optionsDate]);
+
+  // Receive the raw ChainSnapshotResponse from the panel and extract the
+  // distinct cycles present in the points. Auto-select the most-populated
+  // cycle the first time we see >1 cycle in a response — that yields
+  // one trace per strike on roots like OPT_SP_500 by default.
+  // Memoized: the function only writes through stable setter refs
+  // (setAvailableCycles, setOptionsCycle) — no closure state is read,
+  // so the dep array is empty. Without useCallback the prop identity
+  // changes on every parent render, which re-fires the useEffect in
+  // ChainSnapshotPanel that lists onSnapshotData in its deps
+  // (frontend.md H1).
+  const handleSnapshotData = useCallback(function handleSnapshotData(response) {
+    if (!response || !Array.isArray(response.series)) return;
+    const counts = new Map();
+    for (const s of response.series) {
+      if (!s || !Array.isArray(s.points)) continue;
+      for (const p of s.points) {
+        const c = p && typeof p.expiration_cycle === 'string' ? p.expiration_cycle : '';
+        counts.set(c, (counts.get(c) || 0) + 1);
+      }
+    }
+    const cycles = [...counts.keys()].filter((c) => c !== '');
+    cycles.sort();
+    setAvailableCycles((prev) => {
+      // Only update if the set differs — avoids tearing down the
+      // dropdown when the user toggles the field.
+      if (prev.length === cycles.length && prev.every((c, i) => c === cycles[i])) {
+        return prev;
+      }
+      return cycles;
+    });
+    // Auto-select the most-populated cycle on the first response that
+    // surfaces cycle metadata. We pick "first response" as: optionsCycle
+    // is currently null AND we found at least one cycle.
+    setOptionsCycle((current) => {
+      if (current !== null) return current;
+      if (cycles.length === 0) return null;
+      let best = cycles[0];
+      let bestCount = counts.get(best) || 0;
+      for (const c of cycles) {
+        const n = counts.get(c) || 0;
+        if (n > bestCount) {
+          best = c;
+          bestCount = n;
+        }
+      }
+      return best;
+    });
+  }, []);
 
   function renderRight() {
     if (!selected) {
@@ -182,6 +249,22 @@ function DataPage() {
                     </select>
                   </label>
                   <label className={styles.filterLabel}>
+                    Cycle
+                    <select
+                      className={styles.filterInput}
+                      value={optionsCycle ?? ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setOptionsCycle(v === '' ? null : v);
+                      }}
+                    >
+                      <option value="">All cycles</option>
+                      {availableCycles.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className={styles.filterLabel}>
                     Expiration
                     <select
                       className={styles.filterInput}
@@ -208,6 +291,8 @@ function DataPage() {
                     date={optionsDate}
                     type={optionsType}
                     expiration={optionsExpiration.trim()}
+                    expiration_cycle={optionsCycle}
+                    onSnapshotData={handleSnapshotData}
                     onClose={() => setOptionsView('chain')}
                   />
                 ) : (

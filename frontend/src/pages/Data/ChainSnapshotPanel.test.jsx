@@ -276,6 +276,27 @@ describe('<ChainSnapshotPanel> xAxis toggle (strike → K/S)', () => {
   });
 });
 
+describe('<ChainSnapshotPanel> expiration_cycle prop (smile cycle filter)', () => {
+  it('does not pass expiration_cycle when prop is null', async () => {
+    mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
+    await act(async () => {
+      render(<ChainSnapshotPanel {...DEFAULT_PROPS} expiration_cycle={null} />);
+    });
+    const firstCall = mockGetChainSnapshot.mock.calls[0];
+    // Argument is the options object (second positional arg).
+    expect(firstCall[1].expiration_cycle).toBeUndefined();
+  });
+
+  it('passes expiration_cycle through to the API when set', async () => {
+    mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
+    await act(async () => {
+      render(<ChainSnapshotPanel {...DEFAULT_PROPS} expiration_cycle="M" />);
+    });
+    const firstCall = mockGetChainSnapshot.mock.calls[0];
+    expect(firstCall[1].expiration_cycle).toBe('M');
+  });
+});
+
 describe('<ChainSnapshotPanel> missing values (connectgaps)', () => {
   it('null value points appear as null y — no line break attempted', async () => {
     // Middle point has null value → should be null in y array.

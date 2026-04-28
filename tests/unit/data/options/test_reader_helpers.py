@@ -169,6 +169,50 @@ class TestMaterializeChainRow:
         )
         assert pair is None
 
+    # -- expiration_cycle filter (smile cycle disambiguation) -------------
+
+    def test_cycle_filter_none_passes(self, sp500_doc):
+        """Default behaviour (no cycle filter) is unchanged."""
+        pair = _materialize_chain_row(
+            doc=sp500_doc,
+            collection="OPT_SP_500",
+            target_yyyymmdd=20240301,
+            type_filter="C",
+            strike_min=None,
+            strike_max=None,
+            expiration_cycle=None,
+        )
+        assert pair is not None
+        contract, _ = pair
+        # sp500_doc fixture sets expirationCycle="M".
+        assert contract.expiration_cycle == "M"
+
+    def test_cycle_filter_match_passes(self, sp500_doc):
+        """Doc whose cycle matches the filter is kept."""
+        pair = _materialize_chain_row(
+            doc=sp500_doc,
+            collection="OPT_SP_500",
+            target_yyyymmdd=20240301,
+            type_filter="C",
+            strike_min=None,
+            strike_max=None,
+            expiration_cycle="M",
+        )
+        assert pair is not None
+
+    def test_cycle_filter_mismatch_drops(self, sp500_doc):
+        """Doc whose cycle differs from the filter is dropped."""
+        pair = _materialize_chain_row(
+            doc=sp500_doc,
+            collection="OPT_SP_500",
+            target_yyyymmdd=20240301,
+            type_filter="C",
+            strike_min=None,
+            strike_max=None,
+            expiration_cycle="W",
+        )
+        assert pair is None
+
 
 # ---------------------------------------------------------------------------
 # _build_rows — full series with greeks merged by date

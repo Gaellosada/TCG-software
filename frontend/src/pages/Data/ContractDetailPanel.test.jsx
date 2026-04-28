@@ -290,6 +290,46 @@ describe('<ContractDetailPanel> chart traces', () => {
   });
 });
 
+describe('<ContractDetailPanel> cycle metadata row', () => {
+  it('renders Cycle row with full cycle string when expiration_cycle is populated', () => {
+    seriesState.data = {
+      contract: makeContract({ contract_id: 'X|M', expiration_cycle: 'W3 Friday' }),
+      rows: [makeRow('2024-03-01'), makeRow('2024-03-15')],
+    };
+    render(
+      <ContractDetailPanel
+        collection="OPT_SP_500"
+        instrumentId="X|M"
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText('Cycle')).toBeTruthy();
+    expect(screen.getByText('W3 Friday')).toBeTruthy();
+  });
+
+  it('renders Cycle row as em-dash when expiration_cycle is empty', () => {
+    seriesState.data = {
+      contract: makeContract({ contract_id: 'X|M', expiration_cycle: '' }),
+      rows: [makeRow('2024-03-01')],
+    };
+    render(
+      <ContractDetailPanel
+        collection="OPT_SP_500"
+        instrumentId="X|M"
+        onClose={() => {}}
+      />,
+    );
+    // Label still present.
+    expect(screen.getByText('Cycle')).toBeTruthy();
+    // Value is em-dash.
+    const cycleLabel = screen.getByText('Cycle');
+    const metaRow = cycleLabel.closest('[class*="metaRow"]');
+    expect(metaRow).toBeTruthy();
+    // The sibling value span should contain '—'.
+    expect(metaRow.textContent).toContain('—');
+  });
+});
+
 describe('<ContractDetailPanel> close button', () => {
   it('clicking Close calls onClose', () => {
     seriesState.data = {
