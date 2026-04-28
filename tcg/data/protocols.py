@@ -7,7 +7,7 @@ Implementations are private; callers depend only on these interfaces.
 from __future__ import annotations
 
 from datetime import date
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -20,6 +20,12 @@ from tcg.types.market import (
     ContinuousSeries,
     InstrumentId,
     PriceSeries,
+)
+from tcg.types.options import (
+    OptionContractDoc,
+    OptionContractSeries,
+    OptionDailyRow,
+    OptionRootInfo,
 )
 from tcg.types.simulation import SimResult
 from tcg.types.strategy import StrategyDefinition, StrategyMeta, StrategyStage
@@ -85,6 +91,30 @@ class MarketDataService(Protocol):
         start: date | None = None,
         end: date | None = None,
     ) -> tuple[npt.NDArray[np.int64], dict[str, PriceSeries]]: ...
+
+    # --- Options (Phase 1B Module 1) ---
+    #
+    # Stored-only, read-only. Implementations MUST NOT call into Module 2
+    # (``tcg.engine.options.pricing``) — see guardrail #2.
+
+    async def get_option_contract(
+        self,
+        collection: str,
+        contract_id: str,
+    ) -> OptionContractSeries: ...
+
+    async def query_options_chain(
+        self,
+        root: str,
+        date: date,
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+    ) -> list[tuple[OptionContractDoc, OptionDailyRow]]: ...
+
+    async def list_option_roots(self) -> list[OptionRootInfo]: ...
 
 
 class StrategyStore(Protocol):

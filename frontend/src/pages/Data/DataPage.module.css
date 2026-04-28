@@ -44,3 +44,185 @@
   line-height: 1.5;
   font-size: 0.85rem;
 }
+
+.optionsContainer {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0; /* prevent flex overflow */
+}
+
+/* OptionChainTable takes remaining space; when ContractDetailPanel is present
+   it is constrained to 40% of the container via ContractDetailPanel's own CSS.
+   OptionChainTable should fill the remainder by default (flex: 1). */
+
+/* ---------------------------------------------------------------------------
+   Tier-2 view switcher (tab strip + body)
+   Tab style mirrors EditorPanel.module.css (same design language).
+   --------------------------------------------------------------------------- */
+
+.optionsWrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.optionsTabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+}
+
+.optionsTab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px 8px;
+  margin: 0;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted, var(--text-secondary));
+  opacity: 0.7;
+  cursor: pointer;
+  outline: none;
+}
+
+.optionsTab:hover {
+  opacity: 0.95;
+}
+
+.optionsTab:focus-visible {
+  outline: 2px solid var(--border-accent);
+  outline-offset: -2px;
+  border-radius: 2px;
+}
+
+.optionsTabActive {
+  color: var(--text-secondary);
+  opacity: 1;
+  border-bottom-color: var(--border-accent, var(--text-secondary));
+}
+
+.optionsTabBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------------------
+   Snapshot / multi-smile filter strip
+   Phase-1 ergonomics: plain text inputs for expiration dates.
+   --------------------------------------------------------------------------- */
+
+.snapshotView {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.snapshotFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  align-items: flex-start;
+}
+
+.filterLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.filterInput {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary);
+  min-width: 130px;
+}
+
+.expirationInputRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.addButton {
+  appearance: none;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border: 1px solid var(--border-accent, var(--text-secondary));
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.addButton:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+}
+
+.addButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.expirationList {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.expirationTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  color: var(--text-secondary);
+}
+
+.removeButton {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-muted);
+}

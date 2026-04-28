@@ -193,3 +193,75 @@
   max-height: 300px;
   overflow-y: auto;
 }
+
+/* ── Options category ─────────────────────────────────────────────────────── */
+
+.optionRoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px 6px 25px;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background 0.15s ease, border-left-color 0.15s ease;
+}
+
+.optionRoot:hover {
+  background: var(--bg-hover);
+}
+
+.optionRootActive {
+  background: var(--accent-subtle);
+  border-left-color: var(--cat-options);
+}
+
+.optionRootName {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.optionRootActive .optionRootName {
+  color: var(--cat-options);
+}
+
+.optionRootBadges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.optionGreeksBadge {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--cat-options);
+  background: rgba(34, 197, 94, 0.12);
+  border-radius: 3px;
+  padding: 1px 5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.optionVerificationBadge {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  border-radius: 3px;
+  padding: 1px 5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: help;
+}

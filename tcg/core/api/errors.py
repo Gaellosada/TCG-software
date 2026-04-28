@@ -5,7 +5,13 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from tcg.types.errors import TCGError
+from tcg.types.errors import (
+    TCGError,
+    OptionsValidationError,
+    OptionsContractNotFound,
+    OptionsSelectionError,
+    OptionsDataAccessError,
+)
 
 STATUS_MAP: dict[str, int] = {
     "data_not_found": 404,
@@ -13,6 +19,11 @@ STATUS_MAP: dict[str, int] = {
     "strategy_execution_error": 422,
     "simulation_error": 500,
     "validation_error": 400,
+    # Options-domain error types
+    "options_validation_error": 400,
+    "options_contract_not_found": 404,
+    "options_selection_error": 422,
+    "options_data_access_error": 502,
 }
 
 

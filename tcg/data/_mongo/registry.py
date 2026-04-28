@@ -70,5 +70,15 @@ class CollectionRegistry:
         """All collections in scope (excludes options for now)."""
         return self.indexes + self.assets + self.futures
 
+    @property
+    def all_options(self) -> list[str]:
+        """Discovered ``OPT_*`` collections, sorted.
+
+        Kept separate from ``all_active`` so the existing
+        ``MarketDataService`` contract (price/continuous flows) does not
+        gain a hidden options branch — guardrail #8 (mirror conventions).
+        """
+        return list(self.options)
+
     def __contains__(self, collection: str) -> bool:
         return collection in self.all_active
