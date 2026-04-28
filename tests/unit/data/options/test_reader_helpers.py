@@ -495,3 +495,212 @@ class TestFindDocumentCompoundId:
             coll, "expirationCycle=M|internalSymbol=DOES_NOT_EXIST"
         )
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# query_chain — Mongo projection (Wave-3 robustness fix, 2026-04-28)
+# ---------------------------------------------------------------------------
+#
+# Regression: ``query_chain`` previously issued ``coll.find(query)`` with no
+# projection, so every matched contract document shipped its full
+# ``eodDatas`` + ``eodGreeks`` history (and any other per-vendor
+# decorations like ``intradayDatas``) over the wire — O(100 MB) for an
+# SP-500 90-day chain pull. We now project to exactly the fields read by
+# ``_doc_to_dto.doc_to_contract`` and ``_materialize_chain_row``. If a
+# future contributor drops a needed field from ``_CHAIN_PROJECTION``,
+# these tests fail loudly.
+
+
+class _ChainCursorStub:
+    """Async cursor stub mimicking ``coll.find(...).sort(...)``."""
+
+    def __init__(self, docs):
+        self._docs = list(docs)
+
+    def sort(self, *args, **kwargs):
+        # query_chain calls ``.sort("expiration", ASCENDING)``. For the
+        # purposes of these tests order is irrelevant — fixtures already
+        # carry exactly the docs the reader is expected to emit.
+        return self
+
+    def __aiter__(self):
+        async def _gen():
+            for doc in self._docs:
+                yield doc
+        return _gen()
+
+
+class _ChainCollectionStub:
+    """Captures ``find`` arguments and yields a stubbed cursor."""
+
+    def __init__(self, docs):
+        self._docs = docs
+        self.find_calls: list[dict] = []
+
+    def find(self, query, projection=None, **kwargs):
+        self.find_calls.append(
+            {"query": query, "projection": projection, **kwargs}
+        )
+        return _ChainCursorStub(self._docs)
+
+
+class _ChainDbStub:
+    def __init__(self, coll):
+        self._coll = coll
+
+    def __getitem__(self, name):
+        return self._coll
+
+
+class TestQueryChainProjection:
+    """``query_chain`` must pass an inclusion projection that lists every
+    field consumed downstream (and only those fields)."""
+
+    @pytest.mark.asyncio
+    async def test_find_called_with_chain_projection(self, sp500_doc):
+        from tcg.data.options.reader import (
+            MongoOptionsDataReader,
+            _CHAIN_PROJECTION,
+        )
+
+        coll = _ChainCollectionStub([sp500_doc])
+        reader = MongoOptionsDataReader.__new__(MongoOptionsDataReader)
+        reader._db = _ChainDbStub(coll)
+        reader._registry = None  # not used by query_chain
+
+        await reader.query_chain(
+            root="OPT_SP_500",
+            date=date(2024, 3, 1),
+            type="C",
+            expiration_min=date(2024, 1, 1),
+            expiration_max=date(2024, 12, 31),
+        )
+
+        assert len(coll.find_calls) == 1
+        call = coll.find_calls[0]
+        assert call["projection"] == _CHAIN_PROJECTION
+
+    @pytest.mark.asyncio
+    async def test_projection_lists_every_consumer_field(self):
+        """Lock the projection contents. Drop a field here only after
+        confirming no consumer reads it — see the docstring on
+        ``_CHAIN_PROJECTION`` for the consumer list."""
+        from tcg.data.options.reader import _CHAIN_PROJECTION
+
+        # Fields read by _doc_to_dto.doc_to_contract:
+        contract_fields = {
+            "_id",
+            "expiration",
+            "strike",
+            "type",
+            "rootUnderlying",
+            "underlying",
+            "underlyingSymbol",
+            "contractSize",
+            "currency",
+        }
+        # Fields read by _materialize_chain_row directly:
+        row_fields = {"eodDatas", "eodGreeks"}
+        required = contract_fields | row_fields
+
+        assert set(_CHAIN_PROJECTION.keys()) == required, (
+            "Projection drift: dropping a field here is a silent "
+            "data-loss bug. Update only after auditing consumers."
+        )
+        # Inclusion form: every value is exactly 1.
+        assert all(v == 1 for v in _CHAIN_PROJECTION.values())
+
+    @pytest.mark.asyncio
+    async def test_dtos_unchanged_vs_unprojected_baseline(
+        self,
+        sp500_doc,
+        vix_doc,
+        btc_doc,
+        eth_doc_with_deribit,
+        t_note_doc,
+    ):
+        """Materializing rows from a projected doc must equal materializing
+        from the original doc, for every fixture root. Guards against the
+        case where the projection accidentally drops a field that
+        ``_materialize_chain_row`` (or ``doc_to_contract``) silently
+        depends on.
+        """
+        from tcg.data.options.reader import (
+            _CHAIN_PROJECTION,
+            _materialize_chain_row,
+        )
+
+        cases = [
+            (sp500_doc, "OPT_SP_500", 20240301),
+            (vix_doc, "OPT_VIX", 20240315),
+            (btc_doc, "OPT_BTC", 20240320),
+            (eth_doc_with_deribit, "OPT_ETH", 20240320),
+            (t_note_doc, "OPT_T_NOTE_10_Y", 20240315),
+        ]
+        projected_keys = set(_CHAIN_PROJECTION.keys())
+
+        for doc, collection, target in cases:
+            # Simulate the server-side projection: keep only listed keys.
+            projected = {k: v for k, v in doc.items() if k in projected_keys}
+
+            baseline = _materialize_chain_row(
+                doc=doc,
+                collection=collection,
+                target_yyyymmdd=target,
+                type_filter="BOTH",
+                strike_min=None,
+                strike_max=None,
+            )
+            after = _materialize_chain_row(
+                doc=projected,
+                collection=collection,
+                target_yyyymmdd=target,
+                type_filter="BOTH",
+                strike_min=None,
+                strike_max=None,
+            )
+
+            # Both produce the same (contract, row) tuple — frozen
+            # dataclasses compare by value so == is structural.
+            assert baseline == after, (
+                f"DTO drift on {collection}: projection dropped a "
+                f"field consumed by _materialize_chain_row."
+            )
+
+    @pytest.mark.asyncio
+    async def test_query_chain_filters_apply_post_projection(self, sp500_doc):
+        """Sanity: end-to-end through the projected ``find`` path,
+        ``query_chain`` still returns the expected (contract, row) shape
+        and honours type / strike filters.
+        """
+        from tcg.data.options.reader import MongoOptionsDataReader
+
+        coll = _ChainCollectionStub([sp500_doc])
+        reader = MongoOptionsDataReader.__new__(MongoOptionsDataReader)
+        reader._db = _ChainDbStub(coll)
+        reader._registry = None
+
+        result = await reader.query_chain(
+            root="OPT_SP_500",
+            date=date(2024, 3, 1),
+            type="C",
+            expiration_min=date(2024, 1, 1),
+            expiration_max=date(2024, 12, 31),
+        )
+        assert len(result) == 1
+        contract, row = result[0]
+        assert contract.type == "C"
+        assert contract.strike == 5000.0
+        assert contract.provider == "IVOLATILITY"
+        assert row.date == date(2024, 3, 1)
+        assert row.delta_stored == 0.50
+
+        # Type filter excludes — no calls return rows.
+        result_p = await reader.query_chain(
+            root="OPT_SP_500",
+            date=date(2024, 3, 1),
+            type="P",
+            expiration_min=date(2024, 1, 1),
+            expiration_max=date(2024, 12, 31),
+        )
+        assert result_p == []

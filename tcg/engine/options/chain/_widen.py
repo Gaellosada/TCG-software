@@ -59,6 +59,42 @@ def widen_stored(value: float | None, *, greek_name: str) -> ComputeResult:
     )
 
 
+def wrap_underlying_price(value: float | None) -> ComputeResult:
+    """Wrap a joined ``underlying_price`` value as a ``ComputeResult``.
+
+    Per Decision B, ``ChainSnapshot.underlying_price`` is kept as
+    ``float | None`` inside Module 6 and wrapped into a ``ComputeResult``
+    at the API boundary.  Centralising the wrap here preserves the
+    cardinal invariant that ``source="stored"`` is emitted **only** by
+    this module.
+
+    - ``value is not None`` → ``source="stored"`` (the underlying close
+      came from the joined INDEX or FUT_* document — provider attribution
+      is implicit in the join).
+    - ``value is None`` → ``source="missing"`` with
+      ``error_code="missing_underlying_price"``.
+    """
+    if value is None:
+        return ComputeResult(
+            value=None,
+            source="missing",
+            model=None,
+            inputs_used=None,
+            missing_inputs=("underlying_price",),
+            error_code="missing_underlying_price",
+            error_detail="Underlying price unavailable for this root/date.",
+        )
+    return ComputeResult(
+        value=float(value),
+        source="stored",
+        model=None,
+        inputs_used=None,
+        missing_inputs=None,
+        error_code=None,
+        error_detail=None,
+    )
+
+
 def merge_stored_with_computed(
     *,
     stored_value: float | None,

@@ -76,35 +76,17 @@ def _wrap_underlying_price(value: float | None) -> dict[str, Any]:
     """Wrap ``ChainSnapshot.underlying_price`` as a ComputeResult dict.
 
     Per Decision B: Module 6 keeps ``float | None``; the API router
-    wraps to ``ComputeResult`` at this boundary.
-
-    - ``value is not None`` → ``source="stored"`` (the underlying close
-      came from the joined INDEX or FUT_* document — provider
-      attribution is implicit in the join).
-    - ``value is None`` → ``source="missing"`` with
-      ``error_code="missing_underlying_price"``.
+    wraps to ``ComputeResult`` at this boundary.  The actual wrap is
+    delegated to ``tcg.engine.options.chain._widen.wrap_underlying_price``
+    so the cardinal invariant — ``source="stored"`` is emitted ONLY by
+    Module 6's ``_widen.py`` — is preserved (verified by grep in Wave B2).
     """
-    if value is None:
-        result = ComputeResult(
-            value=None,
-            source="missing",
-            model=None,
-            inputs_used=None,
-            missing_inputs=("underlying_price",),
-            error_code="missing_underlying_price",
-            error_detail="Underlying price unavailable for this root/date.",
-        )
-    else:
-        result = ComputeResult(
-            value=float(value),
-            source="stored",
-            model=None,
-            inputs_used=None,
-            missing_inputs=None,
-            error_code=None,
-            error_detail=None,
-        )
-    return dataclasses.asdict(result)
+    # Local import: keeps the API->engine dependency function-scoped, in
+    # line with the rest of this module's policy of pulling engine helpers
+    # at call sites (see ``_build_contract_row_with_greeks``).
+    from tcg.engine.options.chain._widen import wrap_underlying_price
+
+    return dataclasses.asdict(wrap_underlying_price(value))
 
 
 def _dataclass_to_dict(obj: Any) -> Any:

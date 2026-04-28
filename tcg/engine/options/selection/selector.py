@@ -53,7 +53,7 @@ Module 6 will own the canonical resolver in production wiring.
 from __future__ import annotations
 
 from datetime import date
-from typing import Awaitable, Callable, Literal
+from typing import Literal
 
 from tcg.engine.options.maturity.protocol import MaturityResolver
 from tcg.engine.options.pricing.protocol import OptionsPricer
@@ -62,7 +62,10 @@ from tcg.engine.options.selection._match import (
     match_by_moneyness,
     match_by_strike,
 )
-from tcg.engine.options.selection._ports import ChainReaderPort
+from tcg.engine.options.selection._ports import (
+    ChainReaderPort,
+    UnderlyingPriceResolver,
+)
 from tcg.engine.options.selection.protocol import OptionsSelector
 from tcg.types.options import (
     ByDelta,
@@ -76,10 +79,6 @@ from tcg.types.options import (
     SelectionCriterion,
     SelectionResult,
 )
-
-UnderlyingPriceResolver = Callable[
-    [OptionContractDoc, date], Awaitable[float | None]
-]
 
 
 def _no_chain(root: str, on_date: date) -> SelectionResult:

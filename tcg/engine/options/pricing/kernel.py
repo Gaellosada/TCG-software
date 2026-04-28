@@ -16,9 +16,12 @@ Java ``calculateBlack`` family, which uses ``d=0`` implicitly. With Phase 1's
 ``r=0`` mandate the discount factor ``exp(-rT)`` is identically 1, so call and
 put prices match standard Black-76 with no discounting (cf. Java :112-119).
 
-`implied_vol` delegates to ``py_vollib.ref_python.black.implied_volatility``
-(Peter Jäckel "Let's Be Rational" reference implementation; LEGACY_FINDINGS §2.3
-recommends this over a hand port).
+`implied_vol` delegates to ``py_vollib.black.implied_volatility``
+(Peter Jäckel "Let's Be Rational"; LEGACY_FINDINGS §2.3 recommends this over a
+hand port).  The fast ``py_vollib.black`` C-extension impl is used in place of
+the pure-Python ``py_vollib.ref_python.black`` reference impl — the two are
+drop-in compatible and the kernel matches both to 1e-12 (verified by
+``test_golden.py``).
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from __future__ import annotations
 import math
 from typing import Literal
 
-from py_vollib.ref_python.black.implied_volatility import (
+from py_vollib.black.implied_volatility import (
     implied_volatility as _vollib_implied_volatility,
 )
 
@@ -151,9 +154,9 @@ class BS76Kernel(PricingKernel):
         r: float,
         flag: Literal["c", "p"],
     ) -> float:
-        """Delegate to py_vollib's reference implementation of "Let's Be Rational".
+        """Delegate to py_vollib's "Let's Be Rational" implementation.
 
-        Signature note: ``py_vollib.ref_python.black.implied_volatility`` expects
+        Signature note: ``py_vollib.black.implied_volatility`` expects
         ``(price, F, K, r, t, flag)`` (note the ``r``-then-``t`` ordering).
         Raises ``BelowIntrinsicException`` /
         ``AboveMaximumException`` when no real solution exists; caller wraps

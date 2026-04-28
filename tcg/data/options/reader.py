@@ -64,6 +64,40 @@ def _display_name(collection: str) -> str:
     return collection.removeprefix("OPT_").replace("_", " ").title()
 
 
+# Inclusion projection for ``query_chain``'s Mongo ``find``. Only fields
+# read by downstream consumers are listed; every other top-level key
+# (notably ``intradayDatas`` and any vendor-side decorations) is excluded
+# server-side so the cursor does not ship them over the wire.
+#
+# Consumers (verify before editing — dropping a field here is a silent
+# data-loss bug):
+#   - ``tcg.data.options._doc_to_dto.doc_to_contract`` reads:
+#       ``_id`` (compound), ``expiration``, ``strike``, ``type``,
+#       ``rootUnderlying``, ``underlying``, ``underlyingSymbol``,
+#       ``contractSize``, ``currency``.
+#   - ``_materialize_chain_row`` (this module) reads:
+#       ``eodDatas``, ``eodGreeks`` (per-provider arrays).
+#   - ``tcg.engine.options.chain.{chain,_join,_widen}`` only consume
+#     fields surfaced via the produced DTOs — no additional doc fields.
+#
+# ``_id`` is included by Mongo automatically; we list it for clarity and
+# parity with the analogous projection in
+# ``tcg.data._mongo.instruments`` (line 144).
+_CHAIN_PROJECTION: dict[str, int] = {
+    "_id": 1,
+    "expiration": 1,
+    "strike": 1,
+    "type": 1,
+    "rootUnderlying": 1,
+    "underlying": 1,
+    "underlyingSymbol": 1,
+    "contractSize": 1,
+    "currency": 1,
+    "eodDatas": 1,
+    "eodGreeks": 1,
+}
+
+
 class MongoOptionsDataReader:
     """Read-only adapter for OPT_* collections.
 
@@ -140,7 +174,9 @@ class MongoOptionsDataReader:
                     "$lte": _date_to_int(expiration_max),
                 },
             }
-            cursor = coll.find(query).sort("expiration", ASCENDING)
+            cursor = coll.find(query, projection=_CHAIN_PROJECTION).sort(
+                "expiration", ASCENDING
+            )
 
             type_filter = type.upper() if isinstance(type, str) else "BOTH"
             target_yyyymmdd = _date_to_int(date)
