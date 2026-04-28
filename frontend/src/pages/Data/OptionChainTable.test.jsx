@@ -223,8 +223,8 @@ describe('<OptionChainTable> rendering rows', () => {
 
     render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
 
-    // 2 data rows + 1 header row.
-    expect(screen.getAllByRole('row')).toHaveLength(3);
+    // 2 data rows + 2 grouped-header rows (Calls/Puts on top, fields below).
+    expect(screen.getAllByRole('row')).toHaveLength(4);
     expect(screen.getByText('5000.00')).toBeTruthy();
     expect(screen.getByText('5100.00')).toBeTruthy();
   });
@@ -240,13 +240,10 @@ describe('<OptionChainTable> rendering rows', () => {
     const { container } = render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
     // The IV cell text "0.1800" should appear unwrapped in computed-italic class.
     expect(container.textContent).toContain('0.1800');
-    // The container should not contain the ⓒ badge for this stored cell.
-    // (It might still show the badge somewhere else if other cells are computed —
-    // here only one row, only stored values for IV.)
-    // Check the IV column does NOT have italic on the IV value:
     const cells = container.querySelectorAll('td');
-    // Order: Expiration, Type, Strike, Bid, Ask, Mid, IV, Δ, Γ, Θ, ν, OI
-    const ivCell = cells[6];
+    // Canonical chain: Exp, [call: Bid Ask Mid IV Δ Γ Θ ν OI], C, Strike, P,
+    // [put: Bid Ask Mid IV Δ Γ Θ ν OI]. Call IV → cells[4].
+    const ivCell = cells[4];
     expect(ivCell.querySelector('[class*="computed"]')).toBeNull();
   });
 
@@ -260,7 +257,7 @@ describe('<OptionChainTable> rendering rows', () => {
     };
     const { container } = render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
     const cells = container.querySelectorAll('td');
-    const gammaCell = cells[8]; // Γ column
+    const gammaCell = cells[6]; // call Γ column
     expect(gammaCell.textContent).toContain('ⓒ');
     expect(gammaCell.querySelector('[class*="computed"]')).not.toBeNull();
   });
@@ -279,7 +276,7 @@ describe('<OptionChainTable> rendering rows', () => {
     };
     const { container } = render(<OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />);
     const cells = container.querySelectorAll('td');
-    const thetaCell = cells[9]; // Θ column
+    const thetaCell = cells[7]; // call Θ column
     expect(thetaCell.textContent).toBe('—');
     const span = thetaCell.querySelector('span[title]');
     expect(span.getAttribute('title')).toBe(
@@ -326,9 +323,10 @@ describe('<OptionChainTable> row click', () => {
 
     render(<OptionChainTable root="OPT_SP_500" onRowClick={onRowClick} />);
 
-    // Find the data row (skip the header row).
+    // Skip the 2 grouped-header rows. Clicking the row directly (not a
+    // specific cell) defaults to the call side via the side-aware handler.
     const rows = screen.getAllByRole('row');
-    fireEvent.click(rows[1]);
+    fireEvent.click(rows[2]);
 
     expect(onRowClick).toHaveBeenCalledWith({
       collection: 'OPT_SP_500',

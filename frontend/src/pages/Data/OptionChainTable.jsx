@@ -97,6 +97,137 @@ export function ComputeResultCell({ result, decimals = 4 }) {
 }
 
 // ---------------------------------------------------------------------------
+// MergedChainTable — canonical chain layout. Rows are unique (expiration,
+// strike) pairs; each row carries the call on the left, the strike in the
+// middle, the put on the right. Click on a call cell opens the call's
+// detail; click on a put cell opens the put's. Click on a shared cell (Exp /
+// Strike) defaults to whichever side exists, preferring the call.
+// ---------------------------------------------------------------------------
+
+function mergeRows(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const key = `${r.expiration}|${r.strike}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        expiration: r.expiration,
+        strike: r.strike,
+        call: null,
+        put: null,
+      });
+    }
+    const entry = map.get(key);
+    if (r.type === 'C') entry.call = r;
+    else if (r.type === 'P') entry.put = r;
+  }
+  // Sort by expiration descending, then strike descending — most distant
+  // expiration on top, highest strike first within an expiration.
+  return [...map.values()].sort((a, b) => {
+    if (a.expiration !== b.expiration) return a.expiration < b.expiration ? 1 : -1;
+    return b.strike - a.strike;
+  });
+}
+
+function MergedChainTable({ rows, collection, onRowClick }) {
+  const merged = useMemo(() => mergeRows(rows), [rows]);
+
+  const handleRowClick = (e, entry) => {
+    if (!onRowClick) return;
+    const td = e.target.closest('td');
+    const side = td?.dataset?.side;
+    const target =
+      side === 'call'
+        ? entry.call
+        : side === 'put'
+          ? entry.put
+          : entry.call || entry.put;
+    if (!target) return;
+    onRowClick({
+      collection,
+      instrument_id: target.contract_id,
+      expiry: target.expiration,
+      strike: target.strike,
+      optionType: target.type,
+    });
+  };
+
+  return (
+    <div className={styles.tableWrapper}>
+      <table className={styles.table}>
+        <thead>
+          <tr>
+            <th rowSpan={2} className={styles.colExp}>Expiration</th>
+            <th colSpan={10} className={styles.groupCalls}>Calls</th>
+            <th rowSpan={2} className={styles.colStrike}>Strike</th>
+            <th colSpan={10} className={styles.groupPuts}>Puts</th>
+          </tr>
+          <tr>
+            <th className={styles.bidQuote}>Bid</th>
+            <th>Mid</th>
+            <th className={`${styles.askQuote} ${styles.quoteSepRight}`}>Ask</th>
+            <th>IV</th>
+            <th>Δ</th><th>Γ</th><th>Θ</th><th>ν</th><th>OI</th>
+            <th className={styles.typeCol} aria-label="Call marker"></th>
+            <th className={styles.typeCol} aria-label="Put marker"></th>
+            <th className={styles.bidQuote}>Bid</th>
+            <th>Mid</th>
+            <th className={`${styles.askQuote} ${styles.quoteSepRight}`}>Ask</th>
+            <th>IV</th>
+            <th>Δ</th><th>Γ</th><th>Θ</th><th>ν</th><th>OI</th>
+          </tr>
+        </thead>
+        <tbody>
+          {merged.map((entry) => {
+            const c = entry.call;
+            const p = entry.put;
+            return (
+              <tr
+                key={`${entry.expiration}|${entry.strike}`}
+                className={styles.row}
+                onClick={(e) => handleRowClick(e, entry)}
+              >
+                <td className={styles.colExp}>{entry.expiration}</td>
+                <td data-side="call" className={styles.bidQuote}>{c ? fmt(c.bid, 2) : ''}</td>
+                <td data-side="call">{c ? fmt(c.mid, 2) : ''}</td>
+                <td data-side="call" className={`${styles.askQuote} ${styles.quoteSepRight}`}>{c ? fmt(c.ask, 2) : ''}</td>
+                <td data-side="call">{c ? <ComputeResultCell result={c.iv} decimals={4} /> : ''}</td>
+                <td data-side="call">{c ? <ComputeResultCell result={c.delta} decimals={4} /> : ''}</td>
+                <td data-side="call">{c ? <ComputeResultCell result={c.gamma} decimals={4} /> : ''}</td>
+                <td data-side="call">{c ? <ComputeResultCell result={c.theta} decimals={4} /> : ''}</td>
+                <td data-side="call">{c ? <ComputeResultCell result={c.vega} decimals={4} /> : ''}</td>
+                <td data-side="call">{c ? fmtInt(c.open_interest) : ''}</td>
+                <td
+                  data-side="call"
+                  className={`${styles.typeCol} ${c ? styles.typeCall : ''}`}
+                >
+                  {c ? 'C' : ''}
+                </td>
+                <td className={styles.colStrike}>{fmt(entry.strike, 2)}</td>
+                <td
+                  data-side="put"
+                  className={`${styles.typeCol} ${p ? styles.typePut : ''}`}
+                >
+                  {p ? 'P' : ''}
+                </td>
+                <td data-side="put" className={styles.bidQuote}>{p ? fmt(p.bid, 2) : ''}</td>
+                <td data-side="put">{p ? fmt(p.mid, 2) : ''}</td>
+                <td data-side="put" className={`${styles.askQuote} ${styles.quoteSepRight}`}>{p ? fmt(p.ask, 2) : ''}</td>
+                <td data-side="put">{p ? <ComputeResultCell result={p.iv} decimals={4} /> : ''}</td>
+                <td data-side="put">{p ? <ComputeResultCell result={p.delta} decimals={4} /> : ''}</td>
+                <td data-side="put">{p ? <ComputeResultCell result={p.gamma} decimals={4} /> : ''}</td>
+                <td data-side="put">{p ? <ComputeResultCell result={p.theta} decimals={4} /> : ''}</td>
+                <td data-side="put">{p ? <ComputeResultCell result={p.vega} decimals={4} /> : ''}</td>
+                <td data-side="put">{p ? fmtInt(p.open_interest) : ''}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main table component
 // ---------------------------------------------------------------------------
 
@@ -249,59 +380,11 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
       )}
 
       {rows && rows.length > 0 && (
-        <div className={styles.tableWrapper}>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th>Expiration</th>
-                <th>Type</th>
-                <th>Strike</th>
-                <th>Bid</th>
-                <th>Ask</th>
-                <th>Mid</th>
-                <th>IV</th>
-                <th>Δ</th>
-                <th>Γ</th>
-                <th>Θ</th>
-                <th>ν</th>
-                <th>OI</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr
-                  key={row.contract_id}
-                  className={styles.row}
-                  onClick={() =>
-                    onRowClick &&
-                    onRowClick({
-                      collection: filters.root,
-                      instrument_id: row.contract_id,
-                      expiry: row.expiration,
-                      strike: row.strike,
-                      optionType: row.type,
-                    })
-                  }
-                >
-                  <td>{row.expiration}</td>
-                  <td className={row.type === 'C' ? styles.typeCall : styles.typePut}>
-                    {row.type}
-                  </td>
-                  <td>{fmt(row.strike, 2)}</td>
-                  <td>{fmt(row.bid, 2)}</td>
-                  <td>{fmt(row.ask, 2)}</td>
-                  <td>{fmt(row.mid, 2)}</td>
-                  <td><ComputeResultCell result={row.iv} decimals={4} /></td>
-                  <td><ComputeResultCell result={row.delta} decimals={4} /></td>
-                  <td><ComputeResultCell result={row.gamma} decimals={4} /></td>
-                  <td><ComputeResultCell result={row.theta} decimals={4} /></td>
-                  <td><ComputeResultCell result={row.vega} decimals={4} /></td>
-                  <td>{fmtInt(row.open_interest)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <MergedChainTable
+          rows={rows}
+          collection={filters.root}
+          onRowClick={onRowClick}
+        />
       )}
     </div>
   );

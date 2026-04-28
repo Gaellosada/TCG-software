@@ -201,9 +201,9 @@ function CategoryBrowser({ selected, onSelect }) {
                   cat.optionRoots.map((root) => (
                     <button
                       key={root.collection}
-                      className={`${styles.optionRoot} ${
+                      className={`${styles.instrument} ${
                         selected?.type === 'option' && selected?.collection === root.collection
-                          ? styles.optionRootActive
+                          ? styles.instrumentActive
                           : ''
                       }`}
                       onClick={() =>
@@ -223,14 +223,14 @@ function CategoryBrowser({ selected, onSelect }) {
                         })
                       }
                     >
-                      <span className={styles.optionRootName}>{root.name}</span>
-                      <span className={styles.optionRootBadges}>
+                      <span className={styles.instrumentSymbol}>{root.name}</span>
+                      <span className={styles.badges}>
                         {root.has_greeks && (
-                          <span className={styles.optionGreeksBadge}>Greeks</span>
+                          <span className={styles.greeksBadge}>Greeks</span>
                         )}
                         {root.strike_factor_verified === false && (
                           <span
-                            className={styles.optionVerificationBadge}
+                            className={styles.verificationBadge}
                             title="Strike factor verification pending; some bond/rate option strikes may display at the wrong scale until verified."
                           >
                             Verification pending
