@@ -26,7 +26,7 @@ import pytest
 from httpx import AsyncClient
 
 from tcg.types.errors import OptionsDataAccessError, OptionsContractNotFound
-from tcg.types.options import OptionContractSeries
+from tcg.types.options import OptionContractDoc, OptionContractSeries
 
 from conftest import (  # type: ignore[import-not-found]
     StubOptionsReader,
@@ -523,6 +523,101 @@ async def test_chain_snapshot_happy_path(
     assert "strike" in p
     assert "value" in p
     assert p["value"]["source"] == "stored"
+
+
+async def test_chain_snapshot_smile_point_carries_expiration_cycle(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Each SmilePoint exposes the contract's expirationCycle, so the
+    frontend can populate the cycle dropdown from the unfiltered
+    response."""
+    options_reader.query_chain_result = [
+        (make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
+         make_row(iv_stored=0.16)),
+    ]
+    resp = await client.get(
+        "/api/options/chain-snapshot",
+        params=[
+            ("root", "OPT_SP_500"),
+            ("date", "2024-03-15"),
+            ("type", "C"),
+            ("expirations", "2024-04-19"),
+            ("field", "iv"),
+        ],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    point = body["series"][0]["points"][0]
+    # make_contract() defaults expiration_cycle to "M".
+    assert point["expiration_cycle"] == "M"
+
+
+async def test_chain_snapshot_filters_by_expiration_cycle(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """When expiration_cycle is supplied, only contracts of that cycle
+    flow into the response. Cycle mismatches must be filtered out before
+    the SmilePoint is built."""
+
+    # Two contracts at the same strike, same expiration date, different
+    # cycles. This is the SP_500 weekly-vs-monthly overlap that produces
+    # duplicate strike markers on the smile.
+    monthly_contract = make_contract(
+        contract_id="SPX_C_5000_20240419|M",
+        strike=5000.0,
+    )
+    # Override cycle by reconstructing the contract — make_contract
+    # hard-codes "M".
+    weekly_contract = OptionContractDoc(
+        collection=monthly_contract.collection,
+        contract_id="SPXW_C_5000_20240419|W",
+        root_underlying=monthly_contract.root_underlying,
+        underlying_ref=monthly_contract.underlying_ref,
+        underlying_symbol=monthly_contract.underlying_symbol,
+        expiration=monthly_contract.expiration,
+        expiration_cycle="W",
+        strike=monthly_contract.strike,
+        type=monthly_contract.type,
+        contract_size=monthly_contract.contract_size,
+        currency=monthly_contract.currency,
+        provider=monthly_contract.provider,
+        strike_factor_verified=monthly_contract.strike_factor_verified,
+    )
+    options_reader.query_chain_result = [
+        (monthly_contract, make_row(iv_stored=0.16)),
+        (weekly_contract, make_row(iv_stored=0.18)),
+    ]
+
+    # Without the filter — both points present (current behaviour).
+    resp_all = await client.get(
+        "/api/options/chain-snapshot",
+        params=[
+            ("root", "OPT_SP_500"),
+            ("date", "2024-03-15"),
+            ("type", "C"),
+            ("expirations", "2024-04-19"),
+            ("field", "iv"),
+        ],
+    )
+    assert resp_all.status_code == 200
+    assert len(resp_all.json()["series"][0]["points"]) == 2
+
+    # With expiration_cycle=M — only the monthly survives.
+    resp_m = await client.get(
+        "/api/options/chain-snapshot",
+        params=[
+            ("root", "OPT_SP_500"),
+            ("date", "2024-03-15"),
+            ("type", "C"),
+            ("expirations", "2024-04-19"),
+            ("field", "iv"),
+            ("expiration_cycle", "M"),
+        ],
+    )
+    assert resp_m.status_code == 200
+    pts = resp_m.json()["series"][0]["points"]
+    assert len(pts) == 1
+    assert pts[0]["expiration_cycle"] == "M"
 
 
 async def test_chain_snapshot_max_eight_expirations(client: AsyncClient):

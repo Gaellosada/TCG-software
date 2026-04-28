@@ -40,6 +40,7 @@ class OptionsChain(Protocol):
         compute_missing: bool = False,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> ChainSnapshot:
         """Return the full chain table for ``(root, date)``.
 
@@ -59,5 +60,11 @@ class OptionsChain(Protocol):
             ``source="missing"`` with ``error_code="not_stored"``.
         strike_min, strike_max:
             Optional strike-bounded filtering forwarded to the data port.
+        expiration_cycle:
+            Optional ``OptionContractDoc.expiration_cycle`` filter. When
+            non-None, contracts whose cycle does not match are dropped.
+            Used by the smile UI to disambiguate roots (notably
+            OPT_SP_500) where multiple cycles share the same expiration
+            calendar date.
         """
         ...

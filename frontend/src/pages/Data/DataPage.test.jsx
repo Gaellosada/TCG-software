@@ -74,6 +74,8 @@ vi.mock('./useOptionExpirations', () => ({
 
 // ---------------------------------------------------------------------------
 // Mock ChainSnapshotPanel — captures props so tests can invoke onClose.
+// We also expose a `__resolveSnapshotData` test hook so tests can drive the
+// onSnapshotData callback DataPage uses to populate the cycle dropdown.
 // ---------------------------------------------------------------------------
 let capturedSnapshotProps = null;
 vi.mock('./ChainSnapshotPanel', () => ({
@@ -86,10 +88,12 @@ vi.mock('./ChainSnapshotPanel', () => ({
         data-date={props.date}
         data-type={props.type}
         data-expiration={props.expiration}
+        data-expiration-cycle={props.expiration_cycle == null ? '' : props.expiration_cycle}
       />
     );
   }),
 }));
+
 
 // ---------------------------------------------------------------------------
 // Lifecycle — clean up DOM between each test.
@@ -577,4 +581,118 @@ describe('DataPage — smile gating (ApiError regression)', () => {
     expect(screen.getByTestId('snapshot-empty')).toBeTruthy();
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// Cycle dropdown — smile-cycle filter (eliminates duplicate strike markers).
+// ---------------------------------------------------------------------------
+
+describe('DataPage — Smile cycle dropdown', () => {
+  function pickAndOpenSmile() {
+    act(() => {
+      capturedOnSelect({
+        type: 'option',
+        collection: 'OPT_SP_500',
+        instrument_id: null,
+        expiry: null, strike: null, optionType: null,
+        last_trade_date: '2026-04-27',
+        expiration_last: '2030-12-20',
+      });
+    });
+    act(() => {
+      fireEvent.click(screen.getByRole('tab', { name: 'Smile' }));
+    });
+    const expInput = screen.getByLabelText('Expiration');
+    act(() => {
+      fireEvent.change(expInput, { target: { value: '2026-05-15' } });
+    });
+  }
+
+  // Synthetic smile response carrying two distinct cycles, with "M"
+  // having more points than "W" (so auto-select picks "M").
+  const TWO_CYCLE_RESPONSE = {
+    root: 'OPT_SP_500',
+    date: '2026-04-27',
+    underlying_price: { value: 5500, source: 'stored', model: null,
+      inputs_used: null, missing_inputs: null, error_code: null,
+      error_detail: null },
+    series: [
+      {
+        expiration: '2026-05-15',
+        points: [
+          { strike: 4900, K_over_S: 0.89, expiration_cycle: 'M',
+            value: { value: 0.25, source: 'stored', model: null,
+              inputs_used: null, missing_inputs: null, error_code: null,
+              error_detail: null } },
+          { strike: 5000, K_over_S: 0.91, expiration_cycle: 'M',
+            value: { value: 0.20, source: 'stored', model: null,
+              inputs_used: null, missing_inputs: null, error_code: null,
+              error_detail: null } },
+          { strike: 5100, K_over_S: 0.93, expiration_cycle: 'M',
+            value: { value: 0.17, source: 'stored', model: null,
+              inputs_used: null, missing_inputs: null, error_code: null,
+              error_detail: null } },
+          { strike: 5000, K_over_S: 0.91, expiration_cycle: 'W',
+            value: { value: 0.22, source: 'stored', model: null,
+              inputs_used: null, missing_inputs: null, error_code: null,
+              error_detail: null } },
+        ],
+      },
+    ],
+  };
+
+  it('Cycle dropdown is rendered next to Type/Expiration on the Smile tab', () => {
+    render(<DataPage />);
+    pickAndOpenSmile();
+    // Cycle <select> exists with an "All cycles" sentinel option.
+    expect(screen.getByLabelText('Cycle')).toBeTruthy();
+  });
+
+  it('starts with no cycle filter — passes expiration_cycle=null on first render', () => {
+    render(<DataPage />);
+    pickAndOpenSmile();
+    // Default state before any data has loaded: no filter (cycle === null)
+    expect(capturedSnapshotProps).toBeTruthy();
+    expect(capturedSnapshotProps.expiration_cycle ?? null).toBe(null);
+  });
+
+  it('auto-selects the most-populated cycle once the smile data loads', () => {
+    render(<DataPage />);
+    pickAndOpenSmile();
+    // Simulate the panel reporting back the smile response.
+    act(() => {
+      capturedSnapshotProps.onSnapshotData(TWO_CYCLE_RESPONSE);
+    });
+    // The most-populated cycle in the fixture is 'M' (3 points vs 1).
+    expect(capturedSnapshotProps.expiration_cycle).toBe('M');
+  });
+
+  it('Cycle dropdown lists the distinct cycles from the response', () => {
+    render(<DataPage />);
+    pickAndOpenSmile();
+    act(() => {
+      capturedSnapshotProps.onSnapshotData(TWO_CYCLE_RESPONSE);
+    });
+    const select = screen.getByLabelText('Cycle');
+    const optionValues = Array.from(select.querySelectorAll('option'))
+      .map((o) => o.value);
+    // "" is the "All cycles" sentinel; M and W are the cycles in the
+    // response.
+    expect(optionValues).toEqual(expect.arrayContaining(['', 'M', 'W']));
+  });
+
+  it('selecting "All cycles" clears the filter (passes null to panel)', () => {
+    render(<DataPage />);
+    pickAndOpenSmile();
+    act(() => {
+      capturedSnapshotProps.onSnapshotData(TWO_CYCLE_RESPONSE);
+    });
+    expect(capturedSnapshotProps.expiration_cycle).toBe('M');
+
+    const select = screen.getByLabelText('Cycle');
+    act(() => {
+      fireEvent.change(select, { target: { value: '' } });
+    });
+    expect(capturedSnapshotProps.expiration_cycle ?? null).toBe(null);
+  });
 });

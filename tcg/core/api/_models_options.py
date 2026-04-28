@@ -302,6 +302,7 @@ class ChainRow(BaseModel):
     gamma: ComputeResult
     theta: ComputeResult
     vega: ComputeResult
+    expiration_cycle: str = ""
 
 
 class ChainSnapshot(BaseModel):
@@ -433,12 +434,17 @@ class ChainSnapshotQuery(BaseModel):
 
     ``expirations`` is limited to 8 entries (UI guard per spec §5
     and brief item I.10).
+
+    ``expiration_cycle`` (optional) restricts the smile to a single
+    contract cycle — e.g. SPX monthlies only — so the frontend can show
+    a single trace per strike on roots that have multi-cycle overlap.
     """
     root: str
     date: date
     type: Literal["C", "P"] = "C"
     expirations: list[date]
     field: Literal["iv", "delta"] = "iv"
+    expiration_cycle: str | None = None
 
     @field_validator("expirations")
     @classmethod
@@ -494,6 +500,10 @@ class SmilePoint(BaseModel):
     strike: float
     K_over_S: float | None
     value: ComputeResult   # the IV or delta at this strike
+    # Carried so the frontend can collapse multi-cycle overlap on roots
+    # like OPT_SP_500 (SPX-monthly vs SPXW-weekly sharing the same
+    # expiration calendar date) into a single trace per strike.
+    expiration_cycle: str = ""
 
 
 class SmileSeries(BaseModel):

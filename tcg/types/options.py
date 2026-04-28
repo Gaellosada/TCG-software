@@ -281,6 +281,10 @@ class ChainRow:
     gamma: ComputeResult
     theta: ComputeResult
     vega: ComputeResult
+    # Carried through from OptionContractDoc so the smile UI can
+    # disambiguate same-date / multi-cycle roots (e.g. OPT_SP_500
+    # SPX-monthly vs SPXW-weekly settling on the same Friday).
+    expiration_cycle: str = ""
 
 
 @dataclass(frozen=True)

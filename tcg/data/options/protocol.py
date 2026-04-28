@@ -65,6 +65,7 @@ class OptionsDataReader(Protocol):
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         """Return one (contract, row) pair per option active on *date*.
 
@@ -72,6 +73,11 @@ class OptionsDataReader(Protocol):
         compound index — see ``DB_SCHEMA_FINDINGS`` §5). Rows whose
         ``eodDatas[provider]`` does not contain *date* are skipped, so the
         returned length is the count of contracts that traded that day.
+
+        ``expiration_cycle`` (when non-None) filters out contracts whose
+        ``expiration_cycle`` (e.g. "M" / "W" / "D" / "Q") does not match.
+        Used by the smile UI to collapse multi-cycle overlap on roots
+        such as OPT_SP_500 to a single trace per strike.
         """
         ...
 

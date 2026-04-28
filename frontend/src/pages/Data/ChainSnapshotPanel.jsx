@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import useAsync from '../../hooks/useAsync';
 import Chart from '../../components/Chart';
 import { getChainSnapshot } from '../../api/options';
@@ -26,9 +26,10 @@ function buildXY(points, xAxis) {
   return { xs, ys };
 }
 
-function chartTitle(root, date, expiration, field) {
+function chartTitle(root, date, expiration, field, cycle) {
   const fieldLabel = field === 'delta' ? 'Delta' : 'IV';
-  return `${root} — ${date} — exp ${expiration} — ${fieldLabel}`;
+  const cycleLabel = cycle ? cycle : 'all cycles';
+  return `${root} — ${date} — exp ${expiration} — ${cycleLabel} — ${fieldLabel}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -40,28 +41,55 @@ function chartTitle(root, date, expiration, field) {
  * for one expiration.
  *
  * Props:
- *   root       string  — option root (e.g. 'OPT_SP_500')
- *   date       string  — YYYY-MM-DD
- *   type       'C'|'P' — option type (default 'C')
- *   expiration string  — single expiration date YYYY-MM-DD
- *   onClose    fn      — called when user clicks Close
+ *   root             string  — option root (e.g. 'OPT_SP_500')
+ *   date             string  — YYYY-MM-DD
+ *   type             'C'|'P' — option type (default 'C')
+ *   expiration       string  — single expiration date YYYY-MM-DD
+ *   expiration_cycle string|null — optional contract-cycle filter
+ *                    ('M' / 'W' / 'D' / ...). null = no filter.
+ *   onSnapshotData   fn      — optional, called with the raw
+ *                    ChainSnapshotResponse after each successful fetch.
+ *                    DataPage uses this to populate the cycle dropdown.
+ *   onClose          fn      — called when user clicks Close
  */
 export default function ChainSnapshotPanel({
   root,
   date,
   type = 'C',
   expiration,
+  expiration_cycle = null,
+  onSnapshotData,
   onClose,
 }) {
   const [field, setField] = useState('iv');
   const [xAxis, setXAxis] = useState('strike');
 
-  // Re-fetch whenever root / date / type / expiration / field changes.
-  // xAxis toggle is client-side only — no re-fetch needed.
+  // Re-fetch whenever root / date / type / expiration / cycle / field
+  // changes. xAxis toggle is client-side only — no re-fetch needed.
   const { data, loading, error } = useAsync(
-    () => getChainSnapshot(root, { date, type, expirations: [expiration], field }),
-    [root, date, type, expiration, field],
+    () => getChainSnapshot(
+      root,
+      {
+        date,
+        type,
+        expirations: [expiration],
+        field,
+        // Pass through only when set — keeps the URL clean for the
+        // legacy "all cycles" behaviour.
+        ...(expiration_cycle ? { expiration_cycle } : {}),
+      },
+    ),
+    [root, date, type, expiration, expiration_cycle, field],
   );
+
+  // Surface each successful response upward so the parent can extract
+  // distinct cycles / auto-select the most-populated one. We pass the
+  // ChainSnapshotResponse as-is; the parent decides what to read.
+  useEffect(() => {
+    if (data && typeof onSnapshotData === 'function') {
+      onSnapshotData(data);
+    }
+  }, [data, onSnapshotData]);
 
   const { traces, hasAtmLine } = useMemo(() => {
     if (!data || !Array.isArray(data.series) || data.series.length === 0) {
@@ -131,7 +159,7 @@ export default function ChainSnapshotPanel({
   const layoutOverrides = useMemo(() => ({
     title: {
       text: root && date && expiration
-        ? chartTitle(root, date, expiration, field)
+        ? chartTitle(root, date, expiration, field, expiration_cycle)
         : '',
       font: { size: 13 },
     },
@@ -144,7 +172,7 @@ export default function ChainSnapshotPanel({
     },
     yaxis: { title: { text: field === 'delta' ? 'Delta' : 'IV', font: { size: 11 } } },
     ...(hasAtmLine ? { yaxis2: hiddenOverlayAxis() } : {}),
-  }), [root, date, expiration, field, xAxis, hasAtmLine]);
+  }), [root, date, expiration, field, xAxis, hasAtmLine, expiration_cycle]);
 
   return (
     <div className={styles.container}>

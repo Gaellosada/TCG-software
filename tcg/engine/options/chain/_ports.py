@@ -48,8 +48,13 @@ class OptionsDataPort(Protocol):
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
-        """Return ``(contract, row)`` pairs traded on *date* in the window."""
+        """Return ``(contract, row)`` pairs traded on *date* in the window.
+
+        ``expiration_cycle`` (optional) drops rows whose cycle does not
+        match — used by the smile UI to disambiguate same-date overlap.
+        """
         ...
 
 

@@ -572,6 +572,14 @@ async def get_chain_snapshot(
         ..., description="Expiration dates (max 8 per request)"
     ),
     field: Literal["iv", "delta"] = Query("iv"),
+    expiration_cycle: str | None = Query(
+        None,
+        description=(
+            "Optional ``OptionContractDoc.expiration_cycle`` filter — "
+            "restrict the smile to one cycle (e.g. SPX monthly 'M') so "
+            "multi-cycle roots produce one point per strike."
+        ),
+    ),
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
     """Return per-expiration smile series for a Tier-2 multi-expiration view.
@@ -589,6 +597,7 @@ async def get_chain_snapshot(
                 "type": type,
                 "expirations": expirations,
                 "field": field,
+                "expiration_cycle": expiration_cycle,
             }
         )
     except PydanticValidationError as exc:
@@ -607,6 +616,7 @@ async def get_chain_snapshot(
             expiration_min=expiration,
             expiration_max=expiration,
             compute_missing=False,
+            expiration_cycle=query.expiration_cycle,
         )
         # underlying_price is the same across expirations (same root +
         # date); take the first non-None we observe.
@@ -621,6 +631,7 @@ async def get_chain_snapshot(
                     "strike": row.strike,
                     "K_over_S": row.K_over_S,
                     "value": dataclasses.asdict(cr),
+                    "expiration_cycle": row.expiration_cycle,
                 }
             )
             points.append(point.model_dump())

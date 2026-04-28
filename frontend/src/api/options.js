@@ -143,17 +143,22 @@ export async function selectOption(selectQuery) {
 //    GET /api/options/chain-snapshot
 //
 // options:
-//   date        YYYY-MM-DD string (required)
-//   type        'C' | 'P' (default 'C')
-//   expirations array of YYYY-MM-DD strings (required; max 8 per backend guard)
-//   field       'iv' | 'delta' (default 'iv')
+//   date              YYYY-MM-DD string (required)
+//   type              'C' | 'P' (default 'C')
+//   expirations       array of YYYY-MM-DD strings (required; max 8 per backend guard)
+//   field             'iv' | 'delta' (default 'iv')
+//   expiration_cycle  optional string (e.g. 'M' / 'W' / 'D') — restricts
+//                     the smile to one contract cycle so multi-cycle roots
+//                     (notably OPT_SP_500: SPX-monthly + SPXW-weekly) yield
+//                     a single point per strike. Omit / null to keep all
+//                     cycles (legacy behaviour).
 //
 // expirations MUST be serialised as repeated query params
 // (e.g. expirations=2024-04-19&expirations=2024-05-17), NOT comma-joined.
 // URLSearchParams.append is used — NOT set — to preserve all values.
 // ---------------------------------------------------------------------------
 
-export async function getChainSnapshot(root, { date, type, expirations, field }) {
+export async function getChainSnapshot(root, { date, type, expirations, field, expiration_cycle }) {
   const qp = new URLSearchParams();
   qp.set('root', String(root));
   qp.set('date', String(date));
@@ -165,6 +170,7 @@ export async function getChainSnapshot(root, { date, type, expirations, field })
     }
   }
   if (field != null) qp.set('field', String(field));
+  if (expiration_cycle != null) qp.set('expiration_cycle', String(expiration_cycle));
 
   return fetchClassified(`/options/chain-snapshot?${qp}`);
 }

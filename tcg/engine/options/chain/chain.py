@@ -90,6 +90,7 @@ class DefaultOptionsChain(OptionsChain):
         compute_missing: bool = False,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> ChainSnapshot:
         # 1. Validate parameters.
         if type not in _VALID_TYPES:
@@ -112,6 +113,7 @@ class DefaultOptionsChain(OptionsChain):
                 expiration_max=expiration_max,
                 strike_min=strike_min,
                 strike_max=strike_max,
+                expiration_cycle=expiration_cycle,
             )
         )
 
@@ -239,6 +241,7 @@ class DefaultOptionsChain(OptionsChain):
             gamma=gamma,
             theta=theta,
             vega=vega,
+            expiration_cycle=contract.expiration_cycle,
         )
 
     @staticmethod

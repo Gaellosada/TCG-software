@@ -67,6 +67,7 @@ class _OptionsDataPortAdapter:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         return await self._reader.query_chain(
             root=root,
@@ -76,6 +77,7 @@ class _OptionsDataPortAdapter:
             expiration_max=expiration_max,
             strike_min=strike_min,
             strike_max=strike_max,
+            expiration_cycle=expiration_cycle,
         )
 
 
@@ -114,6 +116,7 @@ class CachedChainReader:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        expiration_cycle: str | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         key = (
             root,
@@ -123,6 +126,7 @@ class CachedChainReader:
             expiration_max,
             strike_min,
             strike_max,
+            expiration_cycle,
         )
         if key in self._cache:
             return self._cache[key]
@@ -134,6 +138,7 @@ class CachedChainReader:
             expiration_max=expiration_max,
             strike_min=strike_min,
             strike_max=strike_max,
+            expiration_cycle=expiration_cycle,
         )
         self._cache[key] = result
         return result
