@@ -6,6 +6,7 @@ Composes MongoInstrumentReader, CollectionRegistry, and LRUCache.
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -22,12 +23,19 @@ from tcg.types.market import (
     InstrumentId,
     PriceSeries,
 )
+from tcg.types.options import (
+    OptionContractDoc,
+    OptionContractSeries,
+    OptionDailyRow,
+    OptionRootInfo,
+)
 
 from tcg.data._cache import LRUCache
 from tcg.data._mongo.instruments import MongoInstrumentReader
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data._rolling import ContinuousSeriesBuilder
 from tcg.data._utils import date_to_int, filter_date_range
+from tcg.data.options.reader import MongoOptionsDataReader
 
 
 class DefaultMarketDataService:
@@ -43,6 +51,7 @@ class DefaultMarketDataService:
         cache_size: int = 200,
     ) -> None:
         self._mongo = MongoInstrumentReader(mongo_db)
+        self._options = MongoOptionsDataReader(mongo_db, registry)
         self._registry = registry
         self._cache = LRUCache(cache_size)
         self._roller = ContinuousSeriesBuilder()
@@ -279,6 +288,41 @@ class DefaultMarketDataService:
             )
 
         return common_dates, aligned
+
+    # --- Options (Phase 1B Module 1) ---
+
+    async def get_option_contract(
+        self,
+        collection: str,
+        contract_id: str,
+    ) -> OptionContractSeries:
+        return await self._options.get_contract(collection, contract_id)
+
+    async def query_options_chain(
+        self,
+        root: str,
+        date: date,
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+    ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
+        return await self._options.query_chain(
+            root,
+            date,
+            type,
+            expiration_min,
+            expiration_max,
+            strike_min=strike_min,
+            strike_max=strike_max,
+        )
+
+    async def list_option_roots(self) -> list[OptionRootInfo]:
+        return await self._options.list_roots()
+
+    async def list_option_expirations(self, root: str) -> list[date]:
+        return await self._options.list_expirations(root)
 
     # --- Internal ---
 

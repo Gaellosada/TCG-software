@@ -13,6 +13,11 @@ STATUS_MAP: dict[str, int] = {
     "strategy_execution_error": 422,
     "simulation_error": 500,
     "validation_error": 400,
+    # Options-domain error types
+    "options_validation_error": 400,
+    "options_contract_not_found": 404,
+    "options_selection_error": 422,
+    "options_data_access_error": 502,
 }
 
 

@@ -6,6 +6,101 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased] — 2026-04-26
+
+### Added — Options feature Phase 1 (data + chain browser)
+
+Options now enter TCG as another well-modelled data source on the existing
+Data page, feeding indicators (Phase 2 will add signals that trade them).
+This is **additive only** — Phase-3 portfolio engine, `LegSpec`, and the
+existing API surface are untouched.
+
+- **7 backend modules behind `typing.Protocol` interfaces.** Acyclic
+  dependency graph; each module unit-testable with synthetic fixtures
+  (no Mongo). `tcg.data.options` (Mongo reader + provider selection),
+  `tcg.engine.options.{pricing, selection, maturity, roll, chain, pnl}`.
+  Pricing kernel swappable via the `PricingKernel` Protocol. Engine ⊥
+  data isolation enforced via `lint-imports`; engine modules talk to
+  data via local Port Protocols defined in their own packages.
+- **5-endpoint API router at `/api/options`.** New router in
+  `tcg/core/api/options.py` mounted alongside the four existing routers:
+  `GET /roots`, `GET /chain`, `GET /contract/{coll}/{id}`, `GET /select`,
+  `GET /chain-snapshot`. All handlers return `model.model_dump()`
+  (plain dict on wire). Adapter wiring in
+  `tcg/core/api/_options_wiring.py` is the only place that imports
+  both `tcg.data.*` and `tcg.engine.options.*`.
+- **`ComputeResult` envelope on every Greek field.** Replaces v2's
+  silent fallback chain. Each cell carries
+  `{ value, source: "stored"|"computed"|"missing", model, inputs_used,
+  missing_inputs, error_code, error_detail }`. Module 6 is the **only**
+  layer that emits `source="stored"` (cardinal invariant verified by
+  reviewer grep). Module 2 emits `"computed"` or `"missing"` only.
+- **Opt-in Black-Scholes / Black-76 pricing kernel.**
+  `tcg.engine.options.pricing.BS76Kernel` ports `BasicBlackScholes.java`
+  for pricing/Greeks; uses
+  `py_vollib.ref_python.black.implied_volatility.implied_volatility`
+  for IV inversion. `r=0` hardcoded and surfaced via
+  `inputs_used.r=0.0` on every successful compute. OPT_VIX returns
+  `error_code="missing_forward_vix_curve"`; OPT_ETH returns
+  `missing_deribit_feed`. No Black-76 fallback for either. Bounded
+  delta error documented (≤ 0.003 at 1m, ≤ 0.030 at 1y).
+- **strikeFactor configuration at
+  `tcg/data/options/_strike_factor.py`.** `STRIKE_FACTOR` and
+  `STRIKE_FACTOR_VERIFIED` dicts gate the bond/rate/FX roots
+  (`OPT_T_NOTE_10_Y`, `OPT_T_BOND`, `OPT_EURUSD`, `OPT_JPYUSD`) per
+  spec §4.7 until live `DataMapping` verification completes
+  (currently blocked on VPN access).
+- **Frontend Data-page extension — Tier 1.** `CategoryBrowser`
+  extended with an Options category (calls `getOptionRoots()`,
+  shows Greeks badge + amber "Verification pending" badge for
+  unverified roots). `OptionChainTable` renders the chain with
+  bid / ask / mid / IV / Δ / Γ / Θ / ν / OI columns; stored Greeks
+  display in normal weight, computed Greeks in italic with `ⓒ` badge
+  and a tooltip enumerating `model` + `inputs_used`; missing values
+  render `—` with `error_code: error_detail` tooltip. The
+  "Compute missing Greeks" toggle is **transient** (no localStorage
+  persistence; per the opt-in-always-tagged design).
+  `ContractDetailPanel` opens on row click with a chart (mid + volume +
+  toggleable Greek overlays) and a metadata sidebar (strike, expiration,
+  type, DTE, root underlying, provider, data range,
+  `strike_factor_verified` badge).
+- **Frontend Data-page extension — Tier 2.** `ChainSnapshotPanel`
+  (single-expiration IV-vs-strike or Δ-vs-strike) and
+  `MultiExpirationSmilePanel` (up to 8 expirations color-coded on one
+  date). Per-contract chart in `ContractDetailPanel` gains optional
+  life-cycle markers (first-trade, expiration, ATM-cross,
+  |Δ|=0.30/0.50/0.70 thresholds) via the existing
+  `createVerticalLineTrace` + hidden-overlay-axis pattern.
+  All three views (Chain / Smile / Multi-smile) surfaced via a 3-tab
+  switcher in `DataPage.jsx` when `selected.type === 'option'`.
+- **VIX/ETH structured failure cascades end-to-end.** Setting
+  `compute_missing=true` on OPT_VIX returns each Greek as
+  `source="missing"` with `error_code="missing_forward_vix_curve"`;
+  the chain table renders `—` with the structured reason in the
+  hover tooltip. OPT_ETH the same with `missing_deribit_feed`. Never
+  a silent zero or wrong number.
+- **No Mongo writes; no new indexes; no Phase-3 portfolio engine
+  changes.** Strict read-only. Chain queries on OPT_SP_500 may run
+  1–3s for inspection windows; if intolerable in real use, the spec
+  calls out two escalation paths (compound index from legacy team or
+  TCG-owned read-model) — decision deferred to measurement.
+
+Implementation: `tcg/data/options/`, `tcg/engine/options/{pricing,
+selection,maturity,roll,chain,pnl}/`, `tcg/core/api/options.py` +
+`_options_wiring.py` + `_models_options.py`,
+`tcg/types/options.py`, `tcg/types/errors.py`,
+`frontend/src/api/options.js`,
+`frontend/src/pages/Data/{useOptionsChain,useContractSeries,
+OptionChainTable,ContractDetailPanel,ChainSnapshotPanel,
+MultiExpirationSmilePanel,CategoryBrowser,DataPage}.{js,jsx}` and
+co-located CSS Modules + tests.
+
+Test counts: backend +266 (875 total, baseline 609); frontend +93
+(805 total, baseline 712). `lint-imports` 3/3 contracts kept. No
+regressions in existing test suites.
+
+---
+
 ## [Unreleased] — 2026-04-22
 
 ### Changed — Signals page refactor v4

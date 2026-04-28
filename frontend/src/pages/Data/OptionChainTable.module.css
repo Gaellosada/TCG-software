@@ -1,0 +1,297 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  flex: 1;
+  overflow: auto;
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.meta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.filterLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.filterInput,
+.filterSelect {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  font-family: inherit;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.fetchButton {
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.fetchButton:hover {
+  filter: brightness(1.1);
+}
+
+.fetchButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.banner {
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.12);
+  border-left: 3px solid #f59e0b;
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+
+.loading,
+.empty {
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.error {
+  padding: 16px;
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
+.tableWrapper {
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  flex: 1;
+  min-height: 0;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: right;
+  padding: 5px 5px;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.table th:first-child {
+  text-align: left;
+}
+
+.table td {
+  padding: 4px 5px;
+  text-align: right;
+  border-bottom: 1px solid var(--border-subtle, var(--border-primary));
+  color: var(--text-primary);
+}
+
+.table td:first-child {
+  text-align: left;
+}
+
+.row {
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+/* Side-aware hover: while pointing at a call cell, all call cells in the
+ * same row get an extra layer of --bg-hover via inset box-shadow (which
+ * stacks on top of the row's bg-hover instead of replacing it, doubling
+ * the tint). Same for the put side. Driven entirely by CSS :has(); no JS
+ * state needed. */
+.row:has(td[data-side="call"]:hover) td[data-side="call"],
+.row:has(td[data-side="put"]:hover) td[data-side="put"] {
+  /* Two stacked inset shadows compound the rgba alpha, so the side tint
+   * lands roughly 3× the row hover (row bg + two shadow passes). */
+  box-shadow:
+    inset 0 0 0 9999px var(--bg-hover),
+    inset 0 0 0 9999px var(--bg-hover);
+}
+
+.computed {
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.computedBadge {
+  display: inline-block;
+  margin-left: 3px;
+  font-size: 0.7em;
+  color: var(--text-muted);
+}
+
+.missing {
+  color: var(--text-muted);
+}
+
+/* C / P markers next to Strike. Higher specificity than `.table td` so the
+ * color actually applies (the base td color rule has the same `td` element
+ * selector, so the bare class would lose the cascade). */
+.table td.typeCall {
+  color: #10b981;
+  font-weight: 600;
+  text-align: center;
+}
+
+.table td.typePut {
+  color: #ef4444;
+  font-weight: 600;
+  text-align: center;
+}
+
+.typeCol {
+  width: 1.4em;
+  padding-left: 3px;
+  padding-right: 3px;
+  text-align: center;
+}
+
+.groupCalls,
+.groupPuts {
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+}
+
+/* Push the group labels toward the Strike column on each side: Calls hugs
+ * Strike from the left (right-aligned), Puts hugs from the right
+ * (left-aligned). Specificity bumped via `.table th` so the alignment
+ * actually wins over the base right-align rule on table headers. */
+.table th.groupCalls {
+  text-align: right;
+}
+
+.table th.groupPuts {
+  text-align: left;
+}
+
+/* Vertical separators framing the Expiration column on the right and the
+ * Strike column on both sides — visually splits the chain into Exp | Calls
+ * | Strike | Puts. Same weight (2px / --text-muted) as the horizontal
+ * separators (header → values, expiration-group breaks) for visual
+ * consistency. */
+.colExp {
+  border-right: 2px solid var(--text-muted);
+}
+
+.colStrike {
+  border-left: 2px solid var(--text-muted);
+  border-right: 2px solid var(--text-muted);
+}
+
+/* Horizontal separator between the column-name header row and the data
+ * rows. Targets the last thead tr (the field-name row) plus the Exp /
+ * Strike rowSpan=2 ths whose visual bottom edge sits in the same line.
+ * Same 2px / --text-muted as the vertical separators and the
+ * expiration-change line. */
+.table thead tr:last-child th,
+.table th.colExp,
+.table th.colStrike {
+  border-bottom: 2px solid var(--text-muted);
+}
+
+/* Thin directional separators — used between the quote block (Bid/Mid/Ask)
+ * and the Greeks on each side, and on the outer edges of the C / P marker
+ * columns. Quieter than the Exp / Strike borders so the strong frame
+ * stays visually dominant. */
+.thinSepRight {
+  border-right: 1px solid var(--border-subtle, var(--border-primary));
+}
+
+.thinSepLeft {
+  border-left: 1px solid var(--border-subtle, var(--border-primary));
+}
+
+/* Group separator between rows whose expiration differs from the previous
+ * row. Applied to every td of the first row in a new expiration group so
+ * border-collapse renders it cleanly across the whole row. Uses
+ * --text-muted (clearly higher contrast than --border-primary, which the
+ * row dividers already use) so the line is visually distinct from the
+ * normal row separator. 2px keeps it noticeable without being heavy. */
+.expChange td {
+  border-top: 2px solid var(--text-muted);
+}
+
+/* Bid = green, Ask = red — applied to both call and put sides regardless.
+ * Much lighter than the C/P markers so they read as a faint hue, not a
+ * stop-light. */
+.table td.bidQuote,
+.table th.bidQuote {
+  color: #86efac;
+}
+
+.table td.askQuote,
+.table th.askQuote {
+  color: #fca5a5;
+}

@@ -193,3 +193,26 @@
   max-height: 300px;
   overflow-y: auto;
 }
+
+/* Trailing badge container — pushes children to the right edge of an
+ * .instrument row. Used by option roots to surface "Greeks" / "Verification
+ * pending" tags. */
+.badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.greeksBadge {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--cat-options);
+  background: rgba(34, 197, 94, 0.12);
+  border-radius: 3px;
+  padding: 1px 5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+

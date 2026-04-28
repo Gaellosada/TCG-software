@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
 import { listCollections, listInstruments } from '../../api/data';
+import { getOptionRoots } from '../../api/options';
 import styles from './CategoryBrowser.module.css';
 
 /**
  * Maps collections into display categories.
- * INDEX -> "Indexes", ETF/FOREX/FUND -> "Assets", FUT_* -> "Futures"
+ * INDEX -> "Indexes", ETF/FOREX/FUND -> "Assets", FUT_* -> "Futures",
+ * OPT_* -> "Options"
  */
 const CATEGORY_CONFIG = [
   {
@@ -25,11 +27,17 @@ const CATEGORY_CONFIG = [
     color: 'var(--cat-futures)',
     dynamicFutures: true,
   },
+  {
+    key: 'options',
+    label: 'Options',
+    color: 'var(--cat-options)',
+    dynamicOptions: true,
+  },
 ];
 
 function CategoryBrowser({ selected, onSelect }) {
   const [categories, setCategories] = useState([]);
-  const [expanded, setExpanded] = useState({ indexes: false, assets: false, futures: false });
+  const [expanded, setExpanded] = useState({ indexes: false, assets: false, futures: false, options: false });
   const [expandedFutGroups, setExpandedFutGroups] = useState({});
   const [contractsExpanded, setContractsExpanded] = useState({});
   const [contractsData, setContractsData] = useState({});
@@ -78,6 +86,11 @@ function CategoryBrowser({ selected, onSelect }) {
             if (cat.dynamicFutures) {
               const futCollections = collections.filter((c) => c.startsWith('FUT_'));
               return { ...cat, futCollections, isFutures: true };
+            }
+
+            if (cat.dynamicOptions) {
+              const resp = await getOptionRoots();
+              return { ...cat, optionRoots: resp.roots || [], isOptions: true };
             }
 
             // Filter available collections for this category
@@ -181,7 +194,45 @@ function CategoryBrowser({ selected, onSelect }) {
 
           {expanded[cat.key] && (
             <div className={styles.categoryBody}>
-              {cat.isFutures ? (
+              {cat.isOptions ? (
+                !cat.optionRoots || cat.optionRoots.length === 0 ? (
+                  <div className={styles.placeholder}>No options roots available</div>
+                ) : (
+                  cat.optionRoots.map((root) => (
+                    <button
+                      key={root.collection}
+                      className={`${styles.instrument} ${
+                        selected?.type === 'option' && selected?.collection === root.collection
+                          ? styles.instrumentActive
+                          : ''
+                      }`}
+                      onClick={() =>
+                        onSelect({
+                          type: 'option',
+                          collection: root.collection,
+                          instrument_id: null,
+                          expiry: null,
+                          strike: null,
+                          optionType: null,
+                          // Surface the root's last bar date so DataPage / the
+                          // chain hook can default the query date to a value
+                          // the data actually covers (today is typically past
+                          // the ingestion cutoff and returns zero rows).
+                          last_trade_date: root.last_trade_date ?? null,
+                          expiration_last: root.expiration_last ?? null,
+                        })
+                      }
+                    >
+                      <span className={styles.instrumentSymbol}>{root.name}</span>
+                      <span className={styles.badges}>
+                        {root.has_greeks && (
+                          <span className={styles.greeksBadge}>Greeks</span>
+                        )}
+                      </span>
+                    </button>
+                  ))
+                )
+              ) : cat.isFutures ? (
                 !cat.futCollections || cat.futCollections.length === 0 ? (
                   <div className={styles.placeholder}>No futures collections available</div>
                 ) : (

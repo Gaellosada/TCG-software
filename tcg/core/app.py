@@ -12,6 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from tcg.core.api.data import router as data_router
 from tcg.core.api.errors import tcg_error_handler
 from tcg.core.api.indicators import router as indicators_router
+from tcg.core.api.options import router as options_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
 from tcg.core.config import load_config
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(portfolio_router)
     app.include_router(indicators_router)
     app.include_router(signals_router)
+    app.include_router(options_router)
     return app
 
 
