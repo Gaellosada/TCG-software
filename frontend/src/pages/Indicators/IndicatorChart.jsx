@@ -200,24 +200,18 @@ function IndicatorChart({ indicator, result, loading, loadingProgress, error, pi
     // Live percentage from the per-date materialiser, when reported.
     // ``loadingProgress`` is a fraction in [0, 1] or ``null`` when no
     // backend progress is being tracked (e.g. spot/continuous
-    // compute). We show the percentage as soon as ``loadingProgress``
-    // is a number — including 0% — so the user gets immediate
-    // confirmation that polling is alive even when the backend has
-    // not yet ticked. ``null`` (non-option_stream computes) keeps the
-    // bare "Computing..." state.
-    let progressLine = null;
+    // compute). The percentage is rendered inline with "Computing..."
+    // as a single centred element — earlier two-row layouts let the
+    // ``flex: 1`` row grow to fill the panel and pushed the percentage
+    // off-screen.
+    let label = 'Computing...';
     if (typeof loadingProgress === 'number') {
       const pct = Math.min(100, Math.max(0, Math.round(loadingProgress * 100)));
-      progressLine = (
-        <div className={styles.stateProgress} aria-live="polite">
-          {pct}%
-        </div>
-      );
+      label = `Computing... ${pct}%`;
     }
     return (
       <div className={styles.panel}>
-        <div className={styles.state}>Computing...</div>
-        {progressLine}
+        <div className={styles.state} aria-live="polite">{label}</div>
       </div>
     );
   }

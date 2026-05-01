@@ -8,27 +8,17 @@
 }
 
 .state {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-/* Sub-line under "Computing..." showing the live %. We layer it
-   absolutely-style by stealing flex from the parent .state via a
-   sibling that anchors below; simplest cross-browser layout is just a
-   second centred row. The .state above flex:1's so we override here. */
-.stateProgress {
+  /* Pin to the top of the panel with intrinsic height so the text is
+     always visible inside the chart panel — earlier ``flex: 1`` made
+     this row grow to fill the panel and centre its text, which on
+     tall result cards (the layout grants the chart a lot of vertical
+     room) pushed the text below the visible viewport. */
   flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 0 16px 0;
-  font-size: 0.85rem;
+  padding: 2rem 1rem;
+  text-align: center;
+  font-size: 0.9rem;
   color: var(--text-secondary);
+  font-style: italic;
   font-variant-numeric: tabular-nums;
 }
 
