@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
 import ContinuousChart from './ContinuousChart';
@@ -28,6 +28,20 @@ const OPTIONS_TABS = [
 function DataPage() {
   const [selected, setSelected] = useState(null);
   const [selectedContract, setSelectedContract] = useState(null);
+
+  // Scroll the contract-detail panel into view whenever the user clicks a new
+  // contract — the panel renders below the (full-viewport) chain table, so
+  // without an explicit scroll the user has no visual cue that anything
+  // happened.  Smooth scroll to the panel's top so the chain table partially
+  // stays visible above for context.
+  const detailPanelRef = useRef(null);
+  useEffect(() => {
+    const node = detailPanelRef.current;
+    // jsdom doesn't implement scrollIntoView, so feature-test before calling.
+    if (selectedContract && node && typeof node.scrollIntoView === 'function') {
+      node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [selectedContract]);
 
   // ---------------------------------------------------------------------------
   // Tier 2 view state — owned here, passed to snapshot / multi panels.
@@ -209,17 +223,20 @@ function DataPage() {
                   key={selected.collection}
                   root={selected.collection}
                   onRowClick={(contract) => setSelectedContract(contract)}
+                  selectedContract={selectedContract}
                   initialFilters={{
                     date: selected.last_trade_date,
                     expirationMin: selected.last_trade_date,
                   }}
                 />
                 {selectedContract && (
-                  <ContractDetailPanel
-                    collection={selectedContract.collection}
-                    instrumentId={selectedContract.instrument_id}
-                    onClose={() => setSelectedContract(null)}
-                  />
+                  <div ref={detailPanelRef}>
+                    <ContractDetailPanel
+                      collection={selectedContract.collection}
+                      instrumentId={selectedContract.instrument_id}
+                      onClose={() => setSelectedContract(null)}
+                    />
+                  </div>
                 )}
               </div>
             )}

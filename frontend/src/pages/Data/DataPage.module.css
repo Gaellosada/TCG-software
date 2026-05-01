@@ -50,15 +50,18 @@
   flex-direction: column;
   gap: 12px;
   flex: 1;
-  min-height: 0; /* allow children to shrink below content size */
-  overflow: hidden; /* belt-and-braces: each child has its own scroll */
+  min-height: 0;
+  /* Outer page-level scroll: when a contract is clicked the detail panel
+     renders below the chain table without compressing it. The user scrolls
+     down to reveal the panel; the chain table's internal row scroll is
+     unaffected. */
+  overflow-y: auto;
 }
 
 /* Stacked layout: OptionChainTable on top, ContractDetailPanel underneath
-   when a contract is selected. Each pane has its own internal scrolling
-   (chain via .tableWrapper, detail via .sidebar + .chartCol), so the
-   table and the contract chart scroll independently. Both children carry
-   flex: 1 so they split the vertical space evenly. */
+   when a contract is selected. Chain table is held at one viewport height
+   (its rows still scroll internally), the detail panel sits below at its
+   natural size, and the .optionsContainer scrolls to reveal both. */
 
 /* ---------------------------------------------------------------------------
    Tier-2 view switcher (tab strip + body)

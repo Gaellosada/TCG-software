@@ -120,15 +120,18 @@ function mergeRows(rows) {
   });
 }
 
-function MergedChainTable({ rows, collection, onRowClick }) {
+function MergedChainTable({ rows, collection, onRowClick, selectedContract }) {
   const merged = useMemo(() => mergeRows(rows), [rows]);
 
-  // Render cycle chips only when the visible chain mixes 2+ distinct non-empty
-  // cycles — single-cycle ETFs / clean roots stay clutter-free.
-  const hasMultipleCycles = useMemo(
-    () => new Set(rows.map((r) => r.expiration_cycle).filter(Boolean)).size >= 2,
-    [rows],
-  );
+  // Identify the currently-selected (call|put) cell so it stays visually
+  // highlighted while the contract-detail panel is open.  Match on
+  // (collection, instrument_id) to avoid cross-root collisions.
+  const selectedId =
+    selectedContract &&
+    selectedContract.collection === collection &&
+    selectedContract.instrument_id
+      ? selectedContract.instrument_id
+      : null;
 
   const handleRowClick = (e, entry) => {
     if (!onRowClick) return;
@@ -181,15 +184,22 @@ function MergedChainTable({ rows, collection, onRowClick }) {
             const p = entry.put;
             const expChanged =
               idx > 0 && merged[idx - 1].expiration !== entry.expiration;
+            const selectedSide =
+              selectedId && c && c.contract_id === selectedId
+                ? 'call'
+                : selectedId && p && p.contract_id === selectedId
+                  ? 'put'
+                  : null;
             return (
               <tr
                 key={`${entry.expiration}|${entry.strike}`}
-                className={`${styles.row} ${expChanged ? styles.expChange : ''}`}
+                className={`${styles.row} ${expChanged ? styles.expChange : ''} ${selectedSide ? styles.rowSelected : ''}`}
+                data-selected-side={selectedSide || undefined}
                 onClick={(e) => handleRowClick(e, entry)}
               >
                 <td className={styles.colExp}>
                   {entry.expiration}
-                  {hasMultipleCycles && entry.expiration_cycle && (
+                  {entry.expiration_cycle && (
                     <span
                       className={styles.cycleChip}
                       title={entry.expiration_cycle}
@@ -243,7 +253,7 @@ function MergedChainTable({ rows, collection, onRowClick }) {
 // Main table component
 // ---------------------------------------------------------------------------
 
-export default function OptionChainTable({ root, onRowClick, initialFilters }) {
+export default function OptionChainTable({ root, onRowClick, initialFilters, selectedContract = null }) {
   const { filters, chainData, loading, fetchChain, updateFilters } = useOptionsChain(
     root,
     initialFilters,
@@ -451,6 +461,7 @@ export default function OptionChainTable({ root, onRowClick, initialFilters }) {
           rows={rows}
           collection={filters.root}
           onRowClick={onRowClick}
+          selectedContract={selectedContract}
         />
       )}
     </div>
