@@ -37,11 +37,15 @@
 // silently ignored by ``IndicatorsPage.hydrateDefault`` — no migration
 // step is required when entries are added, removed, or renamed.
 //
-// Library shape (post 2026-04 pruning rework): 5 canonical logical
-// indicators (10 JS entries — SMA, EMA, RSI, MACD triple, Bollinger quad)
-// plus 13 legacy-port entries translated from the Java simulator. See
-// ``docs/indicators.md`` for the full reference and ``docs/design-decisions.md``
-// for the rationale behind the pruning and the per-port behavioural notes.
+// Library shape (post 2026-05 prune): 9 default entries.
+//   Trend:        sma, ema
+//   Momentum:     rsi, macd-line, macd-signal, macd-histogram
+//   Volatility:   historical-vol
+//   Pattern:      swing-pivots
+//   Statistical:  percentile-filtered-return
+//
+// See ``docs/indicators.md`` for the full reference and
+// ``docs/design-decisions.md`` for the rationale behind the prune.
 
 // --- Trend ------------------------------------------------------------
 import sma from './defaults/sma';
@@ -52,29 +56,14 @@ import rsi from './defaults/rsi';
 import macdLine from './defaults/macd-line';
 import macdSignal from './defaults/macd-signal';
 import macdHistogram from './defaults/macd-histogram';
-import impetus from './defaults/impetus';
-import weightedImpetus from './defaults/weighted-impetus';
-import centredSlope from './defaults/centred-slope';
-import slopeAcceleration from './defaults/slope-acceleration';
 
 // --- Volatility -------------------------------------------------------
-import atr from './defaults/atr';
-import bollingerUpper from './defaults/bollinger-upper';
-import bollingerMiddle from './defaults/bollinger-middle';
-import bollingerLower from './defaults/bollinger-lower';
-import bollingerPercentB from './defaults/bollinger-percent-b';
 import historicalVol from './defaults/historical-vol';
 
 // --- Pattern ----------------------------------------------------------
-import engulfmentPattern from './defaults/engulfment-pattern';
-import engulfmentExit from './defaults/engulfment-exit';
 import swingPivots from './defaults/swing-pivots';
-import trailingExtreme from './defaults/trailing-extreme';
 
 // --- Statistical ------------------------------------------------------
-import absoluteMean from './defaults/absolute-mean';
-import slopeStatistics from './defaults/slope-statistics';
-import rollingPercentileBands from './defaults/rolling-percentile-bands';
 import percentileFilteredReturn from './defaults/percentile-filtered-return';
 
 export const DEFAULT_INDICATORS = [
@@ -86,25 +75,10 @@ export const DEFAULT_INDICATORS = [
   macdLine,
   macdSignal,
   macdHistogram,
-  impetus,
-  weightedImpetus,
-  centredSlope,
-  slopeAcceleration,
   // Volatility
-  atr,
-  bollingerUpper,
-  bollingerMiddle,
-  bollingerLower,
-  bollingerPercentB,
   historicalVol,
   // Pattern
-  engulfmentPattern,
-  engulfmentExit,
   swingPivots,
-  trailingExtreme,
   // Statistical
-  absoluteMean,
-  slopeStatistics,
-  rollingPercentileBands,
   percentileFilteredReturn,
 ];

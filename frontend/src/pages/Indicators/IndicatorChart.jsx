@@ -59,12 +59,12 @@ function IndicatorChart({ indicator, result, loading, error }) {
     }));
 
     // Rendering mode — default to a continuous line. Indicators that emit
-    // sparse outputs (e.g. swing-pivots, engulfment-pattern) rely on
-    // ``connectgaps: true`` below so NaN gaps between isolated non-NaN
-    // points are bridged — the indicator renders as a zigzag line that
-    // visually connects consecutive pivots / breakouts across the NaN
-    // bars between them. Without connectgaps a sparse output would draw
-    // no line segments and be invisible.
+    // sparse outputs (e.g. swing-pivots) rely on ``connectgaps: true``
+    // below so NaN gaps between isolated non-NaN points are bridged — the
+    // indicator renders as a zigzag line that visually connects
+    // consecutive pivots / breakouts across the NaN bars between them.
+    // Without connectgaps a sparse output would draw no line segments and
+    // be invisible.
     //
     // ``chartMode`` is honoured as an author hint (registry-only — not
     // round-tripped through user state) but no fancy marker styling is
@@ -81,9 +81,9 @@ function IndicatorChart({ indicator, result, loading, error }) {
       marker: { color: INDICATOR_COLOR, size: 6 },
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
       // Bridge NaN gaps on the indicator trace so sparse-output indicators
-      // (swing-pivots, engulfment-pattern) render as a visible zigzag line
-      // connecting consecutive non-NaN points. Price trace keeps
-      // connectgaps=false (actual missing data must remain as gaps).
+      // (swing-pivots) render as a visible zigzag line connecting
+      // consecutive non-NaN points. Price trace keeps connectgaps=false
+      // (actual missing data must remain as gaps).
       connectgaps: true,
     };
 

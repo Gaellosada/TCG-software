@@ -1,10 +1,10 @@
 import { test, expect } from '@playwright/test';
 
-// End-to-end spec for the default indicator library (Wave 1).
-// Exercises four representative defaults end-to-end: SMA, RSI, MACD Line,
-// Bollinger %B. Each test: opens the Indicators page, picks the indicator
-// from the left list, waits for the series slot to be auto-filled (the
-// page resolves INDEX/^GSPC on mount), clicks Run, and asserts the Plotly
+// End-to-end spec for the default indicator library.
+// Exercises four representative defaults end-to-end: SMA, EMA, RSI, MACD
+// Line. Each test: opens the Indicators page, picks the indicator from
+// the left list, waits for the series slot to be auto-filled (the page
+// resolves INDEX/^GSPC on mount), clicks Run, and asserts the Plotly
 // chart renders with no error card.
 //
 // All network calls are mocked — no live backend required. The mock setup
@@ -140,9 +140,9 @@ async function runAndAssertChart(page, indicatorName) {
 // identifies it (so a wrong default being run is caught by the mock).
 const CODE_SIGNATURES = {
   SMA: ['def compute(series, window: int = 20):', "series['close']"],
+  EMA: ['def compute(series, window: int = 20):', "series['close']"],
   RSI: ['def compute(series, window: int = 14):', 'gains', 'losses'],
   'MACD Line': ['fast: int = 12', 'slow: int = 26'],
-  'Bollinger %B': ['window: int = 20', 'num_std'],
 };
 
 test.describe('Default indicator library — e2e', () => {

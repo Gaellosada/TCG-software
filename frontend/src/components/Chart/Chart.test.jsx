@@ -9,9 +9,8 @@
 // equity curves with ``fill``, etc. These pages rely on the shared Chart
 // wrapper forwarding the ``traces`` array to Plotly UNMODIFIED. If Chart
 // ever grows a normalization/whitelist step that drops unknown marker
-// sub-fields, every sparse-output indicator (swing-pivots,
-// engulfment-pattern) would silently lose its visible styling and regress
-// to default dots.
+// sub-fields, every sparse-output indicator (e.g. swing-pivots) would
+// silently lose its visible styling and regress to default dots.
 //
 // These tests pin the contract: the ``data`` prop Plotly receives is
 // referentially the same array (or, at minimum, field-for-field equal

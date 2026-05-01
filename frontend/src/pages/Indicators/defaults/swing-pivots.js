@@ -48,7 +48,7 @@ export default {
   code,
   params: {},
   seriesMap: {},
-  doc: `⚠️ **Note.** This detects **pivot inflections** (confirmed swing highs and swing lows with a confirmation delay), **NOT** a rolling high/low envelope. If you want price-range bands (upper = rolling max of highs, lower = rolling min of lows, à la Donchian Channel), use \`trailing-extreme\` with the appropriate mode instead.
+  doc: `⚠️ **Note.** This detects **pivot inflections** (confirmed swing highs and swing lows with a confirmation delay), **NOT** a rolling high/low envelope. If you want price-range bands (upper = rolling max of highs, lower = rolling min of lows, à la Donchian Channel), implement a rolling-extreme indicator yourself in the sandbox — it is a one-line composition.
 
 **Intuition.** Detects confirmed swing highs and swing lows (local extrema) in close using two windows: a larger \`total_periods\` window used to define the extreme, and a smaller \`inflection_periods\` window used as a confirmation delay. A swing high is confirmed when the bar \`inflection_periods\` ago was the maximum of the enclosing \`total_periods\` window AND is a new high since the last confirmed swing low. Swing lows are symmetric. Practitioners use these pivots for support / resistance levels, Elliott-wave labelling, and zig-zag chart overlays. Because pivots are confirmed with a lag, outputs are always stamped at the pivot bar itself (not the confirmation bar).
 

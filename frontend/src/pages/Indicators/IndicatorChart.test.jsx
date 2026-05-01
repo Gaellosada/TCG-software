@@ -208,13 +208,13 @@ describe('<IndicatorChart> — ownPanel split', () => {
   });
 
   it('sets connectgaps=true on the indicator trace so sparse-output indicators render as a visible zigzag', () => {
-    // Regression guard for sparse-output indicators (swing-pivots,
-    // engulfment-pattern). These emit non-NaN at only ~5% of bars. With
-    // mode='lines' and connectgaps=false, Plotly draws no line segment
-    // between non-NaN points separated by NaN, so the indicator would be
-    // effectively invisible. connectgaps=true bridges the NaN gaps so
-    // consecutive non-NaN points form a visible zigzag. This must apply
-    // in BOTH overlay and ownPanel branches.
+    // Regression guard for sparse-output indicators (swing-pivots).
+    // These emit non-NaN at only ~5% of bars. With mode='lines' and
+    // connectgaps=false, Plotly draws no line segment between non-NaN
+    // points separated by NaN, so the indicator would be effectively
+    // invisible. connectgaps=true bridges the NaN gaps so consecutive
+    // non-NaN points form a visible zigzag. This must apply in BOTH
+    // overlay and ownPanel branches.
     //
     // The price trace keeps connectgaps=false — real missing data in the
     // price series must remain as gaps (not interpolated).
