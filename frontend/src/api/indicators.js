@@ -16,16 +16,22 @@ import { listCollections, listInstruments } from './data';
  * so the caller can classify via ``utils/fetchError``.
  *
  * Wire format: body is ``{code, params, series, asset_type?,
- * compatible_asset_types?}`` posted to ``/api/indicators/compute``.
+ * compatible_asset_types?, start?, end?}`` posted to
+ * ``/api/indicators/compute``.
  *
  * ``asset_type`` and ``compatible_asset_types`` are optional — when
  * supplied the backend cross-checks them and may reject with HTTP 422
  * + ``error_code: 'INDICATOR_INCOMPATIBLE_ASSET'``. Omit them to keep
  * the legacy code-only request shape (e.g. ad-hoc compute calls that
  * have no indicator-registry context).
+ *
+ * ``start`` / ``end`` are ISO ``YYYY-MM-DD`` date strings. Required by
+ * the ``option_stream`` resolver (which iterates per business day);
+ * ignored by spot/continuous resolvers. Omit when no option_stream
+ * series is involved to keep the request shape minimal.
  */
 export async function computeIndicator(
-  { code, params, series, asset_type, compatible_asset_types },
+  { code, params, series, asset_type, compatible_asset_types, start, end },
   { signal } = {},
 ) {
   const body = { code, params, series };
@@ -36,6 +42,11 @@ export async function computeIndicator(
   }
   if (Array.isArray(compatible_asset_types)) {
     body.compatible_asset_types = compatible_asset_types;
+  }
+  // ISO date range — only forward when both ends are populated.
+  if (typeof start === 'string' && start && typeof end === 'string' && end) {
+    body.start = start;
+    body.end = end;
   }
   const res = await fetch('/api/indicators/compute', {
     method: 'POST',

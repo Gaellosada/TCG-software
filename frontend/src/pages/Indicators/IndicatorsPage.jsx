@@ -4,6 +4,7 @@ import EditorPanel from './EditorPanel';
 import ParamsPanel from './ParamsPanel';
 import IndicatorChart from './IndicatorChart';
 import { resolveDefaultIndexInstrument, computeIndicator } from '../../api/indicators';
+import { getOptionRoots } from '../../api/options';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { loadState, saveState } from './storage';
@@ -33,6 +34,65 @@ const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
     out = np.full_like(s, np.nan, dtype=float)
     out[window-1:] = np.convolve(s, np.ones(window)/window, mode='valid')
     return out`;
+
+// Module-level cache of /api/options/roots so runIndicator doesn't re-fetch
+// on every Run click. Cleared on full page reload (no invalidation otherwise
+// — option roots' last_trade_date moves slowly enough that staleness within
+// a session is acceptable).
+let _optionRootsCache = null;
+async function getOptionRootsCached() {
+  if (_optionRootsCache) return _optionRootsCache;
+  const resp = await getOptionRoots();
+  _optionRootsCache = Array.isArray(resp?.roots) ? resp.roots : [];
+  return _optionRootsCache;
+}
+
+// Default date range for option_stream computes: [last_trade_date - 1 year,
+// last_trade_date] for the relevant root. Falls back to [today - 1 year,
+// today] when last_trade_date is unknown — the resolver will surface
+// per-date diagnostics if data is missing past the cutoff. Returns null
+// when no option_stream refs are present (caller omits start/end and the
+// backend short-circuits the materialiser).
+async function deriveOptionStreamDateRange(seriesPayload) {
+  const collections = new Set();
+  for (const ref of Object.values(seriesPayload || {})) {
+    if (ref && ref.type === 'option_stream' && ref.collection) {
+      collections.add(ref.collection);
+    }
+  }
+  if (collections.size === 0) return null;
+
+  const roots = await getOptionRootsCached();
+  // Pick the earliest last_trade_date across involved collections so a
+  // multi-collection indicator (none today, but term-structure-slope
+  // could grow into one) doesn't extend past the most-stale root.
+  let earliest = null;
+  for (const coll of collections) {
+    const root = roots.find((r) => r.collection === coll);
+    const ltd = root?.last_trade_date ?? null;
+    if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
+  }
+  const end = earliest ?? isoToday();
+  const start = isoMinusYears(end, 1);
+  return { start, end };
+}
+
+function isoToday() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+function isoMinusYears(iso, years) {
+  const d = new Date(`${iso}T00:00:00`);
+  d.setFullYear(d.getFullYear() - years);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
 
 function nextIndicatorName(existing) {
   let maxN = 0;
@@ -379,6 +439,28 @@ function IndicatorsPage() {
             : { type: 'spot', collection: picked.collection, instrument_id: picked.instrument_id };
         }
       }
+      // Option-stream materialiser walks dates per business day, so it
+      // needs an explicit ISO date range. Derived from the relevant
+      // root's last_trade_date (1-year lookback). Spot/continuous
+      // resolvers ignore start/end so adding them is safe even when no
+      // option_stream is present, but we only attach them when needed
+      // to keep the request shape minimal.
+      let dateRange = null;
+      try {
+        dateRange = await deriveOptionStreamDateRange(seriesPayload);
+      } catch (e) {
+        // Surface a typed error rather than swallowing — Sign 10 (no
+        // silent failures). The user gets a clear message if the
+        // /options/roots lookup itself fails.
+        if (signal.aborted) return;
+        setError({
+          error_type: 'data',
+          message: `Could not resolve option-stream date range: ${e?.message || e}`,
+        });
+        setLastResult(null);
+        return;
+      }
+
       try {
         const data = await computeIndicator(
           {
@@ -392,6 +474,7 @@ function IndicatorsPage() {
             ...(Array.isArray(selectedIndicator.compatibleAssetTypes)
               ? { compatible_asset_types: selectedIndicator.compatibleAssetTypes }
               : {}),
+            ...(dateRange ? { start: dateRange.start, end: dateRange.end } : {}),
           },
           { signal },
         );

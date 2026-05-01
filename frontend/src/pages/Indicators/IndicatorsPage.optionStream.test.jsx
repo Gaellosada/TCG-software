@@ -41,6 +41,15 @@ vi.mock('../../api/indicators', () => ({
   resolveDefaultIndexInstrument: (...args) => resolveDefaultIndexInstrumentMock(...args),
 }));
 
+// runIndicator now resolves a default ISO date range from
+// /api/options/roots when the seriesMap contains an option_stream ref.
+// Mock the API so jsdom doesn't try to fetch and the resolved range is
+// deterministic.
+const getOptionRootsMock = vi.fn();
+vi.mock('../../api/options', () => ({
+  getOptionRoots: (...args) => getOptionRootsMock(...args),
+}));
+
 // Stub DEFAULT_INDICATORS with a single option-only registry entry whose
 // seriesMap is pre-seeded with an option_stream ref. This mirrors what
 // Wave 2c's hydrator will produce once it lands.
@@ -101,12 +110,18 @@ afterEach(() => {
   cleanup();
   computeIndicatorMock.mockReset();
   resolveDefaultIndexInstrumentMock.mockReset();
+  getOptionRootsMock.mockReset();
   try { localStorage.clear(); } catch { /* ignore */ }
 });
 
 beforeEach(() => {
   // No SPX default — option-stream tests never need it.
   resolveDefaultIndexInstrumentMock.mockResolvedValue({ ok: true, data: null });
+  // Roots lookup yields a deterministic last_trade_date so the FE-derived
+  // [start, end] range is reproducible across runs.
+  getOptionRootsMock.mockResolvedValue({
+    roots: [{ collection: 'OPT_SP_500', name: 'SP_500', has_greeks: true, last_trade_date: '2024-12-20' }],
+  });
 });
 
 describe('option_stream — pre-flight gate', () => {
@@ -152,6 +167,12 @@ describe('option_stream — healthy dispatch', () => {
     // Asset-type metadata still flows even though the slot is option_stream-shaped.
     expect(body.asset_type).toBe('option');
     expect(body.compatible_asset_types).toEqual(['option']);
+    // ISO date range derived from the mocked root's last_trade_date
+    // (1-year lookback). Asserting the contract — not the exact strings —
+    // keeps the test robust to clock drift while still proving the
+    // option_stream resolver gets concrete dates instead of None.
+    expect(body.end).toBe('2024-12-20');
+    expect(body.start).toBe('2023-12-20');
 
     await act(async () => {
       resolveCompute({
