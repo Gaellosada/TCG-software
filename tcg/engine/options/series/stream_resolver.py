@@ -59,15 +59,6 @@ from typing import Awaitable, Callable, Literal, Protocol, Sequence, runtime_che
 import numpy as np
 from numpy.typing import NDArray
 
-
-# Bounded concurrency for the per-date resolver loop. Motor's default
-# Mongo connection pool is 100 — keeping the inflight bound well below
-# that prevents queueing-induced latency while still extracting most of
-# the parallelism benefit. Empirically 32 is enough to saturate a remote
-# Mongo for typical 252-day windows; raise only if profiling shows
-# otherwise.
-_MAX_INFLIGHT_PER_DATE = 32
-
 from tcg.engine.options.maturity.protocol import MaturityResolver
 from tcg.engine.options.selection._ports import (
     ChainReaderPort,
@@ -81,6 +72,16 @@ from tcg.types.options import (
     SelectionCriterion,
     SelectionResult,
 )
+
+
+# Bounded concurrency for the per-date resolver loop. Sized to nearly
+# saturate Motor's default 100-slot connection pool — leaves headroom for
+# the underlying-price lookups (FUT_*/INDEX) that resolve_underlying_price
+# fires concurrently with the chain queries. Each per-date task issues
+# 2 chain queries (selector narrow + row re-query); raising the bound
+# above 96 starts queueing inside Motor without throughput gain. Lower
+# only when profiling shows pool-pressure stalls.
+_MAX_INFLIGHT_PER_DATE = 96
 
 
 # Streams readable off ``OptionDailyRow``.  Mirrors the Pydantic
