@@ -54,8 +54,10 @@
   /* Outer page-level scroll: when a contract is clicked the detail panel
      renders below the chain table without compressing it. The user scrolls
      down to reveal the panel; the chain table's internal row scroll is
-     unaffected. */
+     unaffected. Horizontal overflow stays hidden so wide-table content
+     cannot escape the container at narrow viewports. */
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* Stacked layout: OptionChainTable on top, ContractDetailPanel underneath

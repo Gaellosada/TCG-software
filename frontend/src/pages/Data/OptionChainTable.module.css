@@ -269,15 +269,17 @@
   white-space: nowrap;
 }
 
+/* Center the Strike column — both header and body cells so header text
+ * and numeric values are visually aligned.  Specificity must beat
+ * `.table th` (0,1,1) and `.table td` (0,1,1), so we use compound
+ * selectors (OptionChainTable.jsx:163,227). */
 .colStrike {
   border-left: 2px solid var(--text-muted);
   border-right: 2px solid var(--text-muted);
 }
 
-/* Center the "Strike" header in its own column.  The body cells keep the
- * default right-alignment so the numerical strike values still line up on
- * the decimal. */
-.table th.colStrike {
+.table th.colStrike,
+.table td.colStrike {
   text-align: center;
 }
 

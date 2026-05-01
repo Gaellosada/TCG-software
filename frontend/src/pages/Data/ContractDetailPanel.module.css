@@ -87,7 +87,10 @@
   flex: 1;
   background: var(--bg-surface);
   border-radius: 6px;
-  min-height: 420px;
+  /* Cap at 50 vh on small viewports (e.g. 1366×768 laptops) so the chart
+     never forces the panel below the visible area. Clamps down from 420px
+     only when the viewport is shorter than 840px. */
+  min-height: min(420px, 50vh);
   overflow: hidden;
 }
 
