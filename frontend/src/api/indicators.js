@@ -15,20 +15,38 @@ import { listCollections, listInstruments } from './data';
  * the HTTP status as ``err.status``. Network errors propagate untouched
  * so the caller can classify via ``utils/fetchError``.
  *
- * Wire format unchanged — body is ``{code, params, series}`` posted to
- * ``/api/indicators/compute``.
+ * Wire format: body is ``{code, params, series, asset_type?,
+ * compatible_asset_types?}`` posted to ``/api/indicators/compute``.
+ *
+ * ``asset_type`` and ``compatible_asset_types`` are optional — when
+ * supplied the backend cross-checks them and may reject with HTTP 422
+ * + ``error_code: 'INDICATOR_INCOMPATIBLE_ASSET'``. Omit them to keep
+ * the legacy code-only request shape (e.g. ad-hoc compute calls that
+ * have no indicator-registry context).
  */
-export async function computeIndicator({ code, params, series }, { signal } = {}) {
+export async function computeIndicator(
+  { code, params, series, asset_type, compatible_asset_types },
+  { signal } = {},
+) {
+  const body = { code, params, series };
+  // Only attach when explicitly provided so we don't bait the backend
+  // compatibility check on requests that have no registry context.
+  if (typeof asset_type === 'string' && asset_type) {
+    body.asset_type = asset_type;
+  }
+  if (Array.isArray(compatible_asset_types)) {
+    body.compatible_asset_types = compatible_asset_types;
+  }
   const res = await fetch('/api/indicators/compute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, params, series }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    const err = new Error((body && body.message) || res.statusText || 'Request failed');
-    err.body = body;
+    const errBody = await res.json().catch(() => null);
+    const err = new Error((errBody && errBody.message) || res.statusText || 'Request failed');
+    err.body = errBody;
     err.status = res.status;
     throw err;
   }

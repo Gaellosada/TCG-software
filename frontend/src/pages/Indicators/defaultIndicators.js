@@ -16,6 +16,14 @@
 //                   'pattern' | 'statistical'``. Single source of truth for
 //                   grouping the indicator in the library UI and for the
 //                   registry partition checks in ``defaultIndicators.test.js``.
+//   - ``compatibleAssetTypes`` array of asset-type literals from
+//                   ``./assetTypes.js`` (``'index' | 'equity' | 'option'``)
+//                   declaring which input streams the indicator is validated
+//                   against. The 9 surviving v1 defaults all ship as
+//                   ``['index', 'equity']`` (option streams are out of scope
+//                   for the legacy library — see Wave 2c additions).
+//   - ``chartShape`` string — currently always ``'time-series'`` for v1.
+//                   Cross-sectional renderers are deferred.
 //   - ``code``      Python source string.
 //   - ``params``    always ``{}`` — the UI derives it from the parsed
 //                   signature at load time.
@@ -37,10 +45,10 @@
 // silently ignored by ``IndicatorsPage.hydrateDefault`` — no migration
 // step is required when entries are added, removed, or renamed.
 //
-// Library shape (post 2026-05 prune): 9 default entries.
+// Library shape (post Wave 2c additions): 11 default entries.
 //   Trend:        sma, ema
 //   Momentum:     rsi, macd-line, macd-signal, macd-histogram
-//   Volatility:   historical-vol
+//   Volatility:   historical-vol, atm-iv, term-structure-slope
 //   Pattern:      swing-pivots
 //   Statistical:  percentile-filtered-return
 //
@@ -59,6 +67,8 @@ import macdHistogram from './defaults/macd-histogram';
 
 // --- Volatility -------------------------------------------------------
 import historicalVol from './defaults/historical-vol';
+import atmIv from './defaults/atm-iv';
+import termStructureSlope from './defaults/term-structure-slope';
 
 // --- Pattern ----------------------------------------------------------
 import swingPivots from './defaults/swing-pivots';
@@ -77,6 +87,8 @@ export const DEFAULT_INDICATORS = [
   macdHistogram,
   // Volatility
   historicalVol,
+  atmIv,
+  termStructureSlope,
   // Pattern
   swingPivots,
   // Statistical

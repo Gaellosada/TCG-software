@@ -30,6 +30,8 @@ export default {
   name: 'MACD Line',
   readonly: true,
   category: 'momentum',
+  compatibleAssetTypes: ['index', 'equity'],
+  chartShape: 'time-series',
   code,
   params: {},
   seriesMap: {},

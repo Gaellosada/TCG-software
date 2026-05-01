@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the data helpers — resolveDefaultIndexInstrument calls
 // ``listCollections()`` (no args) and ``listInstruments(collection)``.
@@ -8,7 +8,7 @@ vi.mock('./data', () => ({
   listInstruments: vi.fn(),
 }));
 
-import { resolveDefaultIndexInstrument, isSnpSymbol } from './indicators';
+import { resolveDefaultIndexInstrument, isSnpSymbol, computeIndicator } from './indicators';
 import { listCollections, listInstruments } from './data';
 
 describe('isSnpSymbol', () => {
@@ -119,5 +119,107 @@ describe('resolveDefaultIndexInstrument', () => {
     );
     const out = await resolveDefaultIndexInstrument();
     expect(out).toEqual({ ok: true, data: null });
+  });
+});
+
+describe('computeIndicator', () => {
+  let originalFetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function makeFetchMock(response) {
+    const fn = vi.fn().mockResolvedValue(response);
+    globalThis.fetch = fn;
+    return fn;
+  }
+
+  function jsonOk(body) {
+    return {
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(body),
+    };
+  }
+
+  function jsonError(status, body) {
+    return {
+      ok: false,
+      status,
+      statusText: 'Bad',
+      json: () => Promise.resolve(body),
+    };
+  }
+
+  it('forwards code/params/series in the JSON body', async () => {
+    const fetchMock = makeFetchMock(jsonOk({ ok: true }));
+    await computeIndicator({
+      code: 'def compute(...)',
+      params: { window: 20 },
+      series: { close: { type: 'spot', collection: 'INDEX', instrument_id: 'IND_SP_500' } },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.code).toBe('def compute(...)');
+    expect(parsed.params).toEqual({ window: 20 });
+    expect(parsed.series.close.collection).toBe('INDEX');
+    // Optional fields absent → not on the wire body.
+    expect(parsed).not.toHaveProperty('asset_type');
+    expect(parsed).not.toHaveProperty('compatible_asset_types');
+  });
+
+  it('forwards asset_type and compatible_asset_types when provided', async () => {
+    const fetchMock = makeFetchMock(jsonOk({ ok: true }));
+    await computeIndicator({
+      code: 'x',
+      params: {},
+      series: {},
+      asset_type: 'option',
+      compatible_asset_types: ['option'],
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.asset_type).toBe('option');
+    expect(parsed.compatible_asset_types).toEqual(['option']);
+  });
+
+  it('omits asset_type when it is an empty string or non-string', async () => {
+    const fetchMock = makeFetchMock(jsonOk({ ok: true }));
+    await computeIndicator({
+      code: 'x',
+      params: {},
+      series: {},
+      asset_type: '',
+      compatible_asset_types: undefined,
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed).not.toHaveProperty('asset_type');
+    expect(parsed).not.toHaveProperty('compatible_asset_types');
+  });
+
+  it('throws with err.body and err.status on non-2xx', async () => {
+    const errorBody = {
+      error_code: 'INDICATOR_INCOMPATIBLE_ASSET',
+      indicator_id: 'atm-iv',
+      asset_type: 'index',
+      accepted_asset_types: ['option'],
+      message: 'Indicator not compatible',
+    };
+    makeFetchMock(jsonError(422, errorBody));
+    let caught;
+    try {
+      await computeIndicator({ code: 'x', params: {}, series: {} });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeTruthy();
+    expect(caught.status).toBe(422);
+    expect(caught.body).toEqual(errorBody);
+    expect(caught.message).toBe('Indicator not compatible');
   });
 });

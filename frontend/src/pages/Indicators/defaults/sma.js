@@ -13,6 +13,8 @@ export default {
   name: 'SMA',
   readonly: true,
   category: 'trend',
+  compatibleAssetTypes: ['index', 'equity'],
+  chartShape: 'time-series',
   code,
   params: {},
   seriesMap: {},

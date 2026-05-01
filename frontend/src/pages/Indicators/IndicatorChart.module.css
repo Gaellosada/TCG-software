@@ -89,6 +89,69 @@
   --error-card-bg: rgba(239, 68, 68, 0.08);
 }
 
+/* Asset-type incompat — same amber palette as validation; the
+ * indicator is not broken, the input data is the wrong shape. */
+.errorCard[data-error-type="incompatible_asset"] {
+  --error-card-accent: #f0a030;
+  --error-card-bg: rgba(240, 160, 48, 0.08);
+}
+
+/* ── Pinned-meets-incompat banner ──
+ * Replaces the chart entirely when a previously-computed result is
+ * still held but the current asset type is no longer in the
+ * indicator's compat list. The Detach button calls the parent's
+ * onDetachPinned handler to clear the pinned result. */
+.pinnedIncompatBanner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 28px 32px;
+  border-left: 3px solid #f0a030;
+  background: rgba(240, 160, 48, 0.08);
+  margin: 12px;
+  border-radius: var(--radius-sm);
+}
+
+.pinnedIncompatHeading {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.pinnedIncompatReason {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.detachBtn {
+  padding: 6px 16px;
+  background: transparent;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.detachBtn:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+  border-color: var(--border-accent);
+}
+
+.detachBtn:focus-visible {
+  outline: 2px solid var(--border-accent);
+  outline-offset: 2px;
+}
+
 .errorHeader {
   display: flex;
   align-items: center;

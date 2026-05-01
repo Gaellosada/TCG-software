@@ -21,6 +21,8 @@ export default {
   name: 'EMA',
   readonly: true,
   category: 'trend',
+  compatibleAssetTypes: ['index', 'equity'],
+  chartShape: 'time-series',
   code,
   params: {},
   seriesMap: {},

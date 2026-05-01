@@ -33,6 +33,8 @@ export default {
   name: 'Percentile-Filtered Return',
   readonly: true,
   category: 'statistical',
+  compatibleAssetTypes: ['index', 'equity'],
+  chartShape: 'time-series',
   code,
   params: {},
   seriesMap: {},

@@ -35,6 +35,8 @@ export default {
   name: 'RSI',
   readonly: true,
   category: 'momentum',
+  compatibleAssetTypes: ['index', 'equity'],
+  chartShape: 'time-series',
   code,
   params: {},
   seriesMap: {},

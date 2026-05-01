@@ -9,27 +9,41 @@
 // library-wide invariants (count, unique ids, kebab-case), and that the
 // derived spec from parseIndicatorSpec matches what the UI will show.
 //
-// Library shape is the post-2026-05 prune set: 9 entries — sma, ema, rsi,
+// Library shape (post Wave 2c additions): 11 entries — sma, ema, rsi,
 // macd-{line,signal,histogram}, historical-vol, swing-pivots,
-// percentile-filtered-return. See ``docs/indicators.md``.
+// percentile-filtered-return, atm-iv, term-structure-slope.
+// See ``docs/indicators.md``.
 
 import { describe, it, expect } from 'vitest';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { parseIndicatorSpec } from './paramParser';
+import { ASSET_TYPES } from './assetTypes';
 
 // ---------------------------------------------------------------------------
 // Expectation table — mirrors the brief. Single source of truth for the test.
 // ---------------------------------------------------------------------------
+// Every v1 default ships with ['index', 'equity'] — option-stream support
+// is the job of the Wave 2c additions, not the legacy 9. The expectation is
+// pinned per-id so a future patch that flips a default to ['option'] (or
+// drops a value silently) is caught here.
+const DEFAULT_COMPAT = ['index', 'equity'];
+
 const EXPECTATIONS = {
-  sma:                          { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: false },
-  ema:                          { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: false },
-  rsi:                          { params: [{ name: 'window', type: 'int', default: 14 }],                                                                                                                seriesLabels: ['close'], ownPanel: true  },
-  'macd-line':                  { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }],                                                                      seriesLabels: ['close'], ownPanel: true  },
-  'macd-signal':                { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                          seriesLabels: ['close'], ownPanel: true  },
-  'macd-histogram':             { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                          seriesLabels: ['close'], ownPanel: true  },
-  'historical-vol':             { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: true  },
-  'swing-pivots':               { params: [{ name: 'total_periods', type: 'int', default: 20 }, { name: 'inflection_periods', type: 'int', default: 5 }],                                                 seriesLabels: ['close'], ownPanel: false },
-  'percentile-filtered-return': { params: [{ name: 'window', type: 'int', default: 252 }, { name: 'filter_window', type: 'int', default: 50 }, { name: 'percentile', type: 'float', default: 95.0 }],     seriesLabels: ['close'], ownPanel: true  },
+  sma:                          { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: false, compatibleAssetTypes: DEFAULT_COMPAT },
+  ema:                          { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: false, compatibleAssetTypes: DEFAULT_COMPAT },
+  rsi:                          { params: [{ name: 'window', type: 'int', default: 14 }],                                                                                                                seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  'macd-line':                  { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }],                                                                      seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  'macd-signal':                { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                          seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  'macd-histogram':             { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                          seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  'historical-vol':             { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  'swing-pivots':               { params: [{ name: 'total_periods', type: 'int', default: 20 }, { name: 'inflection_periods', type: 'int', default: 5 }],                                                 seriesLabels: ['close'], ownPanel: false, compatibleAssetTypes: DEFAULT_COMPAT },
+  'percentile-filtered-return': { params: [{ name: 'window', type: 'int', default: 252 }, { name: 'filter_window', type: 'int', default: 50 }, { name: 'percentile', type: 'float', default: 95.0 }],     seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  // Wave 2c: option-native defaults. compatibleAssetTypes pins to
+  // ['option'] only — these consume option-derived semantic series labels
+  // (atm_iv / front_atm_iv / back_atm_iv) and have no meaningful binding
+  // for index or equity streams.
+  'atm-iv':                     { params: [{ name: 'smoothing_window', type: 'int', default: 1 }],                                                                                                         seriesLabels: ['atm_iv'], ownPanel: true , compatibleAssetTypes: ['option'] },
+  'term-structure-slope':       { params: [],                                                                                                                                                              seriesLabels: ['front_atm_iv', 'back_atm_iv'], ownPanel: true , compatibleAssetTypes: ['option'] },
 };
 
 const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
@@ -40,8 +54,8 @@ const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
 const CATEGORIES = ['trend', 'momentum', 'volatility', 'pattern', 'statistical'];
 
 describe('DEFAULT_INDICATORS — library invariants', () => {
-  it('contains exactly 9 entries', () => {
-    expect(DEFAULT_INDICATORS).toHaveLength(9);
+  it('contains exactly 11 entries', () => {
+    expect(DEFAULT_INDICATORS).toHaveLength(11);
   });
 
   it('has unique ids', () => {
@@ -122,6 +136,32 @@ describe('DEFAULT_INDICATORS — per-entry shape and spec', () => {
           CATEGORIES,
           `category ${JSON.stringify(entry.category)} for id ${JSON.stringify(entry.id)} is not one of the canonical buckets`,
         ).toContain(entry.category);
+
+        // compatibleAssetTypes — non-empty array of canonical asset-type
+        // literals from ./assetTypes.js. The id-pinned values are also
+        // checked further down against the EXPECTATIONS table.
+        expect(
+          Array.isArray(entry.compatibleAssetTypes),
+          `compatibleAssetTypes must be an array for id ${JSON.stringify(entry.id)}`,
+        ).toBe(true);
+        expect(
+          entry.compatibleAssetTypes.length,
+          `compatibleAssetTypes must be non-empty for id ${JSON.stringify(entry.id)}`,
+        ).toBeGreaterThan(0);
+        for (const value of entry.compatibleAssetTypes) {
+          expect(
+            ASSET_TYPES,
+            `compatibleAssetTypes value ${JSON.stringify(value)} for id ${JSON.stringify(entry.id)} is not a known asset type`,
+          ).toContain(value);
+        }
+
+        // chartShape — v1 ships a single literal value. Cross-sectional
+        // renderers are deferred; if a future entry needs a different
+        // shape, extend the allow-list below in lock-step.
+        expect(
+          entry.chartShape,
+          `chartShape mismatch for id ${JSON.stringify(entry.id)}`,
+        ).toBe('time-series');
       });
 
       it('ships the expected ownPanel flag', () => {
@@ -130,6 +170,16 @@ describe('DEFAULT_INDICATORS — per-entry shape and spec', () => {
           entry.ownPanel,
           `ownPanel mismatch for id ${JSON.stringify(entry.id)}`,
         ).toBe(expected.ownPanel);
+      });
+
+      it('ships the expected compatibleAssetTypes', () => {
+        const expected = EXPECTATIONS[entry.id];
+        // Compare as sets — order in the array is not part of the contract,
+        // membership is. (A future re-ordering should NOT fail the test.)
+        expect(
+          new Set(entry.compatibleAssetTypes),
+          `compatibleAssetTypes mismatch for id ${JSON.stringify(entry.id)}`,
+        ).toEqual(new Set(expected.compatibleAssetTypes));
       });
 
       it('chartMode, if set, is a supported Plotly mode', () => {

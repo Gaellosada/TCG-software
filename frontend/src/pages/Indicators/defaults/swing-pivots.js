@@ -45,6 +45,8 @@ export default {
   name: 'Swing Pivots',
   readonly: true,
   category: 'pattern',
+  compatibleAssetTypes: ['index', 'equity'],
+  chartShape: 'time-series',
   code,
   params: {},
   seriesMap: {},

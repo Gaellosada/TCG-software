@@ -11,7 +11,12 @@ import { AUTOSAVE_KEY } from './storageKeys';
 import { hydrateDefault, applyDefaultSeries } from './hydrateDefault';
 import { buildPersistablePayload, serializePersistablePayload } from './persistablePayload';
 import { computeDefaultSeriesBannerText } from './defaultSeriesBanner';
-import { areAllSlotsFilled, computeRunDisabledReason } from './runGate';
+import {
+  areAllSlotsFilled,
+  computeRunDisabledReason,
+  computeAssetCompatibility,
+  deriveAssetTypeFromSeriesMap,
+} from './runGate';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -50,6 +55,13 @@ function IndicatorsPage() {
   const { run: runAbortable, running, abort: abortRun } = useAbortableAction();
   const [error, setError] = useState(null); // structured: { error_type, message, traceback? }
   const [lastResult, setLastResult] = useState(null);
+  // The asset_type the lastResult was computed against (derived from
+  // the seriesMap at run time). Tracks the "pinned" run so the chart
+  // panel can detect when the user later switches asset slots and the
+  // pinned result is no longer compatible — see the
+  // ``pinnedIncompatBanner`` block below.
+  const [lastResultAssetType, setLastResultAssetType] = useState(null);
+  const [lastResultIndicatorId, setLastResultIndicatorId] = useState(null);
   const [defaultSeries, setDefaultSeries] = useState(null);
   const [defaultSeriesLoaded, setDefaultSeriesLoaded] = useState(false);
   // Classified error from resolveDefaultIndexInstrument — drives the
@@ -316,6 +328,41 @@ function IndicatorsPage() {
   const runIndicator = useCallback(async () => {
     if (!selectedIndicator) return;
     setError(null);
+
+    // Derive the run-time asset_type from the filled seriesMap. We
+    // surface a structured error (Sign 10 — never silently pick one)
+    // when slots disagree, and forward the resolved type + the
+    // indicator's compat declaration to the backend so it can do its
+    // own canonical cross-check.
+    const derived = deriveAssetTypeFromSeriesMap(selectedIndicator.seriesMap);
+    if (!derived.ok) {
+      setError({
+        error_type: 'validation',
+        message: `Series slots disagree on asset type (${derived.types.join(', ')}). Pick consistent series before running.`,
+      });
+      setLastResult(null);
+      return;
+    }
+    const resolvedAssetType = derived.asset_type;
+
+    // Pre-flight compat check — refuse to even fire the request when
+    // the indicator declares a compat list and the resolved type is
+    // not in it. Mirrors the backend's 422; doing it here saves a
+    // round-trip and keeps the failure typed.
+    const compat = computeAssetCompatibility(selectedIndicator);
+    if (!compat.ok && compat.reason === 'incompatible_asset') {
+      setError({
+        error_type: 'incompatible_asset',
+        error_code: 'INDICATOR_INCOMPATIBLE_ASSET',
+        message: `Requires ${compat.accepted_asset_types.join(' or ')} data; current asset is ${compat.asset_type}.`,
+        accepted_asset_types: compat.accepted_asset_types,
+        asset_type: compat.asset_type,
+        indicator_id: selectedIndicator.id,
+      });
+      setLastResult(null);
+      return;
+    }
+
     await runAbortable(async ({ signal }) => {
       const seriesPayload = {};
       for (const [label, picked] of Object.entries(selectedIndicator.seriesMap || {})) {
@@ -337,18 +384,28 @@ function IndicatorsPage() {
             code: selectedIndicator.code,
             params: selectedIndicator.params,
             series: seriesPayload,
+            // Forward both fields when known. The backend treats them
+            // as the canonical source for the compat check; an empty
+            // string / undefined means "don't check".
+            ...(resolvedAssetType ? { asset_type: resolvedAssetType } : {}),
+            ...(Array.isArray(selectedIndicator.compatibleAssetTypes)
+              ? { compatible_asset_types: selectedIndicator.compatibleAssetTypes }
+              : {}),
           },
           { signal },
         );
         if (signal.aborted) return;
         setLastResult(data);
+        setLastResultAssetType(resolvedAssetType);
+        setLastResultIndicatorId(selectedIndicator.id);
       } catch (e) {
         if (signal.aborted) return;
         if (e && typeof e === 'object' && 'status' in e) {
           // Structured error envelope:
           //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
-          // Legacy shapes ({detail: "..."} or {message: "..."}) fall back to
-          // error_type='validation'.
+          // The 422 INDICATOR_INCOMPATIBLE_ASSET case is recognised
+          // via ``error_code`` in ``normalizeErrorEnvelope`` and
+          // surfaces with error_type='incompatible_asset'.
           setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
           setLastResult(null);
         } else {
@@ -370,6 +427,17 @@ function IndicatorsPage() {
       }
     });
   }, [selectedIndicator, runAbortable]);
+
+  // Detach the pinned result — clears the lastResult for the current
+  // indicator (used by the pinned-meets-incompat banner's Detach
+  // button). The result is NOT auto-cleared; the user must explicitly
+  // dismiss it (no silent removal).
+  const detachPinnedResult = useCallback(() => {
+    setLastResult(null);
+    setLastResultAssetType(null);
+    setLastResultIndicatorId(null);
+    setError(null);
+  }, []);
 
   // Cancel any in-flight run when the user switches indicators —
   // otherwise a stale response could overwrite state for the new one.
@@ -400,6 +468,35 @@ function IndicatorsPage() {
     defaultSeriesError,
   });
 
+  // Currently-selected asset type, derived from the SELECTED
+  // indicator's seriesMap. Drives the picker grey-out and the
+  // pinned-meets-incompat banner. ``null`` is meaningful: it means
+  // "we cannot classify the slot yet" → picker shows everything.
+  const currentAssetType = useMemo(() => {
+    const derived = deriveAssetTypeFromSeriesMap(selectedIndicator?.seriesMap);
+    if (!derived.ok) return null; // slot conflict → don't grey
+    return derived.asset_type;
+  }, [selectedIndicator?.seriesMap]);
+
+  // Pinned-meets-incompat: the lastResult was computed for an
+  // asset_type that is no longer in the indicator's compat list (e.g.
+  // user changed a series slot to a different asset). The chart panel
+  // renders a banner instead of the chart; the banner offers a
+  // ``Detach`` button that clears lastResult.
+  const pinnedIncompat = useMemo(() => {
+    if (!lastResult || !selectedIndicator) return null;
+    if (lastResultIndicatorId !== selectedIndicator.id) return null;
+    const compat = selectedIndicator.compatibleAssetTypes;
+    if (!Array.isArray(compat) || compat.length === 0) return null;
+    if (!lastResultAssetType) return null;
+    if (compat.includes(lastResultAssetType)) return null;
+    return {
+      indicatorName: selectedIndicator.name || 'Indicator',
+      asset_type: lastResultAssetType,
+      accepted_asset_types: compat.slice(),
+    };
+  }, [lastResult, selectedIndicator, lastResultIndicatorId, lastResultAssetType]);
+
   return (
     <div className={`${styles.page} ${selectedIndicator?.ownPanel ? styles.pageSplit : ''}`}>
       {bannerText && (
@@ -417,6 +514,7 @@ function IndicatorsPage() {
           onRename={handleRename}
           search={search}
           onSearchChange={setSearch}
+          currentAssetType={currentAssetType}
         />
       </div>
       <div className={styles.editorPanel}>
@@ -483,6 +581,8 @@ function IndicatorsPage() {
             result={lastResult}
             loading={running}
             error={error}
+            pinnedIncompat={pinnedIncompat}
+            onDetachPinned={detachPinnedResult}
           />
         </Card>
       </div>

@@ -13,6 +13,9 @@ const INDICATOR_ERROR_ICONS = {
   data: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
   network: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
   offline: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
+  // Same warning-triangle glyph as 'validation' — incompat is a shape-of-input
+  // mismatch rather than a server/runtime fault.
+  incompatible_asset: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
   generic: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
 };
 
@@ -38,7 +41,7 @@ function coerceIndicatorErrorType(errorType) {
  *     pan on one pane propagates to the other and hover is unified.
  *     Mirrors the Data page's price/volume stacked layout.
  */
-function IndicatorChart({ indicator, result, loading, error }) {
+function IndicatorChart({ indicator, result, loading, error, pinnedIncompat, onDetachPinned }) {
   const ownPanel = !!indicator?.ownPanel;
 
   const { traces, layoutOverrides, hasData } = useMemo(() => {
@@ -157,6 +160,37 @@ function IndicatorChart({ indicator, result, loading, error }) {
       hasData: true,
     };
   }, [result, indicator?.name, ownPanel]);
+
+  // Pinned-meets-incompat — a previously-computed result exists but the
+  // indicator's compat list no longer accepts the resolved asset_type
+  // (e.g. user changed a series slot). We render a banner with the
+  // accepted-asset-types text + a Detach button instead of the chart.
+  // This deliberately wins over loading/error/no-data so users always
+  // see the same panel framing while the pinned result is held.
+  if (pinnedIncompat) {
+    const accepted = (pinnedIncompat.accepted_asset_types || []).join(' or ');
+    const reason = `Requires ${accepted} data; current asset is ${pinnedIncompat.asset_type}`;
+    return (
+      <div className={styles.panel}>
+        <div
+          className={styles.pinnedIncompatBanner}
+          data-testid="pinned-incompat-banner"
+          role="alert"
+        >
+          <h3 className={styles.pinnedIncompatHeading}>{pinnedIncompat.indicatorName}</h3>
+          <p className={styles.pinnedIncompatReason}>{reason}</p>
+          <button
+            type="button"
+            className={styles.detachBtn}
+            onClick={onDetachPinned}
+            aria-label="Detach pinned result"
+          >
+            Detach
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (

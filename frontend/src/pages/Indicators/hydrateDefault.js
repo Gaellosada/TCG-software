@@ -28,6 +28,14 @@ export function hydrateDefault(def, savedEntry) {
   if (typeof def.chartMode === 'string' && def.chartMode) {
     hydrated.chartMode = def.chartMode;
   }
+  // compatibleAssetTypes flows through registry → hydrated indicator
+  // verbatim. Required by ``runGate.computeAssetCompatibility`` and the
+  // picker grey-out logic. Defaults to undefined when the registry
+  // entry omits it (back-compat — runGate then treats the indicator as
+  // universally compatible).
+  if (Array.isArray(def.compatibleAssetTypes)) {
+    hydrated.compatibleAssetTypes = def.compatibleAssetTypes.slice();
+  }
   return hydrated;
 }
 

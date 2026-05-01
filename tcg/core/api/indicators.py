@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from tcg.core.api._adapters import build_roll_config
@@ -53,11 +54,56 @@ class IndicatorComputeRequest(BaseModel):
     series: dict[str, SeriesRef]
     start: str | None = None
     end: str | None = None
+    # Asset-type compatibility guard (Wave 2b). Both fields are optional —
+    # the check only fires when BOTH are populated. ``str``-typed at the
+    # request boundary so legacy / free-form clients aren't rejected by
+    # Pydantic before the route handler can return a structured 422.
+    # The route handler validates ``asset_type`` against the canonical
+    # ``ASSET_TYPES`` set (from ``tcg.core.indicators.asset_types``).
+    asset_type: str | None = None
+    compatible_asset_types: list[str] | None = None
+    # Optional indicator id, echoed into the structured 422 body when the
+    # compat check rejects. Front-end may omit it for ad-hoc / custom
+    # indicators; in that case it is omitted from the error body too.
+    indicator_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+def _incompatible_asset_response(
+    *,
+    indicator_id: str | None,
+    asset_type: str,
+    accepted_asset_types: list[str],
+) -> JSONResponse:
+    """Build the structured 422 response for asset-type compat failures.
+
+    Body shape (FROZEN contract — frontend ``errorTaxonomy`` routes on
+    ``error_code``):
+
+        {
+            "error_code": "INDICATOR_INCOMPATIBLE_ASSET",
+            "indicator_id": <str>?,   # omitted when not provided by client
+            "asset_type": <str>,
+            "accepted_asset_types": [<str>, ...],
+        }
+
+    Status: HTTP 422 (Unprocessable Entity). ``error_response`` is not
+    used because its envelope is ``{error_type, message}`` and grafting
+    a structured payload onto it would diverge from the existing
+    convention. A focused helper keeps the route handler readable.
+    """
+    content: dict = {
+        "error_code": "INDICATOR_INCOMPATIBLE_ASSET",
+        "asset_type": asset_type,
+        "accepted_asset_types": accepted_asset_types,
+    }
+    if indicator_id is not None:
+        content["indicator_id"] = indicator_id
+    return JSONResponse(status_code=422, content=content)
 
 
 @router.post("/compute")
@@ -72,6 +118,21 @@ async def compute_indicator(
     if not body.series:
         return error_response(
             "validation", "'series' must contain at least one entry"
+        )
+
+    # Asset-type compatibility guard. Asymmetric design: enforced on the
+    # backend (canonical), advisory on the frontend (UX). Only fires when
+    # BOTH ``asset_type`` and ``compatible_asset_types`` are populated;
+    # otherwise the request is treated as legacy and proceeds.
+    if (
+        body.asset_type is not None
+        and body.compatible_asset_types is not None
+        and body.asset_type not in body.compatible_asset_types
+    ):
+        return _incompatible_asset_response(
+            indicator_id=body.indicator_id,
+            asset_type=body.asset_type,
+            accepted_asset_types=list(body.compatible_asset_types),
         )
 
     try:

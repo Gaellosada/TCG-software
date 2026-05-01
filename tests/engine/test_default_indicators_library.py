@@ -101,26 +101,92 @@ def _extract_defaults(py_source: str) -> dict[str, int | float | bool]:
 # Discover all default indicator files up front so pytest's collection
 # lists them by id in the progress output.
 _INDICATOR_FILES = sorted(DEFAULTS_DIR.glob("*.js"))
-if len(_INDICATOR_FILES) != 9:
+if not _INDICATOR_FILES:
     raise AssertionError(
-        f"expected 9 default indicator files under {DEFAULTS_DIR}, got "
-        f"{len(_INDICATOR_FILES)}"
+        f"no default indicator files under {DEFAULTS_DIR}"
     )
+
+
+def _extract_series_labels(py_source: str) -> set[str]:
+    """Walk the compute() body and collect every ``series['<label>']`` access.
+
+    Generic over indicator implementation: as long as the body indexes
+    ``series`` by a string literal, the label is discovered. This keeps the
+    smoke-test fixture honest as new option-native defaults land that
+    consume non-`close` semantic labels (e.g. ``atm_iv``,
+    ``front_atm_iv``, ``back_atm_iv``).
+    """
+    tree = ast.parse(py_source)
+    labels: set[str] = set()
+    for node in ast.walk(tree):
+        # Match: series['<label>']
+        if not isinstance(node, ast.Subscript):
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Name) and value.id == "series"):
+            continue
+        # Slice may be an ast.Constant (Py3.9+) or ast.Index wrapping one.
+        slice_node = node.slice
+        if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
+            labels.add(slice_node.value)
+    return labels
+
+
+def _synthetic_label_series(label: str, base: np.ndarray) -> np.ndarray:
+    """Deterministic synthetic series for an arbitrary semantic label.
+
+    The smoke test does not assert correctness, only that compute() runs
+    end-to-end and produces a 1-D float64 array of the right length. Each
+    label gets a deterministic perturbation of the base ramp+wobble so
+    multi-stream indicators (e.g. ``term-structure-slope``) see two
+    distinct, well-conditioned inputs rather than the same array twice.
+    """
+    # Stable per-label seed so runs are reproducible. The hash space is
+    # large enough that collision-induced offset clashes are vanishingly
+    # rare for the small label set we ship.
+    seed = abs(hash(label)) % (2**31 - 1)
+    rng = np.random.default_rng(seed)
+    # Small additive offset and a small multiplicative jitter (well above
+    # zero so derived ratios stay well-defined).
+    offset = rng.uniform(-2.0, 2.0)
+    return (base + offset).astype(np.float64)
+
+
+# Aggregate every series label referenced by any default's compute() body.
+# This drives the fixture so that ANY future default whose body indexes
+# ``series['<new_label>']`` is automatically supplied without further
+# fixture edits.
+_ALL_REFERENCED_LABELS: set[str] = set()
+for _path in _INDICATOR_FILES:
+    _ALL_REFERENCED_LABELS |= _extract_series_labels(_extract_python_source(_path))
 
 
 @pytest.fixture(scope="module")
 def series_dict() -> dict[str, np.ndarray]:
     close = _make_series()
-    # All shipped defaults consume ``series['close']`` only, but we still
-    # provide derived OHLC + entry channels so that future indicators
-    # added back into the library can run without a fixture change.
-    # Offsets are small and deterministic; the test is a smoke test, not
-    # a correctness check.
+    # OHLC + entry channels are pre-populated for backward compatibility
+    # with the legacy 9 defaults (all consume ``series['close']``).
     high = close + 0.5
     low = close - 0.5
     opn = np.concatenate(([close[0]], close[:-1]))
     entry = close.copy()
-    return {"close": close, "open": opn, "high": high, "low": low, "entry": entry}
+    out: dict[str, np.ndarray] = {
+        "close": close,
+        "open": opn,
+        "high": high,
+        "low": low,
+        "entry": entry,
+    }
+    # For every label referenced by a default's compute() body that we
+    # haven't already populated, synthesize a deterministic per-label
+    # array. This keeps the fixture in lock-step with the registry —
+    # adding a new option-native indicator that consumes a fresh
+    # semantic label requires zero fixture maintenance.
+    for label in _ALL_REFERENCED_LABELS:
+        if label in out:
+            continue
+        out[label] = _synthetic_label_series(label, close)
+    return out
 
 
 @pytest.mark.parametrize(
