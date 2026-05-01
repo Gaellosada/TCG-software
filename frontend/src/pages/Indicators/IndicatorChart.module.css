@@ -17,6 +17,21 @@
   font-style: italic;
 }
 
+/* Sub-line under "Computing..." showing the live %. We layer it
+   absolutely-style by stealing flex from the parent .state via a
+   sibling that anchors below; simplest cross-browser layout is just a
+   second centred row. The .state above flex:1's so we override here. */
+.stateProgress {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0 16px 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 .header {
   display: flex;
   align-items: center;

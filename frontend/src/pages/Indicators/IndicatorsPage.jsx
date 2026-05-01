@@ -47,12 +47,15 @@ async function getOptionRootsCached() {
   return _optionRootsCache;
 }
 
-// Default date range for option_stream computes: [last_trade_date - 1 year,
-// last_trade_date] for the relevant root. Falls back to [today - 1 year,
-// today] when last_trade_date is unknown — the resolver will surface
-// per-date diagnostics if data is missing past the cutoff. Returns null
-// when no option_stream refs are present (caller omits start/end and the
-// backend short-circuits the materialiser).
+// Default date range for option_stream computes: [last_trade_date - 6 months,
+// last_trade_date] for the relevant root. Six months keeps the per-date
+// materialiser fast on remote Mongo (~125 trade days × K=2 chain queries =
+// ~250 round-trips) while still showing a meaningful history window.
+// Falls back to [today - 6 months, today] when last_trade_date is unknown
+// — the resolver surfaces per-date diagnostics if data is missing past
+// the cutoff. Returns null when no option_stream refs are present.
+const DEFAULT_OPTION_STREAM_LOOKBACK_MONTHS = 6;
+
 async function deriveOptionStreamDateRange(seriesPayload) {
   const collections = new Set();
   for (const ref of Object.values(seriesPayload || {})) {
@@ -73,7 +76,7 @@ async function deriveOptionStreamDateRange(seriesPayload) {
     if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
   }
   const end = earliest ?? isoToday();
-  const start = isoMinusYears(end, 1);
+  const start = isoMinusMonths(end, DEFAULT_OPTION_STREAM_LOOKBACK_MONTHS);
   return { start, end };
 }
 
@@ -85,9 +88,9 @@ function isoToday() {
   return `${y}-${m}-${dd}`;
 }
 
-function isoMinusYears(iso, years) {
+function isoMinusMonths(iso, months) {
   const d = new Date(`${iso}T00:00:00`);
-  d.setFullYear(d.getFullYear() - years);
+  d.setMonth(d.getMonth() - months);
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
@@ -124,6 +127,11 @@ function IndicatorsPage() {
   const [lastResultAssetType, setLastResultAssetType] = useState(null);
   const [lastResultIndicatorId, setLastResultIndicatorId] = useState(null);
   const [defaultSeries, setDefaultSeries] = useState(null);
+  // Live progress for the option_stream materialiser. Fraction in [0, 1]
+  // updated by the polling loop in ``computeIndicator``. ``null`` means
+  // "no progress reported" (either not an option_stream compute, or the
+  // first poll hasn't returned yet) and the UI shows a generic spinner.
+  const [computeProgress, setComputeProgress] = useState(null);
   const [defaultSeriesLoaded, setDefaultSeriesLoaded] = useState(false);
   // Classified error from resolveDefaultIndexInstrument — drives the
   // top-banner copy. Kind ∈ 'offline' | 'network' | 'not-found' | 'server' | 'client' | 'unknown'.
@@ -461,6 +469,9 @@ function IndicatorsPage() {
         return;
       }
 
+      // Reset any prior progress so the spinner starts fresh; the
+      // poll loop will update it the moment the backend reports.
+      setComputeProgress(dateRange ? 0 : null);
       try {
         const data = await computeIndicator(
           {
@@ -476,13 +487,26 @@ function IndicatorsPage() {
               : {}),
             ...(dateRange ? { start: dateRange.start, end: dateRange.end } : {}),
           },
-          { signal },
+          {
+            signal,
+            // Only forward the callback when there's actually a slow
+            // path to track; ``computeIndicator`` only triggers polling
+            // when ``onProgress`` is supplied.
+            ...(dateRange
+              ? { onProgress: (frac) => setComputeProgress(frac) }
+              : {}),
+          },
         );
         if (signal.aborted) return;
         setLastResult(data);
         setLastResultAssetType(resolvedAssetType);
         setLastResultIndicatorId(selectedIndicator.id);
+        setComputeProgress(null);
       } catch (e) {
+        // Always release the progress spinner — every catch path
+        // either renders an error card or silently aborts; in both
+        // cases the live "computing X%" line should disappear.
+        setComputeProgress(null);
         if (signal.aborted) return;
         if (e && typeof e === 'object' && 'status' in e) {
           // Structured error envelope:
@@ -670,6 +694,7 @@ function IndicatorsPage() {
             indicator={selectedIndicator}
             result={lastResult}
             loading={running}
+            loadingProgress={running ? computeProgress : null}
             error={error}
             pinnedIncompat={pinnedIncompat}
             onDetachPinned={detachPinnedResult}

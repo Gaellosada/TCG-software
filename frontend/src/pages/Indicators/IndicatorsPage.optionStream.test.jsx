@@ -168,11 +168,17 @@ describe('option_stream — healthy dispatch', () => {
     expect(body.asset_type).toBe('option');
     expect(body.compatible_asset_types).toEqual(['option']);
     // ISO date range derived from the mocked root's last_trade_date
-    // (1-year lookback). Asserting the contract — not the exact strings —
-    // keeps the test robust to clock drift while still proving the
+    // (6-month lookback — keeps the per-date materialiser fast enough
+    // on remote Mongo for v1). Asserting the contract proves the
     // option_stream resolver gets concrete dates instead of None.
     expect(body.end).toBe('2024-12-20');
-    expect(body.start).toBe('2023-12-20');
+    expect(body.start).toBe('2024-06-20');
+    // The page forwards an ``onProgress`` callback so the
+    // ``computeIndicator`` helper (mocked here) can poll
+    // /api/indicators/progress/{task_id}. Task-id generation +
+    // polling are exercised in api/indicators.test.js.
+    const [, opts] = computeIndicatorMock.mock.calls[0];
+    expect(typeof opts.onProgress).toBe('function');
 
     await act(async () => {
       resolveCompute({

@@ -45,7 +45,7 @@ function coerceIndicatorErrorType(errorType) {
  *     pan on one pane propagates to the other and hover is unified.
  *     Mirrors the Data page's price/volume stacked layout.
  */
-function IndicatorChart({ indicator, result, loading, error, pinnedIncompat, onDetachPinned }) {
+function IndicatorChart({ indicator, result, loading, loadingProgress, error, pinnedIncompat, onDetachPinned }) {
   const ownPanel = !!indicator?.ownPanel;
 
   const { traces, layoutOverrides, hasData } = useMemo(() => {
@@ -197,9 +197,25 @@ function IndicatorChart({ indicator, result, loading, error, pinnedIncompat, onD
   }
 
   if (loading) {
+    // Live percentage from the per-date materialiser, when reported.
+    // ``loadingProgress`` is a fraction in [0, 1] or ``null`` when no
+    // backend progress is being tracked (e.g. spot/continuous compute).
+    // We show the percentage only after the first non-zero tick to
+    // avoid a flash of "0%" between request dispatch and the first
+    // poll response.
+    let progressLine = null;
+    if (typeof loadingProgress === 'number' && loadingProgress > 0) {
+      const pct = Math.min(100, Math.max(0, Math.round(loadingProgress * 100)));
+      progressLine = (
+        <div className={styles.stateProgress} aria-live="polite">
+          {pct}%
+        </div>
+      );
+    }
     return (
       <div className={styles.panel}>
         <div className={styles.state}>Computing...</div>
+        {progressLine}
       </div>
     );
   }
