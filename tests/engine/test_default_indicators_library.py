@@ -1,4 +1,4 @@
-"""Smoke tests for the 24 default indicators shipped with the UI.
+"""Smoke tests for the 9 default indicators shipped with the UI.
 
 Each test:
  1. Reads the raw .js file for the indicator.
@@ -101,9 +101,9 @@ def _extract_defaults(py_source: str) -> dict[str, int | float | bool]:
 # Discover all default indicator files up front so pytest's collection
 # lists them by id in the progress output.
 _INDICATOR_FILES = sorted(DEFAULTS_DIR.glob("*.js"))
-if len(_INDICATOR_FILES) != 24:
+if len(_INDICATOR_FILES) != 9:
     raise AssertionError(
-        f"expected 24 default indicator files under {DEFAULTS_DIR}, got "
+        f"expected 9 default indicator files under {DEFAULTS_DIR}, got "
         f"{len(_INDICATOR_FILES)}"
     )
 
@@ -111,9 +111,11 @@ if len(_INDICATOR_FILES) != 24:
 @pytest.fixture(scope="module")
 def series_dict() -> dict[str, np.ndarray]:
     close = _make_series()
-    # Derive OHLC + entry from close so indicators that need other fields
-    # (atr, engulfment-*) can run. Offsets are small and deterministic;
-    # the test is a smoke test, not a correctness check.
+    # All shipped defaults consume ``series['close']`` only, but we still
+    # provide derived OHLC + entry channels so that future indicators
+    # added back into the library can run without a fixture change.
+    # Offsets are small and deterministic; the test is a smoke test, not
+    # a correctness check.
     high = close + 0.5
     low = close - 0.5
     opn = np.concatenate(([close[0]], close[:-1]))

@@ -168,3 +168,19 @@ Three terminology / semantics corrections were made during the rework and are wo
 `IndicatorAvg.java` seeds `sum += Math.abs(currentValue)` in init but the streaming step runs `sum += currentFilterValue; sum -= queue.poll()` on signed values. The result is an inconsistent mixing of abs and signed behaviour that only matches the user's mental model when the input is positive. The port applies `abs` in both phases so the indicator is consistently "rolling mean of the absolute value", which is what practitioners reading the class name expect.
 
 **Locations:** `frontend/src/pages/Indicators/defaults/*.js`, `frontend/src/pages/Indicators/defaultIndicators.js`, `docs/indicators.md`.
+
+## Default indicator library further prune (2026-05)
+
+**Decision:** The default indicator registry is reduced from 24 entries (post-2026-04 rework) to 9. Most legacy-port entries and the Bollinger family are dropped; the canonical SMA / EMA / RSI / MACD-triple block plus `historical-vol`, `swing-pivots`, and `percentile-filtered-return` survive. The dropped indicators remain available to users as custom indicators (they can be re-implemented in the sandbox by anyone who needs them) — they are simply no longer shipped pre-loaded in the default library.
+
+**Survivors (9):** `sma`, `ema`, `rsi`, `macd-line`, `macd-signal`, `macd-histogram`, `historical-vol`, `swing-pivots`, `percentile-filtered-return`.
+
+**Dropped (15):** `absolute-mean`, `atr`, `bollinger-{lower,middle,upper,percent-b}`, `centred-slope`, `engulfment-{pattern,exit}`, `impetus`, `rolling-percentile-bands`, `slope-acceleration`, `slope-statistics`, `trailing-extreme`, `weighted-impetus`.
+
+**Rationale:**
+- The post-2026-04 library was designed under a "ship the legacy Java domain knowledge to every new user" mandate. The trade-off (a thicker default surface in exchange for embedded heuristics) was rejected on review: a new user benefits more from a small, instantly-recognisable starting set than from a long list of niche ports each requiring its own `doc` field to explain.
+- The Bollinger quad is dropped along with the legacy ports for consistency. SMA + sample-stddev is a few lines in the sandbox; users who need bands can ship their own.
+- `percentile-filtered-return` is kept intentionally even though `rolling-percentile-bands` is dropped — the two are not duplicates. The bands compute a percentile *of the close series itself*; `percentile-filtered-return` computes a rolling percentile *of a derived mean-reversion residual* `(close - SMA) / SMA`. The latter is a non-trivial composition that is genuinely useful as a default.
+- `historical-vol` is added back into the documented library (the 2026-04 doc had it shipped but undocumented).
+
+**Locations:** `frontend/src/pages/Indicators/defaults/*.js`, `frontend/src/pages/Indicators/defaultIndicators.js`, `frontend/src/pages/Indicators/defaultIndicators.test.js`, `tests/engine/test_default_indicators_library.py`, `docs/indicators.md`.

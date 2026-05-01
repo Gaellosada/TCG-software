@@ -9,9 +9,9 @@
 // library-wide invariants (count, unique ids, kebab-case), and that the
 // derived spec from parseIndicatorSpec matches what the UI will show.
 //
-// Library shape is the post-2026-04-pruning set: 10 canonical JS entries
-// (sma, ema, rsi, macd triple, bollinger quad) plus 13 legacy-port entries
-// translated from the Java simulator. See ``docs/indicators.md``.
+// Library shape is the post-2026-05 prune set: 9 entries — sma, ema, rsi,
+// macd-{line,signal,histogram}, historical-vol, swing-pivots,
+// percentile-filtered-return. See ``docs/indicators.md``.
 
 import { describe, it, expect } from 'vitest';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
@@ -21,33 +21,15 @@ import { parseIndicatorSpec } from './paramParser';
 // Expectation table — mirrors the brief. Single source of truth for the test.
 // ---------------------------------------------------------------------------
 const EXPECTATIONS = {
-  // --- Canonical ---------------------------------------------------------
-  sma:                    { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                                seriesLabels: ['close'],                  ownPanel: false },
-  ema:                    { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                                seriesLabels: ['close'],                  ownPanel: false },
-  rsi:                    { params: [{ name: 'window', type: 'int', default: 14 }],                                                                                                                                seriesLabels: ['close'],                  ownPanel: true  },
-  'macd-line':            { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }],                                                                                      seriesLabels: ['close'],                  ownPanel: true  },
-  'macd-signal':          { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                                         seriesLabels: ['close'],                  ownPanel: true  },
-  'macd-histogram':       { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                                         seriesLabels: ['close'],                  ownPanel: true  },
-  'bollinger-upper':      { params: [{ name: 'window', type: 'int', default: 20 }, { name: 'num_std', type: 'float', default: 2.0 }],                                                                              seriesLabels: ['close'],                  ownPanel: false },
-  'bollinger-middle':     { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                                seriesLabels: ['close'],                  ownPanel: false },
-  'bollinger-lower':      { params: [{ name: 'window', type: 'int', default: 20 }, { name: 'num_std', type: 'float', default: 2.0 }],                                                                              seriesLabels: ['close'],                  ownPanel: false },
-  'bollinger-percent-b':  { params: [{ name: 'window', type: 'int', default: 20 }, { name: 'num_std', type: 'float', default: 2.0 }],                                                                              seriesLabels: ['close'],                  ownPanel: true  },
-
-  // --- Legacy Java ports ------------------------------------------------
-  atr:                           { params: [{ name: 'window', type: 'int', default: 14 }],                                                                                                                          seriesLabels: ['high', 'low', 'close'],  ownPanel: true  },
-  'absolute-mean':               { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                          seriesLabels: ['close'],                 ownPanel: false },
-  impetus:                       { params: [{ name: 'window', type: 'int', default: 14 }],                                                                                                                          seriesLabels: ['close'],                 ownPanel: true  },
-  'weighted-impetus':            { params: [{ name: 'window', type: 'int', default: 14 }],                                                                                                                          seriesLabels: ['close'],                 ownPanel: true  },
-  'centred-slope':               { params: [{ name: 'window', type: 'int', default: 1 }],                                                                                                                           seriesLabels: ['close'],                 ownPanel: true  },
-  'slope-acceleration':          { params: [],                                                                                                                                                                      seriesLabels: ['close'],                 ownPanel: true  },
-  'slope-statistics':            { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                          seriesLabels: ['close'],                 ownPanel: true  },
-  'rolling-percentile-bands':    { params: [{ name: 'window', type: 'int', default: 252 }, { name: 'percentile', type: 'float', default: 95.0 }],                                                                    seriesLabels: ['close'],                 ownPanel: false },
-  'percentile-filtered-return':  { params: [{ name: 'window', type: 'int', default: 252 }, { name: 'filter_window', type: 'int', default: 50 }, { name: 'percentile', type: 'float', default: 95.0 }],              seriesLabels: ['close'],                 ownPanel: true  },
-  'trailing-extreme':            { params: [{ name: 'window', type: 'int', default: 20 }, { name: 'use_min', type: 'bool', default: false }],                                                                        seriesLabels: ['close'],                 ownPanel: false },
-  'engulfment-pattern':          { params: [{ name: 'min_engulfing_periods', type: 'int', default: 5 }],                                                                                                             seriesLabels: ['open', 'high', 'low'],   ownPanel: false },
-  'engulfment-exit':             { params: [{ name: 'box_lookback', type: 'int', default: 20 }, { name: 'ratio_win', type: 'float', default: 2.0 }, { name: 'ratio_loss', type: 'float', default: 1.0 }],            seriesLabels: ['open', 'high', 'low', 'entry'], ownPanel: false },
-  'swing-pivots':                { params: [{ name: 'total_periods', type: 'int', default: 20 }, { name: 'inflection_periods', type: 'int', default: 5 }],                                                           seriesLabels: ['close'],                 ownPanel: false },
-  'historical-vol':              { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                           seriesLabels: ['close'],                 ownPanel: true  },
+  sma:                          { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: false },
+  ema:                          { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: false },
+  rsi:                          { params: [{ name: 'window', type: 'int', default: 14 }],                                                                                                                seriesLabels: ['close'], ownPanel: true  },
+  'macd-line':                  { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }],                                                                      seriesLabels: ['close'], ownPanel: true  },
+  'macd-signal':                { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                          seriesLabels: ['close'], ownPanel: true  },
+  'macd-histogram':             { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                          seriesLabels: ['close'], ownPanel: true  },
+  'historical-vol':             { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: true  },
+  'swing-pivots':               { params: [{ name: 'total_periods', type: 'int', default: 20 }, { name: 'inflection_periods', type: 'int', default: 5 }],                                                 seriesLabels: ['close'], ownPanel: false },
+  'percentile-filtered-return': { params: [{ name: 'window', type: 'int', default: 252 }, { name: 'filter_window', type: 'int', default: 50 }, { name: 'percentile', type: 'float', default: 95.0 }],     seriesLabels: ['close'], ownPanel: true  },
 };
 
 const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
@@ -58,8 +40,8 @@ const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
 const CATEGORIES = ['trend', 'momentum', 'volatility', 'pattern', 'statistical'];
 
 describe('DEFAULT_INDICATORS — library invariants', () => {
-  it('contains exactly 24 entries', () => {
-    expect(DEFAULT_INDICATORS).toHaveLength(24);
+  it('contains exactly 9 entries', () => {
+    expect(DEFAULT_INDICATORS).toHaveLength(9);
   });
 
   it('has unique ids', () => {
@@ -202,13 +184,13 @@ describe('DEFAULT_INDICATORS — per-entry shape and spec', () => {
   }
 });
 
-describe('DEFAULT_INDICATORS — category coverage (post 2026-04 rework)', () => {
-  // The post-rework library covers five grouping buckets. Membership is
-  // derived directly from each entry's ``category`` field — that field is
-  // the single source of truth. The exact registry order is not asserted
-  // (that's plumbing, not a contract), but the presence of at least one
-  // representative per bucket IS part of the product contract — we don't
-  // want a future refactor to silently drop an entire category.
+describe('DEFAULT_INDICATORS — category coverage (post 2026-05 prune)', () => {
+  // Library covers five grouping buckets. Membership is derived directly
+  // from each entry's ``category`` field — that field is the single source
+  // of truth. The exact registry order is not asserted (that's plumbing,
+  // not a contract), but the presence of at least one representative per
+  // bucket IS part of the product contract — we don't want a future
+  // refactor to silently drop an entire category.
   const BUCKET_MEMBERS = CATEGORIES.reduce((acc, cat) => {
     acc[cat] = new Set(
       DEFAULT_INDICATORS.filter((e) => e.category === cat).map((e) => e.id),
