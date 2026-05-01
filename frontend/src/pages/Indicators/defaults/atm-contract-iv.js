@@ -45,7 +45,11 @@ export default {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      cycle: null,
+      // Lock to the SPX *monthly* cycle — OPT_SP_500 mixes monthly (M)
+      // and weekly (W) expirations, and "front month" only makes sense
+      // for monthlies. Without this filter the resolver may pick a
+      // weekly that happens to fall on a third Friday.
+      cycle: 'M',
       maturity: { kind: 'next_third_friday', offset_months: 0 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',

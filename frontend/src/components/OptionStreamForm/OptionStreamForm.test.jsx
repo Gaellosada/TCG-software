@@ -194,11 +194,29 @@ describe('buildDefaultOptionStream', () => {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      cycle: null,
+      // Canonical default is the monthly cycle ('M'): OPT_SP_500 mixes
+      // SPX monthlies and SPXW weeklies, and "front month" only makes
+      // semantic sense on the monthly track. ALL_CYCLES includes 'M',
+      // so the default picks it. Override via ``allowedCycles`` when
+      // a different default is desired.
+      cycle: 'M',
     });
     expect(v.maturity.kind).toBe('next_third_friday');
     expect(v.selection.kind).toBe('by_strike');
     expect(v.stream).toBe('mid');
+  });
+
+  it("falls back to allowedCycles[0] when 'M' is not allowed", () => {
+    const v = buildDefaultOptionStream({
+      availableRoots: ROOTS,
+      allowedCycles: [null, 'W', 'Q'],
+    });
+    expect(v.cycle).toBeNull();
+  });
+
+  it('falls back to null when allowedCycles is empty', () => {
+    const v = buildDefaultOptionStream({ availableRoots: ROOTS, allowedCycles: [] });
+    expect(v.cycle).toBeNull();
   });
 
   it('falls back to empty collection when no roots are available', () => {

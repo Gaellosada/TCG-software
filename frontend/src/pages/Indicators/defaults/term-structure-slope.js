@@ -36,7 +36,10 @@ export default {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      cycle: null,
+      // Lock to monthlies — see atm-contract-iv.js for the rationale
+      // (OPT_SP_500 mixes M and W cycles; "front month" only means the
+      // SPX monthly).
+      cycle: 'M',
       maturity: { kind: 'next_third_friday', offset_months: 0 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
@@ -45,7 +48,7 @@ export default {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      cycle: null,
+      cycle: 'M',
       maturity: { kind: 'next_third_friday', offset_months: 1 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',

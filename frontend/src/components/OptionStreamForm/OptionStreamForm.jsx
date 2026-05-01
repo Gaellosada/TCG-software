@@ -109,11 +109,19 @@ export function buildDefaultOptionStream({
   allowedCycles = ALL_CYCLES,
 }) {
   const root = availableRoots && availableRoots.length > 0 ? availableRoots[0] : null;
+  // Canonical default: prefer the monthly cycle ('M') when allowed,
+  // since OPT_SP_500 (the most common option root in this codebase) has
+  // both monthly (SPX) and weekly (SPXW) cycles and "front month"
+  // typically means the monthly. Falls back to the first allowed cycle
+  // (often null = "Any") when 'M' isn't on the list.
+  const defaultCycle = allowedCycles.includes('M')
+    ? 'M'
+    : (allowedCycles.length === 0 ? null : allowedCycles[0] ?? null);
   return {
     type: 'option_stream',
     collection: root ? root.collection : '',
     option_type: allowedOptionTypes[0] || 'C',
-    cycle: allowedCycles[0] === undefined ? null : allowedCycles[0],
+    cycle: defaultCycle,
     maturity: defaultMaturity(allowedMaturityKinds[0] || 'next_third_friday'),
     selection: defaultSelection(allowedSelectionKinds[0] || 'by_moneyness', allowedOptionTypes[0] || 'C'),
     stream: allowedStreams[0] || 'mid',

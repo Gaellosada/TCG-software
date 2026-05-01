@@ -27,8 +27,8 @@ without passing ``expiration_cycle``.  To honour a caller-supplied
 passes the chosen cycle through.  ``cycle=None`` is a pass-through
 (no filter applied).  See guardrail 11 — cycle is first-class.
 
-Per-date call count (no batching available)
--------------------------------------------
+Per-date call count and concurrency (no batching available)
+------------------------------------------------------------
 The data layer exposes no date-range chain query — see recon doc and
 ``tcg.data.options.protocol.OptionsDataReader.query_chain``.  This
 materialiser issues, per trade date::
@@ -42,17 +42,31 @@ materialiser issues, per trade date::
         - direct query at the resolved expiration
 
 For an N-day backtest this is N (or 2N for NearestToTarget) Mongo
-round-trips.  Acceptable for v1; a per-(collection, root, cycle)
-date-range cache could be added later if profiling shows it dominates.
+round-trips.  The per-date tasks run **concurrently** under
+``asyncio.gather`` with a bounded semaphore (see
+:data:`_MAX_INFLIGHT_PER_DATE`) — wall-clock latency is therefore
+roughly ``ceil(N / _MAX_INFLIGHT_PER_DATE) × Mongo_RTT``, not
+``N × Mongo_RTT`` as a serial loop would give.  Total query count is
+unchanged from the serial loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Awaitable, Callable, Literal, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+# Bounded concurrency for the per-date resolver loop. Motor's default
+# Mongo connection pool is 100 — keeping the inflight bound well below
+# that prevents queueing-induced latency while still extracting most of
+# the parallelism benefit. Empirically 32 is enough to saturate a remote
+# Mongo for typical 252-day windows; raise only if profiling shows
+# otherwise.
+_MAX_INFLIGHT_PER_DATE = 32
 
 from tcg.engine.options.maturity.protocol import MaturityResolver
 from tcg.engine.options.selection._ports import (
@@ -263,51 +277,60 @@ async def resolve_option_stream(
     error_codes: list[str | None] = [None] * n
     attr_name = _STREAM_TO_ATTR[stream]
 
-    for i, d in enumerate(dates):
+    # Bounded concurrency: every per-date task takes the semaphore for
+    # the full chain-query block.  asyncio is single-threaded so direct
+    # ``values[i] = ...`` / ``error_codes[i] = ...`` writes from
+    # disjoint indices are safe without locks.
+    sem = asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
+
+    async def _resolve_one(i: int, d: date) -> None:
         if last_trade_date is not None and d > last_trade_date:
             error_codes[i] = "past_last_trade_date"
-            continue
+            return
+        async with sem:
+            # selector.select swallows pricer-related branches (we passed
+            # pricer=None and compute_missing_for_delta defaults False),
+            # so any path through that requires Module 2 is impossible
+            # here.
+            result: SelectionResult = await selector.select(
+                root=collection,
+                date=d,
+                type=option_type,
+                criterion=selection,
+                maturity=maturity,
+                compute_missing_for_delta=False,
+            )
 
-        # selector.select swallows pricer-related branches (we passed
-        # pricer=None and compute_missing_for_delta defaults False), so
-        # any path through that requires Module 2 is impossible here.
-        result: SelectionResult = await selector.select(
-            root=collection,
-            date=d,
-            type=option_type,
-            criterion=selection,
-            maturity=maturity,
-            compute_missing_for_delta=False,
-        )
+            if result.error_code is not None:
+                error_codes[i] = result.error_code
+                return
+            if result.contract is None:  # pragma: no cover (defensive)
+                error_codes[i] = "no_chain_for_date"
+                return
 
-        if result.error_code is not None:
-            error_codes[i] = result.error_code
-            continue
-        if result.contract is None:  # pragma: no cover (defensive)
-            error_codes[i] = "no_chain_for_date"
-            continue
+            # Selection succeeded — re-query the chain at the resolved
+            # expiration to read the row's stream attribute.  The
+            # CachedChainReader (when wired) deduplicates this against
+            # the selector's narrow query.
+            rows = await cycle_reader.query_chain(
+                root=collection,
+                date=d,
+                type=option_type,
+                expiration_min=result.contract.expiration,
+                expiration_max=result.contract.expiration,
+            )
+            row = _row_for_contract(rows, result.contract)
+            if row is None:  # pragma: no cover (defensive)
+                error_codes[i] = "no_chain_for_date"
+                return
 
-        # Selection succeeded — re-query the chain at the resolved
-        # expiration to read the row's stream attribute.  The
-        # CachedChainReader (when wired) deduplicates this against the
-        # selector's narrow query.
-        rows = await cycle_reader.query_chain(
-            root=collection,
-            date=d,
-            type=option_type,
-            expiration_min=result.contract.expiration,
-            expiration_max=result.contract.expiration,
-        )
-        row = _row_for_contract(rows, result.contract)
-        if row is None:  # pragma: no cover (defensive)
-            error_codes[i] = "no_chain_for_date"
-            continue
+            raw = getattr(row, attr_name, None)
+            if raw is None:
+                error_codes[i] = _missing_code_for(stream)
+                return
+            values[i] = float(raw)
 
-        raw = getattr(row, attr_name, None)
-        if raw is None:
-            error_codes[i] = _missing_code_for(stream)
-            continue
-        values[i] = float(raw)
+    await asyncio.gather(*(_resolve_one(i, d) for i, d in enumerate(dates)))
 
     return values, error_codes
 
