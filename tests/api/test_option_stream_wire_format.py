@@ -150,12 +150,7 @@ def mock_app(monkeypatch):
     )
 
     # Patch the materialiser to bypass the chain-data layer.
-    # ``progress_callback`` accepted but ignored — the route layer wires
-    # it through (see compute_indicator) and tests for that wiring live
-    # in the resolver suite.
-    async def fake_materialise(  # noqa: ARG001
-        ref, *, svc, start_date, end_date, progress_callback=None
-    ):
+    async def fake_materialise(ref, *, svc, start_date, end_date):  # noqa: ARG001
         dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
         values = np.array([0.20, 0.21, 0.22], dtype=np.float64)
         diagnostics: list[str | None] = [None, None, None]
@@ -265,83 +260,3 @@ class TestRouteAcceptsFEShape:
         assert resp.status_code == 200, resp.text
 
 
-@pytest.mark.asyncio
-class TestProgressEndpoint:
-    """GET /api/indicators/progress/{task_id} — frontend progress polling.
-
-    Tests the public contract: response shape (always ``done``,
-    ``total``, ``fraction``); zero-fill on missing task; clamping of
-    fraction to [0, 1]; and the route-handler wiring that registers the
-    entry when the request includes ``task_id`` plus an option_stream
-    ref.
-    """
-
-    async def test_unknown_task_id_returns_zeros(self, client: AsyncClient):
-        resp = await client.get("/api/indicators/progress/no-such-task")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data == {"done": 0, "total": 0, "fraction": 0.0}
-
-    async def test_register_and_tick_via_module_state(self, client: AsyncClient):
-        """Direct test of _progress_register / _progress_tick via the GET
-        endpoint — proves the public contract independent of the
-        compute route's wiring."""
-        from tcg.core.api.indicators import (
-            _progress_clear,
-            _progress_register,
-            _progress_tick,
-        )
-
-        _progress_register("task-123", total=4)
-        try:
-            _progress_tick("task-123")
-            resp = await client.get("/api/indicators/progress/task-123")
-            data = resp.json()
-            assert data["done"] == 1
-            assert data["total"] == 4
-            assert data["fraction"] == pytest.approx(0.25)
-            _progress_tick("task-123")
-            _progress_tick("task-123")
-            resp = await client.get("/api/indicators/progress/task-123")
-            assert resp.json()["fraction"] == pytest.approx(0.75)
-        finally:
-            _progress_clear("task-123")
-
-    async def test_compute_with_task_id_registers_entry(self, client: AsyncClient):
-        """When ``task_id`` is supplied AND the request involves an
-        option_stream ref, the route handler registers a progress entry.
-        Cleanup runs as a BackgroundTask after the response, so by the
-        time we poll the entry should be gone — but we can prove
-        registration by polling DURING the compute via a slow
-        materialiser. To keep this test fast we just assert the
-        endpoint shape + final cleanup."""
-        body = _fe_body(
-            selection={"kind": "by_moneyness", "target": 1.0, "tolerance": 0.05},
-            maturity={"kind": "next_third_friday", "offset_months": 0},
-        )
-        body["task_id"] = "test-task-cleanup"
-        resp = await client.post("/api/indicators/compute", json=body)
-        assert resp.status_code == 200, resp.text
-        # After response, the BackgroundTask cleared the entry.
-        progress_resp = await client.get(
-            "/api/indicators/progress/test-task-cleanup"
-        )
-        assert progress_resp.json() == {"done": 0, "total": 0, "fraction": 0.0}
-
-    async def test_compute_without_task_id_does_not_register(
-        self, client: AsyncClient
-    ):
-        """No task_id → no progress entry — proves we don't leak state
-        for the common (non-option-stream) compute path."""
-        body = _fe_body(
-            selection={"kind": "by_moneyness", "target": 1.0, "tolerance": 0.05},
-            maturity={"kind": "next_third_friday", "offset_months": 0},
-        )
-        # explicitly omit task_id
-        resp = await client.post("/api/indicators/compute", json=body)
-        assert resp.status_code == 200, resp.text
-        # An arbitrary task_id never registered → poll returns zeros.
-        progress_resp = await client.get(
-            "/api/indicators/progress/never-registered"
-        )
-        assert progress_resp.json() == {"done": 0, "total": 0, "fraction": 0.0}

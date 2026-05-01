@@ -1,14 +1,18 @@
-// E2E regression for the user-reported "I don't see the progress percents"
-// bug. The percentage was rendered but flex:1 on the chart's loading-state
-// row let it grow to fill the panel, centring text below the viewport (at
-// y=1621 in the failing instance, panel was ~1700px tall). Fixed by
-// pinning the row to the top with intrinsic height + padding.
+// E2E regression for the user-reported "I don't see the progress" bug.
+// The earlier polling-based percentage was rendered but pushed off-
+// screen by a flex layout bug, then proved fragile in real use (stuck
+// at 0% when the backend wasn't ticking). The progress feature was
+// replaced with a simple FE-side elapsed-time badge ("Computing... Ns")
+// that mounts only while the parent reports loading.
+//
+// This spec asserts the badge is visible inside the chart panel during
+// a slow option_stream compute and that it ticks past 0s.
 
 import { test, expect } from '@playwright/test';
 
 const BASE = 'http://localhost:5173';
 
-test('option_stream Computing-state shows the percentage in the visible viewport', async ({ page }) => {
+test('option_stream Computing-state shows an elapsed-time badge inside the viewport', async ({ page }) => {
   await page.addInitScript(() => {
     try { window.localStorage.clear(); } catch { /* ignore */ }
   });
@@ -27,21 +31,11 @@ test('option_stream Computing-state shows the percentage in the visible viewport
       roots: [{ collection: 'OPT_SP_500', name: 'SP 500', has_greeks: true, providers: ['IVOLATILITY'], expiration_first: '2005-01-21', expiration_last: '2027-12-19', doc_count_estimated: 0, strike_factor_verified: true, last_trade_date: '2024-12-20' }],
     }),
   }));
-  let computeStartedAt = 0;
   await page.route('**/api/indicators/compute', async (r) => {
-    computeStartedAt = Date.now();
-    await new Promise((res) => setTimeout(res, 4000));
+    await new Promise((res) => setTimeout(res, 3000));
     await r.fulfill({
       status: 200, contentType: 'application/json',
       body: JSON.stringify({ dates: [20240620], series: [{ label: 'atm_iv', collection: 'OPT_SP_500', instrument_id: 'stream', close: [0.18] }], values: [0.18] }),
-    });
-  });
-  await page.route('**/api/indicators/progress/*', async (r) => {
-    const elapsed = computeStartedAt ? Date.now() - computeStartedAt : 0;
-    const frac = Math.min(0.9, elapsed / 4000);
-    await r.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ done: Math.round(frac * 100), total: 100, fraction: frac }),
     });
   });
 
@@ -52,7 +46,6 @@ test('option_stream Computing-state shows the percentage in the visible viewport
   if ((await defaultHeader.getAttribute('data-collapsed')) === 'true') {
     await defaultHeader.click();
   }
-
   const atm = page.getByText('ATM contract IV', { exact: true });
   await expect(atm).toBeVisible({ timeout: 10000 });
   await atm.locator('..').click({ force: true });
@@ -61,16 +54,20 @@ test('option_stream Computing-state shows the percentage in the visible viewport
   await expect(runBtn).toBeEnabled({ timeout: 5000 });
   await runBtn.click();
 
+  // Badge must be visible inside the chart panel and reflect elapsed
+  // wall-time (1s+ after we wait 1.5s).
   await page.waitForTimeout(1500);
 
   const chartPanel = page.getByTestId('results-card');
-  // Single combined element: "Computing... 37%". Bounding box must lie
-  // within the visible viewport so the user actually sees it.
-  const computingText = chartPanel.getByText(/Computing\.\.\. \d+%/);
-  await expect(computingText).toBeVisible();
-  const box = await computingText.boundingBox();
+  const badge = chartPanel.getByText(/Computing\.\.\. \d+s/);
+  await expect(badge).toBeVisible();
+
+  const box = await badge.boundingBox();
   const viewport = page.viewportSize();
   expect(box).toBeTruthy();
   expect(box.y).toBeLessThan(viewport.height);
-  expect(box.y + box.height).toBeGreaterThan(0);
+
+  const text = await badge.textContent();
+  const seconds = Number(text.match(/(\d+)s/)[1]);
+  expect(seconds).toBeGreaterThanOrEqual(1);
 });

@@ -226,64 +226,6 @@ describe('computeIndicator', () => {
     expect(parsed).not.toHaveProperty('end');
   });
 
-  it('generates a task_id and forwards it when onProgress is supplied', async () => {
-    const fetchMock = makeFetchMock(jsonOk({ ok: true }));
-    const onProgress = vi.fn();
-    await computeIndicator(
-      { code: 'x', params: {}, series: {} },
-      { onProgress },
-    );
-    // Two fetch calls happen for a typical compute when progress polling
-    // is enabled, but if the compute resolves fast enough we may only
-    // see the main /compute call. The contract under test is just that
-    // the body carries a non-empty task_id string.
-    const computeCall = fetchMock.mock.calls.find(([url]) => url === '/api/indicators/compute');
-    expect(computeCall).toBeTruthy();
-    const parsed = JSON.parse(computeCall[1].body);
-    expect(typeof parsed.task_id).toBe('string');
-    expect(parsed.task_id.length).toBeGreaterThan(0);
-  });
-
-  it('does NOT generate a task_id when onProgress is omitted', async () => {
-    const fetchMock = makeFetchMock(jsonOk({ ok: true }));
-    await computeIndicator({ code: 'x', params: {}, series: {} });
-    const [, init] = fetchMock.mock.calls[0];
-    const parsed = JSON.parse(init.body);
-    expect(parsed).not.toHaveProperty('task_id');
-  });
-
-  it('polls /api/indicators/progress/{task_id} while compute is in flight and reports the fraction', async () => {
-    vi.useFakeTimers();
-    try {
-      // Compute resolves only after we advance the timer past the first
-      // poll tick (500 ms). Progress endpoint returns 0.42 to prove the
-      // helper forwards the fraction through ``onProgress``.
-      let resolveCompute;
-      const computePromise = new Promise((resolve) => {
-        resolveCompute = () => resolve(jsonOk({ ok: true }));
-      });
-      globalThis.fetch = vi.fn((url) => {
-        if (typeof url === 'string' && url.startsWith('/api/indicators/progress/')) {
-          return Promise.resolve(jsonOk({ done: 42, total: 100, fraction: 0.42 }));
-        }
-        return computePromise;
-      });
-      const onProgress = vi.fn();
-      const computing = computeIndicator(
-        { code: 'x', params: {}, series: {} },
-        { onProgress },
-      );
-      // Advance to the first poll tick + microtasks.
-      await vi.advanceTimersByTimeAsync(600);
-      expect(onProgress).toHaveBeenCalledWith(0.42);
-      resolveCompute();
-      await vi.advanceTimersByTimeAsync(0);
-      await computing;
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it('throws with err.body and err.status on non-2xx', async () => {
     const errorBody = {
       error_code: 'INDICATOR_INCOMPATIBLE_ASSET',

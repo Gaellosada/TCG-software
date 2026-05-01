@@ -127,11 +127,6 @@ function IndicatorsPage() {
   const [lastResultAssetType, setLastResultAssetType] = useState(null);
   const [lastResultIndicatorId, setLastResultIndicatorId] = useState(null);
   const [defaultSeries, setDefaultSeries] = useState(null);
-  // Live progress for the option_stream materialiser. Fraction in [0, 1]
-  // updated by the polling loop in ``computeIndicator``. ``null`` means
-  // "no progress reported" (either not an option_stream compute, or the
-  // first poll hasn't returned yet) and the UI shows a generic spinner.
-  const [computeProgress, setComputeProgress] = useState(null);
   const [defaultSeriesLoaded, setDefaultSeriesLoaded] = useState(false);
   // Classified error from resolveDefaultIndexInstrument — drives the
   // top-banner copy. Kind ∈ 'offline' | 'network' | 'not-found' | 'server' | 'client' | 'unknown'.
@@ -469,9 +464,6 @@ function IndicatorsPage() {
         return;
       }
 
-      // Reset any prior progress so the spinner starts fresh; the
-      // poll loop will update it the moment the backend reports.
-      setComputeProgress(dateRange ? 0 : null);
       try {
         const data = await computeIndicator(
           {
@@ -487,26 +479,13 @@ function IndicatorsPage() {
               : {}),
             ...(dateRange ? { start: dateRange.start, end: dateRange.end } : {}),
           },
-          {
-            signal,
-            // Only forward the callback when there's actually a slow
-            // path to track; ``computeIndicator`` only triggers polling
-            // when ``onProgress`` is supplied.
-            ...(dateRange
-              ? { onProgress: (frac) => setComputeProgress(frac) }
-              : {}),
-          },
+          { signal },
         );
         if (signal.aborted) return;
         setLastResult(data);
         setLastResultAssetType(resolvedAssetType);
         setLastResultIndicatorId(selectedIndicator.id);
-        setComputeProgress(null);
       } catch (e) {
-        // Always release the progress spinner — every catch path
-        // either renders an error card or silently aborts; in both
-        // cases the live "computing X%" line should disappear.
-        setComputeProgress(null);
         if (signal.aborted) return;
         if (e && typeof e === 'object' && 'status' in e) {
           // Structured error envelope:
@@ -694,7 +673,6 @@ function IndicatorsPage() {
             indicator={selectedIndicator}
             result={lastResult}
             loading={running}
-            loadingProgress={running ? computeProgress : null}
             error={error}
             pinnedIncompat={pinnedIncompat}
             onDetachPinned={detachPinnedResult}
