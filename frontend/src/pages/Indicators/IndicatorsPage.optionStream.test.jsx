@@ -41,9 +41,10 @@ vi.mock('../../api/indicators', () => ({
   resolveDefaultIndexInstrument: (...args) => resolveDefaultIndexInstrumentMock(...args),
 }));
 
-// runIndicator resolves a default ISO date range from /api/options/roots
-// when the seriesMap contains an option_stream ref. Mock the API so jsdom
-// doesn't try to fetch and the resolved range is deterministic.
+// runIndicator now resolves a default ISO date range from
+// /api/options/roots when the seriesMap contains an option_stream ref.
+// Mock the API so jsdom doesn't try to fetch and the resolved range is
+// deterministic.
 const getOptionRootsMock = vi.fn();
 vi.mock('../../api/options', () => ({
   getOptionRoots: (...args) => getOptionRootsMock(...args),
@@ -172,6 +173,12 @@ describe('option_stream — healthy dispatch', () => {
     // option_stream resolver gets concrete dates instead of None.
     expect(body.end).toBe('2024-12-20');
     expect(body.start).toBe('2024-06-20');
+    // The page forwards an ``onProgress`` callback so the
+    // ``computeIndicator`` helper (mocked here) can poll
+    // /api/indicators/progress/{task_id}. Task-id generation +
+    // polling are exercised in api/indicators.test.js.
+    const [, opts] = computeIndicatorMock.mock.calls[0];
+    expect(typeof opts.onProgress).toBe('function');
 
     await act(async () => {
       resolveCompute({

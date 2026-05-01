@@ -32,7 +32,7 @@ import { listCollections, listInstruments } from './data';
  */
 export async function computeIndicator(
   { code, params, series, asset_type, compatible_asset_types, start, end },
-  { signal } = {},
+  { signal, onProgress } = {},
 ) {
   const body = { code, params, series };
   // Only attach when explicitly provided so we don't bait the backend
@@ -49,20 +49,69 @@ export async function computeIndicator(
     body.end = end;
   }
 
-  const res = await fetch('/api/indicators/compute', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => null);
-    const err = new Error((errBody && errBody.message) || res.statusText || 'Request failed');
-    err.body = errBody;
-    err.status = res.status;
-    throw err;
+  // Progress polling: when ``onProgress`` is supplied, generate a
+  // task_id, attach it to the request, and poll
+  // ``/api/indicators/progress/{task_id}`` every 250 ms while the
+  // compute is running. The backend only registers the task when the
+  // request involves an option_stream ref (the slow path) — otherwise
+  // the poll always returns zeros. Cleanup happens server-side via a
+  // BackgroundTask after the main response is sent.
+  //
+  // Every poll calls ``onProgress`` regardless of fraction value so the
+  // UI can reflect "polling is alive at 0%" vs "no polling at all".
+  // The first poll fires immediately (no 250 ms warm-up gap) so users
+  // see a number as soon as the backend has registered the task.
+  let pollTimer = null;
+  if (typeof onProgress === 'function') {
+    body.task_id = makeTaskId();
+    const pollOnce = async () => {
+      try {
+        const r = await fetch(`/api/indicators/progress/${body.task_id}`, { signal });
+        if (!r.ok) return;
+        const data = await r.json();
+        const frac = typeof data.fraction === 'number' ? data.fraction : 0;
+        onProgress(frac);
+      } catch {
+        // Silent: poll errors must not fail the main request. The
+        // progress UI just stops updating; the compute itself still
+        // completes via the main fetch below.
+      }
+    };
+    // Kick off an immediate poll so the user gets feedback within the
+    // first ~tens of ms rather than waiting a full interval.
+    pollOnce();
+    pollTimer = setInterval(pollOnce, 250);
   }
-  return res.json();
+
+  try {
+    const res = await fetch('/api/indicators/compute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      const err = new Error((errBody && errBody.message) || res.statusText || 'Request failed');
+      err.body = errBody;
+      err.status = res.status;
+      throw err;
+    }
+    return res.json();
+  } finally {
+    if (pollTimer !== null) clearInterval(pollTimer);
+  }
+}
+
+// crypto.randomUUID() is widely supported (Chrome 92+, Firefox 95+,
+// Safari 15.4+, jsdom 22+); the manual fallback is purely defensive
+// for ancient runtimes. The collision domain is per-session so even
+// the weak fallback is acceptable.
+function makeTaskId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // Case-insensitive loose matcher for S&P 500 spot-index symbols across

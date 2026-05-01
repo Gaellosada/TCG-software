@@ -19,7 +19,7 @@ from datetime import date
 
 import numpy as np
 import pandas_market_calendars as mcal
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -76,11 +76,78 @@ class IndicatorComputeRequest(BaseModel):
     # compat check rejects. Front-end may omit it for ad-hoc / custom
     # indicators; in that case it is omitted from the error body too.
     indicator_id: str | None = None
+    # Optional task id for progress polling (UUID-shaped string, but the
+    # route doesn't enforce a format — just a unique key the frontend
+    # uses to poll ``GET /api/indicators/progress/{task_id}`` while the
+    # compute is running). Only populated when the request involves an
+    # ``option_stream`` ref (the per-date materialiser is the slow path
+    # progress reports on); the value is ignored otherwise.
+    task_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Progress tracking — used by the option_stream materialiser to expose
+# per-date completion to the frontend via GET /api/indicators/progress.
+# Module-level dict keyed by task_id. Each entry is removed when the
+# compute completes (success or error) so the dict cannot grow without
+# bound during normal operation. Concurrent computes carry distinct ids
+# generated client-side.
+# ---------------------------------------------------------------------------
+
+_PROGRESS_STATE: dict[str, dict[str, int]] = {}
+
+
+def _progress_register(task_id: str, total: int) -> None:
+    """Initialise a progress entry. Overwrites any prior entry with the
+    same key (a stale carry-over from an aborted compute is the most
+    likely cause; the new compute's total takes precedence)."""
+    _PROGRESS_STATE[task_id] = {"done": 0, "total": max(int(total), 0)}
+
+
+def _progress_tick(task_id: str) -> None:
+    """Increment the done counter. No-op when the entry was already
+    removed (e.g. the compute finished and cleaned up while a stray
+    callback was still in flight — defensive)."""
+    entry = _PROGRESS_STATE.get(task_id)
+    if entry is not None:
+        entry["done"] += 1
+
+
+def _progress_clear(task_id: str) -> None:
+    """Remove the entry. Idempotent — safe to call in a finally block
+    even when registration was skipped (e.g. when no option_stream was
+    in the request)."""
+    _PROGRESS_STATE.pop(task_id, None)
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.get("/progress/{task_id}")
+async def get_compute_progress(task_id: str) -> dict:
+    """Read the in-progress compute counter for a task.
+
+    Returns ``{"done": int, "total": int, "fraction": float}`` where
+    ``fraction = done / total`` (clamped to [0, 1], ``0.0`` when the
+    entry is missing). The frontend polls this endpoint while waiting
+    on ``POST /compute`` so the user can watch the per-date
+    materialiser progress instead of staring at a static spinner.
+
+    Response shape is intentionally permissive (no 404 on missing task)
+    so the FE can poll without race conditions: a poll that fires
+    *before* the route handler registers the entry simply sees zeros.
+    """
+    entry = _PROGRESS_STATE.get(task_id)
+    if entry is None:
+        return {"done": 0, "total": 0, "fraction": 0.0}
+    done = entry["done"]
+    total = entry["total"]
+    fraction = (done / total) if total > 0 else 0.0
+    if fraction > 1.0:
+        fraction = 1.0
+    return {"done": done, "total": total, "fraction": fraction}
 
 
 def _incompatible_asset_response(
@@ -204,6 +271,7 @@ async def _materialise_option_stream(
     svc: MarketDataService,
     start_date: date | None,
     end_date: date | None,
+    progress_callback=None,
 ) -> tuple[np.ndarray, np.ndarray, list[str | None]] | str:
     """Materialise an ``OptionStreamRef`` into ``(dates, values, diagnostics)``.
 
@@ -211,6 +279,10 @@ async def _materialise_option_stream(
     400 ``error_response``) when the date range is missing.  This
     keeps the route handler's ``case "option_stream":`` block tight
     — a guideline from the Wave 2a brief.
+
+    ``progress_callback`` is invoked once per resolved trade date — the
+    route handler wires it to ``_progress_tick`` when ``task_id`` is
+    populated so the FE can poll progress.
     """
     trade_dates = _business_dates_in_range(start_date, end_date)
     if not trade_dates:
@@ -227,14 +299,31 @@ async def _materialise_option_stream(
         chain_reader=chain_reader,
         maturity_resolver=mat_resolver,
         underlying_price_resolver=ul_resolver,
+        progress_callback=progress_callback,
     )
     dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
     return dates_arr, values, diagnostics
 
 
+def _count_option_stream_dates(
+    series: dict[str, SeriesRef],
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> int:
+    """Pre-compute the total per-date work units across every
+    ``option_stream`` ref in ``series`` so the FE-visible progress
+    fraction has a real denominator. Non-option-stream refs contribute
+    zero — their wall-clock cost is dominated by a single MongoDB read
+    that the user should not see ticking on a per-date basis."""
+    n = len(_business_dates_in_range(start_date, end_date))
+    return n * sum(1 for ref in series.values() if isinstance(ref, OptionStreamRef))
+
+
 @router.post("/compute")
 async def compute_indicator(
     body: IndicatorComputeRequest,
+    background_tasks: BackgroundTasks,
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
     """Execute a user-defined indicator against one or more price series."""
@@ -266,6 +355,25 @@ async def compute_indicator(
     except ValueError as exc:
         return error_response("validation", str(exc))
 
+    # Progress tracking: only register when the request involves an
+    # option_stream ref (the slow path) AND the FE supplied a task_id.
+    # The progress callback ticks once per resolved trade date; the FE
+    # polls /progress/{task_id} while waiting on the main response.
+    # Cleanup is queued as a BackgroundTask so it runs after response
+    # send regardless of which early-return path the route takes.
+    progress_task_id: str | None = None
+    progress_callback = None
+    if body.task_id:
+        total = _count_option_stream_dates(
+            body.series, start_date=start_date, end_date=end_date
+        )
+        if total > 0:
+            progress_task_id = body.task_id
+            _progress_register(progress_task_id, total)
+            progress_callback = (
+                lambda tid=progress_task_id: _progress_tick(tid)
+            )
+            background_tasks.add_task(_progress_clear, progress_task_id)
 
     # Param validation (pydantic accepts int/float/bool; we still guard NaN
     # for the numeric path and forward bools unchanged).
@@ -386,7 +494,11 @@ async def compute_indicator(
 
                 case "option_stream":
                     materialised = await _materialise_option_stream(
-                        ref, svc=svc, start_date=start_date, end_date=end_date,
+                        ref,
+                        svc=svc,
+                        start_date=start_date,
+                        end_date=end_date,
+                        progress_callback=progress_callback,
                     )
                     if isinstance(materialised, str):
                         return error_response(

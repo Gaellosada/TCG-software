@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo } from 'react';
 import Chart from '../../components/Chart';
 import { TRACE_COLORS } from '../../utils/chartTheme';
 import { HEADINGS } from './errorTaxonomy';
@@ -45,29 +45,7 @@ function coerceIndicatorErrorType(errorType) {
  *     pan on one pane propagates to the other and hover is unified.
  *     Mirrors the Data page's price/volume stacked layout.
  */
-/**
- * "Computing... 12s" badge — mounted only while the parent reports
- * ``loading``. An internal interval ticks once a second, capturing
- * elapsed wall-time since the badge mounted. Cheap and honest:
- * tells the user the request is alive without faking a percentage.
- */
-function ComputingBadge() {
-  const startedAtRef = useRef(Date.now());
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
-    }, 250);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <div className={styles.state} aria-live="polite">
-      Computing... {elapsed}s
-    </div>
-  );
-}
-
-function IndicatorChart({ indicator, result, loading, error, pinnedIncompat, onDetachPinned }) {
+function IndicatorChart({ indicator, result, loading, loadingProgress, error, pinnedIncompat, onDetachPinned }) {
   const ownPanel = !!indicator?.ownPanel;
 
   const { traces, layoutOverrides, hasData } = useMemo(() => {
@@ -219,9 +197,21 @@ function IndicatorChart({ indicator, result, loading, error, pinnedIncompat, onD
   }
 
   if (loading) {
+    // Live percentage from the per-date materialiser, when reported.
+    // ``loadingProgress`` is a fraction in [0, 1] or ``null`` when no
+    // backend progress is being tracked (e.g. spot/continuous
+    // compute). The percentage is rendered inline with "Computing..."
+    // as a single centred element — earlier two-row layouts let the
+    // ``flex: 1`` row grow to fill the panel and pushed the percentage
+    // off-screen.
+    let label = 'Computing...';
+    if (typeof loadingProgress === 'number') {
+      const pct = Math.min(100, Math.max(0, Math.round(loadingProgress * 100)));
+      label = `Computing... ${pct}%`;
+    }
     return (
       <div className={styles.panel}>
-        <ComputingBadge />
+        <div className={styles.state} aria-live="polite">{label}</div>
       </div>
     );
   }

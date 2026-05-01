@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
-from typing import Literal, Protocol, Sequence, runtime_checkable
+from typing import Awaitable, Callable, Literal, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -67,11 +67,6 @@ from numpy.typing import NDArray
 # Mongo for typical 252-day windows; raise only if profiling shows
 # otherwise.
 _MAX_INFLIGHT_PER_DATE = 32
-
-# (Earlier iterations of this module exposed a per-date ``progress_callback``
-# hook so a polling-based progress UI could tick once per resolved trade
-# date.  That UI was removed in favour of a simpler FE-side elapsed-time
-# display; the resolver no longer needs the hook.)
 
 from tcg.engine.options.maturity.protocol import MaturityResolver
 from tcg.engine.options.selection._ports import (
@@ -216,6 +211,7 @@ async def resolve_option_stream(
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
     last_trade_date: date | None = None,
+    progress_callback: Callable[[], None] | None = None,
 ) -> tuple[NDArray[np.float64], list[str | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
 
@@ -289,51 +285,61 @@ async def resolve_option_stream(
     sem = asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
 
     async def _resolve_one(i: int, d: date) -> None:
-        if last_trade_date is not None and d > last_trade_date:
-            error_codes[i] = "past_last_trade_date"
-            return
-        async with sem:
-            # selector.select swallows pricer-related branches (we
-            # passed pricer=None and compute_missing_for_delta defaults
-            # False), so any path through that requires Module 2 is
-            # impossible here.
-            result: SelectionResult = await selector.select(
-                root=collection,
-                date=d,
-                type=option_type,
-                criterion=selection,
-                maturity=maturity,
-                compute_missing_for_delta=False,
-            )
+        try:
+            if last_trade_date is not None and d > last_trade_date:
+                error_codes[i] = "past_last_trade_date"
+                return
+            async with sem:
+                # selector.select swallows pricer-related branches (we
+                # passed pricer=None and compute_missing_for_delta
+                # defaults False), so any path through that requires
+                # Module 2 is impossible here.
+                result: SelectionResult = await selector.select(
+                    root=collection,
+                    date=d,
+                    type=option_type,
+                    criterion=selection,
+                    maturity=maturity,
+                    compute_missing_for_delta=False,
+                )
 
-            if result.error_code is not None:
-                error_codes[i] = result.error_code
-                return
-            if result.contract is None:  # pragma: no cover (defensive)
-                error_codes[i] = "no_chain_for_date"
-                return
+                if result.error_code is not None:
+                    error_codes[i] = result.error_code
+                    return
+                if result.contract is None:  # pragma: no cover (defensive)
+                    error_codes[i] = "no_chain_for_date"
+                    return
 
-            # Selection succeeded — re-query the chain at the resolved
-            # expiration to read the row's stream attribute.  The
-            # CachedChainReader (when wired) deduplicates this against
-            # the selector's narrow query.
-            rows = await cycle_reader.query_chain(
-                root=collection,
-                date=d,
-                type=option_type,
-                expiration_min=result.contract.expiration,
-                expiration_max=result.contract.expiration,
-            )
-            row = _row_for_contract(rows, result.contract)
-            if row is None:  # pragma: no cover (defensive)
-                error_codes[i] = "no_chain_for_date"
-                return
+                # Selection succeeded — re-query the chain at the
+                # resolved expiration to read the row's stream
+                # attribute.  The CachedChainReader (when wired)
+                # deduplicates this against the selector's narrow query.
+                rows = await cycle_reader.query_chain(
+                    root=collection,
+                    date=d,
+                    type=option_type,
+                    expiration_min=result.contract.expiration,
+                    expiration_max=result.contract.expiration,
+                )
+                row = _row_for_contract(rows, result.contract)
+                if row is None:  # pragma: no cover (defensive)
+                    error_codes[i] = "no_chain_for_date"
+                    return
 
-            raw = getattr(row, attr_name, None)
-            if raw is None:
-                error_codes[i] = _missing_code_for(stream)
-                return
-            values[i] = float(raw)
+                raw = getattr(row, attr_name, None)
+                if raw is None:
+                    error_codes[i] = _missing_code_for(stream)
+                    return
+                values[i] = float(raw)
+        finally:
+            # Notify progress regardless of which path we took — every
+            # date counts as one tick. Wrapped in try/except so a
+            # callback bug never destabilises the resolver itself.
+            if progress_callback is not None:
+                try:
+                    progress_callback()
+                except Exception:  # pragma: no cover (defensive)
+                    pass
 
     await asyncio.gather(*(_resolve_one(i, d) for i, d in enumerate(dates)))
 
