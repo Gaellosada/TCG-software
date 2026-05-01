@@ -1,16 +1,19 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { listCollections, listInstruments, getAvailableCycles } from '../../api/data';
+import { getOptionRoots } from '../../api/options';
+import OptionStreamForm, { buildDefaultOptionStream, validateOptionStream } from '../OptionStreamForm';
 import styles from './InstrumentPickerModal.module.css';
 
 /**
  * Category definitions.
  * Indexes and Assets show instruments directly (no drill-down).
- * Futures keep collection-level navigation (many collections).
+ * Futures and Options keep collection-level navigation (many collections).
  */
 const CATEGORY_CONFIG = [
   { key: 'indexes', label: 'Indexes', color: 'var(--cat-indexes)', collections: ['INDEX'] },
   { key: 'assets', label: 'Assets', color: 'var(--cat-assets)', collections: ['ETF', 'FOREX', 'FUND'] },
   { key: 'futures', label: 'Futures', color: 'var(--cat-futures)', dynamicFutures: true },
+  { key: 'options', label: 'Options', color: 'var(--cat-options)', dynamicOptions: true },
 ];
 
 /**
@@ -19,17 +22,28 @@ const CATEGORY_CONFIG = [
  * futures configuration. Used by Portfolio, Indicators, and Signals pages.
  *
  * Emits the v3 InputInstrument discriminated-union value:
- *   - Spot:       { type: 'spot', collection, instrument_id }
- *   - Continuous: { type: 'continuous', collection, adjustment, cycle,
- *                   rollOffset, strategy: 'front_month' }
+ *   - Spot:         { type: 'spot', collection, instrument_id }
+ *   - Continuous:   { type: 'continuous', collection, adjustment, cycle,
+ *                     rollOffset, strategy: 'front_month' }
+ *   - OptionStream: { type: 'option_stream', collection, option_type, cycle,
+ *                     maturity, selection, stream }
  *
  * Props:
- *   isOpen    {boolean}   whether the modal is visible
- *   onClose   {Function}  () => void — close without selection
- *   onSelect  {Function}  (instrument) => void — called on instrument pick
- *   title     {string?}   modal heading (default: "Select Instrument")
+ *   isOpen            {boolean}    whether the modal is visible
+ *   onClose           {Function}   () => void — close without selection
+ *   onSelect          {Function}   (instrument) => void — called on instrument pick
+ *   title             {string?}    modal heading (default: "Select Instrument")
+ *   hiddenCategories  {string[]?}  category keys to hide (default: []).
+ *                                  e.g. ['options'] to suppress the Options
+ *                                  tab on a page that only handles cash/futures.
  */
-export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title }) {
+export default function InstrumentPickerModal({
+  isOpen,
+  onClose,
+  onSelect,
+  title,
+  hiddenCategories = [],
+}) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
   const [collectionsError, setCollectionsError] = useState(null);
@@ -46,7 +60,23 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
   const [rollOffset, setRollOffset] = useState(2);
   const [availableCycles, setAvailableCycles] = useState([]);
 
+  // Options drill-down state
+  const [optionRoots, setOptionRoots] = useState([]);
+  const [optionRootsLoading, setOptionRootsLoading] = useState(false);
+  const [optionRootsError, setOptionRootsError] = useState(null);
+  const [inOptionsDrillDown, setInOptionsDrillDown] = useState(false);
+  const [optionStreamValue, setOptionStreamValue] = useState(null);
+
   const overlayRef = useRef(null);
+
+  const visibleCategories = useMemo(
+    () => CATEGORY_CONFIG.filter((c) => !hiddenCategories.includes(c.key)),
+    [hiddenCategories],
+  );
+  const optionsVisible = useMemo(
+    () => visibleCategories.some((c) => c.key === 'options'),
+    [visibleCategories],
+  );
 
   /* ── Load collections + instruments when modal opens ── */
   useEffect(() => {
@@ -95,6 +125,27 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
     return () => { cancelled = true; };
   }, [isOpen]);
 
+  /* ── Load option roots when modal opens (only when options visible) ── */
+  useEffect(() => {
+    if (!isOpen || !optionsVisible) return;
+    let cancelled = false;
+    setOptionRootsLoading(true);
+    setOptionRootsError(null);
+    getOptionRoots()
+      .then((resp) => {
+        if (cancelled) return;
+        setOptionRoots(resp.roots || []);
+        setOptionRootsLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setOptionRootsError(err?.message || 'Failed to load option roots');
+        setOptionRoots([]);
+        setOptionRootsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, optionsVisible]);
+
   /* ── Load available cycles for futures drill-down ── */
   useEffect(() => {
     if (!selectedFutCollection) {
@@ -124,6 +175,8 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
       setCycle('');
       setRollOffset(2);
       setExpanded({});
+      setInOptionsDrillDown(false);
+      setOptionStreamValue(null);
     }
   }, [isOpen]);
 
@@ -166,10 +219,32 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
     setRollOffset(2);
   }, []);
 
+  const handleEnterOptionsDrillDown = useCallback(() => {
+    setInOptionsDrillDown(true);
+    setOptionStreamValue((prev) => prev || buildDefaultOptionStream({ availableRoots: optionRoots }));
+  }, [optionRoots]);
+
+  const handleBackFromOptions = useCallback(() => {
+    setInOptionsDrillDown(false);
+    setOptionStreamValue(null);
+  }, []);
+
+  const handleConfirmOptionStream = useCallback(() => {
+    if (!optionStreamValue) return;
+    if (validateOptionStream(optionStreamValue, optionRoots) !== null) return;
+    onSelect(optionStreamValue);
+    onClose();
+  }, [optionStreamValue, optionRoots, onSelect, onClose]);
+
   if (!isOpen) return null;
 
   const futCollections = allCollections.filter((c) => c.startsWith('FUT_'));
   const inFutDrillDown = selectedFutCollection !== null;
+  const futuresVisible = visibleCategories.some((c) => c.key === 'futures');
+  const optionStreamValidation = optionStreamValue
+    ? validateOptionStream(optionStreamValue, optionRoots)
+    : null;
+  const confirmDisabled = !optionStreamValue || optionStreamValidation !== null;
 
   return (
     <div
@@ -184,13 +259,21 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
         {/* Header */}
         <div className={styles.header}>
           <div className={styles.headerLeft}>
-            {inFutDrillDown && (
-              <button className={styles.backBtn} type="button" onClick={handleBackFromFut}>
+            {(inFutDrillDown || inOptionsDrillDown) && (
+              <button
+                className={styles.backBtn}
+                type="button"
+                onClick={inFutDrillDown ? handleBackFromFut : handleBackFromOptions}
+              >
                 &#8592;
               </button>
             )}
             <h3 className={styles.title}>
-              {inFutDrillDown ? selectedFutCollection : (title || 'Select Instrument')}
+              {inFutDrillDown
+                ? selectedFutCollection
+                : inOptionsDrillDown
+                  ? 'Options'
+                  : (title || 'Select Instrument')}
             </h3>
           </div>
           <button className={styles.closeBtn} type="button" onClick={onClose} aria-label="Close">
@@ -207,7 +290,32 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
             <div className={styles.error}>{collectionsError}</div>
           )}
 
-          {inFutDrillDown ? (
+          {inOptionsDrillDown ? (
+            /* ── Options: pick an OptionStreamRef ── */
+            <div className={styles.continuousSection}>
+              {optionRootsLoading && <div className={styles.state}>Loading roots...</div>}
+              {optionRootsError && <div className={styles.error}>{optionRootsError}</div>}
+              {!optionRootsLoading && !optionRootsError && (
+                <>
+                  <OptionStreamForm
+                    value={optionStreamValue}
+                    onChange={setOptionStreamValue}
+                    availableRoots={optionRoots}
+                  />
+                  <button
+                    className={styles.selectContinuousBtn}
+                    type="button"
+                    onClick={handleConfirmOptionStream}
+                    disabled={confirmDisabled}
+                    title={optionStreamValidation ? optionStreamValidation.message : undefined}
+                    data-testid="option-stream-confirm"
+                  >
+                    Confirm
+                  </button>
+                </>
+              )}
+            </div>
+          ) : inFutDrillDown ? (
             /* ── Futures: configure continuous series ── */
             <div className={styles.continuousSection}>
               <p className={styles.continuousText}>
@@ -268,7 +376,7 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
           ) : (
             /* ── Main view: toggleable categories ── */
             <>
-              {CATEGORY_CONFIG.filter((c) => !c.dynamicFutures).map((cat) => {
+              {visibleCategories.filter((c) => !c.dynamicFutures && !c.dynamicOptions).map((cat) => {
                 const instruments = cat.collections.flatMap(
                   (coll) => (instrumentsByCollection[coll] || []).map((inst) => ({ ...inst, collection: coll })),
                 );
@@ -313,7 +421,7 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
               })}
 
               {/* Futures — collection-level drill-down */}
-              {futCollections.length > 0 && (
+              {futuresVisible && futCollections.length > 0 && (
                 <div className={styles.group}>
                   <button
                     className={styles.groupToggle}
@@ -344,6 +452,25 @@ export default function InstrumentPickerModal({ isOpen, onClose, onSelect, title
                       ))}
                     </ul>
                   )}
+                </div>
+              )}
+
+              {/* Options — drill into stream-form */}
+              {optionsVisible && (
+                <div className={styles.group}>
+                  <button
+                    className={styles.groupToggle}
+                    type="button"
+                    onClick={handleEnterOptionsDrillDown}
+                    data-testid="picker-options-toggle"
+                  >
+                    <span className={styles.groupDot} style={{ background: 'var(--cat-options)' }} />
+                    <span className={styles.groupLabel}>Options</span>
+                    <span className={styles.groupCount}>
+                      {optionRootsLoading ? '...' : optionRoots.length}
+                    </span>
+                    <span className={styles.chevron}>&#8250;</span>
+                  </button>
                 </div>
               )}
             </>

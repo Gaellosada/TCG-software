@@ -4,6 +4,8 @@ import {
   computeRunDisabledReason,
   deriveAssetTypeFromSeriesMap,
   computeAssetCompatibility,
+  computeOptionStreamSanity,
+  runGateForBackendError,
 } from './runGate';
 
 const SPOT_INDEX = { type: 'spot', collection: 'INDEX', instrument_id: 'IND_SP_500' };
@@ -183,5 +185,122 @@ describe('computeRunDisabledReason', () => {
     expect(reason).toContain('disagree');
     expect(reason).toContain('index');
     expect(reason).toContain('option');
+  });
+
+  it('reports tautological option_stream selection in the run-disabled tooltip', () => {
+    const tautologicalRef = {
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'C',
+      cycle: null,
+      maturity: { kind: 'nearest_to_target', target_days: 30 },
+      selection: { kind: 'by_delta', target: 0.25 },
+      stream: 'delta',
+    };
+    const reason = computeRunDisabledReason(
+      makeInd({
+        seriesMap: { close: tautologicalRef },
+        compatibleAssetTypes: ['option'],
+      }),
+      ['close'],
+    );
+    expect(reason).toContain('tautological');
+    expect(reason).toContain('close');
+  });
+});
+
+describe('computeOptionStreamSanity', () => {
+  const HEALTHY_STREAM_REF = {
+    type: 'option_stream',
+    collection: 'OPT_SP_500',
+    option_type: 'C',
+    cycle: null,
+    maturity: { kind: 'nearest_to_target', target_days: 30 },
+    selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+    stream: 'iv',
+  };
+
+  it('returns ok for an indicator with no option_stream slots', () => {
+    expect(computeOptionStreamSanity({ seriesMap: { close: SPOT_INDEX } })).toEqual({ ok: true });
+  });
+
+  it('returns ok for a healthy option_stream slot', () => {
+    expect(computeOptionStreamSanity({ seriesMap: { close: HEALTHY_STREAM_REF } })).toEqual({ ok: true });
+  });
+
+  it('flags a tautological by_delta + stream=delta combination', () => {
+    const ref = {
+      ...HEALTHY_STREAM_REF,
+      selection: { kind: 'by_delta', target: 0.25 },
+      stream: 'delta',
+    };
+    const out = computeOptionStreamSanity({ seriesMap: { close: ref } });
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('tautological_option_stream');
+    expect(out.label).toBe('close');
+    expect(out.stream).toBe('delta');
+  });
+
+  it('does NOT flag by_delta + stream=iv (only the delta-stream combo is tautological)', () => {
+    const ref = {
+      ...HEALTHY_STREAM_REF,
+      selection: { kind: 'by_delta', target: 0.25 },
+      stream: 'iv',
+    };
+    expect(computeOptionStreamSanity({ seriesMap: { close: ref } })).toEqual({ ok: true });
+  });
+
+  it('does NOT flag by_moneyness + stream=delta (only by_delta-by-construction is tautological)', () => {
+    const ref = { ...HEALTHY_STREAM_REF, stream: 'delta' };
+    expect(computeOptionStreamSanity({ seriesMap: { close: ref } })).toEqual({ ok: true });
+  });
+
+  it('returns ok when seriesMap is missing or null (defensive)', () => {
+    expect(computeOptionStreamSanity({})).toEqual({ ok: true });
+    expect(computeOptionStreamSanity({ seriesMap: null })).toEqual({ ok: true });
+    expect(computeOptionStreamSanity(null)).toEqual({ ok: true });
+  });
+});
+
+describe('runGateForBackendError', () => {
+  it('returns null for an empty / null error', () => {
+    expect(runGateForBackendError(null)).toBeNull();
+    expect(runGateForBackendError(undefined)).toBeNull();
+    expect(runGateForBackendError({})).toBeNull();
+  });
+
+  it('returns null for an error without a recognised error_code', () => {
+    expect(runGateForBackendError({ error_code: 'INDICATOR_INCOMPATIBLE_ASSET' })).toBeNull();
+    expect(runGateForBackendError({ error_code: 'UNRELATED_CODE' })).toBeNull();
+  });
+
+  it('produces a typed tooltip for TAUTOLOGICAL_OPTION_STREAM', () => {
+    const tip = runGateForBackendError({
+      error_code: 'TAUTOLOGICAL_OPTION_STREAM',
+      asset_type: 'option',
+      accepted_asset_types: ['option'],
+      detail: 'whatever',
+    });
+    expect(tip).toBeTruthy();
+    expect(tip).toContain('Tautological');
+    expect(tip).toContain('by_delta');
+  });
+
+  it('produces a typed tooltip for STREAM_UNAVAILABLE_FOR_ROOT including the root and streams', () => {
+    const tip = runGateForBackendError({
+      error_code: 'STREAM_UNAVAILABLE_FOR_ROOT',
+      root: 'SPX',
+      unavailable_streams: ['gamma', 'vega'],
+    });
+    expect(tip).toBeTruthy();
+    expect(tip).toContain('SPX');
+    expect(tip).toContain('gamma');
+    expect(tip).toContain('vega');
+  });
+
+  it('falls back to a generic root/stream label when fields are missing', () => {
+    const tip = runGateForBackendError({ error_code: 'STREAM_UNAVAILABLE_FOR_ROOT' });
+    expect(tip).toBeTruthy();
+    expect(tip).toContain('this option root');
   });
 });

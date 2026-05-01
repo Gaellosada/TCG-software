@@ -36,21 +36,54 @@ export function hydrateDefault(def, savedEntry) {
   if (Array.isArray(def.compatibleAssetTypes)) {
     hydrated.compatibleAssetTypes = def.compatibleAssetTypes.slice();
   }
+  // defaultSeries — registry-only metadata describing the per-label
+  // SeriesRef the indicator wants pre-bound when the user has not yet
+  // picked. Used by ``applyDefaultSeries`` (Wave 2c). Carried verbatim
+  // (no per-label cloning — ``applyDefaultSeries`` builds a fresh
+  // seriesMap from these and the index-resolver fallback).
+  if (def.defaultSeries && typeof def.defaultSeries === 'object') {
+    hydrated.defaultSeries = def.defaultSeries;
+  }
   return hydrated;
 }
 
-// Auto-populate a default's SPX slot once the resolver returns, but
-// only if the slot is still empty (user may already have picked).
-export function applyDefaultSeries(ind, defaultSeries) {
-  if (!defaultSeries) return ind;
+// Auto-populate a default's empty seriesMap slots once the resolver
+// returns. Only fills slots still pinned to ``null`` (the user may
+// already have picked something).
+//
+// Per-label routing (Wave 2c — metadata-driven, no id-branches):
+//   1. If the indicator declares its own ``defaultSeries[label]`` in
+//      the registry, use that verbatim. This is the only way option-
+//      native indicators (compatibleAssetTypes: ['option']) get a
+//      sensible default — the index resolver returns INDEX instruments
+//      which would not match their accepted asset class.
+//   2. Otherwise fall back to the ambient resolved-index instrument
+//      (legacy ``{collection, instrument_id}`` shape from
+//      ``resolveDefaultIndexInstrument``) — produces a SpotInstrumentRef.
+//   3. If neither is available for a label, leave it as ``null`` (the
+//      slot stays empty; the run-gate surfaces the missing pick).
+//
+// Sign 7 binding: routing is keyed off the indicator's own
+// ``defaultSeries`` metadata, NOT off ``id`` literals.
+export function applyDefaultSeries(ind, indexDefault) {
+  const perLabelDefaults = (ind.defaultSeries && typeof ind.defaultSeries === 'object')
+    ? ind.defaultSeries
+    : null;
+  const hasIndexDefault = !!(indexDefault && indexDefault.collection && indexDefault.instrument_id);
+  // Nothing to fill from — bail early.
+  if (!perLabelDefaults && !hasIndexDefault) return ind;
   const updated = { ...ind.seriesMap };
   let touched = false;
   for (const [label, picked] of Object.entries(updated)) {
-    if (picked === null) {
+    if (picked !== null) continue;
+    if (perLabelDefaults && perLabelDefaults[label]) {
+      updated[label] = perLabelDefaults[label];
+      touched = true;
+    } else if (hasIndexDefault) {
       updated[label] = {
         type: 'spot',
-        collection: defaultSeries.collection,
-        instrument_id: defaultSeries.instrument_id,
+        collection: indexDefault.collection,
+        instrument_id: indexDefault.instrument_id,
       };
       touched = true;
     }

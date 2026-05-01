@@ -140,21 +140,32 @@ class ComputedGreeks(BaseModel):
 
 
 class ByDelta(BaseModel):
-    """Select the contract whose delta is nearest to target."""
-    model_config = ConfigDict(frozen=True)
+    """Select the contract whose delta is nearest to target.
+
+    Wire alias (Sign 12): the FE form ``OptionStreamForm`` emits
+    ``target`` as the criterion magnitude key (shared rendering across
+    by_moneyness/by_delta).  The canonical storage attribute is
+    ``target_delta`` for clarity at the call sites; ``populate_by_name``
+    keeps both wire and BE construction paths working.
+    """
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     kind: Literal["by_delta"] = "by_delta"
-    target_delta: float
+    target_delta: float = Field(alias="target")
     tolerance: float = 0.05
     strict: bool = False
 
 
 class ByMoneyness(BaseModel):
-    """Select by K/S ratio."""
-    model_config = ConfigDict(frozen=True)
+    """Select by K/S ratio.
+
+    Wire alias (Sign 12): FE form emits ``target``; canonical attribute
+    name is ``target_K_over_S`` for clarity.
+    """
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     kind: Literal["by_moneyness"] = "by_moneyness"
-    target_K_over_S: float
+    target_K_over_S: float = Field(alias="target")
     tolerance: float = 0.01
 
 
@@ -220,11 +231,16 @@ class FixedDate(BaseModel):
 
 
 class NearestToTarget(BaseModel):
-    """Find the available expiration nearest to target_dte_days from ref_date."""
-    model_config = ConfigDict(frozen=True)
+    """Find the available expiration nearest to target_dte_days from ref_date.
+
+    Wire alias (Sign 12): FE form emits ``target_days``; canonical
+    attribute name is ``target_dte_days`` (matches the dataclass twin in
+    ``tcg.types.options``).
+    """
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     kind: Literal["nearest_to_target"] = "nearest_to_target"
-    target_dte_days: int
+    target_dte_days: int = Field(alias="target_days")
 
 
 MaturityRule = Annotated[

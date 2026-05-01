@@ -343,6 +343,42 @@ def build_options_chain(market_data: MarketDataService) -> DefaultOptionsChain:
     )
 
 
+def build_stream_resolver_wiring(
+    market_data: MarketDataService,
+) -> tuple[
+    CachedChainReader,
+    DefaultMaturityResolver,
+    Callable[[OptionContractDoc, date], Awaitable[float | None]],
+]:
+    """Return the components a per-date stream materialiser needs.
+
+    The Wave 2 ``OptionStreamRef`` resolver wraps the chain reader in a
+    cycle-injecting proxy and constructs its own selector inside the
+    engine layer (so the engine never imports from ``tcg.data`` or
+    ``tcg.core``).  This factory hands the engine the three live
+    components without imposing the selector class on it.
+
+    Returns
+    -------
+    chain_reader:
+        Cycle-aware ``CachedChainReader`` (per-request cache) wrapping
+        the live ``MongoOptionsDataReader``.
+    maturity_resolver:
+        ``DefaultMaturityResolver`` (stateless).
+    underlying_resolver:
+        Async callable ``(contract, date) -> float | None`` reusing the
+        canonical ``resolve_underlying_price`` join.
+    """
+    reader = get_options_reader(market_data)
+    inner = _OptionsDataPortAdapter(reader)
+    cached = CachedChainReader(inner)
+    maturity_resolver = DefaultMaturityResolver()
+    index_port = _IndexDataPortAdapter(market_data)
+    futures_port = _FuturesDataPortAdapter(market_data)
+    underlying_resolver = _build_underlying_resolver(index_port, futures_port)
+    return cached, maturity_resolver, underlying_resolver
+
+
 def build_options_selector(
     market_data: MarketDataService,
     *,
@@ -377,5 +413,6 @@ __all__ = [
     "build_options_chain",
     "build_options_pricer",
     "build_options_selector",
+    "build_stream_resolver_wiring",
     "get_options_reader",
 ]

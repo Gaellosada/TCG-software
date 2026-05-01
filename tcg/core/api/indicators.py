@@ -15,7 +15,10 @@ second, divergent discovery code path here.
 
 from __future__ import annotations
 
+from datetime import date
+
 import numpy as np
+import pandas_market_calendars as mcal
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -24,18 +27,25 @@ from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
     ContinuousInstrumentRef,
+    OptionStreamRef,
     SeriesRef,
     SpotInstrumentRef,
 )
+from tcg.core.api._options_wiring import build_stream_resolver_wiring
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import error_response, get_market_data
-from tcg.data._utils import int_to_iso
+from tcg.core.api.options import (
+    _criterion_pydantic_to_dataclass,
+    _maturity_pydantic_to_dataclass,
+)
+from tcg.data._utils import date_to_int, int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.indicator_exec import (
     IndicatorRuntimeError,
     IndicatorValidationError,
     run_indicator,
 )
+from tcg.engine.options.series.stream_resolver import resolve_option_stream
 from tcg.types.errors import DataNotFoundError
 
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
@@ -106,6 +116,122 @@ def _incompatible_asset_response(
     return JSONResponse(status_code=422, content=content)
 
 
+# Greek streams that require the root's provider to surface stored
+# greeks.  ``iv`` and ``delta`` are also greek-derived but every
+# Phase-1 root with options data has them — the brief lists only
+# gamma/vega/theta as gated by ``has_greeks``.  Centralised so a
+# future stream addition touches one place.
+_GREEKS_GATED_STREAMS: frozenset[str] = frozenset({"gamma", "vega", "theta"})
+
+
+def _tautological_option_stream_response(
+    *,
+    indicator_id: str | None,
+    label: str,
+) -> JSONResponse:
+    """422 for the v1 tautology rule.
+
+    ``selection.kind == 'by_delta'`` combined with ``stream == 'delta'``
+    is rejected — picking a contract by its delta and then reading that
+    very same delta back as the stream value is a fixed point of the
+    selection criterion; it produces a constant time series equal to
+    the target delta plus selection slack.  The frontend should use
+    a different selection criterion (e.g. ``ByMoneyness``) when the
+    indicator actually wants delta as a stream.
+    """
+    content: dict = {
+        "error_code": "TAUTOLOGICAL_OPTION_STREAM",
+        "asset_type": "option",
+        "accepted_asset_types": ["option"],
+        "detail": (
+            "selection=by_delta + stream='delta' is tautological "
+            f"(label={label!r})"
+        ),
+    }
+    if indicator_id is not None:
+        content["indicator_id"] = indicator_id
+    return JSONResponse(status_code=422, content=content)
+
+
+def _stream_unavailable_for_root_response(
+    *,
+    indicator_id: str | None,
+    root: str,
+    stream: str,
+    unavailable_streams: list[str],
+) -> JSONResponse:
+    """422 for streams not surfaced by the chosen root's provider.
+
+    The provider for some roots does not store eod greeks (notably
+    OPT_VIX, OPT_ETH).  Asking for ``gamma`` / ``vega`` / ``theta`` on
+    such a root is a guaranteed all-NaN — we reject upfront with a
+    typed error_code so the frontend can swap streams without a
+    round-trip of all-empty results.
+    """
+    content: dict = {
+        "error_code": "STREAM_UNAVAILABLE_FOR_ROOT",
+        "asset_type": "option",
+        "root": root,
+        "stream": stream,
+        "unavailable_streams": unavailable_streams,
+    }
+    if indicator_id is not None:
+        content["indicator_id"] = indicator_id
+    return JSONResponse(status_code=422, content=content)
+
+
+def _business_dates_in_range(
+    start: date | None, end: date | None
+) -> list[date] | None:
+    """Enumerate CME business days in [start, end].
+
+    ``OptionStreamRef`` materialisation needs an explicit date axis
+    (no underlying price series in the request to borrow it from).
+    We enumerate business days on the same calendar Module 4 uses
+    (``CME_TradeDate``).  ``None`` is returned when the range is
+    invalid or empty — the caller surfaces a 400 in that case.
+    """
+    if start is None or end is None or start > end:
+        return None
+    cal = mcal.get_calendar("CME_TradeDate")
+    vd = cal.valid_days(start_date=start, end_date=end)
+    return [ts.date() for ts in vd]
+
+
+async def _materialise_option_stream(
+    ref: OptionStreamRef,
+    *,
+    svc: MarketDataService,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[np.ndarray, np.ndarray, list[str | None]] | str:
+    """Materialise an ``OptionStreamRef`` into ``(dates, values, diagnostics)``.
+
+    Returns the triple on success or a string error message (for the
+    400 ``error_response``) when the date range is missing.  This
+    keeps the route handler's ``case "option_stream":`` block tight
+    — a guideline from the Wave 2a brief.
+    """
+    trade_dates = _business_dates_in_range(start_date, end_date)
+    if not trade_dates:
+        return "option_stream requires explicit ISO 'start' and 'end' dates"
+    chain_reader, mat_resolver, ul_resolver = build_stream_resolver_wiring(svc)
+    values, diagnostics = await resolve_option_stream(
+        dates=trade_dates,
+        collection=ref.collection,
+        option_type=ref.option_type,
+        cycle=ref.cycle,
+        maturity=_maturity_pydantic_to_dataclass(ref.maturity),
+        selection=_criterion_pydantic_to_dataclass(ref.selection),
+        stream=ref.stream,
+        chain_reader=chain_reader,
+        maturity_resolver=mat_resolver,
+        underlying_price_resolver=ul_resolver,
+    )
+    dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
+    return dates_arr, values, diagnostics
+
+
 @router.post("/compute")
 async def compute_indicator(
     body: IndicatorComputeRequest,
@@ -168,9 +294,48 @@ async def compute_indicator(
     # Preserve the user's insertion order so the response matches the
     # request — Python dicts preserve insertion order (3.7+).
     fetched: list[
-        tuple[str, SpotInstrumentRef | ContinuousInstrumentRef, np.ndarray, np.ndarray]
+        tuple[
+            str,
+            SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef,
+            np.ndarray,
+            np.ndarray,
+            list[str | None] | None,
+        ]
     ] = []
+    # Pre-flight validation for option_stream variants — both rules emit a
+    # typed 422 BEFORE we touch the database, matching
+    # ``_incompatible_asset_response`` precedent.
+    cached_root_metadata: dict[str, object] | None = None
     for label, ref in body.series.items():
+        if ref.type != "option_stream":
+            continue
+        # Rule 1 — tautological by_delta + stream='delta'.
+        if (
+            getattr(ref.selection, "kind", None) == "by_delta"
+            and ref.stream == "delta"
+        ):
+            return _tautological_option_stream_response(
+                indicator_id=body.indicator_id, label=label
+            )
+        # Rule 2 — gamma/vega/theta on a no-greeks root.  Cache the
+        # root list across labels in this request.
+        if ref.stream in _GREEKS_GATED_STREAMS:
+            if cached_root_metadata is None:
+                roots = await svc.list_option_roots()
+                cached_root_metadata = {r.collection: r for r in roots}
+            root_info = cached_root_metadata.get(ref.collection)
+            if root_info is not None and not getattr(
+                root_info, "has_greeks", True
+            ):
+                return _stream_unavailable_for_root_response(
+                    indicator_id=body.indicator_id,
+                    root=ref.collection,
+                    stream=ref.stream,
+                    unavailable_streams=sorted(_GREEKS_GATED_STREAMS),
+                )
+
+    for label, ref in body.series.items():
+        diagnostics: list[str | None] | None = None
         try:
             match ref.type:
                 case "spot":
@@ -218,6 +383,16 @@ async def compute_indicator(
                         )
                     dates, closes = cseries.prices.dates, cseries.prices.close
 
+                case "option_stream":
+                    materialised = await _materialise_option_stream(
+                        ref, svc=svc, start_date=start_date, end_date=end_date,
+                    )
+                    if isinstance(materialised, str):
+                        return error_response(
+                            "validation", f"Series label {label!r}: {materialised}"
+                        )
+                    dates, closes, diagnostics = materialised
+
                 case _:
                     return error_response(
                         "validation",
@@ -240,12 +415,12 @@ async def compute_indicator(
                 "validation",
                 f"Series {label!r} has non-monotonic or duplicate dates",
             )
-        fetched.append((label, ref, dates, closes))
+        fetched.append((label, ref, dates, closes, diagnostics))
 
     # ── 3. Inner-join on the intersection of dates ──
 
     common_dates = fetched[0][2]
-    for _label, _ref, dates, _close in fetched[1:]:
+    for _label, _ref, dates, _close, _diag in fetched[1:]:
         common_dates = np.intersect1d(common_dates, dates, assume_unique=False)
 
     if common_dates.size == 0:
@@ -255,7 +430,7 @@ async def compute_indicator(
 
     aligned_closes: dict[str, np.ndarray] = {}
     series_response: list[dict] = []
-    for label, ref, dates, closes in fetched:
+    for label, ref, dates, closes, diagnostics in fetched:
         mask = np.isin(dates, common_dates)
         aligned_dates = dates[mask]
         aligned = closes[mask]
@@ -279,6 +454,22 @@ async def compute_indicator(
                 entry["cycle"] = ref.cycle
                 entry["rollOffset"] = ref.rollOffset
                 entry["strategy"] = ref.strategy
+            case "option_stream":
+                entry["type"] = "option_stream"
+                entry["collection"] = ref.collection
+                entry["option_type"] = ref.option_type
+                entry["cycle"] = ref.cycle
+                entry["stream"] = ref.stream
+                if diagnostics is not None:
+                    # Align diagnostics with common_dates the same way as values.
+                    diag_arr = np.array(
+                        [d if d is not None else "" for d in diagnostics],
+                        dtype=object,
+                    )
+                    aligned_diag = diag_arr[mask][order].tolist()
+                    entry["diagnostics"] = [
+                        d if d != "" else None for d in aligned_diag
+                    ]
             case _:
                 return error_response(
                     "validation",

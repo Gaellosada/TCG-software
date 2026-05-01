@@ -48,7 +48,7 @@
 // Library shape (post Wave 2c additions): 11 default entries.
 //   Trend:        sma, ema
 //   Momentum:     rsi, macd-line, macd-signal, macd-histogram
-//   Volatility:   historical-vol, atm-iv, term-structure-slope
+//   Volatility:   historical-vol, atm-contract-iv, term-structure-slope
 //   Pattern:      swing-pivots
 //   Statistical:  percentile-filtered-return
 //
@@ -67,7 +67,7 @@ import macdHistogram from './defaults/macd-histogram';
 
 // --- Volatility -------------------------------------------------------
 import historicalVol from './defaults/historical-vol';
-import atmIv from './defaults/atm-iv';
+import atmContractIv from './defaults/atm-contract-iv';
 import termStructureSlope from './defaults/term-structure-slope';
 
 // --- Pattern ----------------------------------------------------------
@@ -87,7 +87,7 @@ export const DEFAULT_INDICATORS = [
   macdHistogram,
   // Volatility
   historicalVol,
-  atmIv,
+  atmContractIv,
   termStructureSlope,
   // Pattern
   swingPivots,

@@ -316,18 +316,44 @@ export function reconcileParams(existing, parsedParams) {
  * - Drops labels no longer referenced.
  * - Adds new labels with a ``null`` slot (user must fill them in).
  *
- * Output: ``{ [label]: {collection, instrument_id} | null }``.
+ * Each preserved entry is a SeriesRef discriminated union:
+ *   * spot:          { type: 'spot', collection, instrument_id }
+ *   * continuous:    { type: 'continuous', collection, adjustment, ... }
+ *   * option_stream: { type: 'option_stream', collection, option_type,
+ *                      cycle, maturity, selection, stream }
+ * Legacy entries lacking a ``type`` field but carrying both
+ * ``collection`` AND ``instrument_id`` are coerced to spot for
+ * back-compat with payloads stored before the variants existed.
+ *
+ * Output: ``{ [label]: SeriesRef | null }``.
  */
 export function reconcileSeriesMap(existing, labels) {
   const src = existing && typeof existing === 'object' ? existing : {};
   const out = {};
   for (const lbl of labels || []) {
     const prev = src[lbl];
-    if (prev && typeof prev === 'object' && prev.collection && prev.instrument_id) {
-      out[lbl] = { collection: prev.collection, instrument_id: prev.instrument_id };
-    } else {
+    if (!prev || typeof prev !== 'object') {
       out[lbl] = null;
+      continue;
     }
+    if (prev.type === 'continuous' && typeof prev.collection === 'string' && prev.collection) {
+      out[lbl] = { ...prev };
+      continue;
+    }
+    if (prev.type === 'option_stream' && typeof prev.collection === 'string' && prev.collection) {
+      out[lbl] = { ...prev };
+      continue;
+    }
+    if (prev.type === 'spot' && prev.collection && prev.instrument_id) {
+      out[lbl] = { type: 'spot', collection: prev.collection, instrument_id: prev.instrument_id };
+      continue;
+    }
+    // Legacy / typeless entries — coerce to spot when both fields are present.
+    if (prev.collection && prev.instrument_id) {
+      out[lbl] = { type: 'spot', collection: prev.collection, instrument_id: prev.instrument_id };
+      continue;
+    }
+    out[lbl] = null;
   }
   return out;
 }

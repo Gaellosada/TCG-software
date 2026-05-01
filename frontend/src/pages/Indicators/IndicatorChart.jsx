@@ -16,6 +16,10 @@ const INDICATOR_ERROR_ICONS = {
   // Same warning-triangle glyph as 'validation' — incompat is a shape-of-input
   // mismatch rather than a server/runtime fault.
   incompatible_asset: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
+  // Option-stream-specific shape-of-input failures — share the warning-triangle
+  // glyph with the other validation-class incompats.
+  tautological_option_stream: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
+  stream_unavailable_for_root: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
   generic: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
 };
 

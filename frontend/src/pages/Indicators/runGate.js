@@ -16,28 +16,42 @@
 // User-visible Run-disabled tooltip strings are preserved verbatim.
 import { inferAssetType } from './assetTypes';
 
+/**
+ * A SeriesRef counts as "filled" when its identifying fields are all
+ * present. The variants:
+ *   - ``spot``         — needs ``collection`` AND ``instrument_id``.
+ *   - ``continuous``   — identified by ``collection`` alone (rolled
+ *                        from a futures family, no instrument_id).
+ *   - ``option_stream``— identified by ``collection``, ``option_type``,
+ *                        a ``maturity`` rule, a ``selection`` rule, and
+ *                        a ``stream`` field. No ``instrument_id``.
+ *   - legacy / typeless — defaulted to spot semantics.
+ */
+function isRefFilled(picked) {
+  if (!picked || !picked.collection) return false;
+  if (picked.type === 'continuous') return true;
+  if (picked.type === 'option_stream') {
+    return !!picked.option_type
+      && !!picked.maturity
+      && !!picked.selection
+      && typeof picked.stream === 'string'
+      && picked.stream.length > 0;
+  }
+  return !!picked.instrument_id;
+}
+
 export function areAllSlotsFilled(selectedIndicator, seriesLabels) {
   return !!selectedIndicator
     && seriesLabels.length > 0
-    && seriesLabels.every((lbl) => {
-      const picked = selectedIndicator.seriesMap?.[lbl];
-      if (!picked || !picked.collection) return false;
-      // Continuous series are identified by collection alone — no instrument_id.
-      if (picked.type === 'continuous') return true;
-      // Spot (and legacy entries without a type field) require instrument_id.
-      return !!picked.instrument_id;
-    });
+    && seriesLabels.every((lbl) => isRefFilled(selectedIndicator.seriesMap?.[lbl]));
 }
 
 export function computeRunDisabledReason(selectedIndicator, seriesLabels) {
   if (!selectedIndicator) return 'Select an indicator first';
   if (!selectedIndicator.code || !selectedIndicator.code.trim()) return 'Add code before running';
-  const emptyLabel = seriesLabels.find((lbl) => {
-    const picked = selectedIndicator.seriesMap?.[lbl];
-    if (!picked || !picked.collection) return true;
-    if (picked.type === 'continuous') return false;
-    return !picked.instrument_id;
-  });
+  const emptyLabel = seriesLabels.find(
+    (lbl) => !isRefFilled(selectedIndicator.seriesMap?.[lbl]),
+  );
   if (emptyLabel) return `Fill series slot: ${emptyLabel}`;
   // Asset-type compatibility check — only meaningful once all slots
   // are filled, so it lives after the empty-slot guard.
@@ -49,6 +63,12 @@ export function computeRunDisabledReason(selectedIndicator, seriesLabels) {
     if (compat.reason === 'incompatible_asset') {
       return `Requires ${compat.accepted_asset_types.join(' or ')} data; current asset is ${compat.asset_type}`;
     }
+  }
+  // Option-stream-specific pre-flight (tautological by_delta+delta).
+  // Catches a deterministic backend-422 before firing the request.
+  const streamSanity = computeOptionStreamSanity(selectedIndicator);
+  if (!streamSanity.ok && streamSanity.reason === 'tautological_option_stream') {
+    return `Series slot ${streamSanity.label}: by_delta selection with stream='delta' is tautological`;
   }
   return 'Cannot run';
 }
@@ -142,4 +162,75 @@ export function computeAssetCompatibility(indicator) {
     asset_type: derived.asset_type,
     accepted_asset_types: compat.slice(),
   };
+}
+
+/**
+ * Pre-flight sanity for option_stream series refs.
+ *
+ * Two FRONTEND-detectable failure modes:
+ *
+ *   1. Tautological selection: ``selection.kind === 'by_delta'`` paired
+ *      with ``stream === 'delta'`` returns the target delta by
+ *      construction — backend rejects with HTTP 422 +
+ *      ``TAUTOLOGICAL_OPTION_STREAM``. We can pre-flight this purely
+ *      from the seriesMap (Sign 6 — never fire a request the backend
+ *      will deterministically reject).
+ *
+ *   2. Stream-unavailable-for-root requires the backend's
+ *      ``OptionRootInfo.has_greeks`` metadata; the frontend does not
+ *      hold it, so this code is detected only AFTER a request — see
+ *      ``runGateForBackendError`` below.
+ *
+ * Returns:
+ *   - { ok: true }
+ *       no option_stream slot OR no tautological combo found.
+ *   - { ok: false, reason: 'tautological_option_stream', label, stream }
+ *       a slot is tautological — never run.
+ */
+export function computeOptionStreamSanity(indicator) {
+  if (!indicator || !indicator.seriesMap || typeof indicator.seriesMap !== 'object') {
+    return { ok: true };
+  }
+  for (const [label, ref] of Object.entries(indicator.seriesMap)) {
+    if (!ref || ref.type !== 'option_stream') continue;
+    const selectionKind = ref.selection && ref.selection.kind;
+    if (selectionKind === 'by_delta' && ref.stream === 'delta') {
+      return {
+        ok: false,
+        reason: 'tautological_option_stream',
+        label,
+        stream: ref.stream,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Map a typed backend error envelope (from
+ * ``utils/errorEnvelope.normalizeErrorEnvelope``) onto a Run-button
+ * disabled reason.
+ *
+ * Used when a sticky error from the prior compute call is still
+ * displayed and the user has not changed any input — the Run button
+ * stays disabled with a typed tooltip rather than re-firing the same
+ * deterministic failure (Sign 6 — no silent retries).
+ *
+ * Returns ``null`` when the error is not one this gate handles
+ * (caller falls back to the legacy "Cannot run" tooltip).
+ */
+export function runGateForBackendError(error) {
+  if (!error || typeof error !== 'object') return null;
+  const code = typeof error.error_code === 'string' ? error.error_code : null;
+  if (code === 'TAUTOLOGICAL_OPTION_STREAM') {
+    return "Tautological selection: by_delta with stream='delta' returns the target delta by construction";
+  }
+  if (code === 'STREAM_UNAVAILABLE_FOR_ROOT') {
+    const root = typeof error.root === 'string' && error.root ? error.root : 'this option root';
+    const streams = Array.isArray(error.unavailable_streams) && error.unavailable_streams.length
+      ? error.unavailable_streams.join(', ')
+      : 'requested stream';
+    return `Stream unavailable for ${root}: ${streams} not available on this option root`;
+  }
+  return null;
 }

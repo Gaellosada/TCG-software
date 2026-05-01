@@ -15,6 +15,7 @@ import {
   areAllSlotsFilled,
   computeRunDisabledReason,
   computeAssetCompatibility,
+  computeOptionStreamSanity,
   deriveAssetTypeFromSeriesMap,
 } from './runGate';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
@@ -448,10 +449,16 @@ function IndicatorsPage() {
   const seriesLabels = parsedSpec.seriesLabels;
   const allSlotsFilled = areAllSlotsFilled(selectedIndicator, seriesLabels);
 
+  // Pre-flight option_stream sanity (tautological by_delta+stream=delta).
+  // Mirrors the asset-type compat check — refuses the request before
+  // firing rather than letting the backend reject deterministically.
+  const streamSanity = computeOptionStreamSanity(selectedIndicator);
+
   const canRun = !!selectedIndicator
     && !running
     && allSlotsFilled
-    && !!(selectedIndicator.code && selectedIndicator.code.trim());
+    && !!(selectedIndicator.code && selectedIndicator.code.trim())
+    && streamSanity.ok;
 
   // Tooltip shown on the disabled Run button so keyboard and mouse users
   // can tell what's blocking execution. Priority: most-specific first.

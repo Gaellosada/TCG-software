@@ -11,7 +11,7 @@
 //
 // Library shape (post Wave 2c additions): 11 entries — sma, ema, rsi,
 // macd-{line,signal,histogram}, historical-vol, swing-pivots,
-// percentile-filtered-return, atm-iv, term-structure-slope.
+// percentile-filtered-return, atm-contract-iv, term-structure-slope.
 // See ``docs/indicators.md``.
 
 import { describe, it, expect } from 'vitest';
@@ -42,7 +42,7 @@ const EXPECTATIONS = {
   // ['option'] only — these consume option-derived semantic series labels
   // (atm_iv / front_atm_iv / back_atm_iv) and have no meaningful binding
   // for index or equity streams.
-  'atm-iv':                     { params: [{ name: 'smoothing_window', type: 'int', default: 1 }],                                                                                                         seriesLabels: ['atm_iv'], ownPanel: true , compatibleAssetTypes: ['option'] },
+  'atm-contract-iv':            { params: [{ name: 'smoothing_window', type: 'int', default: 1 }],                                                                                                         seriesLabels: ['atm_iv'], ownPanel: true , compatibleAssetTypes: ['option'] },
   'term-structure-slope':       { params: [],                                                                                                                                                              seriesLabels: ['front_atm_iv', 'back_atm_iv'], ownPanel: true , compatibleAssetTypes: ['option'] },
 };
 

@@ -33,6 +33,8 @@ export const INDICATOR_ERROR_TYPES = Object.freeze([
   'network',
   'offline',
   'incompatible_asset',
+  'tautological_option_stream',
+  'stream_unavailable_for_root',
 ]);
 
 /** Human-facing headings for each error type. */
@@ -43,6 +45,24 @@ export const HEADINGS = Object.freeze({
   network: "Couldn't reach the server",
   offline: "You're offline",
   incompatible_asset: 'Indicator not compatible with this asset',
+  tautological_option_stream: 'Tautological selection',
+  stream_unavailable_for_root: 'Stream unavailable for root',
+});
+
+/**
+ * Subtitles / tooltips for option-stream-specific error types. The
+ * canonical phrasing comes from the backend's typed-422 detail field;
+ * when the backend message is absent we fall back to these strings.
+ *
+ * Keep in sync with the backend response body shapes documented in
+ * Wave 2a (`tautological_option_stream_response`,
+ * `stream_unavailable_for_root_response`).
+ */
+export const SUBTITLES = Object.freeze({
+  tautological_option_stream:
+    "selection=by_delta with stream='delta' returns the target delta by construction.",
+  stream_unavailable_for_root:
+    'Greek streams (gamma, vega, theta) are not available on this option root.',
 });
 
 /**
@@ -61,6 +81,8 @@ export const ABORTED = 'aborted';
  */
 export const ERROR_CODE_TO_TYPE = Object.freeze({
   INDICATOR_INCOMPATIBLE_ASSET: 'incompatible_asset',
+  TAUTOLOGICAL_OPTION_STREAM: 'tautological_option_stream',
+  STREAM_UNAVAILABLE_FOR_ROOT: 'stream_unavailable_for_root',
 });
 
 /**
