@@ -247,20 +247,108 @@ describe('DataPage — option dispatch: contract detail split view', () => {
     // prototype before render so the effect can call it.  The DataPage
     // already feature-tests for the function so production users on
     // browsers without scrollIntoView (none in practice) silently no-op.
+    //
+    // Fix 1 (prototype pollution): save prior value (undefined in jsdom)
+    // and restore it in a finally block so the mutation never leaks to
+    // subsequent tests in the same worker.
+    const prior = Element.prototype.scrollIntoView;
     const spy = vi.fn();
-    Element.prototype.scrollIntoView = spy;
+    try {
+      Element.prototype.scrollIntoView = spy;
 
-    renderDataPage();
-    selectOption('OPT_SP_500');
+      renderDataPage();
+      selectOption('OPT_SP_500');
 
-    act(() => {
-      capturedOnRowClick({
+      act(() => {
+        capturedOnRowClick({
+          collection: 'OPT_SP_500',
+          instrument_id: 'SPX|2024-12-20|4500|C',
+        });
+      });
+
+      // window.matchMedia is undefined in jsdom → prefersReduced is
+      // undefined (falsy) → behavior stays 'smooth'.
+      expect(spy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+    } finally {
+      if (prior === undefined) {
+        delete Element.prototype.scrollIntoView;
+      } else {
+        Element.prototype.scrollIntoView = prior;
+      }
+    }
+  });
+
+  it('uses behavior:auto when prefers-reduced-motion is set', () => {
+    // Fix 2: gate scroll behavior on the OS motion preference.
+    const prior = Element.prototype.scrollIntoView;
+    const spy = vi.fn();
+    const originalMatchMedia = window.matchMedia;
+    try {
+      Element.prototype.scrollIntoView = spy;
+      // Stub matchMedia to report reduced-motion preference.
+      window.matchMedia = vi.fn((query) => ({
+        matches: query === '(prefers-reduced-motion: reduce)',
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }));
+
+      renderDataPage();
+      selectOption('OPT_SP_500');
+
+      act(() => {
+        capturedOnRowClick({
+          collection: 'OPT_SP_500',
+          instrument_id: 'SPX|2024-12-20|4500|C',
+        });
+      });
+
+      expect(spy).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
+    } finally {
+      if (prior === undefined) {
+        delete Element.prototype.scrollIntoView;
+      } else {
+        Element.prototype.scrollIntoView = prior;
+      }
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
+  it('fires scrollIntoView only once when the same contract is clicked twice (dedup)', () => {
+    // Fix 8: useEffect deps are identity keys (collection + instrument_id),
+    // not the whole object — re-clicking the same contract must not re-scroll.
+    const prior = Element.prototype.scrollIntoView;
+    const spy = vi.fn();
+    try {
+      Element.prototype.scrollIntoView = spy;
+
+      renderDataPage();
+      selectOption('OPT_SP_500');
+
+      const contract = {
         collection: 'OPT_SP_500',
         instrument_id: 'SPX|2024-12-20|4500|C',
-      });
-    });
+      };
 
-    expect(spy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+      // First click — scrolls.
+      act(() => {
+        capturedOnRowClick(contract);
+      });
+      // Second click of the same contract — fresh object, same identity keys.
+      act(() => {
+        capturedOnRowClick({ ...contract });
+      });
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prior === undefined) {
+        delete Element.prototype.scrollIntoView;
+      } else {
+        Element.prototype.scrollIntoView = prior;
+      }
+    }
   });
 });
 

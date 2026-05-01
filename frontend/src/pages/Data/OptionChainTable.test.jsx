@@ -417,6 +417,51 @@ describe('<OptionChainTable> persistent selection', () => {
     );
     expect(container.querySelectorAll('tr[data-selected-side]').length).toBe(0);
   });
+
+  // Fix 3: aria-selected on selected rows for screen-reader semantics.
+  it('selected row has aria-selected="true"', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C-CALL', expiration: '2024-04-19', strike: 5000, type: 'C' }),
+        makeRow({ contract_id: 'C-PUT', expiration: '2024-04-19', strike: 5000, type: 'P' }),
+      ],
+      notes: [],
+    };
+    const selectedContract = {
+      collection: 'OPT_SP_500',
+      instrument_id: 'C-CALL',
+    };
+    const { container } = render(
+      <OptionChainTable
+        root="OPT_SP_500"
+        onRowClick={() => {}}
+        selectedContract={selectedContract}
+      />,
+    );
+    const selected = container.querySelectorAll('tr[aria-selected="true"]');
+    expect(selected.length).toBe(1);
+    expect(selected[0].getAttribute('data-selected-side')).toBe('call');
+  });
+
+  it('unselected rows have no aria-selected attribute', () => {
+    hookState.chainData = {
+      root: 'OPT_SP_500',
+      date: '2024-03-15',
+      underlying_price: stored(5500),
+      rows: [
+        makeRow({ contract_id: 'C-CALL', expiration: '2024-04-19', strike: 5000, type: 'C' }),
+      ],
+      notes: [],
+    };
+    const { container } = render(
+      <OptionChainTable root="OPT_SP_500" onRowClick={() => {}} />,
+    );
+    // No aria-selected at all — not even aria-selected="false" (which would be noisy).
+    expect(container.querySelectorAll('tr[aria-selected]').length).toBe(0);
+  });
 });
 
 describe('<OptionChainTable> verification-pending banner', () => {

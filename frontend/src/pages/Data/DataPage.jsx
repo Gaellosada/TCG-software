@@ -38,10 +38,16 @@ function DataPage() {
   useEffect(() => {
     const node = detailPanelRef.current;
     // jsdom doesn't implement scrollIntoView, so feature-test before calling.
+    // prefers-reduced-motion: use instant scroll for users who have enabled
+    // the OS motion-reduction setting.
     if (selectedContract && node && typeof node.scrollIntoView === 'function') {
-      node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const prefersReduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      node.scrollIntoView({ behavior: prefersReduced ? 'auto' : 'smooth', block: 'start' });
     }
-  }, [selectedContract]);
+    // Deps on identity keys only — re-clicking the same contract (which
+    // produces a fresh object reference) does NOT re-fire the scroll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedContract?.collection, selectedContract?.instrument_id]);
 
   // ---------------------------------------------------------------------------
   // Tier 2 view state — owned here, passed to snapshot / multi panels.

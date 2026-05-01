@@ -195,6 +195,7 @@ function MergedChainTable({ rows, collection, onRowClick, selectedContract }) {
                 key={`${entry.expiration}|${entry.strike}`}
                 className={`${styles.row} ${expChanged ? styles.expChange : ''} ${selectedSide ? styles.rowSelected : ''}`}
                 data-selected-side={selectedSide || undefined}
+                aria-selected={selectedSide ? 'true' : undefined}
                 onClick={(e) => handleRowClick(e, entry)}
               >
                 <td className={styles.colExp}>
@@ -203,6 +204,7 @@ function MergedChainTable({ rows, collection, onRowClick, selectedContract }) {
                     <span
                       className={styles.cycleChip}
                       title={entry.expiration_cycle}
+                      aria-label={entry.expiration_cycle}
                       data-testid="cycle-chip"
                     >
                       {entry.expiration_cycle.trim()[0]}
