@@ -118,6 +118,13 @@ class MarketDataService(Protocol):
 
     async def list_option_expirations(self, root: str) -> list[date]: ...
 
+    async def list_option_expirations_filtered(
+        self,
+        root: str,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | None = None,
+    ) -> list[date]: ...
+
 
 class StrategyStore(Protocol):
     """CRUD for strategy definitions."""

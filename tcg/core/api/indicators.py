@@ -211,8 +211,7 @@ def _tautological_option_stream_response(
         "asset_type": "option",
         "accepted_asset_types": ["option"],
         "detail": (
-            "selection=by_delta + stream='delta' is tautological "
-            f"(label={label!r})"
+            f"selection=by_delta + stream='delta' is tautological (label={label!r})"
         ),
     }
     if indicator_id is not None:
@@ -247,9 +246,7 @@ def _stream_unavailable_for_root_response(
     return JSONResponse(status_code=422, content=content)
 
 
-def _business_dates_in_range(
-    start: date | None, end: date | None
-) -> list[date] | None:
+def _business_dates_in_range(start: date | None, end: date | None) -> list[date] | None:
     """Enumerate CME business days in [start, end].
 
     ``OptionStreamRef`` materialisation needs an explicit date axis
@@ -287,7 +284,18 @@ async def _materialise_option_stream(
     trade_dates = _business_dates_in_range(start_date, end_date)
     if not trade_dates:
         return "option_stream requires explicit ISO 'start' and 'end' dates"
-    chain_reader, mat_resolver, ul_resolver = build_stream_resolver_wiring(svc)
+    chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
+        svc
+    )
+    # Pre-fetch available expirations filtered by the requested type and
+    # cycle.  The unfiltered variant returned expirations for ALL types /
+    # cycles, causing the bulk resolver to pick expirations that had no
+    # matching contracts — empty chains → spurious NaN holes.
+    all_expirations = await svc.list_option_expirations_filtered(
+        ref.collection,
+        option_type=ref.option_type,
+        cycle=ref.cycle,
+    )
     values, diagnostics = await resolve_option_stream(
         dates=trade_dates,
         collection=ref.collection,
@@ -300,6 +308,8 @@ async def _materialise_option_stream(
         maturity_resolver=mat_resolver,
         underlying_price_resolver=ul_resolver,
         progress_callback=progress_callback,
+        bulk_chain_reader=bulk_reader,
+        available_expirations=all_expirations,
     )
     dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
     return dates_arr, values, diagnostics
@@ -331,9 +341,7 @@ async def compute_indicator(
     # ── 1. Basic request validation ──
 
     if not body.series:
-        return error_response(
-            "validation", "'series' must contain at least one entry"
-        )
+        return error_response("validation", "'series' must contain at least one entry")
 
     # Asset-type compatibility guard. Asymmetric design: enforced on the
     # backend (canonical), advisory on the frontend (UX). Only fires when
@@ -370,9 +378,7 @@ async def compute_indicator(
         if total > 0:
             progress_task_id = body.task_id
             _progress_register(progress_task_id, total)
-            progress_callback = (
-                lambda tid=progress_task_id: _progress_tick(tid)
-            )
+            progress_callback = lambda tid=progress_task_id: _progress_tick(tid)
             background_tasks.add_task(_progress_clear, progress_task_id)
 
     # Param validation (pydantic accepts int/float/bool; we still guard NaN
@@ -385,16 +391,11 @@ async def compute_indicator(
         if not isinstance(value, (int, float)):
             return error_response(
                 "validation",
-                (
-                    f"param {name!r} must be numeric or bool, got "
-                    f"{type(value).__name__}"
-                ),
+                (f"param {name!r} must be numeric or bool, got {type(value).__name__}"),
             )
         fvalue = float(value)
         if fvalue != fvalue:  # NaN guard
-            return error_response(
-                "validation", f"param {name!r} must not be NaN"
-            )
+            return error_response("validation", f"param {name!r} must not be NaN")
         # Preserve int vs float so the sandbox can type-check properly.
         params[name] = int(value) if isinstance(value, int) else fvalue
 
@@ -419,10 +420,7 @@ async def compute_indicator(
         if ref.type != "option_stream":
             continue
         # Rule 1 — tautological by_delta + stream='delta'.
-        if (
-            getattr(ref.selection, "kind", None) == "by_delta"
-            and ref.stream == "delta"
-        ):
+        if getattr(ref.selection, "kind", None) == "by_delta" and ref.stream == "delta":
             return _tautological_option_stream_response(
                 indicator_id=body.indicator_id, label=label
             )
@@ -433,9 +431,7 @@ async def compute_indicator(
                 roots = await svc.list_option_roots()
                 cached_root_metadata = {r.collection: r for r in roots}
             root_info = cached_root_metadata.get(ref.collection)
-            if root_info is not None and not getattr(
-                root_info, "has_greeks", True
-            ):
+            if root_info is not None and not getattr(root_info, "has_greeks", True):
                 return _stream_unavailable_for_root_response(
                     indicator_id=body.indicator_id,
                     root=ref.collection,
@@ -513,17 +509,13 @@ async def compute_indicator(
                     )
 
         except DataNotFoundError as exc:
-            return error_response(
-                "data", f"Series label {label!r}: {exc}"
-            )
+            return error_response("data", f"Series label {label!r}: {exc}")
         # Reject malformed series up front: each series' dates must be
         # strictly monotonically increasing (no duplicates, no unsorted
         # input). Otherwise ``np.intersect1d`` + ``np.isin`` alignment
         # below silently produces differing lengths, which later fails
         # with a confusing sandbox-level error.
-        if dates.size >= 2 and not bool(
-            np.all(np.diff(dates) > 0)
-        ):
+        if dates.size >= 2 and not bool(np.all(np.diff(dates) > 0)):
             return error_response(
                 "validation",
                 f"Series {label!r} has non-monotonic or duplicate dates",
@@ -607,9 +599,7 @@ async def compute_indicator(
     except IndicatorValidationError as exc:
         return error_response("validation", str(exc))
     except IndicatorRuntimeError as exc:
-        return error_response(
-            "runtime", str(exc), traceback=exc.user_traceback or None
-        )
+        return error_response("runtime", str(exc), traceback=exc.user_traceback or None)
 
     # ── 5. Build response ──
 
