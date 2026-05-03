@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ASCENDING
@@ -175,11 +175,22 @@ class MongoOptionsDataReader:
                     "$lte": _date_to_int(expiration_max),
                 },
             }
+            type_filter = type.upper() if isinstance(type, str) else "BOTH"
+            # Push type and cycle filters server-side so MongoDB skips
+            # non-matching docs before they cross the wire — halves the
+            # cursor result set for C/P queries on large roots.
+            if type_filter in ("C", "P"):
+                query["type"] = type_filter
+            if expiration_cycle is not None:
+                query["_id.expirationCycle"] = expiration_cycle
+            if strike_min is not None:
+                query.setdefault("strike", {})["$gte"] = strike_min
+            if strike_max is not None:
+                query.setdefault("strike", {})["$lte"] = strike_max
             cursor = coll.find(query, projection=_CHAIN_PROJECTION).sort(
                 "expiration", ASCENDING
             )
 
-            type_filter = type.upper() if isinstance(type, str) else "BOTH"
             target_yyyymmdd = _date_to_int(date)
 
             results: list[tuple[OptionContractDoc, OptionDailyRow]] = []
@@ -203,6 +214,84 @@ class MongoOptionsDataReader:
             ) from exc
 
     # ------------------------------------------------------------------
+    # query_chain_bulk
+    # ------------------------------------------------------------------
+
+    async def query_chain_bulk(
+        self,
+        root: str,
+        dates: Sequence[date],
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        expiration_cycle: str | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Return ``(contract, row)`` pairs for ALL *dates* in one cursor pass.
+
+        Same server-side Mongo query as ``query_chain`` (filter by expiration
+        range, type, cycle), but instead of scanning bars for a single target
+        date, materialises rows for every date in *dates*.  This avoids
+        N separate cursor iterations when the caller needs the same chain
+        across many dates.
+        """
+        try:
+            coll = self._db[root]
+            query: dict[str, Any] = {
+                "expiration": {
+                    "$gte": _date_to_int(expiration_min),
+                    "$lte": _date_to_int(expiration_max),
+                },
+            }
+            type_filter = type.upper() if isinstance(type, str) else "BOTH"
+            if type_filter in ("C", "P"):
+                query["type"] = type_filter
+            if expiration_cycle is not None:
+                query["_id.expirationCycle"] = expiration_cycle
+            if strike_min is not None:
+                query.setdefault("strike", {})["$gte"] = strike_min
+            if strike_max is not None:
+                query.setdefault("strike", {})["$lte"] = strike_max
+            cursor = coll.find(query, projection=_CHAIN_PROJECTION).sort(
+                "expiration", ASCENDING
+            )
+
+            target_yyyymmdd_set: set[int] = {_date_to_int(d) for d in dates}
+            # Pre-build the reverse map yyyymmdd → date for grouping.
+            yyyymmdd_to_date: dict[int, date] = {_date_to_int(d): d for d in dates}
+
+            results: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {
+                d: [] for d in dates
+            }
+            # Use to_list to batch-fetch all docs in one network round-
+            # trip.  The async-for cursor interleaves poorly with other
+            # concurrent cursors on the same event loop (Motor holds the
+            # connection per batch, blocking parallelism).  to_list
+            # releases the connection as soon as the server finishes,
+            # letting concurrent bulk queries overlap properly.
+            docs = await cursor.to_list(length=None)
+            for doc in docs:
+                triples = _materialize_chain_rows_bulk(
+                    doc=doc,
+                    collection=root,
+                    target_yyyymmdd_set=target_yyyymmdd_set,
+                    type_filter=type_filter,
+                    strike_min=strike_min,
+                    strike_max=strike_max,
+                    expiration_cycle=expiration_cycle,
+                )
+                for yyyymmdd, contract, row in triples:
+                    d = yyyymmdd_to_date[yyyymmdd]
+                    results[d].append((contract, row))
+            return results
+        except PyMongoError as exc:
+            raise OptionsDataAccessError(
+                f"MongoDB error querying chain bulk on '{root}' for "
+                f"{len(dates)} dates: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
     # list_roots
     # ------------------------------------------------------------------
 
@@ -213,8 +302,7 @@ class MongoOptionsDataReader:
                 info = await self._summarize_root(collection)
             except PyMongoError as exc:
                 raise OptionsDataAccessError(
-                    f"MongoDB error summarizing options root "
-                    f"'{collection}': {exc}"
+                    f"MongoDB error summarizing options root '{collection}': {exc}"
                 ) from exc
             out.append(info)
         return out
@@ -246,6 +334,41 @@ class MongoOptionsDataReader:
         return out
 
     # ------------------------------------------------------------------
+    # list_expirations_filtered
+    # ------------------------------------------------------------------
+
+    async def list_expirations_filtered(
+        self,
+        root: str,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | None = None,
+    ) -> list[date]:
+        """Distinct expirations on *root* filtered by type and/or cycle.
+
+        Falls back to the unfiltered :meth:`list_expirations` behaviour
+        when neither filter is supplied.
+        """
+        try:
+            coll = self._db[root]
+            query: dict[str, Any] = {}
+            if option_type is not None:
+                query["type"] = option_type.upper()
+            if cycle is not None:
+                query["_id.expirationCycle"] = cycle
+            raw = await coll.distinct("expiration", query)
+        except PyMongoError as exc:
+            raise OptionsDataAccessError(
+                f"MongoDB error listing filtered expirations on '{root}': {exc}"
+            ) from exc
+        out: list[date] = []
+        for value in raw:
+            d = _int_to_date(value)
+            if d is not None:
+                out.append(d)
+        out.sort()
+        return out
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -253,21 +376,29 @@ class MongoOptionsDataReader:
         coll = self._db[collection]
         doc_count = await coll.estimated_document_count()
 
-        first_doc = await coll.find(
-            {"expiration": {"$ne": None}},
-            projection={"expiration": 1},
-        ).sort("expiration", ASCENDING).limit(1).to_list(length=1)
-        last_doc = await coll.find(
-            {"expiration": {"$ne": None}},
-            projection={"expiration": 1},
-        ).sort("expiration", -1).limit(1).to_list(length=1)
+        first_doc = (
+            await coll.find(
+                {"expiration": {"$ne": None}},
+                projection={"expiration": 1},
+            )
+            .sort("expiration", ASCENDING)
+            .limit(1)
+            .to_list(length=1)
+        )
+        last_doc = (
+            await coll.find(
+                {"expiration": {"$ne": None}},
+                projection={"expiration": 1},
+            )
+            .sort("expiration", -1)
+            .limit(1)
+            .to_list(length=1)
+        )
 
         expiration_first = (
             _int_to_date(first_doc[0]["expiration"]) if first_doc else None
         )
-        expiration_last = (
-            _int_to_date(last_doc[0]["expiration"]) if last_doc else None
-        )
+        expiration_last = _int_to_date(last_doc[0]["expiration"]) if last_doc else None
 
         providers = tuple(await _peek_providers(coll))
         last_trade_date = await _peek_last_trade_date(coll)
@@ -364,10 +495,7 @@ def _materialize_chain_row(
         return None
     if strike_max is not None and contract.strike > strike_max:
         return None
-    if (
-        expiration_cycle is not None
-        and contract.expiration_cycle != expiration_cycle
-    ):
+    if expiration_cycle is not None and contract.expiration_cycle != expiration_cycle:
         return None
 
     bars = eod_datas.get(provider) if isinstance(eod_datas, Mapping) else None
@@ -391,6 +519,70 @@ def _materialize_chain_row(
     if row is None:
         return None
     return contract, row
+
+
+def _materialize_chain_rows_bulk(
+    *,
+    doc: Mapping[str, Any],
+    collection: str,
+    target_yyyymmdd_set: set[int],
+    type_filter: str,
+    strike_min: float | None,
+    strike_max: float | None,
+    expiration_cycle: str | None = None,
+) -> list[tuple[int, OptionContractDoc, OptionDailyRow]]:
+    """Like ``_materialize_chain_row`` but for ALL dates at once.
+
+    Returns list of ``(yyyymmdd, contract, row)`` triples — one per bar
+    whose date is in *target_yyyymmdd_set* and passes all filters.
+    """
+    eod_datas: Mapping[str, Any] | None = doc.get("eodDatas")
+    provider = select_provider(collection, eod_datas)
+    if provider is None or not eod_datas:
+        return []
+
+    contract = doc_to_contract(doc, collection, provider)
+    if contract is None:
+        return []
+
+    if type_filter in ("C", "P") and contract.type != type_filter:
+        return []
+    if strike_min is not None and contract.strike < strike_min:
+        return []
+    if strike_max is not None and contract.strike > strike_max:
+        return []
+    if expiration_cycle is not None and contract.expiration_cycle != expiration_cycle:
+        return []
+
+    bars = eod_datas.get(provider) if isinstance(eod_datas, Mapping) else None
+    if not bars:
+        return []
+
+    # Build the greeks index ONCE per doc.
+    greeks_list = None
+    if has_greeks_for_root(collection):
+        eod_greeks = doc.get("eodGreeks")
+        if isinstance(eod_greeks, Mapping):
+            greeks_list = eod_greeks.get(provider)
+    greeks_index = index_greeks_by_date(greeks_list)
+
+    results: list[tuple[int, OptionContractDoc, OptionDailyRow]] = []
+    for bar in bars:
+        if not isinstance(bar, Mapping):
+            continue
+        raw = bar.get("date")
+        try:
+            iv = int(raw) if raw is not None else None
+        except TypeError, ValueError:
+            continue
+        if iv is None or iv not in target_yyyymmdd_set:
+            continue
+        bar_date = _int_to_date(iv)
+        greek_entry = greeks_index.get(bar_date) if bar_date else None
+        row = bar_and_greek_to_row(bar, greek_entry)
+        if row is not None:
+            results.append((iv, contract, row))
+    return results
 
 
 def _build_rows(
@@ -438,7 +630,7 @@ def _find_bar_for_date(
         raw = bar.get("date") if isinstance(bar, Mapping) else None
         try:
             iv = int(raw) if raw is not None else None
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if iv == target_yyyymmdd:
             return bar
@@ -452,7 +644,7 @@ def _date_to_int(d: date) -> int:
 def _int_to_date(value: Any) -> date | None:
     try:
         iv = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if not (19000101 <= iv <= 21001231):
         return None
