@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
-from typing import Iterable, Literal
+from typing import Literal, Sequence
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -445,7 +445,10 @@ async def test_last_trade_date_truncation():
     d_after = date(2024, 3, 25)
     expiration = date(2024, 4, 19)
     full_chain_before = [
-        (_contract(strike=4500, expiration=expiration), _row(row_date=d_before, iv=0.20)),
+        (
+            _contract(strike=4500, expiration=expiration),
+            _row(row_date=d_before, iv=0.20),
+        ),
     ]
     full_chain_at = [
         (_contract(strike=4500, expiration=expiration), _row(row_date=d_at, iv=0.21)),
@@ -528,7 +531,7 @@ async def test_call_count_upper_bound_non_nearest():
         underlying_price_resolver=None,
     )
     assert len(reader.calls) <= K * len(dates), (
-        f"Expected ≤{K*len(dates)} chain calls for {len(dates)} dates "
+        f"Expected ≤{K * len(dates)} chain calls for {len(dates)} dates "
         f"(K={K} non-NearestToTarget); got {len(reader.calls)}."
     )
 
@@ -560,7 +563,7 @@ async def test_call_count_upper_bound_nearest_to_target():
         underlying_price_resolver=None,
     )
     assert len(reader.calls) <= K * len(dates), (
-        f"Expected ≤{K*len(dates)} chain calls for {len(dates)} dates "
+        f"Expected ≤{K * len(dates)} chain calls for {len(dates)} dates "
         f"(K={K} NearestToTarget); got {len(reader.calls)}."
     )
 
@@ -665,10 +668,7 @@ async def options_client(mock_app_with_options):
         yield ac
 
 
-_TRIVIAL_INDICATOR = (
-    "def compute(series):\n"
-    "    return series['x']\n"
-)
+_TRIVIAL_INDICATOR = "def compute(series):\n    return series['x']\n"
 
 
 async def test_tautological_option_stream_returns_422(options_client: AsyncClient):
@@ -728,3 +728,522 @@ async def test_stream_unavailable_for_root_returns_422(options_client: AsyncClie
     assert "gamma" in payload["unavailable_streams"]
     assert "vega" in payload["unavailable_streams"]
     assert "theta" in payload["unavailable_streams"]
+
+
+# ── Bulk pre-fetch path tests ────────────────────────────────────────
+
+
+class FakeBulkChainReader:
+    """Minimal bulk chain reader for the materialiser.
+
+    Wraps a ``FakeChainReader``'s data and applies the same filtering,
+    but returns results for ALL requested dates in one call.  Tracks
+    calls via ``bulk_calls`` for assertion.
+    """
+
+    def __init__(
+        self,
+        chains_by_date: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]],
+    ) -> None:
+        self._chains = chains_by_date
+        self.bulk_calls: list[dict] = []
+
+    async def query_chain_bulk(
+        self,
+        *,
+        root: str,
+        dates: Sequence[date],
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        expiration_cycle: str | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        dates_list = list(dates)
+        self.bulk_calls.append(
+            {
+                "root": root,
+                "dates": dates_list,
+                "type": type,
+                "expiration_min": expiration_min,
+                "expiration_max": expiration_max,
+                "strike_min": strike_min,
+                "strike_max": strike_max,
+                "expiration_cycle": expiration_cycle,
+            }
+        )
+        result: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+        for d in dates_list:
+            chain = self._chains.get(d, [])
+            filtered = [
+                (c, r)
+                for (c, r) in chain
+                if (c.type == type or type == "both")
+                and expiration_min <= c.expiration <= expiration_max
+                and (expiration_cycle is None or c.expiration_cycle == expiration_cycle)
+            ]
+            if filtered:
+                result[d] = filtered
+        return result
+
+
+async def test_bulk_path_by_strike():
+    """Bulk path produces identical results to per-date path for ByStrike."""
+    dates = [date(2024, 3, 18), date(2024, 3, 19), date(2024, 3, 20)]
+    expiration = date(2024, 4, 19)
+    chains_by_date = {
+        d: [
+            (
+                _contract(strike=4500, expiration=expiration),
+                _row(row_date=d, iv=0.20 + i * 0.01),
+            ),
+        ]
+        for i, d in enumerate(dates)
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+    values, errors = await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert all(e is None for e in errors)
+    assert values[0] == pytest.approx(0.20)
+    assert values[1] == pytest.approx(0.21)
+    assert values[2] == pytest.approx(0.22)
+    # Bulk path: exactly 1 bulk call (one expiration), zero per-date calls.
+    assert len(bulk_reader.bulk_calls) == 1
+    assert len(reader.calls) == 0
+
+
+async def test_bulk_path_by_moneyness():
+    """Bulk path produces correct results for ByMoneyness (underlying I/O)."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    chain = [
+        (_contract(strike=4490, expiration=expiration), _row(row_date=d, iv=0.21)),
+        (_contract(strike=4510, expiration=expiration), _row(row_date=d, iv=0.22)),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    values, errors = await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(4500.0),
+        bulk_chain_reader=bulk_reader,
+    )
+    assert errors[0] is None
+    # Same tie-break as the per-date path: 4510 wins by float arithmetic.
+    assert values[0] == pytest.approx(0.22)
+
+
+async def test_bulk_path_by_delta():
+    """Bulk path produces correct results for ByDelta (stored-only)."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    chain = [
+        (_contract(strike=4490, expiration=expiration), _row(row_date=d, delta=0.45)),
+        (_contract(strike=4500, expiration=expiration), _row(row_date=d, delta=0.50)),
+        (_contract(strike=4510, expiration=expiration), _row(row_date=d, delta=0.55)),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    values, errors = await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByDelta(target_delta=0.50, tolerance=0.05, strict=False),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert errors[0] is None
+    # K=4500 has delta=0.50, closest to target.
+    assert values[0] == pytest.approx(0.20)  # _row default iv=0.20
+
+
+async def test_bulk_path_cycle_filter():
+    """Bulk path respects cycle injection (same as test_multi_cycle_filter)."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    contract_m = _contract(strike=4500, expiration=expiration, cycle="M")
+    contract_w = _contract(strike=4500, expiration=expiration, cycle="W")
+    row_m = _row(row_date=d, iv=0.20)
+    row_w = _row(row_date=d, iv=0.30)
+    chain = [(contract_m, row_m), (contract_w, row_w)]
+
+    # cycle="W" — only W visible in bulk path.
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    values, errors = await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle="W",
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(4500.0),
+        bulk_chain_reader=bulk_reader,
+    )
+    assert errors[0] is None
+    assert values[0] == pytest.approx(0.30)
+
+
+async def test_bulk_path_last_trade_date():
+    """Bulk path respects last_trade_date cutoff."""
+    ltd = date(2024, 3, 22)
+    d_at = ltd
+    d_after = date(2024, 3, 25)
+    expiration = date(2024, 4, 19)
+    chain_at = [
+        (_contract(strike=4500, expiration=expiration), _row(row_date=d_at, iv=0.21)),
+    ]
+    reader = FakeChainReader({d_at: chain_at})
+    bulk_reader = FakeBulkChainReader({d_at: chain_at})
+
+    values, errors = await resolve_option_stream(
+        dates=[d_at, d_after],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        last_trade_date=ltd,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert errors[0] is None and values[0] == pytest.approx(0.21)
+    assert np.isnan(values[1])
+    assert errors[1] == "past_last_trade_date"
+
+
+async def test_bulk_path_nearest_to_target():
+    """Bulk path works with NearestToTarget maturity (one probe + one bulk)."""
+    dates = [date(2024, 3, 18), date(2024, 3, 19), date(2024, 3, 20)]
+    expiration = date(2024, 4, 19)
+    chains_by_date = {
+        d: [
+            (_contract(strike=4500, expiration=expiration), _row(row_date=d, iv=0.20)),
+        ]
+        for d in dates
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+    values, errors = await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=30),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert all(e is None for e in errors)
+    assert all(v == pytest.approx(0.20) for v in values)
+    # Exactly 1 probe query (NearestToTarget), 1 bulk call.
+    assert len(reader.calls) == 1  # probe only
+    assert len(bulk_reader.bulk_calls) == 1
+
+
+async def test_bulk_path_no_chain_for_date():
+    """Bulk path handles dates with no chain data → no_chain_for_date."""
+    dates = [date(2024, 3, 18), date(2024, 3, 19)]
+    expiration = date(2024, 4, 19)
+    # Only d1 has data, d2 does not.
+    chains_by_date = {
+        dates[0]: [
+            (
+                _contract(strike=4500, expiration=expiration),
+                _row(row_date=dates[0], iv=0.20),
+            ),
+        ],
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+    values, errors = await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert errors[0] is None and values[0] == pytest.approx(0.20)
+    assert np.isnan(values[1])
+    assert errors[1] == "no_chain_for_date"
+
+
+async def test_bulk_path_progress_callback():
+    """Bulk path calls progress_callback once per date (including skipped)."""
+    dates = [date(2024, 3, 18), date(2024, 3, 19), date(2024, 3, 25)]
+    expiration = date(2024, 4, 19)
+    chains_by_date = {
+        d: [
+            (_contract(strike=4500, expiration=expiration), _row(row_date=d, iv=0.20)),
+        ]
+        for d in dates
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+    ticks = [0]
+
+    def tick():
+        ticks[0] += 1
+
+    await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        last_trade_date=date(2024, 3, 22),
+        bulk_chain_reader=bulk_reader,
+        progress_callback=tick,
+    )
+    # 3 date ticks (2 queryable + 1 past_last_trade_date) plus 1
+    # Phase B expiration-fetch tick (all dates share one expiration).
+    assert ticks[0] == 4
+
+
+async def test_bulk_path_missing_iv():
+    """Bulk path correctly surfaces missing_iv when iv_stored is None."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    chain = [
+        (_contract(strike=4500, expiration=expiration), _row(row_date=d, iv=None)),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    values, errors = await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert np.isnan(values[0])
+    assert errors[0] == "missing_iv"
+
+
+# ── Strike-window narrowing tests ─────────────────────────────────────
+
+
+async def test_bulk_by_strike_passes_exact_strike_window():
+    """ByStrike selection narrows the bulk query to strike_min=K, strike_max=K."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    chain = [
+        (_contract(strike=4500, expiration=expiration), _row(row_date=d, iv=0.20)),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+    call = bulk_reader.bulk_calls[0]
+    assert call["strike_min"] == 4500.0
+    assert call["strike_max"] == 4500.0
+
+
+async def test_bulk_by_moneyness_passes_strike_window():
+    """ByMoneyness selection computes a strike window from the spot price."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    spot = 4500.0
+    chain = [
+        (_contract(strike=4500, expiration=expiration), _row(row_date=d, iv=0.20)),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(spot),
+        bulk_chain_reader=bulk_reader,
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+    call = bulk_reader.bulk_calls[0]
+    # Window: spot * (1.0 - 0.05 - 0.10) to spot * (1.0 + 0.05 + 0.10)
+    assert call["strike_min"] is not None
+    assert call["strike_max"] is not None
+    assert call["strike_min"] == pytest.approx(spot * 0.85, rel=0.01)
+    assert call["strike_max"] == pytest.approx(spot * 1.15, rel=0.01)
+
+
+async def test_bulk_by_delta_passes_wide_strike_window():
+    """ByDelta selection uses a wide moneyness proxy band (±30% of spot)."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    spot = 4500.0
+    chain = [
+        (
+            _contract(strike=4500, expiration=expiration),
+            _row(row_date=d, iv=0.20, delta=0.50),
+        ),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByDelta(target_delta=0.50, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(spot),
+        bulk_chain_reader=bulk_reader,
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+    call = bulk_reader.bulk_calls[0]
+    assert call["strike_min"] is not None
+    assert call["strike_max"] is not None
+    assert call["strike_min"] == pytest.approx(spot * 0.70, rel=0.01)
+    assert call["strike_max"] == pytest.approx(spot * 1.30, rel=0.01)
+
+
+async def test_bulk_no_underlying_resolver_no_strike_window():
+    """Without an underlying_price_resolver, ByMoneyness has no strike window."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    chain = [
+        (_contract(strike=4500, expiration=expiration), _row(row_date=d, iv=0.20)),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+    call = bulk_reader.bulk_calls[0]
+    assert call["strike_min"] is None
+    assert call["strike_max"] is None
+
+
+# ── Phase B progress ticks test ───────────────────────────────────────
+
+
+async def test_bulk_phase_b_ticks_per_expiration():
+    """Phase B fires one progress tick per unique expiration fetched."""
+    dates = [date(2024, 3, 18), date(2024, 3, 19), date(2024, 5, 13)]
+    exp_apr = date(2024, 4, 19)
+    exp_jun = date(2024, 6, 21)
+    chains_by_date = {
+        date(2024, 3, 18): [
+            (
+                _contract(strike=4500, expiration=exp_apr),
+                _row(row_date=date(2024, 3, 18), iv=0.20),
+            ),
+        ],
+        date(2024, 3, 19): [
+            (
+                _contract(strike=4500, expiration=exp_apr),
+                _row(row_date=date(2024, 3, 19), iv=0.21),
+            ),
+        ],
+        date(2024, 5, 13): [
+            (
+                _contract(strike=4500, expiration=exp_jun),
+                _row(row_date=date(2024, 5, 13), iv=0.22),
+            ),
+        ],
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+    ticks = [0]
+
+    def tick():
+        ticks[0] += 1
+
+    await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+        progress_callback=tick,
+    )
+    # 3 date ticks (Phase C) + 2 expiration ticks (Phase B: 2 unique expirations)
+    assert ticks[0] == 5

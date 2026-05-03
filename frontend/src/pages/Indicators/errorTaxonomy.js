@@ -35,6 +35,7 @@ export const INDICATOR_ERROR_TYPES = Object.freeze([
   'incompatible_asset',
   'tautological_option_stream',
   'stream_unavailable_for_root',
+  'options_data_access_error',
 ]);
 
 /** Human-facing headings for each error type. */
@@ -47,6 +48,7 @@ export const HEADINGS = Object.freeze({
   incompatible_asset: 'Indicator not compatible with this asset',
   tautological_option_stream: 'Tautological selection',
   stream_unavailable_for_root: 'Stream unavailable for root',
+  options_data_access_error: 'Options data unavailable',
 });
 
 /**
