@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
-import { listSessions, createSession, deleteSession } from '../../api/agent';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { listSessions, createSession, deleteSession, renameSession } from '../../api/agent';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import styles from './SessionPanel.module.css';
 
 /**
- * Panel showing the list of agent sessions with create / delete / select.
+ * Panel showing the list of agent sessions with create / delete / rename / select.
  *
  * Props:
  *   selectedId  {string|null}  Currently selected session id
@@ -13,6 +14,10 @@ function SessionPanel({ selectedId, onSelect }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editingName, setEditingName] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const editInputRef = useRef(null);
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -31,6 +36,14 @@ function SessionPanel({ selectedId, onSelect }) {
     fetchSessions();
   }, [fetchSessions]);
 
+  // Focus the rename input when editing starts
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
   async function handleCreate() {
     try {
       const result = await createSession();
@@ -44,7 +57,14 @@ function SessionPanel({ selectedId, onSelect }) {
     }
   }
 
-  async function handleDelete(id) {
+  function handleDeleteClick(id, name) {
+    setDeleteTarget({ id, name });
+  }
+
+  async function handleDeleteConfirm() {
+    if (!deleteTarget) return;
+    const { id } = deleteTarget;
+    setDeleteTarget(null);
     try {
       await deleteSession(id);
       if (selectedId === id) {
@@ -53,6 +73,36 @@ function SessionPanel({ selectedId, onSelect }) {
       await fetchSessions();
     } catch (err) {
       setError(err.message || 'Failed to delete session');
+    }
+  }
+
+  function startRename(id, currentName) {
+    setEditingId(id);
+    setEditingName(currentName);
+  }
+
+  async function commitRename() {
+    if (!editingId) return;
+    const trimmed = editingName.trim();
+    if (trimmed) {
+      try {
+        await renameSession(editingId, trimmed);
+        await fetchSessions();
+      } catch (err) {
+        setError(err.message || 'Failed to rename session');
+      }
+    }
+    setEditingId(null);
+    setEditingName('');
+  }
+
+  function handleRenameKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === 'Escape') {
+      setEditingId(null);
+      setEditingName('');
     }
   }
 
@@ -95,19 +145,41 @@ function SessionPanel({ selectedId, onSelect }) {
         {sessions.map((s) => {
           const id = s.id || s._id;
           const isSelected = id === selectedId;
+          const displayName = s.name || `Session ${id.slice(0, 8)}`;
+          const isEditing = editingId === id;
+
           return (
             <div
               key={id}
               className={`${styles.row} ${isSelected ? styles.rowSelected : ''}`}
-              onClick={() => onSelect(id)}
+              onClick={() => !isEditing && onSelect(id)}
               role="button"
               tabIndex={0}
-              onKeyDown={(e) => e.key === 'Enter' && onSelect(id)}
+              onKeyDown={(e) => e.key === 'Enter' && !isEditing && onSelect(id)}
             >
               <div className={styles.rowInfo}>
-                <span className={styles.rowName}>
-                  {s.name || `Session ${id.slice(0, 8)}`}
-                </span>
+                {isEditing ? (
+                  <input
+                    ref={editInputRef}
+                    className={styles.renameInput}
+                    value={editingName}
+                    onChange={(e) => setEditingName(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={handleRenameKeyDown}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <span
+                    className={styles.rowName}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      startRename(id, displayName);
+                    }}
+                    title="Double-click to rename"
+                  >
+                    {displayName}
+                  </span>
+                )}
                 <span className={styles.rowDate}>
                   {formatDate(s.created_at || s.createdAt)}
                 </span>
@@ -117,10 +189,10 @@ function SessionPanel({ selectedId, onSelect }) {
                 className={styles.deleteBtn}
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleDelete(id);
+                  handleDeleteClick(id, displayName);
                 }}
                 title="Delete session"
-                aria-label={`Delete session ${s.name || id}`}
+                aria-label={`Delete session ${displayName}`}
               >
                 &times;
               </button>
@@ -128,6 +200,16 @@ function SessionPanel({ selectedId, onSelect }) {
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete session"
+        message={`Are you sure you want to delete "${deleteTarget?.name ?? ''}"? This cannot be undone.`}
+        confirmLabel="Delete"
+        destructive
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

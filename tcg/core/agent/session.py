@@ -60,8 +60,9 @@ class AgentSession:
         api_key: str,
         mongo_uri: str,
         mongo_db_name: str,
-        model: str = "claude-sonnet-4-20250514",
-        max_tokens: int = 8192,
+        model: str = "claude-opus-4-20250514",
+        max_tokens: int = 16384,
+        thinking_budget: int = 10000,
         tools: list[dict[str, Any]] | None = None,
         tool_executors: dict[str, ToolExecutor] | None = None,
     ) -> None:
@@ -72,6 +73,7 @@ class AgentSession:
         self.mongo_db_name = mongo_db_name
         self.model = model
         self.max_tokens = max_tokens
+        self.thinking_budget = thinking_budget
         self.tools: list[dict[str, Any]] = tools or []
         self.tool_executors: dict[str, ToolExecutor] = tool_executors or {}
 
@@ -121,6 +123,10 @@ class AgentSession:
                 "max_tokens": self.max_tokens,
                 "system": self.system_prompt,
                 "messages": self.conversation_history,
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget,
+                },
             }
             if self.tools:
                 api_kwargs["tools"] = self.tools
@@ -231,13 +237,15 @@ class AgentSession:
 def _serialise_content(content_blocks: list[Any]) -> list[dict[str, Any]]:
     """Convert SDK ContentBlock objects to plain dicts for JSON serialisation.
 
-    The Anthropic SDK returns typed objects (TextBlock, ToolUseBlock, etc.).
-    We need plain dicts to store in conversation_history and to pass back
-    to the API in subsequent calls.
+    The Anthropic SDK returns typed objects (TextBlock, ToolUseBlock,
+    ThinkingBlock, etc.).  We need plain dicts to store in
+    conversation_history and to pass back to the API in subsequent calls.
     """
     result: list[dict[str, Any]] = []
     for block in content_blocks:
-        if block.type == "text":
+        if block.type == "thinking":
+            result.append({"type": "thinking", "thinking": block.thinking})
+        elif block.type == "text":
             result.append({"type": "text", "text": block.text})
         elif block.type == "tool_use":
             result.append(

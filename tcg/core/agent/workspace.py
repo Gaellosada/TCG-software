@@ -106,6 +106,20 @@ class AgentWorkspace:
             meta["workspace_path"] = str(session_dir)
         return meta
 
+    def rename_session(self, session_id: str, new_name: str) -> dict[str, Any] | None:
+        """Rename a session. Returns updated metadata or None if not found."""
+        session_dir = self.root / session_id
+        meta_path = session_dir / _META_FILE
+        if not meta_path.exists():
+            return None
+        meta = self._read_json(meta_path)
+        if meta is None:
+            return None
+        meta["name"] = new_name
+        self._write_json(meta_path, meta)
+        meta["workspace_path"] = str(session_dir)
+        return meta
+
     def delete_session(self, session_id: str) -> bool:
         """Remove a session directory entirely. Returns True if it existed."""
         session_dir = self.root / session_id

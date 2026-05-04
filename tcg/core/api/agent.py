@@ -37,6 +37,10 @@ class CreateSessionRequest(BaseModel):
     name: str | None = None
 
 
+class RenameSessionRequest(BaseModel):
+    name: str
+
+
 # ------------------------------------------------------------------
 # Dependency helpers
 # ------------------------------------------------------------------
@@ -81,6 +85,24 @@ async def create_session(
     """Create a new agent session."""
     workspace = _get_workspace(request)
     return workspace.create_session(name=body.name)
+
+
+@router.patch("/sessions/{session_id}")
+async def rename_session(
+    request: Request, session_id: str, body: RenameSessionRequest
+) -> Any:
+    """Rename an agent session."""
+    workspace = _get_workspace(request)
+    updated = workspace.rename_session(session_id, body.name)
+    if updated is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "session_not_found",
+                "message": f"No session {session_id}",
+            },
+        )
+    return updated
 
 
 @router.delete("/sessions/{session_id}")
@@ -243,6 +265,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         mongo_db_name=mongo_db_name,
         model=agent_config.model,
         max_tokens=agent_config.max_tokens,
+        thinking_budget=agent_config.thinking_budget,
         tools=tool_definitions,
         tool_executors=tool_executors,
     )

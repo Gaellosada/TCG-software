@@ -104,6 +104,18 @@
   color: var(--text-muted);
 }
 
+.renameInput {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.82rem;
+  padding: 2px 6px;
+  outline: none;
+}
+
 .deleteBtn {
   flex-shrink: 0;
   background: none;

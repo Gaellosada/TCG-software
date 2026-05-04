@@ -16,6 +16,13 @@ export async function createSession(name) {
   });
 }
 
+export async function renameSession(id, name) {
+  return fetchApi(`/agent/sessions/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
+}
+
 export async function deleteSession(id) {
   return fetchApi(`/agent/sessions/${encodeURIComponent(id)}`, {
     method: 'DELETE',
