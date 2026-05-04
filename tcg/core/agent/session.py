@@ -60,7 +60,7 @@ class AgentSession:
         api_key: str,
         mongo_uri: str,
         mongo_db_name: str,
-        model: str = "claude-opus-4-20250514",
+        model: str = "claude-opus-4-6",
         max_tokens: int = 16384,
         thinking_budget: int = 10000,
         tools: list[dict[str, Any]] | None = None,
