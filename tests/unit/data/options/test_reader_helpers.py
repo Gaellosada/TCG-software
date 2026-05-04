@@ -8,7 +8,22 @@ client-side filter, type-case, and provider-selection plumbing that
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
+
+# Dynamic future date to keep TestPeekLastTradeDate time-independent.
+# _peek_last_trade_date filters expiration >= today_yyyymmdd, so any
+# hardcoded past date would make these tests fail after the date passes.
+_future = date.today() + timedelta(days=30)
+_future_yyyymmdd = _future.year * 10000 + _future.month * 100 + _future.day
+_future_bar = _future - timedelta(days=1)  # simulated "last bar" = day before expiry
+_future_bar_yyyymmdd = (
+    _future_bar.year * 10000 + _future_bar.month * 100 + _future_bar.day
+)
+_future_bar2_yyyymmdd = (
+    (_future - timedelta(days=3)).year * 10000
+    + (_future - timedelta(days=3)).month * 100
+    + (_future - timedelta(days=3)).day
+)
 
 import pytest
 
@@ -67,23 +82,29 @@ class TestMaterializeChainRow:
 
     def test_strike_filter(self, sp500_doc):
         # strike=5000; min=4500 ok, max=4900 excludes
-        assert _materialize_chain_row(
-            doc=sp500_doc,
-            collection="OPT_SP_500",
-            target_yyyymmdd=20240301,
-            type_filter="BOTH",
-            strike_min=4500.0,
-            strike_max=4900.0,
-        ) is None
+        assert (
+            _materialize_chain_row(
+                doc=sp500_doc,
+                collection="OPT_SP_500",
+                target_yyyymmdd=20240301,
+                type_filter="BOTH",
+                strike_min=4500.0,
+                strike_max=4900.0,
+            )
+            is None
+        )
 
-        assert _materialize_chain_row(
-            doc=sp500_doc,
-            collection="OPT_SP_500",
-            target_yyyymmdd=20240301,
-            type_filter="BOTH",
-            strike_min=4500.0,
-            strike_max=5500.0,
-        ) is not None
+        assert (
+            _materialize_chain_row(
+                doc=sp500_doc,
+                collection="OPT_SP_500",
+                target_yyyymmdd=20240301,
+                type_filter="BOTH",
+                strike_min=4500.0,
+                strike_max=5500.0,
+            )
+            is not None
+        )
 
     def test_missing_date_returns_none(self, sp500_doc):
         pair = _materialize_chain_row(
@@ -331,7 +352,9 @@ class _StubCollection:
         cands = [d for d in self._docs if _matches(d, query)]
         if sort:
             field, direction = sort[0]
-            cands.sort(key=lambda d: _get_path(d, field) or 0, reverse=(direction == -1))
+            cands.sort(
+                key=lambda d: _get_path(d, field) or 0, reverse=(direction == -1)
+            )
         return cands[0] if cands else None
 
 
@@ -382,12 +405,14 @@ class TestPeekLastTradeDate:
 
         docs = [
             {
-                "expiration": 20260428,  # live contract
-                "eodDatas": {"IVOLATILITY": [
-                    {"date": 20260101, "bid": 1, "ask": 2},
-                    {"date": 20260427, "bid": 1, "ask": 2},  # latest
-                    {"date": 20260315, "bid": 1, "ask": 2},
-                ]},
+                "expiration": _future_yyyymmdd,  # live contract (dynamic future date)
+                "eodDatas": {
+                    "IVOLATILITY": [
+                        {"date": 20260101, "bid": 1, "ask": 2},
+                        {"date": _future_bar_yyyymmdd, "bid": 1, "ask": 2},  # latest
+                        {"date": _future_bar2_yyyymmdd, "bid": 1, "ask": 2},
+                    ]
+                },
             },
             {
                 "expiration": 20231215,  # already-expired — must be ignored
@@ -395,7 +420,7 @@ class TestPeekLastTradeDate:
             },
         ]
         coll = _StubCollection(docs)
-        assert await _peek_last_trade_date(coll) == date(2026, 4, 27)
+        assert await _peek_last_trade_date(coll) == _future_bar
 
     @pytest.mark.asyncio
     async def test_scans_all_providers_on_live_doc(self):
@@ -407,15 +432,17 @@ class TestPeekLastTradeDate:
 
         docs = [
             {
-                "expiration": 20260428,
-                "eodDatas": {"DERIBIT": [
-                    {"date": 20260425, "bid": 1, "ask": 2},
-                    {"date": 20260427, "bid": 1, "ask": 2},
-                ]},
+                "expiration": _future_yyyymmdd,
+                "eodDatas": {
+                    "DERIBIT": [
+                        {"date": _future_bar2_yyyymmdd, "bid": 1, "ask": 2},
+                        {"date": _future_bar_yyyymmdd, "bid": 1, "ask": 2},
+                    ]
+                },
             },
         ]
         coll = _StubCollection(docs)
-        assert await _peek_last_trade_date(coll) == date(2026, 4, 27)
+        assert await _peek_last_trade_date(coll) == _future_bar
 
     @pytest.mark.asyncio
     async def test_no_live_contract_returns_none(self):
@@ -435,7 +462,7 @@ class TestPeekLastTradeDate:
     async def test_live_contract_without_eod_datas_returns_none(self):
         from tcg.data.options.reader import _peek_last_trade_date
 
-        coll = _StubCollection([{"expiration": 20260428}])  # no eodDatas
+        coll = _StubCollection([{"expiration": _future_yyyymmdd}])  # no eodDatas
         assert await _peek_last_trade_date(coll) is None
 
     @pytest.mark.asyncio
@@ -571,6 +598,7 @@ class _ChainCursorStub:
         async def _gen():
             for doc in self._docs:
                 yield doc
+
         return _gen()
 
 
@@ -582,9 +610,7 @@ class _ChainCollectionStub:
         self.find_calls: list[dict] = []
 
     def find(self, query, projection=None, **kwargs):
-        self.find_calls.append(
-            {"query": query, "projection": projection, **kwargs}
-        )
+        self.find_calls.append({"query": query, "projection": projection, **kwargs})
         return _ChainCursorStub(self._docs)
 
 
@@ -748,3 +774,111 @@ class TestQueryChainProjection:
             expiration_max=date(2024, 12, 31),
         )
         assert result_p == []
+
+
+# ---------------------------------------------------------------------------
+# query_chain_bulk — cursor safety cap (I-1 fix)
+# ---------------------------------------------------------------------------
+
+
+class _BulkCursorStub:
+    """Async cursor stub that captures ``to_list`` arguments."""
+
+    def __init__(self, docs):
+        self._docs = list(docs)
+        self.to_list_calls: list[dict] = []
+
+    def sort(self, *args, **kwargs):
+        return self
+
+    async def to_list(self, length=None):
+        self.to_list_calls.append({"length": length})
+        return self._docs
+
+
+class _BulkCollectionStub:
+    """Captures ``find`` arguments and yields a ``_BulkCursorStub``."""
+
+    def __init__(self, docs):
+        self._cursor = _BulkCursorStub(docs)
+        self.find_calls: list[dict] = []
+
+    def find(self, query, projection=None, **kwargs):
+        self.find_calls.append({"query": query, "projection": projection, **kwargs})
+        return self._cursor
+
+    @property
+    def cursor(self):
+        return self._cursor
+
+
+class _BulkDbStub:
+    def __init__(self, coll):
+        self._coll = coll
+
+    def __getitem__(self, name):
+        return self._coll
+
+
+class TestQueryChainBulkCursorCap:
+    """``query_chain_bulk`` must pass ``_BULK_CURSOR_MAX_DOCS`` as the
+    ``length`` argument to ``cursor.to_list()`` — never ``None``."""
+
+    @pytest.mark.asyncio
+    async def test_to_list_receives_max_docs_cap(self, sp500_doc):
+        from tcg.data.options.reader import (
+            MongoOptionsDataReader,
+            _BULK_CURSOR_MAX_DOCS,
+        )
+
+        coll = _BulkCollectionStub([sp500_doc])
+        reader = MongoOptionsDataReader.__new__(MongoOptionsDataReader)
+        reader._db = _BulkDbStub(coll)
+        reader._registry = None
+
+        await reader.query_chain_bulk(
+            root="OPT_SP_500",
+            dates=[date(2024, 3, 1)],
+            type="C",
+            expiration_min=date(2024, 1, 1),
+            expiration_max=date(2024, 12, 31),
+        )
+
+        assert len(coll.cursor.to_list_calls) == 1
+        call = coll.cursor.to_list_calls[0]
+        assert call["length"] == _BULK_CURSOR_MAX_DOCS, (
+            f"Expected to_list(length={_BULK_CURSOR_MAX_DOCS}), "
+            f"got to_list(length={call['length']})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cap_hit_logs_warning(self, sp500_doc, caplog):
+        """When ``len(docs) == _BULK_CURSOR_MAX_DOCS``, a warning is logged."""
+        import logging
+
+        from tcg.data.options.reader import (
+            MongoOptionsDataReader,
+            _BULK_CURSOR_MAX_DOCS,
+        )
+
+        # Create a stub that returns exactly _BULK_CURSOR_MAX_DOCS docs.
+        # The docs don't need to be valid — we just need len(docs) to hit
+        # the cap. The materialization will silently skip invalid docs.
+        fake_docs = [{}] * _BULK_CURSOR_MAX_DOCS
+        coll = _BulkCollectionStub(fake_docs)
+        reader = MongoOptionsDataReader.__new__(MongoOptionsDataReader)
+        reader._db = _BulkDbStub(coll)
+        reader._registry = None
+
+        with caplog.at_level(logging.WARNING, logger="tcg.data.options.reader"):
+            await reader.query_chain_bulk(
+                root="OPT_SP_500",
+                dates=[date(2024, 3, 1)],
+                type="C",
+                expiration_min=date(2024, 1, 1),
+                expiration_max=date(2024, 12, 31),
+            )
+
+        assert any("safety cap" in record.message for record in caplog.records), (
+            "Expected a warning about hitting the safety cap"
+        )

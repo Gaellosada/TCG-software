@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 
 # Friendly display names for OPT_* roots. Anything not listed falls back
 # to a generated title from the collection name.
+# Safety cap for ``query_chain_bulk``'s ``cursor.to_list()``.  The query
+# already filters by expiration range, type, strike bounds, and cycle —
+# a typical result set is ~20K docs (250 dates × 20 contracts × 4
+# expirations).  50K gives 2.5× headroom without risking unbounded
+# memory spikes on pathological queries against large collections.
+_BULK_CURSOR_MAX_DOCS = 50_000
+
+
 _ROOT_DISPLAY_NAMES: dict[str, str] = {
     "OPT_SP_500": "SP 500",
     "OPT_NASDAQ_100": "NASDAQ 100",
@@ -270,7 +278,15 @@ class MongoOptionsDataReader:
             # connection per batch, blocking parallelism).  to_list
             # releases the connection as soon as the server finishes,
             # letting concurrent bulk queries overlap properly.
-            docs = await cursor.to_list(length=None)
+            docs = await cursor.to_list(length=_BULK_CURSOR_MAX_DOCS)
+            if len(docs) == _BULK_CURSOR_MAX_DOCS:
+                logger.warning(
+                    "query_chain_bulk on '%s' hit the %d-doc safety cap; "
+                    "results may be incomplete — consider narrowing the "
+                    "expiration or strike window",
+                    root,
+                    _BULK_CURSOR_MAX_DOCS,
+                )
             for doc in docs:
                 triples = _materialize_chain_rows_bulk(
                     doc=doc,

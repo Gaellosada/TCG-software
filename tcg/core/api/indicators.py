@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
+from tcg.core.api._models_options import GREEKS_GATED_STREAMS
 from tcg.core.api._models import (
     ContinuousInstrumentRef,
     OptionStreamRef,
@@ -33,7 +34,14 @@ from tcg.core.api._models import (
 )
 from tcg.core.api._options_wiring import build_stream_resolver_wiring
 from tcg.core.api._serializers import nan_safe_floats
-from tcg.core.api.common import error_response, get_market_data
+from tcg.core.api.common import (
+    error_response,
+    get_market_data,
+    progress_clear,
+    progress_register,
+    progress_snapshot,
+    progress_tick,
+)
 from tcg.core.api.options import (
     _criterion_pydantic_to_dataclass,
     _maturity_pydantic_to_dataclass,
@@ -86,41 +94,6 @@ class IndicatorComputeRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Progress tracking — used by the option_stream materialiser to expose
-# per-date completion to the frontend via GET /api/indicators/progress.
-# Module-level dict keyed by task_id. Each entry is removed when the
-# compute completes (success or error) so the dict cannot grow without
-# bound during normal operation. Concurrent computes carry distinct ids
-# generated client-side.
-# ---------------------------------------------------------------------------
-
-_PROGRESS_STATE: dict[str, dict[str, int]] = {}
-
-
-def _progress_register(task_id: str, total: int) -> None:
-    """Initialise a progress entry. Overwrites any prior entry with the
-    same key (a stale carry-over from an aborted compute is the most
-    likely cause; the new compute's total takes precedence)."""
-    _PROGRESS_STATE[task_id] = {"done": 0, "total": max(int(total), 0)}
-
-
-def _progress_tick(task_id: str) -> None:
-    """Increment the done counter. No-op when the entry was already
-    removed (e.g. the compute finished and cleaned up while a stray
-    callback was still in flight — defensive)."""
-    entry = _PROGRESS_STATE.get(task_id)
-    if entry is not None:
-        entry["done"] += 1
-
-
-def _progress_clear(task_id: str) -> None:
-    """Remove the entry. Idempotent — safe to call in a finally block
-    even when registration was skipped (e.g. when no option_stream was
-    in the request)."""
-    _PROGRESS_STATE.pop(task_id, None)
-
-
-# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -138,16 +111,11 @@ async def get_compute_progress(task_id: str) -> dict:
     Response shape is intentionally permissive (no 404 on missing task)
     so the FE can poll without race conditions: a poll that fires
     *before* the route handler registers the entry simply sees zeros.
+
+    Delegates to ``common.progress_snapshot`` (shared state with
+    options router).
     """
-    entry = _PROGRESS_STATE.get(task_id)
-    if entry is None:
-        return {"done": 0, "total": 0, "fraction": 0.0}
-    done = entry["done"]
-    total = entry["total"]
-    fraction = (done / total) if total > 0 else 0.0
-    if fraction > 1.0:
-        fraction = 1.0
-    return {"done": done, "total": total, "fraction": fraction}
+    return progress_snapshot(task_id)
 
 
 def _incompatible_asset_response(
@@ -183,12 +151,9 @@ def _incompatible_asset_response(
     return JSONResponse(status_code=422, content=content)
 
 
-# Greek streams that require the root's provider to surface stored
-# greeks.  ``iv`` and ``delta`` are also greek-derived but every
-# Phase-1 root with options data has them — the brief lists only
-# gamma/vega/theta as gated by ``has_greeks``.  Centralised so a
-# future stream addition touches one place.
-_GREEKS_GATED_STREAMS: frozenset[str] = frozenset({"gamma", "vega", "theta"})
+# GREEKS_GATED_STREAMS is imported from _models_options (shared with
+# options.py).  Local alias keeps call sites short + unchanged.
+_GREEKS_GATED_STREAMS = GREEKS_GATED_STREAMS
 
 
 def _tautological_option_stream_response(
@@ -421,9 +386,9 @@ async def compute_indicator(
         )
         if total > 0:
             progress_task_id = body.task_id
-            _progress_register(progress_task_id, total)
-            progress_callback = lambda tid=progress_task_id: _progress_tick(tid)
-            background_tasks.add_task(_progress_clear, progress_task_id)
+            progress_register(progress_task_id, total)
+            progress_callback = lambda tid=progress_task_id: progress_tick(tid)
+            background_tasks.add_task(progress_clear, progress_task_id)
 
     # Param validation (pydantic accepts int/float/bool; we still guard NaN
     # for the numeric path and forward bools unchanged).
@@ -655,3 +620,9 @@ async def compute_indicator(
         "series": series_response,
         "indicator": indicator_list,
     }
+
+
+# Backward-compatible aliases — tests import these names from indicators.py.
+_progress_register = progress_register
+_progress_tick = progress_tick
+_progress_clear = progress_clear

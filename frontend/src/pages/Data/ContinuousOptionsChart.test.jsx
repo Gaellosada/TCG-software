@@ -55,8 +55,8 @@ vi.mock('../../components/OptionDateRangeControl', () => {
 // Mock getOptionRoots and resolveOptionStream.
 const mockRoots = {
   roots: [
-    { collection: 'OPT_SP_500', root_label: 'S&P 500', has_greeks: true },
-    { collection: 'OPT_AAPL', root_label: 'Apple', has_greeks: false },
+    { collection: 'OPT_SP_500', root_label: 'S&P 500', has_greeks: true, last_trade_date: '2025-03-21' },
+    { collection: 'OPT_AAPL', root_label: 'Apple', has_greeks: false, last_trade_date: '2025-03-20' },
   ],
 };
 
@@ -293,5 +293,34 @@ describe('ContinuousOptionsChart — button states', () => {
     await act(async () => {
       resolvePromise(mockResolveResult);
     });
+  });
+});
+
+describe('ContinuousOptionsChart — anchorEnd prop', () => {
+  it('passes the selected root last_trade_date as anchorEnd to OptionDateRangeControl', async () => {
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+
+    await waitFor(() => {
+      expect(capturedDateRangeProps).not.toBeNull();
+    });
+
+    // The selected root is OPT_SP_500 which has last_trade_date '2025-03-21'
+    expect(capturedDateRangeProps.anchorEnd).toBe('2025-03-21');
+  });
+
+  it('passes undefined as anchorEnd when root has no last_trade_date', async () => {
+    mockGetOptionRoots.mockResolvedValueOnce({
+      roots: [
+        { collection: 'OPT_SP_500', root_label: 'S&P 500', has_greeks: true },
+      ],
+    });
+
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+
+    await waitFor(() => {
+      expect(capturedDateRangeProps).not.toBeNull();
+    });
+
+    expect(capturedDateRangeProps.anchorEnd).toBeUndefined();
   });
 });

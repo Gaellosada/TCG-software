@@ -36,6 +36,7 @@ class ComputeResult(BaseModel):
     source="computed" → model and inputs_used non-null
     source="missing"  → value=None, error_code non-null, missing_inputs non-null
     """
+
     model_config = ConfigDict(frozen=True)
 
     value: float | None
@@ -54,6 +55,7 @@ class ComputeResult(BaseModel):
 
 class OptionContractDoc(BaseModel):
     """Static metadata of one option contract."""
+
     model_config = ConfigDict(frozen=True)
 
     collection: str
@@ -73,6 +75,7 @@ class OptionContractDoc(BaseModel):
 
 class OptionDailyRow(BaseModel):
     """One trading day for one contract — quote + stored greeks."""
+
     model_config = ConfigDict(frozen=True)
 
     date: date
@@ -97,6 +100,7 @@ class OptionDailyRow(BaseModel):
 
 class OptionContractSeries(BaseModel):
     """A contract with its full time-series of daily rows."""
+
     model_config = ConfigDict(frozen=True)
 
     contract: OptionContractDoc
@@ -105,6 +109,7 @@ class OptionContractSeries(BaseModel):
 
 class OptionRootInfo(BaseModel):
     """Per-root metadata returned by /api/options/roots."""
+
     model_config = ConfigDict(frozen=True)
 
     collection: str
@@ -125,6 +130,7 @@ class OptionRootInfo(BaseModel):
 
 class ComputedGreeks(BaseModel):
     """Set of five computed/stored greeks for one contract-row."""
+
     model_config = ConfigDict(frozen=True)
 
     iv: ComputeResult
@@ -148,6 +154,7 @@ class ByDelta(BaseModel):
     ``target_delta`` for clarity at the call sites; ``populate_by_name``
     keeps both wire and BE construction paths working.
     """
+
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     kind: Literal["by_delta"] = "by_delta"
@@ -162,6 +169,7 @@ class ByMoneyness(BaseModel):
     Wire alias (Sign 12): FE form emits ``target``; canonical attribute
     name is ``target_K_over_S`` for clarity.
     """
+
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     kind: Literal["by_moneyness"] = "by_moneyness"
@@ -171,6 +179,7 @@ class ByMoneyness(BaseModel):
 
 class ByStrike(BaseModel):
     """Select by exact strike value."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["by_strike"] = "by_strike"
@@ -185,6 +194,7 @@ SelectionCriterion = Annotated[
 
 class SelectionResult(BaseModel):
     """Outcome of a Module 3 selection call."""
+
     model_config = ConfigDict(frozen=True)
 
     contract: OptionContractDoc | None
@@ -200,6 +210,7 @@ class SelectionResult(BaseModel):
 
 class NextThirdFriday(BaseModel):
     """Roll to the third Friday of the offset month."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["next_third_friday"] = "next_third_friday"
@@ -208,6 +219,7 @@ class NextThirdFriday(BaseModel):
 
 class EndOfMonth(BaseModel):
     """Roll to the last business day of the offset month."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["end_of_month"] = "end_of_month"
@@ -216,6 +228,7 @@ class EndOfMonth(BaseModel):
 
 class PlusNDays(BaseModel):
     """Roll to ref_date + n calendar days."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["plus_n_days"] = "plus_n_days"
@@ -224,6 +237,7 @@ class PlusNDays(BaseModel):
 
 class FixedDate(BaseModel):
     """Use a fixed absolute date as the target expiration."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["fixed"] = "fixed"
@@ -237,6 +251,7 @@ class NearestToTarget(BaseModel):
     attribute name is ``target_dte_days`` (matches the dataclass twin in
     ``tcg.types.options``).
     """
+
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     kind: Literal["nearest_to_target"] = "nearest_to_target"
@@ -258,6 +273,7 @@ MaturitySpec = MaturityRule
 
 class AtExpiry(BaseModel):
     """Roll into a new contract when the held contract expires."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["at_expiry"] = "at_expiry"
@@ -265,6 +281,7 @@ class AtExpiry(BaseModel):
 
 class NDaysBeforeExpiry(BaseModel):
     """Roll n calendar days before expiry (Phase 2 only)."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["n_days_before_expiry"] = "n_days_before_expiry"
@@ -273,6 +290,7 @@ class NDaysBeforeExpiry(BaseModel):
 
 class DeltaCross(BaseModel):
     """Roll when |delta| crosses a threshold (Phase 2 only)."""
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["delta_cross"] = "delta_cross"
@@ -287,6 +305,7 @@ RollRule = Annotated[
 
 class RollResult(BaseModel):
     """Outcome of a Module 5 roll evaluation."""
+
     model_config = ConfigDict(frozen=True)
 
     new_contract: OptionContractDoc | None
@@ -302,6 +321,7 @@ class RollResult(BaseModel):
 
 class ChainRow(BaseModel):
     """One row in the chain table for a given date."""
+
     model_config = ConfigDict(frozen=True)
 
     contract_id: str
@@ -323,6 +343,7 @@ class ChainRow(BaseModel):
 
 class ChainSnapshot(BaseModel):
     """Full chain for a (root, date) pair (Module 6 output)."""
+
     model_config = ConfigDict(frozen=True)
 
     root: str
@@ -339,6 +360,7 @@ class ChainSnapshot(BaseModel):
 
 class PnLPoint(BaseModel):
     """Daily mark and cumulative P&L for one contract on one date."""
+
     model_config = ConfigDict(frozen=True)
 
     date: date
@@ -349,6 +371,7 @@ class PnLPoint(BaseModel):
 
 class PnLSeries(BaseModel):
     """Full P&L replay for a held contract."""
+
     model_config = ConfigDict(frozen=True)
 
     contract: OptionContractDoc
@@ -374,6 +397,7 @@ class ContractRowWithGreeks(BaseModel):
     wrappers are present. This is intentionally self-documenting:
     callers can see both the raw stored value and its provenance wrapper.
     """
+
     model_config = ConfigDict(frozen=True)
 
     # Quote fields (from OptionDailyRow)
@@ -411,6 +435,7 @@ class ContractRowWithGreeks(BaseModel):
 
 class ListRootsRequest(BaseModel):
     """Request model for GET /api/options/roots (no parameters)."""
+
     pass
 
 
@@ -440,6 +465,7 @@ class ChainQuery(BaseModel):
     cycles); the chain-table cycle chip already disambiguates rows
     visually when the filter is off.
     """
+
     root: str
     date: date
     type: Literal["C", "P", "both"] = "both"
@@ -458,6 +484,7 @@ class ChainQuery(BaseModel):
 
 class ContractQuery(BaseModel):
     """Request model for GET /api/options/contract/{coll}/{id}."""
+
     collection: str
     contract_id: str
     compute_missing: bool = False
@@ -467,6 +494,7 @@ class ContractQuery(BaseModel):
 
 class SelectQuery(BaseModel):
     """Request model for GET /api/options/select."""
+
     root: str
     date: date
     type: Literal["C", "P"]
@@ -485,6 +513,7 @@ class ChainSnapshotQuery(BaseModel):
     contract cycle — e.g. SPX monthlies only — so the frontend can show
     a single trace per strike on roots that have multi-cycle overlap.
     """
+
     root: str
     date: date
     type: Literal["C", "P"] = "C"
@@ -520,6 +549,7 @@ class ChainSnapshotQuery(BaseModel):
 
 class ListRootsResponse(BaseModel):
     """Response for GET /api/options/roots."""
+
     roots: list[OptionRootInfo]
 
 
@@ -531,6 +561,7 @@ class ChainResponse(BaseModel):
     (Module 6) keeps it as ``float | None`` per Decision B; the router wraps
     it to ComputeResult before populating this model.
     """
+
     root: str
     date: date
     underlying_price: ComputeResult
@@ -540,12 +571,14 @@ class ChainResponse(BaseModel):
 
 class ContractResponse(BaseModel):
     """Response for GET /api/options/contract/{coll}/{id}."""
+
     contract: OptionContractDoc
     rows: list[ContractRowWithGreeks]
 
 
 class SelectResponse(BaseModel):
     """Response for GET /api/options/select."""
+
     contract: OptionContractDoc | None
     matched_value: float | None
     error_code: str | None
@@ -554,9 +587,10 @@ class SelectResponse(BaseModel):
 
 class SmilePoint(BaseModel):
     """One (strike, value) point in a smile curve."""
+
     strike: float
     K_over_S: float | None
-    value: ComputeResult   # the IV or delta at this strike
+    value: ComputeResult  # the IV or delta at this strike
     # Carried so the frontend can collapse multi-cycle overlap on roots
     # like OPT_SP_500 (SPX-monthly vs SPXW-weekly sharing the same
     # expiration calendar date) into a single trace per strike.
@@ -565,13 +599,27 @@ class SmilePoint(BaseModel):
 
 class SmileSeries(BaseModel):
     """One expiration's smile curve."""
+
     expiration: date
     points: list[SmilePoint]
 
 
 class ChainSnapshotResponse(BaseModel):
     """Response for GET /api/options/chain-snapshot."""
+
     root: str
     date: date
     underlying_price: ComputeResult
     series: list[SmileSeries]
+
+
+# ---------------------------------------------------------------------------
+# Shared constants
+# ---------------------------------------------------------------------------
+
+# Greek streams that require the root's provider to surface stored
+# greeks.  ``iv`` and ``delta`` are also greek-derived but every
+# Phase-1 root with options data has them — the brief lists only
+# gamma/vega/theta as gated by ``has_greeks``.  Centralised here so
+# both ``options.py`` and ``indicators.py`` share one definition.
+GREEKS_GATED_STREAMS: frozenset[str] = frozenset({"gamma", "vega", "theta"})

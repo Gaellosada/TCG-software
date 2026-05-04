@@ -178,6 +178,11 @@ function IndicatorsPage() {
   // lookback. Persisted in localStorage via a separate key so it survives
   // across sessions without bumping the indicators schema version.
   const [optionDateRange, setOptionDateRange] = useState(loadOptionDateRange);
+  // anchorEnd for the OptionDateRangeControl preset buttons: the earliest
+  // last_trade_date across all option_stream collections in the selected
+  // indicator's seriesMap. Derived asynchronously from getOptionRootsCached().
+  // null means "use today" (safe fallback — roots not loaded yet or no option_stream).
+  const [optionAnchorEnd, setOptionAnchorEnd] = useState(null);
   const handleOptionDateRangeChange = useCallback((newRange) => {
     setOptionDateRange(newRange);
     saveOptionDateRange(newRange);
@@ -598,6 +603,45 @@ function IndicatorsPage() {
     return () => abortRun();
   }, [selectedId, abortRun]);
 
+  // Stable string key for the option_stream collections in the selected
+  // indicator — avoids re-running the anchorEnd effect on every render
+  // (selectedIndicator?.seriesMap is an unstable object reference).
+  const optionStreamCollsKey = useMemo(() => {
+    const sm = selectedIndicator?.seriesMap;
+    if (!sm) return '';
+    return Object.values(sm)
+      .filter((ref) => ref?.type === 'option_stream' && ref?.collection)
+      .map((ref) => ref.collection)
+      .sort()
+      .join(',');
+  }, [selectedIndicator]);
+
+  // Derive anchorEnd for the OptionDateRangeControl: the earliest
+  // last_trade_date across the option_stream collections referenced in the
+  // selected indicator's seriesMap. Uses the same cached roots as
+  // resolveOptionDateRange so no extra network round-trip.
+  useEffect(() => {
+    if (!optionStreamCollsKey) {
+      setOptionAnchorEnd(null);
+      return;
+    }
+    let cancelled = false;
+    const collections = optionStreamCollsKey.split(',');
+    getOptionRootsCached().then((roots) => {
+      if (cancelled) return;
+      let earliest = null;
+      for (const coll of collections) {
+        const root = roots.find((r) => r.collection === coll);
+        const ltd = root?.last_trade_date ?? null;
+        if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
+      }
+      setOptionAnchorEnd(earliest || null);
+    }).catch(() => {
+      if (!cancelled) setOptionAnchorEnd(null);
+    });
+    return () => { cancelled = true; };
+  }, [optionStreamCollsKey]);
+
   const seriesLabels = parsedSpec.seriesLabels;
   const allSlotsFilled = areAllSlotsFilled(selectedIndicator, seriesLabels);
 
@@ -732,6 +776,7 @@ function IndicatorsPage() {
           showDateRange={showDateRange}
           optionDateRange={optionDateRange}
           onOptionDateRangeChange={handleOptionDateRangeChange}
+          optionAnchorEnd={optionAnchorEnd}
         />
       </div>
       <div className={styles.chartPanel}>

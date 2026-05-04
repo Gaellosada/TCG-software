@@ -35,6 +35,7 @@ from tcg.data._mongo.instruments import MongoInstrumentReader
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data._rolling import ContinuousSeriesBuilder
 from tcg.data._utils import date_to_int, filter_date_range
+from tcg.data.options.protocol import OptionsDataReader
 from tcg.data.options.reader import MongoOptionsDataReader
 
 
@@ -281,6 +282,11 @@ class DefaultMarketDataService:
         return common_dates, aligned
 
     # --- Options (Phase 1B Module 1) ---
+
+    @property
+    def options_reader(self) -> OptionsDataReader:
+        """Return the underlying options data reader."""
+        return self._options
 
     async def get_option_contract(
         self,

@@ -57,6 +57,14 @@ function ContinuousOptionsChart({ collection }) {
     return { ...range, preset: DEFAULT_PRESET };
   });
 
+  // Derive anchorEnd from the selected root's last_trade_date so preset
+  // buttons anchor to actual data coverage rather than today.
+  const anchorEnd = useMemo(() => {
+    if (!streamRef || !streamRef.collection) return undefined;
+    const root = availableRoots.find((r) => r.collection === streamRef.collection);
+    return root?.last_trade_date || undefined;
+  }, [streamRef, availableRoots]);
+
   // ── Resolution state ──
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -191,6 +199,7 @@ function ContinuousOptionsChart({ collection }) {
           value={dateRange}
           onChange={setDateRange}
           disabled={loading}
+          anchorEnd={anchorEnd}
         />
         <button
           type="button"

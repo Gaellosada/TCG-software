@@ -197,4 +197,50 @@ describe('<OptionDateRangeControl>', () => {
     expect(screen.getByLabelText('Start date').value).toBe('2025-01-01');
     expect(screen.getByLabelText('End date').value).toBe('2025-07-01');
   });
+
+  it('clicking a preset with anchorEnd anchors to the provided date, not today', () => {
+    // System time is July 1 2025, but anchorEnd overrides to Dec 31 2024.
+    render(
+      <OptionDateRangeControl
+        value={baseValue}
+        onChange={onChange}
+        anchorEnd="2024-12-31"
+      />,
+    );
+    fireEvent.click(screen.getByText('6M'));
+    expect(onChange).toHaveBeenCalledOnce();
+    const arg = onChange.mock.calls[0][0];
+    expect(arg.preset).toBe('6m');
+    // end anchored to anchorEnd, not today (2025-07-01)
+    expect(arg.end).toBe('2024-12-31');
+    expect(arg.start).toBe('2024-06-30');
+  });
+
+  it('without anchorEnd, clicking a preset uses today as anchor', () => {
+    // System time set to July 1 2025 in beforeEach.
+    render(<OptionDateRangeControl value={baseValue} onChange={onChange} />);
+    fireEvent.click(screen.getByText('6M'));
+    expect(onChange).toHaveBeenCalledOnce();
+    const arg = onChange.mock.calls[0][0];
+    expect(arg.end).toBe('2025-07-01'); // today
+    expect(arg.start).toBe('2025-01-01');
+  });
+
+  it('anchorEnd prop does not affect manual date input changes', () => {
+    render(
+      <OptionDateRangeControl
+        value={baseValue}
+        onChange={onChange}
+        anchorEnd="2024-12-31"
+      />,
+    );
+    const startInput = screen.getByLabelText('Start date');
+    fireEvent.change(startInput, { target: { value: '2024-03-01' } });
+    // Manual change still sets preset=null and uses the typed value
+    expect(onChange).toHaveBeenCalledWith({
+      start: '2024-03-01',
+      end: '2025-07-01',
+      preset: null,
+    });
+  });
 });

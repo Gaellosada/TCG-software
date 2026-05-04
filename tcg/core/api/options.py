@@ -22,6 +22,7 @@ Spec reference: §5 (API surface).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from datetime import date
@@ -32,6 +33,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from tcg.core.api._models_options import (
+    GREEKS_GATED_STREAMS,
     ChainResponse,
     ChainSnapshotQuery,
     ChainSnapshotResponse,
@@ -51,7 +53,15 @@ from tcg.core.api._options_wiring import (
     build_options_selector,
 )
 from tcg.core.api._serializers import nan_safe_floats
-from tcg.core.api.common import error_response, get_market_data
+from tcg.core.api.common import (
+    error_response,
+    get_market_data,
+    progress_clear,
+    progress_register,
+    progress_snapshot,
+    progress_tick,
+)
+from tcg.data._utils import int_to_date
 from tcg.data.protocols import MarketDataService
 from tcg.types.errors import (
     OptionsContractNotFound,
@@ -341,6 +351,92 @@ async def get_chain(
 
 
 # ---------------------------------------------------------------------------
+# Batch underlying-price helper (used by get_contract)
+# ---------------------------------------------------------------------------
+
+
+async def _batch_underlying_prices(
+    *,
+    contract: OptionContractDoc,
+    rows: tuple[OptionDailyRow, ...] | list[OptionDailyRow],
+    date_from: date | None,
+    date_to: date | None,
+    svc: MarketDataService,
+) -> dict[date, float | None]:
+    """Pre-fetch underlying prices for the entire date range in ONE
+    Mongo round-trip.
+
+    Returns a ``dict[date, float | None]`` mapping each trading date to
+    the underlying close.  BTC contracts store the underlying on the row
+    itself (``underlying_price_stored``), so this function returns an
+    empty dict for BTC — callers fall through to the row-level field.
+
+    For VIX roots the INDEX collection's ``IND_VIX`` document is
+    fetched; for option-on-future roots the FUT_* document referenced
+    by ``contract.underlying_ref`` is fetched.
+    """
+    from tcg.engine.options.chain._join import (
+        _futures_collection_for,
+        _is_btc,
+        _is_vix,
+    )
+
+    # BTC: underlying price lives on the row — no Mongo call.
+    if _is_btc(contract):
+        return {}
+
+    # Determine the date window we actually need.
+    visible_dates = [
+        r.date
+        for r in rows
+        if (date_from is None or r.date >= date_from)
+        and (date_to is None or r.date <= date_to)
+    ]
+    if not visible_dates:
+        return {}
+
+    min_date = min(visible_dates)
+    max_date = max(visible_dates)
+
+    # Decide collection + instrument id for the single bulk fetch.
+    if _is_vix(contract):
+        collection, instrument_id = "INDEX", "IND_VIX"
+    elif contract.underlying_ref is not None:
+        fut_collection = _futures_collection_for(contract.collection)
+        if fut_collection is None:
+            return {}
+        collection, instrument_id = fut_collection, contract.underlying_ref
+    else:
+        # No underlying ref and not BTC/VIX — cannot join.
+        return {}
+
+    try:
+        price_series = await svc.get_prices(
+            collection,
+            instrument_id,
+            start=min_date,
+            end=max_date,
+        )
+    except Exception:  # noqa: BLE001
+        # Same policy as the per-row adapters: any data failure → treat
+        # as join-not-possible; the pricer will surface missing Greeks.
+        return {}
+
+    if price_series is None or len(price_series) == 0:
+        return {}
+
+    # Build date → close lookup from the PriceSeries.
+    lookup: dict[date, float | None] = {}
+    for idx, d_int in enumerate(price_series.dates.tolist()):
+        d_int = int(d_int)
+        try:
+            lookup[int_to_date(d_int)] = float(price_series.close[idx])
+        except ValueError:
+            continue
+    return lookup
+
+
+# ---------------------------------------------------------------------------
 # Endpoint 3 — GET /api/options/contract/{coll}/{id}
 # ---------------------------------------------------------------------------
 
@@ -380,18 +476,20 @@ async def get_contract(
         validated.collection, validated.contract_id
     )
 
-    # Reuse Module 6's _join.resolve_underlying_price per row.  We
-    # construct the ports by hand here (same wiring as
-    # ``build_options_chain`` minus the chain object itself).
-    from tcg.core.api._options_wiring import (
-        _FuturesDataPortAdapter,
-        _IndexDataPortAdapter,
-    )
-    from tcg.engine.options.chain._join import resolve_underlying_price
-
-    index_port = _IndexDataPortAdapter(svc)
-    futures_port = _FuturesDataPortAdapter(svc)
     pricer = build_options_pricer() if validated.compute_missing else None
+
+    # Pre-fetch underlying prices for the entire date range in ONE Mongo
+    # round-trip instead of N sequential calls (was N+1 for non-BTC roots).
+    # BTC uses row.underlying_price_stored (no Mongo hit).
+    underlying_lookup: dict[date, float | None] = {}
+    if pricer is not None:
+        underlying_lookup = await _batch_underlying_prices(
+            contract=series.contract,
+            rows=series.rows,
+            date_from=validated.date_from,
+            date_to=validated.date_to,
+            svc=svc,
+        )
 
     rows_payload: list[dict[str, Any]] = []
     for row in series.rows:
@@ -402,13 +500,11 @@ async def get_contract(
 
         underlying_price: float | None = None
         if pricer is not None:
-            underlying_price = await resolve_underlying_price(
-                contract=series.contract,
-                row=row,
-                target_date=row.date,
-                index_port=index_port,
-                futures_port=futures_port,
-            )
+            # BTC: underlying price lives on the row itself.
+            if row.underlying_price_stored is not None:
+                underlying_price = row.underlying_price_stored
+            else:
+                underlying_price = underlying_lookup.get(row.date)
 
         rows_payload.append(
             _build_contract_row_with_greeks(
@@ -608,19 +704,29 @@ async def get_chain_snapshot(
 
     chain = build_options_chain(svc)
 
+    # Fetch all expiration snapshots concurrently (capped to avoid
+    # overwhelming Mongo with too many parallel queries).
+    _SNAPSHOT_CONCURRENCY = 8
+    sem = asyncio.Semaphore(_SNAPSHOT_CONCURRENCY)
+
+    async def _fetch_one(exp: date) -> ChainSnapshot:
+        async with sem:
+            return await chain.snapshot(
+                root=query.root,
+                date=query.date,
+                type=query.type,
+                expiration_min=exp,
+                expiration_max=exp,
+                compute_missing=False,
+                expiration_cycle=query.expiration_cycle,
+            )
+
+    snapshots = await asyncio.gather(*[_fetch_one(exp) for exp in query.expirations])
+
     series_payload: list[dict[str, Any]] = []
     underlying_value: float | None = None
 
-    for expiration in query.expirations:
-        snapshot = await chain.snapshot(
-            root=query.root,
-            date=query.date,
-            type=query.type,
-            expiration_min=expiration,
-            expiration_max=expiration,
-            compute_missing=False,
-            expiration_cycle=query.expiration_cycle,
-        )
+    for expiration, snapshot in zip(query.expirations, snapshots):
         # underlying_price is the same across expirations (same root +
         # date); take the first non-None we observe.
         if underlying_value is None and snapshot.underlying_price is not None:
@@ -678,32 +784,9 @@ class OptionStreamRequest(BaseModel):
     task_id: str | None = None
 
 
-# Reuse the greeks-gated / tautology checks from indicators.py — these
-# constants and helpers are co-located with the compute route but the
-# invariants are the same.  Import inline to avoid a circular import
-# (options.py is imported by indicators.py for the converter helpers).
-
-_GREEKS_GATED_STREAMS: frozenset[str] = frozenset({"gamma", "vega", "theta"})
-
-
-# Module-level progress state shared with indicators.py — option stream
-# endpoint uses its own key space (task_id comes from the FE) so there
-# is no collision.
-_STREAM_PROGRESS: dict[str, dict[str, int]] = {}
-
-
-def _stream_progress_register(task_id: str, total: int) -> None:
-    _STREAM_PROGRESS[task_id] = {"done": 0, "total": max(int(total), 0)}
-
-
-def _stream_progress_tick(task_id: str) -> None:
-    entry = _STREAM_PROGRESS.get(task_id)
-    if entry is not None:
-        entry["done"] += 1
-
-
-def _stream_progress_clear(task_id: str) -> None:
-    _STREAM_PROGRESS.pop(task_id, None)
+# GREEKS_GATED_STREAMS is imported from _models_options (shared with
+# indicators.py).  Local alias keeps call sites short + unchanged.
+_GREEKS_GATED_STREAMS = GREEKS_GATED_STREAMS
 
 
 @router.get("/stream/progress/{task_id}")
@@ -711,17 +794,10 @@ async def get_stream_progress(task_id: str) -> dict:
     """Read progress for a running ``/api/options/stream`` request.
 
     Same shape as ``/api/indicators/progress/{task_id}`` — the frontend
-    can poll this while waiting for the POST response.
+    can poll this while waiting for the POST response.  Delegates to
+    ``common.progress_snapshot`` (shared state with indicators router).
     """
-    entry = _STREAM_PROGRESS.get(task_id)
-    if entry is None:
-        return {"done": 0, "total": 0, "fraction": 0.0}
-    done = entry["done"]
-    total = entry["total"]
-    fraction = (done / total) if total > 0 else 0.0
-    if fraction > 1.0:
-        fraction = 1.0
-    return {"done": done, "total": total, "fraction": fraction}
+    return progress_snapshot(task_id)
 
 
 @router.post("/stream", response_model=None)
@@ -795,9 +871,9 @@ async def materialise_streams(
         total = len(trade_dates) * len(body.streams) if trade_dates else 0
         if total > 0:
             progress_task_id = body.task_id
-            _stream_progress_register(progress_task_id, total)
-            progress_callback = lambda tid=progress_task_id: _stream_progress_tick(tid)
-            background_tasks.add_task(_stream_progress_clear, progress_task_id)
+            progress_register(progress_task_id, total)
+            progress_callback = lambda tid=progress_task_id: progress_tick(tid)
+            background_tasks.add_task(progress_clear, progress_task_id)
 
     # ── 3. Materialise ──
 
@@ -834,6 +910,12 @@ async def materialise_streams(
 
 
 __all__ = ["router"]
+
+
+# Backward-compatible aliases — tests import these names from options.py.
+_stream_progress_register = progress_register
+_stream_progress_tick = progress_tick
+_stream_progress_clear = progress_clear
 
 
 # Suppress unused-import lint for the module-level helpers used only

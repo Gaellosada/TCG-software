@@ -24,7 +24,7 @@ Plus two API-level validation tests against the FastAPI router:
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal, Sequence
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1084,18 +1084,17 @@ async def test_bulk_path_nearest_to_target_with_available_expirations():
 
 
 async def test_bulk_available_expirations_boundary_filtering():
-    """available_expirations fast path filters out expirations before first_date.
+    """available_expirations fast path: exp_before is included in the
+    candidate set (lower_bound loosened by I-4 fix) but the maturity
+    resolver picks exp_after because it's closer to the target DTE.
 
-    Expirations strictly before ``first_date`` (the earliest queryable
-    date) are excluded by the ``first_date <= e <= far_future`` filter.
-    If the only suitable expiration would be excluded, the resolver
-    should select the next-best from those that remain.
-
-    Setup: two expirations — one before the first trade date (excluded
-    by the boundary filter) and one after (retained).  With
-    target_dte_days=10, the before-expiration would be closer to the
-    target if not filtered.  The test verifies the after-expiration
-    is selected instead, and that iv matches the chain keyed to it.
+    Setup: two expirations — one before the first trade date and one
+    after.  With target_dte_days=10 and first_date=2024-04-01:
+      exp_before (Mar 25): DTE = -7, |(-7) - 10| = 17
+      exp_after  (Apr 19): DTE = 18, |18 - 10| = 8
+    exp_after wins by proximity to target.  The test verifies the
+    after-expiration is selected and that iv matches the chain keyed
+    to it.
     """
     dates = [date(2024, 4, 1), date(2024, 4, 2)]
     # Expiration A: before first_date — filtered out by boundary.
@@ -1406,6 +1405,144 @@ async def test_bulk_no_underlying_resolver_no_strike_window():
     assert call["strike_max"] is None
 
 
+# ── Widened strike window tests (date-range-proportional margin) ──────
+
+
+async def test_bulk_by_delta_strike_window_1day_base_margin():
+    """1-day range (span=0 days): ByDelta uses the base 30% margin."""
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    spot = 4500.0
+    chain = [
+        (
+            _contract(strike=4500, expiration=expiration),
+            _row(row_date=d, iv=0.20, delta=0.50),
+        ),
+    ]
+    reader = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByDelta(target_delta=0.50, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(spot),
+        bulk_chain_reader=bulk_reader,
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+    call = bulk_reader.bulk_calls[0]
+    # span=0 → extra=0 → margin=0.30: spot * 0.70 .. spot * 1.30
+    assert call["strike_min"] == pytest.approx(spot * 0.70, rel=0.001)
+    assert call["strike_max"] == pytest.approx(spot * 1.30, rel=0.001)
+
+
+async def test_bulk_by_delta_strike_window_6month_wider_margin():
+    """6-month range (~183 days): ByDelta widens to ~37.5% margin.
+
+    extra = min(183/365 * 0.15, 0.30) ≈ 0.0752
+    margin = 0.30 + 0.0752 ≈ 0.3752
+
+    Uses NearestToTarget + available_expirations to force both dates
+    onto one expiration so there is exactly one bulk call to inspect.
+    """
+    first_d = date(2024, 1, 2)
+    last_d = date(2024, 7, 3)  # ~183 days later
+    span_days = (last_d - first_d).days
+    assert 180 <= span_days <= 185  # sanity check
+
+    expiration = date(2024, 8, 16)
+    spot = 4500.0
+    dates = [first_d, last_d]
+    chains_by_date = {
+        d: [
+            (
+                _contract(strike=4500, expiration=expiration),
+                _row(row_date=d, iv=0.20, delta=0.50),
+            ),
+        ]
+        for d in dates
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+    await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=180),
+        selection=ByDelta(target_delta=0.50, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(spot),
+        bulk_chain_reader=bulk_reader,
+        available_expirations=[expiration],
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+    call = bulk_reader.bulk_calls[0]
+    expected_extra = min(span_days / 365.0 * 0.15, 0.30)
+    expected_margin = 0.30 + expected_extra
+    assert call["strike_min"] == pytest.approx(spot * (1 - expected_margin), rel=0.001)
+    assert call["strike_max"] == pytest.approx(spot * (1 + expected_margin), rel=0.001)
+    # Margin should be ~37.5%, noticeably wider than the base 30%.
+    assert expected_margin > 0.37
+    assert expected_margin < 0.39
+
+
+async def test_bulk_by_delta_strike_window_2year_capped_margin():
+    """2-year range (730 days): ByDelta caps the extra at +30% → total 60%.
+
+    extra = min(730/365 * 0.15, 0.30) = min(0.30, 0.30) = 0.30
+    margin = 0.30 + 0.30 = 0.60
+
+    Uses NearestToTarget + available_expirations to force both dates
+    onto one expiration so there is exactly one bulk call to inspect.
+    """
+    first_d = date(2022, 3, 22)
+    last_d = date(2024, 3, 22)  # exactly 2 years (731 days with leap year)
+    span_days = (last_d - first_d).days
+    assert span_days >= 730  # 2 years
+
+    expiration = date(2024, 4, 19)
+    spot = 4500.0
+    dates = [first_d, last_d]
+    chains_by_date = {
+        d: [
+            (
+                _contract(strike=4500, expiration=expiration),
+                _row(row_date=d, iv=0.20, delta=0.50),
+            ),
+        ]
+        for d in dates
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+    await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=365),
+        selection=ByDelta(target_delta=0.50, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(spot),
+        bulk_chain_reader=bulk_reader,
+        available_expirations=[expiration],
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+    call = bulk_reader.bulk_calls[0]
+    # Capped: margin = 0.60
+    assert call["strike_min"] == pytest.approx(spot * 0.40, rel=0.001)
+    assert call["strike_max"] == pytest.approx(spot * 1.60, rel=0.001)
+
+
 # ── Phase B progress ticks test ───────────────────────────────────────
 
 
@@ -1457,3 +1594,119 @@ async def test_bulk_phase_b_ticks_per_expiration():
     )
     # 3 date ticks (Phase C) + 2 expiration ticks (Phase B: 2 unique expirations)
     assert ticks[0] == 5
+
+
+# ── NearestToTarget DTE lower-bound fix (I-4) ────────────────────────
+
+
+async def test_nearest_to_target_includes_expirations_before_first_date():
+    """NearestToTarget with small DTE: expirations slightly before first_date
+    must be included in the candidate set (I-4 fix).
+
+    first_date = Apr 8, target_dte_days = 5.  Two expirations:
+      exp_before = Apr 5 (3 days before first_date, DTE = -3,
+                          |(-3) - 5| = 8)
+      exp_far    = Apr 26 (DTE = 18, |18 - 5| = 13)
+
+    Old filter ``first_date <= exp`` would exclude exp_before.  The fix
+    loosens to ``lower_bound = first_date - max(target, 7) = Apr 1``,
+    so exp_before is included.  exp_before wins (|8| < |13|).
+    """
+    first_d = date(2024, 4, 8)
+    second_d = date(2024, 4, 9)
+    exp_before = date(2024, 4, 5)  # before first_date
+    exp_far = date(2024, 4, 26)
+
+    # Chain data keyed to exp_before (the closer-to-target expiration).
+    chains_by_date = {
+        d: [
+            (
+                _contract(strike=4500, expiration=exp_before),
+                _row(row_date=d, iv=0.15),
+            ),
+            (
+                _contract(strike=4500, expiration=exp_far),
+                _row(row_date=d, iv=0.30),
+            ),
+        ]
+        for d in [first_d, second_d]
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+
+    # Pre-fetched expirations — includes exp_before.
+    all_expirations = [exp_before, exp_far]
+
+    values, errors = await resolve_option_stream(
+        dates=[first_d, second_d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=5),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+        available_expirations=all_expirations,
+    )
+    # exp_before (iv=0.15) should be selected as it's closer to target DTE.
+    # If the old filter were still in place, exp_before would be excluded
+    # and exp_far (iv=0.30) would be selected instead.
+    assert all(e is None for e in errors), f"Unexpected errors: {errors}"
+    assert values[0] == pytest.approx(0.15), (
+        f"Expected exp_before (iv=0.15) to be selected; got {values[0]}"
+    )
+    assert values[1] == pytest.approx(0.15)
+    # Zero probe queries (fast path with available_expirations).
+    assert len(reader.calls) == 0
+
+
+async def test_nearest_to_target_fallback_probe_uses_loosened_lower_bound():
+    """NearestToTarget fallback probe query uses the loosened lower bound.
+
+    When ``available_expirations`` is None, the resolver falls back to a
+    probe ``query_chain`` call.  The fix loosens ``expiration_min`` from
+    ``first_date`` to ``first_date - max(target_dte_days, 7)``.  This
+    test verifies the probe query's ``expiration_min`` reflects the
+    loosened bound.
+    """
+    first_d = date(2024, 4, 8)
+    exp_far = date(2024, 4, 26)
+
+    chains_by_date = {
+        first_d: [
+            (
+                _contract(strike=4500, expiration=exp_far),
+                _row(row_date=first_d, iv=0.20),
+            ),
+        ],
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+
+    # No available_expirations → fallback probe query is used.
+    await resolve_option_stream(
+        dates=[first_d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=5),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+        available_expirations=None,  # force fallback probe
+    )
+    # The probe query should have used the loosened lower bound:
+    # lower_bound = first_d - timedelta(days=max(5, 7)) = Apr 8 - 7 = Apr 1
+    assert len(reader.calls) == 1, f"Expected 1 probe query, got {len(reader.calls)}"
+    probe_call = reader.calls[0]
+    expected_lower = first_d - timedelta(days=max(5, 7))
+    assert probe_call["expiration_min"] == expected_lower, (
+        f"Probe query expiration_min should be {expected_lower}, "
+        f"got {probe_call['expiration_min']}"
+    )

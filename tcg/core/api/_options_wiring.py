@@ -29,7 +29,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Awaitable, Callable, Literal, Sequence
 
-from tcg.data.options.reader import MongoOptionsDataReader
+from tcg.data._utils import date_to_int
+from tcg.data.options.protocol import OptionsDataReader
 from tcg.data.protocols import MarketDataService
 from tcg.engine.options.chain._join import resolve_underlying_price
 from tcg.engine.options.chain.chain import DefaultOptionsChain
@@ -46,16 +47,15 @@ from tcg.types.options import OptionContractDoc, OptionDailyRow
 
 
 class _OptionsDataPortAdapter:
-    """Wrap a ``MongoOptionsDataReader`` (or any object implementing
-    ``query_chain``) to satisfy the engine-side ``OptionsDataPort`` /
-    ``ChainReaderPort`` Protocols.
+    """Wrap an ``OptionsDataReader`` to satisfy the engine-side
+    ``OptionsDataPort`` / ``ChainReaderPort`` Protocols.
 
     The shape is identical; this class exists primarily so the wiring
     module references the engine-side contract explicitly and so we can
     later interpose telemetry without touching engine code.
     """
 
-    def __init__(self, reader: MongoOptionsDataReader) -> None:
+    def __init__(self, reader: OptionsDataReader) -> None:
         self._reader = reader
 
     async def query_chain(
@@ -82,7 +82,7 @@ class _OptionsDataPortAdapter:
 
 
 class _BulkOptionsDataPortAdapter:
-    """Wrap a ``MongoOptionsDataReader`` to satisfy the engine-side
+    """Wrap an ``OptionsDataReader`` to satisfy the engine-side
     ``_CycleAwareBulkReader`` Protocol (cycle-aware variant).
 
     The engine's ``_CycleInjectingBulkReader`` strips ``expiration_cycle``
@@ -90,7 +90,7 @@ class _BulkOptionsDataPortAdapter:
     between the engine wrapper and the real data reader.
     """
 
-    def __init__(self, reader: MongoOptionsDataReader) -> None:
+    def __init__(self, reader: OptionsDataReader) -> None:
         self._reader = reader
 
     async def query_chain_bulk(
@@ -211,9 +211,7 @@ class _IndexDataPortAdapter:
         if series is None or len(series) == 0:
             return None
         # PriceSeries.dates is YYYYMMDD int64; find an exact match.
-        target_int = (
-            target_date.year * 10000 + target_date.month * 100 + target_date.day
-        )
+        target_int = date_to_int(target_date)
         for idx, d in enumerate(series.dates.tolist()):
             if int(d) == target_int:
                 return float(series.close[idx])
@@ -250,9 +248,7 @@ class _FuturesDataPortAdapter:
             return None
         if series is None or len(series) == 0:
             return None
-        target_int = (
-            target_date.year * 10000 + target_date.month * 100 + target_date.day
-        )
+        target_int = date_to_int(target_date)
         for idx, d in enumerate(series.dates.tolist()):
             if int(d) == target_int:
                 return float(series.close[idx])
@@ -334,19 +330,13 @@ def _build_underlying_resolver(
 # ---------------------------------------------------------------------------
 
 
-def get_options_reader(market_data: MarketDataService) -> MongoOptionsDataReader:
-    """Pull the underlying ``MongoOptionsDataReader`` out of the service.
+def get_options_reader(market_data: MarketDataService) -> OptionsDataReader:
+    """Return the ``OptionsDataReader`` from the service.
 
-    The default ``DefaultMarketDataService`` stores the reader as
-    ``_options``.  Wave B1 deliberately did not expose it on the
-    Protocol (only the Protocol methods are public).  The router needs
-    direct access to ``list_roots()`` and ``get_contract()``, both of
-    which exist on ``MarketDataService`` already (``list_option_roots``,
-    ``get_option_contract``).  So in practice we never touch the
-    private attribute — every caller below uses the Protocol methods.
-    This helper is kept for symmetry / future use.
+    Accesses the public ``options_reader`` property defined on the
+    ``MarketDataService`` protocol, avoiding any private attribute access.
     """
-    return market_data._options  # type: ignore[attr-defined]
+    return market_data.options_reader
 
 
 def build_options_pricer() -> DefaultOptionsPricer:

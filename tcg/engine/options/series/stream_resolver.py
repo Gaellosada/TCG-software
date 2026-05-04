@@ -353,13 +353,18 @@ async def _resolve_bulk(
             # Use last_date for the upper bound so expirations needed by
             # trade dates near the end of the range are included.
             far_future = last_date + timedelta(days=probe_days)
+            # Loosen the lower bound so expirations slightly before
+            # first_date are included — an expiration that falls between
+            # (first_date - target_dte_days) and first_date may still be
+            # the nearest-to-target for early trade dates with small DTE.
+            lower_bound = first_date - timedelta(days=max(maturity.target_dte_days, 7))
 
             if available_expirations is not None:
                 # Fast path: caller pre-fetched all expirations via
                 # list_expirations (distinct index scan — subsecond).
                 # Filter to the probe window locally.
                 available = [
-                    e for e in available_expirations if first_date <= e <= far_future
+                    e for e in available_expirations if lower_bound <= e <= far_future
                 ]
             else:
                 # Fallback: expensive probe query materialises the full
@@ -369,7 +374,7 @@ async def _resolve_bulk(
                     root=collection,
                     date=first_date,
                     type=option_type,
-                    expiration_min=first_date,
+                    expiration_min=lower_bound,
                     expiration_max=far_future,
                 )
                 available = sorted({c.expiration for c, _r in probe_rows})
@@ -448,11 +453,18 @@ async def _resolve_bulk(
                     strike_min = _spot * max(_lo, 0.01)
                     strike_max = _spot * _hi
                 else:
-                    # ByDelta: wide moneyness proxy band (±30%).
-                    # Delta ~0.5 ≈ ATM; conservative but still cuts
-                    # ~80-90% of contracts on fat roots.
-                    strike_min = _spot * 0.70
-                    strike_max = _spot * 1.30
+                    # ByDelta: wide moneyness proxy band.  Base ±30%
+                    # around the first-date spot price, widened
+                    # proportionally to the date range so that spot
+                    # drift over long ranges doesn't push correct
+                    # strikes outside the window.
+                    _first_d = queryable[0][1]
+                    _last_d = queryable[-1][1]
+                    _span_days = (_last_d - _first_d).days
+                    _extra = min(_span_days / 365.0 * 0.15, 0.30)
+                    _margin = 0.30 + _extra
+                    strike_min = _spot * (1 - _margin)
+                    strike_max = _spot * (1 + _margin)
 
     # One bulk query per unique expiration, run concurrently.
     chain_index: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
@@ -488,40 +500,24 @@ async def _resolve_bulk(
         chain_index.update(result)
 
     # ── Phase C: Per-date selection + stream extraction ─────────────
+    #
+    # ByStrike and ByDelta are pure CPU (matching against pre-fetched
+    # rows) — no asyncio tasks or semaphore needed.  Only ByMoneyness
+    # requires I/O (underlying_price_resolver), so it keeps the async
+    # gather + semaphore pattern.
 
-    sem = asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
-
-    async def _resolve_one_bulk(idx: int, d: date) -> None:
+    def _resolve_one_sync(idx: int, d: date) -> None:
+        """CPU-only resolution for ByStrike and ByDelta."""
         try:
             rows = chain_index.get(d, [])
             if not rows:
                 error_codes[idx] = "no_chain_for_date"
                 return
 
-            # Apply selection criterion.
             result: SelectionResult
             if isinstance(selection, ByStrike):
                 result = match_by_strike(rows, selection.strike)
-            elif isinstance(selection, ByMoneyness):
-                # Underlying price lookup still requires I/O — use semaphore.
-                async with sem:
-                    if underlying_price_resolver is None:
-                        error_codes[idx] = "missing_underlying_price"
-                        return
-                    first_contract = rows[0][0]
-                    S = await underlying_price_resolver(first_contract, d)
-                    if S is None or S <= 0:
-                        error_codes[idx] = "missing_underlying_price"
-                        return
-                    result = match_by_moneyness(
-                        rows=rows,
-                        target_K_over_S=selection.target_K_over_S,
-                        tolerance=selection.tolerance,
-                        underlying_price=float(S),
-                    )
             elif isinstance(selection, ByDelta):
-                # Stored-only path (compute_missing_for_delta is always
-                # False in the stream resolver — no pricer injected).
                 deltas: list[float | None] = [r.delta_stored for _c, r in rows]
                 result = match_by_delta(
                     rows=rows,
@@ -533,7 +529,8 @@ async def _resolve_bulk(
                 )
             else:
                 raise TypeError(  # pragma: no cover
-                    f"Unsupported SelectionCriterion: {type(selection).__name__}"
+                    f"Unsupported SelectionCriterion for sync path: "
+                    f"{type(selection).__name__}"
                 )
 
             if result.error_code is not None:
@@ -543,7 +540,6 @@ async def _resolve_bulk(
                 error_codes[idx] = "no_chain_for_date"
                 return
 
-            # Find the row for the selected contract and extract stream.
             row = _row_for_contract(rows, result.contract)
             if row is None:  # pragma: no cover (defensive)
                 error_codes[idx] = "no_chain_for_date"
@@ -564,23 +560,85 @@ async def _resolve_bulk(
                 except Exception:  # pragma: no cover (defensive)
                     pass
 
-    # Gather tasks only for dates that survived Phase A+B (have rows
-    # in the chain_index or need underlying-price I/O).  Dates already
-    # assigned an error_code in Phase A/B still need their progress tick.
-    tasks: list[asyncio.Task[None]] = []
-    for idx, d in queryable:
-        if error_codes[idx] is not None:
-            # Already resolved (no_chain_for_date) — just tick progress.
-            if progress_callback is not None:
-                try:
-                    progress_callback()
-                except Exception:  # pragma: no cover (defensive)
-                    pass
-            continue
-        tasks.append(asyncio.ensure_future(_resolve_one_bulk(idx, d)))
+    if isinstance(selection, ByMoneyness):
+        # ByMoneyness: underlying price lookup requires I/O — async path.
+        sem = asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
 
-    if tasks:
-        await asyncio.gather(*tasks)
+        async def _resolve_one_moneyness(idx: int, d: date) -> None:
+            try:
+                rows = chain_index.get(d, [])
+                if not rows:
+                    error_codes[idx] = "no_chain_for_date"
+                    return
+
+                async with sem:
+                    if underlying_price_resolver is None:
+                        error_codes[idx] = "missing_underlying_price"
+                        return
+                    first_contract = rows[0][0]
+                    S = await underlying_price_resolver(first_contract, d)
+                    if S is None or S <= 0:
+                        error_codes[idx] = "missing_underlying_price"
+                        return
+                    result = match_by_moneyness(
+                        rows=rows,
+                        target_K_over_S=selection.target_K_over_S,
+                        tolerance=selection.tolerance,
+                        underlying_price=float(S),
+                    )
+
+                if result.error_code is not None:
+                    error_codes[idx] = result.error_code
+                    return
+                if result.contract is None:  # pragma: no cover (defensive)
+                    error_codes[idx] = "no_chain_for_date"
+                    return
+
+                row = _row_for_contract(rows, result.contract)
+                if row is None:  # pragma: no cover (defensive)
+                    error_codes[idx] = "no_chain_for_date"
+                    return
+
+                raw = getattr(row, attr_name, None)
+                if raw is None:
+                    error_codes[idx] = _missing_code_for(stream)
+                    return
+                values[idx] = float(raw)
+            except Exception as exc:
+                error_codes[idx] = "data_access_error"
+                _log.debug("resolve_one_bulk date=%s failed: %s", d, exc)
+            finally:
+                if progress_callback is not None:
+                    try:
+                        progress_callback()
+                    except Exception:  # pragma: no cover (defensive)
+                        pass
+
+        tasks: list[asyncio.Task[None]] = []
+        for idx, d in queryable:
+            if error_codes[idx] is not None:
+                if progress_callback is not None:
+                    try:
+                        progress_callback()
+                    except Exception:  # pragma: no cover (defensive)
+                        pass
+                continue
+            tasks.append(asyncio.ensure_future(_resolve_one_moneyness(idx, d)))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+    else:
+        # ByStrike / ByDelta: pure CPU — synchronous for-loop, no
+        # asyncio tasks or semaphore overhead.
+        for idx, d in queryable:
+            if error_codes[idx] is not None:
+                if progress_callback is not None:
+                    try:
+                        progress_callback()
+                    except Exception:  # pragma: no cover (defensive)
+                        pass
+                continue
+            _resolve_one_sync(idx, d)
 
     # Also tick progress for dates skipped in Phase A (past_last_trade_date).
     if progress_callback is not None:

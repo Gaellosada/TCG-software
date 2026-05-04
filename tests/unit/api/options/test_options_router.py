@@ -781,6 +781,51 @@ async def test_chain_snapshot_blank_cycle_treated_as_no_filter(
     assert len(pts_blank) == len(pts_no_cycle)
 
 
+async def test_chain_snapshot_parallel_multi_expiration(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Multiple expirations are fetched via asyncio.gather; each appears
+    as a separate SmileSeries in the response, in the same order as the
+    request.  The underlying_price is taken from the first non-None
+    snapshot.  This test covers the gather-based parallelisation path."""
+    options_reader.query_chain_result = [
+        (make_contract(strike=5000.0), make_row(iv_stored=0.16)),
+        (
+            make_contract(contract_id="SPX_C_5100_20240419|M", strike=5100.0),
+            make_row(iv_stored=0.155),
+        ),
+    ]
+    resp = await client.get(
+        "/api/options/chain-snapshot",
+        params=[
+            ("root", "OPT_SP_500"),
+            ("date", "2024-03-15"),
+            ("type", "C"),
+            ("expirations", "2024-04-19"),
+            ("expirations", "2024-05-17"),
+            ("expirations", "2024-06-21"),
+            ("field", "iv"),
+        ],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # One SmileSeries per requested expiration, in request order.
+    assert len(body["series"]) == 3
+    assert body["series"][0]["expiration"] == "2024-04-19"
+    assert body["series"][1]["expiration"] == "2024-05-17"
+    assert body["series"][2]["expiration"] == "2024-06-21"
+    # Each series should have the same points (stub returns same data).
+    for smile in body["series"]:
+        assert len(smile["points"]) == 2
+        assert smile["points"][0]["value"]["source"] == "stored"
+    # underlying_price should be populated (from any snapshot).
+    assert body["underlying_price"]["source"] == "stored"
+    assert body["underlying_price"]["value"] is not None
+    # Verify that 3 separate query_chain calls were issued (one per
+    # expiration snapshot).
+    assert len(options_reader.query_chain_calls) == 3
+
+
 async def test_chain_snapshot_max_eight_expirations(client: AsyncClient):
     params: list[tuple[str, str]] = [
         ("root", "OPT_SP_500"),

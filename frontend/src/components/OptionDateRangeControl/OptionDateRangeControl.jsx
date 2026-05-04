@@ -82,12 +82,16 @@ const PILL_OPTIONS = PRESETS.map((p) => ({ value: p, label: p.toUpperCase() }));
  * @param {{ start: string, end: string, preset: string|null }} value
  * @param {(v: { start: string, end: string, preset: string|null }) => void} onChange
  * @param {boolean} [disabled]
+ * @param {string} [anchorEnd] Optional ISO date ('YYYY-MM-DD') to anchor preset
+ *   ranges. When provided, preset buttons compute their range relative to this
+ *   date instead of today. Pass the root's `last_trade_date` so the UI dates
+ *   stay in sync with what the backend will actually receive.
  */
-export default function OptionDateRangeControl({ value, onChange, disabled = false }) {
+export default function OptionDateRangeControl({ value, onChange, disabled = false, anchorEnd }) {
   const { start, end, preset } = value;
 
   const handlePreset = (key) => {
-    const range = computePresetRange(key);
+    const range = computePresetRange(key, anchorEnd);
     onChange({ ...range, preset: key });
   };
 
