@@ -115,14 +115,19 @@ def _is_business_day(d: date, cal) -> bool:
     return len(vd) > 0
 
 
-def _prior_business_day(d: date, cal) -> date:
-    """Return the last business day strictly before d (search up to 10 days back)."""
+def _prior_business_day(d: date, cal) -> date | None:
+    """Return the last business day strictly before *d*.
+
+    Searches up to 30 calendar days back (covers any realistic holiday run —
+    Christmas + New Year + weekends is ~11 calendar days max).
+    Returns ``None`` if no business day is found within the window.
+    """
     candidate = d - timedelta(days=1)
-    for _ in range(10):
+    for _ in range(30):
         if _is_business_day(candidate, cal):
             return candidate
         candidate -= timedelta(days=1)
-    raise RuntimeError(f"Could not find prior business day within 10 days of {d}")
+    return None
 
 
 def _last_business_day_of_month(year: int, month: int, cal) -> date:
@@ -228,7 +233,12 @@ class DefaultMaturityResolver:
 
         cal = _calendar(calendar)
         if not _is_business_day(tf, cal):
-            tf = _prior_business_day(tf, cal)
+            rolled = _prior_business_day(tf, cal)
+            # If no prior business day found (extreme calendar gap), keep the
+            # original third-Friday date as a best-effort fallback rather than
+            # crashing the entire stream resolution.
+            if rolled is not None:
+                tf = rolled
         return tf
 
     def _resolve_end_of_month(

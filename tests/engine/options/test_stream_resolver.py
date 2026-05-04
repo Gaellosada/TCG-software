@@ -236,6 +236,60 @@ async def test_missing_underlying_price():
     assert errors[0] == "missing_underlying_price"
 
 
+async def test_zero_underlying_price_treated_as_missing():
+    """``underlying_price=0.0`` must produce ``missing_underlying_price``,
+    not infinity or NaN without an error code.
+
+    Both the legacy per-date path (via the selector) and the bulk pre-fetch
+    path guard ``S <= 0`` before any ``K/S`` division.  This test pins that
+    zero is treated identically to ``None``.
+    """
+    d = date(2024, 3, 22)
+    expiration = date(2024, 4, 19)
+    chain = [
+        (
+            _contract(strike=4500, expiration=expiration),
+            _row(row_date=d, iv=0.20),
+        ),
+    ]
+
+    # -- Legacy per-date path (no bulk_chain_reader) --
+    reader = FakeChainReader({d: chain})
+    values, errors = await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(0.0),
+    )
+    assert np.isnan(values[0])
+    assert errors[0] == "missing_underlying_price"
+
+    # -- Bulk pre-fetch path --
+    reader_b = FakeChainReader({d: chain})
+    bulk_reader = FakeBulkChainReader({d: chain})
+    values_b, errors_b = await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=0),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.05),
+        stream="iv",
+        chain_reader=reader_b,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=_make_underlying_resolver(0.0),
+        bulk_chain_reader=bulk_reader,
+    )
+    assert np.isnan(values_b[0])
+    assert errors_b[0] == "missing_underlying_price"
+
+
 # ── 3. ATM tie deterministic — lower strike wins ───────────────────────
 
 
@@ -973,6 +1027,162 @@ async def test_bulk_path_nearest_to_target():
     # Exactly 1 probe query (NearestToTarget), 1 bulk call.
     assert len(reader.calls) == 1  # probe only
     assert len(bulk_reader.bulk_calls) == 1
+
+
+async def test_bulk_path_nearest_to_target_with_available_expirations():
+    """Bulk path + NearestToTarget + available_expirations skips the probe query.
+
+    When ``available_expirations`` is supplied, the resolver filters
+    locally (``first_date <= e <= far_future``) instead of issuing an
+    expensive probe ``query_chain`` call.  This test verifies:
+    - Zero probe queries on chain_reader (reader.calls == 0).
+    - The correct expiration is selected from the pre-fetched list.
+    - Results are identical to the probe-query fallback.
+    """
+    dates = [date(2024, 3, 18), date(2024, 3, 19), date(2024, 3, 20)]
+    expiration = date(2024, 4, 19)
+    chains_by_date = {
+        d: [
+            (_contract(strike=4500, expiration=expiration), _row(row_date=d, iv=0.20)),
+        ]
+        for d in dates
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+
+    # Pre-fetched expirations: includes the target plus some decoys.
+    all_expirations = [
+        date(2024, 1, 19),  # far past — should be filtered out
+        date(2024, 4, 19),  # the correct one (nearest to target_dte_days=30)
+        date(2024, 5, 17),  # also in window, but farther from target
+        date(2024, 6, 21),  # also in window
+        date(2027, 12, 19),  # may be beyond far_future depending on probe_days
+    ]
+
+    values, errors = await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=30),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+        available_expirations=all_expirations,
+    )
+    assert all(e is None for e in errors)
+    assert all(v == pytest.approx(0.20) for v in values)
+    # The key assertion: zero probe queries — the fast path was used.
+    assert len(reader.calls) == 0, (
+        f"Expected 0 probe queries (available_expirations fast path); "
+        f"got {len(reader.calls)}"
+    )
+    assert len(bulk_reader.bulk_calls) == 1
+
+
+async def test_bulk_available_expirations_boundary_filtering():
+    """available_expirations fast path filters out expirations before first_date.
+
+    Expirations strictly before ``first_date`` (the earliest queryable
+    date) are excluded by the ``first_date <= e <= far_future`` filter.
+    If the only suitable expiration would be excluded, the resolver
+    should select the next-best from those that remain.
+
+    Setup: two expirations — one before the first trade date (excluded
+    by the boundary filter) and one after (retained).  With
+    target_dte_days=10, the before-expiration would be closer to the
+    target if not filtered.  The test verifies the after-expiration
+    is selected instead, and that iv matches the chain keyed to it.
+    """
+    dates = [date(2024, 4, 1), date(2024, 4, 2)]
+    # Expiration A: before first_date — filtered out by boundary.
+    exp_before = date(2024, 3, 25)
+    # Expiration B: after first_date — retained.
+    exp_after = date(2024, 4, 19)
+
+    chains_by_date = {
+        d: [
+            (
+                _contract(strike=4500, expiration=exp_after),
+                _row(row_date=d, iv=0.25),
+            ),
+        ]
+        for d in dates
+    }
+    reader = FakeChainReader(chains_by_date)
+    bulk_reader = FakeBulkChainReader(chains_by_date)
+
+    # Provide both expirations; exp_before should be filtered out.
+    all_expirations = [exp_before, exp_after]
+
+    values, errors = await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=10),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+        available_expirations=all_expirations,
+    )
+    assert all(e is None for e in errors)
+    assert all(v == pytest.approx(0.25) for v in values)
+    # Fast path: zero probe queries.
+    assert len(reader.calls) == 0
+    # Only one bulk call for exp_after.
+    assert len(bulk_reader.bulk_calls) == 1
+    assert bulk_reader.bulk_calls[0]["expiration_min"] == exp_after
+    assert bulk_reader.bulk_calls[0]["expiration_max"] == exp_after
+
+
+async def test_bulk_available_expirations_picks_nearest_to_target():
+    """available_expirations: resolver picks the expiration closest to target DTE.
+
+    With target_dte_days=30 and trade date 2024-04-01, the target
+    expiration date is 2024-05-01.  Among two candidates (2024-04-19
+    at DTE=18 and 2024-05-17 at DTE=46), 2024-04-19 is closer to the
+    target (|18-30|=12 vs |46-30|=16) and should be selected.
+    """
+    d = date(2024, 4, 1)
+    exp_close = date(2024, 4, 19)  # DTE=18, |18-30|=12
+    exp_far = date(2024, 5, 17)  # DTE=46, |46-30|=16
+    chain = [
+        (_contract(strike=4500, expiration=exp_close), _row(row_date=d, iv=0.18)),
+        (_contract(strike=4500, expiration=exp_far), _row(row_date=d, iv=0.22)),
+    ]
+    reader = FakeChainReader({d: chain})
+    # Bulk reader only has the exp_close chain for this date (since the
+    # resolver will issue a bulk query filtered to exp_close).
+    bulk_reader = FakeBulkChainReader({d: chain})
+
+    values, errors = await resolve_option_stream(
+        dates=[d],
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=30),
+        selection=ByStrike(strike=4500.0),
+        stream="iv",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk_reader,
+        available_expirations=[exp_close, exp_far],
+    )
+    assert errors[0] is None
+    # exp_close (iv=0.18) should win.
+    assert values[0] == pytest.approx(0.18)
+    assert len(reader.calls) == 0  # no probe query
+    # Bulk fetches only for exp_close (the resolved expiration).
+    assert len(bulk_reader.bulk_calls) == 1
+    assert bulk_reader.bulk_calls[0]["expiration_min"] == exp_close
 
 
 async def test_bulk_path_no_chain_for_date():

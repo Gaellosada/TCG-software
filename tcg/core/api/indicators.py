@@ -370,7 +370,7 @@ def _count_option_stream_dates(
     fraction has a real denominator. Non-option-stream refs contribute
     zero — their wall-clock cost is dominated by a single MongoDB read
     that the user should not see ticking on a per-date basis."""
-    n = len(_business_dates_in_range(start_date, end_date))
+    n = len(_business_dates_in_range(start_date, end_date) or [])
     return n * sum(1 for ref in series.values() if isinstance(ref, OptionStreamRef))
 
 

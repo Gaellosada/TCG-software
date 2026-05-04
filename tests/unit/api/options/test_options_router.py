@@ -59,9 +59,7 @@ async def test_roots_happy_path(client: AsyncClient, options_reader: StubOptions
 async def test_roots_data_access_error_502(
     client: AsyncClient, options_reader: StubOptionsReader
 ):
-    options_reader.list_roots_side_effect = OptionsDataAccessError(
-        "Mongo timeout"
-    )
+    options_reader.list_roots_side_effect = OptionsDataAccessError("Mongo timeout")
     resp = await client.get("/api/options/roots")
     assert resp.status_code == 502
     body = resp.json()
@@ -103,9 +101,7 @@ async def test_expirations_empty_collection_is_empty_list(
 async def test_expirations_data_access_error_502(
     client: AsyncClient, options_reader: StubOptionsReader
 ):
-    options_reader.list_expirations_side_effect = OptionsDataAccessError(
-        "Mongo down"
-    )
+    options_reader.list_expirations_side_effect = OptionsDataAccessError("Mongo down")
     resp = await client.get("/api/options/expirations", params={"root": "OPT_SP_500"})
     assert resp.status_code == 502
     body = resp.json()
@@ -261,9 +257,7 @@ async def test_chain_empty_returns_note(
 async def test_chain_data_access_error_502(
     client: AsyncClient, options_reader: StubOptionsReader
 ):
-    options_reader.query_chain_side_effect = OptionsDataAccessError(
-        "Mongo down"
-    )
+    options_reader.query_chain_side_effect = OptionsDataAccessError("Mongo down")
     resp = await client.get(
         "/api/options/chain",
         params={
@@ -561,9 +555,7 @@ async def test_select_by_strike_happy_path(
     options_reader.query_chain_result = [
         (make_contract(strike=5100.0), make_row()),
         (
-            make_contract(
-                contract_id="SPX_C_5200_20240419|M", strike=5200.0
-            ),
+            make_contract(contract_id="SPX_C_5200_20240419|M", strike=5200.0),
             make_row(),
         ),
     ]
@@ -578,9 +570,7 @@ async def test_select_by_strike_happy_path(
         "maturity": {"kind": "fixed", "date": "2024-04-19"},
         "compute_missing_for_delta_selection": False,
     }
-    resp = await client.get(
-        "/api/options/select", params={"q": json.dumps(payload)}
-    )
+    resp = await client.get("/api/options/select", params={"q": json.dumps(payload)})
     assert resp.status_code == 200
     body = resp.json()
     assert body["error_code"] is None
@@ -589,9 +579,7 @@ async def test_select_by_strike_happy_path(
 
 
 async def test_select_malformed_json_400(client: AsyncClient):
-    resp = await client.get(
-        "/api/options/select", params={"q": "{not-json}"}
-    )
+    resp = await client.get("/api/options/select", params={"q": "{not-json}"})
     assert resp.status_code == 400
     body = resp.json()
     assert body["error_type"] == "options_validation_error"
@@ -613,9 +601,7 @@ async def test_select_no_chain_returns_422(
         "maturity": {"kind": "fixed", "date": "2024-04-19"},
         "compute_missing_for_delta_selection": False,
     }
-    resp = await client.get(
-        "/api/options/select", params={"q": json.dumps(payload)}
-    )
+    resp = await client.get("/api/options/select", params={"q": json.dumps(payload)})
     assert resp.status_code == 422
     body = resp.json()
     assert body["error_type"] == "options_selection_error"
@@ -632,15 +618,11 @@ async def test_chain_snapshot_happy_path(
     options_reader.query_chain_result = [
         (make_contract(strike=5000.0), make_row(iv_stored=0.16)),
         (
-            make_contract(
-                contract_id="SPX_C_5100_20240419|M", strike=5100.0
-            ),
+            make_contract(contract_id="SPX_C_5100_20240419|M", strike=5100.0),
             make_row(iv_stored=0.155),
         ),
         (
-            make_contract(
-                contract_id="SPX_C_5200_20240419|M", strike=5200.0
-            ),
+            make_contract(contract_id="SPX_C_5200_20240419|M", strike=5200.0),
             make_row(iv_stored=0.15),
         ),
     ]
@@ -675,8 +657,10 @@ async def test_chain_snapshot_smile_point_carries_expiration_cycle(
     frontend can populate the cycle dropdown from the unfiltered
     response."""
     options_reader.query_chain_result = [
-        (make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
-         make_row(iv_stored=0.16)),
+        (
+            make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
+            make_row(iv_stored=0.16),
+        ),
     ]
     resp = await client.get(
         "/api/options/chain-snapshot",
@@ -769,8 +753,10 @@ async def test_chain_snapshot_blank_cycle_treated_as_no_filter(
     """?expiration_cycle= (empty string) must be coerced to None by the
     validator and behave identically to omitting the param (backend.md H1)."""
     options_reader.query_chain_result = [
-        (make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
-         make_row(iv_stored=0.16)),
+        (
+            make_contract(strike=5000.0, contract_id="SPX_C_5000_20240419|M"),
+            make_row(iv_stored=0.16),
+        ),
     ]
     base_params = [
         ("root", "OPT_SP_500"),
@@ -780,9 +766,7 @@ async def test_chain_snapshot_blank_cycle_treated_as_no_filter(
         ("field", "iv"),
     ]
     # No cycle param — baseline.
-    resp_no_cycle = await client.get(
-        "/api/options/chain-snapshot", params=base_params
-    )
+    resp_no_cycle = await client.get("/api/options/chain-snapshot", params=base_params)
     assert resp_no_cycle.status_code == 200
     pts_no_cycle = resp_no_cycle.json()["series"][0]["points"]
 
@@ -815,9 +799,7 @@ async def test_chain_snapshot_max_eight_expirations(client: AsyncClient):
 async def test_chain_snapshot_data_access_error_502(
     client: AsyncClient, options_reader: StubOptionsReader
 ):
-    options_reader.query_chain_side_effect = OptionsDataAccessError(
-        "Mongo timeout"
-    )
+    options_reader.query_chain_side_effect = OptionsDataAccessError("Mongo timeout")
     resp = await client.get(
         "/api/options/chain-snapshot",
         params=[
@@ -837,8 +819,8 @@ async def test_chain_snapshot_data_access_error_502(
 # ---------------------------------------------------------------------------
 
 
-async def test_app_registers_six_options_paths(client: AsyncClient):
-    """OpenAPI exposes the 6 options endpoints."""
+async def test_app_registers_options_paths(client: AsyncClient):
+    """OpenAPI exposes the options endpoints."""
     resp = await client.get("/openapi.json")
     assert resp.status_code == 200
     paths = resp.json()["paths"]
@@ -850,4 +832,6 @@ async def test_app_registers_six_options_paths(client: AsyncClient):
         "/api/options/expirations",
         "/api/options/roots",
         "/api/options/select",
+        "/api/options/stream",
+        "/api/options/stream/progress/{task_id}",
     ]

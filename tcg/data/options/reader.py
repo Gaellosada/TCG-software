@@ -573,7 +573,7 @@ def _materialize_chain_rows_bulk(
         raw = bar.get("date")
         try:
             iv = int(raw) if raw is not None else None
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
         if iv is None or iv not in target_yyyymmdd_set:
             continue
@@ -630,7 +630,7 @@ def _find_bar_for_date(
         raw = bar.get("date") if isinstance(bar, Mapping) else None
         try:
             iv = int(raw) if raw is not None else None
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
         if iv == target_yyyymmdd:
             return bar
@@ -644,7 +644,7 @@ def _date_to_int(d: date) -> int:
 def _int_to_date(value: Any) -> date | None:
     try:
         iv = int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     if not (19000101 <= iv <= 21001231):
         return None

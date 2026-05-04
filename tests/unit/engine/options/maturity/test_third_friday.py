@@ -15,7 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
+from tcg.engine.options.maturity.resolver import (
+    DefaultMaturityResolver,
+    _prior_business_day,
+)
 from tcg.types.options import NextThirdFriday
 
 _r = DefaultMaturityResolver()
@@ -134,6 +137,52 @@ def test_holiday_skip_synthetic_mock() -> None:
         result = resolver.resolve(date(2024, 3, 1), NextThirdFriday(offset_months=0))
 
     assert result == date(2024, 3, 14)
+
+
+# ---------------------------------------------------------------------------
+# Edge: _prior_business_day returns None when all days are holidays
+# ---------------------------------------------------------------------------
+
+
+def test_prior_business_day_returns_none_on_extended_closure() -> None:
+    """When all 30 days before a holiday 3rd Friday are also holidays,
+    _prior_business_day returns None and the resolver falls back to the
+    original (unrolled) third-Friday date instead of crashing.
+    """
+    import pandas as pd
+
+    target_friday = date(2024, 3, 15)
+
+    def _mock_valid_days(start_date, end_date):
+        # Every single-day probe returns empty → entire window is "holidays"
+        return pd.DatetimeIndex([], dtype="datetime64[us, UTC]")
+
+    mock_cal = MagicMock()
+    mock_cal.valid_days.side_effect = _mock_valid_days
+
+    from tcg.engine.options.maturity import resolver as res_module
+
+    with patch.object(res_module, "_get_calendar", return_value=mock_cal):
+        resolver = DefaultMaturityResolver()
+        result = resolver.resolve(date(2024, 3, 1), NextThirdFriday(offset_months=0))
+
+    # The 3rd Friday itself is a "holiday" (mock says so), but since no prior
+    # business day is found either, the resolver falls back to the original date.
+    assert result == target_friday, (
+        f"Expected fallback to {target_friday} when no prior business day exists, got {result}"
+    )
+
+
+def test_prior_business_day_returns_none_directly() -> None:
+    """_prior_business_day returns None (not RuntimeError) when every day in
+    the 30-day search window is a holiday."""
+    import pandas as pd
+
+    mock_cal = MagicMock()
+    mock_cal.valid_days.return_value = pd.DatetimeIndex([], dtype="datetime64[us, UTC]")
+
+    result = _prior_business_day(date(2024, 6, 1), mock_cal)
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
