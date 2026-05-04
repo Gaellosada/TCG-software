@@ -80,7 +80,7 @@ def mock_app(monkeypatch):
         return _fake_materialise_result(labels)
 
     monkeypatch.setattr(
-        "tcg.core.api.indicators.materialise_option_streams",
+        "tcg.core.api._options_materialise.materialise_option_streams",
         fake_materialise,
     )
 
@@ -296,7 +296,7 @@ class TestEmptyDateRange:
             return "option_stream requires explicit ISO 'start' and 'end' dates"
 
         monkeypatch.setattr(
-            "tcg.core.api.indicators.materialise_option_streams",
+            "tcg.core.api._options_materialise.materialise_option_streams",
             fail_materialise,
         )
         body = _request_body([_stream_entry()])

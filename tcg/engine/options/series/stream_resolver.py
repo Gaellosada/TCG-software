@@ -466,22 +466,27 @@ async def _resolve_bulk(
                     strike_min = _spot * (1 - _margin)
                     strike_max = _spot * (1 + _margin)
 
-    # One bulk query per unique expiration, run concurrently.
+    # One bulk query per unique expiration, run concurrently but with a
+    # semaphore to avoid exhausting the MongoDB connection pool on
+    # multi-decade date ranges (e.g. 1990–2026 can produce 50+ groups).
+    _BULK_FETCH_CONCURRENCY = 8
+    _bulk_sem = asyncio.Semaphore(_BULK_FETCH_CONCURRENCY)
     chain_index: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
 
     async def _fetch_exp(
         exp: date,
         group_dates: list[date],
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        result = await bulk_reader.query_chain_bulk(
-            root=collection,
-            dates=group_dates,
-            type=option_type,
-            expiration_min=exp,
-            expiration_max=exp,
-            strike_min=strike_min,
-            strike_max=strike_max,
-        )
+        async with _bulk_sem:
+            result = await bulk_reader.query_chain_bulk(
+                root=collection,
+                dates=group_dates,
+                type=option_type,
+                expiration_min=exp,
+                expiration_max=exp,
+                strike_min=strike_min,
+                strike_max=strike_max,
+            )
         # Tick progress after each expiration fetch so the frontend
         # sees Phase B movement instead of a stuck 0%.  The progress
         # endpoint clamps fraction to [0, 1] so the extra ticks are safe.

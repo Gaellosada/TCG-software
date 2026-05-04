@@ -19,6 +19,9 @@ async def create_mongo_client(config: MongoConfig) -> AsyncIOMotorDatabase:
     """
     client: AsyncIOMotorClient = AsyncIOMotorClient(
         config.uri,
-        serverSelectionTimeoutMS=5000,
+        serverSelectionTimeoutMS=30_000,
+        connectTimeoutMS=60_000,
+        socketTimeoutMS=300_000,
+        maxPoolSize=20,
     )
     return client[config.db_name]

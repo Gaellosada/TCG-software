@@ -130,6 +130,11 @@
   color: var(--cat-signals);
 }
 
+.typeBadge[data-type="option_stream"] {
+  background: rgba(56, 189, 248, 0.12);
+  color: var(--cat-options, #38bdf8);
+}
+
 /* ── Instrument column: merged collection + symbol ── */
 
 .instrumentPrimary {

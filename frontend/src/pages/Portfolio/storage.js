@@ -42,6 +42,11 @@ export function savePortfolio(name, { legs, rebalance }) {
       signalId: l.signalId || null,
       signalName: l.signalName || null,
       signalSpec: l.signalSpec || null,
+      // Option-stream-specific fields (null for non-option legs).
+      option_type: l.option_type || null,
+      maturity: l.maturity || null,
+      selection: l.selection || null,
+      stream: l.stream || null,
     })),
     weights: weightsDict,
     rebalance,

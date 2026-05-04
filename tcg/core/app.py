@@ -38,7 +38,13 @@ def _cors_origins() -> list[str]:
 async def lifespan(app: FastAPI):
     """Startup: connect to MongoDB, build services, init agent. Shutdown: close client."""
     config = load_config()
-    client = AsyncIOMotorClient(config.uri, serverSelectionTimeoutMS=5000)
+    client = AsyncIOMotorClient(
+        config.uri,
+        serverSelectionTimeoutMS=30_000,
+        connectTimeoutMS=60_000,
+        socketTimeoutMS=300_000,
+        maxPoolSize=20,
+    )
     db = client[config.db_name]
     services = await create_services(db)
     app.state.market_data = services["market_data"]

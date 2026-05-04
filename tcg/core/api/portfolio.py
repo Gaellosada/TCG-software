@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -11,6 +12,13 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tcg.core.api._dates import parse_iso_range
+from tcg.core.api._models import OptionStreamLabel, OptionStreamRef
+from tcg.core.api._models_options import MaturityRule, SelectionCriterion
+from tcg.core.api._options_materialise import (
+    PRICE_LIKE_STREAMS,
+    materialise_option_streams,
+)
+from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import get_market_data
 from tcg.core.api.signals import (
     IndicatorSpecIn,
@@ -76,21 +84,29 @@ class SignalLegSpec(BaseModel):
 
 
 class LegSpec(BaseModel):
-    type: str  # "instrument", "continuous", or "signal"
-    collection: str | None = None    # Required for "instrument"/"continuous"
-    symbol: str | None = None        # Required for "instrument"
-    strategy: str | None = None      # Required for "continuous"
-    adjustment: str | None = None    # Optional for "continuous" (default "none")
-    cycle: str | None = None         # Optional for "continuous"
-    roll_offset: int | None = None   # Optional for "continuous" (days before expiration)
+    type: str  # "instrument", "continuous", "signal", or "option_stream"
+    collection: str | None = (
+        None  # Required for "instrument"/"continuous"/"option_stream"
+    )
+    symbol: str | None = None  # Required for "instrument"
+    strategy: str | None = None  # Required for "continuous"
+    adjustment: str | None = None  # Optional for "continuous" (default "none")
+    cycle: str | None = None  # Optional for "continuous" and "option_stream"
+    roll_offset: int | None = None  # Optional for "continuous" (days before expiration)
     signal_spec: SignalLegSpec | None = None  # Required for "signal"
+    # Option-stream fields (required when type == "option_stream")
+    option_type: Literal["C", "P"] | None = None
+    maturity: MaturityRule | None = None
+    selection: SelectionCriterion | None = None
+    stream: OptionStreamLabel | None = None
 
     @field_validator("type")
     @classmethod
     def validate_type(cls, v: str) -> str:
-        if v not in ("instrument", "continuous", "signal"):
+        if v not in ("instrument", "continuous", "signal", "option_stream"):
             raise ValueError(
-                f"leg type must be 'instrument', 'continuous', or 'signal', got {v!r}"
+                f"leg type must be 'instrument', 'continuous', 'signal', "
+                f"or 'option_stream', got {v!r}"
             )
         return v
 
@@ -98,6 +114,26 @@ class LegSpec(BaseModel):
     def validate_signal_has_spec(self) -> LegSpec:
         if self.type == "signal" and self.signal_spec is None:
             raise ValueError("signal legs require 'signal_spec'")
+        return self
+
+    @model_validator(mode="after")
+    def validate_option_stream_has_fields(self) -> LegSpec:
+        """Ensure option_stream legs carry all required option fields."""
+        if self.type != "option_stream":
+            return self
+        missing: list[str] = []
+        if self.collection is None:
+            missing.append("collection")
+        if self.option_type is None:
+            missing.append("option_type")
+        if self.maturity is None:
+            missing.append("maturity")
+        if self.selection is None:
+            missing.append("selection")
+        if self.stream is None:
+            missing.append("stream")
+        if missing:
+            raise ValueError(f"option_stream legs require: {', '.join(missing)}")
         return self
 
 
@@ -121,12 +157,13 @@ def _parse_legs(
 ) -> dict[str, InstrumentId | ContinuousLegSpec]:
     """Convert request leg specs to service-layer types with validation.
 
-    Only processes instrument/continuous legs; signal legs are skipped.
+    Only processes instrument/continuous legs; signal and option_stream
+    legs are skipped (handled separately).
     """
     legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
 
     for label, leg in legs.items():
-        if leg.type == "signal":
+        if leg.type in ("signal", "option_stream"):
             continue
 
         if leg.type == "instrument":
@@ -222,9 +259,7 @@ async def _evaluate_signal_leg(
     try:
         signal = parse_signal(leg.signal_spec.spec)
     except SignalValidationError as exc:
-        raise ValidationError(
-            f"Leg '{label}': signal validation error: {exc}"
-        ) from exc
+        raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
 
     if len(signal.inputs) == 0:
         raise ValidationError(f"Leg '{label}': signal has no inputs")
@@ -250,29 +285,24 @@ async def _evaluate_signal_leg(
     # 3. Compute input overlap dates
     try:
         overlap_start, overlap_end = await compute_input_overlap(
-            svc, signal, start_date, end_date,
+            svc,
+            signal,
+            start_date,
+            end_date,
         )
     except SignalDataError as exc:
-        raise ValidationError(
-            f"Leg '{label}': signal data error: {exc}"
-        ) from exc
+        raise ValidationError(f"Leg '{label}': signal data error: {exc}") from exc
 
     # 4. Create fetcher and evaluate
     fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
     try:
         result = await evaluate_signal(signal, indicators, fetcher)
     except SignalValidationError as exc:
-        raise ValidationError(
-            f"Leg '{label}': signal validation error: {exc}"
-        ) from exc
+        raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
     except SignalDataError as exc:
-        raise ValidationError(
-            f"Leg '{label}': signal data error: {exc}"
-        ) from exc
+        raise ValidationError(f"Leg '{label}': signal data error: {exc}") from exc
     except SignalRuntimeError as exc:
-        raise ValidationError(
-            f"Leg '{label}': signal runtime error: {exc}"
-        ) from exc
+        raise ValidationError(f"Leg '{label}': signal runtime error: {exc}") from exc
 
     # 5. Aggregate realized_pnl across all inputs
     T = len(result.index)
@@ -284,6 +314,88 @@ async def _evaluate_signal_leg(
     synthetic = 100.0 * (1.0 + aggregated_pnl)
 
     return result.index, synthetic
+
+
+def _compute_level_metrics(values: npt.NDArray[np.float64]) -> dict:
+    """Compute summary metrics for a level (non-price) series."""
+    valid = values[~np.isnan(values)]
+    if len(valid) == 0:
+        return {
+            "mean": None,
+            "std": None,
+            "min": None,
+            "max": None,
+            "first": None,
+            "last": None,
+            "change": None,
+        }
+    return {
+        "mean": float(np.mean(valid)),
+        "std": float(np.std(valid)),
+        "min": float(np.min(valid)),
+        "max": float(np.max(valid)),
+        "first": float(valid[0]),
+        "last": float(valid[-1]),
+        "change": float(valid[-1] - valid[0]),
+    }
+
+
+async def _evaluate_option_stream_leg(
+    label: str,
+    leg: LegSpec,
+    svc: MarketDataService,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], str]:
+    """Resolve an option_stream leg and return (dates, values, stream_mode).
+
+    stream_mode is "price" for mid stream (participates in equity curve)
+    or "level" for greeks/IV (tracking overlay only).
+
+    Returns:
+        Tuple of (YYYYMMDD int dates, values array, stream_mode).
+    """
+    # 1. Build an OptionStreamRef from the leg's fields
+    ref = OptionStreamRef(
+        type="option_stream",
+        collection=leg.collection,
+        option_type=leg.option_type,
+        cycle=leg.cycle,
+        maturity=leg.maturity,
+        selection=leg.selection,
+        stream=leg.stream,
+    )
+
+    # 2. Materialise via shared infrastructure
+    result = await materialise_option_streams(
+        [("_leg", ref)],
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if isinstance(result, str):
+        raise ValidationError(f"Leg '{label}': {result}")
+
+    dates_arr, values, _diagnostics = result["_leg"]
+
+    # 3. Determine stream mode
+    stream_mode = "price" if leg.stream in PRICE_LIKE_STREAMS else "level"
+
+    # 4. Forward-fill NaN for price streams (needed for returns/equity)
+    if stream_mode == "price":
+        nan_mask = np.isnan(values)
+        if nan_mask.all():
+            raise ValidationError(f"Leg '{label}': all option stream values are NaN")
+        # Forward fill
+        for i in range(1, len(values)):
+            if nan_mask[i]:
+                values[i] = values[i - 1]
+        # If first value is NaN, backfill from first valid
+        if nan_mask[0]:
+            first_valid = int(np.argmax(~nan_mask))
+            values[:first_valid] = values[first_valid]
+
+    return dates_arr, values, stream_mode
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +446,15 @@ async def compute_portfolio(
     # ── 2. Separate legs by type ──
 
     instrument_legs = {
-        label: leg for label, leg in body.legs.items()
+        label: leg
+        for label, leg in body.legs.items()
         if leg.type in ("instrument", "continuous")
     }
     signal_legs = {
-        label: leg for label, leg in body.legs.items()
-        if leg.type == "signal"
+        label: leg for label, leg in body.legs.items() if leg.type == "signal"
+    }
+    option_stream_legs = {
+        label: leg for label, leg in body.legs.items() if leg.type == "option_stream"
     }
 
     # ── 3. Fetch instrument prices (if any) ──
@@ -397,16 +512,54 @@ async def compute_portfolio(
 
     for label, leg in signal_legs.items():
         sig_dates, sig_prices = await _evaluate_signal_leg(
-            label, leg, svc, start_date, end_date,
+            label,
+            leg,
+            svc,
+            start_date,
+            end_date,
         )
         signal_dates_map[label] = sig_dates
         signal_closes[label] = sig_prices
         all_date_grids.append(sig_dates)
 
+    # ── 4.5. Evaluate option_stream legs (if any) ──
+
+    option_stream_dates_map: dict[str, npt.NDArray[np.int64]] = {}
+    option_stream_closes: dict[str, npt.NDArray[np.float64]] = {}
+    tracking_series: dict[str, dict] = {}  # level legs -> separate response section
+
+    for label, leg in option_stream_legs.items():
+        os_dates, os_values, stream_mode = await _evaluate_option_stream_leg(
+            label,
+            leg,
+            svc,
+            start_date,
+            end_date,
+        )
+
+        if stream_mode == "price":
+            # Price leg -- joins the main portfolio equity curve
+            option_stream_dates_map[label] = os_dates
+            option_stream_closes[label] = os_values
+            all_date_grids.append(os_dates)
+        else:
+            # Level leg -- tracking overlay only (not in equity curve)
+            tracking_series[label] = {
+                "dates": [int_to_iso(int(d)) for d in os_dates],
+                "values": nan_safe_floats(os_values),
+                "stream": leg.stream,
+                "stream_mode": "level",
+                "metrics": _compute_level_metrics(os_values),
+            }
+
     # ── 5. Align all series to common dates ──
 
     if not all_date_grids:
-        raise ValidationError("No valid legs to compute")
+        raise ValidationError(
+            "No price-like legs to compute portfolio equity curve. "
+            "Use 'mid' stream for option legs that should participate "
+            "in the portfolio."
+        )
 
     # Find intersection of all date grids
     common_dates = all_date_grids[0]
@@ -429,9 +582,20 @@ async def compute_portfolio(
     # Slice signal closes to common dates
     for label in signal_closes:
         sig_mask = np.isin(
-            signal_dates_map[label], common_dates, assume_unique=True,
+            signal_dates_map[label],
+            common_dates,
+            assume_unique=True,
         )
         aligned_closes[label] = signal_closes[label][sig_mask]
+
+    # Slice option_stream price closes to common dates
+    for label in option_stream_closes:
+        os_mask = np.isin(
+            option_stream_dates_map[label],
+            common_dates,
+            assume_unique=True,
+        )
+        aligned_closes[label] = option_stream_closes[label][os_mask]
 
     # ── 6. Compute full date range for the slider ──
     #
@@ -446,20 +610,27 @@ async def compute_portfolio(
         # Signal dates are already the full evaluation range (overlap_start
         # to overlap_end within each signal). Use them as-is.
         full_date_grids.append(signal_dates_map[label])
+    for label in option_stream_dates_map:
+        full_date_grids.append(option_stream_dates_map[label])
 
     full_common_all = full_date_grids[0]
     for grid in full_date_grids[1:]:
         full_common_all = np.intersect1d(
-            full_common_all, grid, assume_unique=False,
+            full_common_all,
+            grid,
+            assume_unique=False,
         )
     full_start_iso = int_to_iso(int(full_common_all[0]))
     full_end_iso = int_to_iso(int(full_common_all[-1]))
 
     # ── 7. Compute portfolio ──
 
+    # Filter weights to only include legs present in aligned_closes.
+    # Level-mode option_stream legs are in tracking_series, not
+    # aligned_closes, so they are naturally excluded.
     result = compute_weighted_portfolio(
         aligned_closes,
-        body.weights,
+        {label: body.weights[label] for label in aligned_closes},
         rebalance_freq.value,
         body.return_type,
         common_dates,
@@ -469,19 +640,24 @@ async def compute_portfolio(
 
     metrics = compute_metrics(result.portfolio_equity)
     leg_metrics = {
-        label: compute_metrics(eq)
-        for label, eq in result.per_leg_equities.items()
+        label: compute_metrics(eq) for label, eq in result.per_leg_equities.items()
     }
 
     # ── 9. Aggregate returns ──
 
     monthly = aggregate_returns(
-        common_dates, result.portfolio_returns, result.per_leg_returns,
-        body.return_type, "monthly",
+        common_dates,
+        result.portfolio_returns,
+        result.per_leg_returns,
+        body.return_type,
+        "monthly",
     )
     yearly = aggregate_returns(
-        common_dates, result.portfolio_returns, result.per_leg_returns,
-        body.return_type, "yearly",
+        common_dates,
+        result.portfolio_returns,
+        result.per_leg_returns,
+        body.return_type,
+        "yearly",
     )
 
     # ── 10. Build response ──
@@ -492,16 +668,12 @@ async def compute_portfolio(
         "dates": dates_iso,
         "portfolio_equity": result.portfolio_equity.tolist(),
         "leg_equities": {
-            label: eq.tolist()
-            for label, eq in result.per_leg_equities.items()
+            label: eq.tolist() for label, eq in result.per_leg_equities.items()
         },
         "raw_leg_equities": {
-            label: eq.tolist()
-            for label, eq in result.raw_leg_equities.items()
+            label: eq.tolist() for label, eq in result.raw_leg_equities.items()
         },
-        "rebalance_dates": [
-            int_to_iso(int(d)) for d in result.rebalance_dates
-        ],
+        "rebalance_dates": [int_to_iso(int(d)) for d in result.rebalance_dates],
         "metrics": asdict(metrics),
         "leg_metrics": {label: asdict(m) for label, m in leg_metrics.items()},
         "monthly_returns": monthly,
@@ -510,4 +682,5 @@ async def compute_portfolio(
         "full_date_range": {"start": full_start_iso, "end": full_end_iso},
         "rebalance": rebalance_freq.value,
         "return_type": body.return_type,
+        "tracking_series": tracking_series,
     }

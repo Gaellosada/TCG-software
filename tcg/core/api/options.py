@@ -814,7 +814,7 @@ async def materialise_streams(
     logic.
     """
     from tcg.core.api._dates import parse_iso_range
-    from tcg.core.api.indicators import (
+    from tcg.core.api._options_materialise import (
         _business_dates_in_range,
         materialise_option_streams,
     )
