@@ -563,7 +563,7 @@ async def compute_input_overlap(
                 # the earliest and latest available expirations, clamped
                 # to the caller's [start, end] bounds.  No materialisation
                 # — the actual resolver runs later inside the fetcher.
-                from tcg.core.api.indicators import _business_dates_in_range
+                from tcg.core.api._options_materialise import _business_dates_in_range
                 from tcg.data._utils import date_to_int
 
                 all_expirations = await svc.list_option_expirations_filtered(
@@ -677,7 +677,7 @@ def make_signal_fetcher(
             # Lazy imports — keeps the engine/options dependency
             # function-scoped (same pattern as _options_materialise).
             from tcg.core.api._options_wiring import build_stream_resolver_wiring
-            from tcg.core.api.indicators import _business_dates_in_range
+            from tcg.core.api._options_materialise import _business_dates_in_range
             from tcg.data._utils import date_to_int
             from tcg.engine.options.series.stream_resolver import (
                 resolve_option_stream,

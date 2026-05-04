@@ -147,7 +147,7 @@ def mock_app(monkeypatch):
 
     # Mock _business_dates_in_range to return our test dates
     monkeypatch.setattr(
-        "tcg.core.api.indicators._business_dates_in_range",
+        "tcg.core.api._options_materialise._business_dates_in_range",
         lambda start, end: OPTION_DATES_PY if start and end else None,
     )
 
@@ -182,13 +182,6 @@ class TestSignalOptionStream:
     async def test_signal_option_stream_only(self, client):
         """Signal with only an option_stream input computes successfully."""
         body = _simple_signal([OPT_INPUT], input_id="Y")
-        resp = await client.post(
-            "/api/signals/compute",
-            json=body,
-            params={"start": "2024-01-01", "end": "2024-03-31"},
-        )
-        # The signal passes start/end in the body, not query params. Let me
-        # put them in the body.
         body["start"] = "2024-01-01"
         body["end"] = "2024-03-31"
         resp = await client.post("/api/signals/compute", json=body)
