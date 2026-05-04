@@ -71,6 +71,13 @@ const ICONS = {
       <line x1="12" y1="8" x2="12.01" y2="8" />
     </>
   ),
+  agent: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M7 8l3 3-3 3" />
+      <line x1="13" y1="14" x2="17" y2="14" />
+    </>
+  ),
 };
 
 function Icon({ name, size = 18 }) {

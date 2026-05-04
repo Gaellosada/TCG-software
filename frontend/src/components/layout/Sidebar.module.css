@@ -64,6 +64,23 @@
   padding: 12px 0;
 }
 
+.agentNav {
+  padding: 8px 0;
+}
+
+.sectionLabel {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  padding: 4px 20px;
+  text-transform: uppercase;
+}
+
+.collapsed .sectionLabel {
+  display: none;
+}
+
 .spacer {
   flex: 1;
 }

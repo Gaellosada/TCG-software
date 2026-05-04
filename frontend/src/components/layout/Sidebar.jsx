@@ -9,10 +9,35 @@ const MAIN_NAV = [
   { to: '/portfolio', label: 'Portfolio', icon: 'portfolio' },
 ];
 
+const AGENT_NAV = [
+  { to: '/agent', label: 'MongoDB Agent', icon: 'agent' },
+];
+
 const BOTTOM_NAV = [
   { to: '/help', label: 'Help', icon: 'help' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
 ];
+
+function NavItems({ items, collapsed }) {
+  return (
+    <ul className={styles.navList}>
+      {items.map(({ to, label, icon }) => (
+        <li key={to} className={styles.navItem}>
+          <NavLink
+            to={to}
+            className={({ isActive }) =>
+              `${styles.navLink} ${isActive ? styles.active : ''}`
+            }
+            title={collapsed ? label : undefined}
+          >
+            <span className={styles.navIcon}><Icon name={icon} size={18} /></span>
+            {!collapsed && <span className={styles.navLabel}>{label}</span>}
+          </NavLink>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function Sidebar({ collapsed, onToggle }) {
   return (
@@ -30,42 +55,17 @@ function Sidebar({ collapsed, onToggle }) {
         </button>
       </div>
       <nav className={styles.topNav}>
-        <ul className={styles.navList}>
-          {MAIN_NAV.map(({ to, label, icon }) => (
-            <li key={to} className={styles.navItem}>
-              <NavLink
-                to={to}
-                className={({ isActive }) =>
-                  `${styles.navLink} ${isActive ? styles.active : ''}`
-                }
-                title={collapsed ? label : undefined}
-              >
-                <span className={styles.navIcon}><Icon name={icon} size={18} /></span>
-                {!collapsed && <span className={styles.navLabel}>{label}</span>}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+        <NavItems items={MAIN_NAV} collapsed={collapsed} />
+      </nav>
+      <div className={styles.divider} />
+      <nav className={styles.agentNav}>
+        {!collapsed && <div className={styles.sectionLabel}>Agents</div>}
+        <NavItems items={AGENT_NAV} collapsed={collapsed} />
       </nav>
       <div className={styles.spacer} />
       <div className={styles.divider} />
       <nav className={styles.bottomNav}>
-        <ul className={styles.navList}>
-          {BOTTOM_NAV.map(({ to, label, icon }) => (
-            <li key={to} className={styles.navItem}>
-              <NavLink
-                to={to}
-                className={({ isActive }) =>
-                  `${styles.navLink} ${isActive ? styles.active : ''}`
-                }
-                title={collapsed ? label : undefined}
-              >
-                <span className={styles.navIcon}><Icon name={icon} size={18} /></span>
-                {!collapsed && <span className={styles.navLabel}>{label}</span>}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+        <NavItems items={BOTTOM_NAV} collapsed={collapsed} />
       </nav>
     </aside>
   );

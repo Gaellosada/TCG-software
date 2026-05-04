@@ -9,13 +9,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from tcg.core.agent.workspace import AgentWorkspace
+from tcg.core.api.agent import agent_websocket, router as agent_router
 from tcg.core.api.data import router as data_router
 from tcg.core.api.errors import tcg_error_handler
 from tcg.core.api.indicators import router as indicators_router
 from tcg.core.api.options import router as options_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
-from tcg.core.config import load_config
+from tcg.core.config import load_agent_config, load_config
 from tcg.data import create_services
 from tcg.types.errors import TCGError
 
@@ -34,12 +36,23 @@ def _cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: connect to MongoDB, build services. Shutdown: close client."""
+    """Startup: connect to MongoDB, build services, init agent. Shutdown: close client."""
     config = load_config()
     client = AsyncIOMotorClient(config.uri, serverSelectionTimeoutMS=5000)
     db = client[config.db_name]
     services = await create_services(db)
     app.state.market_data = services["market_data"]
+
+    # Store mongo connection info for agent tools
+    app.state.mongo_uri = config.uri
+    app.state.mongo_db_name = config.db_name
+
+    # Agent workspace -- always created (session management works without API key)
+    app.state.agent_workspace = AgentWorkspace()
+
+    # Agent config -- None when ANTHROPIC_API_KEY is missing (graceful degradation)
+    app.state.agent_config = load_agent_config()
+
     yield
     client.close()
 
@@ -59,6 +72,11 @@ def create_app() -> FastAPI:
     app.include_router(indicators_router)
     app.include_router(signals_router)
     app.include_router(options_router)
+    app.include_router(agent_router)
+
+    # Mount WebSocket outside the router to avoid prefix routing issues
+    app.websocket("/ws/agent/{session_id}")(agent_websocket)
+
     return app
 
 

@@ -9,6 +9,7 @@ import IndicatorsPage from './pages/Indicators/IndicatorsPage';
 import SignalsPage from './pages/Signals/SignalsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
 import SettingsPage from './pages/Settings/SettingsPage';
+import AgentPage from './pages/Agent/AgentPage';
 import './App.css';
 
 function App() {
@@ -78,6 +79,16 @@ function App() {
                 <PageContainer>
                   <ErrorBoundary>
                     <PortfolioPage />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/agent"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <AgentPage />
                   </ErrorBoundary>
                 </PageContainer>
               }

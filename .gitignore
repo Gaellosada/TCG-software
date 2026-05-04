@@ -35,6 +35,9 @@ frontend/e2e/ux-refinements.spec.js
 frontend/e2e/vix-audit.spec.js
 frontend/e2e/vix-zoom.spec.js
 
+# Agent workspaces (runtime-generated session data)
+agent_workspaces/
+
 # Claude Code
 CLAUDE.md
 .claude/
