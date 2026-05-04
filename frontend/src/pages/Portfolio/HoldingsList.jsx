@@ -90,9 +90,11 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                         <span className={styles.typeBadge} data-type={leg.type}>
                           {isSignal
                             ? 'Signal'
-                            : leg.type === 'continuous'
-                              ? 'Continuous'
-                              : 'Instrument'}
+                            : leg.type === 'option_stream'
+                              ? 'Option'
+                              : leg.type === 'continuous'
+                                ? 'Continuous'
+                                : 'Instrument'}
                         </span>
                       </td>
                       <td className={styles.monoCell}>
@@ -110,6 +112,17 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                               {inputs.length} input{inputs.length !== 1 ? 's' : ''}
                             </span>
                           </button>
+                        ) : leg.type === 'option_stream' ? (
+                          <span>
+                            <span className={styles.instrumentPrimary}>
+                              {leg.collection} {leg.option_type}
+                            </span>
+                            <span className={styles.instrumentSecondary}>
+                              {leg.stream}
+                              {leg.selection?.kind ? ` \u00B7 ${leg.selection.kind}` : ''}
+                              {leg.maturity?.kind ? ` \u00B7 ${leg.maturity.kind}` : ''}
+                            </span>
+                          </span>
                         ) : leg.type === 'continuous' ? (
                           <span>
                             <span className={styles.instrumentPrimary}>{leg.collection}</span>

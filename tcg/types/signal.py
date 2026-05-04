@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from tcg.types.options import MaturitySpec, SelectionCriterion
+
 
 # ---------------------------------------------------------------------------
 # Input instrument (discriminated union)
@@ -59,7 +61,42 @@ class InstrumentContinuous:
     kind: Literal["continuous"] = "continuous"
 
 
-InputInstrument = InstrumentSpot | InstrumentContinuous
+# Streams readable off a single option contract row.  Mirrors the engine
+# ``StreamLabel`` and the API ``OptionStreamLabel`` — redeclared here so
+# the types layer has no dependency on engine or core.
+OptionStreamLabel = Literal[
+    "mid",
+    "iv",
+    "delta",
+    "gamma",
+    "vega",
+    "theta",
+    "open_interest",
+    "volume",
+]
+
+
+@dataclass(frozen=True)
+class InstrumentOptionStream:
+    """Option-stream instrument — materialises a 1-D float stream off a
+    selected option contract on each trade date.
+
+    Uses the same maturity/selection/stream vocabulary as the indicator
+    and options routers so a signal can bind to an option-derived series
+    (e.g. 25-delta put IV, front-month mid price) without inventing a
+    parallel spec.
+    """
+
+    collection: str
+    option_type: Literal["C", "P"]
+    cycle: str | None
+    maturity: MaturitySpec
+    selection: SelectionCriterion
+    stream: OptionStreamLabel
+    kind: Literal["option_stream"] = "option_stream"
+
+
+InputInstrument = InstrumentSpot | InstrumentContinuous | InstrumentOptionStream
 
 
 @dataclass(frozen=True)
@@ -248,8 +285,10 @@ __all__ = [
     "InRangeCondition",
     "InstrumentContinuous",
     "InstrumentOperand",
+    "InstrumentOptionStream",
     "InstrumentSpot",
     "Operand",
+    "OptionStreamLabel",
     "RollingCondition",
     "Signal",
     "SignalRules",

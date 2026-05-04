@@ -40,13 +40,13 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-describe('Signals storage (v4)', () => {
-  it('SCHEMA_VERSION is 4', () => {
-    expect(SCHEMA_VERSION).toBe(4);
+describe('Signals storage (v5)', () => {
+  it('SCHEMA_VERSION is 5', () => {
+    expect(SCHEMA_VERSION).toBe(5);
   });
 
-  it('storage key is tcg.signals.v4', () => {
-    expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v4');
+  it('storage key is tcg.signals.v5', () => {
+    expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v5');
   });
 
   it('SECTIONS are exactly ["entries", "exits"]', () => {
@@ -62,7 +62,7 @@ describe('Signals storage (v4)', () => {
     expect(loadState()).toEqual({ signals: [] });
   });
 
-  it('discards any pre-v4 payload (no migration) and warns exactly once per page load', () => {
+  it('discards any pre-v5 payload (no migration) and warns exactly once per page load', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: 3,
       signals: [{ id: 'old', name: 'Old', rules: { entries: [], exits: [] } }],
@@ -83,13 +83,22 @@ describe('Signals storage (v4)', () => {
     expect(warnSpy).toHaveBeenCalledWith('[signals] discarding incompatible v2 state');
   });
 
+  it('discards a v4 payload (clean break — no migration from v4 to v5)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: 4,
+      signals: [{ id: 'old', name: 'Old', inputs: [], rules: { entries: [], exits: [] } }],
+    }));
+    expect(loadState()).toEqual({ signals: [] });
+    expect(warnSpy).toHaveBeenCalledWith('[signals] discarding incompatible v4 state');
+  });
+
   it('does NOT write to the Indicators localStorage key', () => {
     saveState({ signals: [{ id: 's1', name: 'S1', inputs: [], rules: emptyRules() }] });
     expect(storage.getItem('tcg.indicators.v1')).toBe(null);
     expect(storage.getItem(SIGNALS_STORAGE_KEY)).not.toBe(null);
   });
 
-  it('round-trips a v4 signal with entries + exits referencing them', () => {
+  it('round-trips a v5 signal with entries + exits referencing them', () => {
     const entryId = 'entry-uuid-1';
     const state = {
       signals: [
@@ -149,6 +158,85 @@ describe('Signals storage (v4)', () => {
     saveState(state);
     const loaded = loadState();
     expect(loaded).toEqual(state);
+  });
+
+  it('round-trips an option_stream instrument through save/load', () => {
+    const state = {
+      signals: [
+        {
+          id: 's2',
+          name: 'Options Signal',
+          doc: '',
+          inputs: [
+            {
+              id: 'O',
+              instrument: {
+                type: 'option_stream',
+                collection: 'OPT_SPX',
+                option_type: 'C',
+                cycle: 'W3_FRI',
+                maturity: { kind: 'fixed', value: '2025-06-20' },
+                selection: { kind: 'delta', value: 0.3 },
+                stream: 'iv',
+              },
+            },
+          ],
+          rules: emptyRules(),
+          settings: { dont_repeat: true },
+        },
+      ],
+    };
+    saveState(state);
+    const loaded = loadState();
+    expect(loaded).toEqual(state);
+  });
+
+  it('sanitiser rejects an option_stream with missing fields', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's3',
+          name: 'Bad Opt',
+          inputs: [
+            { id: 'O', instrument: { type: 'option_stream', collection: 'OPT_SPX' } },
+          ],
+          rules: emptyRules(),
+        },
+      ],
+    }));
+    const out = loadState();
+    // Incomplete option_stream → null (input kept but instrument is null)
+    expect(out.signals[0].inputs[0].instrument).toBe(null);
+  });
+
+  it('sanitiser rejects an option_stream with invalid stream value', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's4',
+          name: 'Bad Stream',
+          inputs: [
+            {
+              id: 'O',
+              instrument: {
+                type: 'option_stream',
+                collection: 'OPT_SPX',
+                option_type: 'C',
+                cycle: null,
+                maturity: { kind: 'fixed', value: '2025-06-20' },
+                selection: { kind: 'delta', value: 0.3 },
+                stream: 'rogue_value',
+              },
+            },
+          ],
+          rules: emptyRules(),
+        },
+      ],
+    }));
+    const out = loadState();
+    expect(out.signals[0].inputs[0].instrument).toBe(null);
   });
 
   it('preserves a stored dont_repeat=false even when the default is true', () => {

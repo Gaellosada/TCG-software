@@ -9,7 +9,7 @@ import {
   isBlockRunnable,
 } from './blockShape';
 
-// Inputs fixtures (v4 — unchanged from v3).
+// Inputs fixtures (v5 — unchanged from v3).
 const SPOT_INPUT = { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } };
 const SPOT_INPUT_BAD = { id: 'Y', instrument: { type: 'spot', collection: '', instrument_id: 'SPX' } };
 const CONT_INPUT = {
@@ -23,10 +23,22 @@ const CONT_INPUT = {
     strategy: 'front_month',
   },
 };
-const INPUTS = [SPOT_INPUT, CONT_INPUT];
+const OPT_STREAM_INPUT = {
+  id: 'O',
+  instrument: {
+    type: 'option_stream',
+    collection: 'OPT_SPX',
+    option_type: 'C',
+    cycle: 'W3_FRI',
+    maturity: { kind: 'fixed', value: '2025-06-20' },
+    selection: { kind: 'delta', value: 0.3 },
+    stream: 'iv',
+  },
+};
+const INPUTS = [SPOT_INPUT, CONT_INPUT, OPT_STREAM_INPUT];
 const INPUTS_BY_ID = indexInputs(INPUTS);
 
-// Operands (v4 — unchanged from v3).
+// Operands (v5 — unchanged from v3).
 const INST_OP_OK = { kind: 'instrument', input_id: 'X', field: 'close' };
 const INST_OP_NO_FIELD = { kind: 'instrument', input_id: 'X' };
 const INST_OP_UNKNOWN = { kind: 'instrument', input_id: 'NONE', field: 'close' };
@@ -35,7 +47,7 @@ const IND_OP_OK = { kind: 'indicator', indicator_id: 'sma', input_id: 'X', outpu
 const IND_OP_NO_INPUT = { kind: 'indicator', indicator_id: 'sma', input_id: '', output: null };
 const IND_OP_UNKNOWN_INPUT = { kind: 'indicator', indicator_id: 'sma', input_id: 'NONE', output: null };
 
-describe('defaultBlock (v4)', () => {
+describe('defaultBlock (v5)', () => {
   it('entry block defaults: id, input_id: "", weight: 0, conditions: []', () => {
     const b = defaultBlock('entries');
     expect(typeof b.id).toBe('string');
@@ -118,9 +130,91 @@ describe('isInputConfigured', () => {
       },
     })).toBe(false);
   });
+
+  it('accepts a fully-configured option_stream input', () => {
+    expect(isInputConfigured(OPT_STREAM_INPUT)).toBe(true);
+  });
+
+  it('rejects an option_stream input missing collection', () => {
+    expect(isInputConfigured({
+      id: 'O',
+      instrument: {
+        type: 'option_stream', collection: '', option_type: 'C',
+        cycle: 'W3_FRI',
+        maturity: { kind: 'fixed', value: '2025-06-20' },
+        selection: { kind: 'delta', value: 0.3 },
+        stream: 'iv',
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an option_stream input with invalid option_type', () => {
+    expect(isInputConfigured({
+      id: 'O',
+      instrument: {
+        type: 'option_stream', collection: 'OPT_SPX', option_type: 'X',
+        cycle: 'W3_FRI',
+        maturity: { kind: 'fixed', value: '2025-06-20' },
+        selection: { kind: 'delta', value: 0.3 },
+        stream: 'iv',
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an option_stream input missing maturity', () => {
+    expect(isInputConfigured({
+      id: 'O',
+      instrument: {
+        type: 'option_stream', collection: 'OPT_SPX', option_type: 'C',
+        cycle: 'W3_FRI',
+        maturity: null,
+        selection: { kind: 'delta', value: 0.3 },
+        stream: 'iv',
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an option_stream input missing selection', () => {
+    expect(isInputConfigured({
+      id: 'O',
+      instrument: {
+        type: 'option_stream', collection: 'OPT_SPX', option_type: 'C',
+        cycle: 'W3_FRI',
+        maturity: { kind: 'fixed', value: '2025-06-20' },
+        selection: null,
+        stream: 'iv',
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an option_stream input with empty stream', () => {
+    expect(isInputConfigured({
+      id: 'O',
+      instrument: {
+        type: 'option_stream', collection: 'OPT_SPX', option_type: 'C',
+        cycle: 'W3_FRI',
+        maturity: { kind: 'fixed', value: '2025-06-20' },
+        selection: { kind: 'delta', value: 0.3 },
+        stream: '',
+      },
+    })).toBe(false);
+  });
+
+  it('accepts an option_stream input with null cycle', () => {
+    expect(isInputConfigured({
+      id: 'O',
+      instrument: {
+        type: 'option_stream', collection: 'OPT_SPX', option_type: 'P',
+        cycle: null,
+        maturity: { kind: 'dte', value: 30 },
+        selection: { kind: 'strike', value: 5000 },
+        stream: 'delta',
+      },
+    })).toBe(true);
+  });
 });
 
-describe('isOperandComplete (v4)', () => {
+describe('isOperandComplete (v5)', () => {
   it('null / undefined / non-object → false', () => {
     expect(isOperandComplete(null, INPUTS_BY_ID)).toBe(false);
     expect(isOperandComplete(undefined, INPUTS_BY_ID)).toBe(false);
@@ -158,7 +252,7 @@ describe('isOperandComplete (v4)', () => {
   });
 });
 
-describe('isConditionComplete (v4)', () => {
+describe('isConditionComplete (v5)', () => {
   it('rejects bad inputs', () => {
     expect(isConditionComplete(null, INPUTS_BY_ID)).toBe(false);
     expect(isConditionComplete({}, INPUTS_BY_ID)).toBe(false);
@@ -235,7 +329,7 @@ describe('collectEntryIds', () => {
   });
 });
 
-describe('isBlockRunnable (v4 — entries)', () => {
+describe('isBlockRunnable (v5 — entries)', () => {
   const runnableCondition = { op: 'gt', lhs: CONST_OK, rhs: CONST_OK };
   const entryBlock = (over = {}) => ({
     id: 'e1', input_id: 'X', weight: 40, conditions: [runnableCondition], ...over,
@@ -308,7 +402,7 @@ describe('isBlockRunnable (v4 — entries)', () => {
   });
 });
 
-describe('isBlockRunnable (v4 — exits)', () => {
+describe('isBlockRunnable (v5 — exits)', () => {
   const runnableCondition = { op: 'gt', lhs: CONST_OK, rhs: CONST_OK };
   const exitBlock = (over = {}) => ({
     id: 'x1',

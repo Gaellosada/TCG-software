@@ -1,10 +1,10 @@
-// Pure data helpers for Block-level validation — v4.
+// Pure data helpers for Block-level validation — v5.
 //
 // Single source of truth for "is this block complete enough to Run?".
 // Used by the UI (Run gate, per-block status dot) and the request
 // builder. No React imports — unit-testable in isolation.
 //
-// v4 Block shape:
+// v5 Block shape:
 //   entry: {
 //     id: <uuid>,
 //     input_id: <string>,
@@ -21,7 +21,7 @@
 // input is derived from the target entry's input_id. The backend
 // rejects exit payloads containing input_id with HTTP 400.
 //
-// v4 Operand shapes (unchanged from v3):
+// v5 Operand shapes (unchanged from v3):
 //   - indicator:  { kind:'indicator', indicator_id, input_id, output,
 //                   params_override, series_override }
 //   - instrument: { kind:'instrument', input_id, field }
@@ -58,8 +58,9 @@ export function defaultBlock(section = 'entries') {
 
 /**
  * True iff an input's instrument is fully configured.
- *   - spot:       requires collection + instrument_id.
- *   - continuous: requires collection + adjustment + cycle + rollOffset + strategy.
+ *   - spot:          requires collection + instrument_id.
+ *   - continuous:    requires collection + adjustment + cycle + rollOffset + strategy.
+ *   - option_stream: requires collection + option_type + maturity + selection + stream.
  */
 export function isInputConfigured(input) {
   if (!input || typeof input !== 'object') return false;
@@ -76,6 +77,13 @@ export function isInputConfigured(input) {
       && (inst.cycle == null || typeof inst.cycle === 'string')
       && Number.isFinite(inst.rollOffset)
       && inst.strategy === 'front_month';
+  }
+  if (inst.type === 'option_stream') {
+    return !!(typeof inst.collection === 'string' && inst.collection.length > 0
+      && ['C', 'P'].includes(inst.option_type)
+      && inst.maturity && typeof inst.maturity === 'object' && typeof inst.maturity.kind === 'string'
+      && inst.selection && typeof inst.selection === 'object' && typeof inst.selection.kind === 'string'
+      && typeof inst.stream === 'string' && inst.stream.length > 0);
   }
   return false;
 }

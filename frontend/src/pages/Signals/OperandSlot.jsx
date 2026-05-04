@@ -234,6 +234,18 @@ function IndicatorEditor({ operand, indicators, inputs, onChange }) {
 }
 
 function InstrumentEditor({ operand, inputs, onChange }) {
+  const list = Array.isArray(inputs) ? inputs : [];
+  const boundInput = list.find((i) => i.id === operand.input_id);
+  const isOptionStream = boundInput?.instrument?.type === 'option_stream';
+  const fieldOptions = isOptionStream
+    ? [{ value: 'close', label: 'value' }]
+    : [
+        { value: 'open', label: 'open' },
+        { value: 'high', label: 'high' },
+        { value: 'low', label: 'low' },
+        { value: 'close', label: 'close' },
+        { value: 'volume', label: 'volume' },
+      ];
   return (
     <div className={styles.operandInstrumentWrap}>
       <InputIdSelect
@@ -254,11 +266,9 @@ function InstrumentEditor({ operand, inputs, onChange }) {
         aria-label="Instrument field"
         data-testid="operand-instrument-field"
       >
-        <option value="open">open</option>
-        <option value="high">high</option>
-        <option value="low">low</option>
-        <option value="close">close</option>
-        <option value="volume">volume</option>
+        {fieldOptions.map((opt) => (
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
+        ))}
       </select>
     </div>
   );

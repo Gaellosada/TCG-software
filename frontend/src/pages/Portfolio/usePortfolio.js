@@ -72,6 +72,11 @@ export default function usePortfolio() {
       if (leg.type === 'signal') {
         return fetchSignalLegRange(leg);
       }
+      if (leg.type === 'option_stream') {
+        // Option streams need materialisation to know exact date bounds.
+        // Return null dates — the user must set explicit start/end dates.
+        return { id: leg.id, start: null, end: null };
+      }
       try {
         let dates;
         if (leg.type === 'continuous') {
@@ -148,7 +153,7 @@ export default function usePortfolio() {
         {
           id,
           label,
-          type: leg.type,           // "instrument" or "continuous"
+          type: leg.type,           // "instrument", "continuous", or "option_stream"
           collection: leg.collection,
           symbol: leg.symbol || null,
           strategy: leg.strategy || null,
@@ -156,6 +161,11 @@ export default function usePortfolio() {
           cycle: leg.cycle || null,
           rollOffset: leg.rollOffset ?? 0,
           weight: leg.weight ?? 100,
+          // option_stream fields (null for non-option legs)
+          option_type: leg.option_type || null,
+          maturity: leg.maturity || null,
+          selection: leg.selection || null,
+          stream: leg.stream || null,
         },
       ];
     });
@@ -231,6 +241,13 @@ export default function usePortfolio() {
       return;
     }
 
+    // Option stream legs require explicit dates (the backend can't infer range)
+    const hasOptionStreamLegs = legs.some((l) => l.type === 'option_stream');
+    if (hasOptionStreamLegs && (!startDate || !endDate)) {
+      setError('Option stream legs require explicit start and end dates. Please set a date range.');
+      return;
+    }
+
     // Build legs dict for API
     const availableIndicators = hydrateAvailableIndicators();
     const apiLegs = {};
@@ -244,6 +261,16 @@ export default function usePortfolio() {
         apiLegs[leg.label] = {
           type: 'signal',
           signal_spec: body,
+        };
+      } else if (leg.type === 'option_stream') {
+        apiLegs[leg.label] = {
+          type: 'option_stream',
+          collection: leg.collection,
+          option_type: leg.option_type,
+          cycle: leg.cycle,
+          maturity: leg.maturity,
+          selection: leg.selection,
+          stream: leg.stream,
         };
       } else if (leg.type === 'continuous') {
         apiLegs[leg.label] = {

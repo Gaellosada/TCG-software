@@ -74,6 +74,7 @@ from tcg.types.signal import (
     InputInstrument,
     InstrumentContinuous,
     InstrumentOperand,
+    InstrumentOptionStream,
     InstrumentSpot,
     Operand,
     RollingCondition,
@@ -152,9 +153,7 @@ def _input_table(signal: Signal) -> dict[str, Input]:
     return out
 
 
-def _require_input(
-    input_id: str, inputs: dict[str, Input], *, ctx: str
-) -> Input:
+def _require_input(input_id: str, inputs: dict[str, Input], *, ctx: str) -> Input:
     if not input_id:
         raise SignalValidationError(f"{ctx}: input_id is empty")
     inp = inputs.get(input_id)
@@ -178,6 +177,16 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
             inst.cycle or "",
             int(inst.roll_offset),
             inst.strategy,
+        )
+    if isinstance(inst, InstrumentOptionStream):
+        return (
+            "option_stream",
+            inst.collection,
+            inst.option_type,
+            inst.cycle or "",
+            repr(inst.maturity),
+            repr(inst.selection),
+            inst.stream,
         )
     raise SignalValidationError(f"unknown instrument kind: {inst!r}")
 
@@ -216,10 +225,7 @@ def _merge_indicator_effective(
             other = _require_input(
                 overrides[label],
                 inputs,
-                ctx=(
-                    f"indicator {op.indicator_id!r} series_override"
-                    f"[{label!r}]"
-                ),
+                ctx=(f"indicator {op.indicator_id!r} series_override[{label!r}]"),
             )
             eff_label_inst[label] = other.instrument
         elif idx == 0:
@@ -232,9 +238,7 @@ def _merge_indicator_effective(
                     f"base series_map entry and is not overridden"
                 )
             coll, iid = base_entry
-            eff_label_inst[label] = InstrumentSpot(
-                collection=coll, instrument_id=iid
-            )
+            eff_label_inst[label] = InstrumentSpot(collection=coll, instrument_id=iid)
 
     return eff_params, eff_label_inst
 
@@ -279,9 +283,7 @@ def _operand_key(
             _freeze_label_inst(eff_i),
         )
     if isinstance(operand, InstrumentOperand):
-        inp = _require_input(
-            operand.input_id, inputs, ctx="instrument operand"
-        )
+        inp = _require_input(operand.input_id, inputs, ctx="instrument operand")
         return (
             "instrument",
             _instrument_identity(inp.instrument),
@@ -370,18 +372,14 @@ async def _resolve_indicator_operand(
     try:
         result = run_indicator(base.code, dict(eff_params), aligned)
     except IndicatorValidationError as exc:
-        raise SignalValidationError(
-            f"indicator {op.indicator_id!r}: {exc}"
-        ) from exc
+        raise SignalValidationError(f"indicator {op.indicator_id!r}: {exc}") from exc
     except IndicatorRuntimeError as exc:
         raise SignalRuntimeError(
             f"indicator {op.indicator_id!r}: {exc}",
             user_traceback=exc.user_traceback,
         ) from exc
 
-    return common.astype(np.int64, copy=False), result.astype(
-        np.float64, copy=False
-    )
+    return common.astype(np.int64, copy=False), result.astype(np.float64, copy=False)
 
 
 async def _resolve_operand(
@@ -397,9 +395,7 @@ async def _resolve_operand(
     if isinstance(operand, ConstantOperand):
         return None, None, float(operand.value)
     if isinstance(operand, InstrumentOperand):
-        inp = _require_input(
-            operand.input_id, inputs, ctx="instrument operand"
-        )
+        inp = _require_input(operand.input_id, inputs, ctx="instrument operand")
         dates, values = await fetcher(inp.instrument, operand.field)
         if dates.size >= 2 and not bool(np.all(np.diff(dates) > 0)):
             raise SignalValidationError(
@@ -531,9 +527,7 @@ def _eval_condition(
         x = values_by_key[k(cond.operand)]
         kk = int(cond.lookback)
         if kk < 1:
-            raise SignalValidationError(
-                f"rolling lookback must be >= 1, got {kk}"
-            )
+            raise SignalValidationError(f"rolling lookback must be >= 1, got {kk}")
         truth = np.zeros(T, dtype=np.bool_)
         nan_at_t = np.isnan(x).copy()
         nan_at_t[: min(kk, T)] = True
@@ -578,9 +572,7 @@ def _usable_entry(block: Block, inputs: dict[str, Input]) -> bool:
     return True
 
 
-def _usable_exit(
-    block: Block, inputs: dict[str, Input], entry_names: set[str]
-) -> bool:
+def _usable_exit(block: Block, inputs: dict[str, Input], entry_names: set[str]) -> bool:
     """Exit block is usable iff it has id + conditions AND
     target_entry_block_name references a usable entry's name.
 
@@ -598,9 +590,7 @@ def _usable_exit(
     return True
 
 
-def _exit_input_id(
-    exit_block: Block, entries_by_name: dict[str, Block]
-) -> str:
+def _exit_input_id(exit_block: Block, entries_by_name: dict[str, Block]) -> str:
     """Return the operating input id for an exit block, derived from its
     target entry.
 
@@ -729,9 +719,7 @@ async def evaluate_signal(
         raise SignalValidationError(
             "duplicate entry block name within signal.rules.entries"
         )
-    entries_by_name: dict[str, Block] = {
-        b.name: b for b in entry_blocks if b.name
-    }
+    entries_by_name: dict[str, Block] = {b.name: b for b in entry_blocks if b.name}
 
     exit_blocks: list[Block] = [
         b for b in signal.rules.exits if _usable_exit(b, inputs, entry_names)
@@ -920,6 +908,8 @@ async def evaluate_signal(
         if key in values_by_key:
             if isinstance(inp.instrument, InstrumentSpot):
                 price_label = f"{inp.instrument.instrument_id}.close"
+            elif isinstance(inp.instrument, InstrumentOptionStream):
+                price_label = f"{inp.instrument.collection}.{inp.instrument.stream}"
             else:
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]
@@ -929,9 +919,7 @@ async def evaluate_signal(
             prev_price = price_values[:-1]
             cur_price = price_values[1:]
             valid = (
-                np.isfinite(prev_price)
-                & np.isfinite(cur_price)
-                & (prev_price != 0.0)
+                np.isfinite(prev_price) & np.isfinite(cur_price) & (prev_price != 0.0)
             )
             step = np.zeros(T - 1, dtype=np.float64)
             with np.errstate(invalid="ignore", divide="ignore"):
@@ -998,9 +986,7 @@ async def evaluate_signal(
                     indicator_id=op.indicator_id,
                     series=values_by_key[k],
                     params_override=(
-                        dict(op.params_override)
-                        if op.params_override
-                        else None
+                        dict(op.params_override) if op.params_override else None
                     ),
                 )
             )
