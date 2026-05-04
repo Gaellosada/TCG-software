@@ -204,7 +204,7 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  margin-bottom: 8px;
+  align-self: center;
 }
 
 .dotConnected {
