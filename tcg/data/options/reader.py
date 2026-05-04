@@ -45,11 +45,11 @@ logger = logging.getLogger(__name__)
 # Friendly display names for OPT_* roots. Anything not listed falls back
 # to a generated title from the collection name.
 # Safety cap for ``query_chain_bulk``'s ``cursor.to_list()``.  The query
-# already filters by expiration range, type, strike bounds, and cycle —
-# a typical result set is ~20K docs (250 dates × 20 contracts × 4
-# expirations).  50K gives 2.5× headroom without risking unbounded
-# memory spikes on pathological queries against large collections.
-_BULK_CURSOR_MAX_DOCS = 50_000
+# already filters by expiration range, type, strike bounds, and cycle.
+# For long date ranges (e.g. 1990–2026) a single expiration group can
+# contain hundreds of thousands of rows.  500K accommodates multi-decade
+# ranges without risking unbounded memory on truly pathological queries.
+_BULK_CURSOR_MAX_DOCS = 500_000
 
 
 _ROOT_DISPLAY_NAMES: dict[str, str] = {
@@ -589,7 +589,7 @@ def _materialize_chain_rows_bulk(
         raw = bar.get("date")
         try:
             iv = int(raw) if raw is not None else None
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if iv is None or iv not in target_yyyymmdd_set:
             continue
@@ -646,7 +646,7 @@ def _find_bar_for_date(
         raw = bar.get("date") if isinstance(bar, Mapping) else None
         try:
             iv = int(raw) if raw is not None else None
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if iv == target_yyyymmdd:
             return bar
@@ -660,7 +660,7 @@ def _date_to_int(d: date) -> int:
 def _int_to_date(value: Any) -> date | None:
     try:
         iv = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if not (19000101 <= iv <= 21001231):
         return None
