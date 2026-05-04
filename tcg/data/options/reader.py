@@ -45,11 +45,11 @@ logger = logging.getLogger(__name__)
 # Friendly display names for OPT_* roots. Anything not listed falls back
 # to a generated title from the collection name.
 # Safety cap for ``query_chain_bulk``'s ``cursor.to_list()``.  The query
-# already filters by expiration range, type, strike bounds, and cycle —
-# a typical result set is ~20K docs (250 dates × 20 contracts × 4
-# expirations).  50K gives 2.5× headroom without risking unbounded
-# memory spikes on pathological queries against large collections.
-_BULK_CURSOR_MAX_DOCS = 50_000
+# already filters by expiration range, type, strike bounds, and cycle.
+# For long date ranges (e.g. 1990–2026) a single expiration group can
+# contain hundreds of thousands of rows.  500K accommodates multi-decade
+# ranges without risking unbounded memory on truly pathological queries.
+_BULK_CURSOR_MAX_DOCS = 500_000
 
 
 _ROOT_DISPLAY_NAMES: dict[str, str] = {

@@ -4,12 +4,11 @@
 // Indicators page (``tcg.indicators.*``) are impossible. A future
 // key-version migration can be done in one place.
 //
-// v4 (signals-refactor-v4): unified entries/exits with signed weight
-// percentages in [-100, +100]; exits target a specific entry block by id.
-// Pre-v4 payloads are discarded on load — no migration code.
+// v5: adds option_stream to the InputInstrument union. Clean break from v4.
+// Pre-v5 payloads are discarded on load — no migration code.
 
 /** Versioned schema key for the main signals state (signals[]). */
-export const SIGNALS_STORAGE_KEY = 'tcg.signals.v4';
+export const SIGNALS_STORAGE_KEY = 'tcg.signals.v5';
 
 /** Autosave-enabled toggle persisted per browser session. */
 export const AUTOSAVE_KEY = 'tcg.signals.autosave';

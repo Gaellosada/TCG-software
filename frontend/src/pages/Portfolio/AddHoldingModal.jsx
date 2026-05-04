@@ -14,7 +14,19 @@ import InstrumentPickerModal from '../../components/InstrumentPickerModal/Instru
 export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
   const handleSelect = useCallback(
     (instrument) => {
-      if (instrument.type === 'continuous') {
+      if (instrument.type === 'option_stream') {
+        onAddLeg({
+          label: `${instrument.collection} ${instrument.option_type} ${instrument.stream}`,
+          type: 'option_stream',
+          collection: instrument.collection,
+          option_type: instrument.option_type,
+          cycle: instrument.cycle,
+          maturity: instrument.maturity,
+          selection: instrument.selection,
+          stream: instrument.stream,
+          weight: 100,
+        });
+      } else if (instrument.type === 'continuous') {
         onAddLeg({
           label: instrument.collection,
           type: 'continuous',

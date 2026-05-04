@@ -18,7 +18,6 @@ from __future__ import annotations
 from datetime import date
 
 import numpy as np
-import pandas_market_calendars as mcal
 from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -32,7 +31,11 @@ from tcg.core.api._models import (
     SeriesRef,
     SpotInstrumentRef,
 )
-from tcg.core.api._options_wiring import build_stream_resolver_wiring
+from tcg.core.api._options_materialise import (
+    _business_dates_in_range,
+    _materialise_option_stream,
+    materialise_option_streams,
+)
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import (
     error_response,
@@ -42,18 +45,13 @@ from tcg.core.api.common import (
     progress_snapshot,
     progress_tick,
 )
-from tcg.core.api.options import (
-    _criterion_pydantic_to_dataclass,
-    _maturity_pydantic_to_dataclass,
-)
-from tcg.data._utils import date_to_int, int_to_iso
+from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.indicator_exec import (
     IndicatorRuntimeError,
     IndicatorValidationError,
     run_indicator,
 )
-from tcg.engine.options.series.stream_resolver import resolve_option_stream
 from tcg.types.errors import DataNotFoundError
 
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
@@ -209,119 +207,6 @@ def _stream_unavailable_for_root_response(
     if indicator_id is not None:
         content["indicator_id"] = indicator_id
     return JSONResponse(status_code=422, content=content)
-
-
-def _business_dates_in_range(start: date | None, end: date | None) -> list[date] | None:
-    """Enumerate CME business days in [start, end].
-
-    ``OptionStreamRef`` materialisation needs an explicit date axis
-    (no underlying price series in the request to borrow it from).
-    We enumerate business days on the same calendar Module 4 uses
-    (``CME_TradeDate``).  ``None`` is returned when the range is
-    invalid or empty — the caller surfaces a 400 in that case.
-    """
-    if start is None or end is None or start > end:
-        return None
-    cal = mcal.get_calendar("CME_TradeDate")
-    vd = cal.valid_days(start_date=start, end_date=end)
-    return [ts.date() for ts in vd]
-
-
-async def materialise_option_streams(
-    refs_with_labels: list[tuple[str, OptionStreamRef]],
-    *,
-    svc: MarketDataService,
-    start_date: date | None,
-    end_date: date | None,
-    progress_callback=None,
-) -> dict[str, tuple[np.ndarray, np.ndarray, list[str | None]]] | str:
-    """Materialise one or more ``OptionStreamRef`` into keyed results.
-
-    Parameters
-    ----------
-    refs_with_labels:
-        List of ``(label, ref)`` tuples.  Each ref is resolved
-        independently; results are keyed by label.
-    svc:
-        The ``MarketDataService`` providing MongoDB access.
-    start_date, end_date:
-        ISO date boundaries.  Both required for option streams.
-    progress_callback:
-        Invoked once per resolved trade date per ref — the caller
-        wires it to ``_progress_tick`` for FE progress polling.
-
-    Returns
-    -------
-    A dict ``{label: (dates_arr, values, diagnostics)}`` on success,
-    or a string error message when the date range is missing.
-    """
-    trade_dates = _business_dates_in_range(start_date, end_date)
-    if not trade_dates:
-        return "option_stream requires explicit ISO 'start' and 'end' dates"
-
-    chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
-        svc
-    )
-
-    results: dict[str, tuple[np.ndarray, np.ndarray, list[str | None]]] = {}
-    for label, ref in refs_with_labels:
-        # Pre-fetch available expirations filtered by the requested type
-        # and cycle.  The unfiltered variant returned expirations for ALL
-        # types / cycles, causing the bulk resolver to pick expirations
-        # that had no matching contracts — empty chains → spurious NaN
-        # holes.
-        all_expirations = await svc.list_option_expirations_filtered(
-            ref.collection,
-            option_type=ref.option_type,
-            cycle=ref.cycle,
-        )
-        values, diagnostics = await resolve_option_stream(
-            dates=trade_dates,
-            collection=ref.collection,
-            option_type=ref.option_type,
-            cycle=ref.cycle,
-            maturity=_maturity_pydantic_to_dataclass(ref.maturity),
-            selection=_criterion_pydantic_to_dataclass(ref.selection),
-            stream=ref.stream,
-            chain_reader=chain_reader,
-            maturity_resolver=mat_resolver,
-            underlying_price_resolver=ul_resolver,
-            progress_callback=progress_callback,
-            bulk_chain_reader=bulk_reader,
-            available_expirations=all_expirations,
-        )
-        dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
-        results[label] = (dates_arr, values, diagnostics)
-
-    return results
-
-
-async def _materialise_option_stream(
-    ref: OptionStreamRef,
-    *,
-    svc: MarketDataService,
-    start_date: date | None,
-    end_date: date | None,
-    progress_callback=None,
-) -> tuple[np.ndarray, np.ndarray, list[str | None]] | str:
-    """Materialise a single ``OptionStreamRef`` into ``(dates, values, diagnostics)``.
-
-    Thin wrapper around :func:`materialise_option_streams` for backward
-    compatibility with the ``/api/indicators/compute`` handler.
-
-    Returns the triple on success or a string error message when the
-    date range is missing.
-    """
-    result = await materialise_option_streams(
-        [("_single", ref)],
-        svc=svc,
-        start_date=start_date,
-        end_date=end_date,
-        progress_callback=progress_callback,
-    )
-    if isinstance(result, str):
-        return result
-    return result["_single"]
 
 
 def _count_option_stream_dates(

@@ -14,6 +14,11 @@ export function legsToRangesKey(legs) {
       }).join(',');
       return `s:${l.signalId}:[${inputKeys}]`;
     }
+    if (l.type === 'option_stream') {
+      const m = l.maturity || {};
+      const s = l.selection || {};
+      return `o:${l.collection}:${l.option_type}:${l.cycle}:${JSON.stringify(m)}:${JSON.stringify(s)}:${l.stream}`;
+    }
     if (l.type === 'continuous') return `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`;
     return `i:${l.collection}:${l.symbol}`;
   }).join('|');

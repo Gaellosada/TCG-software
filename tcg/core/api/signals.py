@@ -86,6 +86,7 @@ from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
     ContinuousInstrumentRef,
+    OptionStreamRef,
     SpotInstrumentRef,
 )
 from tcg.core.api._serializers import nan_safe_floats
@@ -112,6 +113,7 @@ from tcg.types.signal import (
     InputInstrument,
     InstrumentContinuous,
     InstrumentOperand,
+    InstrumentOptionStream,
     InstrumentSpot,
     Operand,
     RollingCondition,
@@ -135,7 +137,7 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 class _InputIn(BaseModel):
     id: str
     # Pydantic v2 discriminated union on ``type``.
-    instrument: SpotInstrumentRef | ContinuousInstrumentRef = Field(
+    instrument: SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef = Field(
         discriminator="type"
     )
 
@@ -244,6 +246,37 @@ def _parse_input(inp_in: _InputIn) -> Input:
             collection=inst_in.collection,
             instrument_id=inst_in.instrument_id,
         )
+    elif isinstance(inst_in, OptionStreamRef):
+        if not inst_in.collection:
+            raise SignalValidationError(
+                f"input {iid!r}: option_stream instrument requires collection"
+            )
+        # Lazy imports to avoid circular deps (same pattern as indicators.py)
+        from tcg.core.api.options import (
+            _criterion_pydantic_to_dataclass,
+            _maturity_pydantic_to_dataclass,
+        )
+
+        # Reject tautological: by_delta selection + delta stream
+        if (
+            hasattr(inst_in.selection, "kind")
+            and inst_in.selection.kind == "by_delta"
+            and inst_in.stream == "delta"
+        ):
+            raise SignalValidationError(
+                f"input {iid!r}: by_delta selection with delta stream is tautological"
+            )
+
+        maturity = _maturity_pydantic_to_dataclass(inst_in.maturity)
+        selection = _criterion_pydantic_to_dataclass(inst_in.selection)
+        instrument = InstrumentOptionStream(
+            collection=inst_in.collection,
+            option_type=inst_in.option_type,
+            cycle=inst_in.cycle,
+            maturity=maturity,
+            selection=selection,
+            stream=inst_in.stream,
+        )
     else:
         if not inst_in.collection:
             raise SignalValidationError(
@@ -293,9 +326,7 @@ def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
         )
     if op_in.kind == "constant":
         if op_in.value is None:
-            raise SignalValidationError(
-                f"{path}: constant operand requires 'value'"
-            )
+            raise SignalValidationError(f"{path}: constant operand requires 'value'")
         return ConstantOperand(value=float(op_in.value))
     raise SignalValidationError(f"{path}: unknown operand kind {op_in.kind!r}")
 
@@ -375,19 +406,15 @@ def _parse_blocks(
         # Placeholder blocks (no conditions + no input) are accepted
         # as sentinels; they skip evaluation. Otherwise full validation.
         placeholder = (
-            not conds and not iid and not bid
-            and weight == 0.0 and tgt_name is None
+            not conds and not iid and not bid and weight == 0.0 and tgt_name is None
         )
         if not placeholder:
             if not bid:
-                raise SignalValidationError(
-                    f"{path}: block id is required"
-                )
+                raise SignalValidationError(f"{path}: block id is required")
             if is_entry:
                 if tgt_name is not None:
                     raise SignalValidationError(
-                        f"{path}: entry blocks must not set "
-                        f"'target_entry_block_name'"
+                        f"{path}: entry blocks must not set 'target_entry_block_name'"
                     )
                 if legacy_tgt is not None:
                     raise SignalValidationError(
@@ -435,8 +462,7 @@ def _parse_blocks(
                     )
                 if not tgt_name:
                     raise SignalValidationError(
-                        f"{path}: exit blocks require "
-                        f"'target_entry_block_name'"
+                        f"{path}: exit blocks require 'target_entry_block_name'"
                     )
                 assert entry_names is not None
                 if tgt_name not in entry_names:
@@ -463,7 +489,9 @@ def _parse_blocks(
 def parse_signal(raw: SignalIn) -> Signal:
     inputs = tuple(_parse_input(i) for i in raw.inputs)
     entries = _parse_blocks(
-        raw.rules.entries, section="entries", is_entry=True,
+        raw.rules.entries,
+        section="entries",
+        is_entry=True,
     )
     entry_names: set[str] = {b.name for b in entries if b.name}
     exits = _parse_blocks(
@@ -509,9 +537,7 @@ async def compute_input_overlap(
                         end=end,
                     )
                 except DataNotFoundError as exc:
-                    raise SignalDataError(
-                        f"input {inp.id!r}: {exc}"
-                    ) from exc
+                    raise SignalDataError(f"input {inp.id!r}: {exc}") from exc
                 date_arrays.append(series.dates)
             case "InstrumentContinuous":
                 try:
@@ -521,9 +547,7 @@ async def compute_input_overlap(
                         inst.roll_offset,  # type: ignore[union-attr]
                     )
                 except ValueError as exc:
-                    raise SignalDataError(
-                        f"input {inp.id!r}: {exc}"
-                    ) from exc
+                    raise SignalDataError(f"input {inp.id!r}: {exc}") from exc
                 try:
                     cseries = await svc.get_continuous(
                         inst.collection,  # type: ignore[union-attr]
@@ -532,14 +556,46 @@ async def compute_input_overlap(
                         end=end,
                     )
                 except DataNotFoundError as exc:
-                    raise SignalDataError(
-                        f"input {inp.id!r}: {exc}"
-                    ) from exc
+                    raise SignalDataError(f"input {inp.id!r}: {exc}") from exc
                 date_arrays.append(cseries.prices.dates)
-            case _:
-                raise SignalDataError(
-                    f"input {inp.id!r}: unsupported instrument type"
+            case "InstrumentOptionStream":
+                # Cheap pre-flight: enumerate business days between
+                # the earliest and latest available expirations, clamped
+                # to the caller's [start, end] bounds.  No materialisation
+                # — the actual resolver runs later inside the fetcher.
+                from tcg.core.api._options_materialise import _business_dates_in_range
+                from tcg.data._utils import date_to_int
+
+                all_expirations = await svc.list_option_expirations_filtered(
+                    inst.collection,  # type: ignore[union-attr]
+                    option_type=inst.option_type,  # type: ignore[union-attr]
+                    cycle=inst.cycle,  # type: ignore[union-attr]
                 )
+                if not all_expirations:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: no option expirations found for "
+                        f"{inst.collection} {inst.option_type} "  # type: ignore[union-attr]
+                        f"cycle={inst.cycle}"  # type: ignore[union-attr]
+                    )
+                lo_date = min(all_expirations)
+                hi_date = max(all_expirations)
+                # Clamp to caller's date bounds if provided.
+                if start is not None:
+                    lo_date = max(lo_date, start)
+                if end is not None:
+                    hi_date = min(hi_date, end)
+                trade_dates = _business_dates_in_range(lo_date, hi_date)
+                if not trade_dates:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: no business days in option "
+                        f"date range [{lo_date}, {hi_date}]"
+                    )
+                dates_arr = np.array(
+                    [date_to_int(d) for d in trade_dates], dtype=np.int64
+                )
+                date_arrays.append(dates_arr)
+            case _:
+                raise SignalDataError(f"input {inp.id!r}: unsupported instrument type")
 
     # Intersect all date arrays to find the common range.
     common = date_arrays[0]
@@ -588,6 +644,11 @@ def make_signal_fetcher(
     start: date | None,
     end: date | None,
 ) -> Any:
+    # Lazy-init cache for option_stream wiring — built once on first
+    # option_stream fetch, then reused for all subsequent option_stream
+    # inputs within this signal evaluation.
+    _os_wiring_cache: dict[str, Any] = {}
+
     async def fetch(
         instrument: InputInstrument, field: str
     ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
@@ -612,6 +673,52 @@ def make_signal_fetcher(
             values = _pick_field(series, field)
             return series.dates, values
 
+        if isinstance(instrument, InstrumentOptionStream):
+            # Lazy imports — keeps the engine/options dependency
+            # function-scoped (same pattern as _options_materialise).
+            from tcg.core.api._options_wiring import build_stream_resolver_wiring
+            from tcg.core.api._options_materialise import _business_dates_in_range
+            from tcg.data._utils import date_to_int
+            from tcg.engine.options.series.stream_resolver import (
+                resolve_option_stream,
+            )
+
+            trade_dates = _business_dates_in_range(start, end)
+            if not trade_dates:
+                raise SignalDataError("option_stream requires explicit start/end dates")
+
+            # Build wiring once per signal evaluation, capture in closure.
+            if "wiring" not in _os_wiring_cache:
+                _os_wiring_cache["wiring"] = build_stream_resolver_wiring(svc)
+            chain_reader, mat_resolver, ul_resolver, bulk_reader = _os_wiring_cache[
+                "wiring"
+            ]
+
+            # Pre-fetch available expirations filtered by type + cycle.
+            all_expirations = await svc.list_option_expirations_filtered(
+                instrument.collection,
+                option_type=instrument.option_type,
+                cycle=instrument.cycle,
+            )
+
+            values, diagnostics = await resolve_option_stream(
+                dates=trade_dates,
+                collection=instrument.collection,
+                option_type=instrument.option_type,
+                cycle=instrument.cycle,
+                maturity=instrument.maturity,
+                selection=instrument.selection,
+                stream=instrument.stream,
+                chain_reader=chain_reader,
+                maturity_resolver=mat_resolver,
+                underlying_price_resolver=ul_resolver,
+                bulk_chain_reader=bulk_reader,
+                available_expirations=all_expirations,
+            )
+
+            dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
+            return dates_arr, values
+
         # continuous
         try:
             roll_config = build_roll_config(
@@ -620,9 +727,7 @@ def make_signal_fetcher(
                 instrument.roll_offset,
             )
         except ValueError as exc:
-            raise SignalValidationError(
-                f"continuous input: {exc}"
-            ) from exc
+            raise SignalValidationError(f"continuous input: {exc}") from exc
         try:
             cseries = await svc.get_continuous(
                 instrument.collection,
@@ -631,9 +736,7 @@ def make_signal_fetcher(
                 end=end,
             )
         except DataNotFoundError as exc:
-            raise SignalDataError(
-                f"continuous {instrument.collection}: {exc}"
-            ) from exc
+            raise SignalDataError(f"continuous {instrument.collection}: {exc}") from exc
         if cseries is None:
             raise SignalDataError(
                 f"continuous series unavailable for {instrument.collection!r}"
@@ -661,6 +764,18 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             "type": "spot",
             "collection": inst.collection,
             "instrument_id": inst.instrument_id,
+        }
+    if isinstance(inst, InstrumentOptionStream):
+        from dataclasses import asdict
+
+        return {
+            "type": "option_stream",
+            "collection": inst.collection,
+            "option_type": inst.option_type,
+            "cycle": inst.cycle,
+            "maturity": asdict(inst.maturity),
+            "selection": asdict(inst.selection),
+            "stream": inst.stream,
         }
     return {
         "type": "continuous",
@@ -711,7 +826,10 @@ async def compute_signal(
     # --- compute the biggest overlap of all input date ranges ----------
     try:
         overlap_start, overlap_end = await compute_input_overlap(
-            svc, signal, start_date, end_date,
+            svc,
+            signal,
+            start_date,
+            end_date,
         )
     except SignalDataError as exc:
         return error_response("data", str(exc))
@@ -724,13 +842,9 @@ async def compute_signal(
     except SignalDataError as exc:
         return error_response("data", str(exc))
     except SignalRuntimeError as exc:
-        return error_response(
-            "runtime", str(exc), traceback=exc.user_traceback or None
-        )
+        return error_response("runtime", str(exc), traceback=exc.user_traceback or None)
 
-    timestamps = [
-        _int_yyyymmdd_to_unix_ms(int(d)) for d in result.index.tolist()
-    ]
+    timestamps = [_int_yyyymmdd_to_unix_ms(int(d)) for d in result.index.tolist()]
 
     positions_out: list[dict] = []
     realized_pnl_out: list[list[float]] = []

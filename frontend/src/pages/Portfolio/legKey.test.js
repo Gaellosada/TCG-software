@@ -51,4 +51,64 @@ describe('legsToRangesKey', () => {
     ]);
     expect(key).toBe('i:EQ:AAPL|i:EQ:MSFT');
   });
+
+  // ── option_stream leg tests ──
+
+  it('encodes option_stream legs with all discriminating fields', () => {
+    const key = legsToRangesKey([{
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'C',
+      cycle: null,
+      maturity: { kind: 'next_third_friday', offset_months: 0 },
+      selection: { kind: 'by_delta', target: 0.25 },
+      stream: 'mid',
+    }]);
+    expect(key).toContain('o:');
+    expect(key).toContain('OPT_SP_500');
+    expect(key).toContain('C');
+    expect(key).toContain('mid');
+  });
+
+  it('different streams produce different keys for option_stream', () => {
+    const base = {
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C',
+      cycle: null, maturity: { kind: 'next_third_friday' },
+      selection: { kind: 'by_delta' },
+    };
+    const midKey = legsToRangesKey([{ ...base, stream: 'mid' }]);
+    const ivKey = legsToRangesKey([{ ...base, stream: 'iv' }]);
+    expect(midKey).not.toBe(ivKey);
+  });
+
+  it('different selections produce different keys for option_stream', () => {
+    const base = {
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C',
+      cycle: null, maturity: { kind: 'next_third_friday' }, stream: 'mid',
+    };
+    const deltaKey = legsToRangesKey([{ ...base, selection: { kind: 'by_delta' } }]);
+    const strikeKey = legsToRangesKey([{ ...base, selection: { kind: 'by_strike' } }]);
+    expect(deltaKey).not.toBe(strikeKey);
+  });
+
+  it('different selection targets produce different keys for option_stream', () => {
+    const base = {
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C',
+      cycle: null, maturity: { kind: 'next_third_friday' }, stream: 'mid',
+    };
+    const k25 = legsToRangesKey([{ ...base, selection: { kind: 'by_delta', target: 0.25 } }]);
+    const k50 = legsToRangesKey([{ ...base, selection: { kind: 'by_delta', target: 0.50 } }]);
+    expect(k25).not.toBe(k50);
+  });
+
+  it('different option types produce different keys', () => {
+    const base = {
+      type: 'option_stream', collection: 'OPT_SP_500', cycle: null,
+      maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
+      stream: 'mid',
+    };
+    const callKey = legsToRangesKey([{ ...base, option_type: 'C' }]);
+    const putKey = legsToRangesKey([{ ...base, option_type: 'P' }]);
+    expect(callKey).not.toBe(putKey);
+  });
 });

@@ -1,11 +1,11 @@
-// Local persistence for the Signals page state — schema v4.
+// Local persistence for the Signals page state — schema v5.
 //
 // All direct ``localStorage`` access for signals lives in this module —
 // other modules MUST go through load/save here.
 //
-// Schema v4 (signals-refactor-v4):
+// Schema v5:
 //   {
-//     "version": 4,
+//     "version": 5,
 //     "signals": [
 //       {
 //         "id", "name", "doc",
@@ -37,9 +37,11 @@
 // sanitiser strips any such legacy fields on load.
 //
 // InputInstrument is a discriminated union:
-//   - Spot:        { type: 'spot',       collection, instrument_id }
-//   - Continuous:  { type: 'continuous', collection, adjustment, cycle,
-//                    rollOffset, strategy }
+//   - Spot:          { type: 'spot',          collection, instrument_id }
+//   - Continuous:    { type: 'continuous',    collection, adjustment, cycle,
+//                      rollOffset, strategy }
+//   - OptionStream:  { type: 'option_stream', collection, option_type,
+//                      cycle, maturity, selection, stream }
 //
 // Operand shapes (stored verbatim):
 //   - indicator:   { kind:'indicator', indicator_id, input_id, output,
@@ -47,12 +49,12 @@
 //   - instrument:  { kind:'instrument', input_id, field }
 //   - constant:    { kind:'constant', value }
 //
-// Migration policy (v4): ANY payload with version !== 4 is DROPPED on load
-// (single console.warn per page load). No v3→v4 or v2→drop code.
+// Migration policy (v5): ANY payload with version !== 5 is DROPPED on load
+// (single console.warn per page load). Clean break from v4 — no migration.
 
 import { SIGNALS_STORAGE_KEY } from './storageKeys';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** Canonical list of rule sections. */
 export const SECTIONS = Object.freeze(['entries', 'exits']);
@@ -138,8 +140,28 @@ function sanitiseContinuousInstrument(raw) {
   return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy: 'front_month' };
 }
 
+function sanitiseOptionStreamInstrument(raw) {
+  const collection = typeof raw.collection === 'string' ? raw.collection : '';
+  if (!collection) return null;
+  const option_type = ['C', 'P'].includes(raw.option_type) ? raw.option_type : null;
+  if (!option_type) return null;
+  // maturity and selection are discriminated unions — preserve as-is if they have a valid kind
+  const maturity = raw.maturity && typeof raw.maturity === 'object' && typeof raw.maturity.kind === 'string'
+    ? raw.maturity : null;
+  if (!maturity) return null;
+  const selection = raw.selection && typeof raw.selection === 'object' && typeof raw.selection.kind === 'string'
+    ? raw.selection : null;
+  if (!selection) return null;
+  const VALID_STREAMS = ['mid', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
+  const stream = VALID_STREAMS.includes(raw.stream) ? raw.stream : null;
+  if (!stream) return null;
+  const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
+  return { type: 'option_stream', collection, option_type, cycle, maturity, selection, stream };
+}
+
 function sanitiseInstrument(raw) {
   if (!raw || typeof raw !== 'object') return null;
+  if (raw.type === 'option_stream') return sanitiseOptionStreamInstrument(raw);
   if (raw.type === 'continuous') return sanitiseContinuousInstrument(raw);
   // Default/legacy path: treat as spot.
   return sanitiseSpotInstrument(raw);
