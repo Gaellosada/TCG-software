@@ -104,14 +104,37 @@ describe('applyDefaultSeries — Wave 2c routing', () => {
     });
   });
 
-  it('leaves user-picked slots alone (only fills nulls)', () => {
+  it('leaves user-picked slots alone on non-readonly indicators', () => {
     const userPick = { type: 'spot', collection: 'IDX', instrument_id: 'NDX' };
     const ind = {
+      readonly: false,
       seriesMap: { atm_iv: userPick },
       defaultSeries: { atm_iv: optionRef },
     };
     const next = applyDefaultSeries(ind, indexDefault);
     expect(next.seriesMap.atm_iv).toBe(userPick);
+  });
+
+  it('overwrites stale saved slots on readonly indicators when defaultSeries exists', () => {
+    // When the developer changes a default (e.g., cycle: 'M' → 'W3 Friday'),
+    // the registry default must win over any stale saved state.
+    const staleRef = {
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'C',
+      cycle: 'M', // OLD default
+      maturity: { kind: 'next_third_friday', offset_months: 0 },
+      selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+      stream: 'iv',
+    };
+    const ind = {
+      readonly: true,
+      seriesMap: { atm_iv: staleRef },
+      defaultSeries: { atm_iv: optionRef },
+    };
+    const next = applyDefaultSeries(ind, indexDefault);
+    // Registry default wins — stale 'M' cycle replaced with the registry ref.
+    expect(next.seriesMap.atm_iv).toEqual(optionRef);
   });
 
   it('returns the same object when no fill source is available', () => {

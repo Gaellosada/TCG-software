@@ -63,6 +63,14 @@ export function hydrateDefault(def, savedEntry) {
 //   3. If neither is available for a label, leave it as ``null`` (the
 //      slot stays empty; the run-gate surfaces the missing pick).
 //
+// For readonly indicators with ``defaultSeries``, the registry always
+// wins: a stale saved seriesMap (e.g. ``cycle: 'M'`` from before a
+// default was changed to ``cycle: 'W3 Friday'``) must not override
+// the developer's updated default. User customizations on readonly
+// defaults are not preserved when the registry changes — this is
+// intentional because the developer update (typically a bug fix) takes
+// priority over a stale auto-filled value.
+//
 // Sign 7 binding: routing is keyed off the indicator's own
 // ``defaultSeries`` metadata, NOT off ``id`` literals.
 export function applyDefaultSeries(ind, indexDefault) {
@@ -75,11 +83,15 @@ export function applyDefaultSeries(ind, indexDefault) {
   const updated = { ...ind.seriesMap };
   let touched = false;
   for (const [label, picked] of Object.entries(updated)) {
-    if (picked !== null) continue;
+    // Registry defaultSeries always wins for readonly indicators.
+    // This ensures developer updates to defaults propagate even when
+    // the user's localStorage has a stale auto-filled value.
     if (perLabelDefaults && perLabelDefaults[label]) {
-      updated[label] = perLabelDefaults[label];
-      touched = true;
-    } else if (hasIndexDefault) {
+      if (picked === null || ind.readonly) {
+        updated[label] = perLabelDefaults[label];
+        touched = true;
+      }
+    } else if (picked === null && hasIndexDefault) {
       updated[label] = {
         type: 'spot',
         collection: indexDefault.collection,

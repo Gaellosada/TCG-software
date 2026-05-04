@@ -76,6 +76,7 @@ def _canonical_calendar_name(name: str) -> str:
 # Calendar cache (one instance per canonical name)
 # ---------------------------------------------------------------------------
 
+
 @functools.lru_cache(maxsize=16)
 def _get_calendar(canonical_name: str):  # type: ignore[return]
     """Return a cached pandas_market_calendars calendar instance."""
@@ -89,6 +90,7 @@ def _calendar(name: str):  # type: ignore[return]
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _third_friday_of_month(year: int, month: int) -> date:
     """Return the third Friday of the given (year, month)."""
@@ -136,6 +138,7 @@ def _last_business_day_of_month(year: int, month: int, cal) -> date:
 # ---------------------------------------------------------------------------
 # DefaultMaturityResolver
 # ---------------------------------------------------------------------------
+
 
 class DefaultMaturityResolver:
     """Stateless implementation of MaturityResolver.
@@ -206,10 +209,11 @@ class DefaultMaturityResolver:
         rule: NextThirdFriday,
         calendar: str,
     ) -> date:
-        """Third Friday of (ref_date.month + offset_months), at-or-after ref_date.
+        """Third Friday of (ref_date.month + offset_months), strictly after ref_date.
 
-        "At-or-after": if offset_months=0 and ref_date is already past the
+        "Strictly after": if offset_months=0 and ref_date is ON or past the
         3rd Friday of the current month, advance to the next month's 3rd Friday.
+        This avoids expiration-day contracts whose IV is undefined (zero DTE).
         If the result is a holiday, roll to the prior business day.
         """
         target_base = _add_months(ref_date, rule.offset_months)
@@ -218,7 +222,7 @@ class DefaultMaturityResolver:
         # If the 3rd Friday is in the past (or today, still past after ref_date
         # check), advance one month.  This handles offset_months=0 when ref_date
         # is already past the 3rd Friday.
-        if tf < ref_date:
+        if tf <= ref_date:
             next_month = _add_months(target_base, 1)
             tf = _third_friday_of_month(next_month.year, next_month.month)
 

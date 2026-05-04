@@ -306,6 +306,74 @@ function HelpPage() {
           price chart instead of overlaying it. Useful for oscillators and indicators
           with a different scale than price.
         </p>
+
+        <h3 className={styles.conceptTitle}>Option Stream Inputs</h3>
+        <p className={styles.conceptText}>
+          Option-native indicators (ATM contract IV, Term-Structure Slope) consume
+          option data streams instead of spot prices. Their input form lets you
+          configure the option contract selection.
+        </p>
+
+        <Details title="Expiration cycles">
+          <p>
+            The <strong>Cycle</strong> selector filters which contracts the indicator queries.
+            Available cycles depend on the option root:
+          </p>
+          <ul>
+            <li><strong>Any</strong> &mdash; no filter; includes all available cycles.</li>
+            <li><strong>Standard Monthly (M)</strong> &mdash; AM-settled quarterly standard
+              options (Mar/Jun/Sep/Dec only on SPX). These are the original standard
+              SPX options.</li>
+            <li><strong>Monthly 3rd Friday (W3)</strong> &mdash; PM-settled options expiring
+              on the 3rd Friday of every month (SPXW weeklies). Covers all 12 months,
+              making it the best choice for monthly indicators on SPX.</li>
+            <li><strong>1st / 2nd / 4th Friday (W1, W2, W4)</strong> &mdash; PM-settled
+              weekly options expiring on the corresponding Friday of each month.
+              Available on SPX only. Useful for short-dated strategies and weekly
+              vol analysis.</li>
+            <li><strong>Weekly (W)</strong> &mdash; generic weekly cycle used by some
+              roots (crypto, VIX). Not the same as the Friday-specific weeklies above.</li>
+            <li><strong>Quarterly (Q)</strong> &mdash; quarterly expirations, used by
+              some roots (crypto).</li>
+          </ul>
+          <p>
+            <em>Tip:</em> For SPX monthly indicators, use <strong>W3 Friday</strong> (not M).
+            The M cycle only covers quarterly months, leaving 8 of 12 months empty.
+          </p>
+        </Details>
+
+        <Details title="Maturity rules">
+          <p>
+            The <strong>Maturity</strong> selector determines which expiration to target:
+          </p>
+          <ul>
+            <li><strong>Next 3rd Friday</strong> &mdash; targets the 3rd Friday of the
+              current month (or next month if past it). Pure date arithmetic; does not
+              consult available expirations.</li>
+            <li><strong>Nearest to Target DTE</strong> &mdash; picks the available
+              expiration closest to the target number of days-to-expiration (e.g.,
+              30 DTE for front-month, 90 DTE for back-month). Adapts to whatever
+              expirations exist in the data.</li>
+            <li><strong>End of Month</strong> &mdash; last business day of the offset month.</li>
+            <li><strong>+N Days</strong> &mdash; ref_date + N calendar days.</li>
+            <li><strong>Fixed Date</strong> &mdash; a specific date.</li>
+          </ul>
+        </Details>
+
+        <Details title="Selection criteria">
+          <p>
+            The <strong>Selection</strong> determines which contract to pick from the
+            chain on each date:
+          </p>
+          <ul>
+            <li><strong>By Moneyness (K/S)</strong> &mdash; pick the contract with
+              strike/spot ratio closest to the target (1.0 = ATM).</li>
+            <li><strong>By Delta</strong> &mdash; pick the contract with delta
+              closest to the target (0.5 = near-ATM call).</li>
+            <li><strong>By Strike</strong> &mdash; pick the contract with a specific
+              strike price.</li>
+          </ul>
+        </Details>
       </section>
 
       {/* ── Signals ── */}

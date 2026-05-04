@@ -307,5 +307,30 @@ describe('<IndicatorsList>', () => {
       fireEvent.click(screen.getByText('SMA'));
       expect(onSelect).toHaveBeenCalledWith('sma');
     });
+
+    it('indicators with defaultSeries are never greyed (self-contained)', () => {
+      const indsWithDefaults = [
+        { id: 'sma', name: 'SMA', readonly: true, compatibleAssetTypes: ['index', 'equity'] },
+        {
+          id: 'atm',
+          name: 'ATM IV',
+          readonly: true,
+          compatibleAssetTypes: ['option'],
+          defaultSeries: {
+            atm_iv: { type: 'option_stream', collection: 'OPT_SP_500' },
+          },
+        },
+      ];
+      render(<IndicatorsList
+        {...defaultProps({ indicators: indsWithDefaults, currentAssetType: 'index' })}
+      />);
+      expandBoth();
+      const smaRow = screen.getByText('SMA').closest('[role="button"]');
+      const atmRow = screen.getByText('ATM IV').closest('[role="button"]');
+      // SMA is compatible with index → not greyed.
+      expect(smaRow.getAttribute('data-incompat')).toBe('false');
+      // ATM IV is option-only but has defaultSeries → not greyed.
+      expect(atmRow.getAttribute('data-incompat')).toBe('false');
+    });
   });
 });

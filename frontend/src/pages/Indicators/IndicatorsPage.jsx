@@ -8,7 +8,8 @@ import { getOptionRoots } from '../../api/options';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { loadState, saveState } from './storage';
-import { AUTOSAVE_KEY } from './storageKeys';
+import { AUTOSAVE_KEY, OPTION_DATE_RANGE_KEY } from './storageKeys';
+import { computePresetRange, DEFAULT_PRESET } from '../../components/OptionDateRangeControl';
 import { hydrateDefault, applyDefaultSeries } from './hydrateDefault';
 import { buildPersistablePayload, serializePersistablePayload } from './persistablePayload';
 import { computeDefaultSeriesBannerText } from './defaultSeriesBanner';
@@ -47,16 +48,21 @@ async function getOptionRootsCached() {
   return _optionRootsCache;
 }
 
-// Default date range for option_stream computes: [last_trade_date - 6 months,
-// last_trade_date] for the relevant root. Six months keeps the per-date
-// materialiser fast on remote Mongo (~125 trade days × K=2 chain queries =
-// ~250 round-trips) while still showing a meaningful history window.
-// Falls back to [today - 6 months, today] when last_trade_date is unknown
-// — the resolver surfaces per-date diagnostics if data is missing past
-// the cutoff. Returns null when no option_stream refs are present.
-const DEFAULT_OPTION_STREAM_LOOKBACK_MONTHS = 6;
-
-async function deriveOptionStreamDateRange(seriesPayload) {
+/**
+ * Resolve the effective date range for an option_stream compute.
+ *
+ * When `optionDateRange.preset` is non-null, the range is anchored to the
+ * root's `last_trade_date` (falling back to today if unknown) via
+ * `computePresetRange(preset, anchorEnd)`. This reuses the same
+ * day-clamping arithmetic the UI component uses, avoiding a mismatch
+ * between the displayed dates and the dates sent to the backend.
+ *
+ * When `optionDateRange.preset` is null (custom dates), the user's explicit
+ * `start` and `end` are used directly.
+ *
+ * Returns null when no option_stream refs are present in `seriesPayload`.
+ */
+async function resolveOptionDateRange(seriesPayload, optionDateRange) {
   const collections = new Set();
   for (const ref of Object.values(seriesPayload || {})) {
     if (ref && ref.type === 'option_stream' && ref.collection) {
@@ -65,36 +71,65 @@ async function deriveOptionStreamDateRange(seriesPayload) {
   }
   if (collections.size === 0) return null;
 
+  if (optionDateRange.preset === null) {
+    // Custom dates — use as-is.
+    return { start: optionDateRange.start, end: optionDateRange.end };
+  }
+
+  // Preset mode: anchor to the root's last_trade_date using
+  // computePresetRange so day-clamping is consistent with the UI.
   const roots = await getOptionRootsCached();
-  // Pick the earliest last_trade_date across involved collections so a
-  // multi-collection indicator (none today, but term-structure-slope
-  // could grow into one) doesn't extend past the most-stale root.
   let earliest = null;
   for (const coll of collections) {
     const root = roots.find((r) => r.collection === coll);
     const ltd = root?.last_trade_date ?? null;
     if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
   }
-  const end = earliest ?? isoToday();
-  const start = isoMinusMonths(end, DEFAULT_OPTION_STREAM_LOOKBACK_MONTHS);
-  return { start, end };
+  return computePresetRange(optionDateRange.preset, earliest || undefined);
 }
 
-function isoToday() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
+/**
+ * Check whether an indicator's seriesMap references at least one
+ * option_stream entry. Used to conditionally show the date range control.
+ */
+export function hasOptionStreamRef(indicator) {
+  return Object.values(indicator?.seriesMap || {}).some(
+    (ref) => ref?.type === 'option_stream',
+  );
 }
 
-function isoMinusMonths(iso, months) {
-  const d = new Date(`${iso}T00:00:00`);
-  d.setMonth(d.getMonth() - months);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
+/**
+ * Load persisted option date range from localStorage, or return a default.
+ */
+function loadOptionDateRange() {
+  try {
+    const raw = localStorage.getItem(OPTION_DATE_RANGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.start === 'string' && typeof parsed.end === 'string') {
+        return {
+          start: parsed.start,
+          end: parsed.end,
+          preset: typeof parsed.preset === 'string' ? parsed.preset : null,
+        };
+      }
+    }
+  } catch {
+    // Corrupt / inaccessible — use default.
+  }
+  const range = computePresetRange(DEFAULT_PRESET);
+  return { ...range, preset: DEFAULT_PRESET };
+}
+
+/**
+ * Persist option date range to localStorage.
+ */
+function saveOptionDateRange(value) {
+  try {
+    localStorage.setItem(OPTION_DATE_RANGE_KEY, JSON.stringify(value));
+  } catch {
+    // Quota — ignore.
+  }
 }
 
 function nextIndicatorName(existing) {
@@ -137,6 +172,14 @@ function IndicatorsPage() {
   // top-banner copy. Kind ∈ 'offline' | 'network' | 'not-found' | 'server' | 'client' | 'unknown'.
   const [defaultSeriesError, setDefaultSeriesError] = useState(null);
   const [defaultAutoFilled, setDefaultAutoFilled] = useState(false);
+  // User-configurable option date range — replaces the hardcoded 6-month
+  // lookback. Persisted in localStorage via a separate key so it survives
+  // across sessions without bumping the indicators schema version.
+  const [optionDateRange, setOptionDateRange] = useState(loadOptionDateRange);
+  const handleOptionDateRangeChange = useCallback((newRange) => {
+    setOptionDateRange(newRange);
+    saveOptionDateRange(newRange);
+  }, []);
   const [autosave, setAutosaveState] = useState(() => {
     try {
       const raw = localStorage.getItem(AUTOSAVE_KEY);
@@ -448,14 +491,14 @@ function IndicatorsPage() {
         }
       }
       // Option-stream materialiser walks dates per business day, so it
-      // needs an explicit ISO date range. Derived from the relevant
-      // root's last_trade_date (1-year lookback). Spot/continuous
-      // resolvers ignore start/end so adding them is safe even when no
-      // option_stream is present, but we only attach them when needed
-      // to keep the request shape minimal.
+      // needs an explicit ISO date range. When the user has configured a
+      // range via the OptionDateRangeControl, use that (preset mode
+      // anchors to last_trade_date; custom mode passes dates through).
+      // Spot/continuous resolvers ignore start/end so adding them is
+      // safe, but we only attach when needed to keep request shape minimal.
       let dateRange = null;
       try {
-        dateRange = await deriveOptionStreamDateRange(seriesPayload);
+        dateRange = await resolveOptionDateRange(seriesPayload, optionDateRange);
       } catch (e) {
         // Surface a typed error rather than swallowing — Sign 10 (no
         // silent failures). The user gets a clear message if the
@@ -534,7 +577,7 @@ function IndicatorsPage() {
         }
       }
     });
-  }, [selectedIndicator, runAbortable]);
+  }, [selectedIndicator, runAbortable, optionDateRange]);
 
   // Detach the pinned result — clears the lastResult for the current
   // indicator (used by the pinned-meets-incompat banner's Detach
@@ -560,6 +603,9 @@ function IndicatorsPage() {
   // Mirrors the asset-type compat check — refuses the request before
   // firing rather than letting the backend reject deterministically.
   const streamSanity = computeOptionStreamSanity(selectedIndicator);
+
+  // Show date range control when the selected indicator has option_stream refs.
+  const showDateRange = hasOptionStreamRef(selectedIndicator);
 
   const canRun = !!selectedIndicator
     && !running
@@ -681,6 +727,9 @@ function IndicatorsPage() {
           defaultCollection={defaultSeries?.collection || null}
           ownPanel={!!selectedIndicator?.ownPanel}
           onOwnPanelChange={handleOwnPanelChange}
+          showDateRange={showDateRange}
+          optionDateRange={optionDateRange}
+          onOptionDateRangeChange={handleOptionDateRangeChange}
         />
       </div>
       <div className={styles.chartPanel}>

@@ -123,16 +123,22 @@ function IndicatorsList({
     //   * the parent passed a non-null currentAssetType, AND
     //   * this indicator declares a non-empty compatibleAssetTypes
     //     array, AND
-    //   * the current asset's type is not in that array.
+    //   * the current asset's type is not in that array, AND
+    //   * the indicator does NOT have its own defaultSeries (indicators
+    //     with defaultSeries are self-sufficient — they bring their own
+    //     data source and don't depend on the currently selected asset).
     // A missing or empty compatibleAssetTypes means "universally
     // compatible" (back-compat for user-authored indicators) — never
     // greyed. Sign 10: the tooltip surfaces a human-readable reason.
     const compat = Array.isArray(ind.compatibleAssetTypes) ? ind.compatibleAssetTypes : null;
+    const hasSelfContainedDefaults = !!(ind.defaultSeries && typeof ind.defaultSeries === 'object'
+      && Object.keys(ind.defaultSeries).length > 0);
     const isIncompat = !!(
       currentAssetType
       && compat
       && compat.length > 0
       && !compat.includes(currentAssetType)
+      && !hasSelfContainedDefaults
     );
     const incompatTitle = isIncompat
       ? `Not compatible with ${currentAssetType} data — accepts ${compat.join(' or ')}.`

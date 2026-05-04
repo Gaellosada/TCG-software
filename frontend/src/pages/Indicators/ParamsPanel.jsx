@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
+import OptionDateRangeControl from '../../components/OptionDateRangeControl';
 import { getSeriesSummary } from '../../api/seriesSummary';
 import styles from './ParamsPanel.module.css';
 
@@ -122,8 +123,11 @@ function formatSelection(s, optionType) {
  *   onRun            {Function}     () => void
  *   running          {boolean}
  *   canRun           {boolean}
- *   ownPanel         {boolean}      render indicator in a separate chart below
- *   onOwnPanelChange {Function}     (nextBool) => void — noop when readonly
+ *   ownPanel                {boolean}      render indicator in a separate chart below
+ *   onOwnPanelChange        {Function}     (nextBool) => void — noop when readonly
+ *   showDateRange           {boolean}      whether to show the option date range control
+ *   optionDateRange         {Object|null}  { start, end, preset }
+ *   onOptionDateRangeChange {Function}     (value) => void
  */
 function ParamsPanel({
   indicator,
@@ -137,6 +141,9 @@ function ParamsPanel({
   runDisabledReason,
   ownPanel,
   onOwnPanelChange,
+  showDateRange,
+  optionDateRange,
+  onOptionDateRangeChange,
 }) {
   // Per-input raw string drafts for numeric fields. Keyed by param name.
   const [numericDrafts, setNumericDrafts] = useState({});
@@ -398,6 +405,18 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
       {/* Run section */}
       <div className={styles.section}>
         <div className={styles.sectionLabel}>Run</div>
+
+        {showDateRange && optionDateRange && (
+          <div className={styles.dateRangeRow} data-testid="option-date-range-row">
+            <div className={styles.dateRangeLabel}>Option date range</div>
+            <OptionDateRangeControl
+              value={optionDateRange}
+              onChange={onOptionDateRangeChange}
+              disabled={!indicator || running}
+            />
+          </div>
+        )}
+
         <label
           className={styles.ownPanelRow}
           title={

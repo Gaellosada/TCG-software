@@ -50,10 +50,15 @@
 
 .fieldInline {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 4px;
   font-size: 0.75rem;
   color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.fieldInline .input {
+  width: 5em;
 }
 
 .radioGroup {

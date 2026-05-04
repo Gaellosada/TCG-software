@@ -11,3 +11,6 @@ export const AUTOSAVE_KEY = 'tcg.indicators.autosave';
 
 /** Per-section collapse state for the DEFAULT / CUSTOM list sections. */
 export const LIST_COLLAPSED_KEY = 'tcg.indicators.listCollapsed';
+
+/** User's option-stream date range: { start, end, preset }. */
+export const OPTION_DATE_RANGE_KEY = 'tcg.indicators.optionDateRange';

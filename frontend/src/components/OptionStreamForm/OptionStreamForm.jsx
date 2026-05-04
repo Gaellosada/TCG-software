@@ -12,7 +12,7 @@ import styles from './OptionStreamForm.module.css';
  *     type: 'option_stream',
  *     collection: 'OPT_SP_500',
  *     option_type: 'C' | 'P',
- *     cycle: null | 'M' | 'W' | 'Q',
+ *     cycle: null | 'M' | 'W3 Friday' | 'W' | 'Q',
  *     maturity: { kind, ... },           // discriminated union (kind field)
  *     selection: { kind, ... },          // discriminated union (kind field)
  *     stream: 'mid'|'iv'|'delta'|'gamma'|'vega'|'theta'|'open_interest'|'volume',
@@ -27,14 +27,15 @@ import styles from './OptionStreamForm.module.css';
  */
 
 const ALL_OPTION_TYPES = ['C', 'P'];
-const ALL_CYCLES = [null, 'M', 'W', 'Q'];
+const ALL_CYCLES = [null, 'M', 'W3 Friday', 'W1 Friday', 'W2 Friday', 'W4 Friday', 'W', 'Q'];
 const ALL_STREAMS = ['mid', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
 const GREEK_STREAMS = new Set(['gamma', 'vega', 'theta']);
-const ALL_MATURITY_KINDS = ['next_third_friday', 'end_of_month', 'plus_n_days', 'fixed'];
-const ALL_SELECTION_KINDS = ['by_strike', 'by_moneyness', 'by_delta'];
+const ALL_MATURITY_KINDS = ['next_third_friday', 'nearest_to_target', 'end_of_month', 'plus_n_days', 'fixed'];
+const ALL_SELECTION_KINDS = ['by_moneyness', 'by_delta', 'by_strike'];
 
 const MATURITY_LABELS = {
   next_third_friday: 'Next 3rd Friday',
+  nearest_to_target: 'Nearest to Target DTE',
   end_of_month: 'End of Month',
   plus_n_days: '+N Days',
   fixed: 'Fixed Date',
@@ -57,7 +58,16 @@ const STREAM_LABELS = {
   volume: 'Volume',
 };
 
-const CYCLE_LABELS = { _any: 'Any', M: 'Monthly (M)', W: 'Weekly (W)', Q: 'Quarterly (Q)' };
+const CYCLE_LABELS = {
+  _any: 'Any',
+  M: 'Standard Monthly (M)',
+  'W3 Friday': 'Monthly 3rd Friday (W3)',
+  'W1 Friday': '1st Friday (W1)',
+  'W2 Friday': '2nd Friday (W2)',
+  'W4 Friday': '4th Friday (W4)',
+  W: 'Weekly (W)',
+  Q: 'Quarterly (Q)',
+};
 
 /**
  * Build a default-shaped MaturityRule for a given kind.
@@ -68,6 +78,8 @@ function defaultMaturity(kind) {
       return { kind: 'next_third_friday', offset_months: 0 };
     case 'end_of_month':
       return { kind: 'end_of_month', offset_months: 0 };
+    case 'nearest_to_target':
+      return { kind: 'nearest_to_target', target_days: 30 };
     case 'plus_n_days':
       return { kind: 'plus_n_days', n: 30 };
     case 'fixed':
@@ -109,14 +121,13 @@ export function buildDefaultOptionStream({
   allowedCycles = ALL_CYCLES,
 }) {
   const root = availableRoots && availableRoots.length > 0 ? availableRoots[0] : null;
-  // Canonical default: prefer the monthly cycle ('M') when allowed,
-  // since OPT_SP_500 (the most common option root in this codebase) has
-  // both monthly (SPX) and weekly (SPXW) cycles and "front month"
-  // typically means the monthly. Falls back to the first allowed cycle
-  // (often null = "Any") when 'M' isn't on the list.
-  const defaultCycle = allowedCycles.includes('M')
-    ? 'M'
-    : (allowedCycles.length === 0 ? null : allowedCycles[0] ?? null);
+  // Canonical default: prefer W3 Friday (the real monthly cycle — every
+  // month's 3rd Friday, PM-settled) over M (quarterly standard, AM-settled,
+  // Mar/Jun/Sep/Dec only). Falls back to M, then the first allowed cycle
+  // (often null = "Any") when neither is on the list.
+  const defaultCycle = allowedCycles.includes('W3 Friday')
+    ? 'W3 Friday'
+    : (allowedCycles.includes('M') ? 'M' : (allowedCycles.length === 0 ? null : allowedCycles[0] ?? null));
   return {
     type: 'option_stream',
     collection: root ? root.collection : '',
@@ -221,7 +232,7 @@ export default function OptionStreamForm({
 
   const setMaturityField = useCallback((field, raw) => {
     const next = { ...v.maturity };
-    if (field === 'offset_months' || field === 'n') {
+    if (field === 'offset_months' || field === 'n' || field === 'target_days') {
       const parsed = parseInt(raw, 10);
       next[field] = Number.isNaN(parsed) ? 0 : parsed;
     } else {
@@ -337,6 +348,19 @@ export default function OptionStreamForm({
               />
             </label>
           )}
+          {v.maturity.kind === 'nearest_to_target' && (
+            <label className={styles.fieldInline}>
+              Target DTE (days)
+              <input
+                type="number"
+                className={styles.input}
+                value={v.maturity.target_days}
+                onChange={(e) => setMaturityField('target_days', e.target.value)}
+                disabled={disabled}
+                aria-label="Target DTE days"
+              />
+            </label>
+          )}
           {v.maturity.kind === 'end_of_month' && (
             <label className={styles.fieldInline}>
               Offset (months)
@@ -439,7 +463,7 @@ export default function OptionStreamForm({
           {v.selection.kind === 'by_delta' && (
             <>
               <label className={styles.fieldInline}>
-                Target delta (signed)
+                Delta
                 <input
                   type="number"
                   className={styles.input}
@@ -462,7 +486,7 @@ export default function OptionStreamForm({
                   aria-label="Delta tolerance"
                 />
               </label>
-              <label className={styles.fieldInline}>
+              <label className={styles.fieldInline} title="When checked, reject dates where no contract is within tolerance (NaN). When unchecked, use the closest match.">
                 <input
                   type="checkbox"
                   checked={!!v.selection.strict}
@@ -470,7 +494,7 @@ export default function OptionStreamForm({
                   disabled={disabled}
                   aria-label="Strict"
                 />
-                Strict
+                Strict (NaN if no match, closest otherwise)
               </label>
             </>
           )}

@@ -348,8 +348,11 @@ async def _resolve_bulk(
     if isinstance(maturity, NearestToTarget):
         if queryable:
             first_date = queryable[0][1]
+            last_date = queryable[-1][1]
             probe_days = max(maturity.target_dte_days * 3, 180)
-            far_future = first_date + timedelta(days=probe_days)
+            # Use last_date for the upper bound so expirations needed by
+            # trade dates near the end of the range are included.
+            far_future = last_date + timedelta(days=probe_days)
 
             if available_expirations is not None:
                 # Fast path: caller pre-fetched all expirations via

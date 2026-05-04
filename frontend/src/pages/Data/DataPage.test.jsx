@@ -29,6 +29,12 @@ vi.mock('./ContinuousChart', () => ({
   )),
 }));
 
+vi.mock('./ContinuousOptionsChart', () => ({
+  default: vi.fn(({ collection }) => (
+    <div data-testid="continuous-options-chart" data-collection={collection} />
+  )),
+}));
+
 // ---------------------------------------------------------------------------
 // Mock C2.2 deliverables — OptionChainTable and ContractDetailPanel.
 // These may not be in the tree yet; mocking them makes the test suite
@@ -461,7 +467,7 @@ describe('DataPage — Tier-2 tab strip initial state', () => {
     expect(screen.getByRole('tab', { name: 'Smile' })).toBeTruthy();
   });
 
-  it('Continuous tab shows the coming-soon placeholder when selected', () => {
+  it('Continuous tab renders ContinuousOptionsChart when selected', () => {
     renderDataPage();
     selectOption('OPT_SP_500');
 
@@ -469,8 +475,8 @@ describe('DataPage — Tier-2 tab strip initial state', () => {
       fireEvent.click(screen.getByRole('tab', { name: 'Continuous' }));
     });
 
-    expect(screen.getByTestId('continuous-empty')).toBeTruthy();
-    expect(screen.getByText(/coming soon/i)).toBeTruthy();
+    expect(screen.getByTestId('continuous-options-chart')).toBeTruthy();
+    expect(screen.getByTestId('continuous-options-chart').dataset.collection).toBe('OPT_SP_500');
     expect(screen.queryByTestId('option-chain-table')).toBeNull();
   });
 });

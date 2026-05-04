@@ -262,6 +262,75 @@ def _business_dates_in_range(start: date | None, end: date | None) -> list[date]
     return [ts.date() for ts in vd]
 
 
+async def materialise_option_streams(
+    refs_with_labels: list[tuple[str, OptionStreamRef]],
+    *,
+    svc: MarketDataService,
+    start_date: date | None,
+    end_date: date | None,
+    progress_callback=None,
+) -> dict[str, tuple[np.ndarray, np.ndarray, list[str | None]]] | str:
+    """Materialise one or more ``OptionStreamRef`` into keyed results.
+
+    Parameters
+    ----------
+    refs_with_labels:
+        List of ``(label, ref)`` tuples.  Each ref is resolved
+        independently; results are keyed by label.
+    svc:
+        The ``MarketDataService`` providing MongoDB access.
+    start_date, end_date:
+        ISO date boundaries.  Both required for option streams.
+    progress_callback:
+        Invoked once per resolved trade date per ref — the caller
+        wires it to ``_progress_tick`` for FE progress polling.
+
+    Returns
+    -------
+    A dict ``{label: (dates_arr, values, diagnostics)}`` on success,
+    or a string error message when the date range is missing.
+    """
+    trade_dates = _business_dates_in_range(start_date, end_date)
+    if not trade_dates:
+        return "option_stream requires explicit ISO 'start' and 'end' dates"
+
+    chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
+        svc
+    )
+
+    results: dict[str, tuple[np.ndarray, np.ndarray, list[str | None]]] = {}
+    for label, ref in refs_with_labels:
+        # Pre-fetch available expirations filtered by the requested type
+        # and cycle.  The unfiltered variant returned expirations for ALL
+        # types / cycles, causing the bulk resolver to pick expirations
+        # that had no matching contracts — empty chains → spurious NaN
+        # holes.
+        all_expirations = await svc.list_option_expirations_filtered(
+            ref.collection,
+            option_type=ref.option_type,
+            cycle=ref.cycle,
+        )
+        values, diagnostics = await resolve_option_stream(
+            dates=trade_dates,
+            collection=ref.collection,
+            option_type=ref.option_type,
+            cycle=ref.cycle,
+            maturity=_maturity_pydantic_to_dataclass(ref.maturity),
+            selection=_criterion_pydantic_to_dataclass(ref.selection),
+            stream=ref.stream,
+            chain_reader=chain_reader,
+            maturity_resolver=mat_resolver,
+            underlying_price_resolver=ul_resolver,
+            progress_callback=progress_callback,
+            bulk_chain_reader=bulk_reader,
+            available_expirations=all_expirations,
+        )
+        dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
+        results[label] = (dates_arr, values, diagnostics)
+
+    return results
+
+
 async def _materialise_option_stream(
     ref: OptionStreamRef,
     *,
@@ -270,49 +339,24 @@ async def _materialise_option_stream(
     end_date: date | None,
     progress_callback=None,
 ) -> tuple[np.ndarray, np.ndarray, list[str | None]] | str:
-    """Materialise an ``OptionStreamRef`` into ``(dates, values, diagnostics)``.
+    """Materialise a single ``OptionStreamRef`` into ``(dates, values, diagnostics)``.
 
-    Returns the triple on success or a string error message (for the
-    400 ``error_response``) when the date range is missing.  This
-    keeps the route handler's ``case "option_stream":`` block tight
-    — a guideline from the Wave 2a brief.
+    Thin wrapper around :func:`materialise_option_streams` for backward
+    compatibility with the ``/api/indicators/compute`` handler.
 
-    ``progress_callback`` is invoked once per resolved trade date — the
-    route handler wires it to ``_progress_tick`` when ``task_id`` is
-    populated so the FE can poll progress.
+    Returns the triple on success or a string error message when the
+    date range is missing.
     """
-    trade_dates = _business_dates_in_range(start_date, end_date)
-    if not trade_dates:
-        return "option_stream requires explicit ISO 'start' and 'end' dates"
-    chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
-        svc
-    )
-    # Pre-fetch available expirations filtered by the requested type and
-    # cycle.  The unfiltered variant returned expirations for ALL types /
-    # cycles, causing the bulk resolver to pick expirations that had no
-    # matching contracts — empty chains → spurious NaN holes.
-    all_expirations = await svc.list_option_expirations_filtered(
-        ref.collection,
-        option_type=ref.option_type,
-        cycle=ref.cycle,
-    )
-    values, diagnostics = await resolve_option_stream(
-        dates=trade_dates,
-        collection=ref.collection,
-        option_type=ref.option_type,
-        cycle=ref.cycle,
-        maturity=_maturity_pydantic_to_dataclass(ref.maturity),
-        selection=_criterion_pydantic_to_dataclass(ref.selection),
-        stream=ref.stream,
-        chain_reader=chain_reader,
-        maturity_resolver=mat_resolver,
-        underlying_price_resolver=ul_resolver,
+    result = await materialise_option_streams(
+        [("_single", ref)],
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
         progress_callback=progress_callback,
-        bulk_chain_reader=bulk_reader,
-        available_expirations=all_expirations,
     )
-    dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
-    return dates_arr, values, diagnostics
+    if isinstance(result, str):
+        return result
+    return result["_single"]
 
 
 def _count_option_stream_dates(

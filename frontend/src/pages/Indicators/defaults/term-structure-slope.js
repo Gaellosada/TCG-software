@@ -7,11 +7,11 @@
 // => contango (typical regime).
 //
 // Both inputs are nearest-strike-to-spot ATM-CONTRACT IVs (per the
-// ``atm-contract-iv`` honesty rename) — front uses ``offset_months: 0``
-// and back uses ``offset_months: 1`` of the next-third-Friday rule, both
-// with the same ``ByMoneyness(target=1.0, tolerance=0.05)`` selection.
-// When the user pins the indicator without picking custom streams, the
-// ``defaultSeries`` field below auto-binds both slots on OPT_SP_500.
+// ``atm-contract-iv`` honesty rename) — front uses ``nearest_to_target(30)``
+// targeting ~1-month DTE and back uses ``nearest_to_target(90)`` targeting
+// ~3-month DTE, both with the same ``ByMoneyness(target=1.0, tolerance=0.05)``
+// selection. The DTE targets guarantee the two legs resolve to different
+// expirations on any date.
 const code = `def compute(series):
     front = series['front_atm_iv']
     back = series['back_atm_iv']
@@ -36,11 +36,13 @@ export default {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      // Lock to monthlies — see atm-contract-iv.js for the rationale
-      // (OPT_SP_500 mixes M and W cycles; "front month" only means the
-      // SPX monthly).
-      cycle: 'M',
-      maturity: { kind: 'next_third_friday', offset_months: 0 },
+      // Lock to W3 Friday — the real "monthly" cycle for SPX. IVolatility
+      // tags quarterly (Mar/Jun/Sep/Dec) third-Friday contracts as 'M' and
+      // all other months' third-Friday contracts as 'W3 Friday'. Using 'M'
+      // would leave 8 of 12 months with no data. 'W3 Friday' covers every
+      // month's third Friday (PM-settled SPXW contracts).
+      cycle: 'W3 Friday',
+      maturity: { kind: 'nearest_to_target', target_days: 30 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
     },
@@ -48,8 +50,9 @@ export default {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      cycle: 'M',
-      maturity: { kind: 'next_third_friday', offset_months: 1 },
+      // Same W3 Friday cycle rationale as front_atm_iv above.
+      cycle: 'W3 Friday',
+      maturity: { kind: 'nearest_to_target', target_days: 90 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
     },
@@ -70,7 +73,7 @@ The output preserves the input units (volatility points). No smoothing, no scali
 - Inputs must be the same length and aligned on the same time index — that is the consumer's job. The indicator does NOT validate alignment.
 - Sign convention: positive means front > back (backwardated). Negative means front < back (contango). Zero means flat.
 - The two streams should both be ATM-contract IV series of the SAME underlying; mixing underlyings or non-ATM strikes makes the slope meaningless.
-- Both default streams use the SAME selection (\`ByMoneyness(target=1.0, tolerance=0.05)\`) — only the \`offset_months\` differs (0 vs. 1). If the user repoints either slot at a different selection or different underlying, alignment of the slope semantics becomes their responsibility.`,
+- Both default streams use the SAME selection (\`ByMoneyness(target=1.0, tolerance=0.05)\`) — front targets ~30 DTE via \`nearest_to_target(30)\` and back targets ~90 DTE via \`nearest_to_target(90)\`. If the user repoints either slot at a different selection or different underlying, alignment of the slope semantics becomes their responsibility.`,
   ownPanel: true,
   chartMode: 'lines',
 };

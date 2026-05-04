@@ -57,7 +57,7 @@ describe('<OptionStreamForm>', () => {
     expect(next.collection).toBe('OPT_VIX');
     expect(next.option_type).toBe('C');
     expect(next.maturity.kind).toBe('next_third_friday');
-    expect(next.selection.kind).toBe('by_strike');
+    expect(next.selection.kind).toBe('by_moneyness');
     expect(next.stream).toBe('mid');
   });
 
@@ -194,15 +194,13 @@ describe('buildDefaultOptionStream', () => {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      // Canonical default is the monthly cycle ('M'): OPT_SP_500 mixes
-      // SPX monthlies and SPXW weeklies, and "front month" only makes
-      // semantic sense on the monthly track. ALL_CYCLES includes 'M',
-      // so the default picks it. Override via ``allowedCycles`` when
-      // a different default is desired.
-      cycle: 'M',
+      // Canonical default is W3 Friday (the real monthly cycle — every
+      // month's 3rd Friday, PM-settled). ALL_CYCLES includes 'W3 Friday',
+      // so the default picks it. Falls back to 'M', then first allowed.
+      cycle: 'W3 Friday',
     });
     expect(v.maturity.kind).toBe('next_third_friday');
-    expect(v.selection.kind).toBe('by_strike');
+    expect(v.selection.kind).toBe('by_moneyness');
     expect(v.stream).toBe('mid');
   });
 

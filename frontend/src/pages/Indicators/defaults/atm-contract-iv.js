@@ -45,11 +45,12 @@ export default {
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
-      // Lock to the SPX *monthly* cycle — OPT_SP_500 mixes monthly (M)
-      // and weekly (W) expirations, and "front month" only makes sense
-      // for monthlies. Without this filter the resolver may pick a
-      // weekly that happens to fall on a third Friday.
-      cycle: 'M',
+      // Lock to W3 Friday — the real "monthly" cycle for SPX. IVolatility
+      // tags quarterly (Mar/Jun/Sep/Dec) third-Friday contracts as 'M' and
+      // all other months' third-Friday contracts as 'W3 Friday'. Using 'M'
+      // would leave 8 of 12 months with no data. 'W3 Friday' covers every
+      // month's third Friday (PM-settled SPXW contracts).
+      cycle: 'W3 Friday',
       maturity: { kind: 'next_third_friday', offset_months: 0 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',

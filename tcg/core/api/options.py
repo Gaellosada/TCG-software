@@ -1,4 +1,4 @@
-"""Options router — five GET endpoints under ``/api/options``.
+"""Options router — GET + POST endpoints under ``/api/options``.
 
 Wave B4 (Phase 1B) wiring layer.  Each handler:
 
@@ -27,8 +27,9 @@ import json
 from datetime import date
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import ValidationError as PydanticValidationError
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from tcg.core.api._models_options import (
     ChainResponse,
@@ -43,12 +44,14 @@ from tcg.core.api._models_options import (
     SmilePoint,
     SmileSeries,
 )
+from tcg.core.api._models import OptionStreamRef
 from tcg.core.api._options_wiring import (
     build_options_chain,
     build_options_pricer,
     build_options_selector,
 )
-from tcg.core.api.common import get_market_data
+from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api.common import error_response, get_market_data
 from tcg.data.protocols import MarketDataService
 from tcg.types.errors import (
     OptionsContractNotFound,
@@ -246,21 +249,15 @@ async def list_expirations(
 async def get_chain(
     root: str = Query(..., description="OPT_* collection name"),
     date: date = Query(..., description="Trade date (YYYY-MM-DD)"),
-    type: Literal["C", "P", "both"] = Query(
-        "both", description="Option type filter"
-    ),
+    type: Literal["C", "P", "both"] = Query("both", description="Option type filter"),
     expiration_min: date = Query(
         ..., description="Lower bound for expiration window (inclusive)"
     ),
     expiration_max: date = Query(
         ..., description="Upper bound for expiration window (inclusive)"
     ),
-    strike_min: float | None = Query(
-        None, description="Optional strike lower bound"
-    ),
-    strike_max: float | None = Query(
-        None, description="Optional strike upper bound"
-    ),
+    strike_min: float | None = Query(None, description="Optional strike lower bound"),
+    strike_max: float | None = Query(None, description="Optional strike upper bound"),
     compute_missing: bool = Query(
         False,
         description=(
@@ -466,14 +463,10 @@ async def select_contract(
     try:
         payload = SelectQuery.model_validate_json(q)
     except PydanticValidationError as exc:
-        raise OptionsValidationError(
-            f"Invalid 'q' SelectQuery payload: {exc}"
-        ) from exc
+        raise OptionsValidationError(f"Invalid 'q' SelectQuery payload: {exc}") from exc
     except ValueError as exc:
         # Bare-JSON parse error path
-        raise OptionsValidationError(
-            f"Could not decode 'q' as JSON: {exc}"
-        ) from exc
+        raise OptionsValidationError(f"Could not decode 'q' as JSON: {exc}") from exc
 
     selector = build_options_selector(
         svc, with_pricer=payload.compute_missing_for_delta_selection
@@ -499,10 +492,10 @@ async def select_contract(
     # compute)".  We map only the unambiguous error_codes that match
     # this definition; other errors (e.g. ``no_match_within_tolerance``)
     # are returned as a 200 with structured ``error_code``.
-    if (
-        result.contract is None
-        and result.error_code in {"missing_delta_no_compute", "no_chain_for_date"}
-    ):
+    if result.contract is None and result.error_code in {
+        "missing_delta_no_compute",
+        "no_chain_for_date",
+    }:
         raise OptionsSelectionError(
             f"Selection unresolvable: error_code={result.error_code!r}, "
             f"diagnostic={result.diagnostic!r}"
@@ -645,9 +638,7 @@ async def get_chain_snapshot(
                 }
             )
             points.append(point.model_dump())
-        smile = SmileSeries.model_validate(
-            {"expiration": expiration, "points": points}
-        )
+        smile = SmileSeries.model_validate({"expiration": expiration, "points": points})
         series_payload.append(smile.model_dump())
 
     response = ChainSnapshotResponse.model_validate(
@@ -659,6 +650,187 @@ async def get_chain_snapshot(
         }
     )
     return response.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 6 — POST /api/options/stream
+# ---------------------------------------------------------------------------
+
+
+class _StreamEntry(BaseModel):
+    """One labeled option stream reference in the request."""
+
+    ref: OptionStreamRef
+    label: str
+
+
+class OptionStreamRequest(BaseModel):
+    """Request body for ``POST /api/options/stream``.
+
+    Each entry in ``streams`` is an ``OptionStreamRef`` with a
+    user-chosen label.  The endpoint materialises every ref over the
+    given date range and returns keyed time-series results.
+    """
+
+    streams: list[_StreamEntry]
+    start: str
+    end: str
+    task_id: str | None = None
+
+
+# Reuse the greeks-gated / tautology checks from indicators.py — these
+# constants and helpers are co-located with the compute route but the
+# invariants are the same.  Import inline to avoid a circular import
+# (options.py is imported by indicators.py for the converter helpers).
+
+_GREEKS_GATED_STREAMS: frozenset[str] = frozenset({"gamma", "vega", "theta"})
+
+
+# Module-level progress state shared with indicators.py — option stream
+# endpoint uses its own key space (task_id comes from the FE) so there
+# is no collision.
+_STREAM_PROGRESS: dict[str, dict[str, int]] = {}
+
+
+def _stream_progress_register(task_id: str, total: int) -> None:
+    _STREAM_PROGRESS[task_id] = {"done": 0, "total": max(int(total), 0)}
+
+
+def _stream_progress_tick(task_id: str) -> None:
+    entry = _STREAM_PROGRESS.get(task_id)
+    if entry is not None:
+        entry["done"] += 1
+
+
+def _stream_progress_clear(task_id: str) -> None:
+    _STREAM_PROGRESS.pop(task_id, None)
+
+
+@router.get("/stream/progress/{task_id}")
+async def get_stream_progress(task_id: str) -> dict:
+    """Read progress for a running ``/api/options/stream`` request.
+
+    Same shape as ``/api/indicators/progress/{task_id}`` — the frontend
+    can poll this while waiting for the POST response.
+    """
+    entry = _STREAM_PROGRESS.get(task_id)
+    if entry is None:
+        return {"done": 0, "total": 0, "fraction": 0.0}
+    done = entry["done"]
+    total = entry["total"]
+    fraction = (done / total) if total > 0 else 0.0
+    if fraction > 1.0:
+        fraction = 1.0
+    return {"done": done, "total": total, "fraction": fraction}
+
+
+@router.post("/stream", response_model=None)
+async def materialise_streams(
+    body: OptionStreamRequest,
+    background_tasks: BackgroundTasks,
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict | JSONResponse:
+    """Materialise one or more option stream refs over a date range.
+
+    Returns keyed time-series results — no Python code execution, no
+    params, just stream resolution.  Simpler than
+    ``/api/indicators/compute`` but reuses the same core materialisation
+    logic.
+    """
+    from tcg.core.api._dates import parse_iso_range
+    from tcg.core.api.indicators import (
+        _business_dates_in_range,
+        materialise_option_streams,
+    )
+    from tcg.data._utils import int_to_iso
+
+    # ── 1. Validate request ──
+
+    if not body.streams:
+        return error_response("validation", "'streams' must contain at least one entry")
+
+    try:
+        start_date, end_date = parse_iso_range(body.start, body.end)
+    except ValueError as exc:
+        return error_response("validation", str(exc))
+
+    # Pre-flight: tautology + greeks-gated checks
+    cached_root_metadata: dict[str, object] | None = None
+    for entry in body.streams:
+        ref = entry.ref
+        label = entry.label
+
+        # Tautology: by_delta + stream='delta'
+        if getattr(ref.selection, "kind", None) == "by_delta" and ref.stream == "delta":
+            content: dict = {
+                "error_code": "TAUTOLOGICAL_OPTION_STREAM",
+                "detail": (
+                    f"selection=by_delta + stream='delta' is tautological "
+                    f"(label={label!r})"
+                ),
+            }
+            return JSONResponse(status_code=422, content=content)
+
+        # Greeks-gated streams on a no-greeks root
+        if ref.stream in _GREEKS_GATED_STREAMS:
+            if cached_root_metadata is None:
+                roots = await svc.list_option_roots()
+                cached_root_metadata = {r.collection: r for r in roots}
+            root_info = cached_root_metadata.get(ref.collection)
+            if root_info is not None and not getattr(root_info, "has_greeks", True):
+                content = {
+                    "error_code": "STREAM_UNAVAILABLE_FOR_ROOT",
+                    "root": ref.collection,
+                    "stream": ref.stream,
+                    "unavailable_streams": sorted(_GREEKS_GATED_STREAMS),
+                }
+                return JSONResponse(status_code=422, content=content)
+
+    # ── 2. Progress tracking ──
+
+    progress_task_id: str | None = None
+    progress_callback = None
+    if body.task_id:
+        trade_dates = _business_dates_in_range(start_date, end_date)
+        total = len(trade_dates) * len(body.streams) if trade_dates else 0
+        if total > 0:
+            progress_task_id = body.task_id
+            _stream_progress_register(progress_task_id, total)
+            progress_callback = lambda tid=progress_task_id: _stream_progress_tick(tid)
+            background_tasks.add_task(_stream_progress_clear, progress_task_id)
+
+    # ── 3. Materialise ──
+
+    refs_with_labels = [(e.label, e.ref) for e in body.streams]
+    result = await materialise_option_streams(
+        refs_with_labels,
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
+        progress_callback=progress_callback,
+    )
+    if isinstance(result, str):
+        return error_response("validation", result)
+
+    # ── 4. Build response ──
+
+    # All streams share the same date axis (CME business days in range).
+    # Extract from the first result.
+    first_key = next(iter(result))
+    dates_arr = result[first_key][0]
+    dates_iso = [int_to_iso(int(d)) for d in dates_arr]
+
+    streams_payload: dict[str, dict] = {}
+    for label, (_, values, diagnostics) in result.items():
+        streams_payload[label] = {
+            "values": nan_safe_floats(values),
+            "diagnostics": diagnostics,
+        }
+
+    return {
+        "dates": dates_iso,
+        "streams": streams_payload,
+    }
 
 
 __all__ = ["router"]
