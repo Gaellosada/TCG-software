@@ -227,7 +227,7 @@ describe('ContinuousOptionsChart — resolve flow', () => {
     expect(screen.getByText(/Server error: 500/)).toBeTruthy();
   });
 
-  it('does not send the type field in the ref (backend does not expect it)', async () => {
+  it('sends the type field in the ref for backend OptionStreamRef validation', async () => {
     render(<ContinuousOptionsChart collection="OPT_SP_500" />);
 
     await waitFor(() => {

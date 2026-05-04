@@ -1,6 +1,30 @@
 import { fetchApi } from './client';
 import { classifyFetchError, FetchError } from '../utils/fetchError';
 
+// Re-throw any error as a classified ``FetchError``. Preserves AbortError
+// for callers that need abort semantics. Shared by both GET helpers
+// (``fetchClassified``) and the POST ``resolveOptionStream`` function.
+function rethrowClassified(err) {
+  if (err && err.name === 'AbortError') throw err;
+  if (err && err.name === 'ApiError') {
+    if (err.errorType === 'network_error') {
+      const classified = classifyFetchError(new TypeError(err.message));
+      throw new FetchError({ ...classified, cause: err });
+    }
+    const status = (err.details && err.details.status)
+      || (err.errorType === 'not_found' ? 404 : null)
+      || (err.errorType === 'validation' ? 400 : null)
+      || (err.errorType === 'server_error' ? 500 : null)
+      || null;
+    if (status) {
+      const classified = classifyFetchError(null, { status }, err.message);
+      throw new FetchError({ ...classified, cause: err });
+    }
+  }
+  const classified = classifyFetchError(err);
+  throw new FetchError({ ...classified, cause: err });
+}
+
 // Thin wrapper around ``fetchApi`` that re-throws network/HTTP failures
 // as a ``FetchError`` with a classified ``kind``. Mirrors the same helper
 // defined in ``data.js`` — both files use an identical local copy so neither
@@ -9,23 +33,7 @@ async function fetchClassified(path) {
   try {
     return await fetchApi(path);
   } catch (err) {
-    if (err && err.name === 'ApiError') {
-      if (err.errorType === 'network_error') {
-        const classified = classifyFetchError(new TypeError(err.message));
-        throw new FetchError({ ...classified, cause: err });
-      }
-      const status = (err.details && err.details.status)
-        || (err.errorType === 'not_found' ? 404 : null)
-        || (err.errorType === 'validation' ? 400 : null)
-        || (err.errorType === 'server_error' ? 500 : null)
-        || null;
-      if (status) {
-        const classified = classifyFetchError(null, { status }, err.message);
-        throw new FetchError({ ...classified, cause: err });
-      }
-    }
-    const classified = classifyFetchError(err);
-    throw new FetchError({ ...classified, cause: err });
+    rethrowClassified(err);
   }
 }
 
@@ -211,29 +219,9 @@ export async function resolveOptionStream(streams, start, end, { signal, onProgr
     });
     return result;
   } catch (err) {
-    // Preserve abort semantics
-    if (err && err.name === 'AbortError') throw err;
-    // Classify through the same pipeline as other options endpoints
-    if (err && err.name === 'ApiError') {
-      if (err.errorType === 'network_error') {
-        const classified = classifyFetchError(new TypeError(err.message));
-        throw new FetchError({ ...classified, cause: err });
-      }
-      const status = (err.details && err.details.status)
-        || (err.errorType === 'not_found' ? 404 : null)
-        || (err.errorType === 'validation' ? 400 : null)
-        || (err.errorType === 'server_error' ? 500 : null)
-        || null;
-      if (status) {
-        const classified = classifyFetchError(null, { status }, err.message);
-        throw new FetchError({ ...classified, cause: err });
-      }
-    }
-    const classified = classifyFetchError(err);
-    throw new FetchError({ ...classified, cause: err });
+    rethrowClassified(err);
   } finally {
     if (progressInterval) clearInterval(progressInterval);
-    if (onProgress) onProgress(1.0);
   }
 }
 

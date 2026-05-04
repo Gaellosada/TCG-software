@@ -40,12 +40,14 @@ const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
 // on every Run click. Cleared on full page reload (no invalidation otherwise
 // — option roots' last_trade_date moves slowly enough that staleness within
 // a session is acceptable).
-let _optionRootsCache = null;
+let _optionRootsPromise = null;
 async function getOptionRootsCached() {
-  if (_optionRootsCache) return _optionRootsCache;
-  const resp = await getOptionRoots();
-  _optionRootsCache = Array.isArray(resp?.roots) ? resp.roots : [];
-  return _optionRootsCache;
+  if (!_optionRootsPromise) {
+    _optionRootsPromise = getOptionRoots().then(
+      (resp) => Array.isArray(resp?.roots) ? resp.roots : [],
+    );
+  }
+  return _optionRootsPromise;
 }
 
 /**
