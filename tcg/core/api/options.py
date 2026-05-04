@@ -1,4 +1,4 @@
-"""Options router — five GET endpoints under ``/api/options``.
+"""Options router — GET + POST endpoints under ``/api/options``.
 
 Wave B4 (Phase 1B) wiring layer.  Each handler:
 
@@ -22,15 +22,18 @@ Spec reference: §5 (API surface).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from datetime import date
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import ValidationError as PydanticValidationError
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from tcg.core.api._models_options import (
+    GREEKS_GATED_STREAMS,
     ChainResponse,
     ChainSnapshotQuery,
     ChainSnapshotResponse,
@@ -43,12 +46,22 @@ from tcg.core.api._models_options import (
     SmilePoint,
     SmileSeries,
 )
+from tcg.core.api._models import OptionStreamRef
 from tcg.core.api._options_wiring import (
     build_options_chain,
     build_options_pricer,
     build_options_selector,
 )
-from tcg.core.api.common import get_market_data
+from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api.common import (
+    error_response,
+    get_market_data,
+    progress_clear,
+    progress_register,
+    progress_snapshot,
+    progress_tick,
+)
+from tcg.data._utils import int_to_date
 from tcg.data.protocols import MarketDataService
 from tcg.types.errors import (
     OptionsContractNotFound,
@@ -246,21 +259,15 @@ async def list_expirations(
 async def get_chain(
     root: str = Query(..., description="OPT_* collection name"),
     date: date = Query(..., description="Trade date (YYYY-MM-DD)"),
-    type: Literal["C", "P", "both"] = Query(
-        "both", description="Option type filter"
-    ),
+    type: Literal["C", "P", "both"] = Query("both", description="Option type filter"),
     expiration_min: date = Query(
         ..., description="Lower bound for expiration window (inclusive)"
     ),
     expiration_max: date = Query(
         ..., description="Upper bound for expiration window (inclusive)"
     ),
-    strike_min: float | None = Query(
-        None, description="Optional strike lower bound"
-    ),
-    strike_max: float | None = Query(
-        None, description="Optional strike upper bound"
-    ),
+    strike_min: float | None = Query(None, description="Optional strike lower bound"),
+    strike_max: float | None = Query(None, description="Optional strike upper bound"),
     compute_missing: bool = Query(
         False,
         description=(
@@ -344,6 +351,92 @@ async def get_chain(
 
 
 # ---------------------------------------------------------------------------
+# Batch underlying-price helper (used by get_contract)
+# ---------------------------------------------------------------------------
+
+
+async def _batch_underlying_prices(
+    *,
+    contract: OptionContractDoc,
+    rows: tuple[OptionDailyRow, ...] | list[OptionDailyRow],
+    date_from: date | None,
+    date_to: date | None,
+    svc: MarketDataService,
+) -> dict[date, float | None]:
+    """Pre-fetch underlying prices for the entire date range in ONE
+    Mongo round-trip.
+
+    Returns a ``dict[date, float | None]`` mapping each trading date to
+    the underlying close.  BTC contracts store the underlying on the row
+    itself (``underlying_price_stored``), so this function returns an
+    empty dict for BTC — callers fall through to the row-level field.
+
+    For VIX roots the INDEX collection's ``IND_VIX`` document is
+    fetched; for option-on-future roots the FUT_* document referenced
+    by ``contract.underlying_ref`` is fetched.
+    """
+    from tcg.engine.options.chain._join import (
+        _futures_collection_for,
+        _is_btc,
+        _is_vix,
+    )
+
+    # BTC: underlying price lives on the row — no Mongo call.
+    if _is_btc(contract):
+        return {}
+
+    # Determine the date window we actually need.
+    visible_dates = [
+        r.date
+        for r in rows
+        if (date_from is None or r.date >= date_from)
+        and (date_to is None or r.date <= date_to)
+    ]
+    if not visible_dates:
+        return {}
+
+    min_date = min(visible_dates)
+    max_date = max(visible_dates)
+
+    # Decide collection + instrument id for the single bulk fetch.
+    if _is_vix(contract):
+        collection, instrument_id = "INDEX", "IND_VIX"
+    elif contract.underlying_ref is not None:
+        fut_collection = _futures_collection_for(contract.collection)
+        if fut_collection is None:
+            return {}
+        collection, instrument_id = fut_collection, contract.underlying_ref
+    else:
+        # No underlying ref and not BTC/VIX — cannot join.
+        return {}
+
+    try:
+        price_series = await svc.get_prices(
+            collection,
+            instrument_id,
+            start=min_date,
+            end=max_date,
+        )
+    except Exception:  # noqa: BLE001
+        # Same policy as the per-row adapters: any data failure → treat
+        # as join-not-possible; the pricer will surface missing Greeks.
+        return {}
+
+    if price_series is None or len(price_series) == 0:
+        return {}
+
+    # Build date → close lookup from the PriceSeries.
+    lookup: dict[date, float | None] = {}
+    for idx, d_int in enumerate(price_series.dates.tolist()):
+        d_int = int(d_int)
+        try:
+            lookup[int_to_date(d_int)] = float(price_series.close[idx])
+        except ValueError:
+            continue
+    return lookup
+
+
+# ---------------------------------------------------------------------------
 # Endpoint 3 — GET /api/options/contract/{coll}/{id}
 # ---------------------------------------------------------------------------
 
@@ -383,18 +476,20 @@ async def get_contract(
         validated.collection, validated.contract_id
     )
 
-    # Reuse Module 6's _join.resolve_underlying_price per row.  We
-    # construct the ports by hand here (same wiring as
-    # ``build_options_chain`` minus the chain object itself).
-    from tcg.core.api._options_wiring import (
-        _FuturesDataPortAdapter,
-        _IndexDataPortAdapter,
-    )
-    from tcg.engine.options.chain._join import resolve_underlying_price
-
-    index_port = _IndexDataPortAdapter(svc)
-    futures_port = _FuturesDataPortAdapter(svc)
     pricer = build_options_pricer() if validated.compute_missing else None
+
+    # Pre-fetch underlying prices for the entire date range in ONE Mongo
+    # round-trip instead of N sequential calls (was N+1 for non-BTC roots).
+    # BTC uses row.underlying_price_stored (no Mongo hit).
+    underlying_lookup: dict[date, float | None] = {}
+    if pricer is not None:
+        underlying_lookup = await _batch_underlying_prices(
+            contract=series.contract,
+            rows=series.rows,
+            date_from=validated.date_from,
+            date_to=validated.date_to,
+            svc=svc,
+        )
 
     rows_payload: list[dict[str, Any]] = []
     for row in series.rows:
@@ -405,13 +500,11 @@ async def get_contract(
 
         underlying_price: float | None = None
         if pricer is not None:
-            underlying_price = await resolve_underlying_price(
-                contract=series.contract,
-                row=row,
-                target_date=row.date,
-                index_port=index_port,
-                futures_port=futures_port,
-            )
+            # BTC: underlying price lives on the row itself.
+            if row.underlying_price_stored is not None:
+                underlying_price = row.underlying_price_stored
+            else:
+                underlying_price = underlying_lookup.get(row.date)
 
         rows_payload.append(
             _build_contract_row_with_greeks(
@@ -466,14 +559,10 @@ async def select_contract(
     try:
         payload = SelectQuery.model_validate_json(q)
     except PydanticValidationError as exc:
-        raise OptionsValidationError(
-            f"Invalid 'q' SelectQuery payload: {exc}"
-        ) from exc
+        raise OptionsValidationError(f"Invalid 'q' SelectQuery payload: {exc}") from exc
     except ValueError as exc:
         # Bare-JSON parse error path
-        raise OptionsValidationError(
-            f"Could not decode 'q' as JSON: {exc}"
-        ) from exc
+        raise OptionsValidationError(f"Could not decode 'q' as JSON: {exc}") from exc
 
     selector = build_options_selector(
         svc, with_pricer=payload.compute_missing_for_delta_selection
@@ -499,10 +588,10 @@ async def select_contract(
     # compute)".  We map only the unambiguous error_codes that match
     # this definition; other errors (e.g. ``no_match_within_tolerance``)
     # are returned as a 200 with structured ``error_code``.
-    if (
-        result.contract is None
-        and result.error_code in {"missing_delta_no_compute", "no_chain_for_date"}
-    ):
+    if result.contract is None and result.error_code in {
+        "missing_delta_no_compute",
+        "no_chain_for_date",
+    }:
         raise OptionsSelectionError(
             f"Selection unresolvable: error_code={result.error_code!r}, "
             f"diagnostic={result.diagnostic!r}"
@@ -615,19 +704,29 @@ async def get_chain_snapshot(
 
     chain = build_options_chain(svc)
 
+    # Fetch all expiration snapshots concurrently (capped to avoid
+    # overwhelming Mongo with too many parallel queries).
+    _SNAPSHOT_CONCURRENCY = 8
+    sem = asyncio.Semaphore(_SNAPSHOT_CONCURRENCY)
+
+    async def _fetch_one(exp: date) -> ChainSnapshot:
+        async with sem:
+            return await chain.snapshot(
+                root=query.root,
+                date=query.date,
+                type=query.type,
+                expiration_min=exp,
+                expiration_max=exp,
+                compute_missing=False,
+                expiration_cycle=query.expiration_cycle,
+            )
+
+    snapshots = await asyncio.gather(*[_fetch_one(exp) for exp in query.expirations])
+
     series_payload: list[dict[str, Any]] = []
     underlying_value: float | None = None
 
-    for expiration in query.expirations:
-        snapshot = await chain.snapshot(
-            root=query.root,
-            date=query.date,
-            type=query.type,
-            expiration_min=expiration,
-            expiration_max=expiration,
-            compute_missing=False,
-            expiration_cycle=query.expiration_cycle,
-        )
+    for expiration, snapshot in zip(query.expirations, snapshots):
         # underlying_price is the same across expirations (same root +
         # date); take the first non-None we observe.
         if underlying_value is None and snapshot.underlying_price is not None:
@@ -645,9 +744,7 @@ async def get_chain_snapshot(
                 }
             )
             points.append(point.model_dump())
-        smile = SmileSeries.model_validate(
-            {"expiration": expiration, "points": points}
-        )
+        smile = SmileSeries.model_validate({"expiration": expiration, "points": points})
         series_payload.append(smile.model_dump())
 
     response = ChainSnapshotResponse.model_validate(
@@ -661,7 +758,164 @@ async def get_chain_snapshot(
     return response.model_dump()
 
 
+# ---------------------------------------------------------------------------
+# Endpoint 6 — POST /api/options/stream
+# ---------------------------------------------------------------------------
+
+
+class _StreamEntry(BaseModel):
+    """One labeled option stream reference in the request."""
+
+    ref: OptionStreamRef
+    label: str
+
+
+class OptionStreamRequest(BaseModel):
+    """Request body for ``POST /api/options/stream``.
+
+    Each entry in ``streams`` is an ``OptionStreamRef`` with a
+    user-chosen label.  The endpoint materialises every ref over the
+    given date range and returns keyed time-series results.
+    """
+
+    streams: list[_StreamEntry]
+    start: str
+    end: str
+    task_id: str | None = None
+
+
+# GREEKS_GATED_STREAMS is imported from _models_options (shared with
+# indicators.py).  Local alias keeps call sites short + unchanged.
+_GREEKS_GATED_STREAMS = GREEKS_GATED_STREAMS
+
+
+@router.get("/stream/progress/{task_id}")
+async def get_stream_progress(task_id: str) -> dict:
+    """Read progress for a running ``/api/options/stream`` request.
+
+    Same shape as ``/api/indicators/progress/{task_id}`` — the frontend
+    can poll this while waiting for the POST response.  Delegates to
+    ``common.progress_snapshot`` (shared state with indicators router).
+    """
+    return progress_snapshot(task_id)
+
+
+@router.post("/stream", response_model=None)
+async def materialise_streams(
+    body: OptionStreamRequest,
+    background_tasks: BackgroundTasks,
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict | JSONResponse:
+    """Materialise one or more option stream refs over a date range.
+
+    Returns keyed time-series results — no Python code execution, no
+    params, just stream resolution.  Simpler than
+    ``/api/indicators/compute`` but reuses the same core materialisation
+    logic.
+    """
+    from tcg.core.api._dates import parse_iso_range
+    from tcg.core.api.indicators import (
+        _business_dates_in_range,
+        materialise_option_streams,
+    )
+    from tcg.data._utils import int_to_iso
+
+    # ── 1. Validate request ──
+
+    if not body.streams:
+        return error_response("validation", "'streams' must contain at least one entry")
+
+    try:
+        start_date, end_date = parse_iso_range(body.start, body.end)
+    except ValueError as exc:
+        return error_response("validation", str(exc))
+
+    # Pre-flight: tautology + greeks-gated checks
+    cached_root_metadata: dict[str, object] | None = None
+    for entry in body.streams:
+        ref = entry.ref
+        label = entry.label
+
+        # Tautology: by_delta + stream='delta'
+        if getattr(ref.selection, "kind", None) == "by_delta" and ref.stream == "delta":
+            content: dict = {
+                "error_code": "TAUTOLOGICAL_OPTION_STREAM",
+                "detail": (
+                    f"selection=by_delta + stream='delta' is tautological "
+                    f"(label={label!r})"
+                ),
+            }
+            return JSONResponse(status_code=422, content=content)
+
+        # Greeks-gated streams on a no-greeks root
+        if ref.stream in _GREEKS_GATED_STREAMS:
+            if cached_root_metadata is None:
+                roots = await svc.list_option_roots()
+                cached_root_metadata = {r.collection: r for r in roots}
+            root_info = cached_root_metadata.get(ref.collection)
+            if root_info is not None and not getattr(root_info, "has_greeks", True):
+                content = {
+                    "error_code": "STREAM_UNAVAILABLE_FOR_ROOT",
+                    "root": ref.collection,
+                    "stream": ref.stream,
+                    "unavailable_streams": sorted(_GREEKS_GATED_STREAMS),
+                }
+                return JSONResponse(status_code=422, content=content)
+
+    # ── 2. Progress tracking ──
+
+    progress_task_id: str | None = None
+    progress_callback = None
+    if body.task_id:
+        trade_dates = _business_dates_in_range(start_date, end_date)
+        total = len(trade_dates) * len(body.streams) if trade_dates else 0
+        if total > 0:
+            progress_task_id = body.task_id
+            progress_register(progress_task_id, total)
+            progress_callback = lambda tid=progress_task_id: progress_tick(tid)
+            background_tasks.add_task(progress_clear, progress_task_id)
+
+    # ── 3. Materialise ──
+
+    refs_with_labels = [(e.label, e.ref) for e in body.streams]
+    result = await materialise_option_streams(
+        refs_with_labels,
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
+        progress_callback=progress_callback,
+    )
+    if isinstance(result, str):
+        return error_response("validation", result)
+
+    # ── 4. Build response ──
+
+    # All streams share the same date axis (CME business days in range).
+    # Extract from the first result.
+    first_key = next(iter(result))
+    dates_arr = result[first_key][0]
+    dates_iso = [int_to_iso(int(d)) for d in dates_arr]
+
+    streams_payload: dict[str, dict] = {}
+    for label, (_, values, diagnostics) in result.items():
+        streams_payload[label] = {
+            "values": nan_safe_floats(values),
+            "diagnostics": diagnostics,
+        }
+
+    return {
+        "dates": dates_iso,
+        "streams": streams_payload,
+    }
+
+
 __all__ = ["router"]
+
+
+# Backward-compatible aliases — tests import these names from options.py.
+_stream_progress_register = progress_register
+_stream_progress_tick = progress_tick
+_stream_progress_clear = progress_clear
 
 
 # Suppress unused-import lint for the module-level helpers used only

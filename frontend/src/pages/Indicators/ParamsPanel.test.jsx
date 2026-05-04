@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import ParamsPanel, { fromPickerValue } from './ParamsPanel';
+import ParamsPanel, { fromPickerValue, formatSeriesRefLabel } from './ParamsPanel';
 
 // InstrumentPickerModal loads collections/instruments on mount — mock the API
 // so the component doesn't throw during rendering.
@@ -144,5 +144,75 @@ describe('<ParamsPanel> — instrument picker button', () => {
     expect(btn.title).toBe('Change instrument');
     // Chip label: "INDEX / SPX"
     expect(screen.getByText('INDEX / SPX')).toBeTruthy();
+  });
+
+  it('renders a readable label for an option_stream-shaped series ref', () => {
+    render(<ParamsPanel {...baseProps({
+      seriesLabels: ['atm_iv'],
+      indicator: {
+        ...baseProps().indicator,
+        seriesMap: {
+          atm_iv: {
+            type: 'option_stream',
+            collection: 'OPT_SP_500',
+            option_type: 'C',
+            cycle: null,
+            maturity: { kind: 'next_third_friday', offset_months: 0 },
+            selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+            stream: 'iv',
+          },
+        },
+      },
+    })} />);
+    // Bug-1 regression: option_stream refs used to render as "OPT_SP_500 /
+    // undefined" because the chip looked for instrument_id. The new
+    // formatSeriesRefLabel summarises the relevant fields.
+    const chip = screen.getByText(/OPT_SP_500/);
+    expect(chip.textContent).toMatch(/Call/);
+    expect(chip.textContent).toMatch(/front month/);
+    expect(chip.textContent).toMatch(/ATM/);
+    expect(chip.textContent).toMatch(/IV/);
+    expect(chip.textContent).not.toMatch(/undefined/);
+  });
+});
+
+describe('formatSeriesRefLabel', () => {
+  it('returns null for null / undefined input (caller falls back gracefully)', () => {
+    expect(formatSeriesRefLabel(null)).toBeNull();
+    expect(formatSeriesRefLabel(undefined)).toBeNull();
+  });
+
+  it('formats spot refs as "<collection> / <instrument_id>"', () => {
+    expect(formatSeriesRefLabel({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' }))
+      .toBe('INDEX / SPX');
+  });
+
+  it('formats continuous refs as "<collection> (continuous)"', () => {
+    expect(formatSeriesRefLabel({ type: 'continuous', collection: 'FUT_ES' }))
+      .toBe('FUT_ES (continuous)');
+  });
+
+  it('summarises option_stream refs with collection / side / maturity / selection / stream', () => {
+    const ref = {
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'P',
+      cycle: 'M',
+      maturity: { kind: 'next_third_friday', offset_months: 1 },
+      selection: { kind: 'by_delta', target: -0.25 },
+      stream: 'mid',
+    };
+    const label = formatSeriesRefLabel(ref);
+    expect(label).toMatch(/OPT_SP_500/);
+    expect(label).toMatch(/Put/);
+    expect(label).toMatch(/back month/);
+    // by_delta: 25Δp (signed convention; absolute pct + side from option_type).
+    expect(label).toMatch(/25Δp/);
+    expect(label).toMatch(/cycle=M/);
+    expect(label).toMatch(/MID/);
+  });
+
+  it('returns null for a fully empty option_stream ref (defensive — caller falls back to "Select instrument")', () => {
+    expect(formatSeriesRefLabel({ type: 'option_stream' })).toBeNull();
   });
 });

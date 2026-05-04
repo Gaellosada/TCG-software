@@ -1,7 +1,7 @@
 """Shared fixtures for options router unit tests.
 
 Builds a fully mocked ``MarketDataService`` that:
-- exposes a stub ``MongoOptionsDataReader`` on the ``_options`` attribute
+- exposes a ``StubOptionsReader`` via the public ``options_reader`` property
   (so ``_options_wiring.get_options_reader`` returns it),
 - delegates the four Protocol methods to the same stub,
 - mocks ``get_prices`` for the INDEX / FUT_* underlying joins.
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import numpy as np
 import pytest
@@ -119,9 +119,7 @@ def make_index_close_series(
     target_date: date = date(2024, 3, 15),
     value: float = 5117.94,
 ) -> PriceSeries:
-    target_int = (
-        target_date.year * 10000 + target_date.month * 100 + target_date.day
-    )
+    target_int = target_date.year * 10000 + target_date.month * 100 + target_date.day
     return PriceSeries(
         dates=np.array([target_int], dtype=np.int64),
         open=np.array([value]),
@@ -146,9 +144,7 @@ class StubOptionsReader:
     """
 
     def __init__(self) -> None:
-        self.query_chain_result: list[
-            tuple[OptionContractDoc, OptionDailyRow]
-        ] = []
+        self.query_chain_result: list[tuple[OptionContractDoc, OptionDailyRow]] = []
         self.get_contract_result: OptionContractSeries | None = None
         self.list_roots_result: list[OptionRootInfo] = []
         self.list_expirations_result: list[date] = []
@@ -205,6 +201,7 @@ class StubOptionsReader:
             raise self.get_contract_side_effect
         if self.get_contract_result is None:
             from tcg.types.errors import OptionsContractNotFound
+
             raise OptionsContractNotFound(
                 f"stub: no contract {contract_id} in {collection}"
             )
@@ -235,13 +232,14 @@ async def options_reader() -> StubOptionsReader:
 async def client(options_reader: StubOptionsReader):
     """Build a TestClient with a mocked MarketDataService.
 
-    The mock exposes ``_options`` (the wiring helper reads it directly)
-    and forwards the four Protocol methods to the same stub.
+    The mock exposes ``options_reader`` (the wiring helper reads it via
+    the public Protocol property) and forwards the four Protocol methods
+    to the same stub.
     """
     app = create_app()
 
     mock_svc = MagicMock()
-    mock_svc._options = options_reader
+    type(mock_svc).options_reader = PropertyMock(return_value=options_reader)
 
     async def _list_option_roots() -> list[OptionRootInfo]:
         return await options_reader.list_roots()

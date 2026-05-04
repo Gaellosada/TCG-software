@@ -10,7 +10,7 @@ Spec reference: ``OPTIONS_FEATURE_SPEC.md`` §3.1.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Sequence
 
 from tcg.types.options import (
     OptionContractDoc,
@@ -81,6 +81,26 @@ class OptionsDataReader(Protocol):
         """
         ...
 
+    async def query_chain_bulk(
+        self,
+        root: str,
+        dates: Sequence[date],
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        expiration_cycle: str | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Return ``(contract, row)`` pairs for ALL *dates* in one cursor pass.
+
+        Same server-side filters as ``query_chain`` (expiration range, type,
+        cycle), but materialises rows for every date in *dates* rather than
+        a single target date.  Avoids N separate cursor iterations when the
+        caller needs the same chain across many dates.
+        """
+        ...
+
     async def list_roots(self) -> list[OptionRootInfo]:
         """List every OPT_* collection with display metadata.
 
@@ -95,4 +115,13 @@ class OptionsDataReader(Protocol):
         Used by the chain / smile UIs to constrain the user-facing date
         pickers to dates that actually have contracts.
         """
+        ...
+
+    async def list_expirations_filtered(
+        self,
+        root: str,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | None = None,
+    ) -> list[date]:
+        """Distinct expirations filtered by type and/or cycle."""
         ...

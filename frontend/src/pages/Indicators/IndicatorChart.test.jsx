@@ -265,3 +265,88 @@ describe('<IndicatorChart> — ownPanel split', () => {
     expect(screen.queryByTestId('chart-stub')).toBeNull();
   });
 });
+
+describe('<IndicatorChart> — pinned-meets-incompat banner', () => {
+  it('renders the banner instead of the chart when pinnedIncompat is set', () => {
+    const onDetach = vi.fn();
+    render(
+      <IndicatorChart
+        indicator={{ id: 'atm', name: 'ATM IV' }}
+        result={makeResult()}
+        loading={false}
+        error={null}
+        pinnedIncompat={{
+          indicatorName: 'ATM IV',
+          asset_type: 'index',
+          accepted_asset_types: ['option'],
+        }}
+        onDetachPinned={onDetach}
+      />,
+    );
+    const banner = screen.getByTestId('pinned-incompat-banner');
+    expect(banner).toBeTruthy();
+    // Indicator name and reason text are visible.
+    expect(screen.getByText('ATM IV')).toBeTruthy();
+    expect(screen.getByText(/Requires option data; current asset is index/)).toBeTruthy();
+    // No chart rendered.
+    expect(screen.queryByTestId('chart-stub')).toBeNull();
+  });
+
+  it('Detach button invokes onDetachPinned', () => {
+    const onDetach = vi.fn();
+    render(
+      <IndicatorChart
+        indicator={{ id: 'atm', name: 'ATM IV' }}
+        result={makeResult()}
+        loading={false}
+        error={null}
+        pinnedIncompat={{
+          indicatorName: 'ATM IV',
+          asset_type: 'index',
+          accepted_asset_types: ['option'],
+        }}
+        onDetachPinned={onDetach}
+      />,
+    );
+    const btn = screen.getByRole('button', { name: /detach pinned result/i });
+    btn.click();
+    expect(onDetach).toHaveBeenCalledOnce();
+  });
+
+  it('shows multiple accepted asset types joined with " or "', () => {
+    render(
+      <IndicatorChart
+        indicator={{ id: 'sma', name: 'SMA' }}
+        result={makeResult()}
+        loading={false}
+        error={null}
+        pinnedIncompat={{
+          indicatorName: 'SMA',
+          asset_type: 'option',
+          accepted_asset_types: ['index', 'equity'],
+        }}
+        onDetachPinned={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Requires index or equity data; current asset is option/)).toBeTruthy();
+  });
+
+  it('banner takes precedence over loading and renders no chart', () => {
+    render(
+      <IndicatorChart
+        indicator={{ id: 'atm', name: 'ATM IV' }}
+        result={makeResult()}
+        loading={true}
+        error={null}
+        pinnedIncompat={{
+          indicatorName: 'ATM IV',
+          asset_type: 'index',
+          accepted_asset_types: ['option'],
+        }}
+        onDetachPinned={() => {}}
+      />,
+    );
+    expect(screen.getByTestId('pinned-incompat-banner')).toBeTruthy();
+    expect(screen.queryByText(/Computing/i)).toBeNull();
+  });
+});

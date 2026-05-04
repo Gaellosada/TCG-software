@@ -4,14 +4,22 @@ import EditorPanel from './EditorPanel';
 import ParamsPanel from './ParamsPanel';
 import IndicatorChart from './IndicatorChart';
 import { resolveDefaultIndexInstrument, computeIndicator } from '../../api/indicators';
+import { getOptionRoots } from '../../api/options';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 import { loadState, saveState } from './storage';
-import { AUTOSAVE_KEY } from './storageKeys';
+import { AUTOSAVE_KEY, OPTION_DATE_RANGE_KEY } from './storageKeys';
+import { computePresetRange, DEFAULT_PRESET } from '../../components/OptionDateRangeControl';
 import { hydrateDefault, applyDefaultSeries } from './hydrateDefault';
 import { buildPersistablePayload, serializePersistablePayload } from './persistablePayload';
 import { computeDefaultSeriesBannerText } from './defaultSeriesBanner';
-import { areAllSlotsFilled, computeRunDisabledReason } from './runGate';
+import {
+  areAllSlotsFilled,
+  computeRunDisabledReason,
+  computeAssetCompatibility,
+  computeOptionStreamSanity,
+  deriveAssetTypeFromSeriesMap,
+} from './runGate';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -27,6 +35,104 @@ const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
     out = np.full_like(s, np.nan, dtype=float)
     out[window-1:] = np.convolve(s, np.ones(window)/window, mode='valid')
     return out`;
+
+// Module-level cache of /api/options/roots so runIndicator doesn't re-fetch
+// on every Run click. Cleared on full page reload (no invalidation otherwise
+// — option roots' last_trade_date moves slowly enough that staleness within
+// a session is acceptable).
+let _optionRootsPromise = null;
+async function getOptionRootsCached() {
+  if (!_optionRootsPromise) {
+    _optionRootsPromise = getOptionRoots().then(
+      (resp) => Array.isArray(resp?.roots) ? resp.roots : [],
+    );
+  }
+  return _optionRootsPromise;
+}
+
+/**
+ * Resolve the effective date range for an option_stream compute.
+ *
+ * When `optionDateRange.preset` is non-null, the range is anchored to the
+ * root's `last_trade_date` (falling back to today if unknown) via
+ * `computePresetRange(preset, anchorEnd)`. This reuses the same
+ * day-clamping arithmetic the UI component uses, avoiding a mismatch
+ * between the displayed dates and the dates sent to the backend.
+ *
+ * When `optionDateRange.preset` is null (custom dates), the user's explicit
+ * `start` and `end` are used directly.
+ *
+ * Returns null when no option_stream refs are present in `seriesPayload`.
+ */
+async function resolveOptionDateRange(seriesPayload, optionDateRange) {
+  const collections = new Set();
+  for (const ref of Object.values(seriesPayload || {})) {
+    if (ref && ref.type === 'option_stream' && ref.collection) {
+      collections.add(ref.collection);
+    }
+  }
+  if (collections.size === 0) return null;
+
+  if (optionDateRange.preset === null) {
+    // Custom dates — use as-is.
+    return { start: optionDateRange.start, end: optionDateRange.end };
+  }
+
+  // Preset mode: anchor to the root's last_trade_date using
+  // computePresetRange so day-clamping is consistent with the UI.
+  const roots = await getOptionRootsCached();
+  let earliest = null;
+  for (const coll of collections) {
+    const root = roots.find((r) => r.collection === coll);
+    const ltd = root?.last_trade_date ?? null;
+    if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
+  }
+  return computePresetRange(optionDateRange.preset, earliest || undefined);
+}
+
+/**
+ * Check whether an indicator's seriesMap references at least one
+ * option_stream entry. Used to conditionally show the date range control.
+ */
+export function hasOptionStreamRef(indicator) {
+  return Object.values(indicator?.seriesMap || {}).some(
+    (ref) => ref?.type === 'option_stream',
+  );
+}
+
+/**
+ * Load persisted option date range from localStorage, or return a default.
+ */
+function loadOptionDateRange() {
+  try {
+    const raw = localStorage.getItem(OPTION_DATE_RANGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.start === 'string' && typeof parsed.end === 'string') {
+        return {
+          start: parsed.start,
+          end: parsed.end,
+          preset: typeof parsed.preset === 'string' ? parsed.preset : null,
+        };
+      }
+    }
+  } catch {
+    // Corrupt / inaccessible — use default.
+  }
+  const range = computePresetRange(DEFAULT_PRESET);
+  return { ...range, preset: DEFAULT_PRESET };
+}
+
+/**
+ * Persist option date range to localStorage.
+ */
+function saveOptionDateRange(value) {
+  try {
+    localStorage.setItem(OPTION_DATE_RANGE_KEY, JSON.stringify(value));
+  } catch {
+    // Quota — ignore.
+  }
+}
 
 function nextIndicatorName(existing) {
   let maxN = 0;
@@ -50,12 +156,37 @@ function IndicatorsPage() {
   const { run: runAbortable, running, abort: abortRun } = useAbortableAction();
   const [error, setError] = useState(null); // structured: { error_type, message, traceback? }
   const [lastResult, setLastResult] = useState(null);
+  // The asset_type the lastResult was computed against (derived from
+  // the seriesMap at run time). Tracks the "pinned" run so the chart
+  // panel can detect when the user later switches asset slots and the
+  // pinned result is no longer compatible — see the
+  // ``pinnedIncompatBanner`` block below.
+  const [lastResultAssetType, setLastResultAssetType] = useState(null);
+  const [lastResultIndicatorId, setLastResultIndicatorId] = useState(null);
   const [defaultSeries, setDefaultSeries] = useState(null);
+  // Live progress for the option_stream materialiser. Fraction in [0, 1]
+  // updated by the polling loop in ``computeIndicator``. ``null`` means
+  // "no progress reported" (either not an option_stream compute, or the
+  // first poll hasn't returned yet) and the UI shows a generic spinner.
+  const [computeProgress, setComputeProgress] = useState(null);
   const [defaultSeriesLoaded, setDefaultSeriesLoaded] = useState(false);
   // Classified error from resolveDefaultIndexInstrument — drives the
   // top-banner copy. Kind ∈ 'offline' | 'network' | 'not-found' | 'server' | 'client' | 'unknown'.
   const [defaultSeriesError, setDefaultSeriesError] = useState(null);
   const [defaultAutoFilled, setDefaultAutoFilled] = useState(false);
+  // User-configurable option date range — replaces the hardcoded 6-month
+  // lookback. Persisted in localStorage via a separate key so it survives
+  // across sessions without bumping the indicators schema version.
+  const [optionDateRange, setOptionDateRange] = useState(loadOptionDateRange);
+  // anchorEnd for the OptionDateRangeControl preset buttons: the earliest
+  // last_trade_date across all option_stream collections in the selected
+  // indicator's seriesMap. Derived asynchronously from getOptionRootsCached().
+  // null means "use today" (safe fallback — roots not loaded yet or no option_stream).
+  const [optionAnchorEnd, setOptionAnchorEnd] = useState(null);
+  const handleOptionDateRangeChange = useCallback((newRange) => {
+    setOptionDateRange(newRange);
+    saveOptionDateRange(newRange);
+  }, []);
   const [autosave, setAutosaveState] = useState(() => {
     try {
       const raw = localStorage.getItem(AUTOSAVE_KEY);
@@ -316,6 +447,41 @@ function IndicatorsPage() {
   const runIndicator = useCallback(async () => {
     if (!selectedIndicator) return;
     setError(null);
+
+    // Derive the run-time asset_type from the filled seriesMap. We
+    // surface a structured error (Sign 10 — never silently pick one)
+    // when slots disagree, and forward the resolved type + the
+    // indicator's compat declaration to the backend so it can do its
+    // own canonical cross-check.
+    const derived = deriveAssetTypeFromSeriesMap(selectedIndicator.seriesMap);
+    if (!derived.ok) {
+      setError({
+        error_type: 'validation',
+        message: `Series slots disagree on asset type (${derived.types.join(', ')}). Pick consistent series before running.`,
+      });
+      setLastResult(null);
+      return;
+    }
+    const resolvedAssetType = derived.asset_type;
+
+    // Pre-flight compat check — refuse to even fire the request when
+    // the indicator declares a compat list and the resolved type is
+    // not in it. Mirrors the backend's 422; doing it here saves a
+    // round-trip and keeps the failure typed.
+    const compat = computeAssetCompatibility(selectedIndicator);
+    if (!compat.ok && compat.reason === 'incompatible_asset') {
+      setError({
+        error_type: 'incompatible_asset',
+        error_code: 'INDICATOR_INCOMPATIBLE_ASSET',
+        message: `Requires ${compat.accepted_asset_types.join(' or ')} data; current asset is ${compat.asset_type}.`,
+        accepted_asset_types: compat.accepted_asset_types,
+        asset_type: compat.asset_type,
+        indicator_id: selectedIndicator.id,
+      });
+      setLastResult(null);
+      return;
+    }
+
     await runAbortable(async ({ signal }) => {
       const seriesPayload = {};
       for (const [label, picked] of Object.entries(selectedIndicator.seriesMap || {})) {
@@ -331,24 +497,73 @@ function IndicatorsPage() {
             : { type: 'spot', collection: picked.collection, instrument_id: picked.instrument_id };
         }
       }
+      // Option-stream materialiser walks dates per business day, so it
+      // needs an explicit ISO date range. When the user has configured a
+      // range via the OptionDateRangeControl, use that (preset mode
+      // anchors to last_trade_date; custom mode passes dates through).
+      // Spot/continuous resolvers ignore start/end so adding them is
+      // safe, but we only attach when needed to keep request shape minimal.
+      let dateRange = null;
+      try {
+        dateRange = await resolveOptionDateRange(seriesPayload, optionDateRange);
+      } catch (e) {
+        // Surface a typed error rather than swallowing — Sign 10 (no
+        // silent failures). The user gets a clear message if the
+        // /options/roots lookup itself fails.
+        if (signal.aborted) return;
+        setError({
+          error_type: 'data',
+          message: `Could not resolve option-stream date range: ${e?.message || e}`,
+        });
+        setLastResult(null);
+        return;
+      }
+
+      // Reset any prior progress so the spinner starts fresh; the
+      // poll loop will update it the moment the backend reports.
+      setComputeProgress(dateRange ? 0 : null);
       try {
         const data = await computeIndicator(
           {
             code: selectedIndicator.code,
             params: selectedIndicator.params,
             series: seriesPayload,
+            // Forward both fields when known. The backend treats them
+            // as the canonical source for the compat check; an empty
+            // string / undefined means "don't check".
+            ...(resolvedAssetType ? { asset_type: resolvedAssetType } : {}),
+            ...(Array.isArray(selectedIndicator.compatibleAssetTypes)
+              ? { compatible_asset_types: selectedIndicator.compatibleAssetTypes }
+              : {}),
+            ...(dateRange ? { start: dateRange.start, end: dateRange.end } : {}),
           },
-          { signal },
+          {
+            signal,
+            // Only forward the callback when there's actually a slow
+            // path to track; ``computeIndicator`` only triggers polling
+            // when ``onProgress`` is supplied.
+            ...(dateRange
+              ? { onProgress: (frac) => setComputeProgress(frac) }
+              : {}),
+          },
         );
         if (signal.aborted) return;
         setLastResult(data);
+        setLastResultAssetType(resolvedAssetType);
+        setLastResultIndicatorId(selectedIndicator.id);
+        setComputeProgress(null);
       } catch (e) {
+        // Always release the progress spinner — every catch path
+        // either renders an error card or silently aborts; in both
+        // cases the live "computing X%" line should disappear.
+        setComputeProgress(null);
         if (signal.aborted) return;
         if (e && typeof e === 'object' && 'status' in e) {
           // Structured error envelope:
           //   { error_type: 'validation'|'runtime'|'data', message, traceback? }
-          // Legacy shapes ({detail: "..."} or {message: "..."}) fall back to
-          // error_type='validation'.
+          // The 422 INDICATOR_INCOMPATIBLE_ASSET case is recognised
+          // via ``error_code`` in ``normalizeErrorEnvelope`` and
+          // surfaces with error_type='incompatible_asset'.
           setError(normalizeErrorEnvelope(e.body, e.message || 'Request failed'));
           setLastResult(null);
         } else {
@@ -369,7 +584,18 @@ function IndicatorsPage() {
         }
       }
     });
-  }, [selectedIndicator, runAbortable]);
+  }, [selectedIndicator, runAbortable, optionDateRange]);
+
+  // Detach the pinned result — clears the lastResult for the current
+  // indicator (used by the pinned-meets-incompat banner's Detach
+  // button). The result is NOT auto-cleared; the user must explicitly
+  // dismiss it (no silent removal).
+  const detachPinnedResult = useCallback(() => {
+    setLastResult(null);
+    setLastResultAssetType(null);
+    setLastResultIndicatorId(null);
+    setError(null);
+  }, []);
 
   // Cancel any in-flight run when the user switches indicators —
   // otherwise a stale response could overwrite state for the new one.
@@ -377,13 +603,61 @@ function IndicatorsPage() {
     return () => abortRun();
   }, [selectedId, abortRun]);
 
+  // Stable string key for the option_stream collections in the selected
+  // indicator — avoids re-running the anchorEnd effect on every render
+  // (selectedIndicator?.seriesMap is an unstable object reference).
+  const optionStreamCollsKey = useMemo(() => {
+    const sm = selectedIndicator?.seriesMap;
+    if (!sm) return '';
+    return Object.values(sm)
+      .filter((ref) => ref?.type === 'option_stream' && ref?.collection)
+      .map((ref) => ref.collection)
+      .sort()
+      .join(',');
+  }, [selectedIndicator]);
+
+  // Derive anchorEnd for the OptionDateRangeControl: the earliest
+  // last_trade_date across the option_stream collections referenced in the
+  // selected indicator's seriesMap. Uses the same cached roots as
+  // resolveOptionDateRange so no extra network round-trip.
+  useEffect(() => {
+    if (!optionStreamCollsKey) {
+      setOptionAnchorEnd(null);
+      return;
+    }
+    let cancelled = false;
+    const collections = optionStreamCollsKey.split(',');
+    getOptionRootsCached().then((roots) => {
+      if (cancelled) return;
+      let earliest = null;
+      for (const coll of collections) {
+        const root = roots.find((r) => r.collection === coll);
+        const ltd = root?.last_trade_date ?? null;
+        if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
+      }
+      setOptionAnchorEnd(earliest || null);
+    }).catch(() => {
+      if (!cancelled) setOptionAnchorEnd(null);
+    });
+    return () => { cancelled = true; };
+  }, [optionStreamCollsKey]);
+
   const seriesLabels = parsedSpec.seriesLabels;
   const allSlotsFilled = areAllSlotsFilled(selectedIndicator, seriesLabels);
+
+  // Pre-flight option_stream sanity (tautological by_delta+stream=delta).
+  // Mirrors the asset-type compat check — refuses the request before
+  // firing rather than letting the backend reject deterministically.
+  const streamSanity = computeOptionStreamSanity(selectedIndicator);
+
+  // Show date range control when the selected indicator has option_stream refs.
+  const showDateRange = hasOptionStreamRef(selectedIndicator);
 
   const canRun = !!selectedIndicator
     && !running
     && allSlotsFilled
-    && !!(selectedIndicator.code && selectedIndicator.code.trim());
+    && !!(selectedIndicator.code && selectedIndicator.code.trim())
+    && streamSanity.ok;
 
   // Tooltip shown on the disabled Run button so keyboard and mouse users
   // can tell what's blocking execution. Priority: most-specific first.
@@ -399,6 +673,35 @@ function IndicatorsPage() {
     defaultSeries,
     defaultSeriesError,
   });
+
+  // Currently-selected asset type, derived from the SELECTED
+  // indicator's seriesMap. Drives the picker grey-out and the
+  // pinned-meets-incompat banner. ``null`` is meaningful: it means
+  // "we cannot classify the slot yet" → picker shows everything.
+  const currentAssetType = useMemo(() => {
+    const derived = deriveAssetTypeFromSeriesMap(selectedIndicator?.seriesMap);
+    if (!derived.ok) return null; // slot conflict → don't grey
+    return derived.asset_type;
+  }, [selectedIndicator?.seriesMap]);
+
+  // Pinned-meets-incompat: the lastResult was computed for an
+  // asset_type that is no longer in the indicator's compat list (e.g.
+  // user changed a series slot to a different asset). The chart panel
+  // renders a banner instead of the chart; the banner offers a
+  // ``Detach`` button that clears lastResult.
+  const pinnedIncompat = useMemo(() => {
+    if (!lastResult || !selectedIndicator) return null;
+    if (lastResultIndicatorId !== selectedIndicator.id) return null;
+    const compat = selectedIndicator.compatibleAssetTypes;
+    if (!Array.isArray(compat) || compat.length === 0) return null;
+    if (!lastResultAssetType) return null;
+    if (compat.includes(lastResultAssetType)) return null;
+    return {
+      indicatorName: selectedIndicator.name || 'Indicator',
+      asset_type: lastResultAssetType,
+      accepted_asset_types: compat.slice(),
+    };
+  }, [lastResult, selectedIndicator, lastResultIndicatorId, lastResultAssetType]);
 
   return (
     <div className={`${styles.page} ${selectedIndicator?.ownPanel ? styles.pageSplit : ''}`}>
@@ -417,6 +720,7 @@ function IndicatorsPage() {
           onRename={handleRename}
           search={search}
           onSearchChange={setSearch}
+          currentAssetType={currentAssetType}
         />
       </div>
       <div className={styles.editorPanel}>
@@ -469,6 +773,10 @@ function IndicatorsPage() {
           defaultCollection={defaultSeries?.collection || null}
           ownPanel={!!selectedIndicator?.ownPanel}
           onOwnPanelChange={handleOwnPanelChange}
+          showDateRange={showDateRange}
+          optionDateRange={optionDateRange}
+          onOptionDateRangeChange={handleOptionDateRangeChange}
+          optionAnchorEnd={optionAnchorEnd}
         />
       </div>
       <div className={styles.chartPanel}>
@@ -482,7 +790,10 @@ function IndicatorsPage() {
             indicator={selectedIndicator}
             result={lastResult}
             loading={running}
+            loadingProgress={running ? computeProgress : null}
             error={error}
+            pinnedIncompat={pinnedIncompat}
+            onDetachPinned={detachPinnedResult}
           />
         </Card>
       </div>

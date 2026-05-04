@@ -1,0 +1,46 @@
+.root {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  /* Reset fieldset defaults */
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-inline-size: 0;
+}
+
+.root:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.dateLabel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.dateInput {
+  padding: 3px 6px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.75rem;
+}
+
+.dateInput:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.warning {
+  font-size: 0.7rem;
+  color: var(--accent-warm);
+  white-space: nowrap;
+}

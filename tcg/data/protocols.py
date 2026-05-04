@@ -30,6 +30,8 @@ from tcg.types.options import (
 from tcg.types.simulation import SimResult
 from tcg.types.strategy import StrategyDefinition, StrategyMeta, StrategyStage
 
+from tcg.data.options.protocol import OptionsDataReader
+
 
 class MarketDataService(Protocol):
     """Read-only access to market data (indexes and futures).
@@ -117,6 +119,22 @@ class MarketDataService(Protocol):
     async def list_option_roots(self) -> list[OptionRootInfo]: ...
 
     async def list_option_expirations(self, root: str) -> list[date]: ...
+
+    async def list_option_expirations_filtered(
+        self,
+        root: str,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | None = None,
+    ) -> list[date]: ...
+
+    @property
+    def options_reader(self) -> OptionsDataReader:
+        """Return the underlying options data reader.
+
+        Exposes the ``OptionsDataReader`` port so callers in ``tcg.core``
+        can pass it to engine adapters without accessing private attributes.
+        """
+        ...
 
 
 class StrategyStore(Protocol):

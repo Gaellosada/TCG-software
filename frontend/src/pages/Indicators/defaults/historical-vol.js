@@ -16,6 +16,8 @@ export default {
   name: 'Historical Volatility',
   readonly: true,
   category: 'volatility',
+  compatibleAssetTypes: ['index', 'equity'],
+  chartShape: 'time-series',
   code,
   params: {},
   seriesMap: {},

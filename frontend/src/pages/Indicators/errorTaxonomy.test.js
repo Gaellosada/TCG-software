@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   INDICATOR_ERROR_TYPES,
   HEADINGS,
+  SUBTITLES,
   ABORTED,
+  ERROR_CODE_TO_TYPE,
   fetchKindToErrorType,
   coerceErrorType,
+  errorCodeToType,
 } from './errorTaxonomy';
 
 describe('INDICATOR_ERROR_TYPES / HEADINGS', () => {
@@ -17,6 +20,32 @@ describe('INDICATOR_ERROR_TYPES / HEADINGS', () => {
   it('HEADINGS has no stray keys outside the canonical list', () => {
     const canonical = new Set(INDICATOR_ERROR_TYPES);
     for (const key of Object.keys(HEADINGS)) {
+      expect(canonical.has(key)).toBe(true);
+    }
+  });
+
+  it('includes incompatible_asset as a canonical error type', () => {
+    expect(INDICATOR_ERROR_TYPES).toContain('incompatible_asset');
+    expect(HEADINGS.incompatible_asset).toBeTruthy();
+  });
+
+  it('includes the option-stream-specific error types', () => {
+    expect(INDICATOR_ERROR_TYPES).toContain('tautological_option_stream');
+    expect(INDICATOR_ERROR_TYPES).toContain('stream_unavailable_for_root');
+    expect(HEADINGS.tautological_option_stream).toBe('Tautological selection');
+    expect(HEADINGS.stream_unavailable_for_root).toBe('Stream unavailable for root');
+  });
+});
+
+describe('SUBTITLES', () => {
+  it('carries copy for the option-stream-specific error types', () => {
+    expect(SUBTITLES.tautological_option_stream).toMatch(/by_delta/);
+    expect(SUBTITLES.stream_unavailable_for_root).toMatch(/Greek/);
+  });
+
+  it('every SUBTITLES key is a canonical error type', () => {
+    const canonical = new Set(INDICATOR_ERROR_TYPES);
+    for (const key of Object.keys(SUBTITLES)) {
       expect(canonical.has(key)).toBe(true);
     }
   });
@@ -57,5 +86,37 @@ describe('coerceErrorType', () => {
     expect(coerceErrorType('bogus')).toBe('validation');
     expect(coerceErrorType(undefined)).toBe('validation');
     expect(coerceErrorType(null)).toBe('validation');
+  });
+});
+
+describe('ERROR_CODE_TO_TYPE / errorCodeToType', () => {
+  it('maps INDICATOR_INCOMPATIBLE_ASSET to incompatible_asset', () => {
+    expect(ERROR_CODE_TO_TYPE.INDICATOR_INCOMPATIBLE_ASSET).toBe('incompatible_asset');
+    expect(errorCodeToType('INDICATOR_INCOMPATIBLE_ASSET')).toBe('incompatible_asset');
+  });
+
+  it('maps TAUTOLOGICAL_OPTION_STREAM to tautological_option_stream', () => {
+    expect(ERROR_CODE_TO_TYPE.TAUTOLOGICAL_OPTION_STREAM).toBe('tautological_option_stream');
+    expect(errorCodeToType('TAUTOLOGICAL_OPTION_STREAM')).toBe('tautological_option_stream');
+  });
+
+  it('maps STREAM_UNAVAILABLE_FOR_ROOT to stream_unavailable_for_root', () => {
+    expect(ERROR_CODE_TO_TYPE.STREAM_UNAVAILABLE_FOR_ROOT).toBe('stream_unavailable_for_root');
+    expect(errorCodeToType('STREAM_UNAVAILABLE_FOR_ROOT')).toBe('stream_unavailable_for_root');
+  });
+
+  it('returns null for unknown / empty / non-string codes', () => {
+    expect(errorCodeToType('UNKNOWN_CODE')).toBeNull();
+    expect(errorCodeToType('')).toBeNull();
+    expect(errorCodeToType(undefined)).toBeNull();
+    expect(errorCodeToType(null)).toBeNull();
+    expect(errorCodeToType(42)).toBeNull();
+  });
+
+  it('every value in ERROR_CODE_TO_TYPE is a canonical error type', () => {
+    const canonical = new Set(INDICATOR_ERROR_TYPES);
+    for (const v of Object.values(ERROR_CODE_TO_TYPE)) {
+      expect(canonical.has(v)).toBe(true);
+    }
   });
 });

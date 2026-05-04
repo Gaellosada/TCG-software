@@ -13,6 +13,13 @@ const INDICATOR_ERROR_ICONS = {
   data: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
   network: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
   offline: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4l3 2',
+  // Same warning-triangle glyph as 'validation' — incompat is a shape-of-input
+  // mismatch rather than a server/runtime fault.
+  incompatible_asset: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
+  // Option-stream-specific shape-of-input failures — share the warning-triangle
+  // glyph with the other validation-class incompats.
+  tautological_option_stream: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
+  stream_unavailable_for_root: 'M12 9v4M12 17h.01M4 19h16a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0L2.3 16A2 2 0 0 0 4 19z',
   generic: 'M12 9v4M12 17h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
 };
 
@@ -38,7 +45,7 @@ function coerceIndicatorErrorType(errorType) {
  *     pan on one pane propagates to the other and hover is unified.
  *     Mirrors the Data page's price/volume stacked layout.
  */
-function IndicatorChart({ indicator, result, loading, error }) {
+function IndicatorChart({ indicator, result, loading, loadingProgress, error, pinnedIncompat, onDetachPinned }) {
   const ownPanel = !!indicator?.ownPanel;
 
   const { traces, layoutOverrides, hasData } = useMemo(() => {
@@ -158,10 +165,53 @@ function IndicatorChart({ indicator, result, loading, error }) {
     };
   }, [result, indicator?.name, ownPanel]);
 
-  if (loading) {
+  // Pinned-meets-incompat — a previously-computed result exists but the
+  // indicator's compat list no longer accepts the resolved asset_type
+  // (e.g. user changed a series slot). We render a banner with the
+  // accepted-asset-types text + a Detach button instead of the chart.
+  // This deliberately wins over loading/error/no-data so users always
+  // see the same panel framing while the pinned result is held.
+  if (pinnedIncompat) {
+    const accepted = (pinnedIncompat.accepted_asset_types || []).join(' or ');
+    const reason = `Requires ${accepted} data; current asset is ${pinnedIncompat.asset_type}`;
     return (
       <div className={styles.panel}>
-        <div className={styles.state}>Computing...</div>
+        <div
+          className={styles.pinnedIncompatBanner}
+          data-testid="pinned-incompat-banner"
+          role="alert"
+        >
+          <h3 className={styles.pinnedIncompatHeading}>{pinnedIncompat.indicatorName}</h3>
+          <p className={styles.pinnedIncompatReason}>{reason}</p>
+          <button
+            type="button"
+            className={styles.detachBtn}
+            onClick={onDetachPinned}
+            aria-label="Detach pinned result"
+          >
+            Detach
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    // Live percentage from the per-date materialiser, when reported.
+    // ``loadingProgress`` is a fraction in [0, 1] or ``null`` when no
+    // backend progress is being tracked (e.g. spot/continuous
+    // compute). The percentage is rendered inline with "Computing..."
+    // as a single centred element — earlier two-row layouts let the
+    // ``flex: 1`` row grow to fill the panel and pushed the percentage
+    // off-screen.
+    let label = 'Computing...';
+    if (typeof loadingProgress === 'number') {
+      const pct = Math.min(100, Math.max(0, Math.round(loadingProgress * 100)));
+      label = `Computing... ${pct}%`;
+    }
+    return (
+      <div className={styles.panel}>
+        <div className={styles.state} aria-live="polite">{label}</div>
       </div>
     );
   }

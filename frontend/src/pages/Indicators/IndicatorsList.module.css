@@ -177,6 +177,18 @@
   border-left-color: var(--accent);
 }
 
+/* Asset-type incompat — greyed but still clickable so users can
+ * inspect the indicator's docs / params. The Run button is the
+ * actual gate (computeAssetCompatibility in runGate.js). */
+.rowIncompat .rowName {
+  opacity: 0.45;
+}
+
+.rowIncompat:hover {
+  /* Keep the hover affordance subtle so it's still clearly disabled. */
+  background: var(--bg-hover);
+}
+
 .rowName {
   flex: 1;
   font-size: 0.82rem;

@@ -21,14 +21,28 @@ import { LIST_COLLAPSED_KEY } from './storageKeys';
  * remains visible even when CUSTOM is collapsed.
  *
  * Props:
- *   indicators       {Array}    list of indicator objects { id, name, readonly? }
- *   selectedId       {string}   currently selected indicator id
- *   onSelect         {Function} (id) => void
- *   onAdd            {Function} () => void
- *   onDelete         {Function} (id) => void (caller handles confirmation)
- *   onRename         {Function} (id, newName) => void
- *   search           {string}
- *   onSearchChange   {Function} (q) => void
+ *   indicators        {Array}   list of indicator objects { id, name, readonly?, compatibleAssetTypes? }
+ *   selectedId        {string}  currently selected indicator id
+ *   onSelect          {Function} (id) => void
+ *   onAdd             {Function} () => void
+ *   onDelete          {Function} (id) => void (caller handles confirmation)
+ *   onRename          {Function} (id, newName) => void
+ *   search            {string}
+ *   onSearchChange    {Function} (q) => void
+ *   currentAssetType  {'index'|'equity'|'option'|null}
+ *                     the inferred asset_type of the currently-selected
+ *                     indicator's seriesMap. When non-null, indicator
+ *                     rows whose ``compatibleAssetTypes`` array does
+ *                     not include this value are greyed out and given
+ *                     a tooltip listing the accepted types. When
+ *                     ``null`` (no asset selected, slot conflict, or
+ *                     unknown collection), nothing is greyed —
+ *                     full availability so the user sees every option.
+ *
+ * Asset-type compat is decoration only — onSelect still fires on a
+ * greyed row so the user can inspect the indicator's code/docs and
+ * see why it would not run. The Run button is the actual gate (see
+ * ``runGate.computeAssetCompatibility``).
  */
 
 function loadCollapsed() {
@@ -49,7 +63,17 @@ function saveCollapsed(next) {
   try { localStorage.setItem(LIST_COLLAPSED_KEY, JSON.stringify(next)); } catch { /* quota */ }
 }
 
-function IndicatorsList({ indicators, selectedId, onSelect, onAdd, onDelete, onRename, search, onSearchChange }) {
+function IndicatorsList({
+  indicators,
+  selectedId,
+  onSelect,
+  onAdd,
+  onDelete,
+  onRename,
+  search,
+  onSearchChange,
+  currentAssetType = null,
+}) {
   const [renamingId, setRenamingId] = useState(null);
   const [renameDraft, setRenameDraft] = useState('');
   const inputRef = useRef(null);
@@ -95,14 +119,42 @@ function IndicatorsList({ indicators, selectedId, onSelect, onAdd, onDelete, onR
 
   function renderRow(ind) {
     const isRenaming = renamingId === ind.id;
+    // Asset-type compat decoration. Only applies when:
+    //   * the parent passed a non-null currentAssetType, AND
+    //   * this indicator declares a non-empty compatibleAssetTypes
+    //     array, AND
+    //   * the current asset's type is not in that array, AND
+    //   * the indicator does NOT have its own defaultSeries (indicators
+    //     with defaultSeries are self-sufficient — they bring their own
+    //     data source and don't depend on the currently selected asset).
+    // A missing or empty compatibleAssetTypes means "universally
+    // compatible" (back-compat for user-authored indicators) — never
+    // greyed. Sign 10: the tooltip surfaces a human-readable reason.
+    const compat = Array.isArray(ind.compatibleAssetTypes) ? ind.compatibleAssetTypes : null;
+    const hasSelfContainedDefaults = !!(ind.defaultSeries && typeof ind.defaultSeries === 'object'
+      && Object.keys(ind.defaultSeries).length > 0);
+    const isIncompat = !!(
+      currentAssetType
+      && compat
+      && compat.length > 0
+      && !compat.includes(currentAssetType)
+      && !hasSelfContainedDefaults
+    );
+    const incompatTitle = isIncompat
+      ? `Not compatible with ${currentAssetType} data — accepts ${compat.join(' or ')}.`
+      : undefined;
+    const rowClassName = `${styles.row} ${ind.id === selectedId ? styles.rowActive : ''} ${isIncompat ? styles.rowIncompat : ''}`.trim();
     return (
       <div
         key={ind.id}
-        className={`${styles.row} ${ind.id === selectedId ? styles.rowActive : ''}`}
+        className={rowClassName}
+        data-incompat={isIncompat ? 'true' : 'false'}
+        title={incompatTitle}
         onClick={() => onSelect(ind.id)}
         onDoubleClick={() => startRename(ind)}
         role="button"
         tabIndex={0}
+        aria-disabled={isIncompat ? 'true' : undefined}
         onKeyDown={(e) => e.key === 'Enter' && !isRenaming && onSelect(ind.id)}
       >
         {isRenaming ? (

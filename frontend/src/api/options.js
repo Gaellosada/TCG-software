@@ -1,6 +1,30 @@
 import { fetchApi } from './client';
 import { classifyFetchError, FetchError } from '../utils/fetchError';
 
+// Re-throw any error as a classified ``FetchError``. Preserves AbortError
+// for callers that need abort semantics. Shared by both GET helpers
+// (``fetchClassified``) and the POST ``resolveOptionStream`` function.
+function rethrowClassified(err) {
+  if (err && err.name === 'AbortError') throw err;
+  if (err && err.name === 'ApiError') {
+    if (err.errorType === 'network_error') {
+      const classified = classifyFetchError(new TypeError(err.message));
+      throw new FetchError({ ...classified, cause: err });
+    }
+    const status = (err.details && err.details.status)
+      || (err.errorType === 'not_found' ? 404 : null)
+      || (err.errorType === 'validation' ? 400 : null)
+      || (err.errorType === 'server_error' ? 500 : null)
+      || null;
+    if (status) {
+      const classified = classifyFetchError(null, { status }, err.message);
+      throw new FetchError({ ...classified, cause: err });
+    }
+  }
+  const classified = classifyFetchError(err);
+  throw new FetchError({ ...classified, cause: err });
+}
+
 // Thin wrapper around ``fetchApi`` that re-throws network/HTTP failures
 // as a ``FetchError`` with a classified ``kind``. Mirrors the same helper
 // defined in ``data.js`` — both files use an identical local copy so neither
@@ -9,23 +33,7 @@ async function fetchClassified(path) {
   try {
     return await fetchApi(path);
   } catch (err) {
-    if (err && err.name === 'ApiError') {
-      if (err.errorType === 'network_error') {
-        const classified = classifyFetchError(new TypeError(err.message));
-        throw new FetchError({ ...classified, cause: err });
-      }
-      const status = (err.details && err.details.status)
-        || (err.errorType === 'not_found' ? 404 : null)
-        || (err.errorType === 'validation' ? 400 : null)
-        || (err.errorType === 'server_error' ? 500 : null)
-        || null;
-      if (status) {
-        const classified = classifyFetchError(null, { status }, err.message);
-        throw new FetchError({ ...classified, cause: err });
-      }
-    }
-    const classified = classifyFetchError(err);
-    throw new FetchError({ ...classified, cause: err });
+    rethrowClassified(err);
   }
 }
 
@@ -167,6 +175,55 @@ export async function selectOption(selectQuery) {
 // (e.g. expirations=2024-04-19&expirations=2024-05-17), NOT comma-joined.
 // URLSearchParams.append is used — NOT set — to preserve all values.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 6. Resolve option stream(s)
+//    POST /api/options/stream
+//
+// streams: Array<{ ref: OptionStreamRef, label: string }>
+// start:   YYYY-MM-DD string
+// end:     YYYY-MM-DD string
+// task_id: optional UUID for progress polling
+//
+// Returns: { dates: string[], streams: { [label]: { values: number[], diagnostics: (string|null)[] } } }
+//
+// Progress: GET /api/options/stream/progress/{task_id}
+//   Returns: { done: number, total: number, fraction: number }
+// ---------------------------------------------------------------------------
+
+export async function resolveOptionStream(streams, start, end, { signal, onProgress } = {}) {
+  const taskId = typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  let progressInterval = null;
+  if (onProgress) {
+    progressInterval = setInterval(async () => {
+      try {
+        const prog = await fetchApi(`/options/stream/progress/${taskId}`);
+        if (prog && typeof prog.fraction === 'number') {
+          onProgress(prog.fraction);
+        }
+      } catch {
+        // Progress polling is best-effort — swallow errors.
+      }
+    }, 250);
+  }
+
+  try {
+    const body = { streams, start, end, task_id: taskId };
+    const result = await fetchApi('/options/stream', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    });
+    return result;
+  } catch (err) {
+    rethrowClassified(err);
+  } finally {
+    if (progressInterval) clearInterval(progressInterval);
+  }
+}
 
 export async function getChainSnapshot(root, { date, type, expirations, field, expiration_cycle }) {
   const qp = new URLSearchParams();

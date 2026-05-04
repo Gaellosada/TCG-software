@@ -15,7 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
+from tcg.engine.options.maturity.resolver import (
+    DefaultMaturityResolver,
+    _prior_business_day,
+)
 from tcg.types.options import NextThirdFriday
 
 _r = DefaultMaturityResolver()
@@ -25,22 +28,30 @@ _r = DefaultMaturityResolver()
 # Known 2024 third Fridays
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("ref_date, offset, expected", [
-    # offset=0: resolve to current month's 3rd Friday if ref_date <= it
-    (date(2024, 1, 1),  0, date(2024, 1, 19)),
-    (date(2024, 1, 19), 0, date(2024, 1, 19)),   # ref_date == 3rd Friday → same day
-    # offset=0: ref_date past 3rd Friday → advance to next month
-    (date(2024, 1, 20), 0, date(2024, 2, 16)),
-    # offset=1: always at least one full month ahead
-    (date(2024, 1, 1),  1, date(2024, 2, 16)),
-    (date(2024, 1, 16), 1, date(2024, 2, 16)),
-    (date(2024, 1, 17), 1, date(2024, 2, 16)),
-    # More months
-    (date(2024, 3, 1),  0, date(2024, 3, 15)),
-    (date(2024, 4, 1),  0, date(2024, 4, 19)),
-    (date(2024, 6, 1),  0, date(2024, 6, 21)),
-    (date(2024, 12, 1), 0, date(2024, 12, 20)),
-])
+
+@pytest.mark.parametrize(
+    "ref_date, offset, expected",
+    [
+        # offset=0: resolve to current month's 3rd Friday if ref_date < it
+        (date(2024, 1, 1), 0, date(2024, 1, 19)),
+        (
+            date(2024, 1, 19),
+            0,
+            date(2024, 2, 16),
+        ),  # ref_date == 3rd Friday → advance (0 DTE, no IV)
+        # offset=0: ref_date past 3rd Friday → advance to next month
+        (date(2024, 1, 20), 0, date(2024, 2, 16)),
+        # offset=1: always at least one full month ahead
+        (date(2024, 1, 1), 1, date(2024, 2, 16)),
+        (date(2024, 1, 16), 1, date(2024, 2, 16)),
+        (date(2024, 1, 17), 1, date(2024, 2, 16)),
+        # More months
+        (date(2024, 3, 1), 0, date(2024, 3, 15)),
+        (date(2024, 4, 1), 0, date(2024, 4, 19)),
+        (date(2024, 6, 1), 0, date(2024, 6, 21)),
+        (date(2024, 12, 1), 0, date(2024, 12, 20)),
+    ],
+)
 def test_known_2024_third_fridays(ref_date: date, offset: int, expected: date) -> None:
     result = _r.resolve(ref_date, NextThirdFriday(offset_months=offset))
     assert result == expected, (
@@ -52,6 +63,7 @@ def test_known_2024_third_fridays(ref_date: date, offset: int, expected: date) -
 # Holiday case: 2014-04-18 is the 3rd Friday of April 2014 AND a CME
 # holiday (Good Friday).  The resolver must return 2014-04-17.
 # ---------------------------------------------------------------------------
+
 
 def test_holiday_skip_real_case_2014_april() -> None:
     """3rd Friday of April 2014 (2014-04-18) is a CME_TradeDate holiday.
@@ -86,17 +98,20 @@ def test_holiday_skip_2022_april() -> None:
 # Synthetic holiday via dependency injection (mock the calendar)
 # ---------------------------------------------------------------------------
 
+
 def test_holiday_skip_synthetic_mock() -> None:
     """Inject a synthetic calendar where any arbitrary 3rd Friday is a holiday.
 
     We pick 2024-03-15 (3rd Friday of March 2024) and declare it a holiday.
     Expected: resolver returns 2024-03-14 (prior business day).
     """
+
     # Build a mock calendar where valid_days returns empty when queried for
     # 2024-03-15 alone, and returns 2024-03-14 when queried for that date.
     def _mock_valid_days(start_date, end_date):
         """Synthetic: 2024-03-15 is not a valid day."""
         import pandas as pd
+
         # If the single-day probe is the holiday → return empty
         if start_date == date(2024, 3, 15) and end_date == date(2024, 3, 15):
             return pd.DatetimeIndex([], dtype="datetime64[us, UTC]")
@@ -108,6 +123,7 @@ def test_holiday_skip_synthetic_mock() -> None:
             )
         # Default: return a real calendar response (won't be reached in this test)
         from tcg.engine.options.maturity.resolver import _get_calendar
+
         real_cal = _get_calendar("CME_TradeDate")
         return real_cal.valid_days(start_date=start_date, end_date=end_date)
 
@@ -124,8 +140,55 @@ def test_holiday_skip_synthetic_mock() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Edge: _prior_business_day returns None when all days are holidays
+# ---------------------------------------------------------------------------
+
+
+def test_prior_business_day_returns_none_on_extended_closure() -> None:
+    """When all 30 days before a holiday 3rd Friday are also holidays,
+    _prior_business_day returns None and the resolver falls back to the
+    original (unrolled) third-Friday date instead of crashing.
+    """
+    import pandas as pd
+
+    target_friday = date(2024, 3, 15)
+
+    def _mock_valid_days(start_date, end_date):
+        # Every single-day probe returns empty → entire window is "holidays"
+        return pd.DatetimeIndex([], dtype="datetime64[us, UTC]")
+
+    mock_cal = MagicMock()
+    mock_cal.valid_days.side_effect = _mock_valid_days
+
+    from tcg.engine.options.maturity import resolver as res_module
+
+    with patch.object(res_module, "_get_calendar", return_value=mock_cal):
+        resolver = DefaultMaturityResolver()
+        result = resolver.resolve(date(2024, 3, 1), NextThirdFriday(offset_months=0))
+
+    # The 3rd Friday itself is a "holiday" (mock says so), but since no prior
+    # business day is found either, the resolver falls back to the original date.
+    assert result == target_friday, (
+        f"Expected fallback to {target_friday} when no prior business day exists, got {result}"
+    )
+
+
+def test_prior_business_day_returns_none_directly() -> None:
+    """_prior_business_day returns None (not RuntimeError) when every day in
+    the 30-day search window is a holiday."""
+    import pandas as pd
+
+    mock_cal = MagicMock()
+    mock_cal.valid_days.return_value = pd.DatetimeIndex([], dtype="datetime64[us, UTC]")
+
+    result = _prior_business_day(date(2024, 6, 1), mock_cal)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
 # Edge: non-holiday 3rd Friday unchanged
 # ---------------------------------------------------------------------------
+
 
 def test_non_holiday_unchanged() -> None:
     """March 15 2024 is not a holiday; must be returned as-is."""
@@ -136,6 +199,7 @@ def test_non_holiday_unchanged() -> None:
 # ---------------------------------------------------------------------------
 # Cross-year boundary: offset pushes into next year
 # ---------------------------------------------------------------------------
+
 
 def test_cross_year_boundary() -> None:
     """offset_months=3 from Oct 2024 → Jan 2025 (3rd Friday = Jan 17)."""

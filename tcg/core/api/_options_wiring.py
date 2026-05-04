@@ -27,9 +27,10 @@ single request and avoids cross-request data leaks.
 from __future__ import annotations
 
 from datetime import date
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable, Literal, Sequence
 
-from tcg.data.options.reader import MongoOptionsDataReader
+from tcg.data._utils import date_to_int
+from tcg.data.options.protocol import OptionsDataReader
 from tcg.data.protocols import MarketDataService
 from tcg.engine.options.chain._join import resolve_underlying_price
 from tcg.engine.options.chain.chain import DefaultOptionsChain
@@ -46,16 +47,15 @@ from tcg.types.options import OptionContractDoc, OptionDailyRow
 
 
 class _OptionsDataPortAdapter:
-    """Wrap a ``MongoOptionsDataReader`` (or any object implementing
-    ``query_chain``) to satisfy the engine-side ``OptionsDataPort`` /
-    ``ChainReaderPort`` Protocols.
+    """Wrap an ``OptionsDataReader`` to satisfy the engine-side
+    ``OptionsDataPort`` / ``ChainReaderPort`` Protocols.
 
     The shape is identical; this class exists primarily so the wiring
     module references the engine-side contract explicitly and so we can
     later interpose telemetry without touching engine code.
     """
 
-    def __init__(self, reader: MongoOptionsDataReader) -> None:
+    def __init__(self, reader: OptionsDataReader) -> None:
         self._reader = reader
 
     async def query_chain(
@@ -72,6 +72,41 @@ class _OptionsDataPortAdapter:
         return await self._reader.query_chain(
             root=root,
             date=date,
+            type=type,
+            expiration_min=expiration_min,
+            expiration_max=expiration_max,
+            strike_min=strike_min,
+            strike_max=strike_max,
+            expiration_cycle=expiration_cycle,
+        )
+
+
+class _BulkOptionsDataPortAdapter:
+    """Wrap an ``OptionsDataReader`` to satisfy the engine-side
+    ``_CycleAwareBulkReader`` Protocol (cycle-aware variant).
+
+    The engine's ``_CycleInjectingBulkReader`` strips ``expiration_cycle``
+    from its public signature and injects it here.  This adapter sits
+    between the engine wrapper and the real data reader.
+    """
+
+    def __init__(self, reader: OptionsDataReader) -> None:
+        self._reader = reader
+
+    async def query_chain_bulk(
+        self,
+        root: str,
+        dates: Sequence[date],
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        expiration_cycle: str | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        return await self._reader.query_chain_bulk(
+            root=root,
+            dates=dates,
             type=type,
             expiration_min=expiration_min,
             expiration_max=expiration_max,
@@ -103,9 +138,7 @@ class CachedChainReader:
 
     def __init__(self, inner: _OptionsDataPortAdapter) -> None:
         self._inner = inner
-        self._cache: dict[
-            tuple, list[tuple[OptionContractDoc, OptionDailyRow]]
-        ] = {}
+        self._cache: dict[tuple, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
 
     async def query_chain(
         self,
@@ -178,9 +211,7 @@ class _IndexDataPortAdapter:
         if series is None or len(series) == 0:
             return None
         # PriceSeries.dates is YYYYMMDD int64; find an exact match.
-        target_int = (
-            target_date.year * 10000 + target_date.month * 100 + target_date.day
-        )
+        target_int = date_to_int(target_date)
         for idx, d in enumerate(series.dates.tolist()):
             if int(d) == target_int:
                 return float(series.close[idx])
@@ -217,9 +248,7 @@ class _FuturesDataPortAdapter:
             return None
         if series is None or len(series) == 0:
             return None
-        target_int = (
-            target_date.year * 10000 + target_date.month * 100 + target_date.day
-        )
+        target_int = date_to_int(target_date)
         for idx, d in enumerate(series.dates.tolist()):
             if int(d) == target_int:
                 return float(series.close[idx])
@@ -301,19 +330,13 @@ def _build_underlying_resolver(
 # ---------------------------------------------------------------------------
 
 
-def get_options_reader(market_data: MarketDataService) -> MongoOptionsDataReader:
-    """Pull the underlying ``MongoOptionsDataReader`` out of the service.
+def get_options_reader(market_data: MarketDataService) -> OptionsDataReader:
+    """Return the ``OptionsDataReader`` from the service.
 
-    The default ``DefaultMarketDataService`` stores the reader as
-    ``_options``.  Wave B1 deliberately did not expose it on the
-    Protocol (only the Protocol methods are public).  The router needs
-    direct access to ``list_roots()`` and ``get_contract()``, both of
-    which exist on ``MarketDataService`` already (``list_option_roots``,
-    ``get_option_contract``).  So in practice we never touch the
-    private attribute — every caller below uses the Protocol methods.
-    This helper is kept for symmetry / future use.
+    Accesses the public ``options_reader`` property defined on the
+    ``MarketDataService`` protocol, avoiding any private attribute access.
     """
-    return market_data._options  # type: ignore[attr-defined]
+    return market_data.options_reader
 
 
 def build_options_pricer() -> DefaultOptionsPricer:
@@ -341,6 +364,49 @@ def build_options_chain(market_data: MarketDataService) -> DefaultOptionsChain:
         index_port=index_port,
         futures_port=futures_port,
     )
+
+
+def build_stream_resolver_wiring(
+    market_data: MarketDataService,
+) -> tuple[
+    CachedChainReader,
+    DefaultMaturityResolver,
+    Callable[[OptionContractDoc, date], Awaitable[float | None]],
+    _BulkOptionsDataPortAdapter,
+]:
+    """Return the components a per-date stream materialiser needs.
+
+    The Wave 2 ``OptionStreamRef`` resolver wraps the chain reader in a
+    cycle-injecting proxy and constructs its own selector inside the
+    engine layer (so the engine never imports from ``tcg.data`` or
+    ``tcg.core``).  This factory hands the engine the four live
+    components without imposing the selector class on it.
+
+    Returns
+    -------
+    chain_reader:
+        Cycle-aware ``CachedChainReader`` (per-request cache) wrapping
+        the live ``MongoOptionsDataReader``.
+    maturity_resolver:
+        ``DefaultMaturityResolver`` (stateless).
+    underlying_resolver:
+        Async callable ``(contract, date) -> float | None`` reusing the
+        canonical ``resolve_underlying_price`` join.
+    bulk_chain_reader:
+        Cycle-aware ``_BulkOptionsDataPortAdapter`` wrapping the live
+        ``MongoOptionsDataReader``.  Passed to
+        ``resolve_option_stream(bulk_chain_reader=...)`` to enable the
+        three-phase bulk pre-fetch path.
+    """
+    reader = get_options_reader(market_data)
+    inner = _OptionsDataPortAdapter(reader)
+    cached = CachedChainReader(inner)
+    bulk = _BulkOptionsDataPortAdapter(reader)
+    maturity_resolver = DefaultMaturityResolver()
+    index_port = _IndexDataPortAdapter(market_data)
+    futures_port = _FuturesDataPortAdapter(market_data)
+    underlying_resolver = _build_underlying_resolver(index_port, futures_port)
+    return cached, maturity_resolver, underlying_resolver, bulk
 
 
 def build_options_selector(
@@ -377,5 +443,6 @@ __all__ = [
     "build_options_chain",
     "build_options_pricer",
     "build_options_selector",
+    "build_stream_resolver_wiring",
     "get_options_reader",
 ]

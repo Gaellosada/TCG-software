@@ -227,4 +227,110 @@ describe('<IndicatorsList>', () => {
     // Still collapsed — + New click did not toggle the section.
     expect(customHeader.getAttribute('data-collapsed')).toBe('true');
   });
+
+  // --- Wave 3: asset-type compatibility grey-out + tooltip ---------
+
+  describe('asset-type compatibility', () => {
+    const COMPAT_INDS = [
+      { id: 'sma', name: 'SMA', readonly: true, compatibleAssetTypes: ['index', 'equity'] },
+      { id: 'atm', name: 'ATM IV', readonly: true, compatibleAssetTypes: ['option'] },
+      // user custom — no compat declared, must always be enabled.
+      // Avoid the literal name "Custom" since the category header also
+      // says "Custom" and getByText would match more than one node.
+      { id: 'u1', name: 'My-RSI', readonly: false },
+    ];
+
+    function expandBoth() {
+      // Both sections start collapsed; expand to assert on rows.
+      fireEvent.click(screen.getByTestId('category-default'));
+      fireEvent.click(screen.getByTestId('category-custom'));
+    }
+
+    it('greys out indicators incompatible with currentAssetType=option', () => {
+      render(<IndicatorsList
+        {...defaultProps({ indicators: COMPAT_INDS, currentAssetType: 'option' })}
+      />);
+      expandBoth();
+      const smaRow = screen.getByText('SMA').closest('[role="button"]');
+      const atmRow = screen.getByText('ATM IV').closest('[role="button"]');
+      expect(smaRow.getAttribute('data-incompat')).toBe('true');
+      expect(atmRow.getAttribute('data-incompat')).toBe('false');
+    });
+
+    it('tooltip on incompatible row mentions accepted asset types', () => {
+      render(<IndicatorsList
+        {...defaultProps({ indicators: COMPAT_INDS, currentAssetType: 'option' })}
+      />);
+      expandBoth();
+      const smaRow = screen.getByText('SMA').closest('[role="button"]');
+      const title = smaRow.getAttribute('title') || '';
+      expect(title).toContain('option'); // current
+      expect(title).toContain('index');  // accepted
+      expect(title).toContain('equity'); // accepted
+    });
+
+    it('does not grey anything when currentAssetType is null', () => {
+      render(<IndicatorsList
+        {...defaultProps({ indicators: COMPAT_INDS, currentAssetType: null })}
+      />);
+      expandBoth();
+      const smaRow = screen.getByText('SMA').closest('[role="button"]');
+      const atmRow = screen.getByText('ATM IV').closest('[role="button"]');
+      expect(smaRow.getAttribute('data-incompat')).toBe('false');
+      expect(atmRow.getAttribute('data-incompat')).toBe('false');
+    });
+
+    it('user custom indicators (no compat) are never greyed', () => {
+      render(<IndicatorsList
+        {...defaultProps({
+          indicators: COMPAT_INDS,
+          currentAssetType: 'option',
+          selectedId: 'atm',
+        })}
+      />);
+      expandBoth();
+      const userRow = screen.getByText('My-RSI').closest('[role="button"]');
+      expect(userRow.getAttribute('data-incompat')).toBe('false');
+      expect(userRow.getAttribute('title')).toBeNull();
+    });
+
+    it('greyed rows still fire onSelect (decoration only)', () => {
+      const onSelect = vi.fn();
+      render(<IndicatorsList
+        {...defaultProps({
+          indicators: COMPAT_INDS,
+          currentAssetType: 'option',
+          onSelect,
+        })}
+      />);
+      expandBoth();
+      fireEvent.click(screen.getByText('SMA'));
+      expect(onSelect).toHaveBeenCalledWith('sma');
+    });
+
+    it('indicators with defaultSeries are never greyed (self-contained)', () => {
+      const indsWithDefaults = [
+        { id: 'sma', name: 'SMA', readonly: true, compatibleAssetTypes: ['index', 'equity'] },
+        {
+          id: 'atm',
+          name: 'ATM IV',
+          readonly: true,
+          compatibleAssetTypes: ['option'],
+          defaultSeries: {
+            atm_iv: { type: 'option_stream', collection: 'OPT_SP_500' },
+          },
+        },
+      ];
+      render(<IndicatorsList
+        {...defaultProps({ indicators: indsWithDefaults, currentAssetType: 'index' })}
+      />);
+      expandBoth();
+      const smaRow = screen.getByText('SMA').closest('[role="button"]');
+      const atmRow = screen.getByText('ATM IV').closest('[role="button"]');
+      // SMA is compatible with index → not greyed.
+      expect(smaRow.getAttribute('data-incompat')).toBe('false');
+      // ATM IV is option-only but has defaultSeries → not greyed.
+      expect(atmRow.getAttribute('data-incompat')).toBe('false');
+    });
+  });
 });

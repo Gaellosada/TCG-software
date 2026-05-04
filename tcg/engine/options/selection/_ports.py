@@ -26,7 +26,7 @@ Spec / guardrail references
 from __future__ import annotations
 
 from datetime import date
-from typing import Awaitable, Callable, Literal, Protocol, runtime_checkable
+from typing import Awaitable, Callable, Literal, Protocol, Sequence, runtime_checkable
 
 from tcg.types.options import (
     OptionContractDoc,
@@ -57,6 +57,31 @@ class ChainReaderPort(Protocol):
         ...
 
 
+@runtime_checkable
+class BulkChainReaderPort(Protocol):
+    """Minimal shape for bulk chain queries across multiple dates.
+
+    Mirrors ``OptionsDataReader.query_chain_bulk`` by structural typing.
+    Unlike ``ChainReaderPort``, this returns rows for ALL requested dates
+    in a single cursor pass.  Does NOT include ``expiration_cycle`` —
+    cycle injection is handled by ``_CycleInjectingBulkReader`` in the
+    stream resolver layer.
+    """
+
+    async def query_chain_bulk(
+        self,
+        root: str,
+        dates: Sequence[date],
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Return ``(contract, row)`` pairs for ALL *dates* in one pass."""
+        ...
+
+
 # Canonical type alias for the optional underlying-price resolver injected
 # at construction time.  Returns ``None`` when the join cannot be made
 # (caller surfaces ``error_code="missing_underlying_price"``).
@@ -65,6 +90,4 @@ class ChainReaderPort(Protocol):
 # optional Module-2 compute path on ``ByDelta``).  Module 6 (chain) owns
 # the canonical resolver in production wiring; the API layer wires both
 # modules to the same callable.
-UnderlyingPriceResolver = Callable[
-    [OptionContractDoc, date], Awaitable[float | None]
-]
+UnderlyingPriceResolver = Callable[[OptionContractDoc, date], Awaitable[float | None]]

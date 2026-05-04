@@ -379,3 +379,21 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/*
+ * Option date range control — sits above the ownPanel checkbox in the
+ * Run section. Compact: the label is small uppercase to match sectionLabel,
+ * the control itself wraps on narrow widths.
+ */
+.dateRangeRow {
+  margin-bottom: 10px;
+}
+
+.dateRangeLabel {
+  font-size: 0.68rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}

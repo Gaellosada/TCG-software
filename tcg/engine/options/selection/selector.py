@@ -131,6 +131,11 @@ class DefaultOptionsSelector(OptionsSelector):
         self._maturity = maturity_resolver
         self._pricer = pricer
         self._resolve_underlying = underlying_price_resolver
+        # Per-instance cache for the NearestToTarget probe.  Available
+        # expirations are a property of the root/type, not of the trade
+        # date — the same probe result applies to every date in a
+        # stream materialisation.  Keyed by (root, type, window_end).
+        self._expiration_cache: dict[tuple, list[date]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -210,25 +215,39 @@ class DefaultOptionsSelector(OptionsSelector):
     ) -> date | None:
         """Resolve the rule, querying a probe chain only for NearestToTarget."""
         if isinstance(maturity, NearestToTarget):
-            # Probe with a wide window to enumerate available expirations
-            # on this date.  Module 4's resolve_with_chain picks the
-            # nearest DTE.
+            # Probe a window around the target DTE to enumerate available
+            # expirations.  Module 4's resolve_with_chain picks the nearest.
             #
-            # Window choice: ref_date .. ref_date + 5y covers any plausible
-            # listed maturity; bonds peak near 10y but those are not used
-            # with NearestToTarget in Phase 1.  Bound chosen on the high
-            # side rather than guessing exactly.
+            # Window: target_dte × 3, floored at 180 days.  Tight enough
+            # to avoid the catastrophic 20K-doc cursors that a 5y window
+            # produces on large roots (OPT_SP_500: 418K docs, 958s/cursor),
+            # wide enough that the nearest expiration is always included
+            # (options expirations are at most weeks apart).
+            #
+            # The probe result is cached per (root, type, window_end) so
+            # that a 125-date stream materialisation pays the cost once
+            # instead of 125 times.  The cache lives on the selector
+            # instance, which is scoped to one request.
             from datetime import timedelta
 
-            far_future = ref_date + timedelta(days=365 * 5)
-            probe_rows = await self._reader.query_chain(
-                root=root,
-                date=ref_date,
-                type=type,
-                expiration_min=ref_date,
-                expiration_max=far_future,
-            )
-            available = sorted({c.expiration for c, _r in probe_rows})
+            probe_days = max(maturity.target_dte_days * 3, 180)
+            far_future = ref_date + timedelta(days=probe_days)
+            # Cache by (root, type) — available expirations are a
+            # structural property of the collection, not of the trade
+            # date.  The first date's probe result covers all later
+            # dates in the range (expiration_min only moves forward).
+            cache_key = (root, type)
+            available = self._expiration_cache.get(cache_key)
+            if available is None:
+                probe_rows = await self._reader.query_chain(
+                    root=root,
+                    date=ref_date,
+                    type=type,
+                    expiration_min=ref_date,
+                    expiration_max=far_future,
+                )
+                available = sorted({c.expiration for c, _r in probe_rows})
+                self._expiration_cache[cache_key] = available
             if not available:
                 return None
             return self._maturity.resolve_with_chain(
@@ -337,8 +356,7 @@ class DefaultOptionsSelector(OptionsSelector):
             ):
                 reasons = ", ".join(sorted(compute_failure_reasons))
                 enriched = (
-                    f"{result.diagnostic}; computed delta unavailable due to "
-                    f"{reasons}"
+                    f"{result.diagnostic}; computed delta unavailable due to {reasons}"
                 )
                 return SelectionResult(
                     contract=None,

@@ -35,6 +35,7 @@ from tcg.data._mongo.instruments import MongoInstrumentReader
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data._rolling import ContinuousSeriesBuilder
 from tcg.data._utils import date_to_int, filter_date_range
+from tcg.data.options.protocol import OptionsDataReader
 from tcg.data.options.reader import MongoOptionsDataReader
 
 
@@ -78,9 +79,7 @@ class DefaultMarketDataService:
         limit: int = 50,
     ) -> PaginatedResult[InstrumentId]:
         if collection not in self._registry:
-            raise DataNotFoundError(
-                f"Collection '{collection}' not found in registry"
-            )
+            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
 
         instruments, total = await self._mongo.list_instruments(
             collection, skip=skip, limit=limit
@@ -106,12 +105,8 @@ class DefaultMarketDataService:
         # Reject unknown collections up-front so unvalidated user input
         # from API routes can't reach into Mongo system collections.
         if collection not in self._registry:
-            raise DataNotFoundError(
-                f"Collection '{collection}' not found in registry"
-            )
-        cache_key = self._make_key(
-            collection, instrument_id, provider, start, end
-        )
+            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
+        cache_key = self._make_key(collection, instrument_id, provider, start, end)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
@@ -145,9 +140,7 @@ class DefaultMarketDataService:
         rolling engine, and optionally filters by date range.
         """
         if collection not in self._registry:
-            raise DataNotFoundError(
-                f"Collection '{collection}' not found in registry"
-            )
+            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
         if not collection.startswith("FUT_"):
             raise DataNotFoundError(
                 f"Collection '{collection}' is not a futures collection"
@@ -179,8 +172,7 @@ class DefaultMarketDataService:
             start_int = date_to_int(start) if start is not None else 0
             end_int = date_to_int(end) if end is not None else 99999999
             filtered_roll_dates = tuple(
-                rd for rd in result.roll_dates
-                if start_int <= rd <= end_int
+                rd for rd in result.roll_dates if start_int <= rd <= end_int
             )
 
             result = ContinuousSeries(
@@ -197,9 +189,7 @@ class DefaultMarketDataService:
     async def get_available_cycles(self, collection: str) -> list[str]:
         """Return available expiration cycles for a futures collection."""
         if collection not in self._registry:
-            raise DataNotFoundError(
-                f"Collection '{collection}' not found in registry"
-            )
+            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
         return await self._mongo.fetch_available_cycles(collection)
 
     async def get_aligned_prices(
@@ -242,11 +232,17 @@ class DefaultMarketDataService:
         for label, spec in legs.items():
             if isinstance(spec, InstrumentId):
                 series = await self.get_prices(
-                    spec.collection, spec.symbol, start=start, end=end,
+                    spec.collection,
+                    spec.symbol,
+                    start=start,
+                    end=end,
                 )
             elif isinstance(spec, ContinuousLegSpec):
                 result = await self.get_continuous(
-                    spec.collection, spec.roll_config, start=start, end=end,
+                    spec.collection,
+                    spec.roll_config,
+                    start=start,
+                    end=end,
                 )
                 series = result.prices if result is not None else None
             else:
@@ -256,9 +252,7 @@ class DefaultMarketDataService:
                 )
 
             if series is None:
-                raise DataNotFoundError(
-                    f"No price data found for leg '{label}'"
-                )
+                raise DataNotFoundError(f"No price data found for leg '{label}'")
             fetched[label] = series
 
         # --- 2. Compute date intersection (inner join) ---
@@ -268,9 +262,7 @@ class DefaultMarketDataService:
             common &= ds
 
         if not common:
-            raise ValidationError(
-                "No overlapping dates across instruments"
-            )
+            raise ValidationError("No overlapping dates across instruments")
 
         common_dates = np.array(sorted(common), dtype=np.int64)
 
@@ -290,6 +282,11 @@ class DefaultMarketDataService:
         return common_dates, aligned
 
     # --- Options (Phase 1B Module 1) ---
+
+    @property
+    def options_reader(self) -> OptionsDataReader:
+        """Return the underlying options data reader."""
+        return self._options
 
     async def get_option_contract(
         self,
@@ -323,6 +320,16 @@ class DefaultMarketDataService:
 
     async def list_option_expirations(self, root: str) -> list[date]:
         return await self._options.list_expirations(root)
+
+    async def list_option_expirations_filtered(
+        self,
+        root: str,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | None = None,
+    ) -> list[date]:
+        return await self._options.list_expirations_filtered(
+            root, option_type=option_type, cycle=cycle
+        )
 
     # --- Internal ---
 

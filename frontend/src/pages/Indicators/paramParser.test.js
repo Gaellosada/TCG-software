@@ -262,10 +262,10 @@ describe('reconcileParams', () => {
 // reconcileSeriesMap
 // ---------------------------------------------------------------------------
 describe('reconcileSeriesMap', () => {
-  it('preserves picks for labels still present', () => {
+  it('preserves picks for labels still present (legacy typeless → coerced to spot)', () => {
     const existing = { price: { collection: 'INDEX', instrument_id: '^GSPC' } };
     expect(reconcileSeriesMap(existing, ['price'])).toEqual({
-      price: { collection: 'INDEX', instrument_id: '^GSPC' },
+      price: { type: 'spot', collection: 'INDEX', instrument_id: '^GSPC' },
     });
   });
 
@@ -275,7 +275,7 @@ describe('reconcileSeriesMap', () => {
       dead: { collection: 'X', instrument_id: 'Y' },
     };
     expect(reconcileSeriesMap(existing, ['price'])).toEqual({
-      price: { collection: 'INDEX', instrument_id: '^GSPC' },
+      price: { type: 'spot', collection: 'INDEX', instrument_id: '^GSPC' },
     });
   });
 
@@ -289,6 +289,49 @@ describe('reconcileSeriesMap', () => {
   it('resets malformed existing entries to null', () => {
     const existing = { price: { collection: 'INDEX' /* no instrument_id */ } };
     expect(reconcileSeriesMap(existing, ['price'])).toEqual({ price: null });
+  });
+
+  it('preserves a continuous SeriesRef verbatim', () => {
+    const existing = {
+      price: { type: 'continuous', collection: 'FUT_ES', adjustment: 'none' },
+    };
+    expect(reconcileSeriesMap(existing, ['price'])).toEqual({
+      price: { type: 'continuous', collection: 'FUT_ES', adjustment: 'none' },
+    });
+  });
+
+  it('preserves an option_stream SeriesRef verbatim', () => {
+    const existing = {
+      close: {
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'nearest_to_target', target_days: 30 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'iv',
+      },
+    };
+    expect(reconcileSeriesMap(existing, ['close'])).toEqual({
+      close: {
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'nearest_to_target', target_days: 30 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'iv',
+      },
+    });
+  });
+
+  it('keeps an explicit spot SeriesRef and tags it as spot', () => {
+    const existing = {
+      price: { type: 'spot', collection: 'ETF', instrument_id: 'SPY' },
+    };
+    expect(reconcileSeriesMap(existing, ['price'])).toEqual({
+      price: { type: 'spot', collection: 'ETF', instrument_id: 'SPY' },
+    });
   });
 });
 

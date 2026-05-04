@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
+import OptionDateRangeControl from '../../components/OptionDateRangeControl';
 import { getSeriesSummary } from '../../api/seriesSummary';
 import styles from './ParamsPanel.module.css';
 
@@ -8,16 +9,99 @@ import styles from './ParamsPanel.module.css';
  * Passes through the full discriminated-union SeriesRef so the backend
  * receives the correct type tag.
  *
- * Spot:       { type: 'spot', collection, instrument_id }
- * Continuous: { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+ * Spot:          { type: 'spot', collection, instrument_id }
+ * Continuous:    { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+ * Option stream: { type: 'option_stream', collection, option_type, cycle,
+ *                  maturity: MaturityRule, selection: SelectionCriterion, stream }
  *
- * Extensibility: any future pickerValue.type (e.g. 'options') passes through
- * unchanged — add explicit handling only when special-casing is needed.
+ * Extensibility: any future pickerValue.type passes through unchanged —
+ * add explicit handling only when special-casing is needed.
  */
 export function fromPickerValue(pickerValue) {
   if (!pickerValue) return null;
   // Pass through the full discriminated union — the type field is authoritative.
   return { ...pickerValue };
+}
+
+/**
+ * Compact human-readable label for any SeriesRef, used in the seriesMap chip.
+ * Returns null when ``picked`` cannot be summarised at all (defensive — the
+ * UI then falls back to the "Select instrument" button rather than
+ * rendering an "undefined" chip).
+ */
+export function formatSeriesRefLabel(picked) {
+  if (!picked) return null;
+  if (picked.type === 'continuous') {
+    return picked.collection ? `${picked.collection} (continuous)` : null;
+  }
+  if (picked.type === 'option_stream') {
+    return formatOptionStreamLabel(picked);
+  }
+  // 'spot' or legacy untyped entries (treated as spot upstream).
+  if (picked.collection && picked.instrument_id) {
+    return `${picked.collection} / ${picked.instrument_id}`;
+  }
+  return null;
+}
+
+function formatOptionStreamLabel(ref) {
+  const parts = [];
+  if (ref.collection) parts.push(ref.collection);
+  if (ref.option_type === 'C') parts.push('Call');
+  else if (ref.option_type === 'P') parts.push('Put');
+  const maturity = formatMaturity(ref.maturity);
+  if (maturity) parts.push(maturity);
+  const selection = formatSelection(ref.selection, ref.option_type);
+  if (selection) parts.push(selection);
+  if (ref.cycle) parts.push(`cycle=${ref.cycle}`);
+  if (ref.stream) parts.push(ref.stream.toUpperCase());
+  return parts.length > 0 ? parts.join(' / ') : null;
+}
+
+function formatMaturity(m) {
+  if (!m || !m.kind) return null;
+  switch (m.kind) {
+    case 'next_third_friday': {
+      const off = m.offset_months ?? 0;
+      if (off === 0) return 'front month';
+      if (off === 1) return 'back month';
+      return `month +${off}`;
+    }
+    case 'end_of_month': {
+      const off = m.offset_months ?? 0;
+      return off === 0 ? 'this month-end' : `month-end +${off}`;
+    }
+    case 'plus_n_days':
+      return `+${m.n ?? '?'} days`;
+    case 'fixed':
+      return m.date ? `exp ${m.date}` : 'fixed exp';
+    case 'nearest_to_target':
+      return m.target_days != null ? `~${m.target_days}d DTE` : 'target DTE';
+    default:
+      return m.kind;
+  }
+}
+
+function formatSelection(s, optionType) {
+  if (!s || !s.kind) return null;
+  if (s.kind === 'by_strike') {
+    return s.strike != null ? `K=${s.strike}` : 'fixed K';
+  }
+  if (s.kind === 'by_moneyness') {
+    const t = s.target;
+    if (t == null) return 'moneyness';
+    if (Math.abs(t - 1.0) < 1e-9) return 'ATM';
+    return `K/S=${t}`;
+  }
+  if (s.kind === 'by_delta') {
+    const t = s.target;
+    if (t == null) return 'delta';
+    // Signed convention: sign carries side; absolute value displayed for readability.
+    const signLabel = optionType === 'P' ? 'Δp' : 'Δc';
+    const pct = Math.round(Math.abs(t) * 100);
+    return `${pct}${signLabel}`;
+  }
+  return s.kind;
 }
 
 /**
@@ -39,8 +123,12 @@ export function fromPickerValue(pickerValue) {
  *   onRun            {Function}     () => void
  *   running          {boolean}
  *   canRun           {boolean}
- *   ownPanel         {boolean}      render indicator in a separate chart below
- *   onOwnPanelChange {Function}     (nextBool) => void — noop when readonly
+ *   ownPanel                {boolean}      render indicator in a separate chart below
+ *   onOwnPanelChange        {Function}     (nextBool) => void — noop when readonly
+ *   showDateRange           {boolean}      whether to show the option date range control
+ *   optionDateRange         {Object|null}  { start, end, preset }
+ *   onOptionDateRangeChange {Function}     (value) => void
+ *   optionAnchorEnd         {string|null}  ISO date to anchor preset buttons (last_trade_date)
  */
 function ParamsPanel({
   indicator,
@@ -54,6 +142,10 @@ function ParamsPanel({
   runDisabledReason,
   ownPanel,
   onOwnPanelChange,
+  showDateRange,
+  optionDateRange,
+  onOptionDateRangeChange,
+  optionAnchorEnd,
 }) {
   // Per-input raw string drafts for numeric fields. Keyed by param name.
   const [numericDrafts, setNumericDrafts] = useState({});
@@ -240,9 +332,7 @@ function ParamsPanel({
                     <span className={`${styles.seriesLabelText} codeRefLabel`}>{label}</span>
                     {picked ? (
                       <span className={styles.seriesChip}>
-                        {picked.type === 'continuous'
-                          ? `${picked.collection} (continuous)`
-                          : `${picked.collection} / ${picked.instrument_id}`}
+                        {formatSeriesRefLabel(picked) ?? '(unknown series)'}
                       </span>
                     ) : (
                       <button
@@ -317,6 +407,19 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
       {/* Run section */}
       <div className={styles.section}>
         <div className={styles.sectionLabel}>Run</div>
+
+        {showDateRange && optionDateRange && (
+          <div className={styles.dateRangeRow} data-testid="option-date-range-row">
+            <div className={styles.dateRangeLabel}>Option date range</div>
+            <OptionDateRangeControl
+              value={optionDateRange}
+              onChange={onOptionDateRangeChange}
+              disabled={!indicator || running}
+              anchorEnd={optionAnchorEnd || undefined}
+            />
+          </div>
+        )}
+
         <label
           className={styles.ownPanelRow}
           title={

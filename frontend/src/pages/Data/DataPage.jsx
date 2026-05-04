@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
 import ContinuousChart from './ContinuousChart';
+import ContinuousOptionsChart from './ContinuousOptionsChart';
 import OptionChainTable from './OptionChainTable';
 import ContractDetailPanel from './ContractDetailPanel';
 import ChainSnapshotPanel from './ChainSnapshotPanel';
@@ -330,21 +331,12 @@ function DataPage() {
               </div>
             )}
 
-            {/* -------- Continuous tab (placeholder — coming soon) -------- */}
+            {/* -------- Continuous tab -------- */}
             {optionsView === 'continuous' && (
-              <div className={styles.snapshotView}>
-                <div className={styles.snapshotEmpty} data-testid="continuous-empty">
-                  <div>
-                    <strong>Continuous options series — coming soon</strong>
-                    <p style={{ marginTop: 8, fontStyle: 'normal', maxWidth: 480 }}>
-                      Stitch successive expirations into a single continuous
-                      price series by rolling at chosen criteria (DTE,
-                      |Δ| target, or calendar) — same idea as the futures
-                      continuous chart, applied to options.
-                    </p>
-                  </div>
-                </div>
-              </div>
+              <ContinuousOptionsChart
+                key={selected.collection}
+                collection={selected.collection}
+              />
             )}
           </div>
         </div>
