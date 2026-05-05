@@ -16,7 +16,7 @@ function AgentPage() {
   const [activeTab, setActiveTab] = useState('chat');
   const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-6');
 
-  const { messages, assumptions, status, isConnected, isProcessing, sendMessage, notebookReady } =
+  const { messages, assumptions, status, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady } =
     useAgentSession(selectedSessionId);
 
   const isStreaming = isProcessing;
@@ -25,6 +25,12 @@ function AgentPage() {
   const handleSendMessage = useCallback(
     (content) => sendMessage(content, { model: selectedModel }),
     [sendMessage, selectedModel],
+  );
+
+  // Wrap interruptAgent to include the selected model
+  const handleInterruptAgent = useCallback(
+    (content) => interruptAgent(content, { model: selectedModel }),
+    [interruptAgent, selectedModel],
   );
 
   return (
@@ -66,6 +72,8 @@ function AgentPage() {
                 messages={messages}
                 isConnected={isConnected}
                 sendMessage={handleSendMessage}
+                stopAgent={stopAgent}
+                interruptAgent={handleInterruptAgent}
                 isStreaming={isStreaming}
                 selectedModel={selectedModel}
                 onModelChange={setSelectedModel}

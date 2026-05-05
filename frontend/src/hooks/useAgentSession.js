@@ -134,6 +134,7 @@ function useAgentSession(sessionId) {
 
       switch (data.type) {
         case 'token': {
+          setIsProcessing(true); // Re-assert for queued turns
           // Append token text to the current streaming assistant message
           setMessages((prev) => {
             const last = prev[prev.length - 1];
@@ -187,6 +188,7 @@ function useAgentSession(sessionId) {
         }
 
         case 'tool_call': {
+          setIsProcessing(true); // Re-assert for queued turns
           // Finalize any streaming assistant message before adding tool message
           if (streamingRef.current) {
             streamingRef.current = null;
@@ -197,6 +199,40 @@ function useAgentSession(sessionId) {
               : prev;
             return [...updated, { role: 'tool', name: data.name, input: data.input }];
           });
+          break;
+        }
+
+        case 'stopped': {
+          setIsProcessing(false);
+          streamingRef.current = null;
+          setMessages((prev) => {
+            if (prev.length === 0) return prev;
+            const last = prev[prev.length - 1];
+            if (last.streaming) {
+              return [...prev.slice(0, -1), { ...last, streaming: false }];
+            }
+            return prev;
+          });
+          break;
+        }
+
+        case 'queued': {
+          // Message was queued — no UI action needed
+          break;
+        }
+
+        case 'interrupted': {
+          // Current turn cancelled, new one starting
+          streamingRef.current = null;
+          setMessages((prev) => {
+            if (prev.length === 0) return prev;
+            const last = prev[prev.length - 1];
+            if (last.streaming) {
+              return [...prev.slice(0, -1), { ...last, streaming: false }];
+            }
+            return prev;
+          });
+          // isProcessing stays true — new turn starting
           break;
         }
 
@@ -261,7 +297,26 @@ function useAgentSession(sessionId) {
     [],
   );
 
-  return { messages, assumptions, status, isConnected, isProcessing, sendMessage, notebookReady };
+  const stopAgent = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'stop' }));
+    }
+  }, []);
+
+  const interruptAgent = useCallback(
+    (content, { model } = {}) => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        setMessages((prev) => [...prev, { role: 'user', content }]);
+        setIsProcessing(true);
+        const payload = { type: 'interrupt', content };
+        if (model) payload.model = model;
+        wsRef.current.send(JSON.stringify(payload));
+      }
+    },
+    [],
+  );
+
+  return { messages, assumptions, status, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady };
 }
 
 export default useAgentSession;

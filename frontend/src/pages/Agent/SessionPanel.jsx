@@ -66,10 +66,11 @@ function SessionPanel({ selectedId, onSelect }) {
     const { id } = deleteTarget;
     setDeleteTarget(null);
     try {
-      await deleteSession(id);
+      // Deselect first to disconnect WebSocket (kills running agent subprocess)
       if (selectedId === id) {
         onSelect(null);
       }
+      await deleteSession(id);
       await fetchSessions();
     } catch (err) {
       setError(err.message || 'Failed to delete session');

@@ -6,15 +6,18 @@ import styles from './ChatPanel.module.css';
  * Chat interface panel — message list + input area.
  *
  * Props:
- *   messages       {Array}     [{role, content, streaming?, name?, input?}]
- *   isConnected    {boolean}   WebSocket connected
- *   sendMessage    {Function}  (content: string) => void
- *   isStreaming    {boolean}   Last message is still streaming
- *   selectedModel  {string}    Current model id
- *   onModelChange  {Function}  (modelId: string) => void
+ *   messages        {Array}     [{role, content, streaming?, name?, input?}]
+ *   isConnected     {boolean}   WebSocket connected
+ *   sendMessage     {Function}  (content: string) => void
+ *   stopAgent       {Function}  () => void
+ *   interruptAgent  {Function}  (content: string) => void
+ *   isStreaming     {boolean}   Last message is still streaming
+ *   selectedModel   {string}    Current model id
+ *   onModelChange   {Function}  (modelId: string) => void
  */
-function ChatPanel({ messages, isConnected, sendMessage, isStreaming, selectedModel, onModelChange }) {
+function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAgent, isStreaming, selectedModel, onModelChange }) {
   const [draft, setDraft] = useState('');
+  const [busyDialogText, setBusyDialogText] = useState(null);
   const listRef = useRef(null);
   const textareaRef = useRef(null);
   const shouldAutoScroll = useRef(true);
@@ -48,9 +51,40 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming, selectedMo
 
   function handleSend() {
     const text = draft.trim();
-    if (!text || !isConnected || isStreaming) return;
+    if (!text || !isConnected) return;
+
+    if (isStreaming) {
+      // Agent is busy — show dialog
+      setBusyDialogText(text);
+      return;
+    }
+
     sendMessage(text);
     setDraft('');
+  }
+
+  function handleStop() {
+    if (stopAgent) stopAgent();
+  }
+
+  function handleBusyInterrupt() {
+    if (busyDialogText && interruptAgent) {
+      interruptAgent(busyDialogText);
+      setDraft('');
+    }
+    setBusyDialogText(null);
+  }
+
+  function handleBusyQueue() {
+    if (busyDialogText) {
+      sendMessage(busyDialogText);
+      setDraft('');
+    }
+    setBusyDialogText(null);
+  }
+
+  function handleBusyCancel() {
+    setBusyDialogText(null);
   }
 
   function handleKeyDown(e) {
@@ -97,7 +131,7 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming, selectedMo
     );
   }
 
-  const canSend = isConnected && !isStreaming && draft.trim().length > 0;
+  const canSend = isConnected && draft.trim().length > 0;
 
   // Show thinking indicator when the agent is processing but not actively streaming text.
   // This covers: initial thinking, tool execution, between tool loops.
@@ -134,20 +168,42 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming, selectedMo
           disabled={!isConnected}
           rows={1}
         />
-        <button
-          type="button"
-          className={styles.sendBtn}
-          onClick={handleSend}
-          disabled={!canSend}
-          title="Send"
-          aria-label="Send message"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M3 13V3l10 5-10 5z" fill="currentColor" />
-          </svg>
-        </button>
+        {isStreaming ? (
+          <button
+            type="button"
+            className={`${styles.sendBtn} ${styles.stopBtn}`}
+            onClick={handleStop}
+            title="Stop agent"
+            aria-label="Stop agent"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={styles.sendBtn}
+            onClick={handleSend}
+            disabled={!canSend}
+            title="Send"
+            aria-label="Send message"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M3 13V3l10 5-10 5z" fill="currentColor" />
+            </svg>
+          </button>
+        )}
         <ModelPicker selected={selectedModel} onChange={onModelChange} />
       </div>
+
+      {busyDialogText !== null && (
+        <BusyDialog
+          onInterrupt={handleBusyInterrupt}
+          onQueue={handleBusyQueue}
+          onCancel={handleBusyCancel}
+        />
+      )}
     </div>
   );
 }
@@ -225,6 +281,34 @@ function ThinkingIndicator() {
           <span className={styles.dot} />
           <span className={styles.dot} />
         </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Dialog shown when the user tries to send a message while the agent is working.
+ * Offers: Interrupt & Send, Queue, or Cancel.
+ */
+function BusyDialog({ onInterrupt, onQueue, onCancel }) {
+  return (
+    <div
+      className={styles.dialogBackdrop}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div className={styles.dialogCard} role="dialog" aria-modal="true">
+        <p className={styles.dialogMessage}>The agent is still working.</p>
+        <div className={styles.dialogActions}>
+          <button type="button" className={styles.dialogBtnCancel} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className={styles.dialogBtnSecondary} onClick={onQueue}>
+            Queue
+          </button>
+          <button type="button" className={styles.dialogBtnPrimary} onClick={onInterrupt}>
+            Interrupt & Send
+          </button>
+        </div>
       </div>
     </div>
   );
