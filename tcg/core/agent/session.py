@@ -244,7 +244,13 @@ def _serialise_content(content_blocks: list[Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for block in content_blocks:
         if block.type == "thinking":
-            result.append({"type": "thinking", "thinking": block.thinking})
+            result.append(
+                {
+                    "type": "thinking",
+                    "thinking": block.thinking,
+                    "signature": block.signature,
+                }
+            )
         elif block.type == "text":
             result.append({"type": "text", "text": block.text})
         elif block.type == "tool_use":
