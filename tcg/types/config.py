@@ -16,17 +16,3 @@ class MongoConfig:
 
     uri: str
     db_name: str = "tcg-instrument"
-
-
-@dataclass(frozen=True)
-class AgentConfig:
-    """Configuration for the Anthropic-powered MongoDB agent.
-
-    When ``api_key`` is empty the agent feature is unavailable and the
-    corresponding endpoints return HTTP 503.
-    """
-
-    api_key: str
-    model: str = "claude-sonnet-4-6"
-    max_tokens: int = 128000
-    thinking_budget: int = 100000
