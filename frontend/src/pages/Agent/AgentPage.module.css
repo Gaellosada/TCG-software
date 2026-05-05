@@ -1,4 +1,26 @@
 .page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Top banner ────────────────────────────────────── */
+
+.banner {
+  flex-shrink: 0;
+  padding: 8px 20px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* ── Main area (below banner) ──────────────────────── */
+
+.mainArea {
   display: grid;
   grid-template-columns: 1fr 2fr;
   flex: 1;
@@ -41,6 +63,7 @@
 
 .tabBar {
   display: flex;
+  align-items: center;
   gap: 4px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border-primary);
@@ -82,6 +105,14 @@
   border-radius: 999px;
   padding: 2px 8px;
   letter-spacing: 0.02em;
+}
+
+.usageInfo {
+  margin-left: auto;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .contentArea {
