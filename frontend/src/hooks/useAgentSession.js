@@ -91,15 +91,16 @@ function useAgentSession(sessionId) {
 
       switch (data.type) {
         case 'token': {
-          // Append token text to the current streaming message (immutable update)
+          // Append token text to the current streaming assistant message
           setMessages((prev) => {
-            if (!streamingRef.current) {
-              streamingRef.current = true;
-              return [...prev, { role: 'assistant', content: data.content ?? '', streaming: true }];
-            }
             const last = prev[prev.length - 1];
-            const updated = { ...last, content: last.content + (data.content ?? '') };
-            return [...prev.slice(0, -1), updated];
+            if (streamingRef.current && last && last.role === 'assistant' && last.streaming) {
+              // Append to the existing streaming assistant message
+              return [...prev.slice(0, -1), { ...last, content: last.content + (data.content ?? '') }];
+            }
+            // Create a new assistant message
+            streamingRef.current = true;
+            return [...prev, { role: 'assistant', content: data.content ?? '', streaming: true }];
           });
           break;
         }
