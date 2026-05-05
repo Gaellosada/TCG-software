@@ -25,7 +25,7 @@ from anthropic import (
 logger = logging.getLogger(__name__)
 
 # Retry configuration for transient API errors
-_MAX_API_RETRIES = 3
+_MAX_API_RETRIES = 5
 _RETRY_BASE_DELAY_S = 20.0  # Rate limit is per-minute; short retries just burn attempts
 _MAX_RETRY_DELAY_S = (
     60.0  # Never wait more than 60s; if API says longer, fail immediately
