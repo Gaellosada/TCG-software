@@ -13,32 +13,14 @@ const TABS = [
 
 function formatUsage(usage) {
   if (!usage) return null;
-  const parts = [];
 
-  // Always show session token count
   const total = (usage.session_input_tokens || 0) + (usage.session_output_tokens || 0);
-  if (total >= 1_000_000) parts.push(`Session: ${(total / 1_000_000).toFixed(1)}M tokens`);
-  else if (total >= 1_000) parts.push(`Session: ${(total / 1_000).toFixed(1)}k tokens`);
-  else parts.push(`Session: ${total} tokens`);
+  let sessionStr;
+  if (total >= 1_000_000) sessionStr = `${(total / 1_000_000).toFixed(1)}M`;
+  else if (total >= 1_000) sessionStr = `${(total / 1_000).toFixed(1)}k`;
+  else sessionStr = String(total);
 
-  if (usage.tokens_limit > 0) {
-    const used = usage.tokens_limit - (usage.tokens_remaining || 0);
-    const pct = ((used / usage.tokens_limit) * 100).toFixed(1);
-    parts.push(`Rate: ${pct}%`);
-  }
-
-  if (usage.tokens_reset) {
-    try {
-      const diffMs = new Date(usage.tokens_reset) - Date.now();
-      if (diffMs > 0) {
-        const mins = Math.ceil(diffMs / 60_000);
-        const reset = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}hr ${mins % 60}m`;
-        parts.push(`Reset: ${reset}`);
-      }
-    } catch { /* ignore */ }
-  }
-
-  return parts.join('  |  ');
+  return `Session: ${sessionStr} tokens`;
 }
 
 function AgentPage() {
