@@ -22,6 +22,47 @@ function buildWsUrl(sessionId) {
 }
 
 /**
+ * Transform Anthropic API-format conversation history into display messages.
+ *
+ * API format: assistant content is [{type:"text",text:...},{type:"tool_use",...}]
+ * Display format: flat array of {role:"assistant",content:string} and {role:"tool",...}
+ */
+function transformHistory(apiMessages) {
+  const display = [];
+  for (const msg of apiMessages) {
+    if (msg.role === 'user') {
+      // User content can be a string or array of tool_result blocks
+      if (typeof msg.content === 'string') {
+        display.push({ role: 'user', content: msg.content });
+      }
+      // tool_result arrays (internal API state) are not shown to user
+      continue;
+    }
+    if (msg.role === 'assistant') {
+      // content is an array of content blocks
+      if (Array.isArray(msg.content)) {
+        const textParts = msg.content
+          .filter((b) => b.type === 'text')
+          .map((b) => b.text || '');
+        const text = textParts.join('');
+        if (text) {
+          display.push({ role: 'assistant', content: text, streaming: false });
+        }
+        // Surface tool_use blocks as tool messages
+        for (const block of msg.content) {
+          if (block.type === 'tool_use') {
+            display.push({ role: 'tool', name: block.name, input: block.input });
+          }
+        }
+      } else if (typeof msg.content === 'string') {
+        display.push({ role: 'assistant', content: msg.content, streaming: false });
+      }
+    }
+  }
+  return display;
+}
+
+/**
  * React hook that manages a WebSocket connection to the agent backend.
  *
  * @param {string|null} sessionId - Connect when truthy, disconnect when falsy.
@@ -117,9 +158,11 @@ function useAgentSession(sessionId) {
         }
 
         case 'history': {
-          // Restore prior conversation on reconnect
+          // Restore prior conversation on reconnect.
+          // Backend stores messages in Anthropic API format where assistant
+          // content is an array of blocks. Transform to display format.
           if (Array.isArray(data.messages)) {
-            setMessages(data.messages);
+            setMessages(transformHistory(data.messages));
           }
           break;
         }
@@ -140,10 +183,16 @@ function useAgentSession(sessionId) {
         }
 
         case 'tool_call': {
-          setMessages((prev) => [
-            ...prev,
-            { role: 'tool', name: data.name, input: data.input },
-          ]);
+          // Finalize any streaming assistant message before adding tool message
+          if (streamingRef.current) {
+            streamingRef.current = null;
+          }
+          setMessages((prev) => {
+            const updated = prev.length > 0 && prev[prev.length - 1].streaming
+              ? [...prev.slice(0, -1), { ...prev[prev.length - 1], streaming: false }]
+              : prev;
+            return [...updated, { role: 'tool', name: data.name, input: data.input }];
+          });
           break;
         }
 

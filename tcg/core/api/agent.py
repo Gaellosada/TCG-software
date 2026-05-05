@@ -304,6 +304,15 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
 
             await session.run_turn(content, on_event)
 
+            # Persist conversation after each successful turn so reconnects
+            # can resume from the latest state (not just on disconnect).
+            try:
+                workspace.save_conversation(session_id, session.conversation_history)
+            except Exception:
+                logger.warning(
+                    "Failed to save conversation mid-session for %s", session_id
+                )
+
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for session %s", session_id)
     except asyncio.CancelledError:

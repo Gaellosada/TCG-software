@@ -8,15 +8,27 @@ emits an ``end_turn`` stop reason (no outstanding tool calls).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from anthropic import (
+    APIConnectionError,
+    APIStatusError,
+    AsyncAnthropic,
+    RateLimitError,
+)
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration for transient API errors
+_MAX_API_RETRIES = 3
+_RETRY_BASE_DELAY_S = 2.0
+# Maximum tool-use loop iterations to prevent runaway loops
+_MAX_TOOL_LOOPS = 25
 
 # Type alias for the tool executor registry injected at creation.
 # Each tool is an async callable: (input_dict) -> str | dict
@@ -115,8 +127,27 @@ class AgentSession:
         self,
         on_event: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> None:
-        """Loop: call the API, stream tokens, execute tools, repeat until end_turn."""
+        """Loop: call the API, stream tokens, execute tools, repeat until end_turn.
+
+        Resilience features:
+        - Retries on rate limit and transient API errors with exponential backoff
+        - Tool errors are passed back to the model (it can adapt its approach)
+        - Loop iteration cap prevents runaway tool chains
+        """
+        loop_count = 0
+
         while True:
+            loop_count += 1
+            if loop_count > _MAX_TOOL_LOOPS:
+                await on_event(
+                    {
+                        "type": "token",
+                        "content": "\n\n[Reached maximum tool iterations. Stopping here.]",
+                    }
+                )
+                await on_event({"type": "message_complete", "content": ""})
+                return
+
             # Build API kwargs
             api_kwargs: dict[str, Any] = {
                 "model": self.model,
@@ -131,16 +162,22 @@ class AgentSession:
             if self.tools:
                 api_kwargs["tools"] = self.tools
 
-            # Stream the response
+            # Stream the response with retry on transient errors
             full_text_parts: list[str] = []
+            response = await self._stream_with_retry(
+                api_kwargs, full_text_parts, on_event
+            )
 
-            async with self._client.messages.stream(**api_kwargs) as stream:
-                async for event in stream:
-                    if event.type == "text":
-                        full_text_parts.append(event.text)
-                        await on_event({"type": "token", "content": event.text})
-
-                response = await stream.get_final_message()
+            if response is None:
+                # All retries exhausted — inform the user and stop
+                await on_event(
+                    {
+                        "type": "token",
+                        "content": "\n\n[API temporarily unavailable. Your conversation is saved — try again in a moment.]",
+                    }
+                )
+                await on_event({"type": "message_complete", "content": ""})
+                return
 
             # Extract content blocks from the response for conversation history
             assistant_content = _serialise_content(response.content)
@@ -210,6 +247,80 @@ class AgentSession:
 
             # Append tool results as a user message and loop
             self.conversation_history.append({"role": "user", "content": tool_results})
+
+    async def _stream_with_retry(
+        self,
+        api_kwargs: dict[str, Any],
+        full_text_parts: list[str],
+        on_event: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> Any:
+        """Stream an API call with retry on rate limit / transient errors.
+
+        Returns the final message on success, or None if all retries fail.
+        """
+        for attempt in range(_MAX_API_RETRIES):
+            try:
+                async with self._client.messages.stream(**api_kwargs) as stream:
+                    async for event in stream:
+                        if event.type == "text":
+                            full_text_parts.append(event.text)
+                            await on_event({"type": "token", "content": event.text})
+                    return await stream.get_final_message()
+
+            except RateLimitError as exc:
+                delay = _RETRY_BASE_DELAY_S * (2**attempt)
+                logger.warning(
+                    "Rate limited (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    _MAX_API_RETRIES,
+                    delay,
+                    exc,
+                )
+                if attempt < _MAX_API_RETRIES - 1:
+                    await on_event(
+                        {
+                            "type": "token",
+                            "content": f"\n[Rate limited — waiting {delay:.0f}s before retry...]\n",
+                        }
+                    )
+                    await asyncio.sleep(delay)
+                    # Clear partial text from failed attempt
+                    full_text_parts.clear()
+
+            except APIConnectionError as exc:
+                delay = _RETRY_BASE_DELAY_S * (2**attempt)
+                logger.warning(
+                    "API connection error (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    _MAX_API_RETRIES,
+                    delay,
+                    exc,
+                )
+                if attempt < _MAX_API_RETRIES - 1:
+                    await asyncio.sleep(delay)
+                    full_text_parts.clear()
+
+            except APIStatusError as exc:
+                # 5xx errors are transient, 4xx (except 429) are not
+                if exc.status_code >= 500:
+                    delay = _RETRY_BASE_DELAY_S * (2**attempt)
+                    logger.warning(
+                        "API server error %d (attempt %d/%d), retrying: %s",
+                        exc.status_code,
+                        attempt + 1,
+                        _MAX_API_RETRIES,
+                        exc,
+                    )
+                    if attempt < _MAX_API_RETRIES - 1:
+                        await asyncio.sleep(delay)
+                        full_text_parts.clear()
+                else:
+                    # Non-retryable (e.g., 400 bad request)
+                    raise
+
+        # All retries exhausted
+        logger.error("All %d API retries exhausted", _MAX_API_RETRIES)
+        return None
 
     # ------------------------------------------------------------------
     # Tool execution

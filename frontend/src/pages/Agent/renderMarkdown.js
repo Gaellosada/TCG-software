@@ -21,6 +21,17 @@ function escapeHtml(str) {
 
 export default function renderMarkdown(text) {
   if (!text) return '';
+  // Guard: content may be an array of content blocks (Anthropic API format)
+  // when restored from conversation history.
+  if (typeof text !== 'string') {
+    if (Array.isArray(text)) {
+      const textParts = text
+        .filter((b) => b && b.type === 'text')
+        .map((b) => b.text || '');
+      return renderMarkdown(textParts.join(''));
+    }
+    return '';
+  }
 
   // Split on fenced code blocks first — they take priority and their
   // contents must not be processed for inline formatting.
