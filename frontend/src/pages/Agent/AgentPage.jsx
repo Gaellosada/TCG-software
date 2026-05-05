@@ -11,23 +11,11 @@ const TABS = [
   { id: 'notebook', label: 'Notebook' },
 ];
 
-function formatUsage(usage) {
-  if (!usage) return null;
-
-  const total = (usage.session_input_tokens || 0) + (usage.session_output_tokens || 0);
-  let sessionStr;
-  if (total >= 1_000_000) sessionStr = `${(total / 1_000_000).toFixed(1)}M`;
-  else if (total >= 1_000) sessionStr = `${(total / 1_000).toFixed(1)}k`;
-  else sessionStr = String(total);
-
-  return `Session: ${sessionStr} tokens`;
-}
-
 function AgentPage() {
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
 
-  const { messages, assumptions, status, isConnected, sendMessage, notebookReady, usage } =
+  const { messages, assumptions, status, isConnected, sendMessage, notebookReady } =
     useAgentSession(selectedSessionId);
 
   const isStreaming =
@@ -64,9 +52,6 @@ function AgentPage() {
             ))}
             {status && status !== 'idle' && (
               <span className={styles.statusBadge}>{status}</span>
-            )}
-            {activeTab === 'chat' && usage && (
-              <span className={styles.usageInfo}>{formatUsage(usage)}</span>
             )}
           </div>
           <div className={styles.contentArea}>

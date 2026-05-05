@@ -116,14 +116,6 @@
   letter-spacing: 0.02em;
 }
 
-.usageInfo {
-  margin-left: auto;
-  font-size: 0.72rem;
-  font-family: var(--font-mono);
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
 .contentArea {
   flex: 1;
   min-height: 0;

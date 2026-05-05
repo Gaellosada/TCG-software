@@ -40,7 +40,6 @@ function useAgentSession(sessionId) {
   const [status, setStatus] = useState('idle');
   const [isConnected, setIsConnected] = useState(false);
   const [notebookReady, setNotebookReady] = useState(false);
-  const [usage, setUsage] = useState(null);
 
   const wsRef = useRef(null);
   const retriesRef = useRef(0);
@@ -148,11 +147,6 @@ function useAgentSession(sessionId) {
           break;
         }
 
-        case 'usage': {
-          setUsage(data);
-          break;
-        }
-
         case 'error': {
           setMessages((prev) => [
             ...prev,
@@ -175,7 +169,6 @@ function useAgentSession(sessionId) {
     setStatus('idle');
     setIsConnected(false);
     setNotebookReady(false);
-    setUsage(null);
     streamingRef.current = null;
     retriesRef.current = 0;
     clearReconnectTimer();
@@ -210,7 +203,7 @@ function useAgentSession(sessionId) {
     [],
   );
 
-  return { messages, assumptions, status, isConnected, sendMessage, notebookReady, usage };
+  return { messages, assumptions, status, isConnected, sendMessage, notebookReady };
 }
 
 export default useAgentSession;

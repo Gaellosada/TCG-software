@@ -79,8 +79,6 @@ class AgentSession:
 
         self.conversation_history: list[dict[str, Any]] = []
         self._client = AsyncAnthropic(api_key=api_key)
-        self._session_input_tokens: int = 0
-        self._session_output_tokens: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -143,9 +141,6 @@ class AgentSession:
                         await on_event({"type": "token", "content": event.text})
 
                 response = await stream.get_final_message()
-
-                # Emit usage info from response + rate-limit headers
-                await self._emit_usage(stream, response, on_event)
 
             # Extract content blocks from the response for conversation history
             assistant_content = _serialise_content(response.content)
@@ -215,57 +210,6 @@ class AgentSession:
 
             # Append tool results as a user message and loop
             self.conversation_history.append({"role": "user", "content": tool_results})
-
-    # ------------------------------------------------------------------
-    # Usage tracking
-    # ------------------------------------------------------------------
-
-    async def _emit_usage(self, stream: Any, response: Any, on_event: Callable) -> None:
-        """Extract token usage and rate-limit info, emit to frontend."""
-        try:
-            usage = response.usage
-            self._session_input_tokens += getattr(usage, "input_tokens", 0)
-            self._session_output_tokens += getattr(usage, "output_tokens", 0)
-
-            # Try to extract rate-limit headers (best-effort)
-            tokens_limit = 0
-            tokens_remaining = 0
-            tokens_reset = ""
-            requests_limit = 0
-            requests_remaining = 0
-            requests_reset = ""
-            try:
-                headers = stream.response.headers
-                tokens_limit = int(headers.get("anthropic-ratelimit-tokens-limit", 0))
-                tokens_remaining = int(
-                    headers.get("anthropic-ratelimit-tokens-remaining", 0)
-                )
-                tokens_reset = headers.get("anthropic-ratelimit-tokens-reset", "")
-                requests_limit = int(
-                    headers.get("anthropic-ratelimit-requests-limit", 0)
-                )
-                requests_remaining = int(
-                    headers.get("anthropic-ratelimit-requests-remaining", 0)
-                )
-                requests_reset = headers.get("anthropic-ratelimit-requests-reset", "")
-            except Exception:
-                pass  # Rate limit headers not available
-
-            await on_event(
-                {
-                    "type": "usage",
-                    "session_input_tokens": self._session_input_tokens,
-                    "session_output_tokens": self._session_output_tokens,
-                    "tokens_limit": tokens_limit,
-                    "tokens_remaining": tokens_remaining,
-                    "tokens_reset": tokens_reset,
-                    "requests_limit": requests_limit,
-                    "requests_remaining": requests_remaining,
-                    "requests_reset": requests_reset,
-                }
-            )
-        except Exception as exc:
-            logger.error("Failed to emit usage: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Tool execution
