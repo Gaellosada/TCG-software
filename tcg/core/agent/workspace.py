@@ -46,8 +46,15 @@ _ASSUMPTIONS_TEMPLATE: dict[str, Any] = {
 
 
 def _get_mongo_uri() -> str:
-    """Resolve MongoDB connection string from environment."""
-    return os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+    """Resolve MongoDB connection string from .env file or environment.
+
+    Uses the same priority as ``tcg.core.config.load_config``:
+    real env vars > .env file > default.
+    """
+    from tcg.core.config import _load_env
+
+    env = _load_env()
+    return os.getenv("MONGO_URI") or env.get("MONGO_URI") or "mongodb://localhost:27017"
 
 
 def _build_mcp_json(mongo_uri: str) -> dict[str, Any]:
