@@ -131,7 +131,11 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
         {allMessages.length === 0 && (
           <div className={styles.empty}>Start a conversation...</div>
         )}
-        {allMessages.map(renderMessage)}
+        {allMessages.length > 0 && (
+          <div className={styles.messagesInner}>
+            {allMessages.map(renderMessage)}
+          </div>
+        )}
       </div>
 
       <div className={styles.inputArea}>
@@ -157,7 +161,9 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
           title="Send"
           aria-label="Send message"
         >
-          &#9654;
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M3 13V3l10 5-10 5z" fill="currentColor" />
+          </svg>
         </button>
       </div>
     </div>
