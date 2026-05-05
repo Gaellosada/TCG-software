@@ -11,46 +11,25 @@ const TABS = [
   { id: 'notebook', label: 'Notebook' },
 ];
 
-function formatTokens(n) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
-function formatReset(isoString) {
-  if (!isoString) return null;
-  try {
-    const reset = new Date(isoString);
-    const now = Date.now();
-    const diffMs = reset - now;
-    if (diffMs <= 0) return 'now';
-    const mins = Math.ceil(diffMs / 60_000);
-    if (mins < 60) return `${mins}m`;
-    const hrs = Math.floor(mins / 60);
-    const rm = mins % 60;
-    return `${hrs}hr ${rm}m`;
-  } catch {
-    return null;
-  }
-}
-
-function UsageBar({ usage }) {
+function formatUsage(usage) {
   if (!usage) return null;
-
-  const sessionTokens =
-    (usage.session_input_tokens || 0) + (usage.session_output_tokens || 0);
-
-  const parts = [`Session: ${formatTokens(sessionTokens)} tokens`];
+  const parts = [];
 
   if (usage.tokens_limit > 0) {
     const used = usage.tokens_limit - (usage.tokens_remaining || 0);
     const pct = ((used / usage.tokens_limit) * 100).toFixed(1);
-    parts.push(`Rate: ${pct}%`);
+    parts.push(`Tokens: ${pct}%`);
   }
 
-  const reset = formatReset(usage.tokens_reset);
-  if (reset) {
-    parts.push(`Reset: ${reset}`);
+  if (usage.tokens_reset) {
+    try {
+      const diffMs = new Date(usage.tokens_reset) - Date.now();
+      if (diffMs > 0) {
+        const mins = Math.ceil(diffMs / 60_000);
+        const reset = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}hr ${mins % 60}m`;
+        parts.push(`Reset: ${reset}`);
+      }
+    } catch { /* ignore */ }
   }
 
   if (usage.requests_limit > 0) {
@@ -59,7 +38,7 @@ function UsageBar({ usage }) {
     parts.push(`Requests: ${pct}%`);
   }
 
-  return <span className={styles.usageInfo}>{parts.join('  |  ')}</span>;
+  return parts.length > 0 ? parts.join('  |  ') : null;
 }
 
 function AgentPage() {
@@ -75,6 +54,7 @@ function AgentPage() {
   return (
     <div className={styles.page}>
       <div className={styles.banner}>
+        <span className={styles.bannerIcon}>&#9888;</span>
         This agent only has access to the database within this page, it cannot see other parts of the app. It retains everything you share (including strategies), so avoid disclosing sensitive or proprietary information.
       </div>
       <div className={styles.mainArea}>
@@ -103,7 +83,9 @@ function AgentPage() {
             {status && status !== 'idle' && (
               <span className={styles.statusBadge}>{status}</span>
             )}
-            {activeTab === 'chat' && <UsageBar usage={usage} />}
+            {activeTab === 'chat' && formatUsage(usage) && (
+              <span className={styles.usageInfo}>{formatUsage(usage)}</span>
+            )}
           </div>
           <div className={styles.contentArea}>
             {activeTab === 'chat' ? (

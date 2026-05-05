@@ -227,18 +227,29 @@ class AgentSession:
             self._session_input_tokens += getattr(usage, "input_tokens", 0)
             self._session_output_tokens += getattr(usage, "output_tokens", 0)
 
-            # Try to extract rate-limit headers
-            headers = stream.response.headers if hasattr(stream, "response") else {}
-            tokens_limit = int(headers.get("anthropic-ratelimit-tokens-limit", 0))
-            tokens_remaining = int(
-                headers.get("anthropic-ratelimit-tokens-remaining", 0)
-            )
-            tokens_reset = headers.get("anthropic-ratelimit-tokens-reset", "")
-            requests_limit = int(headers.get("anthropic-ratelimit-requests-limit", 0))
-            requests_remaining = int(
-                headers.get("anthropic-ratelimit-requests-remaining", 0)
-            )
-            requests_reset = headers.get("anthropic-ratelimit-requests-reset", "")
+            # Try to extract rate-limit headers (best-effort)
+            tokens_limit = 0
+            tokens_remaining = 0
+            tokens_reset = ""
+            requests_limit = 0
+            requests_remaining = 0
+            requests_reset = ""
+            try:
+                headers = stream.response.headers
+                tokens_limit = int(headers.get("anthropic-ratelimit-tokens-limit", 0))
+                tokens_remaining = int(
+                    headers.get("anthropic-ratelimit-tokens-remaining", 0)
+                )
+                tokens_reset = headers.get("anthropic-ratelimit-tokens-reset", "")
+                requests_limit = int(
+                    headers.get("anthropic-ratelimit-requests-limit", 0)
+                )
+                requests_remaining = int(
+                    headers.get("anthropic-ratelimit-requests-remaining", 0)
+                )
+                requests_reset = headers.get("anthropic-ratelimit-requests-reset", "")
+            except Exception:
+                pass  # Rate limit headers not available
 
             await on_event(
                 {
@@ -253,8 +264,8 @@ class AgentSession:
                     "requests_reset": requests_reset,
                 }
             )
-        except Exception:
-            pass  # Usage tracking is best-effort
+        except Exception as exc:
+            logger.warning("Failed to emit usage: %s", exc)
 
     # ------------------------------------------------------------------
     # Tool execution
