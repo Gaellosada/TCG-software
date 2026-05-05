@@ -25,6 +25,8 @@ from tcg.types.config import AgentConfig
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6"}
+
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
@@ -293,6 +295,11 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
             if not content.strip():
                 await websocket.send_json({"type": "error", "message": "Empty message"})
                 continue
+
+            # Allow per-message model override from the frontend
+            requested_model = data.get("model")
+            if requested_model and requested_model in ALLOWED_MODELS:
+                session.model = requested_model
 
             async def on_event(event: dict[str, Any]) -> None:
                 try:

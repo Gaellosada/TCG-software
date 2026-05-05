@@ -248,12 +248,14 @@ function useAgentSession(sessionId) {
   }, [sessionId, connect, clearReconnectTimer]);
 
   const sendMessage = useCallback(
-    (content) => {
+    (content, { model } = {}) => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         // Add the user message to local state immediately (optimistic)
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
-        wsRef.current.send(JSON.stringify({ type: 'message', content }));
+        const payload = { type: 'message', content };
+        if (model) payload.model = model;
+        wsRef.current.send(JSON.stringify(payload));
       }
     },
     [],

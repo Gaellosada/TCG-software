@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import useAgentSession from '../../hooks/useAgentSession';
 import SessionPanel from './SessionPanel';
 import ChatPanel from './ChatPanel';
@@ -11,14 +11,26 @@ const TABS = [
   { id: 'notebook', label: 'Notebook' },
 ];
 
+const MODELS = [
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { id: 'claude-opus-4-6', label: 'Opus 4.6' },
+];
+
 function AgentPage() {
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
+  const [selectedModel, setSelectedModel] = useState(MODELS[0].id);
 
   const { messages, assumptions, status, isConnected, isProcessing, sendMessage, notebookReady } =
     useAgentSession(selectedSessionId);
 
   const isStreaming = isProcessing;
+
+  // Wrap sendMessage to include the selected model
+  const handleSendMessage = useCallback(
+    (content) => sendMessage(content, { model: selectedModel }),
+    [sendMessage, selectedModel],
+  );
 
   return (
     <div className={styles.page}>
@@ -49,6 +61,17 @@ function AgentPage() {
                 {label}
               </button>
             ))}
+            <div className={styles.tabBarSpacer} />
+            <select
+              className={styles.modelSelect}
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              title="Model"
+            >
+              {MODELS.map(({ id, label }) => (
+                <option key={id} value={id}>{label}</option>
+              ))}
+            </select>
             {status && status !== 'idle' && (
               <span className={styles.statusBadge}>{status}</span>
             )}
@@ -58,7 +81,7 @@ function AgentPage() {
               <ChatPanel
                 messages={messages}
                 isConnected={isConnected}
-                sendMessage={sendMessage}
+                sendMessage={handleSendMessage}
                 isStreaming={isStreaming}
               />
             ) : (

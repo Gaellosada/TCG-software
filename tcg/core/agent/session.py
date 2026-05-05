@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 # Retry configuration for transient API errors
 _MAX_API_RETRIES = 3
 _RETRY_BASE_DELAY_S = 20.0  # Rate limit is per-minute; short retries just burn attempts
+_MAX_RETRY_DELAY_S = (
+    60.0  # Never wait more than 60s; if API says longer, fail immediately
+)
 # Maximum tool-use loop iterations to prevent runaway loops
 _MAX_TOOL_LOOPS = 25
 
@@ -173,7 +176,7 @@ class AgentSession:
                 await on_event(
                     {
                         "type": "token",
-                        "content": "\n\n[API temporarily unavailable. Your conversation is saved — try again in a moment.]",
+                        "content": "\n\n[Rate limit exceeded. Try switching to Sonnet (faster limits) or wait a minute before retrying.]",
                     }
                 )
                 await on_event({"type": "message_complete", "content": ""})
@@ -268,17 +271,27 @@ class AgentSession:
                     return await stream.get_final_message()
 
             except RateLimitError as exc:
-                # Prefer the retry-after header from the API if available
+                # Read retry-after header from the API response
                 retry_after = None
                 if hasattr(exc, "response") and exc.response is not None:
                     retry_after_str = exc.response.headers.get("retry-after")
                     if retry_after_str:
                         try:
                             retry_after = float(retry_after_str)
-                        except ValueError, TypeError:
+                        except Exception:
                             pass
-                delay = (
-                    retry_after if retry_after else _RETRY_BASE_DELAY_S * (2**attempt)
+
+                # If API says wait longer than our cap, fail immediately
+                if retry_after and retry_after > _MAX_RETRY_DELAY_S:
+                    logger.warning(
+                        "Rate limit retry-after=%ds exceeds cap, failing fast",
+                        retry_after,
+                    )
+                    return None
+
+                delay = min(
+                    retry_after if retry_after else _RETRY_BASE_DELAY_S * (2**attempt),
+                    _MAX_RETRY_DELAY_S,
                 )
                 logger.warning(
                     "Rate limited (attempt %d/%d), retrying in %.1fs: %s",
@@ -291,11 +304,10 @@ class AgentSession:
                     await on_event(
                         {
                             "type": "token",
-                            "content": f"\n[Rate limited — waiting {delay:.0f}s before retry...]\n",
+                            "content": f"\n[Rate limited — retrying in {delay:.0f}s...]\n",
                         }
                     )
                     await asyncio.sleep(delay)
-                    # Clear partial text from failed attempt
                     full_text_parts.clear()
 
             except APIConnectionError as exc:
