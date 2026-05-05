@@ -75,7 +75,7 @@ function AgentPage() {
   return (
     <div className={styles.page}>
       <div className={styles.banner}>
-        This agent only has access to the database within this page — it cannot see other parts of the app. It retains everything you share (including strategies), so avoid disclosing sensitive or proprietary information.
+        This agent only has access to the database within this page, it cannot see other parts of the app. It retains everything you share (including strategies), so avoid disclosing sensitive or proprietary information.
       </div>
       <div className={styles.mainArea}>
         <div className={styles.leftColumn}>
