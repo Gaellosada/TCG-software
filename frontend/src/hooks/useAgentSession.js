@@ -194,6 +194,8 @@ function useAgentSession(sessionId) {
   const sendMessage = useCallback(
     (content) => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // Add the user message to local state immediately (optimistic)
+        setMessages((prev) => [...prev, { role: 'user', content }]);
         wsRef.current.send(JSON.stringify({ type: 'message', content }));
       }
     },

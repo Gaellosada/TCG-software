@@ -3,21 +3,6 @@ import renderMarkdown from './renderMarkdown';
 import styles from './ChatPanel.module.css';
 
 /**
- * Merge backend messages with locally-appended user messages.
- *
- * If the backend echoes user messages, they'll appear in `hookMsgs`.
- * Local messages that haven't been echoed are appended at the end.
- * Once the backend provides its own user-role messages we avoid duplicates
- * by counting the user messages already present in hookMsgs.
- */
-function mergeMessages(hookMsgs, localUserMsgs) {
-  const echoedCount = hookMsgs.filter((m) => m.role === 'user').length;
-  const unechoed = localUserMsgs.slice(echoedCount);
-  if (unechoed.length === 0) return hookMsgs;
-  return [...hookMsgs, ...unechoed];
-}
-
-/**
  * Chat interface panel — message list + input area.
  *
  * Props:
@@ -28,20 +13,9 @@ function mergeMessages(hookMsgs, localUserMsgs) {
  */
 function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
   const [draft, setDraft] = useState('');
-  const [localUserMsgs, setLocalUserMsgs] = useState([]);
   const listRef = useRef(null);
   const textareaRef = useRef(null);
   const shouldAutoScroll = useRef(true);
-
-  // Reset local messages when the hook's messages are cleared (session change)
-  useEffect(() => {
-    if (messages.length === 0) {
-      setLocalUserMsgs([]);
-    }
-  }, [messages.length]);
-
-  // Merged view: backend messages + optimistic user messages
-  const allMessages = mergeMessages(messages, localUserMsgs);
 
   // Track whether user has scrolled up to avoid hijacking their position
   const handleScroll = useCallback(() => {
@@ -53,12 +27,11 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
   }, []);
 
   // Auto-scroll to bottom on new messages (unless user scrolled up)
-  const msgCount = allMessages.length;
   useEffect(() => {
     if (shouldAutoScroll.current && listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
-  }, [msgCount, messages]);
+  }, [messages]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -74,7 +47,6 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
   function handleSend() {
     const text = draft.trim();
     if (!text || !isConnected || isStreaming) return;
-    setLocalUserMsgs((prev) => [...prev, { role: 'user', content: text }]);
     sendMessage(text);
     setDraft('');
   }
@@ -128,12 +100,12 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
   return (
     <div className={styles.panel}>
       <div className={styles.messageList} ref={listRef} onScroll={handleScroll}>
-        {allMessages.length === 0 && (
+        {messages.length === 0 && (
           <div className={styles.empty}>Start a conversation...</div>
         )}
-        {allMessages.length > 0 && (
+        {messages.length > 0 && (
           <div className={styles.messagesInner}>
-            {allMessages.map(renderMessage)}
+            {messages.map(renderMessage)}
           </div>
         )}
       </div>
