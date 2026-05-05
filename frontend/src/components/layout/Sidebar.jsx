@@ -55,6 +55,7 @@ function Sidebar({ collapsed, onToggle }) {
         </button>
       </div>
       <nav className={styles.topNav}>
+        {!collapsed && <div className={styles.sectionLabel}>Manual</div>}
         <NavItems items={MAIN_NAV} collapsed={collapsed} />
       </nav>
       <div className={styles.divider} />
@@ -65,6 +66,7 @@ function Sidebar({ collapsed, onToggle }) {
       <div className={styles.spacer} />
       <div className={styles.divider} />
       <nav className={styles.bottomNav}>
+        {!collapsed && <div className={styles.sectionLabel}>App</div>}
         <NavItems items={BOTTOM_NAV} collapsed={collapsed} />
       </nav>
     </aside>
