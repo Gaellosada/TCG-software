@@ -202,6 +202,24 @@ async def agent_health(request: Request) -> dict[str, Any]:
 # rather than via the router, to avoid FastAPI WebSocket prefix issues.
 
 
+async def _keepalive(
+    websocket: WebSocket, session: CLISession, interval: int = 30
+) -> None:
+    """Send periodic status events to keep the WebSocket alive.
+
+    During long CLI tool executions, no data flows on the wire.  Proxies
+    (Vite http-proxy defaults to ~120 s) and browsers may drop the idle
+    connection.  This heartbeat keeps traffic flowing.
+    """
+    while not session._cancelled:
+        await asyncio.sleep(interval)
+        try:
+            await websocket.send_json({"type": "status", "status": "processing"})
+        except Exception:
+            session._cancelled = True
+            break
+
+
 async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
     """WebSocket handler for agent chat.
 
@@ -279,7 +297,20 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
             if requested_model not in ALLOWED_MODELS:
                 requested_model = "claude-sonnet-4-6"
 
-            await session.run_turn(content, model=requested_model)
+            # Run turn with a keepalive heartbeat to prevent proxy timeouts.
+            # The CLI can be silent for minutes during tool execution — without
+            # traffic on the wire, the Vite proxy drops the WebSocket.
+            heartbeat_task = asyncio.create_task(
+                _keepalive(websocket, session, interval=30)
+            )
+            try:
+                await session.run_turn(content, model=requested_model)
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
             # Persist conversation after each successful turn
             try:

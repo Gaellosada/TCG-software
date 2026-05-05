@@ -10,6 +10,7 @@ export default defineConfig({
       '/ws': {
         target: 'http://localhost:8000',
         ws: true,
+        timeout: 0,  // disable proxy timeout — agent turns can take minutes
       },
     },
   },
