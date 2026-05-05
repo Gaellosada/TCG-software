@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from starlette.applications import Starlette
-from starlette.routing import Route
 
 from fastapi import FastAPI
 
@@ -16,11 +16,10 @@ from tcg.core.agent.workspace import AgentWorkspace
 from tcg.core.api.agent import router
 
 
-def _make_test_app(tmp_path: Path, agent_config: Any = None) -> FastAPI:
+def _make_test_app(tmp_path: Path) -> FastAPI:
     """Build a minimal FastAPI app with only the agent router."""
     app = FastAPI()
     app.state.agent_workspace = AgentWorkspace(root=tmp_path / "workspaces")
-    app.state.agent_config = agent_config
     app.include_router(router)
     return app
 
@@ -126,7 +125,6 @@ class TestGetNotebook:
         session_dir = Path(ws.get_session(session_id)["workspace_path"])
         results_dir = session_dir / "results"
         results_dir.mkdir(parents=True)
-        import json
 
         nb = {"nbformat": 4, "cells": []}
         (results_dir / "notebook.ipynb").write_text(json.dumps(nb))
@@ -152,22 +150,18 @@ class TestGetAssumptions:
 
 
 class TestHealthEndpoint:
-    async def test_unavailable_when_no_config(self, client: AsyncClient) -> None:
-        resp = await client.get("/api/agent/health")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["available"] is False
-        assert data["model"] is None
-
-    async def test_available_with_config(self, tmp_path: Path) -> None:
-        from tcg.types.config import AgentConfig
-
-        config = AgentConfig(api_key="sk-test-fake")
-        app = _make_test_app(tmp_path, agent_config=config)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async def test_available_when_claude_on_path(self, client: AsyncClient) -> None:
+        with patch("tcg.core.api.agent.cli_available", return_value=True):
             resp = await client.get("/api/agent/health")
             assert resp.status_code == 200
             data = resp.json()
             assert data["available"] is True
-            assert data["model"] == "claude-sonnet-4-20250514"
+            assert data["model"] == "claude-sonnet-4-6"
+
+    async def test_unavailable_when_no_claude(self, client: AsyncClient) -> None:
+        with patch("tcg.core.api.agent.cli_available", return_value=False):
+            resp = await client.get("/api/agent/health")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["available"] is False
+            assert data["model"] is None
