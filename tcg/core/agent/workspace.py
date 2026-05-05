@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tcg.core.agent.pipeline_guide import PIPELINE_GUIDE_MD
+
 
 def _workspaces_root() -> Path:
     """Resolve the root directory for all agent workspaces.
@@ -69,6 +71,23 @@ class AgentWorkspace:
         self._write_json(session_dir / _META_FILE, meta)
         self._write_json(session_dir / _CONVERSATION_FILE, [])
         self._write_json(session_dir / _ASSUMPTIONS_FILE, _ASSUMPTIONS_TEMPLATE)
+
+        # Write pipeline guide for the agent to read on first turn
+        (session_dir / "PIPELINE_GUIDE.md").write_text(
+            PIPELINE_GUIDE_MD, encoding="utf-8"
+        )
+
+        # Copy snippet templates into the workspace
+        snippets_src = (
+            Path(__file__).resolve().parents[3] / "tcg" / "backtester" / "snippets"
+        )
+        if snippets_src.exists():
+            snippets_dst = session_dir / "snippets"
+            snippets_dst.mkdir(exist_ok=True)
+            for snippet in snippets_src.glob("*.py"):
+                (snippets_dst / snippet.name).write_text(
+                    snippet.read_text(encoding="utf-8"), encoding="utf-8"
+                )
 
         return {
             "id": session_id,
