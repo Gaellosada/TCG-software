@@ -28,5 +28,5 @@ class AgentConfig:
 
     api_key: str
     model: str = "claude-opus-4-6"
-    max_tokens: int = 16384
-    thinking_budget: int = 10000
+    max_tokens: int = 32000
+    thinking_budget: int = 20000

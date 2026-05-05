@@ -61,8 +61,8 @@ class AgentSession:
         mongo_uri: str,
         mongo_db_name: str,
         model: str = "claude-opus-4-6",
-        max_tokens: int = 16384,
-        thinking_budget: int = 10000,
+        max_tokens: int = 32000,
+        thinking_budget: int = 20000,
         tools: list[dict[str, Any]] | None = None,
         tool_executors: dict[str, ToolExecutor] | None = None,
     ) -> None:
