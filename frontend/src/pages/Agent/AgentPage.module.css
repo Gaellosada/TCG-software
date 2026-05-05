@@ -104,28 +104,6 @@
   border-color: var(--border-accent);
 }
 
-.tabBarSpacer {
-  flex: 1;
-}
-
-.modelSelect {
-  font-size: 0.75rem;
-  font-family: inherit;
-  color: var(--text-secondary);
-  background: var(--bg-primary);
-  border: 1px solid var(--border-primary);
-  border-radius: 6px;
-  padding: 4px 8px;
-  cursor: pointer;
-  outline: none;
-  transition: border-color 0.15s;
-}
-
-.modelSelect:hover,
-.modelSelect:focus {
-  border-color: var(--text-muted);
-}
-
 .statusBadge {
   font-size: 0.7rem;
   font-weight: 500;

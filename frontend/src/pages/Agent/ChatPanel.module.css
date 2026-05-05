@@ -351,3 +351,78 @@
 .sendBtn:not(:disabled):hover {
   opacity: 0.8;
 }
+
+/* ── Model picker (Claude-style) ─────────────────── */
+
+.modelPicker {
+  position: relative;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.modelBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.modelBtn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.modelLabel {
+  letter-spacing: 0.01em;
+}
+
+.modelChevron {
+  opacity: 0.6;
+}
+
+.modelDropdown {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  padding: 4px;
+  min-width: 120px;
+  z-index: 100;
+}
+
+.modelOption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.modelOption:hover {
+  background: var(--bg-tertiary);
+}
+
+.modelOptionActive {
+  color: var(--text-primary);
+  font-weight: 500;
+}

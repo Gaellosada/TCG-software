@@ -6,12 +6,14 @@ import styles from './ChatPanel.module.css';
  * Chat interface panel — message list + input area.
  *
  * Props:
- *   messages     {Array}     [{role, content, streaming?, name?, input?}]
- *   isConnected  {boolean}   WebSocket connected
- *   sendMessage  {Function}  (content: string) => void
- *   isStreaming  {boolean}   Last message is still streaming
+ *   messages       {Array}     [{role, content, streaming?, name?, input?}]
+ *   isConnected    {boolean}   WebSocket connected
+ *   sendMessage    {Function}  (content: string) => void
+ *   isStreaming    {boolean}   Last message is still streaming
+ *   selectedModel  {string}    Current model id
+ *   onModelChange  {Function}  (modelId: string) => void
  */
-function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
+function ChatPanel({ messages, isConnected, sendMessage, isStreaming, selectedModel, onModelChange }) {
   const [draft, setDraft] = useState('');
   const listRef = useRef(null);
   const textareaRef = useRef(null);
@@ -144,7 +146,69 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
             <path d="M3 13V3l10 5-10 5z" fill="currentColor" />
           </svg>
         </button>
+        <ModelPicker selected={selectedModel} onChange={onModelChange} />
       </div>
+    </div>
+  );
+}
+
+const MODELS = [
+  { id: 'claude-sonnet-4-6', label: 'Sonnet' },
+  { id: 'claude-opus-4-6', label: 'Opus' },
+];
+
+/**
+ * Claude-style model picker — compact pill dropdown below the input.
+ */
+function ModelPicker({ selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [open]);
+
+  const current = MODELS.find((m) => m.id === selected) || MODELS[0];
+
+  return (
+    <div className={styles.modelPicker} ref={ref}>
+      <button
+        type="button"
+        className={styles.modelBtn}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title="Select model"
+      >
+        <span className={styles.modelLabel}>{current.label}</span>
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className={styles.modelChevron}>
+          <path d="M2.5 4L5 6.5L7.5 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className={styles.modelDropdown}>
+          {MODELS.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              className={`${styles.modelOption} ${id === selected ? styles.modelOptionActive : ''}`}
+              onClick={() => { onChange(id); setOpen(false); }}
+            >
+              {label}
+              {id === selected && (
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path d="M2 6L5 9L10 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
