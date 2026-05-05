@@ -17,7 +17,7 @@ from tcg.core.api.indicators import router as indicators_router
 from tcg.core.api.options import router as options_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
-from tcg.core.config import load_agent_config, load_config
+from tcg.core.config import load_config
 from tcg.data import create_services
 from tcg.types.errors import TCGError
 
@@ -53,11 +53,8 @@ async def lifespan(app: FastAPI):
     app.state.mongo_uri = config.uri
     app.state.mongo_db_name = config.db_name
 
-    # Agent workspace -- always created (session management works without API key)
+    # Agent workspace -- always created (session management works without CLI)
     app.state.agent_workspace = AgentWorkspace()
-
-    # Agent config -- None when ANTHROPIC_API_KEY is missing (graceful degradation)
-    app.state.agent_config = load_agent_config()
 
     yield
     client.close()

@@ -3,6 +3,9 @@
 The WebSocket endpoint is mounted at ``/ws/agent/{session_id}`` to avoid
 prefix-routing issues with FastAPI's ``APIRouter``.  The REST endpoints
 live under ``/api/agent``.
+
+This module uses the Claude CLI (subprocess) for agent conversations,
+requiring no Anthropic API key — only the ``claude`` binary on PATH.
 """
 
 from __future__ import annotations
@@ -17,14 +20,12 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from tcg.core.agent.prompt import build_system_prompt
-from tcg.core.agent.session import AgentSession
-from tcg.core.agent.tools import create_tools
+from tcg.core.agent.session import CLISession, cli_available
 from tcg.core.agent.workspace import AgentWorkspace
-from tcg.types.config import AgentConfig
 
 logger = logging.getLogger(__name__)
 
+# The CLI accepts full model names directly
 ALLOWED_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6"}
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -50,22 +51,6 @@ class RenameSessionRequest(BaseModel):
 
 def _get_workspace(request: Request) -> AgentWorkspace:
     return request.app.state.agent_workspace
-
-
-def _get_agent_config(request: Request) -> AgentConfig | None:
-    return getattr(request.app.state, "agent_config", None)
-
-
-def _require_agent_config(request: Request) -> AgentConfig:
-    """Return agent config or raise 503."""
-    config = _get_agent_config(request)
-    if config is None:
-        raise _AgentUnavailable()
-    return config
-
-
-class _AgentUnavailable(Exception):
-    """Raised when the agent feature is not configured."""
 
 
 # ------------------------------------------------------------------
@@ -197,11 +182,15 @@ async def get_assumptions(request: Request, session_id: str) -> Any:
 
 @router.get("/health")
 async def agent_health(request: Request) -> dict[str, Any]:
-    """Check whether the agent feature is available."""
-    config = _get_agent_config(request)
+    """Check whether the agent feature is available.
+
+    The agent is available when the ``claude`` CLI binary is found on PATH.
+    No API key is required — the CLI handles its own authentication.
+    """
+    available = cli_available()
     return {
-        "available": config is not None,
-        "model": config.model if config else None,
+        "available": available,
+        "model": "claude-sonnet-4-6" if available else None,
     }
 
 
@@ -217,15 +206,14 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
     """WebSocket handler for agent chat.
 
     Protocol (JSON messages):
-    - Client sends:  ``{"type": "message", "content": "..."}``
-    - Server sends:  ``{"type": "token"|"tool_call"|"tool_result"|"message_complete"|"error", ...}``
+    - Client sends:  ``{"type": "message", "content": "...", "model": "..."}``
+    - Server sends:  ``{"type": "token"|"tool_call"|"tool_result"|"message_complete"|"error"|"history", ...}``
     """
-    # Check agent availability before accepting
-    agent_config: AgentConfig | None = getattr(
-        websocket.app.state, "agent_config", None
-    )
-    if agent_config is None:
-        await websocket.close(code=1008, reason="Agent feature not configured")
+    # Check that claude CLI is available
+    if not cli_available():
+        await websocket.close(
+            code=1008, reason="Agent feature not available (claude CLI not found)"
+        )
         return
 
     workspace: AgentWorkspace = websocket.app.state.agent_workspace
@@ -238,40 +226,28 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
 
     await websocket.accept()
 
-    # Load any prior conversation
-    prior_messages = workspace.load_conversation(session_id)
-
-    # Read mongo config from app state
-    mongo_uri: str = getattr(
-        websocket.app.state, "mongo_uri", "mongodb://localhost:27017"
-    )
-    mongo_db_name: str = getattr(websocket.app.state, "mongo_db_name", "tcg-instrument")
-
-    # Build tools and system prompt
     workspace_path = Path(session_meta["workspace_path"])
-    tool_definitions, tool_executors = create_tools(
-        workspace_path=workspace_path,
-        mongo_uri=mongo_uri,
-        mongo_db_name=mongo_db_name,
-        session_id=session_id,
-        workspace_manager=workspace,
-    )
-    system_prompt = build_system_prompt()
 
-    session = AgentSession(
+    # Event callback that sends to WebSocket
+    async def on_event(event: dict[str, Any]) -> None:
+        try:
+            await websocket.send_json(event)
+        except Exception:
+            logger.warning("Failed to send event to client, session %s", session_id)
+
+    # Create the CLI session
+    session = CLISession(
         session_id=session_id,
         workspace_path=workspace_path,
-        system_prompt=system_prompt,
-        api_key=agent_config.api_key,
-        mongo_uri=mongo_uri,
-        mongo_db_name=mongo_db_name,
-        model=agent_config.model,
-        max_tokens=agent_config.max_tokens,
-        thinking_budget=agent_config.thinking_budget,
-        tools=tool_definitions,
-        tool_executors=tool_executors,
+        on_event=on_event,
     )
-    session.conversation_history = prior_messages
+
+    # Load any prior conversation history
+    prior_messages = workspace.load_conversation(session_id)
+    if prior_messages:
+        session.conversation_history = prior_messages
+        # If there are prior messages, this is a resumed session
+        session._first_turn = False
 
     # Send conversation history to client on connect
     if prior_messages:
@@ -296,23 +272,14 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
                 await websocket.send_json({"type": "error", "message": "Empty message"})
                 continue
 
-            # Allow per-message model override from the frontend
-            requested_model = data.get("model")
-            if requested_model and requested_model in ALLOWED_MODELS:
-                session.model = requested_model
+            # Determine model (default to sonnet)
+            requested_model = data.get("model", "claude-sonnet-4-6")
+            if requested_model not in ALLOWED_MODELS:
+                requested_model = "claude-sonnet-4-6"
 
-            async def on_event(event: dict[str, Any]) -> None:
-                try:
-                    await websocket.send_json(event)
-                except Exception:
-                    logger.warning(
-                        "Failed to send event to client, session %s", session_id
-                    )
+            await session.run_turn(content, model=requested_model)
 
-            await session.run_turn(content, on_event)
-
-            # Persist conversation after each successful turn so reconnects
-            # can resume from the latest state (not just on disconnect).
+            # Persist conversation after each successful turn
             try:
                 workspace.save_conversation(session_id, session.conversation_history)
             except Exception:
@@ -327,6 +294,8 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
     except Exception:
         logger.exception("WebSocket error for session %s", session_id)
     finally:
+        # Kill any running subprocess
+        await session.cancel()
         # Persist conversation on disconnect
         try:
             workspace.save_conversation(session_id, session.conversation_history)

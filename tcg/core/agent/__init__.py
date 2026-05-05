@@ -1,15 +1,12 @@
-"""Agent module -- Anthropic-powered MongoDB backtester assistant.
+"""Agent module -- Claude CLI-powered assistant for backtesting workflows.
 
 Public API:
-- ``AgentSession``   — one multi-turn conversation with tool-use loop
+- ``CLISession``     — one multi-turn conversation via Claude CLI subprocess
 - ``AgentWorkspace`` — on-disk session storage (conversations, assumptions)
-- ``create_tools``   — factory for tool definitions + executors
-- ``build_system_prompt`` — full backtester system prompt
+- ``cli_available``  — check if the claude binary is on PATH
 """
 
-from tcg.core.agent.prompt import build_system_prompt
-from tcg.core.agent.session import AgentSession
-from tcg.core.agent.tools import create_tools
+from tcg.core.agent.session import CLISession, cli_available
 from tcg.core.agent.workspace import AgentWorkspace
 
-__all__ = ["AgentSession", "AgentWorkspace", "build_system_prompt", "create_tools"]
+__all__ = ["CLISession", "AgentWorkspace", "cli_available"]

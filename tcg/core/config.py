@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from tcg.types.config import AgentConfig, MongoConfig
+from tcg.types.config import MongoConfig
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +35,3 @@ def load_config() -> MongoConfig:
         db_name=os.getenv("MONGO_DB_NAME")
         or env.get("MONGO_DB_NAME", "tcg-instrument"),
     )
-
-
-def load_agent_config() -> AgentConfig | None:
-    """Load Anthropic agent configuration.
-
-    Returns ``None`` when ``ANTHROPIC_API_KEY`` is not set -- the app
-    starts normally but agent endpoints return HTTP 503.
-    """
-    env = _load_env()
-    api_key = os.getenv("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        logger.info("ANTHROPIC_API_KEY not set -- agent feature disabled")
-        return None
-    return AgentConfig(api_key=api_key)

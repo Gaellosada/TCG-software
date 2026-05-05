@@ -4,6 +4,9 @@ Each session gets a UUID-named directory under ``WORKSPACES_ROOT`` containing:
 - ``conversation.json``  — full message history for the Anthropic API
 - ``ASSUMPTIONS.json``   — running list of assumptions the agent surfaces
 - ``meta.json``          — session name, creation timestamp, etc.
+- ``.mcp.json``          — MongoDB MCP server config for the Claude CLI
+- ``.claude/settings.json`` — permissions config for the Claude CLI
+- ``CLAUDE.md``          — agent system instructions for the Claude CLI
 """
 
 from __future__ import annotations
@@ -42,6 +45,146 @@ _ASSUMPTIONS_TEMPLATE: dict[str, Any] = {
 }
 
 
+def _get_mongo_uri() -> str:
+    """Resolve MongoDB connection string from environment."""
+    return os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+
+
+def _build_mcp_json(mongo_uri: str) -> dict[str, Any]:
+    """Build .mcp.json content for the Claude CLI MongoDB MCP server."""
+    return {
+        "mcpServers": {
+            "mongodb": {
+                "command": "npx",
+                "args": ["-y", "mongodb-mcp-server", "--readOnly"],
+                "env": {
+                    "MDB_MCP_CONNECTION_STRING": mongo_uri,
+                },
+            }
+        }
+    }
+
+
+def _build_claude_settings() -> dict[str, Any]:
+    """Build .claude/settings.json with permissions for the backtester agent."""
+    return {
+        "permissions": {
+            "allow": [
+                "Bash(python *)",
+                "Bash(python3 *)",
+                "Bash(ls *)",
+                "Bash(mkdir *)",
+                "Bash(mkdir -p *)",
+                "Bash(cp *)",
+                "Bash(find *)",
+                "Bash(grep *)",
+                "Bash(cat *)",
+                "Bash(head *)",
+                "Bash(tail *)",
+                "Bash(wc *)",
+            ],
+            "deny": [
+                "Bash(rm *)",
+                "Bash(sudo *)",
+                "Bash(curl *)",
+                "Bash(wget *)",
+                "Bash(ssh *)",
+                "Bash(pip *)",
+                "Bash(npm *)",
+                "Bash(git push *)",
+                "Bash(git commit *)",
+                "Bash(git reset *)",
+            ],
+        },
+        "enabledMcpjsonServers": ["mongodb"],
+    }
+
+
+_CLAUDE_MD_CONTENT = """\
+# Backtester Agent
+
+You are a quantitative analyst that turns strategy descriptions into backtested results.
+Given a trading idea, you produce a workspace with scripts, a compiled notebook, and metrics.
+Communicate results, not process.
+
+## Tools
+
+You have access to the Claude CLI built-in tools (Bash, Read, Write, Edit, Glob, Grep) \
+plus the MongoDB MCP server configured in `.mcp.json` (read-only access to market data).
+
+## First Turn Protocol
+
+1. Read `PIPELINE_GUIDE.md` — contains the workflow, decision tree, and API reference.
+2. Check if `ASSUMPTIONS.json` has existing assumptions (resume context from prior turns).
+3. Follow the pipeline decision tree in the guide.
+
+## Library: tcg.backtester.lib
+
+ALL scripts MUST import from this library. Never reimplement what it provides.
+
+```python
+from tcg.backtester.lib import data_load, signals, engine, metrics, plotting, diagnostics
+from tcg.backtester.lib.engine import BacktestSpec, ExecutionConfig, SizingConfig
+from tcg.backtester.lib.validate import bar_integrity
+```
+
+Key classes:
+- `BacktestSpec` — top-level specification: bars, signal, sizing, execution config
+- `ExecutionConfig` — slippage, commission, fill assumptions
+- `SizingConfig` — position sizing method and parameters
+
+Key functions:
+- `data_load.fetch_index_bars(symbol, start, end)` — load price bars from MongoDB
+- `data_load.fetch_futures_bars(symbol, start, end)` — load futures price bars
+- `signals.sma(series, period)` — simple moving average
+- `signals.ema(series, period)` — exponential moving average
+- `engine.run_backtest(spec)` — execute a backtest from a BacktestSpec
+- `metrics.compute_metrics(result)` — compute performance metrics from backtest result
+
+Key pattern (sync, no asyncio needed):
+```python
+bars = data_load.fetch_index_bars("IND_SP_500", start=20200101, end=20241231)
+fast = signals.sma(bars.close, 50)
+slow = signals.sma(bars.close, 200)
+sig = (fast > slow).astype(float)
+spec = BacktestSpec(
+    bars=bars,
+    signal=sig,
+    sizing=SizingConfig(method="fixed_fraction", fraction=1.0),
+)
+result = engine.run_backtest(spec)
+m = metrics.compute_metrics(result)
+print(m.to_dict())
+```
+
+## Critical Rules
+
+- `BacktestSpec` takes `bars` (PriceSeries), NOT separate dates/close arrays.
+- `fetch_*` functions are sync — no `asyncio.run` needed. They manage their own DB connection.
+- Signal arrays must be same length as `bars.dates`. NaN warm-up is normal.
+- Engine fires entries on signal transitions (0->nonzero or sign change), not on every nonzero bar.
+- Use `Path.cwd()` in scripts, never `Path(__file__)`.
+- NEVER fabricate data or results. If data is missing, stop and report.
+- On ANY failure: write to `PROBLEMS.md`, explain plainly, wait for the user.
+
+## Communication Style
+
+Speak as a quant to a portfolio manager. Report what you found, what you built, what the \
+numbers say. When you need input, ask one clear question about the strategy itself.
+
+## Workspace Files
+
+| Path | Purpose |
+|------|---------|
+| `scripts/` | Generated Python scripts (numbered: `01_data.py`, `02_signal.py`, etc.) |
+| `results/` | Outputs — notebook.ipynb, metrics JSON, plots |
+| `snippets/` | Reusable code templates — read before writing new code |
+| `ASSUMPTIONS.json` | Tracked assumptions — update when inferring strategy parameters |
+| `PIPELINE_GUIDE.md` | Workflow instructions and decision tree |
+| `PROBLEMS.md` | Failure log — write here when something goes wrong |
+"""
+
+
 class AgentWorkspace:
     """Manages on-disk session directories for the agent feature."""
 
@@ -58,7 +201,7 @@ class AgentWorkspace:
 
         Returns a dict with ``id``, ``name``, ``created_at``, ``workspace_path``.
         """
-        session_id = uuid.uuid4().hex
+        session_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         session_dir = self.root / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +231,20 @@ class AgentWorkspace:
                 (snippets_dst / snippet.name).write_text(
                     snippet.read_text(encoding="utf-8"), encoding="utf-8"
                 )
+
+        # --- CLI-compatible configuration files ---
+
+        # .mcp.json — MongoDB MCP server config
+        mongo_uri = _get_mongo_uri()
+        self._write_json(session_dir / ".mcp.json", _build_mcp_json(mongo_uri))
+
+        # .claude/settings.json — permissions config
+        claude_dir = session_dir / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        self._write_json(claude_dir / "settings.json", _build_claude_settings())
+
+        # CLAUDE.md — agent system instructions
+        (session_dir / "CLAUDE.md").write_text(_CLAUDE_MD_CONTENT, encoding="utf-8")
 
         return {
             "id": session_id,
