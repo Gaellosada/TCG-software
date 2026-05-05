@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Retry configuration for transient API errors
 _MAX_API_RETRIES = 3
-_RETRY_BASE_DELAY_S = 2.0
+_RETRY_BASE_DELAY_S = 20.0  # Rate limit is per-minute; short retries just burn attempts
 # Maximum tool-use loop iterations to prevent runaway loops
 _MAX_TOOL_LOOPS = 25
 
@@ -268,7 +268,18 @@ class AgentSession:
                     return await stream.get_final_message()
 
             except RateLimitError as exc:
-                delay = _RETRY_BASE_DELAY_S * (2**attempt)
+                # Prefer the retry-after header from the API if available
+                retry_after = None
+                if hasattr(exc, "response") and exc.response is not None:
+                    retry_after_str = exc.response.headers.get("retry-after")
+                    if retry_after_str:
+                        try:
+                            retry_after = float(retry_after_str)
+                        except ValueError, TypeError:
+                            pass
+                delay = (
+                    retry_after if retry_after else _RETRY_BASE_DELAY_S * (2**attempt)
+                )
                 logger.warning(
                     "Rate limited (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
