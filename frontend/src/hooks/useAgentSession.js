@@ -81,6 +81,8 @@ function useAgentSession(sessionId) {
   const [status, setStatus] = useState('idle');
   const [isConnected, setIsConnected] = useState(false);
   const [notebookReady, setNotebookReady] = useState(false);
+  // True from user send until message_complete (covers thinking + streaming + tool loops)
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const wsRef = useRef(null);
   const retriesRef = useRef(0);
@@ -109,6 +111,7 @@ function useAgentSession(sessionId) {
 
     ws.addEventListener('close', () => {
       setIsConnected(false);
+      setIsProcessing(false);
       wsRef.current = null;
 
       if (retriesRef.current < MAX_RETRIES) {
@@ -146,6 +149,7 @@ function useAgentSession(sessionId) {
         }
 
         case 'message_complete': {
+          setIsProcessing(false);
           if (streamingRef.current) {
             streamingRef.current = null;
             setMessages((prev) => {
@@ -197,6 +201,7 @@ function useAgentSession(sessionId) {
         }
 
         case 'error': {
+          setIsProcessing(false);
           setMessages((prev) => [
             ...prev,
             { role: 'error', content: data.message ?? 'Unknown error' },
@@ -217,6 +222,7 @@ function useAgentSession(sessionId) {
     setAssumptions([]);
     setStatus('idle');
     setIsConnected(false);
+    setIsProcessing(false);
     setNotebookReady(false);
     streamingRef.current = null;
     retriesRef.current = 0;
@@ -246,13 +252,14 @@ function useAgentSession(sessionId) {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         // Add the user message to local state immediately (optimistic)
         setMessages((prev) => [...prev, { role: 'user', content }]);
+        setIsProcessing(true);
         wsRef.current.send(JSON.stringify({ type: 'message', content }));
       }
     },
     [],
   );
 
-  return { messages, assumptions, status, isConnected, sendMessage, notebookReady };
+  return { messages, assumptions, status, isConnected, isProcessing, sendMessage, notebookReady };
 }
 
 export default useAgentSession;

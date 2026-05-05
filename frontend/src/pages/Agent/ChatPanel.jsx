@@ -97,6 +97,12 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
 
   const canSend = isConnected && !isStreaming && draft.trim().length > 0;
 
+  // Show thinking indicator when the agent is processing but not actively streaming text.
+  // This covers: initial thinking, tool execution, between tool loops.
+  const lastMsg = messages[messages.length - 1];
+  const isActivelyStreaming = lastMsg?.role === 'assistant' && lastMsg.streaming && lastMsg.content;
+  const showThinking = isStreaming && !isActivelyStreaming;
+
   return (
     <div className={styles.panel}>
       <div className={styles.messageList} ref={listRef} onScroll={handleScroll}>
@@ -106,6 +112,7 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
         {messages.length > 0 && (
           <div className={styles.messagesInner}>
             {messages.map(renderMessage)}
+            {showThinking && <ThinkingIndicator />}
           </div>
         )}
       </div>
@@ -137,6 +144,23 @@ function ChatPanel({ messages, isConnected, sendMessage, isStreaming }) {
             <path d="M3 13V3l10 5-10 5z" fill="currentColor" />
           </svg>
         </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Animated dots indicator shown while the agent is thinking/processing.
+ */
+function ThinkingIndicator() {
+  return (
+    <div className={`${styles.msgRow} ${styles.msgRowAssistant}`}>
+      <div className={styles.assistantBubble}>
+        <span className={styles.thinking}>
+          <span className={styles.dot} />
+          <span className={styles.dot} />
+          <span className={styles.dot} />
+        </span>
       </div>
     </div>
   );

@@ -15,11 +15,10 @@ function AgentPage() {
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
 
-  const { messages, assumptions, status, isConnected, sendMessage, notebookReady } =
+  const { messages, assumptions, status, isConnected, isProcessing, sendMessage, notebookReady } =
     useAgentSession(selectedSessionId);
 
-  const isStreaming =
-    messages.length > 0 && messages[messages.length - 1]?.streaming === true;
+  const isStreaming = isProcessing;
 
   return (
     <div className={styles.page}>
