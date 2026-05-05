@@ -15,10 +15,16 @@ function formatUsage(usage) {
   if (!usage) return null;
   const parts = [];
 
+  // Always show session token count
+  const total = (usage.session_input_tokens || 0) + (usage.session_output_tokens || 0);
+  if (total >= 1_000_000) parts.push(`Session: ${(total / 1_000_000).toFixed(1)}M tokens`);
+  else if (total >= 1_000) parts.push(`Session: ${(total / 1_000).toFixed(1)}k tokens`);
+  else parts.push(`Session: ${total} tokens`);
+
   if (usage.tokens_limit > 0) {
     const used = usage.tokens_limit - (usage.tokens_remaining || 0);
     const pct = ((used / usage.tokens_limit) * 100).toFixed(1);
-    parts.push(`Tokens: ${pct}%`);
+    parts.push(`Rate: ${pct}%`);
   }
 
   if (usage.tokens_reset) {
@@ -32,13 +38,7 @@ function formatUsage(usage) {
     } catch { /* ignore */ }
   }
 
-  if (usage.requests_limit > 0) {
-    const used = usage.requests_limit - (usage.requests_remaining || 0);
-    const pct = ((used / usage.requests_limit) * 100).toFixed(1);
-    parts.push(`Requests: ${pct}%`);
-  }
-
-  return parts.length > 0 ? parts.join('  |  ') : null;
+  return parts.join('  |  ');
 }
 
 function AgentPage() {
@@ -83,7 +83,7 @@ function AgentPage() {
             {status && status !== 'idle' && (
               <span className={styles.statusBadge}>{status}</span>
             )}
-            {activeTab === 'chat' && formatUsage(usage) && (
+            {activeTab === 'chat' && usage && (
               <span className={styles.usageInfo}>{formatUsage(usage)}</span>
             )}
           </div>

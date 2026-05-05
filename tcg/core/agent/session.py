@@ -265,7 +265,7 @@ class AgentSession:
                 }
             )
         except Exception as exc:
-            logger.warning("Failed to emit usage: %s", exc)
+            logger.error("Failed to emit usage: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Tool execution
