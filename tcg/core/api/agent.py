@@ -233,7 +233,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         try:
             await websocket.send_json(event)
         except Exception:
-            logger.warning("Failed to send event to client, session %s", session_id)
+            # WebSocket is dead — cancel the session so the parse loop stops
+            logger.warning("WebSocket dead for session %s, cancelling", session_id)
+            session._cancelled = True
 
     # Create the CLI session
     session = CLISession(

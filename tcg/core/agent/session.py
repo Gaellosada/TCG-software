@@ -64,6 +64,7 @@ class CLISession:
         self.workspace_path = workspace_path
         self.on_event = on_event
         self._first_turn = True
+        self._cancelled = False
         self.conversation_history: list[dict[str, Any]] = []
         self._process: asyncio.subprocess.Process | None = None
         # Track file state for change detection
@@ -179,6 +180,7 @@ class CLISession:
 
     async def cancel(self) -> None:
         """Kill the running subprocess if any (e.g., on WebSocket disconnect)."""
+        self._cancelled = True
         if self._process and self._process.returncode is None:
             try:
                 self._process.terminate()
@@ -268,7 +270,7 @@ class CLISession:
         # Track active content blocks for tool_use accumulation
         active_blocks: dict[int, dict[str, Any]] = {}
 
-        while True:
+        while not self._cancelled:
             line = await self._process.stdout.readline()
             if not line:
                 break
@@ -287,6 +289,9 @@ class CLISession:
             await self._handle_event(
                 event, assistant_content, full_text_parts, active_blocks
             )
+
+        if self._cancelled:
+            logger.info("Stream parsing cancelled for session %s", self.session_id)
 
         # Emit message_complete with the accumulated text
         final_text = "".join(full_text_parts)
