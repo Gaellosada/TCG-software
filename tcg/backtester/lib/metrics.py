@@ -1,4 +1,17 @@
-"""MetricsSuite (frontend-aligned) + monthly / yearly tables + drawdown periods."""
+"""MetricsSuite (frontend-aligned) + monthly / yearly tables + drawdown periods.
+
+Public API (mirrored in ``__all__`` so a single ``dir(metrics)`` shows the
+full exported surface — avoids the cold-start failure mode of skimming the
+file and missing a function defined further down):
+
+- :class:`MetricsSuite` — the canonical metrics dataclass
+- :func:`compute_metrics` — full suite from a :class:`BacktestResult`
+- :func:`monthly_returns_table`, :func:`yearly_returns_table` — period tables
+- :func:`aggregate_returns` — dispatcher over period={'M', 'Y'}; accepts
+  either a ``BacktestResult`` or ``(equity, dates)`` directly
+- :func:`drawdown_periods` — drawdown segmentation
+- :func:`buy_and_hold_curve`, :func:`risk_free_curve`, :func:`compare_stats`
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +22,18 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .engine import BacktestResult, Trade
+
+__all__ = [
+    "MetricsSuite",
+    "compute_metrics",
+    "monthly_returns_table",
+    "yearly_returns_table",
+    "aggregate_returns",
+    "drawdown_periods",
+    "buy_and_hold_curve",
+    "risk_free_curve",
+    "compare_stats",
+]
 
 
 @dataclass(frozen=True)
@@ -75,7 +100,7 @@ def compute_metrics(
 ) -> MetricsSuite:
     """Compute MetricsSuite. Accepts either (equity, dates, trades=...) or (BacktestResult).
 
-    `risk_free_rate` matches `execution.risk_free_rate` in `STRATEGY.yaml`. When
+    `risk_free_rate` matches `execution.risk_free_rate` in `META["execution"]`. When
     `equity_or_result` is a `BacktestResult` and the kwarg is not passed, it's
     auto-threaded from `result.meta['spec']['risk_free_rate']`.
     """

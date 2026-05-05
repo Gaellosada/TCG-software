@@ -29,8 +29,8 @@ Tool: WebSearch | WebFetch | context7
 ## Summary
 <3-5 bullets, plain English>
 
-## Implication for spec
-<1-3 bullets tying back to fields in STRATEGY.yaml>
+## Implication for strategy.py
+<1-3 bullets tying back to fields in META or signal logic>
 
 ## Citations
 - <full citation 1>

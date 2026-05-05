@@ -472,10 +472,18 @@ def _select_expiration(
         return min(pool, key=lambda e: abs(_calendar_dte(today, e) - target))
     if isinstance(sel, WeeklySelector):
         target = 7
-        return min(expiries, key=lambda e: abs(_calendar_dte(today, e) - target))
+        valid = [(e, _calendar_dte(today, e)) for e in expiries]
+        valid = [(e, dte) for e, dte in valid if dte is not None]
+        if not valid:
+            return None
+        return min((e for e, _ in valid), key=lambda e: abs(_calendar_dte(today, e) - target))
     if isinstance(sel, MonthlySelector):
         target = 30
-        return min(expiries, key=lambda e: abs(_calendar_dte(today, e) - target))
+        valid = [(e, _calendar_dte(today, e)) for e in expiries]
+        valid = [(e, dte) for e, dte in valid if dte is not None]
+        if not valid:
+            return None
+        return min((e for e, _ in valid), key=lambda e: abs(_calendar_dte(today, e) - target))
     return None
 
 
@@ -1041,72 +1049,6 @@ def run_backtest(spec: BacktestSpec) -> BacktestResult:
     )
 
 
-def run_option_strategy_from_spec(
-    *,
-    underlying_npz,
-    chain_pkl,
-    legs_builder: Callable[[float], "tuple[OptionLegSpec, ...] | list[OptionLegSpec]"],
-    signal_builder: Callable[[NDArray[np.float64]], NDArray[np.float64]],
-    execution: ExecutionConfig,
-    capital_base: float,
-    out_pkl=None,
-) -> BacktestResult:
-    """Boilerplate scaffold for option-strategy backtests.
-
-    Loads underlying bars from `underlying_npz` and the option chain from
-    `chain_pkl` (the `.pkl` produced by `lib.options.save_chain_pkl`), builds
-    `chain_by_date = {asof_date: snapshot}`, runs `run_backtest` with
-    `SizingConfig("fixed_fraction", 0.0)` (legs carry the exposure), persists to
-    `out_pkl` when given, and returns the result.
-
-    Strategy-specific code is supplied as two callables:
-      - `legs_builder(spot_hint) -> tuple[OptionLegSpec, ...]`
-      - `signal_builder(close) -> NDArray[float64]` returning a per-bar entry signal.
-
-    `execution` is REQUIRED — passing the `ExecutionConfig` explicitly forces
-    callers to declare fees/slippage, surfacing the prior `fees_bps=2.0`
-    snippet drift versus the documented default.
-    """
-    import pickle
-    from pathlib import Path
-    from . import data_load as _data_load
-    from . import options as _options
-
-    bars = _data_load.load_npz(Path(underlying_npz))
-    chain_history = _options.load_chain_pkl(Path(chain_pkl))
-    chain_by_date = {int(s.asof_date): s for s in chain_history.snapshots}
-
-    close = np.asarray(bars.close, dtype=np.float64)
-    signal = np.asarray(signal_builder(close), dtype=np.float64)
-    if signal.shape[0] != close.shape[0]:
-        raise ValueError(
-            f"signal_builder length mismatch: signal={signal.shape[0]} bars={close.shape[0]}"
-        )
-
-    # First finite close as a spot hint passed through to leg builders.
-    finite_close = close[np.isfinite(close)]
-    spot_hint = float(finite_close[0]) if finite_close.size > 0 else 0.0
-    legs = tuple(legs_builder(spot_hint))
-
-    spec = BacktestSpec(
-        bars=bars,
-        signal=signal,
-        execution=execution,
-        sizing=SizingConfig(method="fixed_fraction", fraction=0.0),
-        capital_base=float(capital_base),
-        option_legs=legs,
-        option_chain_provider=lambda d: chain_by_date.get(int(d)),
-    )
-    result = run_backtest(spec)
-
-    if out_pkl is not None:
-        out = Path(out_pkl)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("wb") as fh:
-            pickle.dump(result, fh)
-    return result
-
-
 __all__ = [
     "ExecutionConfig",
     "SizingConfig",
@@ -1131,5 +1073,4 @@ __all__ = [
     "Trade",
     "BacktestResult",
     "run_backtest",
-    "run_option_strategy_from_spec",
 ]

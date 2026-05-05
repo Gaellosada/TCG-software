@@ -1,9 +1,11 @@
 """Option helpers: BS pricer, chain selection, expiry helpers, multi-leg builders.
 
-Multi-leg spread builders (`vertical`, `calendar`, `iron_condor`, `straddle`,
-`strangle`, plus the dispatcher `build_spread`) emit `OptionLegSpec` tuples that
-`lib.engine.run_backtest` consumes. The legacy `OptionLeg` (pre-priced array
-exposure) is preserved for the short-put strategy snippet.
+Multi-leg builders (`vertical`, `calendar`, `iron_condor`, `straddle`,
+`strangle`) plus the generic `build_legs` helper emit `OptionLegSpec` tuples
+that `lib.engine.run_backtest` consumes. Strategies use the named structure
+helpers when the shape is canonical and `build_legs` for the escape-hatch
+N-leg case. The legacy `OptionLeg` (pre-priced array exposure) is preserved
+for hand-crafted analytic strategies.
 """
 from __future__ import annotations
 
@@ -351,12 +353,15 @@ def monthly_expirations(chain: OptionChainSnapshot) -> list[int]:
 # ----------------------------------------------------------------------------- multi-leg
 
 from .engine import (
+    AtmSelector,
+    ContractSelector,
     DeltaSelector,
     DteSelector,
     ExitRule,
     ExpirySelector,
     FixedExpirySelector,
     HoldToExpiration,
+    MoneynessSelector,
     OptionLegSpec,
     StrikeOffsetPctSelector,
 )
@@ -577,23 +582,133 @@ def strangle(
     )
 
 
-_SPREAD_BUILDERS = {
-    "vertical": vertical,
-    "calendar": calendar,
-    "iron_condor": iron_condor,
-    "straddle": straddle,
-    "strangle": strangle,
-}
+# --------------------------------------------------------------------------- generic build_legs
 
 
-def build_spread(spread_type: str, **kwargs) -> tuple[OptionLegSpec, ...]:
-    """Dispatch on `spread_type` to the correct builder; returns OptionLegSpec tuple."""
-    fn = _SPREAD_BUILDERS.get(str(spread_type))
-    if fn is None:
-        raise ValueError(
-            f"unknown spread_type {spread_type!r}; supported: {sorted(_SPREAD_BUILDERS)}"
+@dataclass(frozen=True)
+class LegSpec:
+    """Light-weight per-leg input for :func:`build_legs`.
+
+    The agent describes each leg of the desired structure with a side, an
+    option type, a strike specification (absolute price OR ``("offset_pct",
+    pct)`` OR ``("moneyness", m)``), an exit rule, and a unit count. The
+    helper resolves ``contract_selector`` / ``expiry_selector`` accordingly
+    and emits an :class:`OptionLegSpec`.
+    """
+
+    side: Literal["long", "short"]
+    option_type: Literal["C", "P"]
+    strike: float | tuple[Literal["offset_pct", "moneyness", "atm"], float | None]
+    leg_id: str | None = None
+    qty_units: int = 1
+    exit_rule: ExitRule | None = None
+
+
+def build_legs(
+    legs: list[LegSpec | dict],
+    *,
+    expiry_selector: ExpirySelector,
+    spot_hint: float,
+) -> tuple[OptionLegSpec, ...]:
+    """Generic N-leg builder — escape-hatch shape that subsumes vertical /
+    calendar / iron_condor / straddle / strangle.
+
+    Each input leg may be a :class:`LegSpec` or a plain dict with the same
+    keys. ``strike`` accepts:
+
+      - ``float``           — absolute strike (resolved via spot_hint -> pct).
+      - ``("offset_pct", x)`` — strike at ``spot * (1 + x)``.
+      - ``("moneyness", m)``  — strike at ``spot * m``.
+      - ``("atm", offset)``   — at-the-money via :class:`AtmSelector`
+        (``offset_strikes=offset`` if int, else 0).
+
+    Strategies build an iron condor in 5-8 lines via this helper without
+    touching ``OptionLegSpec`` directly.
+
+    Example (4-leg iron condor)::
+
+        legs = [
+            {"side": "short", "option_type": "C",
+             "strike": ("offset_pct", 0.05), "leg_id": "short_call"},
+            {"side": "long",  "option_type": "C",
+             "strike": ("offset_pct", 0.10), "leg_id": "long_call"},
+            {"side": "short", "option_type": "P",
+             "strike": ("offset_pct", -0.05), "leg_id": "short_put"},
+            {"side": "long",  "option_type": "P",
+             "strike": ("offset_pct", -0.10), "leg_id": "long_put"},
+        ]
+        legs_built = build_legs(
+            legs, expiry_selector=DteSelector(target_dte=30), spot_hint=4500.0,
         )
-    return fn(**kwargs)
+    """
+    if not legs:
+        raise ValueError("build_legs: legs list is empty")
+    out: list[OptionLegSpec] = []
+    for i, raw in enumerate(legs):
+        if isinstance(raw, LegSpec):
+            spec_in = raw
+        elif isinstance(raw, dict):
+            spec_in = LegSpec(
+                side=raw["side"],
+                option_type=raw["option_type"],
+                strike=raw["strike"],
+                leg_id=raw.get("leg_id"),
+                qty_units=int(raw.get("qty_units", 1)),
+                exit_rule=raw.get("exit_rule"),
+            )
+        else:
+            raise TypeError(
+                f"build_legs: leg {i} must be LegSpec or dict, got "
+                f"{type(raw).__name__}"
+            )
+        side = spec_in.side
+        otype = spec_in.option_type
+        if side not in ("long", "short"):
+            raise ValueError(f"leg {i}: side must be 'long' or 'short', got {side!r}")
+        if otype not in ("C", "P"):
+            raise ValueError(f"leg {i}: option_type must be 'C' or 'P', got {otype!r}")
+
+        strike_val = spec_in.strike
+        contract_selector: ContractSelector
+        if isinstance(strike_val, (int, float)):
+            contract_selector = _strike_selector(float(strike_val), float(spot_hint))
+            label_strike = f"{int(float(strike_val))}"
+        elif isinstance(strike_val, tuple) and len(strike_val) == 2:
+            kind, val = strike_val
+            if kind == "offset_pct":
+                contract_selector = StrikeOffsetPctSelector(pct_offset=float(val))
+                label_strike = f"pct{int(float(val) * 100):+d}"
+            elif kind == "moneyness":
+                from .engine import MoneynessSelector
+                contract_selector = MoneynessSelector(moneyness=float(val))
+                label_strike = f"m{float(val):.2f}"
+            elif kind == "atm":
+                from .engine import AtmSelector
+                offset = int(val) if val is not None else 0
+                contract_selector = AtmSelector(offset_strikes=offset)
+                label_strike = f"atm{offset:+d}"
+            else:
+                raise ValueError(
+                    f"leg {i}: unknown strike spec kind {kind!r}; "
+                    f"supported: 'offset_pct', 'moneyness', 'atm'"
+                )
+        else:
+            raise ValueError(
+                f"leg {i}: strike must be float or 2-tuple, got {strike_val!r}"
+            )
+        leg_id = spec_in.leg_id or f"{side}_{otype}_{label_strike}_{i}"
+        out.append(
+            OptionLegSpec(
+                leg_id=leg_id,
+                side=side,
+                qty_units=int(spec_in.qty_units),
+                option_type=otype,
+                contract_selector=contract_selector,
+                expiry_selector=expiry_selector,
+                exit_rule=(spec_in.exit_rule or HoldToExpiration()),
+            )
+        )
+    return tuple(out)
 
 
 # --------------------------------------------------------------------------- data fetch + npz IO
@@ -650,277 +765,6 @@ def list_expirations(
             continue
     return sorted(out)
 
-
-_DEFAULT_INSTRUMENT_TO_OPTION_ROOT: dict[str, str] = {
-    # Equity-index spot tickers -> OPT_* collection roots used by the IVOL feed.
-    "SPX": "SP_500",
-    "SPY": "SPY",
-    "QQQ": "QQQ",
-    "IWM": "IWM",
-    "VIX": "VIX",
-    "RUT": "RUSSELL_2000",
-    "NDX": "NASDAQ_100",
-}
-
-
-def chain_args_from_spec(
-    spec: dict,
-    *,
-    root_alias: dict[str, str] | None = None,
-    spot_hint: float | None = None,
-) -> dict:
-    """Translate a STRATEGY.yaml-shaped spec to ``load_chain`` kwargs.
-
-    Returns ``{root, start, end, dte_min, dte_max, right, use_aggregation: True,
-    strike_min, strike_max, expiration_cycle}`` suitable for
-    ``load_chain(db, **chain_args_from_spec(spec, spot_hint=...))``.
-
-    Translation rules:
-    - ``start`` / ``end`` come from ``spec['date_range']``.
-    - ``signals.type`` MUST be ``'option_strategy'`` (else ``ValueError``).
-    - For each leg in ``spec['signals']['legs']``, ``expiry_selector.kind``
-      MUST be one of ``'dte'``, ``'weekly'``, or ``'monthly'``. ``'weekly'``
-      expands to DTE band ``[3, 10]`` and ``'monthly'`` expands to ``[25, 45]``
-      to match the ``WeeklySelector`` / ``MonthlySelector`` engine semantics.
-      Other kinds (``'absolute'``, ``'next_expiry'``, ``'fixed'``, etc.) raise
-      ``ValueError`` rather than being silently ignored — those need a chain
-      load with explicitly-computed DTE bounds.
-    - ``dte_min = max(0, min(target_dte - tolerance_days))`` across legs.
-      ``dte_max = max(target_dte + tolerance_days)`` across legs. (Union of
-      per-leg DTE windows; the chain must cover every leg.)
-    - ``right``: union of ``leg['option_type']`` — all ``'P'`` -> ``'P'``,
-      all ``'C'`` -> ``'C'``, mixed -> ``'BOTH'``.
-    - ``root``: takes the single tradable in ``spec['universe']`` (multiple
-      tradables -> ``ValueError``). Resolves via ``root_alias`` if supplied,
-      otherwise via the built-in equity-index map
-      (``_DEFAULT_INSTRUMENT_TO_OPTION_ROOT``: SPX -> SP_500, etc.). When the
-      ``instrument_id`` is unknown to both maps, the value is passed verbatim
-      and a ``UserWarning`` is emitted via ``warnings.warn``.
-    - ``use_aggregation=True`` is hardcoded — production callers should never
-      think about this flag (Wave 2 perf fix; see ``load_chain`` docstring).
-
-    Focused-query derivation (the "don't load all strikes" principle):
-    - ``expiration_cycle``: derived from the legs' ``expiry_selector.kind``.
-      All-weekly legs → ``"W"``; all-monthly legs → ``"M"``; otherwise
-      ``None`` (no cycle filter, e.g. mixed/dte-band legs).
-    - ``strike_min`` / ``strike_max``: derived from ``spot_hint`` per the
-      union of leg ``contract_selector`` kinds:
-        * ``delta`` (any |target_delta|): ±30% band around spot — generous
-          enough to cover deep OTM through deep ITM rebalances.
-        * ``atm``: ±15% band around spot.
-        * ``pct_offset``: ``spot * (1 + pct_offset) ± 15%`` per leg, then
-          union.
-        * ``moneyness``: ``spot * moneyness ± 15%`` per leg, then union.
-      When ``spot_hint is None`` the strike band is left ``None``/``None``
-      (no push-down) and a ``UserWarning`` is emitted naming the missing
-      hint — fresh agents see exactly why their load is slow. The engine
-      still works without spot_hint; callers who care about the 21-min ->
-      sub-10-min speedup must pass ``spot_hint``.
-
-    Args:
-        spec: STRATEGY.yaml-shaped dict.
-        root_alias: optional ``instrument_id -> OPT_<root>`` override.
-        spot_hint: representative spot price for strike-band derivation. The
-            value need only be in the ballpark (within ~30% of mid-window
-            spot) since the band is generous; for SPX 2021-2025 a value
-            like ``4500.0`` works for the entire 4-year window.
-
-    Raises:
-        ValueError: ``signals.type != 'option_strategy'``; empty legs;
-            unsupported ``expiry_selector.kind``; multiple tradables.
-    """
-    if not isinstance(spec, dict):
-        raise ValueError(f"spec must be a dict, got {type(spec).__name__}")
-    signals = spec.get("signals")
-    if not isinstance(signals, dict):
-        raise ValueError("spec['signals'] missing or not a dict")
-    if signals.get("type") != "option_strategy":
-        raise ValueError(
-            f"chain_args_from_spec only supports signals.type='option_strategy', "
-            f"got {signals.get('type')!r}"
-        )
-    legs = signals.get("legs") or []
-    if not legs:
-        raise ValueError("spec['signals']['legs'] is empty; nothing to translate")
-
-    # Date range
-    date_range = spec.get("date_range") or {}
-    if "start" not in date_range or "end" not in date_range:
-        raise ValueError("spec['date_range'] must contain 'start' and 'end'")
-    start = int(date_range["start"])
-    end = int(date_range["end"])
-
-    # DTE union across legs
-    lows: list[int] = []
-    highs: list[int] = []
-    rights: set[str] = set()
-    expiry_kinds: list[str] = []
-    contract_selectors: list[dict] = []
-    # Bands matching engine.WeeklySelector / engine.MonthlySelector.
-    _BAND_BY_KIND: dict[str, tuple[int, int]] = {
-        "weekly": (3, 10),
-        "monthly": (25, 45),
-    }
-    for i, leg in enumerate(legs):
-        sel = leg.get("expiry_selector")
-        if not isinstance(sel, dict):
-            raise ValueError(f"leg[{i}].expiry_selector missing or not a dict")
-        kind = sel.get("kind")
-        if kind == "dte":
-            if "target_dte" not in sel or "tolerance_days" not in sel:
-                raise ValueError(
-                    f"leg[{i}].expiry_selector requires 'target_dte' and 'tolerance_days'"
-                )
-            target = int(sel["target_dte"])
-            tol = int(sel["tolerance_days"])
-            lows.append(target - tol)
-            highs.append(target + tol)
-        elif kind in _BAND_BY_KIND:
-            band_lo, band_hi = _BAND_BY_KIND[kind]
-            lows.append(band_lo)
-            highs.append(band_hi)
-        else:
-            raise ValueError(
-                f"leg[{i}].expiry_selector.kind={kind!r} is unsupported by "
-                f"chain_args_from_spec; supported kinds: 'dte', 'weekly', "
-                f"'monthly'. For 'fixed'/'absolute'/'next_expiry' selectors, "
-                f"compute DTE bounds manually before calling load_chain."
-            )
-        expiry_kinds.append(kind)
-        otype = leg.get("option_type")
-        if otype not in ("C", "P"):
-            raise ValueError(
-                f"leg[{i}].option_type must be 'C' or 'P', got {otype!r}"
-            )
-        rights.add(otype)
-        # Capture contract_selector for strike-band derivation. Default to
-        # delta-style {} when missing — that triggers the most-generous band
-        # which is the safer fallback for ambiguous specs.
-        cs = leg.get("contract_selector")
-        contract_selectors.append(cs if isinstance(cs, dict) else {})
-    dte_min = max(0, min(lows))
-    dte_max = max(highs)
-
-    # Right aggregation
-    if rights == {"P"}:
-        right: Literal["C", "P", "BOTH"] = "P"
-    elif rights == {"C"}:
-        right = "C"
-    else:
-        right = "BOTH"
-
-    # Root resolution from universe
-    universe = spec.get("universe") or []
-    tradables = [
-        u for u in universe
-        if isinstance(u, dict) and (u.get("role") == "tradable" or "role" not in u)
-    ]
-    # If 'role' is unset across the universe, treat all entries as tradables (legacy specs).
-    if not tradables:
-        tradables = list(universe)
-    if len(tradables) != 1:
-        raise ValueError(
-            f"chain_args_from_spec requires exactly one tradable in spec['universe']; "
-            f"found {len(tradables)}. Single-root pipeline only — multi-root needs a "
-            f"future relaxation."
-        )
-    instrument_id = tradables[0].get("instrument_id")
-    if not instrument_id:
-        raise ValueError("tradable universe entry missing 'instrument_id'")
-
-    # Alias precedence: caller-supplied > built-in equity-index map > verbatim+warn.
-    if root_alias is not None and instrument_id in root_alias:
-        root = root_alias[instrument_id]
-    elif instrument_id in _DEFAULT_INSTRUMENT_TO_OPTION_ROOT:
-        root = _DEFAULT_INSTRUMENT_TO_OPTION_ROOT[instrument_id]
-    else:
-        warnings.warn(
-            f"chain_args_from_spec: no option-root alias for instrument_id="
-            f"{instrument_id!r}; passing verbatim to load_chain (will fail if "
-            f"OPT_{instrument_id} is not a real collection). Pass `root_alias=` "
-            f"to override.",
-            stacklevel=2,
-        )
-        root = instrument_id
-
-    # ------------------------------------------------------------------
-    # Focused-query derivation: expiration_cycle + strike_min/strike_max.
-    # ------------------------------------------------------------------
-    # Cycle: only push when ALL legs agree on a single cycle ("W" or "M").
-    # Mixed/dte legs leave it None so the chain still covers every cycle.
-    if all(k == "weekly" for k in expiry_kinds):
-        expiration_cycle = "W"
-    elif all(k == "monthly" for k in expiry_kinds):
-        expiration_cycle = "M"
-    else:
-        expiration_cycle = None
-
-    # Strike band: per leg, derive a per-leg [lo, hi] using contract_selector
-    # kind + spot_hint, then take the union (min lo, max hi).
-    strike_min = None
-    strike_max = None
-    if spot_hint is not None:
-        spot = float(spot_hint)
-        if not (spot > 0.0):
-            raise ValueError(
-                f"spot_hint must be > 0; got {spot_hint!r}"
-            )
-        # Per-selector-kind bands. The principle: generous on delta (the
-        # delta-target moves with vol) so a single band covers a 4-year
-        # SPX backtest; tight on pct_offset / moneyness because those are
-        # explicitly anchored.
-        DELTA_BAND = 0.30   # ±30% drift-tolerant band (matches sibling-stack STRIKE_DRIFT_BAND)
-        ATM_BAND = 0.15     # ±15% around spot
-        ANCHOR_BAND = 0.15  # ±15% around the explicitly-anchored target
-        per_leg: list[tuple[float, float]] = []
-        for cs in contract_selectors:
-            kind = cs.get("kind") if cs else None
-            if kind == "delta" or kind is None:
-                # Default: delta-style (most generous). `kind=None` happens
-                # when the spec doesn't specify a contract_selector — be
-                # conservative and assume the strategy may rebalance widely.
-                per_leg.append((spot * (1.0 - DELTA_BAND), spot * (1.0 + DELTA_BAND)))
-            elif kind == "atm":
-                per_leg.append((spot * (1.0 - ATM_BAND), spot * (1.0 + ATM_BAND)))
-            elif kind == "pct_offset":
-                pct = float(cs.get("pct_offset", 0.0))
-                anchor = spot * (1.0 + pct)
-                per_leg.append((anchor * (1.0 - ANCHOR_BAND), anchor * (1.0 + ANCHOR_BAND)))
-            elif kind == "moneyness":
-                m = float(cs.get("moneyness", 1.0))
-                anchor = spot * m
-                per_leg.append((anchor * (1.0 - ANCHOR_BAND), anchor * (1.0 + ANCHOR_BAND)))
-            else:
-                # Unknown selector kind — fall back to the generous delta
-                # band rather than skipping. Better a slightly-wider band
-                # than silently dropping the push-down.
-                per_leg.append((spot * (1.0 - DELTA_BAND), spot * (1.0 + DELTA_BAND)))
-        strike_min = float(min(lo for lo, _ in per_leg))
-        strike_max = float(max(hi for _, hi in per_leg))
-    else:
-        # No spot_hint — emit a one-shot warning so a fresh agent sees why
-        # the multi-year load is slow. The engine still works without this;
-        # the warning is the documented escape hatch.
-        warnings.warn(
-            "chain_args_from_spec: spot_hint not supplied — strike_min/max "
-            "left unbounded. Multi-year option chain loads will scan all "
-            "strikes (~21min for 4yr SPX). Pass `spot_hint=<approx_spot>` "
-            "to push a server-side strike band and cut load time ~10x.",
-            stacklevel=2,
-        )
-
-    return {
-        "root": root,
-        "start": start,
-        "end": end,
-        "dte_min": dte_min,
-        "dte_max": dte_max,
-        "right": right,
-        "strike_min": strike_min,
-        "strike_max": strike_max,
-        "expiration_cycle": expiration_cycle,
-        "use_aggregation": True,
-    }
 
 
 def load_chain(
@@ -1067,9 +911,9 @@ def load_chain(
         exp_hi = _yyyymmdd(hi_dt)
         query["expiration"] = {"$gte": exp_lo, "$lte": exp_hi}
     # Server-side strike-band filter. Mirror `load_option_chain`'s A5 push-down:
-    # for delta/moneyness/ATM strategies the caller (or `chain_args_from_spec`)
-    # supplies a generous spot-relative band, cutting OPT_SP_500's ~4,000
-    # strikes to ~200-400 candidates before the cursor reads anything.
+    # for delta/moneyness/ATM strategies the caller supplies a generous
+    # spot-relative band, cutting OPT_SP_500's ~4,000 strikes to ~200-400
+    # candidates before the cursor reads anything.
     if strike_min is not None or strike_max is not None:
         strike_pred: dict[str, Any] = {}
         if strike_min is not None:

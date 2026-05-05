@@ -11,8 +11,9 @@ Style contract (Wave 6):
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 import plotly.graph_objects as go
@@ -770,6 +771,211 @@ def stats_panel(strategy_result: BacktestResult, *, title: str | None = None) ->
     return fig
 
 
+# --------------------------------------------------------------------------- raw-input sanity chart
+
+
+def _has_meaningful_volume(volume: np.ndarray) -> bool:
+    """Return True iff the volume column carries non-zero, non-NaN data.
+
+    Used to gate the volume sub-row of `plot_price_history`. The npz files
+    written by P2 (data_load.save_bars_npz) always include a `volume` key,
+    but providers like INDEX/YAHOO publish synthetic volume that's a
+    string of zeros — that's the same as missing data for plotting purposes.
+    """
+    if volume is None:
+        return False
+    v = np.asarray(volume, dtype=np.float64)
+    if v.size == 0:
+        return False
+    finite = v[np.isfinite(v)]
+    if finite.size == 0:
+        return False
+    return bool(np.any(finite > 0.0))
+
+
+def plot_price_history(
+    bars: PriceSeries,
+    *,
+    benchmark: PriceSeries | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Sanity-check chart of the raw input data: close price + optional benchmark + conditional volume.
+
+    Renders BENEATH §3 Data summary in the deliverable notebook so the user
+    can eyeball the underlying before reading any equity curve. Reads from
+    the cached `.npz` (via `PriceSeries`) — never re-fetches.
+
+    Layout:
+      - When `bars.volume` carries non-zero values: 2-row stacked subplot,
+        row 1 = close (+ optional benchmark trace, normalized to bars[0] when
+        scales differ by >2x), row 2 = volume bars.
+      - When volume is missing or all-zero: single-row figure with just the
+        close (+ optional benchmark).
+
+    `benchmark` is rendered when supplied. If its first close differs from
+    `bars.close[0]` by more than 2x (typical when comparing SPX index to ETF),
+    we display the benchmark on a secondary y-axis to keep both visible.
+
+    Style: solid lines, sky strategy + amber benchmark, x-unified hover —
+    matches the rest of the plot suite. No dashes (Sign 1).
+    """
+    if not isinstance(bars, PriceSeries):
+        raise TypeError(f"plot_price_history requires a PriceSeries, got {type(bars).__name__}")
+    if bars.dates.size == 0:
+        raise ValueError("plot_price_history: bars is empty")
+
+    show_volume = _has_meaningful_volume(bars.volume)
+    iso = _yyyymmdd_to_iso(bars.dates)
+    instrument = bars.instrument_id or "Underlying"
+    close = np.asarray(bars.close, dtype=np.float64)
+
+    # Decide whether to put benchmark on a secondary y-axis. When the absolute
+    # scales differ by >2x at the first valid sample, share the same panel but
+    # plot the benchmark against y2 so neither trace gets squashed.
+    bench_on_y2 = False
+    if benchmark is not None and benchmark.dates.size > 0 and close.size > 0:
+        b_close = np.asarray(benchmark.close, dtype=np.float64)
+        if b_close.size > 0:
+            ref_a = float(close[0])
+            ref_b = float(b_close[0])
+            if ref_a > 0 and ref_b > 0:
+                ratio = max(ref_a, ref_b) / max(min(ref_a, ref_b), 1e-9)
+                bench_on_y2 = ratio > 2.0
+
+    if show_volume:
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            row_heights=[0.75, 0.25],
+            vertical_spacing=0.06,
+            specs=[
+                [{"secondary_y": bench_on_y2}],
+                [{}],
+            ],
+        )
+    else:
+        fig = make_subplots(
+            rows=1,
+            cols=1,
+            specs=[[{"secondary_y": bench_on_y2}]],
+        )
+
+    price_hover = "%{y:,.2f}<extra>%{fullData.name}</extra>"
+
+    # Row 1 — close.
+    fig.add_trace(
+        go.Scatter(
+            x=iso,
+            y=close.tolist(),
+            mode="lines",
+            name=f"{instrument} Close",
+            line={"width": 1.5, "color": _COLOR_STRATEGY},
+            hovertemplate=price_hover,
+        ),
+        row=1, col=1,
+        secondary_y=False,
+    )
+
+    # Row 1 — benchmark overlay (optional).
+    if benchmark is not None and benchmark.dates.size > 0:
+        b_iso = _yyyymmdd_to_iso(benchmark.dates)
+        b_close_arr = np.asarray(benchmark.close, dtype=np.float64)
+        b_base_label = (benchmark.instrument_id or "Benchmark") + " (benchmark)"
+        # When the benchmark is rescaled onto a secondary y-axis, surface the fact
+        # in the legend label so it isn't only visible in hover. The full visual
+        # explanation goes on a subtitle annotation below.
+        b_label = b_base_label + (" — right axis" if bench_on_y2 else "")
+        fig.add_trace(
+            go.Scatter(
+                x=b_iso,
+                y=b_close_arr.tolist(),
+                mode="lines",
+                name=b_label,
+                line={"width": 1.25, "color": _COLOR_BH},
+                hovertemplate=price_hover,
+            ),
+            row=1, col=1,
+            secondary_y=bench_on_y2,
+        )
+
+    # Row 2 — volume (only when present).
+    if show_volume:
+        v = np.asarray(bars.volume, dtype=np.float64)
+        # Replace NaNs with 0 for display so plotly doesn't drop bars.
+        v = np.where(np.isfinite(v), v, 0.0)
+        fig.add_trace(
+            go.Bar(
+                x=iso,
+                y=v.tolist(),
+                name="Volume",
+                marker_color=_FILL_STRATEGY,
+                hovertemplate="%{y:,.0f}<extra>Volume</extra>",
+            ),
+            row=2, col=1,
+        )
+
+    # Apply themed layout, then per-axis tweaks.
+    layout = _base_layout("Price")
+    # Extra top margin so the linear/log toggle (top-right) doesn't crowd the
+    # title (top-left).
+    layout["margin"] = {**layout["margin"], "t": 88}
+    fig.update_layout(**layout)
+    fig.update_layout(title=title or f"Raw Input Data — {instrument}")
+
+    # Per-axis overrides: the top row is price (date x-axis already set by base layout),
+    # the bottom row needs a date xaxis2 + numeric "Volume" yaxis2/yaxis3 (depending on
+    # whether the secondary_y was used for benchmark).
+    fig.update_xaxes(**{**_AXIS_DEFAULTS, "type": "date"}, row=1, col=1)
+    fig.update_yaxes(
+        **{**_AXIS_DEFAULTS, "title": f"{instrument} Price"},
+        row=1, col=1, secondary_y=False,
+    )
+    if bench_on_y2:
+        # Secondary y-axis title — use the benchmark instrument for clarity.
+        b_title = (benchmark.instrument_id if benchmark is not None else "Benchmark") + " Price"
+        fig.update_yaxes(
+            **{**_AXIS_DEFAULTS, "title": b_title},
+            row=1, col=1, secondary_y=True,
+        )
+        # Subtitle annotation: make the rescaling explicit, not just legend-implicit.
+        fig.add_annotation(
+            text="benchmark rescaled to share the close-price visual span (right axis)",
+            xref="paper", yref="paper",
+            x=0.0, y=1.04, xanchor="left", yanchor="bottom",
+            showarrow=False,
+            font={"size": 10, "color": "#6b7280"},
+        )
+    if show_volume:
+        fig.update_xaxes(**{**_AXIS_DEFAULTS, "type": "date"}, row=2, col=1)
+        fig.update_yaxes(**{**_AXIS_DEFAULTS, "title": "Volume"}, row=2, col=1)
+
+    # Linear/log y-toggle for the close-price axis only (volume bars on a log
+    # scale are meaningless). When the benchmark is on `yaxis2` (row-1 secondary_y),
+    # toggle that too so both close-price traces share the same scale type.
+    # Volume axis ids (yaxis2 or yaxis3, depending on bench_on_y2) are deliberately
+    # excluded.
+    price_axes = ["yaxis"]
+    if bench_on_y2:
+        price_axes.append("yaxis2")
+    linear_args: dict = {f"{ax}.type": "linear" for ax in price_axes}
+    log_args: dict = {f"{ax}.type": "log" for ax in price_axes}
+    fig.update_layout(updatemenus=[{
+        "type": "buttons", "direction": "right",
+        "x": 1.0, "y": 1.12, "xanchor": "right", "yanchor": "top",
+        "pad": {"t": 4, "b": 4, "l": 6, "r": 6},
+        "bgcolor": "#ffffff",
+        "bordercolor": "#d1d5db",
+        "font": {"color": "#374151", "size": 11},
+        "buttons": [
+            {"label": "linear", "method": "relayout", "args": [linear_args]},
+            {"label": "log", "method": "relayout", "args": [log_args]},
+        ],
+    }])
+
+    return fig
+
+
 # --------------------------------------------------------------------------- batch writer
 
 
@@ -810,3 +1016,40 @@ def write_plot_set(
         fig.write_json(str(p))
         paths[pid] = p
     return paths
+
+
+# ---------------------------------------------------------------------------
+# Plot registry — PlotJob + BASELINE_PLOTS
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PlotJob:
+    """Bind a plot ``id`` to a ``builder`` + frozen ``kwargs``.
+
+    The compile pipeline runs each ``PlotJob`` (baseline + strategy-declared
+    ``EXTRA_PLOTS``), writing per-plot JSON to ``results/plots/<id>.json``.
+    The builder receives ``result`` (a ``BacktestResult``-like object) as its
+    first positional argument by convention, plus any ``kwargs``.
+
+    Builders that need different positional inputs wrap the call with a
+    closure when declared in ``EXTRA_PLOTS``.
+    """
+
+    id: str
+    builder: Callable[..., Any]
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+# Baseline plots — always rendered for any strategy that produces an equity
+# curve. Six builders chosen per the locked design:
+#   1. equity, 2. drawdown, 3. yearly bars (returns histogram),
+#   4. stats panel (metrics_panel), 5. trade markers, 6. hold-time hist.
+BASELINE_PLOTS: list[PlotJob] = [
+    PlotJob(id="equity", builder=equity_curve),
+    PlotJob(id="drawdown", builder=drawdown),
+    PlotJob(id="yearly_bars", builder=yearly_returns_bars),
+    PlotJob(id="stats_panel", builder=stats_panel),
+    PlotJob(id="trade_markers", builder=trade_markers),
+    PlotJob(id="hold_time_hist", builder=hold_time_histogram),
+]

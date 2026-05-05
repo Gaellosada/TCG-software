@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BacktesterManifest",
+  "type": "object",
+  "required": [
+    "dates", "portfolio_equity", "leg_equities", "raw_leg_equities",
+    "rebalance_dates", "metrics", "leg_metrics",
+    "monthly_returns", "yearly_returns",
+    "date_range", "full_date_range", "rebalance", "return_type",
+    "benchmark_equity", "trades",
+    "assumptions_ref", "notebook_path", "plot_paths", "iterations"
+  ],
+  "properties": {
+    "dates": {"type": "array", "items": {"type": "string", "format": "date"}},
+    "portfolio_equity": {"type": "array", "items": {"type": "number"}},
+    "leg_equities": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "number"}}},
+    "raw_leg_equities": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "number"}}},
+    "rebalance_dates": {"type": "array", "items": {"type": "string", "format": "date"}},
+    "metrics": {
+      "type": "object",
+      "required": [
+        "total_return","annualized_return","sharpe_ratio","sortino_ratio",
+        "max_drawdown","calmar_ratio","cvar_5","time_underwater_days",
+        "annualized_volatility","num_trades","win_rate"
+      ],
+      "properties": {
+        "total_return": {"type": "number"},
+        "annualized_return": {"type": "number"},
+        "sharpe_ratio": {"type": "number"},
+        "sortino_ratio": {"type": "number"},
+        "max_drawdown": {"type": "number"},
+        "calmar_ratio": {"type": "number"},
+        "cvar_5": {"type": "number"},
+        "time_underwater_days": {"type": "integer"},
+        "annualized_volatility": {"type": "number"},
+        "num_trades": {"type": "integer"},
+        "win_rate": {"type": ["number", "null"]}
+      }
+    },
+    "leg_metrics": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/properties/metrics"}
+    },
+    "monthly_returns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["period", "portfolio"],
+        "properties": {
+          "period": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+          "portfolio": {"type": "number"}
+        },
+        "additionalProperties": {"type": "number"}
+      }
+    },
+    "yearly_returns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["period", "portfolio"],
+        "properties": {
+          "period": {"type": "string", "pattern": "^[0-9]{4}$"},
+          "portfolio": {"type": "number"}
+        },
+        "additionalProperties": {"type": "number"}
+      }
+    },
+    "date_range": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date"}
+      }
+    },
+    "full_date_range": {"$ref": "#/properties/date_range"},
+    "rebalance": {"type": "string", "enum": ["bar","daily","weekly","monthly","quarterly","annually"]},
+    "return_type": {"type": "string", "enum": ["normal","log"]},
+    "benchmark_equity": {"type": ["array", "null"], "items": {"type": "number"}},
+    "trades": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["date","side","qty","price","cost","pnl","leg"],
+        "properties": {
+          "date": {"type": "string", "format": "date"},
+          "side": {"type": "string", "enum": ["BUY","SELL"]},
+          "qty": {"type": "number"},
+          "price": {"type": "number"},
+          "cost": {"type": "number"},
+          "pnl": {"type": "number"},
+          "leg": {"type": "string"}
+        }
+      }
+    },
+    "assumptions_ref": {"type": "string"},
+    "notebook_path": {"type": "string"},
+    "plot_paths": {
+      "type": "object",
+      "properties": {
+        "equity": {"type": "string"},
+        "drawdown": {"type": "string"},
+        "returns_heatmap": {"type": "string"},
+        "log_returns_heatmap": {"type": "string"},
+        "yearly_bars": {"type": "string"},
+        "trade_markers": {"type": "string"},
+        "hold_time_hist": {"type": "string"},
+        "stats_panel": {"type": "string"},
+        "price_history": {"type": "string"}
+      },
+      "additionalProperties": {"type": "string"}
+    },
+    "iterations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["timestamp", "summary", "scope", "path"],
+        "properties": {
+          "timestamp": {"type": "string", "format": "date-time"},
+          "summary": {"type": "string"},
+          "scope": {"type": "array", "items": {"type": "string", "pattern": "^P[1-7]$"}},
+          "path": {
+            "type": ["string", "null"],
+            "description": "Filesystem path (relative to workspace root) to the snapshot manifest of this iteration, e.g., results/iter_03/manifest.json. Null when the iteration is the current run (results/manifest.json itself) and no snapshot has been taken yet."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ASSUMPTIONS",
+  "type": "object",
+  "required": ["metadata", "assumptions"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["strategy_id", "created_at", "last_updated"],
+      "properties": {
+        "strategy_id": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "last_updated": {"type": "string", "format": "date-time"},
+        "schema_version": {"type": "string", "default": "1.0"},
+        "dismissed_probes": {
+          "type": "array",
+          "description": "Audit trail of probe interactions where the user declined the suggestion and the agent applied the documented safe default.",
+          "items": {
+            "type": "object",
+            "required": ["probe_id", "user_response", "applied_default"],
+            "properties": {
+              "probe_id": {"type": "string"},
+              "user_response": {"type": "string"},
+              "applied_default": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["field", "value", "source", "confidence", "rationale", "editable", "group"],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Dotted path into strategy.py META, e.g. execution.fees_bps"
+          },
+          "value": {
+            "description": "The applied value. Any JSON type."
+          },
+          "source": {
+            "type": "string",
+            "enum": ["default", "inferred", "user"]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "rationale": {
+            "type": "string",
+            "description": "One-line plain-English justification."
+          },
+          "editable": {
+            "type": "boolean",
+            "description": "True iff the frontend can offer inline-edit. Always true for source=default|inferred; false for fields the engine cannot recompute mid-iteration."
+          },
+          "group": {
+            "type": "string",
+            "enum": ["meta", "universe", "date_range", "execution", "signals", "sizing", "benchmark", "reporting"]
+          },
+          "applied_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Optional. When this assumption was first written."
+          },
+          "iteration_id": {
+            "type": ["string", "null"],
+            "description": "Optional. The ITERATIONS.md entry that introduced this value, if any."
+          },
+          "superseded_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Optional. Set when a later iteration replaces this assumption; preserves audit trail."
+          }
+        }
+      }
+    }
+  }
+}

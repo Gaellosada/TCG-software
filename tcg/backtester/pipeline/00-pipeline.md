@@ -6,7 +6,7 @@ This file defines the state machine. Every other `pipeline/*.md` is a phase impl
 
 | File                       | Owner phase | Lifecycle                     |
 |----------------------------|-------------|-------------------------------|
-| `STRATEGY.yaml`            | intake      | created in P1, edited in P6   |
+| `strategy.py`              | intake      | created in P1, edited in P6   |
 | `ASSUMPTIONS.json`         | intake      | created in P1, appended P2-P6 |
 | `data/data_summary.json`   | data        | rewritten on every P2 run     |
 | `data/<series>.npz`        | data        | cached, reused across iters   |
@@ -27,9 +27,9 @@ Run a phase iff its declared inputs exist and are newer than its output, OR the 
 
 | Phase | Inputs                                              | Outputs                              |
 |-------|-----------------------------------------------------|--------------------------------------|
-| P1    | user prompt                                         | STRATEGY.yaml, ASSUMPTIONS.json      |
-| P2    | STRATEGY.yaml (universe, date_range)                | data/*.npz, data/data_summary.json   |
-| P3    | STRATEGY.yaml (signals, sizing, execution), data/*  | results/raw_result.{pkl,json}        |
+| P1    | user prompt                                         | strategy.py, ASSUMPTIONS.json        |
+| P2    | strategy.py (META.universe, META.dates)             | data/*.npz, data/data_summary.json   |
+| P3    | strategy.py (compute_signal or run), data/*         | results/raw_result.{pkl,json}        |
 | P4    | results/raw_result.pkl                              | results/metrics.json, plots/*.json, results/diagnostics.json |
 | P5    | scripts/, results/metrics.json, plots/              | notebook.ipynb, manifest.json        |
 | P6    | user variant request OR P4 actionable insight       | ITERATIONS.md entry, re-run subset   |
@@ -41,13 +41,13 @@ Given a variant request, identify the smallest valid re-run set:
 
 | Change in spec                              | Re-run                  |
 |---------------------------------------------|-------------------------|
-| signal parameter (e.g., SMA 20 -> 50)       | P3, P4, P5              |
+| signal logic (e.g., SMA window tweak)       | P3, P4, P5              |
 | sizing rule                                 | P3, P4, P5              |
 | execution config (fees, slippage, fill)     | P3, P4, P5              |
 | date_range subset of cached range           | P3, P4, P5              |
 | date_range extending beyond cached range    | P2, P3, P4, P5          |
 | new instrument                              | P2, P3, P4, P5          |
-| new signal type entirely                    | P1 (re-validate), P3-P5 |
+| new signal shape entirely                   | P3-P5 (no P1 re-run needed — strategy.py is the spec) |
 | reporting tweak (section override only)     | P5                      |
 
 Always append to `ITERATIONS.md` before re-running. One iteration entry per variant request. Never delete prior results.
@@ -57,7 +57,7 @@ Snapshots are MANDATORY on every iteration cycle. See `pipeline/06-iterate.md` �
 ## Decision tree at session start
 
 ```
-exists(STRATEGY.yaml)?
+exists(strategy.py)?
   no  -> P1
   yes -> exists(results/manifest.json)?
            no  -> resume at first phase whose output is missing
@@ -80,13 +80,13 @@ No phase reads or writes outside the workspace.
 
 ## Determinism rule
 
-Same `STRATEGY.yaml` + same `ASSUMPTIONS.json` user-confirmed values + same data snapshot MUST produce the same `results/manifest.json` modulo timestamps. The pipeline path through phases is fully determined by the state-file presence table above. No agent freelancing.
+Same `strategy.py` + same `ASSUMPTIONS.json` user-confirmed values + same data snapshot MUST produce the same `results/manifest.json` modulo timestamps. The pipeline path through phases is fully determined by the state-file presence table above. No agent freelancing.
 
 ## Failure messages
 
 For each phase, when it cannot proceed, the agent emits one of these canonical messages followed by the specific cause:
 
-- P1 intake: "Cannot finalize strategy spec — <reason>. See `PROBLEMS.md`."
+- P1 intake: "Cannot finalise strategy — <reason>. See `PROBLEMS.md`."
 - P2 data: "Data load failed for <instrument>:<range> — <reason>. The MongoDB collection returned <N> bars."
 - P3 backtest: "Backtest aborted — <reason>. Inputs: <bars=N, signal=N, benchmark=N>."
 - P4 analyze: "Analysis aborted — <reason>."

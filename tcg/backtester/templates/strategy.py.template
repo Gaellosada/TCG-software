@@ -1,0 +1,144 @@
+"""Code-first strategy entry point.
+
+This file IS the strategy contract. The lib reads ``META`` (above heavy
+imports so static parsing works), then calls ``compute_signal(bars, ctx)``
+to drive the engine. Fill in the ``TODO`` placeholders and replace the stub
+``compute_signal`` body with your signal logic. The notebook compile step
+embeds this file verbatim, so the reader sees exactly the code that
+produced the equity curve.
+"""
+
+# ---- META ------------------------------------------------------------------
+# Required keys: slug, description, dates, universe, benchmark.
+# Optional keys: asset_class (default "INDEX"; e.g. "ETF", "FUT"),
+# sizing, execution, capital_base, tags, seed.
+# Keep META above heavy imports so ``ast.literal_eval`` could parse it
+# without executing anything.
+
+META = {
+    "slug": "TODO",
+    "description": "TODO",
+    "dates": {"start": "TODO", "end": "TODO"},
+    "universe": ["TODO"],                 # canonical instrument is universe[0]
+    "benchmark": "TODO",
+    "asset_class": "INDEX",               # INDEX | ETF | FUT | OPT
+    "sizing": {"method": "fixed_fraction", "fraction": 1.0},
+    "execution": {"fees_bps": 5.0, "slippage_bps": 5.0, "fill_timing": "next_open"},
+    "tags": [],                           # advisory only, never gatekeeping
+}
+
+# ---- imports (heavy stuff, below META) -------------------------------------
+
+import numpy as np
+from numpy.typing import NDArray
+
+from lib.indicators import (
+    apply_direction,
+    breakout,
+    daily_pulse,
+    ema,
+    rolling_vol,
+    rsi,
+    sma,
+)
+
+
+# ---- compute_signal --------------------------------------------------------
+#
+# Available on `ctx` (StrategyContext, frozen dataclass):
+#   ctx.workspace_path    : Path to this workspace
+#   ctx.meta              : the META dict above
+#   ctx.bars              : the loaded PriceSeries (same as the `bars` arg)
+#   ctx.logger            : stdlib logger namespaced under META["slug"]
+#   ctx.load_bars         : callable to load extra legs (multi-instrument)
+#   ctx.load_option_chain : callable to fetch an option chain by date range
+#   ctx.run_backtest      : engine entry (used by the run-shape escape hatch)
+#   ctx.indicators        : the lib.indicators module (alternative to direct import)
+#   ctx.options           : the lib.options module (vertical, iron_condor,
+#                           build_legs, ...)
+#
+# Indicator helpers available from lib.indicators:
+#   sma(x, n)                            simple moving average
+#   ema(x, n)                            exponential moving average
+#   rsi(close, n=14)                     Wilder's RSI
+#   breakout(high, low, close, lookback) Donchian-style +/-1 / 0
+#   rolling_vol(close, window, ...)      annualised rolling stdev of returns
+#   apply_direction(signal, dir)         clamp to long_only / short_only / long_short
+#   daily_pulse(n_bars)                  alternating +/-1 (for daily-rebalance)
+#
+# Look-ahead policy: the engine applies a one-bar shift internally
+# (position[t] uses signal[t-1]). Compose your signal on the bars you have;
+# the engine takes care of "no peeking at today's close to fill today's bar".
+
+
+def compute_signal(bars, ctx) -> NDArray[np.float64]:
+    # TODO: signal logic here.
+    return np.zeros(len(bars.dates), dtype=np.float64)
+
+
+# ---- escape hatch (uncomment if you need it) -------------------------------
+#
+# When the canonical (compute_signal) shape doesn't fit — e.g. multi-leg,
+# options-strategy, load extra series, run an optimiser, do your own
+# backtest call — export `run` instead. The lib then hands you the
+# StrategyContext (with ``ctx.bars is None``) and you return a
+# BacktestResult yourself.
+#
+# BacktestSpec fields you'll typically set (see `lib/engine.py:BacktestSpec`
+# for the full list):
+#   bars: PriceSeries           — the primary instrument
+#   signal: NDArray[float64]    — same length as bars.dates
+#   benchmark: PriceSeries|None — for §6 comparison (load via ctx.load_bars
+#                                 and pass the result; NOT an id string)
+#   sizing: SizingConfig        — defaults to META["sizing"]
+#   execution: ExecutionConfig  — defaults to META["execution"]
+#   capital_base: float         — defaults to META.get("capital_base", 100_000)
+#   option_legs: tuple[...]|None        — multi-leg options (see lib.options)
+#   option_chain_provider: Callable|None — REQUIRED with option_legs; per-bar
+#                                          chain loader. See the iron-condor
+#                                          canonical example for the full
+#                                          shape (DTE + strike narrowing).
+#
+# from lib import BacktestResult, BacktestSpec, ExecutionConfig, SizingConfig
+# from lib.engine import DteSelector
+# from lib.options import build_legs
+#
+# def run(ctx) -> BacktestResult:
+#     bars = ctx.load_bars("SPX", asset_class="INDEX",
+#                          start=20200101, end=20241231)
+#     bench = ctx.load_bars("ETF_SPY", asset_class="ETF",
+#                           start=20200101, end=20241231)
+#     legs = build_legs(
+#         [
+#             {"side": "short", "option_type": "C",
+#              "strike": ("offset_pct",  0.05), "leg_id": "short_call"},
+#             {"side": "long",  "option_type": "C",
+#              "strike": ("offset_pct",  0.10), "leg_id": "long_call"},
+#         ],
+#         expiry_selector=DteSelector(target_dte=30),
+#         spot_hint=4500.0,
+#     )
+#     spec = BacktestSpec(
+#         bars=bars,
+#         signal=ctx.indicators.daily_pulse(len(bars.dates)),
+#         benchmark=bench,
+#         option_legs=legs,
+#         sizing=SizingConfig(method="fixed_fraction", fraction=0.0),
+#     )
+#     return ctx.run_backtest(spec)
+
+
+# ---- extra plots (uncomment to add) ----------------------------------------
+#
+# BASELINE_PLOTS already covers equity, drawdown, yearly bars, metrics
+# panel, trade markers, hold-time histogram. To add strategy-specific
+# diagnostics (e.g. signal overlay, regime ribbon, payoff diagram),
+# declare additional PlotJobs here. Each builder receives ``result``
+# (BacktestResult) by default; the compile pipeline writes
+# results/plots/<id>.json.
+#
+# from lib.plotting import PlotJob
+#
+# EXTRA_PLOTS = [
+#     PlotJob(id="signal_overlay", builder=my_signal_builder, kwargs={}),
+# ]

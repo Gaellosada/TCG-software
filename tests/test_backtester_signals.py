@@ -1,8 +1,8 @@
-"""Test vectorized signal functions from the vendored library."""
+"""Test vectorized indicator functions from the vendored library."""
 
 import numpy as np
 import pytest
-from tcg.backtester.lib.signals import sma, ema, rsi
+from tcg.backtester.lib.indicators import sma, ema, rsi
 
 
 class TestSMA:

@@ -1,34 +1,64 @@
-# Purpose: run a single-leg backtest end-to-end and persist the result.
+# Purpose: run a code-first strategy end-to-end and persist the result.
+#
+# Copy to scripts/03_backtest.py and run from the workspace root. The script
+# imports strategy.py, calls lib.run_strategy, runs behavioural probes, and
+# writes raw_result.pkl + raw_result.json.
+#
+# CWD must be the workspace root (the directory containing strategy.py).
 
-import json, pickle
-from tcg_backtester.lib import data_load, engine, types
+from __future__ import annotations
 
-BARS_NPZ = "data/SPY.npz"
-SIGNAL_NPZ = "data/signal_sma.npz"
-BENCH_NPZ = "data/SPY.npz"
-EXECUTION = types.ExecutionConfig(fees_bps=5, slippage_bps=5, fill_timing="next_open", look_ahead_shift=1)
-SIZING = types.SizingConfig(method="fixed_fraction", fraction=1.0)
-OUT_DIR = "results"
+import importlib.util
+import json
+import pickle
+from pathlib import Path
 
-bars = data_load.load_npz(BARS_NPZ)
-sig = data_load.load_signal_npz(SIGNAL_NPZ)
-bench = data_load.load_npz(BENCH_NPZ)
+from lib import run_strategy
+from lib.validate import run_probes, first_fired
 
-spec = types.BacktestSpec(
-    bars=bars, signal=sig, benchmark=bench, execution=EXECUTION, sizing=SIZING,
-)
-result = engine.run_backtest(spec)
+# ---- edit point 1: workspace root ------------------------------------------
+WS = Path.cwd()  # run from workspace root; never hardcode an absolute path
 
-with open(f"{OUT_DIR}/raw_result.pkl", "wb") as f:
+# ---- load strategy module ---------------------------------------------------
+_spec = importlib.util.spec_from_file_location("strategy", WS / "strategy.py")
+strategy = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(strategy)
+
+# If requirements.txt is present, pre-flight should have already run
+# `pip install -r requirements.txt` before this script is called.
+# That step is handled by the pipeline's pre-flight phase; this script does
+# NOT install dependencies itself.
+
+# ---- run strategy -----------------------------------------------------------
+result = run_strategy(strategy, workspace_path=WS)
+
+# ---- behavioural probes -----------------------------------------------------
+# run_probes needs the bars only for compute_signal-shape strategies.
+# For run-shape strategies, pass None — the probe skips signal-specific checks.
+_bars = getattr(result, "_bars", None)
+report = run_probes(strategy, _bars, result, workspace_path=WS)
+fired = first_fired(report)
+if fired is not None:
+    print(f"[probe WARN] {fired} — check strategy.py and re-run, or dismiss if intentional")
+else:
+    print(f"[probe] all probes PASS (severity={report.severity})")
+
+# ---- persist ----------------------------------------------------------------
+out_dir = WS / "results"
+out_dir.mkdir(parents=True, exist_ok=True)
+
+with open(out_dir / "raw_result.pkl", "wb") as f:
     pickle.dump(result, f)
-with open(f"{OUT_DIR}/raw_result.json", "w") as f:
+
+with open(out_dir / "raw_result.json", "w") as f:
     json.dump(result.to_json_dict(), f)
-print(f"backtest done: equity[-1]={result.equity[-1]:.4f}, trades={len(result.trades)}")
+
+print(
+    f"backtest done: equity[-1]={result.equity[-1]:.4f} "
+    f"trades={len(result.trades)} "
+    f"n_bars={len(result.dates)}"
+)
 
 # Edit points:
-#   1. BARS_NPZ        — tradable bar npz path
-#   2. SIGNAL_NPZ      — signal npz path (must align to BARS_NPZ dates)
-#   3. BENCH_NPZ       — benchmark bar npz path (often same as BARS_NPZ)
-#   4. EXECUTION       — fees, slippage, fill_timing, look_ahead_shift
-#   5. SIZING          — fixed_fraction / inverse_vol / kelly_capped
-#   6. OUT_DIR         — usually "results"
+#   1. WS          — workspace root (default: Path.cwd(); do not hardcode)
+#   (everything else is driven by strategy.py's META and signal logic)

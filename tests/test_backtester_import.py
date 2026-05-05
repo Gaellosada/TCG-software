@@ -9,14 +9,15 @@ def test_all_modules_import():
         aliases,
         compile,
         constants,
+        data,
         data_load,
         diagnostics,
         engine,
+        indicators,
         metrics,
         mongo,
         options,
         plotting,
-        signals,
         snippets_registry,
         types,
         validate,
@@ -29,14 +30,15 @@ def test_all_modules_import():
             aliases,
             compile,
             constants,
+            data,
             data_load,
             diagnostics,
             engine,
+            indicators,
             metrics,
             mongo,
             options,
             plotting,
-            signals,
             snippets_registry,
             types,
             validate,
@@ -49,5 +51,14 @@ def test_top_level_reexport():
     import tcg.backtester
 
     assert hasattr(tcg.backtester, "engine")
-    assert hasattr(tcg.backtester, "signals")
+    assert hasattr(tcg.backtester, "indicators")
     assert hasattr(tcg.backtester, "metrics")
+
+
+def test_strategy_exports():
+    """tcg.backtester should re-export strategy entry points."""
+    import tcg.backtester
+
+    assert hasattr(tcg.backtester, "run_strategy")
+    assert hasattr(tcg.backtester, "StrategyContext")
+    assert hasattr(tcg.backtester, "BacktestResult")

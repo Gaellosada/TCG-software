@@ -1,0 +1,2 @@
+# pip dependencies the strategy needs that aren't in pyproject.toml.
+# Pre-flight runs `pip install -r requirements.txt` before importing strategy.

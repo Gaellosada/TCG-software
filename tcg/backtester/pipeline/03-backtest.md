@@ -1,74 +1,94 @@
 # P3 — Backtest
 
-Goal: produce `results/raw_result.pkl` (and a JSON twin) by running `lib.engine.run_backtest` against the spec. Do not analyze yet.
+Goal: produce `results/raw_result.pkl` (and a JSON twin) by running the strategy end-to-end via `lib.run_strategy`. Do not analyse yet.
+
+## The strategy contract
+
+`strategy.py` defines `META` plus either:
+
+- **`compute_signal(bars, ctx) -> NDArray[np.float64]`** — canonical shape. The lib loads bars per `META`, calls `compute_signal`, applies the one-bar look-ahead shift internally, sizes, and runs the engine. The returned array must be the same length as `bars.dates`.
+- **`run(ctx) -> BacktestResult`** — escape hatch. The strategy loads its own series, builds legs, runs its own `ctx.run_backtest(spec)` call, and returns the result. `ctx.bars` is `None` in this shape.
+
+The lib detects which shape is present. If both are defined, `run` wins (lib logs a warning).
 
 ## Generate `scripts/03_backtest.py`
 
-Start from `snippets/run_basic_backtest.py`. Replace its placeholder edits with values from `STRATEGY.yaml`. The script MUST:
+Start from `snippets/run_basic_backtest.py`. The script MUST:
 
-1. Load cached series from `data/`.
-2. Build a `BacktestSpec` with explicit `execution` (`fees_bps`, `slippage_bps`, `fill_timing`, `look_ahead_shift`, `risk_free_rate`), `bars`, `signal`, `sizing`, `benchmark`, `option_legs` (when applicable). The bars and signal arrays go directly on the spec; there is no separate `data` argument.
-3. Call `lib.engine.run_backtest(spec) -> BacktestResult`. Single argument; the spec carries everything the engine needs.
-4. `pickle.dump` the result to `results/raw_result.pkl` and write the JSON-safe view via `result.to_json_dict()` to `results/raw_result.json`.
+1. Import and load the strategy module: `import importlib.util; strategy = importlib.util.spec_from_file_location(...)` or simply `import strategy` when CWD is the workspace root.
+2. Call `lib.run_strategy(strategy, workspace_path=Path.cwd())` — single call, returns `BacktestResult`.
+3. Call `lib.validate.run_probes(strategy, bars, result, workspace_path=Path.cwd())` and surface the first failure via `first_fired(report)`.
+4. `pickle.dump` the result to `results/raw_result.pkl` and write `result.to_json_dict()` to `results/raw_result.json`.
 
-## Default execution config (do not deviate without an assumption record)
+```python
+from pathlib import Path
+import pickle, json, importlib.util
 
-Execution defaults come from `STRATEGY.yaml.execution.*`, set at intake (see `pipeline/01-intake.md` § Default ladder). Any override MUST already be in `ASSUMPTIONS.json` with `source: "user"` or `source: "inferred"`.
+from lib import run_strategy
+from lib.validate import run_probes, first_fired
 
-## Pure-options strategies (no underlying exposure)
+WS = Path.cwd()
 
-When `signals.legs` contains option legs and you do NOT want underlying exposure (typical for iron condors, vertical spreads, calendar spreads, covered structures), suppress the underlying with **either** of these patterns:
+spec = importlib.util.spec_from_file_location("strategy", WS / "strategy.py")
+strategy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(strategy)
 
-- **Preferred**: pass entry trigger via `BacktestSpec.secondary_signals={"entry": signal}` and set `BacktestSpec.signal=np.zeros(N)`. Each `OptionLegSpec` then references `entry_signal="entry"`.
-- **Compact**: keep the entry trigger on `BacktestSpec.signal` and set `BacktestSpec.sizing=SizingConfig(method="fixed_fraction", fraction=0.0)`. The `fraction=0` makes underlying notional 0 while option legs retain their `qty_units`.
+result = run_strategy(strategy, workspace_path=WS)
 
-Mixing underlying directional exposure with option overlays (covered calls, collars) is supported by leaving sizing non-zero — but the `ASSUMPTIONS.json` must record the choice explicitly.
+# Run behavioural probes; ask user only if one fires.
+report = run_probes(strategy, getattr(result, "_bars", None), result, workspace_path=WS)
+fired = first_fired(report)
+if fired:
+    print(f"[probe] {fired}")
+
+WS.joinpath("results").mkdir(parents=True, exist_ok=True)
+with open(WS / "results" / "raw_result.pkl", "wb") as f:
+    pickle.dump(result, f)
+with open(WS / "results" / "raw_result.json", "w") as f:
+    json.dump(result.to_json_dict(), f)
+print(f"backtest done: equity[-1]={result.equity[-1]:.4f}, trades={len(result.trades)}")
+```
+
+## Execution config
+
+`META["execution"]` carries fees, slippage, and fill timing. `run_strategy` reads these and builds `ExecutionConfig` internally. To override a field without changing `META`, pass it explicitly in `META` with an assumption record in `ASSUMPTIONS.json`.
+
+Default values (applied if `META["execution"]` is absent):
+- `fees_bps=5.0`, `slippage_bps=5.0`, `fill_timing="next_open"`.
+
+## Options strategies (run-shape)
+
+For strategies that use `lib.options.build_legs`, the `run` function handles everything: it loads bars, builds the `OptionLegSpec` tuple via `build_legs`, attaches it to `BacktestSpec`, and calls `ctx.run_backtest(spec)`. No special P3 scaffolding needed — `run_strategy` dispatches to `strategy.run(ctx)` and returns the result.
+
+For pure-options strategies with no underlying directional exposure, set `sizing.fraction=0.0` in `BacktestSpec`. Use `lib.indicators.daily_pulse(n)` as the entry trigger so the engine fires a fresh entry on every bar.
+
+See `templates/examples/complex_iron_condor/strategy.py` for a worked 4-leg example.
 
 ## Look-ahead policy
 
-The engine applies `positions = np.roll(positions, look_ahead_shift); positions[:look_ahead_shift] = 0`. This is the only acceptable look-ahead handling. Never compute signals using `close[t]` and fill at `close[t]` in the same bar.
+The engine applies `positions = np.roll(positions, look_ahead_shift); positions[:look_ahead_shift] = 0` internally. This is the only acceptable look-ahead handling — never compute signals using `close[t]` and fill at `close[t]` in the same bar.
 
-## Daily-rebalance signal semantics (IMPORTANT for option strategies)
+The `no_lookahead` probe in `run_probes` samples 5 mid-range indices and asserts `compute_signal(bars[:-1], ctx)[i] == compute_signal(bars, ctx)[i]` for `i < len-1`. It runs automatically in P3; surface any firing via `first_fired`.
 
-The engine fires entry only when the entry signal **transitions** from `0`
-to nonzero, OR changes sign. A constant `signal=np.ones(N)` opens exactly one
-position over the entire run — even if the leg uses `exit_rule: days_to_hold`
-with `n=1`. The opened-and-closed slot becomes idle the next bar because the
-signal hasn't transitioned again.
+## Daily-rebalance signal semantics (important for options)
 
-To re-enter on every bar (daily rebalance, weekly rebalance with
-`DaysToHold(n=5)`, etc.), the entry signal must change every bar. Two
-canonical patterns:
+The engine fires entry only when the signal **transitions** from 0 to nonzero, OR changes sign. A constant `signal=np.ones(N)` opens exactly one position over the entire run.
 
-1. **`lib.signals.daily_pulse(n_bars)`** — alternating `[+1, -1, +1, -1, ...]`.
-   The leg side comes from `OptionLegSpec.side`, not the trigger sign, so PnL
-   is invariant to the alternation. Preferred for "fire every bar" cases.
-
-2. **Custom signal** — produce an array where `signal[t] != signal[t-1]` on
-   every bar where you want a fresh entry.
+To re-enter on every bar:
 
 ```python
-from tcg_backtester.lib.signals import daily_pulse
+from lib.indicators import daily_pulse
 
-signal = daily_pulse(n_bars=len(bars.dates))
-spec = BacktestSpec(..., signal=signal,
-                    sizing=SizingConfig(method="fixed_fraction", fraction=0.0))
+signal = daily_pulse(n_bars=len(bars.dates))  # alternating +1, -1, +1, -1, ...
 ```
 
-Pair with `exit_rule: {kind: days_to_hold, n: 1}` for daily-rebalance.
+For long-only daily rebalance, wrap with `apply_direction(signal, "long_only")`.
 
 ## `__file__` in compiled notebooks
 
-`scripts/*.py` are concatenated into `results/notebook.ipynb` as cells with
-**no inherent `__file__`**. Patterns like `Path(__file__).resolve().parent`
-crash with `NameError` when run from inside the notebook.
+`scripts/*.py` are concatenated into `results/notebook.ipynb` as cells with no inherent `__file__`. Patterns like `Path(__file__).resolve().parent` crash with `NameError` inside the notebook.
 
-**Use `Path.cwd()` instead.** The notebook bootstrap in `lib.compile` calls
-`os.chdir` to the workspace dir (the directory containing `STRATEGY.yaml`)
-before any user cell runs, so `Path.cwd() / "data"` is always the workspace
-data directory. The bootstrap also injects a synthetic `__file__` fallback
-pointing at `<workspace>/scripts/notebook_cell.py` so legacy patterns still
-resolve, but new scripts should use `Path.cwd()`.
+**Use `Path.cwd()` instead.** The compile step chdirs to the workspace dir before any user cell runs, so `Path.cwd() / "data"` is always the workspace data directory.
 
 ```python
 # Canonical pattern (works in scripts AND in compiled notebook cells):
@@ -76,13 +96,6 @@ from pathlib import Path
 WS = Path.cwd()
 DATA = WS / "data" / "SPX.npz"
 ```
-
-## Signal generation
-
-For each leg in `signals`:
-- indicator-based: build the indicator series via `snippets/compute_signals_<indicator>.py`. Output a signed `{-1,0,1}` array aligned to `dates`.
-- option-leg: build the per-contract position via `snippets/option_strategy_<name>.py`.
-- composite: combine leg signals with the declared weights; clip net position to `[-1, 1]` for fixed_fraction sizing.
 
 ## BacktestResult contents (defined in `lib.engine`)
 
@@ -96,9 +109,9 @@ The frozen dataclass exposes:
 - `positions: NDArray[float64]` — target weights per bar (post look-ahead shift).
 - `cash: NDArray[float64]` — book-keeping cash curve.
 - `gross_exposure: NDArray[float64]` — |target| + leg notionals / capital_base.
-- `meta: dict` — flat snapshot under `meta["spec"]`; also contains `n_bars`, `nan_bars`, `instrument_id`, `benchmark_id`, `n_option_legs_*`, etc.
+- `meta: dict` — flat snapshot; contains `n_bars`, `instrument_id`, `benchmark_id`, `n_option_legs_*`, etc.
 
-There is no `daily_returns` field; compute it from `equity_curve` if needed (`metrics._bar_returns` does this internally). The JSON-safe view `result.to_json_dict()` returns `{"dates": [...iso...], "equity": [...], "benchmark_equity": [...] | null, "drawdown": [...], "positions": [...], "cash": [...], "gross_exposure": [...], "trades": [...dicts...], "meta": {...}}`.
+The JSON-safe view `result.to_json_dict()` returns `{"dates": [...iso...], "equity": [...], "benchmark_equity": [...] | null, "drawdown": [...], "positions": [...], "cash": [...], "gross_exposure": [...], "trades": [...dicts...], "meta": {...}}`.
 
 ## Output contract
 

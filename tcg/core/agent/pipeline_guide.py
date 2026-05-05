@@ -28,12 +28,12 @@ STRATEGY.yaml exists?
 
 ## Library API Reference
 
-### Data Loading (tcg.backtester.lib.data_load)
+### Data Loading (tcg_backtester.lib.data_load)
 
 All fetch functions are **synchronous** — they create their own MongoDB connection internally.
 
 ```python
-from tcg.backtester.lib import data_load
+from tcg_backtester.lib import data_load
 
 # Equities / indices
 bars = data_load.fetch_index_bars("IND_SP_500", start=20200101, end=20241231)
@@ -59,25 +59,26 @@ data_load.save_bars_npz(bars, "data/SPX.npz")
 bars = data_load.load_bars_npz("data/SPX.npz")  # if it exists
 ```
 
-### Signals (tcg.backtester.lib.signals)
+### Indicators (tcg_backtester.lib.indicators)
 
 ```python
-from tcg.backtester.lib import signals
+from tcg_backtester.lib import indicators
 
-signals.sma(close, window)        # NaN for first window-1 bars
-signals.ema(close, span)          # seeded at first finite value, no NaN warm-up
-signals.rsi(close, window=14)     # values [0,100]; NaN for first window bars
-signals.rolling_vol(close, window, annualise_by=252)  # annualised rolling std
-signals.apply_direction(raw, "long_only"|"short_only"|"long_short")  # clip sign
-signals.daily_pulse(n_bars)       # alternating +1/-1 for daily-rebalance entries
+indicators.sma(close, window)        # NaN for first window-1 bars
+indicators.ema(close, span)          # seeded at first finite value, no NaN warm-up
+indicators.rsi(close, window=14)     # values [0,100]; NaN for first window bars
+indicators.breakout(high, low, close, lookback)  # Donchian breakout: +1/-1/0
+indicators.rolling_vol(close, window, annualise_by=252)  # annualised rolling std
+indicators.apply_direction(raw, "long_only"|"short_only"|"long_short")  # clip sign
+indicators.daily_pulse(n_bars)       # alternating +1/-1 for daily-rebalance entries
 ```
 
 All return NDArray[float64] same length as input.
 
-### Engine (tcg.backtester.lib.engine)
+### Engine (tcg_backtester.lib.engine)
 
 ```python
-from tcg.backtester.lib.engine import BacktestSpec, ExecutionConfig, SizingConfig, run_backtest
+from tcg_backtester.lib.engine import BacktestSpec, ExecutionConfig, SizingConfig, run_backtest
 
 spec = BacktestSpec(
     bars=bars,                    # PriceSeries (REQUIRED)
@@ -99,12 +100,12 @@ BacktestResult fields: dates, equity_curve, benchmark_curve, drawdown_curve, tra
 - result.to_json_dict() for JSON serialization
 - result.equity is alias for equity_curve
 
-**Signal semantics**: engine opens position on 0->nonzero transition or sign change. Constant signal=1.0 opens ONE position for the entire run. Use `signals.daily_pulse(n)` for daily re-entry.
+**Signal semantics**: engine opens position on 0->nonzero transition or sign change. Constant signal=1.0 opens ONE position for the entire run. Use `indicators.daily_pulse(n)` for daily re-entry.
 
-### Metrics (tcg.backtester.lib.metrics)
+### Metrics (tcg_backtester.lib.metrics)
 
 ```python
-from tcg.backtester.lib import metrics
+from tcg_backtester.lib import metrics
 m = metrics.compute_metrics(result)  # accepts BacktestResult directly
 m = metrics.compute_metrics(result, risk_free_rate=0.04)  # override rf
 print(m.to_dict())
@@ -112,36 +113,36 @@ print(m.to_dict())
 
 MetricsSuite fields: total_return, annualized_return, sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio, cvar_5, time_underwater_days, annualized_volatility, num_trades, win_rate
 
-### Validation (tcg.backtester.lib.validate)
+### Validation (tcg_backtester.lib.validate)
 
 ```python
-from tcg.backtester.lib.validate import bar_integrity, signal_integrity
+from tcg_backtester.lib.validate import bar_integrity, signal_integrity
 report = bar_integrity(bars)           # -> IntegrityReport
 report = signal_integrity(sig, bars)   # -> IntegrityReport
 # report.ok (bool), report.severity ("PASS"|"WARN"|"FAIL"), report.summary_line()
 ```
 
-### Diagnostics (tcg.backtester.lib.diagnostics)
+### Diagnostics (tcg_backtester.lib.diagnostics)
 
 ```python
-from tcg.backtester.lib import diagnostics
+from tcg_backtester.lib import diagnostics
 diag = diagnostics.compute_diagnostics(result, m, benchmark_metrics=bench_m)
 # Returns: {"as_of": ..., "should_suggest": bool, "diagnostics": [...]}
 ```
 
-### Plotting (tcg.backtester.lib.plotting)
+### Plotting (tcg_backtester.lib.plotting)
 
 ```python
-from tcg.backtester.lib import plotting
+from tcg_backtester.lib import plotting
 paths = plotting.write_plot_set(result, "results/plots",
     ["equity", "drawdown", "returns_heatmap", "yearly_bars", "trade_markers", "hold_time_hist", "stats_panel"])
 # Writes one .json per plot_id; returns {id: Path}
 ```
 
-### Compilation (tcg.backtester.lib.compile)
+### Compilation (tcg_backtester.lib.compile)
 
 ```python
-from tcg.backtester.lib.compile import compile_workspace
+from tcg_backtester.lib.compile import compile_workspace
 nb_path = compile_workspace(Path.cwd(), execute=True)
 # Runs scripts/01-04 for artifacts, compiles scripts/05+ into notebook
 ```

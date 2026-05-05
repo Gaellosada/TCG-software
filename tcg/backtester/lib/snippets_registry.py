@@ -17,27 +17,25 @@ Scenario = Literal["fetch", "signal", "backtest", "metrics", "plot", "compile", 
 SNIPPETS: dict[tuple[str, str], str] = {
     # --- index
     ("index", "fetch"): "snippets/fetch_index_bars.py",
-    ("index", "signal"): "snippets/compute_signals_sma.py",
     ("index", "backtest"): "snippets/run_basic_backtest.py",
     # --- etf
     ("etf", "fetch"): "snippets/fetch_etf_bars.py",
-    ("etf", "signal"): "snippets/compute_signals_rsi.py",
     # --- futures
     ("futures", "fetch"): "snippets/fetch_futures_continuous.py",
     ("futures", "backtest"): "snippets/run_basic_backtest.py",
     # --- option
+    # Signal/indicator logic now lives in strategy.py (code-first). Multi-leg
+    # option strategies use lib.options.build_legs inside the run() escape hatch;
+    # see templates/examples/complex_iron_condor/strategy.py for a worked example.
     ("option", "fetch_chain"): "snippets/fetch_options_chain.py",
     ("option", "fetch_contract"): "snippets/fetch_option_contract.py",
-    ("option", "short_put"): "snippets/option_strategy_short_put.py",
-    ("option", "vertical_spread"): "snippets/option_strategy_vertical_spread.py",
-    ("option", "iron_condor"): "snippets/option_strategy_iron_condor.py",
-    ("option", "calendar_spread"): "snippets/option_strategy_calendar_spread.py",
     # --- shared scenarios (asset_class = generic)
     ("generic", "metrics"): "snippets/compute_metrics.py",
     ("generic", "plot_equity"): "snippets/plot_equity.py",
     ("generic", "plot_returns_heatmap"): "snippets/plot_returns_heatmap.py",
     ("generic", "plot_trade_markers"): "snippets/plot_trade_markers.py",
     ("generic", "plot_stats_panel"): "snippets/plot_stats_panel.py",
+    ("generic", "plot_price_history"): "snippets/plot_price_history.py",
     ("generic", "validate"): "snippets/validate_data.py",
     ("generic", "compile"): "snippets/compile_notebook.py",
     ("generic", "backtest"): "snippets/run_basic_backtest.py",

@@ -37,9 +37,11 @@ DEFAULT_DB = "tcg-instrument"
 
 
 def _find_workspace_root(start: Path) -> Path | None:
-    """Walk upwards looking for STRATEGY.yaml; first hit wins."""
+    """Walk upwards looking for strategy.py (code-first) or STRATEGY.yaml (legacy); first hit wins."""
     cur = start.resolve()
     for parent in [cur, *cur.parents]:
+        if (parent / "strategy.py").is_file() or (parent / "strategy" / "__init__.py").is_file():
+            return parent
         if (parent / "STRATEGY.yaml").is_file():
             return parent
     return None
@@ -59,6 +61,37 @@ def _find_repo_root(start: Path) -> Path | None:
         if (parent / "lib" / "mongo.py").is_file():
             return parent
     return None
+
+
+def _mongo_uri_explicitly_set(env_path: Path | None = None) -> bool:
+    """Return True iff MONGO_URI is set (non-empty) in the process env or the resolved .env file.
+
+    Mirrors the lookup priority of `resolve_env` (env > workspace .env > repo .env)
+    but stops at MONGO_URI and treats the default fallback as "not set" — the
+    explicit-bootstrap contract is what callers of `create_client` need.
+    """
+    if os.environ.get("MONGO_URI"):
+        return True
+    candidates: list[Path] = []
+    if env_path is not None:
+        if env_path.is_file():
+            candidates.append(env_path)
+    else:
+        cwd = Path.cwd()
+        ws = _find_workspace_root(cwd)
+        if ws is not None:
+            candidates.append(ws / ".env")
+        repo = _find_repo_root(cwd)
+        if repo is not None:
+            candidates.append(repo / ".env")
+    for cand in candidates:
+        if cand.is_file():
+            file_vals = {k: v for k, v in dotenv_values(cand).items() if v is not None}
+            if file_vals.get("MONGO_URI"):
+                return True
+            # First existing .env wins — match resolve_env's stop-at-first behaviour.
+            return False
+    return False
 
 
 def resolve_env(env_path: Path | None = None) -> dict[str, str]:
@@ -104,7 +137,23 @@ def create_client(
 
     Validates the URI scheme (`mongodb://` or `mongodb+srv://`) before constructing
     the client to defend against URI confusion / unintended targets via .env override.
+
+    Fails fast with `RuntimeError` if `MONGO_URI` is missing or empty in the
+    process env AND the resolved `.env` file (caller-provided ``env=`` mapping
+    bypasses this check — explicit override). The default fallback URI in
+    `resolve_env` is for read-only convenience helpers; the actual client must
+    not silently target localhost.
     """
+    if env is None:
+        if not _mongo_uri_explicitly_set(env_path):
+            repo = _find_repo_root(Path.cwd())
+            expected = (repo / ".env") if repo is not None else Path(".env").resolve()
+            raise RuntimeError(
+                f"MONGO_URI is unset or empty. Expected it in the process env or in "
+                f"`{expected}` (KEY=value). Bootstrap: from the repo root run "
+                f"`pip install -e .` then create `.env` with `MONGO_URI=...` "
+                f"(see CLAUDE.md § Bootstrap)."
+            )
     cfg = env if env is not None else resolve_env(env_path)
     uri = cfg["MONGO_URI"]
     if not (uri.startswith("mongodb://") or uri.startswith("mongodb+srv://")):
@@ -373,6 +422,28 @@ class _SyncDB:
 
 
 def sync_db(env_path: Path | None = None) -> _SyncDB:
-    """Return a sync-callable wrapper around the default database (read-only)."""
+    """Return a sync-callable wrapper around the default database (read-only).
+
+    Ensures a current asyncio event loop exists before constructing the
+    Motor client. ``AsyncIOMotorClient`` caches its IO loop reference at
+    creation time; on Python 3.14 + Motor 3.7.1, attribute access on the
+    DB (e.g. ``list_collection_names()``) raises ``RuntimeError: There is
+    no current event loop`` *before* returning a coroutine when no loop is
+    set for the calling thread. Pre-binding the persistent loop here keeps
+    every downstream call (sync helpers, ``lib.data._live_collection_names``,
+    ``raw_db()`` direct access) working from a bare script context.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop. Make sure there's at least a current loop bound
+        # for this thread so Motor's lazy loop-cache picks up _our_ loop
+        # rather than failing.
+        try:
+            existing = asyncio.get_event_loop_policy().get_event_loop()
+            if existing.is_closed():
+                raise RuntimeError("event loop closed")
+        except RuntimeError:
+            asyncio.set_event_loop(_get_persistent_loop())
     client = create_client(env_path)
     return _SyncDB(get_db(client))

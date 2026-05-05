@@ -51,7 +51,7 @@ _SYS_PATH_BOOTSTRAP = '''\
 # --- notebook bootstrap: makes this notebook robust to kernel cwd / env state ---
 # 1. Adds the backtester repo root to sys.path so `from tcg_backtester.lib import …`
 #    works regardless of whether the package is editable-installed in this kernel.
-# 2. Changes cwd to the strategy workspace dir (containing STRATEGY.yaml) so
+# 2. Changes cwd to the strategy workspace dir (containing strategy.py) so
 #    `Path(".") / "data" / "X.npz"` resolves the same way under Jupyter as under nbclient.
 # 3. Applies nest_asyncio so `sync_run` / `asyncio.run` work inside Jupyter\'s
 #    already-running event loop. Skipped if nest_asyncio is unavailable.
@@ -73,7 +73,7 @@ if _nb:
 _search.append(_here)
 for _start in _search:
     for _q in [_start, *_start.parents]:
-        if (_q / "STRATEGY.yaml").is_file():
+        if (_q / "strategy.py").is_file() or (_q / "strategy" / "__init__.py").is_file():
             if Path.cwd().resolve() != _q:
                 os.chdir(_q)
             break
@@ -233,71 +233,12 @@ def _validate_manifest_or_raise(manifest: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Plot-set declarations (P0-L).
+# Plot-set declarations.
+#
+# Closed strategy_class -> plot-set mapping is gone (Sign 1). The code-first
+# surface uses ``lib.plotting.BASELINE_PLOTS`` plus the strategy module's
+# optional ``EXTRA_PLOTS`` list, enumerated by :func:`render_extra_plots`.
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class PlotJob:
-    """One required-or-optional plot job for a strategy class.
-
-    `plot_id` is a stable identifier (e.g. `equity`, `drawdown`); `snippet`
-    points to the canonical generator under `snippets/`; `required` flips
-    True for the P4 fixed set.
-    """
-
-    plot_id: str
-    snippet: str
-    required: bool
-    rationale: str
-
-
-# Phase 1: 6 P4-locked plot ids per `pipeline/04-analyze.md:22-32`. All three
-# strategy classes resolve to the same set in phase 1 (option-class extras —
-# Greeks-over-time, per-leg P&L — are deferred per ADOPTION_PLAN R-5).
-_PHASE1_PLOTS: tuple[PlotJob, ...] = (
-    PlotJob("equity", "snippets/plot_equity.py", True, "headline portfolio equity curve"),
-    PlotJob("drawdown", "snippets/plot_equity.py", True, "drawdown timeline pairs with equity"),
-    PlotJob("returns_heatmap", "snippets/plot_returns_heatmap.py", True, "monthly returns heatmap"),
-    PlotJob("log_returns_heatmap", "snippets/plot_returns_heatmap.py", False, "monthly log-returns heatmap (optional)"),
-    PlotJob("yearly_bars", "snippets/plot_returns_heatmap.py", True, "yearly returns bar chart"),
-    PlotJob("trade_markers", "snippets/plot_trade_markers.py", True, "trade entry/exit markers on price"),
-    PlotJob("hold_time_hist", "snippets/plot_trade_markers.py", True, "trade hold-time histogram"),
-    PlotJob("stats_panel", "snippets/plot_stats_panel.py", True, "performance stats vs B&H comparison table"),
-)
-
-_PLOT_SETS: dict[str, tuple[PlotJob, ...]] = {
-    "indicator_based": _PHASE1_PLOTS,
-    "option_strategy": _PHASE1_PLOTS,
-    "composite": _PHASE1_PLOTS,
-}
-
-
-def compile_report_set(spec_yaml: dict) -> list[PlotJob]:
-    """Return the deterministic plot job list for the spec's strategy class.
-
-    Looks up `spec_yaml['strategy_class']` in the `_PLOT_SETS` registry.
-    Raises `KeyError` for an unknown strategy class so agents cannot drift
-    into "I'll just produce equity and call it done".
-    """
-    cls = spec_yaml.get("strategy_class")
-    if cls is None:
-        raise KeyError("spec missing required 'strategy_class' field for compile_report_set")
-    if cls not in _PLOT_SETS:
-        raise KeyError(
-            f"unknown strategy_class {cls!r}; known: {sorted(_PLOT_SETS.keys())}"
-        )
-    return list(_PLOT_SETS[cls])
-
-
-def assert_manifest_plot_completeness(manifest: dict, jobs: list[PlotJob]) -> None:
-    """Raise `ValueError` if any required `PlotJob.plot_id` is missing from
-    `manifest['plot_paths']`. Used as a backstop in `emit_manifest`."""
-    plot_paths = manifest.get("plot_paths") or {}
-    missing = [j.plot_id for j in jobs if j.required and j.plot_id not in plot_paths]
-    if missing:
-        raise ValueError(
-            f"manifest plot completeness: required plot ids missing from plot_paths: {missing}"
-        )
 
 
 def _scrub(obj: Any) -> Any:
@@ -499,6 +440,8 @@ def compile_workspace(
 
         # Phase 2: compile presentation scripts into the user-facing notebook.
         cells: list = [nbformat.v4.new_code_cell(source=_SYS_PATH_BOOTSTRAP)]
+        # Embed strategy.py source verbatim (code-first audit trail).
+        cells.extend(_strategy_source_cells(workspace_dir, nbformat))
         presentation_sources: list[str] = []
         for s in presentation_scripts:
             nb = jupytext.read(str(s), fmt="py:percent")
@@ -745,19 +688,10 @@ def emit_manifest(
         "run_timestamp": run_ts,
     }
 
-    # Plot-set completeness backstop (P0-L). Only enforced when the spec
-    # exposes a known `strategy_class`; for legacy callers without one we
-    # skip the check rather than break old workspaces. Reuse the already-
-    # fetched `spec` so any in-place mutation above (e.g. signals_hash) is
-    # visible to the plot-set check too.
-    spec_for_plotset = spec
-    if isinstance(spec_for_plotset, dict) and spec_for_plotset.get("strategy_class") in _PLOT_SETS:
-        try:
-            jobs = compile_report_set(spec_for_plotset)
-        except KeyError:
-            jobs = []
-        if jobs:
-            assert_manifest_plot_completeness(manifest, jobs)
+    # Plot-set completeness backstop is gone (Sign 1: no strategy_class
+    # routing). The code-first surface enumerates BASELINE_PLOTS +
+    # strategy.EXTRA_PLOTS via lib.compile.render_extra_plots; missing plots
+    # surface in the agent's own dry-run, not via lib gatekeeping.
 
     # Hand-rolled schema validation (P0-K). Raises before write so a malformed
     # manifest never lands on disk.
@@ -782,3 +716,138 @@ def canonicalize_manifest_for_diff(manifest: dict) -> dict:
         return obj
 
     return _walk(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Code-first surface: strategy.py embedding + build_notebook + render_extra_plots
+# ---------------------------------------------------------------------------
+
+
+def _read_strategy_source(workspace_dir: Path) -> tuple[str, str] | None:
+    """Return ``(rel_path, source)`` for a workspace's strategy code, or ``None``.
+
+    Looks for ``strategy.py`` first (canonical, single-file), then
+    ``strategy/__init__.py`` (allowed directory shape per the locked design).
+    """
+    candidates = [
+        ("strategy.py", workspace_dir / "strategy.py"),
+        ("strategy/__init__.py", workspace_dir / "strategy" / "__init__.py"),
+    ]
+    for rel_path, abs_path in candidates:
+        if abs_path.is_file():
+            try:
+                return rel_path, abs_path.read_text(encoding="utf-8")
+            except OSError:
+                return rel_path, f"# (failed to read {rel_path})\n"
+    return None
+
+
+def _strategy_source_cells(workspace_dir: Path, nbformat) -> list:
+    """Build a markdown header + verbatim code cell for ``strategy.py``.
+
+    Returns an empty list if no strategy file exists in the workspace —
+    keeps backward-compat with legacy YAML-driven workspaces while the
+    pivot is rolled out.
+    """
+    embedded = _read_strategy_source(workspace_dir)
+    if embedded is None:
+        return []
+    rel_path, source = embedded
+    header = f"# {rel_path} — embedded from workspace at compile time\n"
+    return [
+        nbformat.v4.new_markdown_cell(source="## Strategy source"),
+        nbformat.v4.new_code_cell(source=header + source),
+    ]
+
+
+def build_notebook(workspace_path: Path | str) -> Path:
+    """Code-first alias for :func:`compile_workspace`.
+
+    Per the locked design (DESIGN.md §9), the public name in the new
+    code-first surface is ``lib.compile.build_notebook``. The legacy
+    ``compile_workspace`` name still works (existing pipeline scripts call
+    it).
+    """
+    return compile_workspace(Path(workspace_path))
+
+
+def render_extra_plots(
+    workspace_path: Path | str,
+    result: Any,
+    *,
+    metrics: dict[str, float] | None = None,
+) -> dict[str, Path]:
+    """Run ``BASELINE_PLOTS`` + strategy ``EXTRA_PLOTS`` and write JSON.
+
+    Imports ``strategy`` from ``workspace_path`` (if present), runs every
+    ``PlotJob`` in ``lib.plotting.BASELINE_PLOTS`` plus any in
+    ``getattr(strategy, 'EXTRA_PLOTS', [])``, and writes
+    ``results/plots/<id>.json`` for each.
+
+    The ``stats_panel`` job is special-cased: it accepts a
+    ``BacktestResult`` directly (the mongoDB ``stats_panel`` builder reads
+    the metrics off the result) so no caller-side metrics dict is required.
+
+    Returns a dict mapping plot id to written path. Failures of individual
+    builders are caught and logged but do not abort the run — a single
+    broken EXTRA_PLOTS job should not derail the rest.
+    """
+    import contextlib
+    import importlib
+    import logging
+    import sys
+
+    log = logging.getLogger(__name__)
+
+    workspace_path = Path(workspace_path).resolve()
+    plots_dir = workspace_path / "results" / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    from . import plotting as _plotting
+
+    extra_plots: list[Any] = []
+    if (workspace_path / "strategy.py").is_file() or (
+        workspace_path / "strategy" / "__init__.py"
+    ).is_file():
+        added = False
+        if str(workspace_path) not in sys.path:
+            sys.path.insert(0, str(workspace_path))
+            added = True
+        sys.modules.pop("strategy", None)
+        try:
+            strategy_mod = importlib.import_module("strategy")
+            extra_plots = list(getattr(strategy_mod, "EXTRA_PLOTS", []) or [])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not import strategy from %s: %s", workspace_path, exc)
+        finally:
+            if added:
+                with contextlib.suppress(ValueError):
+                    sys.path.remove(str(workspace_path))
+
+    written: dict[str, Path] = {}
+    for job in list(_plotting.BASELINE_PLOTS) + extra_plots:
+        if not isinstance(job, _plotting.PlotJob):
+            log.warning("EXTRA_PLOTS entry is not a PlotJob; skipping: %r", job)
+            continue
+        out = plots_dir / f"{job.id}.json"
+        try:
+            fig = job.builder(result, **job.kwargs)
+            if fig is None:
+                continue
+            if hasattr(fig, "write_json"):
+                fig.write_json(str(out))
+            else:
+                out.write_text(json.dumps(fig, default=str), encoding="utf-8")
+            written[job.id] = out
+        except Exception as exc:  # noqa: BLE001
+            log.warning("PlotJob %r builder raised: %s", job.id, exc)
+    return written
+
+
+__all__ = [
+    "compile_workspace",
+    "build_notebook",
+    "render_extra_plots",
+    "emit_manifest",
+    "canonicalize_manifest_for_diff",
+]
