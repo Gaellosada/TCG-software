@@ -392,3 +392,185 @@ class TestCLISessionCancel:
         with patch("tcg.core.agent.session.os.killpg") as mock_killpg:
             await session.cancel()
             mock_killpg.assert_called_once_with(12345, __import__("signal").SIGTERM)
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 regression — cancellation must not leave the next turn re-using
+# the same `--session-id` (which the CLI would reject as "already in use"
+# because the per-id transcript file persists after SIGKILL).
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionCancelRefreshesId:
+    """Bug 2: after cancel(), the next CLI invocation must NOT pass
+    ``--session-id <same-uuid>`` because the CLI 2.1.85 keeps the
+    ``<id>.jsonl`` transcript on disk and rejects re-use of that id.
+    """
+
+    async def test_cancel_mints_fresh_session_id(self, tmp_path: Path) -> None:
+        on_event = AsyncMock()
+        original_id = "tainted-uuid-0001"
+        session = CLISession(original_id, tmp_path, on_event)
+
+        # Simulate a turn that started but was cancelled mid-stream
+        # (so _first_turn was never flipped to False).
+        mock_proc = MagicMock()
+        mock_proc.returncode = None
+        mock_proc.pid = 12345
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+        session._process = mock_proc
+        assert session._first_turn is True
+
+        with patch("tcg.core.agent.session.os.killpg"):
+            await session.cancel()
+
+        # After cancel, the session id must have changed so the next
+        # spawn does NOT collide with the on-disk <id>.jsonl that the
+        # CLI left behind.
+        assert session.session_id != original_id, (
+            "cancel() must mint a fresh session_id to avoid CLI"
+            " 'Session ID already in use' on retry"
+        )
+
+        # And the next _build_command must use the NEW id with --session-id
+        # (since this is effectively a new CLI session).
+        cmd = session._build_command("retry", "opus")
+        assert "--session-id" in cmd
+        assert session.session_id in cmd
+        assert original_id not in cmd, (
+            "the old (tainted) session id must not appear in the next argv"
+        )
+
+    async def test_cancel_resets_first_turn_flag(self, tmp_path: Path) -> None:
+        """After a cancel mid-stream, _first_turn must be True so that the
+        next spawn opens a fresh CLI session rather than --resume'ing into
+        a partially-written transcript."""
+        on_event = AsyncMock()
+        session = CLISession("uuid-A", tmp_path, on_event)
+        # Imagine a previous successful turn flipped it to False
+        session._first_turn = False
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = None
+        mock_proc.pid = 5555
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+        session._process = mock_proc
+
+        with patch("tcg.core.agent.session.os.killpg"):
+            await session.cancel()
+
+        assert session._first_turn is True, (
+            "cancel() must reset _first_turn so the next turn opens a"
+            " new CLI session (with the freshly-minted uuid)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug 3 regression — the stream parser must NOT hang forever when the
+# subprocess stops emitting bytes but keeps stdout open. It must emit a
+# visible idle-warning event and continue looping (no kill).
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionIdleWarning:
+    async def test_idle_timeout_emits_warning_and_continues(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bug 3 (Option B): if readline() blocks for IDLE_TIMEOUT seconds,
+        _parse_stream emits {type:status, status:idle_warning, seconds:N}
+        and KEEPS LOOPING. It does NOT break and does NOT kill the subprocess.
+        Only when bytes finally arrive (or EOF) does the parser proceed.
+        """
+        # Override the module constant to keep the test fast.
+        import tcg.core.agent.session as session_module
+
+        monkeypatch.setattr(session_module, "IDLE_TIMEOUT", 0.1)
+
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("idle-sess", tmp_path, on_event)
+
+        # Build a fake stdout reader that:
+        #   call 1: hangs (sleep > IDLE_TIMEOUT) -> wait_for must time out
+        #   call 2: returns one line of stream-json text_delta
+        #   call 3: returns empty bytes (EOF)
+        readline_call_count = {"n": 0}
+
+        async def fake_readline() -> bytes:
+            readline_call_count["n"] += 1
+            n = readline_call_count["n"]
+            if n == 1:
+                # Hang for longer than IDLE_TIMEOUT to trigger the watchdog
+                await asyncio.sleep(1.0)
+                return b""  # never reached under wait_for timeout
+            if n == 2:
+                # After the warning, deliver one real line
+                ev = {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "hi"},
+                    },
+                }
+                return (json.dumps(ev) + "\n").encode("utf-8")
+            return b""  # EOF
+
+        kill_called = {"n": 0}
+
+        class _Proc:
+            returncode = 0
+            pid = 1
+
+            def __init__(self) -> None:
+                self.stdout = MagicMock()
+                self.stdout.readline = fake_readline
+                self.stderr = MagicMock()
+
+            def kill(self) -> None:
+                kill_called["n"] += 1
+
+            def terminate(self) -> None:
+                kill_called["n"] += 1
+
+            async def wait(self) -> int:
+                return 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        proc = _Proc()
+        session._process = proc  # type: ignore[assignment]
+
+        # Run the parser. Bound it with wait_for so a regression doesn't
+        # hang the test suite (the WHOLE point of the fix).
+        await asyncio.wait_for(session._parse_stream(), timeout=5.0)
+
+        # Must have emitted at least one idle_warning status event.
+        idle_warnings = [
+            e
+            for e in events
+            if e.get("type") == "status" and e.get("status") == "idle_warning"
+        ]
+        assert len(idle_warnings) >= 1, (
+            f"expected at least one idle_warning event, got: {events!r}"
+        )
+        # The warning must carry an integer/float 'seconds' field
+        assert "seconds" in idle_warnings[0]
+
+        # The token event from call 2 must have been processed -- proving
+        # the loop CONTINUED past the timeout (not broke out).
+        token_events = [e for e in events if e.get("type") == "token"]
+        assert len(token_events) >= 1, (
+            "parser must continue after idle_warning, not break"
+        )
+
+        # G8: the watchdog must NOT have killed the subprocess
+        assert kill_called["n"] == 0, (
+            "G8 violation: idle warning path must not kill the subprocess"
+        )

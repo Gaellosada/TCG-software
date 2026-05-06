@@ -16,6 +16,7 @@ import logging
 import os
 import signal
 import shutil
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,19 @@ _MODEL_MAP: dict[str, str] = {
     "claude-opus-4-6": "opus",
     "claude-sonnet-4-6": "sonnet",
 }
+
+# Bug 3 watchdog: if the CLI's stdout produces no bytes for this many
+# seconds we emit a visible {type:status, status:idle_warning, seconds:N}
+# event (the FE can show "agent silent for Ns") and KEEP LOOPING. We do
+# NOT kill the subprocess on idle -- cancellation stays user-driven.
+# This is observability, not a kill timer (guardrail G8 honoured).
+#
+# 120s is a balance between (a) noticing real stalls quickly and (b) not
+# emitting noise during slow Anthropic streams with dense tool calls. A
+# single multi-minute stall produces N cumulative events
+# (seconds=120, 240, 360, ...), not N independent "silent for 120s"
+# events -- FE handlers must OVERWRITE, not append.
+IDLE_TIMEOUT: float = 120.0
 
 
 def _cli_model_arg(model: str) -> str:
@@ -200,6 +214,15 @@ class CLISession:
 
         Uses ``os.killpg`` to terminate MCP servers and child shells
         that the CLI may have spawned.
+
+        Also refreshes ``self.session_id`` and resets ``_first_turn``
+        (Bug 2 fix). The Claude CLI 2.1.85 keys "Session ID already in
+        use" off the persistence of ``<id>.jsonl`` in its sessions
+        directory; that file survives SIGTERM/SIGKILL. Re-using the
+        same id on the next spawn would therefore fail. Minting a fresh
+        uuid here decouples the next turn from the now-tainted CLI
+        state. Conversation continuity is preserved Python-side via
+        ``self.conversation_history``.
         """
         self._cancelled = True
         if self._process and self._process.returncode is None:
@@ -222,6 +245,18 @@ class CLISession:
                 # Process or group already dead
                 pass
 
+        # Bug 2 fix: the CLI's transcript file <old_id>.jsonl is now
+        # orphaned on disk. The next spawn must NOT re-emit that id
+        # (the CLI would reject it as "already in use"). Mint a fresh
+        # uuid and reset the first-turn flag so _build_command opens a
+        # clean new CLI session.
+        new_id = str(uuid.uuid4())
+        logger.info(
+            "Refreshing session id after cancel: %s -> %s", self.session_id, new_id
+        )
+        self.session_id = new_id
+        self._first_turn = True
+
     # ------------------------------------------------------------------
     # Retry logic
     # ------------------------------------------------------------------
@@ -233,7 +268,20 @@ class CLISession:
 
         Called when the CLI session store doesn't have the session (e.g.,
         after purge or server migration). Returns assistant_content.
+
+        Bug 2 fix: the original session_id is now tainted in the CLI's
+        on-disk state (or absent — which is exactly why --resume failed).
+        Either way, mint a fresh uuid so --session-id can succeed.
         """
+        new_id = str(uuid.uuid4())
+        logger.info(
+            "Retrying as new session: %s -> %s (was %s)",
+            self.session_id,
+            new_id,
+            "first_turn" if self._first_turn else "resume",
+        )
+        self.session_id = new_id
+        self._first_turn = True
         cmd = self._build_command(user_message, model)
         self._process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -301,10 +349,42 @@ class CLISession:
         # Track active content blocks for tool_use accumulation
         active_blocks: dict[int, dict[str, Any]] = {}
 
+        # Bug 3 (Option B) idle watchdog: track total seconds the CLI's
+        # stdout has been silent across consecutive timeouts so the FE
+        # can show "agent silent for Ns". Resets to 0 each time bytes
+        # arrive. We do NOT kill the subprocess on timeout -- this is
+        # observability, not a kill timer (guardrail G8).
+        idle_seconds_total: float = 0.0
+
         while not self._cancelled:
-            line = await self._process.stdout.readline()
+            try:
+                line = await asyncio.wait_for(
+                    self._process.stdout.readline(), timeout=IDLE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                # Subprocess is alive but stdout has been silent for
+                # IDLE_TIMEOUT seconds. Surface a visible status event
+                # and KEEP LOOPING. The user can cancel via the existing
+                # path; we never kill on idle.
+                idle_seconds_total += IDLE_TIMEOUT
+                logger.info(
+                    "CLI silent for %ss on session %s -- emitting idle_warning",
+                    int(idle_seconds_total),
+                    self.session_id,
+                )
+                await self.on_event(
+                    {
+                        "type": "status",
+                        "status": "idle_warning",
+                        "seconds": idle_seconds_total,
+                    }
+                )
+                continue
             if not line:
                 break
+
+            # Bytes arrived: clear the idle counter.
+            idle_seconds_total = 0.0
 
             line_str = line.decode("utf-8", errors="replace").strip()
             if not line_str:
@@ -421,6 +501,17 @@ class CLISession:
             if subtype == "tool_result" or "tool_result" in str(event):
                 # Try to extract tool result info
                 logger.debug("System tool_result event: %s", str(event)[:300])
+
+        else:
+            # Unknown top-level event type. CLI 2.1.85 emits at least
+            # rate_limit_event and bare-system events whose subtype we
+            # don't currently dispatch. Surfacing here makes future CLI
+            # surface changes diagnosable instead of silent.
+            logger.debug(
+                "Unhandled stream-json event type %r: %s",
+                event_type,
+                str(event)[:200],
+            )
 
     # ------------------------------------------------------------------
     # File change detection (ASSUMPTIONS.json, notebook)
