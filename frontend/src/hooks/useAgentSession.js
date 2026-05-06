@@ -90,6 +90,18 @@ function useAgentSession(sessionId) {
   const reconnectTimerRef = useRef(null);
   // Track the current streaming (partial) assistant message
   const streamingRef = useRef(null);
+  // Sticky flag: true between BE 'compacting' status and 'compact_done'.
+  // While truthy, heartbeat/idle status writes are suppressed so the
+  // "Compacting…" badge stays visible until the BE confirms it ended.
+  const compactingRef = useRef(false);
+  // Tracks whether a user-initiated turn is currently in flight (between
+  // sendMessage / interruptAgent and message_complete / stopped / error).
+  // Used to drop reconnect 'history' replays that would otherwise clobber
+  // the in-flight turn (the BE persists conversation only after the turn
+  // ends, so reconnect-time history is stale until that point — see
+  // workspace/tasks/agent-context-and-streaming/output/issue2-diagnosis.md
+  // §4 candidate 1).
+  const hasInFlightTurnRef = useRef(false);
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
@@ -171,6 +183,7 @@ function useAgentSession(sessionId) {
 
         case 'message_complete': {
           setIsProcessing(false);
+          hasInFlightTurnRef.current = false;
           if (streamingRef.current) {
             streamingRef.current = null;
             setMessages((prev) => {
@@ -183,9 +196,22 @@ function useAgentSession(sessionId) {
         }
 
         case 'history': {
-          // Restore prior conversation on reconnect.
-          // Backend stores messages in Anthropic API format where assistant
-          // content is an array of blocks. Transform to display format.
+          // Restore prior conversation. Fired on every WS connect, including
+          // reconnects mid-turn (see api/agent.py:354-358). The BE only
+          // persists conversation AFTER the turn completes (api/agent.py:281-286),
+          // so during an in-flight turn the BE-replayed history is STALE — it
+          // omits the user message + any streamed assistant tokens emitted
+          // during the current turn. Replacing local state with stale history
+          // wipes the in-flight turn from the UI ("interface reverted"
+          // symptom). Drop the replay if a user turn is currently in flight.
+          // First connect / post-turn reconnect: hasInFlightTurnRef is false,
+          // history is applied as before.
+          if (hasInFlightTurnRef.current) {
+            // Reconnect mid-turn. BE history is stale; keep our optimistic
+            // state intact. Once message_complete fires, the BE will persist
+            // and any future reconnect will see authoritative history.
+            break;
+          }
           if (Array.isArray(data.messages)) {
             setMessages(transformHistory(data.messages));
           }
@@ -193,12 +219,52 @@ function useAgentSession(sessionId) {
         }
 
         case 'assumptions_update': {
+          // Full snapshot replace — BE emits a complete list each time.
+          // Mid-turn arrivals are safe (idempotent: same array shape, no
+          // side effects on messages or processing state).
           setAssumptions(data.assumptions ?? []);
           break;
         }
 
         case 'status': {
-          setStatus(data.status ?? 'idle');
+          const next = data.status ?? 'idle';
+          // Compaction state machine: 'compacting' is sticky (BE may re-emit
+          // every 30s while compaction runs — see issue2-diagnosis.md §1
+          // and the keepalive race in §3). 'compact_done' is terminal and
+          // releases the lock. While compacting, suppress heartbeat
+          // overwrites ('processing'/'idle') so the badge stays stable.
+          if (next === 'compacting') {
+            compactingRef.current = true;
+            setStatus('compacting');
+            break;
+          }
+          if (next === 'compact_done') {
+            compactingRef.current = false;
+            // Hand control back to the normal status state machine. Use
+            // 'processing' if the turn is still in flight (compaction always
+            // happens mid-turn), else 'idle'.
+            setStatus(hasInFlightTurnRef.current ? 'processing' : 'idle');
+            break;
+          }
+          if (compactingRef.current) {
+            // Drop heartbeat / idle / oversized noise during compaction.
+            break;
+          }
+          if (next === 'idle_warning') {
+            // BE emits cumulative seconds-since-last-CLI-output within a
+            // single stalled stretch (see agent-runtime-bugs PROBLEMS.md
+            // and tcg/core/agent/session.py:371-378). Each event is the
+            // running total, NOT an increment — so OVERWRITE the displayed
+            // duration, never append. Resets implicitly when CLI output
+            // resumes (BE emits a non-idle status on the next event).
+            const seconds = Number(data.seconds);
+            const label = Number.isFinite(seconds)
+              ? `Agent silent for ${seconds}s…`
+              : 'Agent silent…';
+            setStatus(label);
+            break;
+          }
+          setStatus(next);
           break;
         }
 
@@ -224,6 +290,8 @@ function useAgentSession(sessionId) {
 
         case 'stopped': {
           setIsProcessing(false);
+          hasInFlightTurnRef.current = false;
+          compactingRef.current = false;
           streamingRef.current = null;
           setMessages((prev) => {
             if (prev.length === 0) return prev;
@@ -242,7 +310,10 @@ function useAgentSession(sessionId) {
         }
 
         case 'interrupted': {
-          // Current turn cancelled, new one starting
+          // Current turn cancelled, new one starting. hasInFlightTurnRef
+          // stays true (a new turn is starting); compaction state, if any,
+          // belongs to the cancelled turn — clear it.
+          compactingRef.current = false;
           streamingRef.current = null;
           setMessages((prev) => {
             if (prev.length === 0) return prev;
@@ -258,6 +329,8 @@ function useAgentSession(sessionId) {
 
         case 'error': {
           setIsProcessing(false);
+          hasInFlightTurnRef.current = false;
+          compactingRef.current = false;
           setMessages((prev) => [
             ...prev,
             { role: 'error', content: data.message ?? 'Unknown error' },
@@ -281,6 +354,8 @@ function useAgentSession(sessionId) {
     setIsProcessing(false);
     setNotebookReady(false);
     streamingRef.current = null;
+    compactingRef.current = false;
+    hasInFlightTurnRef.current = false;
     retriesRef.current = 0;
     clearReconnectTimer();
 
@@ -310,6 +385,9 @@ function useAgentSession(sessionId) {
         // Add the user message to local state immediately (optimistic)
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
+        // Mark turn in flight — reconnect 'history' replays must not
+        // clobber the optimistic state until message_complete fires.
+        hasInFlightTurnRef.current = true;
         const payload = { type: 'message', content };
         if (model) payload.model = model;
         wsRef.current.send(JSON.stringify(payload));
@@ -329,6 +407,7 @@ function useAgentSession(sessionId) {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
+        hasInFlightTurnRef.current = true;
         const payload = { type: 'interrupt', content };
         if (model) payload.model = model;
         wsRef.current.send(JSON.stringify(payload));
