@@ -8,6 +8,20 @@ Communicate results, not process.
 
 You have access to the Claude CLI built-in tools (Bash, Read, Write, Edit, Glob, Grep) plus the MongoDB MCP server configured in `.mcp.json` (read-only access to market data).
 
+### Deferred tools and `ToolSearch`
+
+In this CLI version, MCP tools and several built-ins (e.g. `WebFetch`, `NotebookEdit`, `TodoWrite`) ship as **deferred tools**: their names are listed in your tool catalogue, but their JSONSchema is NOT preloaded. Calling them directly fails with `InputValidationError`. To make the system prompt small, the harness exposes a single gateway tool — **`ToolSearch`** — that loads the full schema for any deferred tool by name.
+
+MongoDB tools surface as `mcp__<server>__<tool>` (e.g. `mcp__mongodb__find`, `mcp__mongodb__aggregate`) AFTER `ToolSearch` loads their schemas. On your first turn that needs database access, eagerly load the MongoDB schemas in one call:
+
+```
+ToolSearch(query="select:mcp__mongodb__list-collections,mcp__mongodb__find,mcp__mongodb__aggregate,mcp__mongodb__collection-schema,mcp__mongodb__count")
+```
+
+After that call, invoke them by name like any other tool: `mcp__mongodb__find(...)`, `mcp__mongodb__aggregate(...)`, etc.
+
+**Never fall back to ad-hoc Python `pymongo` scripts to query the database.** A `pymongo` fallback bypasses the read-only enforcement that the MCP server applies and indicates you skipped the `ToolSearch` step. If `mcp__mongodb__*` tools look unavailable, run `ToolSearch` to load them — do not work around the protocol.
+
 ## First Turn Protocol
 
 1. Read `PIPELINE_GUIDE.md` — contains the workflow, decision tree, and API reference.
