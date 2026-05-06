@@ -216,7 +216,11 @@ async def agent_health(request: Request) -> dict[str, Any]:
 # rather than via the router, to avoid FastAPI WebSocket prefix issues.
 
 
-async def _keepalive(websocket: WebSocket, interval: int = 30) -> None:
+async def _keepalive(
+    websocket: WebSocket,
+    session: CLISession | None = None,
+    interval: int = 30,
+) -> None:
     """Send periodic heartbeat events to keep the WebSocket alive.
 
     APPLICATION-LEVEL keepalive only -- this is independent of the
@@ -227,9 +231,22 @@ async def _keepalive(websocket: WebSocket, interval: int = 30) -> None:
     heartbeat to stay connected. Its purpose is to (a) keep
     intermediary proxies/load balancers from idle-closing the
     connection and (b) feed the frontend a periodic
-    ``{"type":"status","status":"processing"}`` so the UI can
+    ``{"type":"status","status":<sticky>}`` so the UI can
     differentiate "still working" from "frozen". No turn timeout is
     derived from it.
+
+    Issue 2 sticky-status fix: instead of always emitting
+    ``processing``, we emit the session's CURRENT sticky status
+    (e.g. ``compacting`` while a CLI compaction is in progress).
+    This avoids last-writer-wins clobbering on the FE: the BE-side
+    ``_handle_event`` now translates ``system/status:"compacting"``
+    into a ``compacting`` event, and the keepalive must NOT
+    overwrite that with ``processing`` 30 s later. Reading
+    ``session._current_status`` is cheap and removes the race
+    entirely (no need for a pause-keepalive flag dance).
+
+    If no session is supplied (legacy callers / tests) we fall back
+    to the previous ``processing`` behaviour.
 
     Designed to be run as a child asyncio.Task that is cancelled when the
     turn ends.  Uses only ``asyncio.CancelledError`` for shutdown -- no
@@ -238,7 +255,12 @@ async def _keepalive(websocket: WebSocket, interval: int = 30) -> None:
     try:
         while True:
             await asyncio.sleep(interval)
-            await websocket.send_json({"type": "status", "status": "processing"})
+            status = (
+                session._current_status
+                if session is not None
+                else "processing"
+            )
+            await websocket.send_json({"type": "status", "status": status})
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -267,7 +289,7 @@ async def _execute_single_turn(
         model,
     )
     session.is_cancelled = False
-    heartbeat = asyncio.create_task(_keepalive(ws, interval=30))
+    heartbeat = asyncio.create_task(_keepalive(ws, session=session, interval=30))
     try:
         await session.run_turn(content, model=model)
     finally:

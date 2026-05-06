@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -574,3 +575,553 @@ class TestCLISessionIdleWarning:
         assert kill_called["n"] == 0, (
             "G8 violation: idle warning path must not kill the subprocess"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue 5 regression -- readline() raising ValueError (LimitOverrunError
+# converted to bare ValueError inside asyncio/streams.py) must NOT escape
+# _parse_stream. The defensive handler emits an oversized_line warning and
+# CONTINUES the loop. No kill, no break, no propagated exception.
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionOversizedLine:
+    """Issue 5: a single stdout line exceeding the StreamReader buffer
+    causes ``readline()`` to raise ``ValueError("Separator is found, but
+    chunk is longer than limit")``. The parser must catch it, emit a
+    visible status event, and keep reading subsequent lines.
+    """
+
+    async def test_oversized_line_emits_warning_and_continues(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("oversize-sess", tmp_path, on_event)
+
+        readline_n = {"n": 0}
+
+        async def fake_readline() -> bytes:
+            readline_n["n"] += 1
+            n = readline_n["n"]
+            if n == 1:
+                raise ValueError(
+                    "Separator is found, but chunk is longer than limit"
+                )
+            if n == 2:
+                # After the warning, deliver one valid stream-json line
+                ev = {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "ok"},
+                    },
+                }
+                return (json.dumps(ev) + "\n").encode("utf-8")
+            return b""  # EOF
+
+        kill_called = {"n": 0}
+
+        class _Proc:
+            returncode = 0
+            pid = 1
+
+            def __init__(self) -> None:
+                self.stdout = MagicMock()
+                self.stdout.readline = fake_readline
+                self.stderr = MagicMock()
+
+            def kill(self) -> None:
+                kill_called["n"] += 1
+
+            def terminate(self) -> None:
+                kill_called["n"] += 1
+
+            async def wait(self) -> int:
+                return 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        session._process = _Proc()  # type: ignore[assignment]
+
+        await asyncio.wait_for(session._parse_stream(), timeout=5.0)
+
+        oversized = [
+            e
+            for e in events
+            if e.get("type") == "status" and e.get("status") == "oversized_line"
+        ]
+        assert len(oversized) == 1, (
+            f"expected exactly one oversized_line event, got: {events!r}"
+        )
+        # Contract: limit field is the configured StreamReader byte limit.
+        assert isinstance(oversized[0].get("limit"), int)
+        assert oversized[0]["limit"] >= 64 * 1024  # at least raised above default
+        assert "message" in oversized[0]
+
+        # The post-warning token MUST have been processed -- proves continue.
+        token_events = [e for e in events if e.get("type") == "token"]
+        assert len(token_events) >= 1, (
+            "parser must continue past the oversized line, not break"
+        )
+
+        # G8 / Sign 3: no kill on the defensive path.
+        assert kill_called["n"] == 0, (
+            "G8 violation: oversized_line path must not kill the subprocess"
+        )
+
+    async def test_subprocess_exec_uses_raised_limit(self, tmp_path: Path) -> None:
+        """The CLI subprocess must be spawned with limit=STREAM_READER_LIMIT
+        so realistic large MCP payloads no longer trip the buffer ceiling.
+        """
+        import tcg.core.agent.session as session_module
+
+        on_event = AsyncMock()
+        session = CLISession("limit-sess", tmp_path, on_event)
+
+        captured_kwargs: dict[str, Any] = {}
+
+        # Minimal stdout that yields immediate EOF so run_turn returns fast.
+        async def fake_subprocess(*_args: Any, **kwargs: Any) -> Any:
+            captured_kwargs.update(kwargs)
+            return FakeProcess(b"", returncode=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await session.run_turn("ping", model="opus")
+
+        assert "limit" in captured_kwargs, (
+            "create_subprocess_exec must be called with limit= to raise the"
+            " asyncio StreamReader buffer ceiling above the 64 KiB default"
+        )
+        assert captured_kwargs["limit"] == session_module.STREAM_READER_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Argv hardening + env injection -- Issues 1 (§4-5) and 4 (§5).
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionArgvHardening:
+    def test_strict_mcp_config_in_command(self, tmp_path: Path) -> None:
+        on_event = AsyncMock()
+        session = CLISession("hard-sess", tmp_path, on_event)
+        cmd = session._build_command("hi", "opus")
+        assert "--strict-mcp-config" in cmd, (
+            "Issue 1 §4: --strict-mcp-config must be passed so the spawned"
+            " CLI does NOT merge the user's ~/.claude/settings.json MCP"
+            " servers into the agent's context"
+        )
+
+    def test_mcp_config_points_to_workspace_file(self, tmp_path: Path) -> None:
+        on_event = AsyncMock()
+        session = CLISession("hard-sess", tmp_path, on_event)
+        cmd = session._build_command("hi", "opus")
+        assert "--mcp-config" in cmd
+        idx = cmd.index("--mcp-config")
+        # The next argv entry must be the absolute path to the workspace's
+        # .mcp.json (workspace.py writes this at session-create time).
+        expected = str(tmp_path / ".mcp.json")
+        assert cmd[idx + 1] == expected, (
+            f"--mcp-config must point at workspace .mcp.json; got {cmd[idx + 1]!r}"
+        )
+
+
+class TestCLISessionMongoEnvInjection:
+    """Issue 4 §5: the agent's spawned Python (running scripts that import
+    ``tcg.backtester.lib.data_load``) needs ``MONGO_URI`` in its env.
+    Injecting it via ``env=`` on subprocess spawn sidesteps the .env-walk
+    problem (the workspace cwd has no .env)."""
+
+    async def test_subprocess_exec_receives_mongo_uri(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_event = AsyncMock()
+        session = CLISession("env-sess", tmp_path, on_event)
+
+        # Force a deterministic MONGO_URI via process env (highest priority
+        # in workspace._get_mongo_uri's resolution chain).
+        monkeypatch.setenv("MONGO_URI", "mongodb://test-host:27017")
+
+        captured_kwargs: dict[str, Any] = {}
+
+        async def fake_subprocess(*_args: Any, **kwargs: Any) -> Any:
+            captured_kwargs.update(kwargs)
+            return FakeProcess(b"", returncode=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await session.run_turn("ping", model="opus")
+
+        assert "env" in captured_kwargs, (
+            "create_subprocess_exec must be called with env= to inject"
+            " MONGO_URI into the spawned CLI's environment"
+        )
+        env = captured_kwargs["env"]
+        assert env.get("MONGO_URI") == "mongodb://test-host:27017"
+        # Sanity: PATH (or some other os.environ entry) is preserved -- we
+        # MUST NOT strip the parent process env.
+        assert "PATH" in env or len(env) > 1
+
+
+# ---------------------------------------------------------------------------
+# Issue 3 -- live mid-turn streaming of ASSUMPTIONS.json. The watchdog
+# tick after each parsed CLI event must re-snapshot the file and emit
+# ``assumptions_update`` whenever the agent has rewritten it (mtime + sha
+# changed).
+# ---------------------------------------------------------------------------
+
+
+def _make_assumptions_payload(*fields: str) -> str:
+    """Build a JSON-serialised ASSUMPTIONS.json payload."""
+    payload = {
+        "version": 1,
+        "assumptions": [
+            {
+                "field": f,
+                "value": 1,
+                "source": "default",
+                "confidence": "high",
+                "rationale": "test",
+                "group": "execution",
+                "editable": True,
+            }
+            for f in fields
+        ],
+    }
+    return json.dumps(payload)
+
+
+class TestCLISessionAssumptionsWatchdog:
+    """Issue 3: emission cadence changes from post-turn-only to per-event.
+    Shape unchanged (full snapshot of ``data["assumptions"]``)."""
+
+    async def test_mid_turn_emit_on_change(self, tmp_path: Path) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        # Pre-existing ASSUMPTIONS.json (one assumption) so the snapshot
+        # tracker has a baseline.
+        ap = tmp_path / "ASSUMPTIONS.json"
+        ap.write_text(_make_assumptions_payload("a.one"))
+
+        session = CLISession("watchdog-sess", tmp_path, on_event)
+
+        line1 = json.dumps(_text_delta_event("hi ")) + "\n"
+        line2 = json.dumps(_text_delta_event("you")) + "\n"
+        line3 = json.dumps(_result_success("")) + "\n"
+
+        readline_n = {"n": 0}
+
+        async def fake_readline() -> bytes:
+            readline_n["n"] += 1
+            n = readline_n["n"]
+            if n == 1:
+                return line1.encode("utf-8")
+            if n == 2:
+                # Simulate the agent's mid-turn ASSUMPTIONS.json write
+                # right before the next CLI event arrives. Bump mtime
+                # by 1 second so it's reliably distinct on FS that
+                # coalesce sub-millisecond writes.
+                ap.write_text(_make_assumptions_payload("a.one", "b.two"))
+                future = ap.stat().st_mtime_ns + 1_000_000_000
+                os.utime(ap, ns=(future, future))
+                return line2.encode("utf-8")
+            if n == 3:
+                return line3.encode("utf-8")
+            return b""
+
+        class _Proc:
+            returncode = 0
+            pid = 1
+
+            def __init__(self) -> None:
+                self.stdout = MagicMock()
+                self.stdout.readline = fake_readline
+                self.stderr = MagicMock()
+
+            def kill(self) -> None: ...
+
+            def terminate(self) -> None: ...
+
+            async def wait(self) -> int:
+                return 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        async def fake_subprocess(*_args: Any, **_kwargs: Any) -> Any:
+            return _Proc()
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await asyncio.wait_for(
+                session.run_turn("hi", model="opus"), timeout=5.0
+            )
+
+        au = [e for e in events if e.get("type") == "assumptions_update"]
+        # Expect at least 2 emits: mid-turn (watchdog after line 2) and
+        # post-turn (existing _check_file_changes safety net).
+        assert len(au) >= 2, (
+            f"Issue 3: expected >=2 assumptions_update events"
+            f" (mid-turn + post-turn), got {len(au)}: {au!r}"
+        )
+        last_fields = [a["field"] for a in au[-1]["assumptions"]]
+        assert "b.two" in last_fields
+
+    async def test_no_emit_on_unchanged(self, tmp_path: Path) -> None:
+        """If ASSUMPTIONS.json never changes mid-turn, the watchdog must
+        NOT emit any assumptions_update events."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        ap = tmp_path / "ASSUMPTIONS.json"
+        ap.write_text(_make_assumptions_payload("a.one"))
+
+        session = CLISession("nochange-sess", tmp_path, on_event)
+
+        stdout_data = _make_stream_lines(
+            _text_delta_event("hi"),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("hi", model="opus")
+
+        au = [e for e in events if e.get("type") == "assumptions_update"]
+        assert au == [], f"Expected no assumptions_update emits, got {au!r}"
+
+    async def test_invalid_json_swallowed(self, tmp_path: Path) -> None:
+        """Half-written ASSUMPTIONS.json (partial JSON) must not crash
+        the watchdog or emit anything; a subsequent valid write fires
+        normally."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        ap = tmp_path / "ASSUMPTIONS.json"
+        ap.write_text(_make_assumptions_payload("a.one"))
+
+        session = CLISession("badjson-sess", tmp_path, on_event)
+        session._snapshot_file_state()
+
+        # Garbage write + bumped mtime (1s to clear FS coalescing).
+        ap.write_text("{not json")
+        future = ap.stat().st_mtime_ns + 1_000_000_000
+        os.utime(ap, ns=(future, future))
+
+        await session._check_assumptions_changed()
+        assert [e for e in events if e.get("type") == "assumptions_update"] == []
+
+        # Valid write afterwards triggers an emit. Bump mtime PAST the
+        # last-tracked mtime (NOT past the file's current mtime, which
+        # coarse-resolution filesystems may have rounded to the same
+        # value as the previous os.utime). The watchdog gate is
+        # ``mtime != session._last_assumptions_mtime_ns`` so we make
+        # the new mtime monotonically larger than that anchor.
+        ap.write_text(_make_assumptions_payload("a.one", "c.three"))
+        anchor = session._last_assumptions_mtime_ns or ap.stat().st_mtime_ns
+        future2 = anchor + 2_000_000_000
+        os.utime(ap, ns=(future2, future2))
+        await session._check_assumptions_changed()
+        au = [e for e in events if e.get("type") == "assumptions_update"]
+        assert len(au) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue 2 -- BE handling of CLI compaction events.
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionCompactionEvents:
+    async def test_compacting_status_emitted_once(self, tmp_path: Path) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("compact-sess", tmp_path, on_event)
+        ev = {
+            "type": "system",
+            "subtype": "status",
+            "status": "compacting",
+            "session_id": "x",
+        }
+        for _ in range(3):
+            await session._handle_event(ev, [], [], {})
+
+        compacting = [
+            e
+            for e in events
+            if e.get("type") == "status" and e.get("status") == "compacting"
+        ]
+        assert len(compacting) == 1, (
+            "compacting must be sticky: only the FIRST occurrence is forwarded"
+        )
+        assert session._is_compacting is True
+        assert session._current_status == "compacting"
+
+    async def test_compact_boundary_emits_compact_done(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("compact-sess", tmp_path, on_event)
+        session._is_compacting = True
+        session._current_status = "compacting"
+
+        ev = {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "session_id": "x",
+            "compact_metadata": {
+                "trigger": "auto",
+                "pre_tokens": 175296,
+                "preserved_segment": {
+                    "head_uuid": "h",
+                    "anchor_uuid": "a",
+                    "tail_uuid": "t",
+                },
+            },
+        }
+        await session._handle_event(ev, [], [], {})
+
+        done = [
+            e
+            for e in events
+            if e.get("type") == "status" and e.get("status") == "compact_done"
+        ]
+        assert len(done) == 1
+        assert done[0]["trigger"] == "auto"
+        assert done[0]["pre_tokens"] == 175296
+        assert done[0]["preserved_segment"]["head_uuid"] == "h"
+
+        assert session._is_compacting is False
+        assert session._current_status == "processing"
+
+    async def test_microcompact_boundary_ignored(self, tmp_path: Path) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("compact-sess", tmp_path, on_event)
+        ev = {
+            "type": "system",
+            "subtype": "microcompact_boundary",
+            "session_id": "x",
+        }
+        await session._handle_event(ev, [], [], {})
+        assert events == [], "microcompact_boundary must be silently ignored"
+
+    async def test_synthetic_user_event_ignored(self, tmp_path: Path) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("compact-sess", tmp_path, on_event)
+        ev = {
+            "type": "user",
+            "isSynthetic": True,
+            "session_id": "x",
+            "message": {"role": "user", "content": "..."},
+        }
+        await session._handle_event(ev, [], [], {})
+        assert events == []
+
+    async def test_compacting_resets_on_new_turn(self, tmp_path: Path) -> None:
+        """If a previous turn ended mid-compaction, the next turn's
+        _snapshot_file_state must clear sticky compaction state so a
+        fresh compacting event will be re-emitted."""
+        on_event = AsyncMock()
+        session = CLISession("compact-sess", tmp_path, on_event)
+        session._is_compacting = True
+        session._current_status = "compacting"
+        session._snapshot_file_state()
+        assert session._is_compacting is False
+        assert session._current_status == "processing"
+
+
+# ---------------------------------------------------------------------------
+# Issue 2 keepalive sticky status -- the WebSocket heartbeat re-emits the
+# session's current sticky status string rather than always "processing".
+# ---------------------------------------------------------------------------
+
+
+class TestKeepaliveStickyStatus:
+    async def test_keepalive_emits_current_sticky_status(
+        self, tmp_path: Path
+    ) -> None:
+        from tcg.core.api.agent import _keepalive
+
+        sent: list[dict[str, Any]] = []
+
+        class FakeWebSocket:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                sent.append(payload)
+
+        on_event = AsyncMock()
+        session = CLISession("ka-sess", tmp_path, on_event)
+        session._current_status = "compacting"
+
+        task = asyncio.create_task(
+            _keepalive(FakeWebSocket(), session=session, interval=0)
+        )
+        # Drive the loop a few times.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert sent, "keepalive must have emitted at least one heartbeat"
+        for payload in sent:
+            assert payload == {"type": "status", "status": "compacting"}, (
+                f"keepalive must echo session._current_status,"
+                f" got {payload!r}"
+            )
+
+    async def test_keepalive_falls_back_to_processing_without_session(
+        self,
+    ) -> None:
+        """Backwards compat: if no session is supplied, behave as before."""
+        from tcg.core.api.agent import _keepalive
+
+        sent: list[dict[str, Any]] = []
+
+        class FakeWebSocket:
+            async def send_json(self, payload: dict[str, Any]) -> None:
+                sent.append(payload)
+
+        task = asyncio.create_task(_keepalive(FakeWebSocket(), interval=0))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert sent
+        for payload in sent:
+            assert payload == {"type": "status", "status": "processing"}
