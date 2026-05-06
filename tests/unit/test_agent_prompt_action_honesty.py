@@ -109,17 +109,26 @@ class TestActionHonestyRule:
         )
 
     def test_action_honesty_future_tense_examples(self) -> None:
-        """The action-honesty rule must name concrete future-tense trigger phrases."""
+        """The action-honesty rule must name ALL three concrete future-tense trigger phrases.
+
+        Tightened from R-prompt-behavior gap T2: previously this test passed if ANY of
+        the three substrings appeared in the window, so a sloppy edit that dropped two
+        out of three would still pass. The canonical rule wording lists all three
+        ('I'll', 'Let me', 'Now the') as field-reported failure-mode triggers, and a
+        future edit that prunes any of them should be a deliberate decision — not
+        silently green.
+        """
         normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
         anchor = "action honesty"
         idx = normalised.find(anchor)
         assert idx != -1
-        window = normalised[idx : idx + 400]
-        # Must name at least one of the trigger phrases from the field reports
+        window = normalised[idx : idx + 600]
+        # All three trigger phrases must appear in the rule paragraph.
         triggers = ("i'll", "let me", "now the")
-        assert any(t in window for t in triggers), (
-            "Action honesty rule must name at least one future-tense trigger phrase "
-            f"('I'll', 'Let me', 'Now the'). Window: {window!r}"
+        missing = [t for t in triggers if t not in window]
+        assert not missing, (
+            "Action honesty rule must name ALL three future-tense trigger phrases "
+            f"('I'll', 'Let me', 'Now the'). Missing: {missing}. Window: {window!r}"
         )
 
     def test_never_end_turn_while_background_rule_present(self) -> None:
@@ -151,14 +160,31 @@ class TestActionHonestyRule:
         )
 
     def test_not_turn_ending_sentence_example(self) -> None:
-        """The rule must give an example of a non-turn-ending sentence."""
-        # Checks for "not turn-ending" / "not a turn-ending sentence" pattern
-        lower = _CLAUDE_MD_CONTENT.lower()
-        assert "not turn-ending" in lower or "not a turn-ending" in lower or (
-            "backtest is running" in lower and "not" in lower
-        ), (
-            "The 'never end a turn' rule should give an example of a sentence "
-            "that is NOT a valid turn-ending message (e.g. 'Backtest is running')."
+        """The rule must give a concrete example of a non-turn-ending sentence.
+
+        Tightened from R-prompt-behavior gap T3: previously this test had a too-generous
+        OR fallback that matched 'backtest is running' anywhere in the prompt as long as
+        'not' co-occurred. The fallback could trigger on unrelated co-occurrences. The
+        tightened version anchors on the 'never end a turn while' rule and requires the
+        canonical 'Backtest is running' example to appear *within the rule's window*
+        and to be marked as **not** a turn-ending sentence inside the same window.
+        """
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "never end a turn while"
+        idx = normalised.find(anchor)
+        assert idx != -1, (
+            "Could not locate 'never end a turn while' anchor; the rule itself is missing."
+        )
+        # The example must be in the rule's own paragraph (first ~400 chars after the anchor).
+        window = normalised[idx : idx + 400]
+        assert "backtest is running" in window, (
+            "The 'never end a turn' rule must include the canonical 'Backtest is running' "
+            f"example within its own paragraph. Window: {window!r}"
+        )
+        # And the example must be flagged as NOT a turn-ending sentence (literal phrase).
+        assert "not" in window and "turn-ending" in window, (
+            "The example must be explicitly flagged as 'not' a 'turn-ending' sentence. "
+            f"Window: {window!r}"
         )
 
 
@@ -282,4 +308,253 @@ class TestNetworkSandboxWarning:
         assert "tcg.backtester.lib" in _CLAUDE_MD_CONTENT, (
             "Round-4 invariant: 'tcg.backtester.lib' canonical import path "
             "must remain in the prompt. Do not regress to tcg_backtester or lib.data_load."
+        )
+
+    def test_network_sandbox_warning_is_blockquote(self) -> None:
+        """The network-sandbox warning must use markdown blockquote prominence.
+
+        Closes R-prompt-behavior gap T4: the warning's value depends partly on visual
+        prominence (rendered as a callout, not a plain paragraph). A future edit that
+        collapses the blockquote to a regular paragraph would weaken the cue without
+        breaking any other test. This test pins the literal '> **Network sandbox
+        warning' blockquote prefix so any demotion must be deliberate.
+        """
+        # Use raw (non-lowercased, non-normalised) content so the blockquote marker
+        # and bold markdown survive intact.
+        assert "> **Network sandbox warning" in _CLAUDE_MD_CONTENT, (
+            "The network-sandbox warning must remain a markdown blockquote prefixed "
+            "with '> **Network sandbox warning' for visual prominence. Do not demote "
+            "it to a plain paragraph."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Round-6 follow-ups — S1 deferred-completion carve-out, S2 cache recipe,
+# S3 polling protocol, NIT N3 action-honesty scope clarification.
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredCompletionCarveOut:
+    """Round-6 S1: the 'Never end a turn while background' rule must include a
+    carve-out for explicitly user-okayed deferred work."""
+
+    def test_deferred_completion_exception_named(self) -> None:
+        """The rule must label the carve-out as a 'deferred completion' exception."""
+        lower = _CLAUDE_MD_CONTENT.lower()
+        assert "deferred completion" in lower, (
+            "The 'never end a turn' rule must name a 'deferred completion' "
+            "exception so the agent can identify the legitimate-end case by name."
+        )
+
+    def test_carve_out_requires_explicit_user_acknowledgement(self) -> None:
+        """The carve-out must require explicit user acknowledgement, not be implicit."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "deferred completion"
+        idx = normalised.find(anchor)
+        assert idx != -1, "Carve-out anchor 'deferred completion' missing"
+        window = normalised[idx : idx + 500]
+        # Must require the user to have explicitly accepted/asked for deferred work.
+        assert "explicitly" in window, (
+            "The deferred-completion carve-out must require the user to have "
+            f"*explicitly* accepted deferred follow-up. Window: {window!r}"
+        )
+        # Must list at least one of the canonical example phrases so the agent
+        # recognises the trigger from natural-language requests.
+        examples = ("report back later", "overnight", "check tomorrow", "babysit")
+        present = [ex for ex in examples if ex in window]
+        assert present, (
+            "The carve-out must give at least one canonical example phrase "
+            f"(e.g. 'report back later', 'overnight', 'check tomorrow', 'babysit'). "
+            f"Window: {window!r}"
+        )
+
+    def test_carve_out_requires_closing_artefacts(self) -> None:
+        """The carve-out must require the closing message to name path + job id + duration."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "deferred completion"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 500]
+        # The closing message must name the .output path, the PID/background_task_id, and
+        # the expected duration. We require all three so a future edit dropping any of
+        # them is a deliberate decision.
+        assert ".output" in window, (
+            f"Carve-out closing-message contract must name the '.output' path. Window: {window!r}"
+        )
+        assert "pid" in window or "background_task_id" in window, (
+            "Carve-out closing-message contract must name the job's PID or "
+            f"background_task_id. Window: {window!r}"
+        )
+        assert "duration" in window, (
+            f"Carve-out closing-message contract must name the expected duration. Window: {window!r}"
+        )
+
+    def test_carve_out_default_is_polling(self) -> None:
+        """Without an explicit user okay, the default must remain polling."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "deferred completion"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 500]
+        assert "default to polling" in window, (
+            "The carve-out must explicitly state that the default (no user acknowledgement) "
+            f"is to poll, not to end-turn. Window: {window!r}"
+        )
+
+
+class TestPollingProtocol:
+    """Round-6 S3: the polling protocol must specify cadence, terminal-line definition,
+    and a max poll budget."""
+
+    def test_polling_protocol_label_present(self) -> None:
+        """A 'Polling protocol' label must anchor the new instructions."""
+        lower = _CLAUDE_MD_CONTENT.lower()
+        assert "polling protocol" in lower, (
+            "The prompt must contain a 'Polling protocol' label so the agent can "
+            "locate the cadence + terminal-line + budget guidance by name."
+        )
+
+    def test_polling_cadence_specified(self) -> None:
+        """Cadence must be specified — ~10 s between Reads, with sleep guidance."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "polling protocol"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 800]
+        assert "10 s" in window or "10s" in window or "every ~10" in window, (
+            "Polling protocol must specify a concrete cadence (~10 s between Reads). "
+            f"Window: {window!r}"
+        )
+        assert "sleep" in window, (
+            "Polling protocol must mention `sleep` (Bash sleep between Reads) so the "
+            f"agent does not Read in a tight loop. Window: {window!r}"
+        )
+
+    def test_terminal_line_definition_complete(self) -> None:
+        """Terminal-line definition must enumerate success / exception / stable-file cases."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "polling protocol"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 1200]
+        # All three terminal-line cases must be named in the protocol so a clean-exit
+        # script with no DONE marker is not ambiguous.
+        assert "success" in window, (
+            f"Terminal-line definition must mention the 'success' case. Window: {window!r}"
+        )
+        assert "exception" in window or "traceback" in window, (
+            "Terminal-line definition must mention the 'exception' / 'traceback' case. "
+            f"Window: {window!r}"
+        )
+        # Stable-file proxy for clean exit without explicit DONE.
+        assert "stable" in window or "identical" in window, (
+            "Terminal-line definition must include a stable-file / identical-content "
+            f"proxy for a clean exit with no explicit DONE marker. Window: {window!r}"
+        )
+
+    def test_max_poll_budget_specified(self) -> None:
+        """A maximum poll budget (~10 minutes) must be specified."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "polling protocol"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 1200]
+        assert "max poll budget" in window or "max poll" in window, (
+            "Polling protocol must label a 'max poll budget' so the agent stops "
+            f"busy-polling after a bounded time. Window: {window!r}"
+        )
+        assert "10 minutes" in window, (
+            f"Polling protocol must specify a concrete '10 minutes' budget. Window: {window!r}"
+        )
+
+    def test_done_marker_pattern_recommended(self) -> None:
+        """Scripts should be patterned to print a DONE marker for deterministic polling."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "polling protocol"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 1200]
+        assert "done" in window, (
+            "Polling protocol must recommend printing a `DONE` marker on the last line "
+            f"so polling is deterministic. Window: {window!r}"
+        )
+
+
+class TestSandboxCacheRecipe:
+    """Round-6 S2: the network-sandbox warning must include a concrete cache recipe."""
+
+    def test_cache_recipe_data_folder(self) -> None:
+        """The recipe must name `data/` as the cache folder."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "concrete recipe"
+        idx = normalised.find(anchor)
+        assert idx != -1, "Could not locate 'Concrete recipe' anchor under the warning"
+        window = normalised[idx : idx + 800]
+        assert "data/" in window, (
+            "Cache recipe must name the `data/` workspace subfolder as the canonical "
+            f"location for cached MCP exports. Window: {window!r}"
+        )
+
+    def test_cache_recipe_jsonl_format(self) -> None:
+        """The recipe must specify JSON-lines (`jsonl`) as the cache format."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "concrete recipe"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 800]
+        assert "jsonl" in window, (
+            "Cache recipe must specify JSON-lines (`.jsonl`) as the cache format so "
+            f"the agent does not reinvent the schema each turn. Window: {window!r}"
+        )
+
+    def test_cache_recipe_names_aggregate_tool(self) -> None:
+        """The recipe must name `mcp__mongodb__aggregate` as the canonical fetch tool."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "concrete recipe"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 800]
+        # mcp__mongodb__aggregate is the canonical chunked-fetch tool (verified against
+        # the mongodb-mcp-server README — find/aggregate/export are the three Database
+        # Tools relevant for read access). aggregate is the most powerful within the
+        # MCP byte limit; export is named separately for very large dumps.
+        assert "mcp__mongodb__aggregate" in window, (
+            "Cache recipe must name `mcp__mongodb__aggregate` as the canonical fetch "
+            f"tool for chunked queries within the MCP byte limit. Window: {window!r}"
+        )
+
+    def test_cache_recipe_names_export_for_large_dumps(self) -> None:
+        """The recipe must name `mcp__mongodb__export` for large server-side dumps."""
+        lower = _CLAUDE_MD_CONTENT.lower()
+        # export is the right tool for very large dumps — verified by the mongodb-mcp-server
+        # README ("Export a query or aggregation results in the specified EJSON format")
+        # and by the Wave-D probe trace which used mcp__mongodb__export at event 42.
+        assert "mcp__mongodb__export" in lower, (
+            "The network-sandbox section must name `mcp__mongodb__export` as the tool "
+            "for very large server-side dumps that exceed the find/aggregate byte limit."
+        )
+
+
+class TestActionHonestyScope:
+    """Round-6 NIT N3: action-honesty rule must clarify it applies to single-step
+    in-message announcements, not multi-turn plans / explanations."""
+
+    def test_action_honesty_scope_clause_present(self) -> None:
+        """A scope clause must clarify that multi-turn plans are not violations."""
+        normalised = _normalise(_CLAUDE_MD_CONTENT.lower())
+        anchor = "action honesty"
+        idx = normalised.find(anchor)
+        assert idx != -1
+        window = normalised[idx : idx + 1000]
+        assert "scope" in window, (
+            "Action-honesty rule must contain a 'Scope' clause to bound the rule's "
+            f"reach (so it does not over-trip on planning paragraphs). Window: {window!r}"
+        )
+        # The scope clause must explicitly carve out at least one of: multi-turn plans,
+        # recaps, or explanations.
+        carve_outs = ("multi-turn plan", "recap", "explanation")
+        present = [c for c in carve_outs if c in window]
+        assert present, (
+            "Scope clause must carve out multi-turn plans / recaps / explanations. "
+            f"Window: {window!r}"
         )
