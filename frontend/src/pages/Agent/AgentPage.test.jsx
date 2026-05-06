@@ -10,14 +10,34 @@ const mockHookReturn = {
   messages: [],
   assumptions: [],
   status: 'idle',
+  warningMessage: null,
+  compactBanner: null,
+  processExitInfo: null,
+  clearProcessExit: vi.fn(),
+  turnAbortedInfo: null,
+  clearTurnAborted: vi.fn(),
+  subagentCount: 0,
+  tokenUsage: { input: 0, output: 0, total: 0 },
+  elapsedMs: 0,
+  turnStartTimestamp: null,
   isConnected: false,
+  isProcessing: false,
   sendMessage: vi.fn(),
+  stopAgent: vi.fn(),
+  interruptAgent: vi.fn(),
   notebookReady: false,
 };
 
-vi.mock('../../hooks/useAgentSession', () => ({
-  default: vi.fn(() => mockHookReturn),
-}));
+vi.mock('../../hooks/useAgentSession', async (importOriginal) => {
+  // Use importOriginal so the named exports (formatTokens, formatElapsed)
+  // are real and only the default hook is mocked. AgentPage imports both
+  // the hook and the helpers from this module.
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    default: vi.fn(() => mockHookReturn),
+  };
+});
 
 import useAgentSession from '../../hooks/useAgentSession';
 
@@ -66,8 +86,21 @@ describe('<AgentPage>', () => {
       messages: [],
       assumptions: [],
       status: 'idle',
+      warningMessage: null,
+      compactBanner: null,
+      processExitInfo: null,
+      clearProcessExit: vi.fn(),
+      turnAbortedInfo: null,
+      clearTurnAborted: vi.fn(),
+      subagentCount: 0,
+      tokenUsage: { input: 0, output: 0, total: 0 },
+      elapsedMs: 0,
+      turnStartTimestamp: null,
       isConnected: false,
+      isProcessing: false,
       sendMessage: vi.fn(),
+      stopAgent: vi.fn(),
+      interruptAgent: vi.fn(),
       notebookReady: false,
     });
     useAgentSession.mockImplementation(() => mockHookReturn);
@@ -141,5 +174,95 @@ describe('<AgentPage>', () => {
     mockHookReturn.isConnected = true;
     render(<AgentPage />);
     expect(screen.getByTestId('chat-panel').dataset.connected).toBe('true');
+  });
+
+  /* ---------- Runtime visibility (Issues 9-12) ---------- */
+
+  it('does not render subagent badge when count is 0', () => {
+    mockHookReturn.subagentCount = 0;
+    render(<AgentPage />);
+    expect(screen.queryByTestId('subagent-badge')).toBeNull();
+  });
+
+  it('renders subagent badge with singular copy when count is 1', () => {
+    mockHookReturn.subagentCount = 1;
+    render(<AgentPage />);
+    const badge = screen.getByTestId('subagent-badge');
+    expect(badge.textContent).toBe('1 subagent running');
+  });
+
+  it('renders subagent badge with plural copy when count > 1', () => {
+    mockHookReturn.subagentCount = 3;
+    render(<AgentPage />);
+    expect(screen.getByTestId('subagent-badge').textContent).toBe('3 subagents running');
+  });
+
+  it('does not render token footer when total is 0', () => {
+    mockHookReturn.tokenUsage = { input: 0, output: 0, total: 0 };
+    render(<AgentPage />);
+    expect(screen.queryByTestId('token-footer')).toBeNull();
+  });
+
+  it('renders token footer when total > 0 with humanized values', () => {
+    mockHookReturn.tokenUsage = { input: 12345, output: 4700, total: 17045 };
+    render(<AgentPage />);
+    const footer = screen.getByTestId('token-footer');
+    // 12345 → 12.3k; 4700 → 4.7k
+    expect(footer.textContent).toContain('12.3k');
+    expect(footer.textContent).toContain('4.7k');
+  });
+
+  it('renders elapsed badge while processing with formatted seconds', () => {
+    mockHookReturn.isProcessing = true;
+    mockHookReturn.elapsedMs = 12_000;
+    render(<AgentPage />);
+    expect(screen.getByTestId('elapsed-badge').textContent).toBe('Working for 12s');
+  });
+
+  it('renders elapsed badge with minutes-and-seconds format', () => {
+    mockHookReturn.isProcessing = true;
+    mockHookReturn.elapsedMs = 83_000; // 1m 23s
+    render(<AgentPage />);
+    expect(screen.getByTestId('elapsed-badge').textContent).toBe('Working for 1m 23s');
+  });
+
+  it('hides elapsed badge when not processing', () => {
+    mockHookReturn.isProcessing = false;
+    mockHookReturn.elapsedMs = 12_000;
+    render(<AgentPage />);
+    expect(screen.queryByTestId('elapsed-badge')).toBeNull();
+  });
+
+  it('hides elapsed badge when elapsedMs is 0 (turn just started)', () => {
+    // Avoid flicker on the very first frame before the ticker has run.
+    mockHookReturn.isProcessing = true;
+    mockHookReturn.elapsedMs = 0;
+    render(<AgentPage />);
+    expect(screen.queryByTestId('elapsed-badge')).toBeNull();
+  });
+
+  it('renders turn-aborted banner when turnAbortedInfo is set', () => {
+    mockHookReturn.turnAbortedInfo = { reason: 'ws_disconnect', hadPartialContent: true };
+    render(<AgentPage />);
+    const banner = screen.getByTestId('turn-aborted-banner');
+    expect(banner.textContent).toContain('Connection dropped during agent reply');
+    expect(banner.textContent).toContain('partial response saved');
+  });
+
+  it('does not render turn-aborted banner when turnAbortedInfo is null', () => {
+    mockHookReturn.turnAbortedInfo = null;
+    render(<AgentPage />);
+    expect(screen.queryByTestId('turn-aborted-banner')).toBeNull();
+  });
+
+  it('turn-aborted banner dismiss button calls clearTurnAborted', () => {
+    const clearFn = vi.fn();
+    mockHookReturn.turnAbortedInfo = { reason: 'ws_disconnect', hadPartialContent: false };
+    mockHookReturn.clearTurnAborted = clearFn;
+    render(<AgentPage />);
+    const banner = screen.getByTestId('turn-aborted-banner');
+    const dismissBtn = banner.querySelector('button');
+    fireEvent.click(dismissBtn);
+    expect(clearFn).toHaveBeenCalledTimes(1);
   });
 });

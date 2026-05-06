@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import useAgentSession from './useAgentSession';
+import useAgentSession, { formatTokens, formatElapsed } from './useAgentSession';
 
 /* ---------- Minimal WebSocket mock ---------- */
 
@@ -605,6 +605,301 @@ describe('useAgentSession', () => {
 
     act(() => result.current.clearProcessExit());
     expect(result.current.processExitInfo).toBeNull();
+  });
+
+  /* ---------- turn_aborted event (Issue 9) ---------- */
+
+  it('turn_aborted event clears in-flight state and sets turnAbortedInfo', () => {
+    const { result } = renderHook(() => useAgentSession('sess-aborted-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // Put a turn in flight first so we can verify the cleanup.
+    act(() => result.current.sendMessage('analyze'));
+    expect(result.current.isProcessing).toBe(true);
+    expect(result.current.turnAbortedInfo).toBeNull();
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_aborted',
+        reason: 'ws_disconnect',
+        session_id: 'sess-aborted-1',
+        had_partial_content: true,
+      }),
+    );
+
+    expect(result.current.isProcessing).toBe(false);
+    expect(result.current.turnAbortedInfo).toEqual({
+      reason: 'ws_disconnect',
+      hadPartialContent: true,
+    });
+  });
+
+  it('clearTurnAborted resets turnAbortedInfo to null', () => {
+    const { result } = renderHook(() => useAgentSession('sess-aborted-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_aborted',
+        reason: 'ws_disconnect',
+        session_id: 'sess-aborted-2',
+        had_partial_content: false,
+      }),
+    );
+    expect(result.current.turnAbortedInfo).not.toBeNull();
+
+    act(() => result.current.clearTurnAborted());
+    expect(result.current.turnAbortedInfo).toBeNull();
+  });
+
+  it('sending a new user message clears turnAbortedInfo', () => {
+    const { result } = renderHook(() => useAgentSession('sess-aborted-3'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_aborted',
+        reason: 'ws_disconnect',
+        session_id: 'sess-aborted-3',
+        had_partial_content: true,
+      }),
+    );
+    expect(result.current.turnAbortedInfo).not.toBeNull();
+
+    act(() => result.current.sendMessage('try again'));
+    expect(result.current.turnAbortedInfo).toBeNull();
+  });
+
+  it('after turn_aborted, a subsequent history payload is applied (in-flight ref cleared)', () => {
+    // Issue 9 success path: turn_aborted clears hasInFlightTurnRef so the BE
+    // reconnect-history replay populates messages instead of being dropped.
+    const { result } = renderHook(() => useAgentSession('sess-aborted-4'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => result.current.sendMessage('long task'));
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_aborted',
+        reason: 'ws_disconnect',
+        session_id: 'sess-aborted-4',
+        had_partial_content: true,
+      }),
+    );
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'history',
+        messages: [
+          { role: 'user', content: 'long task' },
+          { role: 'assistant', content: [{ type: 'text', text: 'partial' }] },
+        ],
+      }),
+    );
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages[0]).toEqual({ role: 'user', content: 'long task' });
+    expect(result.current.messages[1].content).toBe('partial');
+  });
+
+  it('WS-close handler clears the in-flight ref so a subsequent history is applied', () => {
+    // Defensive complement of Issue 9: even without turn_aborted, the close
+    // handler should clear hasInFlightTurnRef.
+    const { result } = renderHook(() => useAgentSession('sess-close-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => result.current.sendMessage('first'));
+    expect(result.current.messages).toHaveLength(1);
+
+    // Simulate disconnect → reconnect → history payload.
+    act(() => ws._simulateClose());
+    act(() => vi.advanceTimersByTime(3000));
+    const ws2 = MockWebSocket.instances[1];
+    act(() => ws2._simulateOpen());
+    act(() =>
+      ws2._simulateMessage({
+        type: 'history',
+        messages: [{ role: 'user', content: 'persisted-from-be' }],
+      }),
+    );
+    // History was applied (would have been dropped if hasInFlightTurnRef
+    // were still latched).
+    expect(result.current.messages).toEqual([{ role: 'user', content: 'persisted-from-be' }]);
+  });
+
+  /* ---------- subagent_count event (Issue 10) ---------- */
+
+  it('subagent_count event updates subagentCount state', () => {
+    const { result } = renderHook(() => useAgentSession('sess-subagent-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    expect(result.current.subagentCount).toBe(0);
+
+    act(() => ws._simulateMessage({ type: 'subagent_count', count: 3 }));
+    expect(result.current.subagentCount).toBe(3);
+
+    act(() => ws._simulateMessage({ type: 'subagent_count', count: 1 }));
+    expect(result.current.subagentCount).toBe(1);
+
+    // count = 0 must clear the badge (i.e. supersede prior nonzero state).
+    act(() => ws._simulateMessage({ type: 'subagent_count', count: 0 }));
+    expect(result.current.subagentCount).toBe(0);
+  });
+
+  it('subagent_count ignores malformed (non-numeric) payloads', () => {
+    const { result } = renderHook(() => useAgentSession('sess-subagent-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'subagent_count', count: 5 }));
+    expect(result.current.subagentCount).toBe(5);
+
+    act(() => ws._simulateMessage({ type: 'subagent_count', count: 'oops' }));
+    // Malformed payload is ignored; prior value preserved.
+    expect(result.current.subagentCount).toBe(5);
+  });
+
+  /* ---------- token_usage event (Issue 11) ---------- */
+
+  it('token_usage event updates tokenUsage state', () => {
+    const { result } = renderHook(() => useAgentSession('sess-tokens-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    expect(result.current.tokenUsage).toEqual({ input: 0, output: 0, total: 0 });
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'token_usage',
+        session_input: 1000,
+        session_output: 500,
+        session_total: 1500,
+      }),
+    );
+    expect(result.current.tokenUsage).toEqual({ input: 1000, output: 500, total: 1500 });
+
+    // Subsequent emission overwrites (cumulative monotonic per contract).
+    act(() =>
+      ws._simulateMessage({
+        type: 'token_usage',
+        session_input: 12345,
+        session_output: 4700,
+        session_total: 17045,
+      }),
+    );
+    expect(result.current.tokenUsage).toEqual({ input: 12345, output: 4700, total: 17045 });
+  });
+
+  /* ---------- elapsed-time ticker (Issue 12) ---------- */
+
+  it('elapsedMs starts at 0 and ticks forward while processing', () => {
+    const { result } = renderHook(() => useAgentSession('sess-elapsed-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    expect(result.current.elapsedMs).toBe(0);
+
+    act(() => result.current.sendMessage('go'));
+    // Right after send, elapsed is ~0.
+    expect(result.current.elapsedMs).toBeLessThan(50);
+    expect(result.current.turnStartTimestamp).not.toBeNull();
+
+    // Advance fake timers by 12s — the interval ticks each second; React
+    // only re-renders on each setElapsedMs call, but the final state should
+    // reflect ~12_000 ms.
+    act(() => vi.advanceTimersByTime(12_000));
+    // Allow some slack: elapsed is computed from Date.now() - start, both
+    // of which advance with fake timers.
+    expect(result.current.elapsedMs).toBeGreaterThanOrEqual(11_000);
+    expect(result.current.elapsedMs).toBeLessThanOrEqual(13_000);
+  });
+
+  it('elapsedMs clears on message_complete', () => {
+    const { result } = renderHook(() => useAgentSession('sess-elapsed-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => result.current.sendMessage('go'));
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(result.current.elapsedMs).toBeGreaterThan(0);
+
+    act(() => ws._simulateMessage({ type: 'message_complete' }));
+    expect(result.current.turnStartTimestamp).toBeNull();
+    // After message_complete the ticker stops; advancing time should not
+    // change elapsedMs further (it's frozen / zero, depending on terminal
+    // handler — current contract clears turnStartTimestamp which stops the
+    // ticker effect).
+    const beforeAdvance = result.current.elapsedMs;
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(result.current.elapsedMs).toBe(beforeAdvance);
+  });
+
+  it('elapsedMs ticker clears on turn_aborted, error, stopped, process_exit', () => {
+    const terminals = [
+      { type: 'turn_aborted', reason: 'ws_disconnect', session_id: 's', had_partial_content: false },
+      { type: 'error', message: 'boom' },
+      { type: 'stopped' },
+      { type: 'process_exit', returncode: 1, saw_result: false, session_id: 's', had_content: false, stderr_tail: null },
+    ];
+    for (const terminal of terminals) {
+      MockWebSocket.instances = [];
+      const { result, unmount } = renderHook(() => useAgentSession(`sess-elapsed-term-${terminal.type}`));
+      const ws = MockWebSocket.instances[0];
+      act(() => ws._simulateOpen());
+      act(() => result.current.sendMessage('go'));
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(result.current.turnStartTimestamp).not.toBeNull();
+      act(() => ws._simulateMessage(terminal));
+      expect(result.current.turnStartTimestamp).toBeNull();
+      unmount();
+    }
+  });
+
+  it('elapsed ticker is cleaned up on unmount (no leaked interval)', () => {
+    const { result, unmount } = renderHook(() => useAgentSession('sess-elapsed-cleanup'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+    act(() => result.current.sendMessage('go'));
+    act(() => vi.advanceTimersByTime(3_000));
+    const before = result.current.elapsedMs;
+    unmount();
+    // After unmount, advancing timers must NOT throw or trigger setState on
+    // an unmounted component (vitest will surface React act() warnings).
+    act(() => vi.advanceTimersByTime(10_000));
+    // The hook return is the last-rendered snapshot; we just confirm we got
+    // here without errors and the snapshot is reasonable.
+    expect(result.current.elapsedMs).toBe(before);
+  });
+
+  /* ---------- format helpers (Issue 11/12) ---------- */
+
+  it('formatTokens humanizes counts as "123" / "12.3k" / "1.5M"', () => {
+    expect(formatTokens(0)).toBe('0');
+    expect(formatTokens(123)).toBe('123');
+    expect(formatTokens(999)).toBe('999');
+    expect(formatTokens(1_000)).toBe('1.0k');
+    expect(formatTokens(12_345)).toBe('12.3k');
+    expect(formatTokens(99_999)).toBe('100.0k');
+    expect(formatTokens(150_000)).toBe('150k');
+    expect(formatTokens(1_500_000)).toBe('1.5M');
+    expect(formatTokens(-5)).toBe('0');
+    expect(formatTokens('not-a-number')).toBe('0');
+  });
+
+  it('formatElapsed produces "Xs" / "Xm Ys" / "Xh Ym"', () => {
+    expect(formatElapsed(0)).toBe('0s');
+    expect(formatElapsed(12_000)).toBe('12s');
+    expect(formatElapsed(59_999)).toBe('59s');
+    expect(formatElapsed(60_000)).toBe('1m 00s');
+    expect(formatElapsed(83_000)).toBe('1m 23s');
+    expect(formatElapsed(302_000)).toBe('5m 02s');
+    expect(formatElapsed(3_600_000)).toBe('1h 00m');
+    expect(formatElapsed(3_720_000)).toBe('1h 02m');
+    expect(formatElapsed(-100)).toBe('0s');
   });
 
   it('sending a new user message clears processExitInfo', () => {

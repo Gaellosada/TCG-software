@@ -129,6 +129,24 @@
   border-color: rgba(34, 197, 94, 0.25);
 }
 
+/* Subagent badge (Issue 10) — neutral/info color so it sits next to the
+   primary status badge without competing for attention. Visible only when
+   subagentCount > 0. */
+.statusBadgeSubagent {
+  color: var(--accent, #3b82f6);
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.25);
+}
+
+/* Elapsed-time badge (Issue 12) — muted color so it reads as a quiet
+   companion to the status badge. */
+.statusBadgeElapsed {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border-color: var(--border-primary);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Process exit error banner — shown when the agent subprocess exits unexpectedly */
 .processExitBanner {
   display: flex;
@@ -184,6 +202,49 @@
 
 .processExitDismiss:hover {
   opacity: 1;
+}
+
+/* Turn-aborted banner (Issue 9) — connection-loss equivalent of the
+   process-exit banner. Distinct copy + softer (amber) color to signal it's
+   recoverable. */
+.turnAbortedBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(245, 158, 11, 0.12);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.3);
+  color: var(--accent-warm, #f59e0b);
+  font-size: 0.78rem;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+/* Token-usage footer (Issue 11) — small, unobtrusive, tabular numerals so
+   the digits don't jitter as the count grows. */
+.tokenFooter {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tokenFooterLabel {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 0.65rem;
+}
+
+.tokenFooterValue {
+  color: var(--text-secondary);
 }
 
 .contentArea {

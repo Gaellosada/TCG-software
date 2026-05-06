@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import useAgentSession from '../../hooks/useAgentSession';
+import useAgentSession, { formatTokens, formatElapsed } from '../../hooks/useAgentSession';
 import SessionPanel from './SessionPanel';
 import ChatPanel from './ChatPanel';
 import AssumptionsPanel from './AssumptionsPanel';
@@ -17,8 +17,26 @@ function AgentPage() {
   const [activeTab, setActiveTab] = useState('chat');
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
 
-  const { messages, assumptions, status, warningMessage, compactBanner, processExitInfo, clearProcessExit, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady } =
-    useAgentSession(selectedSessionId);
+  const {
+    messages,
+    assumptions,
+    status,
+    warningMessage,
+    compactBanner,
+    processExitInfo,
+    clearProcessExit,
+    turnAbortedInfo,
+    clearTurnAborted,
+    subagentCount,
+    tokenUsage,
+    elapsedMs,
+    isConnected,
+    isProcessing,
+    sendMessage,
+    stopAgent,
+    interruptAgent,
+    notebookReady,
+  } = useAgentSession(selectedSessionId);
 
   // Wrap sendMessage to include the selected model
   const handleSendMessage = useCallback(
@@ -70,6 +88,22 @@ function AgentPage() {
             {compactBanner && (
               <span className={`${styles.statusBadge} ${styles.statusBadgeCompact}`}>{compactBanner}</span>
             )}
+            {subagentCount > 0 && (
+              <span
+                className={`${styles.statusBadge} ${styles.statusBadgeSubagent}`}
+                data-testid="subagent-badge"
+              >
+                {subagentCount === 1 ? '1 subagent running' : `${subagentCount} subagents running`}
+              </span>
+            )}
+            {isProcessing && elapsedMs > 0 && (
+              <span
+                className={`${styles.statusBadge} ${styles.statusBadgeElapsed}`}
+                data-testid="elapsed-badge"
+              >
+                {`Working for ${formatElapsed(elapsedMs)}`}
+              </span>
+            )}
           </div>
           {processExitInfo && (
             <div className={styles.processExitBanner}>
@@ -85,6 +119,20 @@ function AgentPage() {
               <button
                 className={styles.processExitDismiss}
                 onClick={clearProcessExit}
+                aria-label="Dismiss"
+              >
+                &times;
+              </button>
+            </div>
+          )}
+          {turnAbortedInfo && (
+            <div className={styles.turnAbortedBanner} data-testid="turn-aborted-banner">
+              <span>
+                Connection dropped during agent reply — partial response saved. Send a new message to continue.
+              </span>
+              <button
+                className={styles.processExitDismiss}
+                onClick={clearTurnAborted}
                 aria-label="Dismiss"
               >
                 &times;
@@ -110,6 +158,14 @@ function AgentPage() {
               />
             )}
           </div>
+          {tokenUsage && tokenUsage.total > 0 && (
+            <div className={styles.tokenFooter} data-testid="token-footer">
+              <span className={styles.tokenFooterLabel}>Session:</span>
+              <span className={styles.tokenFooterValue}>
+                {`${formatTokens(tokenUsage.input)} in / ${formatTokens(tokenUsage.output)} out`}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>

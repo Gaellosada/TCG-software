@@ -3,6 +3,47 @@ import { getAssumptions } from '../api/agent';
 
 const MAX_RETRIES = 5;
 const RECONNECT_DELAY_MS = 3000;
+// Issue 12: how often the elapsed-time UI re-renders while a turn is in
+// flight. 1 s gives a smooth seconds-counter without thrashing React.
+const ELAPSED_TICK_MS = 1000;
+
+/**
+ * Humanize a token count for compact UI display (Issue 11).
+ * 0..999 → "123"; 1_000..999_999 → "12.3k"; 1_000_000+ → "1.5M".
+ * Negative or non-finite inputs are clamped to "0".
+ */
+export function formatTokens(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '0';
+  if (v < 1000) return String(Math.floor(v));
+  if (v < 1_000_000) {
+    const k = v / 1000;
+    // Show one decimal under 100k; integer above for compactness.
+    return k < 100 ? `${k.toFixed(1)}k` : `${Math.floor(k)}k`;
+  }
+  const m = v / 1_000_000;
+  return m < 100 ? `${m.toFixed(1)}M` : `${Math.floor(m)}M`;
+}
+
+/**
+ * Format an elapsed duration in ms to a compact label (Issue 12).
+ * < 60 s → "12s"; 60..3599 s → "1m 23s" (zero-padded seconds when minutes
+ * are non-zero); ≥ 1 h → "1h 02m".
+ */
+export function formatElapsed(ms) {
+  const v = Number(ms);
+  if (!Number.isFinite(v) || v < 0) return '0s';
+  const totalSeconds = Math.floor(v / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return `${hours}h ${String(remMinutes).padStart(2, '0')}m`;
+}
 
 /**
  * Build the WebSocket URL for an agent session.
@@ -75,6 +116,12 @@ function transformHistory(apiMessages) {
  *   compactBanner: string|null,
  *   processExitInfo: {returncode: int|null, stderrTail: string|null, sessionId: string}|null,
  *   clearProcessExit: () => void,
+ *   turnAbortedInfo: {reason: string, hadPartialContent: boolean}|null,
+ *   clearTurnAborted: () => void,
+ *   subagentCount: number,
+ *   tokenUsage: {input: number, output: number, total: number},
+ *   elapsedMs: number,
+ *   turnStartTimestamp: number|null,
  *   isConnected: boolean,
  *   sendMessage: (content: string) => void,
  *   notebookReady: boolean,
@@ -97,6 +144,25 @@ function useAgentSession(sessionId) {
   // Shape: { returncode: int|null, stderrTail: string|null, sessionId: string }
   // Cleared by user dismiss (clearProcessExit) or next sendMessage/interruptAgent.
   const [processExitInfo, setProcessExitInfo] = useState(null);
+  // Non-null when the BE notified that an in-flight turn was aborted by a
+  // WS disconnect (turn_aborted event — Issue 9). Distinct from process_exit:
+  // here the subprocess was killed by the BE on connection loss, not by a
+  // crash. Shape: { reason: string, hadPartialContent: bool }
+  // Cleared by user dismiss (clearTurnAborted) or next sendMessage/interruptAgent.
+  const [turnAbortedInfo, setTurnAbortedInfo] = useState(null);
+  // Subagent runtime visibility (Issue 10). Stateful: latest count supersedes;
+  // 0 means no subagents running.
+  const [subagentCount, setSubagentCount] = useState(0);
+  // Cumulative session-level token usage (Issue 11). Monotonic non-decreasing.
+  const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 });
+  // Elapsed-time visibility (Issue 12). turnStartTimestamp is the wall-clock
+  // ms set when the user sends a message; nulled on terminal events. The
+  // elapsedMs state ticks every 1s while a turn is in flight so the UI can
+  // re-render. We split start-timestamp (ref-like) from elapsedMs (state) so
+  // ticking re-renders without recomputing the start.
+  const turnStartTimestampRef = useRef(null);
+  const [turnStartTimestamp, setTurnStartTimestamp] = useState(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const wsRef = useRef(null);
   const retriesRef = useRef(0);
@@ -134,6 +200,10 @@ function useAgentSession(sessionId) {
     setProcessExitInfo(null);
   }, []);
 
+  const clearTurnAborted = useCallback(() => {
+    setTurnAbortedInfo(null);
+  }, []);
+
   const connect = useCallback(() => {
     if (!sessionId) return;
 
@@ -162,6 +232,17 @@ function useAgentSession(sessionId) {
 
       setIsConnected(false);
       setIsProcessing(false);
+      // Defensive complement to the `turn_aborted` event handler (Issue 9).
+      // The BE may emit `turn_aborted` after the next reconnect delivers a
+      // `history` payload, but if we keep `hasInFlightTurnRef` latched here
+      // the history payload gets dropped (see useAgentSession history-guard
+      // at the `case 'history':` branch). Clearing on close means: any
+      // reconnect now accepts BE history, and the optional `turn_aborted`
+      // event will reinforce the user-visible state with a banner. This is
+      // the round-2 design intent updated for round-3 incremental save: BE
+      // is source-of-truth on reconnect because partial content is now
+      // persisted before the disconnect.
+      hasInFlightTurnRef.current = false;
       wsRef.current = null;
 
       // Only reconnect on abnormal closure codes.
@@ -208,6 +289,8 @@ function useAgentSession(sessionId) {
         case 'message_complete': {
           setIsProcessing(false);
           hasInFlightTurnRef.current = false;
+          turnStartTimestampRef.current = null;
+          setTurnStartTimestamp(null);
           if (streamingRef.current) {
             streamingRef.current = null;
             setMessages((prev) => {
@@ -340,6 +423,8 @@ function useAgentSession(sessionId) {
           hasInFlightTurnRef.current = false;
           compactingRef.current = false;
           streamingRef.current = null;
+          turnStartTimestampRef.current = null;
+          setTurnStartTimestamp(null);
           setMessages((prev) => {
             if (prev.length === 0) return prev;
             const last = prev[prev.length - 1];
@@ -378,6 +463,8 @@ function useAgentSession(sessionId) {
           setIsProcessing(false);
           hasInFlightTurnRef.current = false;
           compactingRef.current = false;
+          turnStartTimestampRef.current = null;
+          setTurnStartTimestamp(null);
           setMessages((prev) => [
             ...prev,
             { role: 'error', content: data.message ?? 'Unknown error' },
@@ -391,10 +478,54 @@ function useAgentSession(sessionId) {
           // Do NOT auto-clear: the banner stays until user dismisses or sends a new message.
           setIsProcessing(false);
           hasInFlightTurnRef.current = false;
+          turnStartTimestampRef.current = null;
+          setTurnStartTimestamp(null);
           setProcessExitInfo({
             returncode: data.returncode ?? null,
             stderrTail: data.stderr_tail ?? null,
             sessionId: data.session_id,
+          });
+          break;
+        }
+
+        case 'turn_aborted': {
+          // Issue 9: BE notifies that the prior in-flight turn was aborted by
+          // a WS disconnect. Treated similarly to process_exit but with a
+          // distinct banner copy (this is connection-loss, not subprocess
+          // crash). Banner stays until user dismisses or sends a new message.
+          setIsProcessing(false);
+          hasInFlightTurnRef.current = false;
+          turnStartTimestampRef.current = null;
+          setTurnStartTimestamp(null);
+          setTurnAbortedInfo({
+            reason: data.reason ?? 'ws_disconnect',
+            hadPartialContent: Boolean(data.had_partial_content),
+          });
+          break;
+        }
+
+        case 'subagent_count': {
+          // Issue 10: stateful — latest count supersedes. count includes 0
+          // (clears the badge). Coerce to non-negative integer; ignore non-
+          // numeric payloads.
+          const n = Number(data.count);
+          if (Number.isFinite(n) && n >= 0) {
+            setSubagentCount(Math.floor(n));
+          }
+          break;
+        }
+
+        case 'token_usage': {
+          // Issue 11: cumulative session totals. Monotonic non-decreasing per
+          // contract; we trust the BE and overwrite. Coerce missing fields to
+          // 0 to keep the consumer total-only render path safe.
+          const input = Number(data.session_input);
+          const output = Number(data.session_output);
+          const total = Number(data.session_total);
+          setTokenUsage({
+            input: Number.isFinite(input) ? input : 0,
+            output: Number.isFinite(output) ? output : 0,
+            total: Number.isFinite(total) ? total : 0,
           });
           break;
         }
@@ -417,9 +548,15 @@ function useAgentSession(sessionId) {
     setWarningMessage(null);
     setCompactBanner(null);
     setProcessExitInfo(null);
+    setTurnAbortedInfo(null);
+    setSubagentCount(0);
+    setTokenUsage({ input: 0, output: 0, total: 0 });
+    setTurnStartTimestamp(null);
+    setElapsedMs(0);
     streamingRef.current = null;
     compactingRef.current = false;
     hasInFlightTurnRef.current = false;
+    turnStartTimestampRef.current = null;
     retriesRef.current = 0;
     clearReconnectTimer();
     clearCompactBannerTimer();
@@ -445,17 +582,46 @@ function useAgentSession(sessionId) {
     };
   }, [sessionId, connect, clearReconnectTimer, clearCompactBannerTimer]);
 
+  // Issue 12: tick elapsed time every ELAPSED_TICK_MS while a turn is in
+  // flight. Cleared on unmount AND whenever the conditions go false (turn
+  // ends or session reset nulls turnStartTimestamp). The interval reads from
+  // the ref so timestamp updates do not require restarting the timer.
+  useEffect(() => {
+    if (!isProcessing || turnStartTimestamp === null) {
+      // Not processing → no ticker. setElapsedMs is intentionally NOT reset
+      // here so that terminal handlers can decide whether to freeze or zero
+      // the displayed value (we zero it in those handlers explicitly).
+      return undefined;
+    }
+    // Establish initial value immediately so the UI shows "0s" without a 1 s
+    // gap.
+    setElapsedMs(Date.now() - turnStartTimestamp);
+    const intervalId = setInterval(() => {
+      const start = turnStartTimestampRef.current;
+      if (start === null) return;
+      setElapsedMs(Date.now() - start);
+    }, ELAPSED_TICK_MS);
+    return () => clearInterval(intervalId);
+  }, [isProcessing, turnStartTimestamp]);
+
   const sendMessage = useCallback(
     (content, { model } = {}) => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        // Clear any stale process_exit banner — new user message supersedes it.
+        // Clear any stale process_exit / turn_aborted banner — new user
+        // message supersedes them.
         setProcessExitInfo(null);
+        setTurnAbortedInfo(null);
         // Add the user message to local state immediately (optimistic)
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
         // Mark turn in flight — reconnect 'history' replays must not
         // clobber the optimistic state until message_complete fires.
         hasInFlightTurnRef.current = true;
+        // Issue 12: start the elapsed-time clock for this turn.
+        const now = Date.now();
+        turnStartTimestampRef.current = now;
+        setTurnStartTimestamp(now);
+        setElapsedMs(0);
         const payload = { type: 'message', content };
         if (model) payload.model = model;
         wsRef.current.send(JSON.stringify(payload));
@@ -473,11 +639,18 @@ function useAgentSession(sessionId) {
   const interruptAgent = useCallback(
     (content, { model } = {}) => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        // Clear any stale process_exit banner — new user message supersedes it.
+        // Clear any stale process_exit / turn_aborted banner — new user
+        // message supersedes them.
         setProcessExitInfo(null);
+        setTurnAbortedInfo(null);
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
         hasInFlightTurnRef.current = true;
+        // Issue 12: restart the elapsed clock for the interrupt turn.
+        const now = Date.now();
+        turnStartTimestampRef.current = now;
+        setTurnStartTimestamp(now);
+        setElapsedMs(0);
         const payload = { type: 'interrupt', content };
         if (model) payload.model = model;
         wsRef.current.send(JSON.stringify(payload));
@@ -486,7 +659,28 @@ function useAgentSession(sessionId) {
     [],
   );
 
-  return { messages, assumptions, status, warningMessage, compactBanner, processExitInfo, clearProcessExit, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady };
+  return {
+    messages,
+    assumptions,
+    status,
+    warningMessage,
+    compactBanner,
+    processExitInfo,
+    clearProcessExit,
+    turnAbortedInfo,
+    clearTurnAborted,
+    subagentCount,
+    tokenUsage,
+    elapsedMs,
+    turnStartTimestamp,
+    isConnected,
+    isProcessing,
+    sendMessage,
+    stopAgent,
+    interruptAgent,
+    notebookReady,
+  };
 }
+
 
 export default useAgentSession;
