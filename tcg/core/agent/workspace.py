@@ -165,8 +165,23 @@ class AgentWorkspace:
         # (``MDB_MCP_CONNECTION_STRING`` set in ``_build_subprocess_env``)
         # remains the canonical source for the MCP child; this ``.env``
         # is for agent-spawned Python scripts only.
+        #
+        # F3 (R-be-correctness): single-quote the value. python-dotenv
+        # treats unquoted values as spanning to the first ``#`` (start
+        # of inline comment); a MongoDB URI with ``#`` (legal in a
+        # password or fragment) would silently truncate on read. Single
+        # quotes also disable backslash-escape and dollar-expansion in
+        # python-dotenv, so the URI round-trips byte-for-byte. URIs
+        # containing a literal ``'`` are rejected at write-time --
+        # RFC 3986 §3 forbids unencoded single quotes in URI authority,
+        # so this only blocks pathological input.
+        if "'" in mongo_uri:
+            raise ValueError(
+                f"MONGO_URI contains a single quote, which the .env writer"
+                f" cannot escape safely: {mongo_uri!r}"
+            )
         (session_dir / ".env").write_text(
-            f"MONGO_URI={mongo_uri}\n", encoding="utf-8"
+            f"MONGO_URI='{mongo_uri}'\n", encoding="utf-8"
         )
 
         # CLAUDE.md — agent system instructions

@@ -186,7 +186,15 @@ class CLISession:
         # with ``process_exit`` (silent-EOF path) -- a turn emits exactly
         # one of them. Internal-only attribute -- no FakeCLISession
         # parity needed (G5 lockstep grep verified clean).
-        turn_start_time = datetime.now(timezone.utc)
+        #
+        # F2 (R-be-correctness): stored on ``self`` so
+        # ``_retry_as_new_session`` can re-anchor it. Without re-anchor,
+        # a stale-session retry reports ``elapsed_seconds`` covering
+        # the failed initial spawn AND the successful retry, inflating
+        # the user-visible turn duration. Re-anchored = elapsed reports
+        # only the retry that actually produced a result.
+        self._turn_start_time = datetime.now(timezone.utc)
+        turn_start_time = self._turn_start_time
 
         # Issue 6 / 7: per-turn bookkeeping reset. ``_saw_result`` gates
         # the post-turn ``_first_turn = False`` flip; the partial-text
@@ -313,15 +321,21 @@ class CLISession:
                 # clean ``result`` path, AFTER any partial-flush save.
                 # Transient: not buffered on reconnect (unlike Round-4
                 # ``turn_aborted``); FE missing it is non-fatal.
-                elapsed = (
-                    datetime.now(timezone.utc) - turn_start_time
-                ).total_seconds()
+                # F2: read from ``self._turn_start_time`` so a retry
+                # that re-anchored the start sees the post-retry value
+                # (elapsed reflects the spawn that produced the result,
+                # not the failed initial spawn that preceded it).
+                # F8 (R-be-correctness): single ``datetime.now`` call so
+                # ``timestamp - elapsed_seconds == turn_start_time`` to
+                # the microsecond.
+                end_time = datetime.now(timezone.utc)
+                elapsed = (end_time - self._turn_start_time).total_seconds()
                 await self.on_event(
                     {
                         "type": "turn_complete",
                         "session_id": self.session_id,
                         "elapsed_seconds": round(elapsed, 1),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": end_time.isoformat(),
                     }
                 )
             elif self._process.returncode is not None:
@@ -582,6 +596,13 @@ class CLISession:
         )
         self.session_id = new_id
         self._first_turn = True
+        # F2 (R-be-correctness): re-anchor turn timing so the upcoming
+        # ``turn_complete`` reports elapsed_seconds covering ONLY the
+        # retry spawn, not the cumulative wait. The original spawn
+        # was a stale-session probe that produced no user-visible
+        # work; conflating it with the retry's runtime confuses the
+        # FE's "turn took X seconds" display.
+        self._turn_start_time = datetime.now(timezone.utc)
         cmd = self._build_command(user_message, model)
         self._process = await asyncio.create_subprocess_exec(
             *cmd,

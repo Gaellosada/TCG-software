@@ -2163,3 +2163,303 @@ class TestCLISessionTurnCompleteEvent:
             f"turn_complete must fire once per turn; got {len(tcs)}"
             f" across two clean turns; events={events!r}"
         )
+
+    # -------------------------------------------------------------
+    # Round-5 follow-up: missing-test coverage from R-be-correctness.
+    # F1, F2, cancel-no-emit, UTC-tz. Each test pins a contract
+    # boundary that the original 6-test suite did not cover.
+    # -------------------------------------------------------------
+
+    async def test_turn_complete_timestamp_is_utc_aware(
+        self, tmp_path: Path
+    ) -> None:
+        """R-be-correctness §5: ``timestamp`` must be UTC-aware. A naive
+        datetime would parse via ``fromisoformat`` and silently drop
+        the timezone, so the existing parse-roundtrip test does NOT
+        guard against the regression."""
+        from datetime import datetime as _dt, timedelta, timezone as _tz
+
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("utc-tc-sess", tmp_path, on_event)
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("hi"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("ping", model="opus")
+
+        tc = next(e for e in events if e.get("type") == "turn_complete")
+        parsed = _dt.fromisoformat(tc["timestamp"])
+        assert parsed.tzinfo is not None, (
+            f"turn_complete.timestamp must be timezone-aware;"
+            f" got naive datetime from {tc['timestamp']!r}"
+        )
+        assert parsed.utcoffset() == timedelta(0), (
+            f"turn_complete.timestamp must be UTC (utcoffset==0);"
+            f" got {parsed.utcoffset()} from {tc['timestamp']!r}"
+        )
+
+    async def test_turn_complete_not_emitted_on_cancel_mid_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Contract: a turn cancelled mid-stream (CancelledError raised
+        out of run_turn) must NOT emit ``turn_complete``. The contract
+        says turn_complete is the POSITIVE end-of-turn marker; cancel
+        is the negative path (``turn_aborted`` is the FE-visible
+        sibling, buffered by the WS layer, not session.py)."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("cancel-tc-sess", tmp_path, on_event)
+
+        # FakeProcess that streams text but never produces a ``result``
+        # event. We then cancel the run_turn task before EOF.
+        partial_stream = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("partial"),
+        )
+
+        # Build a reader that yields the partial bytes then BLOCKS
+        # forever (simulating a live subprocess that hasn't ended).
+        async def hanging_readline() -> bytes:
+            # Yield the queued partial bytes once each, then sleep.
+            if hanging_readline._queue:  # type: ignore[attr-defined]
+                return hanging_readline._queue.pop(0)  # type: ignore[attr-defined]
+            await asyncio.sleep(3600)
+            return b""
+
+        # Pre-split lines so each readline returns one.
+        lines = [
+            line + b"\n" for line in partial_stream.split(b"\n") if line
+        ]
+        hanging_readline._queue = lines  # type: ignore[attr-defined]
+
+        fake_proc = FakeProcess(b"", returncode=0)
+        fake_proc.stdout.readline = hanging_readline  # type: ignore[assignment]
+        fake_proc.returncode = None  # still running
+        fake_proc.kill = MagicMock()
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            run_task = asyncio.create_task(
+                session.run_turn("hang", model="opus")
+            )
+            # Give the task a moment to spawn + start parsing.
+            await asyncio.sleep(0.05)
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+        tcs = [e for e in events if e.get("type") == "turn_complete"]
+        assert tcs == [], (
+            f"a cancelled turn must NOT emit turn_complete -- the"
+            f" CancelledError handler short-circuits before the clean-end"
+            f" branch; got events={events!r}"
+        )
+
+    async def test_turn_complete_after_retry_uses_retry_anchored_elapsed(
+        self, tmp_path: Path
+    ) -> None:
+        """F2 (R-be-correctness): when the initial spawn fails with
+        a stale-session error and ``_retry_as_new_session`` succeeds,
+        ``turn_complete.elapsed_seconds`` must be anchored to the
+        retry's start (not the original run_turn entry). Otherwise the
+        FE shows a duration covering both spawns, inflating the
+        user-visible turn time.
+
+        Verifies the re-anchor by checking that ``self._turn_start_time``
+        was updated DURING the retry (after the failed initial spawn),
+        and that ``elapsed_seconds`` is shorter than the wall-clock
+        duration of the entire run_turn call."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("retry-tc-sess", tmp_path, on_event)
+        # Force --resume path so the retry-as-new-session branch fires.
+        session._first_turn = False
+
+        # First subprocess: fails with "already in use" stderr, no
+        # stdout content -- triggers _retry_as_new_session.
+        first_proc = FakeProcess(b"", returncode=1)
+        first_proc.communicate = AsyncMock(  # type: ignore[method-assign]
+            return_value=(b"", b"Error: id xyz already in use, aborting")
+        )
+        # Retry subprocess: clean response.
+        retry_stdout = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("ok"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        retry_proc = FakeProcess(retry_stdout, returncode=0)
+
+        call_count = {"n": 0}
+
+        # Add a measurable delay BEFORE the first spawn returns its
+        # FakeProcess, so the original turn_start_time lags far behind
+        # the retry anchor. F2: re-anchored elapsed should be small;
+        # un-fixed elapsed would include this delay.
+        async def fake_subprocess(*_args: Any, **_kwargs: Any) -> Any:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Simulate the initial spawn taking real wall-clock
+                # time (e.g. CLI startup + stale-session detection).
+                await asyncio.sleep(0.5)
+                return first_proc
+            return retry_proc
+
+        # Capture the run_turn entry time so we can compare.
+        from datetime import datetime as _dt, timezone as _tz
+        wall_start = _dt.now(_tz.utc)
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await session.run_turn("retry-me", model="opus")
+        wall_elapsed = (_dt.now(_tz.utc) - wall_start).total_seconds()
+
+        assert call_count["n"] == 2, "retry path must fire"
+        tcs = [e for e in events if e.get("type") == "turn_complete"]
+        assert len(tcs) == 1, (
+            f"retry-as-new-session that succeeds must emit exactly one"
+            f" turn_complete; got {len(tcs)} in events={events!r}"
+        )
+        reported = tcs[0]["elapsed_seconds"]
+        # F2 fix: reported must NOT include the 0.5s pre-retry delay.
+        # Allow generous slack for CI scheduling -- but the wall_elapsed
+        # is >= 0.5s, so a re-anchored elapsed should be MUCH less.
+        assert reported < wall_elapsed - 0.3, (
+            f"F2: turn_complete.elapsed_seconds ({reported}) must be"
+            f" RE-ANCHORED to the retry's start, not the original"
+            f" run_turn entry. wall_elapsed={wall_elapsed:.3f} >="
+            f" 0.5s pre-retry delay; reported should be ~retry-only."
+        )
+
+    def test_pending_abort_not_enqueued_when_saw_result(
+        self, tmp_path: Path
+    ) -> None:
+        """F1 (R-be-correctness) regression: the WS-disconnect handler
+        in api/agent.py must NOT enqueue a pending turn_aborted
+        notification when the session already saw a clean ``result``
+        event (``_saw_result == True``). Otherwise the FE on reconnect
+        receives BOTH turn_complete (transient, may be missed but
+        legal) and turn_aborted (buffered, always delivered),
+        violating the contract's mutual-exclusion guarantee.
+
+        Drives the production WS handler via FastAPI's TestClient so
+        the test verifies the actual branch in api/agent.py, not a
+        local re-implementation. Uses a CLISession-like stand-in that
+        sets ``_saw_result=True`` BEFORE the WS is dropped, mirroring
+        the post-parse tail where the bug manifests."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from tcg.core.api import agent as agent_module
+        from tcg.core.api.agent import agent_websocket
+
+        # Module-level state must start clean -- not relying on the
+        # test_agent_websocket.py fixture (out of scope).
+        agent_module._active_connections.clear()
+        agent_module._pending_abort_notifications.clear()
+
+        class _Stub:
+            def __init__(
+                self,
+                session_id: str,
+                workspace_path: Path,
+                on_event: Any,
+                on_persist: Any = None,
+            ) -> None:
+                self.session_id = session_id
+                self.workspace_path = workspace_path
+                self.on_event = on_event
+                self._on_persist = on_persist
+                self._first_turn = True
+                self._cancelled = False
+                self.conversation_history: list[dict[str, Any]] = []
+                # F1: post-parse tail where the bug manifests --
+                # ``_saw_result`` flipped True by the parse loop, but
+                # ``run_turn`` hasn't returned yet.
+                self._saw_result = True
+                self._partial_text_parts: list[str] = []
+                self.complete_event = asyncio.Event()
+
+            @property
+            def is_cancelled(self) -> bool:
+                return self._cancelled
+
+            @is_cancelled.setter
+            def is_cancelled(self, value: bool) -> None:
+                self._cancelled = bool(value)
+
+            async def run_turn(self, user_message: str, model: str = "opus") -> None:
+                # Block forever so the WS-drop fires while
+                # turn_task.done() is False (matching the F1 race).
+                await self.complete_event.wait()
+
+            async def cancel(self) -> None:
+                self._cancelled = True
+                self.complete_event.set()
+
+        class _StubWorkspace:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+                ws_path = root / "f1-prod-sess"
+                ws_path.mkdir(parents=True, exist_ok=True)
+                self._meta = {"workspace_path": str(ws_path)}
+
+            def get_session(self, sid: str) -> dict[str, Any] | None:
+                return self._meta if sid == "f1-prod-sess" else None
+
+            def load_conversation(self, sid: str) -> list[dict[str, Any]]:
+                return []
+
+            def save_conversation(
+                self, sid: str, messages: list[dict[str, Any]]
+            ) -> None:
+                return None
+
+        try:
+            app = FastAPI()
+            app.state.agent_workspace = _StubWorkspace(tmp_path)
+            app.websocket("/ws/agent/{session_id}")(agent_websocket)
+
+            with patch("tcg.core.api.agent.cli_available", return_value=True), \
+                 patch("tcg.core.api.agent.CLISession", _Stub):
+                client = TestClient(app)
+                with client.websocket_connect("/ws/agent/f1-prod-sess") as ws:
+                    # Send a message to start a turn.
+                    ws.send_json({"type": "message", "content": "ping"})
+                    # Drain initial events until the turn is in flight
+                    # (we expect at least the "queued"-or-immediate ack
+                    # is invisible; the WS handler spawns turn_task).
+                    # Brief sleep so the run_turn coroutine reaches its
+                    # blocking await.
+                    import time as _time
+                    _time.sleep(0.2)
+                    # Drop the WS while turn_task is in flight AND
+                    # _saw_result is True (set in __init__ above to
+                    # mirror the race window).
+
+                # F1 contract: with _saw_result=True at WS-drop, NO
+                # turn_aborted notification must be enqueued. Pre-fix,
+                # the unconditional check at api/agent.py:623 enqueued
+                # regardless, producing the contract violation.
+                assert "f1-prod-sess" not in agent_module._pending_abort_notifications, (
+                    "F1: when _saw_result is True at WS-disconnect (turn"
+                    " ended cleanly), the api/agent.py finally-block must"
+                    " NOT buffer a turn_aborted notification. Got pending="
+                    f" {agent_module._pending_abort_notifications!r}"
+                )
+        finally:
+            agent_module._active_connections.clear()
+            agent_module._pending_abort_notifications.clear()

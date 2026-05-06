@@ -620,7 +620,20 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         # _cancel_turn so we capture the partial-content hint while
         # the session state is still intact. No new kill timers are
         # introduced (G3): we only annotate the existing cancel.
-        if turn_task is not None and not turn_task.done():
+        #
+        # F1 (R-be-correctness): mutex with ``turn_complete``. If the
+        # turn already saw a clean ``result`` event (``_saw_result``
+        # is True), the run_turn body is in the post-parse tail --
+        # the turn ended cleanly and turn_complete has either been
+        # emitted or is one await away. Buffering turn_aborted in
+        # that ~1ms window would deliver BOTH events to the FE on
+        # reconnect, violating the contract's "one of T or A per
+        # turn" guarantee. Skip the enqueue when _saw_result is True.
+        if (
+            turn_task is not None
+            and not turn_task.done()
+            and not getattr(session, "_saw_result", False)
+        ):
             had_partial = bool(
                 getattr(session, "_partial_text_parts", None)
             ) or any(
