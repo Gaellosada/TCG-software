@@ -78,7 +78,7 @@ multi-leg, and novel-dependency shapes.
 
 ```python
 # Data access — re-export layer over lib.data_load + new helpers.
-# Read `lib/data/SCHEMA.md` once at intake: per-collection _id shapes,
+# Read `SCHEMA.md` (scaffolded into your session workspace) once at intake: per-collection _id shapes,
 # provider priority, gotchas (close==0 on untraded options, composite OPT
 # _id, FUTURE/OPTION are collection-prefix shorthands not bar-loader keys).
 from lib import data
@@ -213,7 +213,7 @@ Don't force questions. The bar is reckless inference, not "any uncertainty."
 
 The library and pipeline already encode the right pattern for the common cases. Do not invent a workaround for friction you hit on the first try — read the relevant doc first.
 
-- **Schema question — what fields does an OPT/FUT/INDEX doc carry?** -> read `lib/data/SCHEMA.md` once at intake. Per-collection `_id` shape, provider priority, top-level fields, `eodDatas.<provider>` row schema, `eodGreeks.<provider>` row schema (OPT_*), and the gotchas (close==0 on untraded options falling back to mid/mark, composite OPT _id, expiration cycle letters FGHJKMNQUVXZ, YYYYMMDD int64 dates). Do not crawl `data_load.py` to answer schema questions — the doc is anchored to it.
+- **Schema question — what fields does an OPT/FUT/INDEX doc carry?** -> read `SCHEMA.md` (scaffolded into your session workspace alongside this guide) once at intake. Per-collection `_id` shape, provider priority, top-level fields, `eodDatas.<provider>` row schema, `eodGreeks.<provider>` row schema (OPT_*), and the gotchas (close==0 on untraded options falling back to mid/mark, composite OPT _id, expiration cycle letters FGHJKMNQUVXZ, YYYYMMDD int64 dates). Do not crawl `data_load.py` to answer schema questions — the doc is anchored to it.
 - **Need a query the lib doesn't expose** -> use `lib.data.raw_db()` and write the read query directly. It returns the same read-only proxy as `lib.mongo.sync_db()` so writes still raise `MongoWriteForbiddenError`. If you reach for `raw_db()` more than once for the same access pattern, the right fix is to add a first-class `lib.data` helper.
 - **"Daily rebalance / fire on every bar"** -> use `lib.indicators.daily_pulse(n_bars)` (alternating +/-1). The engine fires entries on signal *transitions*, so a constant `signal=np.ones(N)` opens exactly one position over the whole run.
 - **`__file__` in compiled notebook cells** -> use `Path.cwd()`. The bootstrap chdirs to the workspace dir before any user cell runs. See `pipeline/03-backtest.md` § `__file__` in compiled notebooks.

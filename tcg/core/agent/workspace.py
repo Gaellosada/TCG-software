@@ -124,6 +124,19 @@ class AgentWorkspace:
                 backtester_guide_src.read_text(encoding="utf-8"), encoding="utf-8"
             )
 
+        # Scaffold SCHEMA.md (per-collection MongoDB doc shapes) into the
+        # session workspace. The library docs reference this file; copying
+        # rather than symlinking guarantees the agent can `Read` it without
+        # tripping over symlink-target permission rules and keeps the file
+        # available even if the source is later moved.
+        schema_src = (
+            _PROJECT_ROOT / "tcg" / "backtester" / "lib" / "data" / "SCHEMA.md"
+        )
+        if schema_src.exists():
+            (session_dir / "SCHEMA.md").write_text(
+                schema_src.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
         # Copy snippet templates into the workspace
         snippets_src = _PROJECT_ROOT / "tcg" / "backtester" / "snippets"
         if snippets_src.exists():

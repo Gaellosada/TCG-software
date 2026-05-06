@@ -37,9 +37,10 @@ from tcg.backtester.lib.compile import compile_workspace
 
 ```
 STRATEGY.yaml          Strategy specification (you create this)
-ASSUMPTIONS.json       Running assumption log (use write_assumptions tool)
+ASSUMPTIONS.json       Running assumption log — Write/Edit each entry as you decide it (do not batch)
 PIPELINE_GUIDE.md      This file
 BACKTESTER_GUIDE.md    Full API reference for the backtester library
+SCHEMA.md              Per-collection MongoDB doc shapes (read once on first turn)
 ITERATIONS.md          Append-only iteration log
 PROBLEMS.md            Failure/issue log
 snippets/              Ready-to-use code templates (read before writing scripts)
@@ -61,7 +62,7 @@ Script numbering convention:
 ## Workflow Summary
 
 ### Intake
-Parse user prompt into STRATEGY.yaml. For unspecified fields, apply defaults (see Default Ladder below) and log via write_assumptions. Run probes mentally. If a probe fires, ask ONE focused question about the strategy. Max 3 questions; beyond that, take defaults with confidence: "low". Print a 3-line summary when done.
+Parse user prompt into STRATEGY.yaml. For unspecified fields, apply defaults (see Default Ladder below) and log each one to `ASSUMPTIONS.json` directly via the `Write` or `Edit` tool (there is no dedicated assumptions tool — `ASSUMPTIONS.json` is plain JSON). Write each assumption **immediately** as you decide it; do not batch them up and write at the end of the phase. The user sees these update in real time. Run probes mentally. If a probe fires, ask ONE focused question about the strategy. Max 3 questions; beyond that, take defaults with confidence: "low". Print a 3-line summary when done.
 
 ### Data
 Fetch every series needed. Validate with bar_integrity(). Cache to data/*.npz. Write data/data_summary.json. If validation fails (report.ok == False), stop and ask.
@@ -183,12 +184,14 @@ When user says "weekly expiries" -> kind: weekly (NOT kind: dte with target_dte=
 | sizing.fraction | 1.0 (single instrument) | medium |
 | benchmark.instrument_id | underlying spot for options; SPX otherwise | medium |
 
-Assumption record format for write_assumptions:
+Assumption record format — append one of these to the `assumptions` array in `ASSUMPTIONS.json` via `Write`/`Edit` (no dedicated tool exists; treat the file as plain JSON):
 ```json
 {"field": "execution.fees_bps", "value": 5, "source": "default", "confidence": "high",
  "rationale": "Standard default.", "group": "execution", "editable": true}
 ```
 source: "default" | "inferred" (from context) | "user" (explicitly stated).
+
+**Write incrementally.** As soon as a single assumption is decided, persist it. The frontend streams `assumptions_update` events whenever the file changes, so a turn-end-only batch write blanks the panel until the very last second of a long turn.
 
 ---
 
