@@ -84,10 +84,17 @@ class CLISession:
         session_id: str,
         workspace_path: Path,
         on_event: Callable[[dict[str, Any]], Awaitable[None]],
+        on_persist: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.workspace_path = workspace_path
         self.on_event = on_event
+        # Issue 7 (incremental save): callback invoked with the current
+        # conversation_history whenever it gains a new piece (start of
+        # turn user-append, end of turn assistant-append, cancel/error
+        # partial-append). Optional for backwards compat; api/agent.py
+        # wires this to ``workspace.save_conversation``.
+        self._on_persist = on_persist
         self._first_turn = True
         self._cancelled = False
         self.conversation_history: list[dict[str, Any]] = []
@@ -113,6 +120,22 @@ class CLISession:
         # _keepalive to re-emit the *current* sticky status rather than
         # always "processing" (which would clobber "compacting").
         self._current_status: str = "processing"
+        # Issue 6: per-turn flag set by ``_handle_event`` whenever the
+        # CLI emits a ``result`` event. A turn that ends WITHOUT a
+        # ``result`` is a non-clean exit (subprocess EOF mid-stream,
+        # crash, kill). Gates the ``_first_turn = False`` flip so the
+        # next turn doesn't try ``--resume <tainted_id>``.
+        self._saw_result: bool = False
+        # Issue 7: per-turn buffers for partial assistant content. The
+        # streaming text deltas are mirrored here so the cancel/error
+        # paths can flush whatever was streamed into a synthetic
+        # ``{"role": "assistant", ..., "interrupted": True}`` history
+        # entry before re-raising. ``_turn_user_appended`` /
+        # ``_turn_assistant_appended`` are idempotency guards so the
+        # cancel/error paths don't double-append after the success path.
+        self._partial_text_parts: list[str] = []
+        self._turn_user_appended: bool = False
+        self._turn_assistant_appended: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -141,6 +164,30 @@ class CLISession:
         """
         # Snapshot file state before turn for change detection
         self._snapshot_file_state()
+
+        # Issue 6 / 7: per-turn bookkeeping reset. ``_saw_result`` gates
+        # the post-turn ``_first_turn = False`` flip; the partial-text
+        # buffer feeds the cancel/error flush; the appended flags are
+        # idempotency guards so the success path doesn't double-append
+        # after the cancel/error path has already flushed.
+        self._saw_result = False
+        self._partial_text_parts = []
+        self._turn_user_appended = False
+        self._turn_assistant_appended = False
+
+        # Issue 7 (Option A): append the user message and persist
+        # IMMEDIATELY -- before any cancellable await. Earlier code
+        # appended only at the end of a successful turn, so a mid-turn
+        # cancel (session-switch, WS disconnect, ``stop`` message) lost
+        # the user's input forever even though ``save_conversation``
+        # ran in the agent_websocket finally. The save in the finally
+        # remains as a defensive backstop, but the BE no longer relies
+        # on it for round-trip integrity.
+        self.conversation_history.append(
+            {"role": "user", "content": user_message}
+        )
+        self._turn_user_appended = True
+        await self._persist()
 
         try:
             cmd = self._build_command(user_message, model)
@@ -175,14 +222,20 @@ class CLISession:
             stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
 
             if self._process.returncode != 0:
-                # If --resume failed (session not found), retry with --session-id
+                # If --resume (or --session-id on a tainted id) failed,
+                # retry as a fresh --session-id. Issue 6: the keyword
+                # filter now also matches "already in use" -- the CLI
+                # 2.1.85 wording when the on-disk <id>.jsonl exists but
+                # the prior process didn't release it cleanly.
+                stderr_lower = stderr_text.lower()
                 if (
                     not self._first_turn
                     and not assistant_content
                     and (
-                        "session" in stderr_text.lower()
-                        or "not found" in stderr_text.lower()
-                        or "resume" in stderr_text.lower()
+                        "session" in stderr_lower
+                        or "not found" in stderr_lower
+                        or "resume" in stderr_lower
+                        or "already in use" in stderr_lower
                     )
                 ):
                     logger.warning(
@@ -210,17 +263,66 @@ class CLISession:
                         stderr_text[:200],
                     )
 
-            # Turn succeeded — record in history
-            self.conversation_history.append({"role": "user", "content": user_message})
-            if assistant_content:
+            # Issue 7: append assistant content (idempotent w.r.t. the
+            # cancel/error flush path -- guarded by
+            # ``_turn_assistant_appended``). Persist immediately so a
+            # session-switch right AFTER turn-complete but BEFORE the
+            # api/agent.py backstop save sees the up-to-date history.
+            if assistant_content and not self._turn_assistant_appended:
                 self.conversation_history.append(
                     {"role": "assistant", "content": assistant_content}
                 )
+                self._turn_assistant_appended = True
+                await self._persist()
 
-            # After first successful turn, switch to --resume for subsequent turns
-            self._first_turn = False
+            # Issue 6: gate the ``_first_turn = False`` flip on the
+            # presence of a clean ``result`` event. A non-clean exit
+            # (subprocess EOF / crash mid-stream with content already
+            # streamed) leaves the CLI's <id>.jsonl in a state that
+            # 2.1.85 may reject on --resume. Emit a visible
+            # ``process_exit`` event AND mint a fresh session_id so
+            # the next user message starts a clean CLI session.
+            if self._saw_result:
+                self._first_turn = False
+            elif self._process.returncode is not None:
+                # No ``result`` observed but the process is gone --
+                # the silent-EOF path. Surface as a visible state.
+                stderr_tail = stderr_text[-500:] if stderr_text else None
+                await self.on_event(
+                    {
+                        "type": "process_exit",
+                        "returncode": self._process.returncode,
+                        "saw_result": False,
+                        "session_id": self.session_id,
+                        "had_content": bool(assistant_content),
+                        "stderr_tail": stderr_tail,
+                    }
+                )
+                self._mint_fresh_session_id(reason="silent_eof")
 
         except asyncio.CancelledError:
+            # Issue 7: flush whatever assistant content streamed before
+            # the cancel arrived, so a session-switch / stop mid-turn
+            # preserves the partial response on disk. Marked
+            # ``interrupted=True`` so future loaders / FE renderers
+            # can disambiguate. Idempotent via the appended-flag.
+            if not self._turn_assistant_appended and self._partial_text_parts:
+                partial_text = "".join(self._partial_text_parts)
+                if partial_text:
+                    self.conversation_history.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": partial_text}],
+                            "interrupted": True,
+                        }
+                    )
+                    self._turn_assistant_appended = True
+                    try:
+                        await self._persist()
+                    except Exception:
+                        logger.debug(
+                            "Persist on cancel failed for %s", self.session_id
+                        )
             # Kill subprocess on cancellation
             if self._process and self._process.returncode is None:
                 self._process.kill()
@@ -228,6 +330,27 @@ class CLISession:
         except Exception as exc:
             logger.exception("CLI turn failed for session %s", self.session_id)
             await self.on_event({"type": "error", "message": str(exc)})
+            # Issue 7: same partial-flush as the cancel path. The user
+            # message is already on disk (appended at run_turn entry);
+            # whatever streamed is now appended as an interrupted
+            # assistant entry so the on-disk record stays balanced.
+            if not self._turn_assistant_appended and self._partial_text_parts:
+                partial_text = "".join(self._partial_text_parts)
+                if partial_text:
+                    self.conversation_history.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": partial_text}],
+                            "interrupted": True,
+                        }
+                    )
+                    self._turn_assistant_appended = True
+                    try:
+                        await self._persist()
+                    except Exception:
+                        logger.debug(
+                            "Persist on error failed for %s", self.session_id
+                        )
         finally:
             self._process = None
             # Post-turn file change detection fires on ALL exit paths
@@ -278,13 +401,56 @@ class CLISession:
         # orphaned on disk. The next spawn must NOT re-emit that id
         # (the CLI would reject it as "already in use"). Mint a fresh
         # uuid and reset the first-turn flag so _build_command opens a
-        # clean new CLI session.
+        # clean new CLI session. Shared with the Issue 6 silent-EOF
+        # path in run_turn -- both routes leave the on-disk transcript
+        # tainted.
+        self._mint_fresh_session_id(reason="cancel")
+
+    # ------------------------------------------------------------------
+    # Internal helpers (Issue 6 / 7)
+    # ------------------------------------------------------------------
+
+    def _mint_fresh_session_id(self, reason: str) -> None:
+        """Replace ``self.session_id`` with a fresh uuid and reset state.
+
+        Called on every code path that leaves the prior CLI transcript
+        tainted on disk (explicit ``cancel()``; subprocess EOF mid-turn
+        with no ``result`` event observed -- Issue 6). The CLI 2.1.85
+        keys "Session ID already in use" off the persistence of
+        ``<id>.jsonl`` in its sessions directory; that file survives
+        SIGTERM/SIGKILL and orphan-on-EOF. Re-using the same id on the
+        next spawn would fail. Conversation continuity is preserved
+        Python-side via ``self.conversation_history``.
+        """
         new_id = str(uuid.uuid4())
         logger.info(
-            "Refreshing session id after cancel: %s -> %s", self.session_id, new_id
+            "Refreshing session id (%s): %s -> %s",
+            reason,
+            self.session_id,
+            new_id,
         )
         self.session_id = new_id
         self._first_turn = True
+
+    async def _persist(self) -> None:
+        """Trigger the persistence callback if wired.
+
+        Issue 7 incremental save: persistence is called at user-append
+        (start of turn), assistant-append (end of turn or partial-flush
+        on cancel/error). Idempotent w.r.t. file content -- re-saving
+        the same list is a no-op for the FE's load_conversation. The
+        ``api/agent.py`` finally-block save remains as a defensive
+        backstop. Failures are logged and swallowed; the turn must NOT
+        be aborted by a save failure.
+        """
+        if self._on_persist is None:
+            return
+        try:
+            await self._on_persist(list(self.conversation_history))
+        except Exception:
+            logger.warning(
+                "Incremental save failed for session %s", self.session_id
+            )
 
     # ------------------------------------------------------------------
     # Retry logic
@@ -594,6 +760,14 @@ class CLISession:
                     )
 
         elif event_type == "result":
+            # Issue 6: a ``result`` event -- regardless of subtype --
+            # marks a CLEAN CLI termination (the CLI flushed its final
+            # bookkeeping). Subprocess EOF without one is a silent
+            # crash. ``run_turn`` reads this flag to decide whether to
+            # flip ``_first_turn`` to False or to mint a fresh
+            # session_id.
+            self._saw_result = True
+
             # Final result event
             subtype = event.get("subtype", "")
             is_error = event.get("is_error", False)
@@ -864,6 +1038,12 @@ class CLISession:
                 text = delta.get("text", "")
                 if text:
                     full_text_parts.append(text)
+                    # Issue 7: mirror onto the session-level buffer so
+                    # the cancel/error path in run_turn can flush the
+                    # streamed-so-far text into a synthetic interrupted
+                    # assistant entry. ``full_text_parts`` is local to
+                    # ``_parse_stream`` and unreachable from there.
+                    self._partial_text_parts.append(text)
                     await self.on_event({"type": "token", "content": text})
 
             elif delta_type == "input_json_delta":

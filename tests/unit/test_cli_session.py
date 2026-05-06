@@ -1125,3 +1125,480 @@ class TestKeepaliveStickyStatus:
         assert sent
         for payload in sent:
             assert payload == {"type": "status", "status": "processing"}
+
+
+# ---------------------------------------------------------------------------
+# Issue 6 -- silent agent stop. Subprocess EOF mid-turn (no ``result`` event
+# was emitted by the CLI) must surface as a visible ``process_exit`` event
+# AND must mint a fresh session_id so the next turn does not try to
+# ``--resume <tainted_id>`` (which the CLI 2.1.85 rejects as "already in
+# use" because the orphaned ``<id>.jsonl`` survives the crashed process).
+# ---------------------------------------------------------------------------
+
+
+def _tool_use_block(index: int = 0, tool_id: str = "t1", name: str = "Write") -> bytes:
+    """Encode a complete tool_use stream block PLUS the top-level
+    ``assistant`` event the CLI emits at the end of an assistant message
+    (mirrors the live transcript). The stream then ends WITHOUT a
+    ``result`` event -- simulating a CLI subprocess that crashed
+    mid-turn after streaming a tool call."""
+    return _make_stream_lines(
+        _content_block_start_tool(index, tool_id, name),
+        _input_json_delta(index, '{"file_path": "/tmp/x.py", "content": "x"}'),
+        _content_block_stop(index),
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": name,
+                        "input": {"file_path": "/tmp/x.py", "content": "x"},
+                    }
+                ]
+            },
+        },
+    )
+
+
+class TestCLISessionSilentEofProcessExit:
+    """Issue 6: subprocess EOF without a ``result`` event must emit
+    ``process_exit``, must NOT flip ``_first_turn`` to False, and must
+    mint a fresh ``session_id`` so the next turn opens a clean CLI."""
+
+    async def test_silent_eof_emits_process_exit_event(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("eof-sess", tmp_path, on_event)
+
+        # Stream a tool_use block then EOF -- no ``result`` event.
+        stdout_data = _tool_use_block()
+        # returncode!=0 + content matches the live transcript pattern.
+        fake_proc = FakeProcess(stdout_data, returncode=1)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("draft a script", model="opus")
+
+        process_exits = [e for e in events if e.get("type") == "process_exit"]
+        assert len(process_exits) == 1, (
+            f"silent EOF must emit exactly one process_exit event;"
+            f" got events={events!r}"
+        )
+        ev = process_exits[0]
+        # Contract shape (mandated by orders / A6 §7a):
+        assert ev["returncode"] == 1
+        assert ev["saw_result"] is False
+        assert ev["had_content"] is True
+        assert "session_id" in ev
+        # stderr_tail is allowed to be None when stderr is empty.
+        assert "stderr_tail" in ev
+
+    async def test_silent_eof_refreshes_session_id(self, tmp_path: Path) -> None:
+        """The next turn after a silent EOF must NOT use --resume on the
+        tainted id. The fresh id is minted, _first_turn stays True so the
+        next _build_command emits --session-id <new_id>."""
+        on_event = AsyncMock()
+        original_id = "tainted-eof-uuid"
+        session = CLISession(original_id, tmp_path, on_event)
+
+        # Tool_use streamed, then EOF, no ``result`` event.
+        fake_proc = FakeProcess(_tool_use_block(), returncode=1)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("test", model="opus")
+
+        assert session.session_id != original_id, (
+            "silent EOF must mint a fresh session_id (parity with cancel())"
+        )
+        assert session._first_turn is True, (
+            "silent EOF must NOT flip _first_turn -- the next turn opens"
+            " a new CLI session, not --resume"
+        )
+
+        # Sanity: the next argv emits --session-id <new>, not --resume <old>.
+        cmd = session._build_command("next", "opus")
+        assert "--session-id" in cmd
+        assert "--resume" not in cmd
+        assert original_id not in cmd
+
+    async def test_silent_eof_does_not_set_first_turn_false(
+        self, tmp_path: Path
+    ) -> None:
+        """Pre-fix, run_turn fell through to ``_first_turn = False`` even
+        on a non-clean exit. This regression guard pins the gating on
+        ``_saw_result``."""
+        on_event = AsyncMock()
+        session = CLISession("eof-sess", tmp_path, on_event)
+        assert session._first_turn is True
+        assert session._saw_result is False
+
+        fake_proc = FakeProcess(_tool_use_block(), returncode=1)
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("hi", model="opus")
+
+        assert session._saw_result is False, (
+            "no ``result`` event was streamed, so _saw_result must be False"
+        )
+        assert session._first_turn is True, (
+            "_first_turn MUST NOT flip on a non-clean exit -- otherwise the"
+            " next turn would --resume <tainted_id> and trip 'already in use'"
+        )
+
+    async def test_clean_result_event_still_sets_first_turn_false(
+        self, tmp_path: Path
+    ) -> None:
+        """Healthy multi-turn sessions must not regress: a turn that DID
+        emit a ``result`` event still flips ``_first_turn`` to False."""
+        on_event = AsyncMock()
+        session = CLISession("clean-sess", tmp_path, on_event)
+
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("hi"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("ping", model="opus")
+
+        assert session._saw_result is True
+        assert session._first_turn is False
+        # No process_exit event on the clean path.
+        # (events are absorbed by AsyncMock; we re-instrument below.)
+
+    async def test_clean_turn_does_not_emit_process_exit(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("clean-sess", tmp_path, on_event)
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("ok"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("ping", model="opus")
+
+        process_exits = [e for e in events if e.get("type") == "process_exit"]
+        assert process_exits == [], (
+            "clean turns (with ``result``) must NOT emit process_exit"
+        )
+
+    async def test_already_in_use_stderr_triggers_retry(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue 6 (§3d): widened retry-guard keyword filter must match
+        'already in use' so the CLI 2.1.85 wording on tainted resume is
+        recovered as a fresh --session-id retry."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("resume-sess", tmp_path, on_event)
+        # Pretend a prior turn succeeded so we are on --resume.
+        session._first_turn = False
+
+        # First subprocess: --resume fails with "already in use" stderr,
+        # no stdout content, non-zero returncode.
+        first_proc = FakeProcess(b"", returncode=1)
+        # Use stderr wording that ONLY matches the new "already in use"
+        # keyword (not the pre-fix 'session' / 'resume' / 'not found').
+        first_proc.communicate = AsyncMock(  # type: ignore[method-assign]
+            return_value=(b"", b"Error: id xyz already in use, aborting")
+        )
+        # Retry subprocess: clean response (would be _retry_as_new_session).
+        retry_stdout = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("recovered"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        retry_proc = FakeProcess(retry_stdout, returncode=0)
+
+        call_count = {"n": 0}
+
+        async def fake_subprocess(*_args: Any, **_kwargs: Any) -> Any:
+            call_count["n"] += 1
+            return first_proc if call_count["n"] == 1 else retry_proc
+
+        original_id = session.session_id
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await session.run_turn("retry-me", model="opus")
+
+        # Two spawns total -- the resume failure + the fresh-session retry.
+        assert call_count["n"] == 2, (
+            "'already in use' stderr must trigger _retry_as_new_session"
+        )
+        # The retry mints a fresh id and uses --session-id.
+        assert session.session_id != original_id
+        # Final state is healthy multi-turn (after retry success).
+        assert session._first_turn is False
+        # Token from retry made it through.
+        assert any(
+            e.get("type") == "token" and e.get("content") == "recovered"
+            for e in events
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue 7 -- conversation lost on session-switch. The user message must be
+# appended to ``conversation_history`` and persisted (via on_persist callback)
+# BEFORE any cancellable await; on cancel/error mid-turn, whatever assistant
+# text streamed must be flushed as a synthetic ``interrupted`` entry.
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionIncrementalPersistence:
+    """Issue 7: incremental conversation save -- user message at turn-start,
+    partial assistant on cancel/error. The api/agent.py finally-block save
+    becomes a defensive backstop, not the only persistence path."""
+
+    async def test_user_message_appended_before_subprocess_spawn(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue 7 root-cause: pre-fix, the user message was appended only
+        on success (session.py:214), so a cancel/disconnect mid-turn lost
+        it. Post-fix, it's appended at run_turn entry, before any
+        cancellable await. We verify by checking history mid-spawn."""
+        on_event = AsyncMock()
+        persisted: list[list[dict[str, Any]]] = []
+
+        async def on_persist(msgs: list[dict[str, Any]]) -> None:
+            # Capture a deep-ish copy via list() so subsequent mutations
+            # don't retroactively change snapshots.
+            persisted.append([dict(m) for m in msgs])
+
+        session = CLISession("persist-sess", tmp_path, on_event)
+        session._on_persist = on_persist
+
+        captured_history_at_spawn: list[list[dict[str, Any]]] = []
+
+        async def fake_subprocess(*_args: Any, **_kwargs: Any) -> Any:
+            # Snapshot conversation_history at the moment of spawn --
+            # PROVES the user-append happened BEFORE the subprocess
+            # was created (i.e. before any cancellable await).
+            captured_history_at_spawn.append(
+                [dict(m) for m in session.conversation_history]
+            )
+            return FakeProcess(
+                _make_stream_lines(
+                    _content_block_start_text(0),
+                    _text_delta_event("ok"),
+                    _content_block_stop(0),
+                    _result_success(""),
+                ),
+                returncode=0,
+            )
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await session.run_turn("hello world", model="opus")
+
+        assert captured_history_at_spawn, "subprocess must have been spawned"
+        snap = captured_history_at_spawn[0]
+        assert snap == [{"role": "user", "content": "hello world"}], (
+            "the user message MUST be appended to conversation_history"
+            " BEFORE the subprocess is spawned (Issue 7 incremental save)"
+        )
+        # And ``on_persist`` must have fired at least once with that snapshot.
+        assert any(
+            entry == [{"role": "user", "content": "hello world"}]
+            for entry in persisted
+        ), (
+            "on_persist must be invoked with the user-only history at"
+            f" turn start; got {persisted!r}"
+        )
+
+    async def test_cancel_mid_turn_flushes_partial_assistant(
+        self, tmp_path: Path
+    ) -> None:
+        """The cancel path must append a synthetic ``interrupted`` entry
+        carrying whatever streamed-so-far text, so a session-switch
+        navigates away with a complete-enough on-disk record."""
+        events: list[dict[str, Any]] = []
+        persisted: list[list[dict[str, Any]]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        async def on_persist(msgs: list[dict[str, Any]]) -> None:
+            persisted.append([dict(m) for m in msgs])
+
+        session = CLISession("cancel-sess", tmp_path, on_event)
+        session._on_persist = on_persist
+
+        # Build a process that streams 2 tokens, then awaits forever
+        # (simulating mid-turn) so we can cancel before result.
+        readline_n = {"n": 0}
+        hang_event = asyncio.Event()
+
+        async def fake_readline() -> bytes:
+            readline_n["n"] += 1
+            n = readline_n["n"]
+            if n == 1:
+                return (json.dumps(_content_block_start_text(0)) + "\n").encode()
+            if n == 2:
+                return (json.dumps(_text_delta_event("partial ")) + "\n").encode()
+            if n == 3:
+                return (json.dumps(_text_delta_event("response")) + "\n").encode()
+            # n>=4: hang until cancelled.
+            await hang_event.wait()
+            return b""
+
+        class _Proc:
+            returncode = None  # alive
+            pid = 1
+
+            def __init__(self) -> None:
+                self.stdout = MagicMock()
+                self.stdout.readline = fake_readline
+                self.stderr = MagicMock()
+
+            def kill(self) -> None:
+                # Simulating a kill: returncode flips so cleanup can complete.
+                _Proc.returncode = -9  # type: ignore[assignment]
+
+            def terminate(self) -> None:
+                pass
+
+            async def wait(self) -> int:
+                return -9
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b""
+
+        async def fake_subprocess(*_args: Any, **_kwargs: Any) -> Any:
+            return _Proc()
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            task = asyncio.create_task(
+                session.run_turn("draft", model="opus")
+            )
+            # Wait until at least 2 tokens streamed.
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                token_events = [
+                    e for e in events if e.get("type") == "token"
+                ]
+                if len(token_events) >= 2:
+                    break
+            assert (
+                len([e for e in events if e.get("type") == "token"]) >= 2
+            ), f"tokens not streamed; events={events!r}"
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        # User message must be present (appended at turn start).
+        roles = [m.get("role") for m in session.conversation_history]
+        assert roles == ["user", "assistant"], (
+            f"history must contain user + interrupted assistant;"
+            f" got roles={roles!r}, history={session.conversation_history!r}"
+        )
+        user_entry = session.conversation_history[0]
+        assert user_entry == {"role": "user", "content": "draft"}
+        assistant_entry = session.conversation_history[1]
+        assert assistant_entry.get("interrupted") is True
+        # The streamed text was buffered and flushed.
+        flat = json.dumps(assistant_entry["content"])
+        assert "partial " in flat or "response" in flat, (
+            "partial assistant text must be captured;"
+            f" got {assistant_entry!r}"
+        )
+
+        # on_persist must have been invoked at least twice: once at
+        # user-append (start), once at partial-flush (cancel).
+        assert len(persisted) >= 2, (
+            f"on_persist must fire at user-append AND partial-flush;"
+            f" got {len(persisted)} invocations"
+        )
+        # Last persisted snapshot must include the interrupted assistant.
+        last = persisted[-1]
+        assert any(
+            m.get("role") == "assistant" and m.get("interrupted") is True
+            for m in last
+        ), f"last persisted snapshot missing interrupted assistant: {last!r}"
+
+    async def test_persist_called_idempotent_at_turn_complete(
+        self, tmp_path: Path
+    ) -> None:
+        """Successful turn: on_persist fires at user-append AND at
+        assistant-append. The cancel/error flush path must NOT
+        re-append (idempotency)."""
+        on_event = AsyncMock()
+        persisted: list[list[dict[str, Any]]] = []
+
+        async def on_persist(msgs: list[dict[str, Any]]) -> None:
+            persisted.append([dict(m) for m in msgs])
+
+        session = CLISession("idem-sess", tmp_path, on_event)
+        session._on_persist = on_persist
+
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("ok"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("hi", model="opus")
+
+        # History: user + assistant (no interrupted entry, no double).
+        assert len(session.conversation_history) == 2
+        assert session.conversation_history[0]["role"] == "user"
+        assert session.conversation_history[1]["role"] == "assistant"
+        assert "interrupted" not in session.conversation_history[1]
+
+        # on_persist fired exactly twice (user, then assistant).
+        assert len(persisted) == 2, (
+            f"expected exactly 2 on_persist calls (user + assistant);"
+            f" got {len(persisted)}: {persisted!r}"
+        )
+
+    async def test_persist_failure_does_not_break_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """on_persist exceptions must be swallowed -- a save failure
+        (e.g. disk full, permission) must NOT abort the running turn."""
+        on_event = AsyncMock()
+
+        async def flaky_persist(_msgs: list[dict[str, Any]]) -> None:
+            raise OSError("disk full")
+
+        session = CLISession("flaky-sess", tmp_path, on_event)
+        session._on_persist = flaky_persist
+
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("ok"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("hi", model="opus")
+
+        # Turn completed despite the failing persist.
+        assert session._first_turn is False
+        assert len(session.conversation_history) == 2

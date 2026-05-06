@@ -365,6 +365,24 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         on_event=on_event,
     )
 
+    # Issue 7 (incremental save): wire the workspace's
+    # ``save_conversation`` to the session via the ``_on_persist``
+    # attribute. The session calls this at user-append (start of
+    # turn), assistant-append (end of turn), and partial-append
+    # (cancel/error). The finally-block save below remains as a
+    # defensive backstop. Wired post-construction (rather than as a
+    # constructor kwarg) to keep the test-double constructor in
+    # ``tests/test_agent_websocket.py`` unchanged (Sign 4).
+    async def on_persist(messages: list[dict[str, Any]]) -> None:
+        try:
+            workspace.save_conversation(session_id, messages)
+        except Exception:
+            logger.warning(
+                "Incremental save failed for session %s", session_id
+            )
+
+    session._on_persist = on_persist
+
     # Load any prior conversation history
     prior_messages = workspace.load_conversation(session_id)
     if prior_messages:
