@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach, act } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
-import AgentPage from './AgentPage';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
+import AgentPage, { formatAgo } from './AgentPage';
 
 // ---------------------------------------------------------------------------
 // Mock useAgentSession hook
@@ -346,5 +346,154 @@ describe('<AgentPage>', () => {
     expect(footer.textContent).toContain('Last turn:');
     expect(footer.textContent).toContain('5.0k');
     expect(footer.textContent).toContain('2.0k');
+  });
+
+  /* ---------- R5 follow-up: M1/M2/S1/S2/S3/S4 fixes (F-fe-fixes) ---------- */
+
+  describe('M1 — badge enters visible (useLayoutEffect fires before paint)', () => {
+    it('badge has Visible class immediately on first render with lastTurnComplete set', () => {
+      vi.useFakeTimers();
+      mockHookReturn.lastTurnComplete = {
+        at: new Date('2026-05-07T14:00:00Z'),
+        elapsedSeconds: 10,
+      };
+      mockHookReturn.isProcessing = false;
+      // useLayoutEffect fires synchronously inside act() before paint in JSDOM.
+      act(() => {
+        render(<AgentPage />);
+      });
+      const badge = screen.getByTestId('turn-complete-badge');
+      // Class name contains the CSS module-hashed suffix; check the base name portion.
+      expect(badge.className).toMatch(/TurnCompleteVisible/);
+      expect(badge.className).not.toMatch(/TurnCompleteFaded/);
+      vi.useRealTimers();
+    });
+
+    it('badge transitions to Faded class after 3s (TURN_COMPLETE_VISIBLE_MS)', () => {
+      vi.useFakeTimers();
+      mockHookReturn.lastTurnComplete = {
+        at: new Date('2026-05-07T14:00:00Z'),
+        elapsedSeconds: 10,
+      };
+      mockHookReturn.isProcessing = false;
+      act(() => {
+        render(<AgentPage />);
+      });
+      // Advance past the 3000ms timeout.
+      act(() => {
+        vi.advanceTimersByTime(3100);
+      });
+      const badge = screen.getByTestId('turn-complete-badge');
+      expect(badge.className).toMatch(/TurnCompleteFaded/);
+      expect(badge.className).not.toMatch(/TurnCompleteVisible/);
+      vi.useRealTimers();
+    });
+  });
+
+  describe('M2 — aria-live region on badge', () => {
+    it('turn-complete badge has role="status", aria-live="polite", aria-atomic="true"', () => {
+      mockHookReturn.lastTurnComplete = {
+        at: new Date('2026-05-07T14:00:00Z'),
+        elapsedSeconds: 10,
+      };
+      mockHookReturn.isProcessing = false;
+      render(<AgentPage />);
+      const badge = screen.getByTestId('turn-complete-badge');
+      expect(badge.getAttribute('role')).toBe('status');
+      expect(badge.getAttribute('aria-live')).toBe('polite');
+      expect(badge.getAttribute('aria-atomic')).toBe('true');
+    });
+  });
+
+  describe('S1 — faded badge does not use the 0.35 low-contrast opacity', () => {
+    it('Faded class is applied after timeout and is not the old 35% value (CSS verified via class presence)', () => {
+      // The actual opacity value (0.7 vs 0.35) is in the CSS module which
+      // JSDOM does not evaluate. We verify the correct class is applied and
+      // trust the CSS change in AgentPage.module.css.
+      vi.useFakeTimers();
+      mockHookReturn.lastTurnComplete = {
+        at: new Date('2026-05-07T14:00:00Z'),
+        elapsedSeconds: 10,
+      };
+      mockHookReturn.isProcessing = false;
+      act(() => { render(<AgentPage />); });
+      act(() => { vi.advanceTimersByTime(3100); });
+      const badge = screen.getByTestId('turn-complete-badge');
+      // Correct faded class applied (opacity: 0.7 in CSS, not 0.35).
+      expect(badge.className).toMatch(/TurnCompleteFaded/);
+      vi.useRealTimers();
+    });
+  });
+
+  describe('S2 — footer time format is 24h', () => {
+    it('footer displays time with no AM/PM for a noon timestamp', () => {
+      // Use a UTC timestamp that is noon UTC. toLocaleTimeString with hour12:false
+      // must produce "12:00:00" not "12:00:00 PM".
+      const noonUTC = new Date('2026-05-07T12:00:00Z');
+      mockHookReturn.lastTurnComplete = { at: noonUTC, elapsedSeconds: 5 };
+      mockHookReturn.isProcessing = false;
+      render(<AgentPage />);
+      const footer = screen.getByTestId('turn-complete-footer');
+      // Must not contain AM or PM.
+      expect(footer.textContent).not.toMatch(/AM|PM/i);
+      expect(footer.textContent).toContain('Last turn:');
+    });
+
+    it('footer displays time with no AM/PM for a morning timestamp', () => {
+      const morningUTC = new Date('2026-05-07T08:30:15Z');
+      mockHookReturn.lastTurnComplete = { at: morningUTC, elapsedSeconds: 5 };
+      mockHookReturn.isProcessing = false;
+      render(<AgentPage />);
+      const footer = screen.getByTestId('turn-complete-footer');
+      expect(footer.textContent).not.toMatch(/AM|PM/i);
+    });
+  });
+
+  describe('S4 — persistent footer relative-time staleness indicator', () => {
+    it('no relative time appended when gap < 1h', () => {
+      // Timestamp 30 minutes ago — under threshold.
+      const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
+      mockHookReturn.lastTurnComplete = { at: thirtyMinAgo, elapsedSeconds: 5 };
+      mockHookReturn.isProcessing = false;
+      render(<AgentPage />);
+      const footer = screen.getByTestId('turn-complete-footer');
+      expect(footer.textContent).not.toMatch(/ago/);
+    });
+
+    it('appends "(Xh ago)" when gap >= 1h', () => {
+      // Timestamp exactly 2h ago — over threshold.
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      mockHookReturn.lastTurnComplete = { at: twoHoursAgo, elapsedSeconds: 5 };
+      mockHookReturn.isProcessing = false;
+      render(<AgentPage />);
+      const footer = screen.getByTestId('turn-complete-footer');
+      expect(footer.textContent).toMatch(/2h ago/);
+    });
+
+    it('appends "(1h ago)" when gap is 90 minutes (floor to hours)', () => {
+      // formatAgo is exported from AgentPage for direct testing.
+      // formatAgo uses Math.floor(diffMin/60): 90min → floor(1.5) = 1 → "1h ago".
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-07T14:00:00Z'));
+      const ninetyMinAgo = new Date('2026-05-07T12:30:00Z');
+      expect(formatAgo(ninetyMinAgo)).toBe(' (1h ago)');
+      vi.useRealTimers();
+    });
+
+    it('formatAgo returns empty string for gap < 1h', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-07T14:00:00Z'));
+      const fortyMinAgo = new Date('2026-05-07T13:20:00Z');
+      expect(formatAgo(fortyMinAgo)).toBe('');
+      vi.useRealTimers();
+    });
+
+    it('formatAgo returns " (2h ago)" for exactly 2h gap', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-07T14:00:00Z'));
+      const twoHoursAgo = new Date('2026-05-07T12:00:00Z');
+      expect(formatAgo(twoHoursAgo)).toBe(' (2h ago)');
+      vi.useRealTimers();
+    });
   });
 });

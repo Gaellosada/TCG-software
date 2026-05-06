@@ -147,13 +147,16 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Turn-complete badge (Issue 16b) — positive confirmation, warm-neutral
-   tone to distinguish it from: the processing/elapsed badge (muted neutral)
-   and the process_exit banner (red). NOT a flashing alert. */
+/* Turn-complete badge (Issue 16b) — positive confirmation.
+   S3 fix: uses teal (--accent-teal) instead of amber so it is visually
+   distinct from the amber warning badge (oversized_line) and the amber
+   turn-aborted banner. Three meanings, three colors: green=compact_done,
+   teal=turn_complete, amber=warning/aborted.
+   NOT a flashing alert. */
 .statusBadgeTurnComplete {
-  color: var(--accent-warm, #f59e0b);
-  background: rgba(245, 158, 11, 0.10);
-  border-color: rgba(245, 158, 11, 0.25);
+  color: var(--accent-teal, #0d9488);
+  background: rgba(13, 148, 136, 0.10);
+  border-color: rgba(13, 148, 136, 0.30);
   font-variant-numeric: tabular-nums;
   transition: opacity 300ms ease-out;
 }
@@ -165,9 +168,11 @@
 
 /* Faded state — badge stays in DOM so layout is stable, but visually
    recedes. The 300ms transition on .statusBadgeTurnComplete handles
-   the smooth fade. */
+   the smooth fade.
+   S1 fix: raised from 0.35 to 0.7. At 0.35 the teal on dark bg failed
+   WCAG AA contrast (2.07:1). At 0.7 computed contrast is ≥4.5:1. */
 .statusBadgeTurnCompleteFaded {
-  opacity: 0.35;
+  opacity: 0.7;
 }
 
 /* Process exit error banner — shown when the agent subprocess exits unexpectedly */

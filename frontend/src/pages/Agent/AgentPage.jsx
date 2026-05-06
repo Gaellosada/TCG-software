@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import useAgentSession, { formatTokens, formatElapsed, formatElapsedSeconds } from '../../hooks/useAgentSession';
 import SessionPanel from './SessionPanel';
 import ChatPanel from './ChatPanel';
@@ -10,6 +10,21 @@ import styles from './AgentPage.module.css';
 // Duration (ms) the "Turn complete" momentary badge stays fully visible before
 // fading out. The CSS transition handles the visual fade over ~300ms after this.
 const TURN_COMPLETE_VISIBLE_MS = 3000;
+
+// Threshold (ms) above which the persistent footer appends a relative-time
+// string: "Last turn: 09:14:32 (3h ago)". Finance context → 1h threshold.
+const RELATIVE_TIME_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+
+// S4 helper: returns " (Xm ago)" / " (Xh ago)" when diffMs >= 1h, else "".
+// Intentionally shows nothing for < 1h (time stamp alone is sufficient).
+// Exported for test access; not part of the hook API.
+export function formatAgo(date) {
+  const diffMs = Date.now() - date.getTime();
+  if (diffMs < RELATIVE_TIME_THRESHOLD_MS) return '';
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 60) return ` (${diffMin}m ago)`;
+  return ` (${Math.floor(diffMin / 60)}h ago)`;
+}
 
 const TABS = [
   { id: 'chat', label: 'Chat' },
@@ -50,7 +65,11 @@ function AgentPage() {
   const [turnCompleteBadgeVisible, setTurnCompleteBadgeVisible] = useState(false);
   const turnCompleteTimerRef = useRef(null);
 
-  useEffect(() => {
+  // M1 fix: useLayoutEffect fires synchronously before paint so the badge
+  // enters the DOM at opacity 1 (Visible class) from the very first frame,
+  // then decays to Faded after TURN_COMPLETE_VISIBLE_MS. useEffect was
+  // post-paint, causing an unintended 0.35→1.0 fade-in instead of 1.0→0.35.
+  useLayoutEffect(() => {
     if (!lastTurnComplete) {
       setTurnCompleteBadgeVisible(false);
       return undefined;
@@ -139,8 +158,14 @@ function AgentPage() {
                 {`Working for ${formatElapsed(elapsedMs)}`}
               </span>
             )}
+            {/* M2 fix: role="status" + aria-live="polite" so screen readers
+                announce the badge text when it appears dynamically. aria-atomic
+                ensures the full label is read, not just the changed portion. */}
             {lastTurnComplete && !isProcessing && (
               <span
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
                 className={`${styles.statusBadge} ${styles.statusBadgeTurnComplete} ${turnCompleteBadgeVisible ? styles.statusBadgeTurnCompleteVisible : styles.statusBadgeTurnCompleteFaded}`}
                 data-testid="turn-complete-badge"
               >
@@ -205,7 +230,9 @@ function AgentPage() {
             <div className={styles.tokenFooter} data-testid="token-footer">
               {lastTurnComplete && !isProcessing && (
                 <span className={styles.tokenFooterTurnComplete} data-testid="turn-complete-footer">
-                  {`Last turn: ${lastTurnComplete.at.toLocaleTimeString()}`}
+                  {/* S2 fix: explicit hour12:false for 24h display in all locales.
+                      S4 fix: append relative time when gap > 1h via formatAgo(). */}
+                  {`Last turn: ${lastTurnComplete.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}${formatAgo(lastTurnComplete.at)}`}
                 </span>
               )}
               {tokenUsage.total > 0 && (
