@@ -43,7 +43,7 @@ The single biggest cost on first turn is *fragmented* discovery (one Read here, 
    - `ASSUMPTIONS.json` — existing assumptions (resume context from prior turns)
    - `STRATEGY.yaml` (if present) — current spec
 
-3. **Start large data fetches immediately — work in parallel while they run.** If the task requires fetching a significant amount of data (multi-year bars, option chains, multiple instruments), kick off a `Bash run_in_background` call for the data script as soon as you know what data you need. While it runs, draft the backtest script, resolve entry/exit dates, and write initial assumptions — do not wait idle. When the fetch completes, validate and proceed. Do not hold off on the fetch "until the plan is ready": the fetch IS part of planning.
+3. **Start large data fetches immediately — work in parallel while they run.** If the task requires fetching a significant amount of data (multi-year bars, option chains, multiple instruments), kick off a `Bash run_in_background` call for the data script as soon as you know what data you need. While it runs, draft the backtest script, resolve entry/exit dates, and write initial assumptions — do not wait idle. When the fetch completes, validate and proceed — **in the same turn**. Do not end the turn while the background Bash is still running; poll its `.output` file (Read the path returned by Bash) until you see a terminal line (success metric, exception, or done marker), then validate. Do not hold off on the fetch "until the plan is ready": the fetch IS part of planning.
 
 4. **Do not grep/glob the library to discover its surface.** The library entry points are listed below in the `Library: tcg.backtester.lib` section and the full reference is in `BACKTESTER_GUIDE.md`. If after reading both you still need to inspect a function, jump straight to its source file with one targeted `Read` — do not crawl with multiple `Grep`s.
 
@@ -80,6 +80,8 @@ Two data-shaped modules exist in this codebase. Only ONE is for your scripts:
 | `tcg.data`                         | **NO**   | FastAPI backend's async service module (`async create_services(mongo_db)` over Motor). Not for scripts — it expects a running Motor handle and returns coroutines. Do **not** import this from `strategy.py` or any `scripts/*.py`. |
 
 The per-collection doc shapes (`_id` fields, provider priority, gotchas like `close==0` on untraded options) live in `SCHEMA.md`, scaffolded into your workspace. Read it on first turn rather than probing collections one-`find`-at-a-time.
+
+> **Network sandbox warning.** The Bash tool runs in a network-isolated namespace (CLI sandbox); it **cannot reach** `10.0.5.10` or any off-host IP — only `127.0.0.1` is reachable. Calling `tcg.backtester.lib.data_load.fetch_*` from a Python script inside Bash **will fail** with `Network is unreachable`. Do NOT rationalise this as "the lib is broken" or fall back to `pymongo` (same failure). The correct pattern: use `mcp__mongodb__find` / `mcp__mongodb__aggregate` (unsandboxed, reach the DB via the MCP process) to fetch and save data to a local file, then load that file in your analysis scripts.
 
 ## Library: tcg.backtester.lib
 
@@ -138,9 +140,11 @@ print(m.to_dict())
 - `fetch_*` functions are sync — no `asyncio.run` needed. They manage their own DB connection.
 - Signal arrays must be same length as `bars.dates`. NaN warm-up is normal.
 - Engine fires entries on signal transitions (0->nonzero or sign change), not on every nonzero bar.
-- Use `Path.cwd()` in scripts, never `Path(__file__)`.
+- Use `Path.cwd()` in scripts, never `Path(__file__)`. Bash subprocesses start with CWD = the session workspace (the directory containing this `CLAUDE.md`), so `Path.cwd()` and relative paths resolve correctly. **Important:** CWD does NOT persist across separate Bash invocations within a turn — if you `cd` inside one Bash call, the next Bash call starts back at the session workspace. Use absolute paths when a directory change in one invocation needs to be visible in the next.
 - NEVER fabricate data or results. If data is missing, stop and report.
 - On ANY failure: write to `PROBLEMS.md`, explain plainly, wait for the user.
+- **Action honesty.** Do not write text that announces a future action ("I'll run X", "Now the strategy.py", "Let me kick off the backtest") unless the tool call for that action is in the **same assistant message**. If you are about to type "I'll", "Now", or "Let me", emit the `tool_use` block first — describe what happened in past tense after the tool result returns. Future-tense announcements followed by `end_turn` (without the tool call) are the failure mode; every announced action must have a paired tool call in the same message.
+- **Never end a turn while a `Bash run_in_background` job is still running.** Poll its output: Read the `.output` path returned by the Bash call until the job produces a terminal line — success metric, exception, or "done" marker. Only then write the summary and end the turn. "Backtest is running" and "Fetch kicked off" are **not** turn-ending sentences.
 
 ## Communication Style
 
