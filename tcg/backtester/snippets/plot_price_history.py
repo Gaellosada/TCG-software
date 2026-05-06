@@ -13,7 +13,7 @@
 # option contract. The §3 chart is a sanity-check on the data feeding the
 # backtest, and option chains have their own diagnostics.
 
-from tcg_backtester.lib import data_load, plotting
+from tcg.backtester.lib import data_load, plotting
 
 # --- Single-instrument path (most common) --------------------------------
 INPUT_NPZ = "data/SPX.npz"

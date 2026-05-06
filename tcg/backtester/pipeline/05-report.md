@@ -29,7 +29,7 @@ The canonical pattern:
 import json
 import pickle
 from pathlib import Path
-from tcg_backtester.lib import compile as cc
+from tcg.backtester.lib import compile as cc
 
 WORKSPACE = Path(".").resolve()
 

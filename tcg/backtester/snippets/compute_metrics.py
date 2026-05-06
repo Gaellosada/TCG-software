@@ -2,7 +2,7 @@
 
 import json, pickle
 from datetime import datetime, timezone
-from tcg_backtester.lib import metrics
+from tcg.backtester.lib import metrics
 
 RESULT_PKL = "results/raw_result.pkl"
 OUT_JSON = "results/metrics.json"

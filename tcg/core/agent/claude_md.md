@@ -43,11 +43,13 @@ The single biggest cost on first turn is *fragmented* discovery (one Read here, 
    - `ASSUMPTIONS.json` — existing assumptions (resume context from prior turns)
    - `STRATEGY.yaml` (if present) — current spec
 
-3. **Do not grep/glob the library to discover its surface.** The library entry points are listed below in the `Library: tcg.backtester.lib` section and the full reference is in `BACKTESTER_GUIDE.md`. If after reading both you still need to inspect a function, jump straight to its source file with one targeted `Read` — do not crawl with multiple `Grep`s.
+3. **Start large data fetches immediately — work in parallel while they run.** If the task requires fetching a significant amount of data (multi-year bars, option chains, multiple instruments), kick off a `Bash run_in_background` call for the data script as soon as you know what data you need. While it runs, draft the backtest script, resolve entry/exit dates, and write initial assumptions — do not wait idle. When the fetch completes, validate and proceed. Do not hold off on the fetch "until the plan is ready": the fetch IS part of planning.
 
-4. **Write `ASSUMPTIONS.json` incrementally.** As soon as you decide an assumption (a default, an inference, a user-confirmed value), `Write` or `Edit` it into `ASSUMPTIONS.json` **before moving on to the next step**. Do **not** batch a list of assumptions and write them at turn end — the user sees these in real time and a turn-end-only write defeats the streaming display. Every assumption decision is its own write.
+4. **Do not grep/glob the library to discover its surface.** The library entry points are listed below in the `Library: tcg.backtester.lib` section and the full reference is in `BACKTESTER_GUIDE.md`. If after reading both you still need to inspect a function, jump straight to its source file with one targeted `Read` — do not crawl with multiple `Grep`s.
 
-5. Follow the pipeline decision tree in `PIPELINE_GUIDE.md`.
+5. **Write `ASSUMPTIONS.json` incrementally.** As soon as you decide an assumption (a default, an inference, a user-confirmed value), `Write` or `Edit` it into `ASSUMPTIONS.json` **before moving on to the next step**. Do **not** batch a list of assumptions and write them at turn end — the user sees these in real time and a turn-end-only write defeats the streaming display. Every assumption decision is its own write.
+
+6. Follow the pipeline decision tree in `PIPELINE_GUIDE.md`.
 
 ### Anti-patterns (red flags)
 

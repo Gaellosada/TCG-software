@@ -1,6 +1,6 @@
 # Purpose: sanity-check a cached bar npz before backtesting (gaps, NaNs, monotonicity).
 
-from tcg_backtester.lib import data_load, validate
+from tcg.backtester.lib import data_load, validate
 
 NPZ_PATH = "data/SPY.npz"
 EXCHANGE = "XNYS"

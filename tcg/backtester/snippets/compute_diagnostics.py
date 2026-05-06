@@ -6,8 +6,8 @@ import json
 import pickle
 from pathlib import Path
 
-from tcg_backtester.lib import metrics as mm
-from tcg_backtester.lib.diagnostics import compute_diagnostics
+from tcg.backtester.lib import metrics as mm
+from tcg.backtester.lib.diagnostics import compute_diagnostics
 
 WORKSPACE = Path(".").resolve()
 

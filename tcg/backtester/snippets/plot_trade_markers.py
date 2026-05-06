@@ -1,7 +1,7 @@
 # Purpose: price chart with entry/exit markers + hold-time histogram.
 
 import pickle
-from tcg_backtester.lib import plotting
+from tcg.backtester.lib import plotting
 
 RESULT_PKL = "results/raw_result.pkl"
 OUT_DIR = "results/plots"

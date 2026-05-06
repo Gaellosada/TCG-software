@@ -1,6 +1,6 @@
 # Purpose: performance stats panel (strategy vs Buy & Hold) as a Plotly table figure.
 import pickle
-from tcg_backtester.lib import plotting
+from tcg.backtester.lib import plotting
 
 RESULT_PKL = "results/raw_result.pkl"
 OUT_DIR = "results/plots"

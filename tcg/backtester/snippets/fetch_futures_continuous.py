@@ -1,6 +1,6 @@
 # Purpose: build a continuous front-month series (e.g. VIX futures) with adjustment.
 
-from tcg_backtester.lib import data_load
+from tcg.backtester.lib import data_load
 
 ROOT = "VIX"
 ADJUSTMENT = "ratio"

@@ -1,6 +1,6 @@
 # Purpose: load a single option contract daily series.
 
-from tcg_backtester.lib import data_load, options, mongo
+from tcg.backtester.lib import data_load, options, mongo
 
 ROOT = "SPX"
 CONTRACT_ID = "SPX_20241220_4500_C"

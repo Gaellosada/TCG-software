@@ -1,6 +1,6 @@
 # Purpose: load a single ETF series (e.g. SPY) from Mongo.
 
-from tcg_backtester.lib import data_load
+from tcg.backtester.lib import data_load
 
 INSTRUMENT_ID = "SPY"
 PROVIDER = "YAHOO"

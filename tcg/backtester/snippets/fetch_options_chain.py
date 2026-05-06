@@ -13,7 +13,7 @@ import json
 import time
 from pathlib import Path
 
-from tcg_backtester.lib import mongo, options, validate
+from tcg.backtester.lib import mongo, options, validate
 
 # ---- edit point 1: option root name ----------------------------------------
 # OPT_<ROOT> collection name in MongoDB.
@@ -36,7 +36,7 @@ RIGHT: str | None = None  # None = load both calls and puts
 # strike_min / strike_max automatically. For SPX 2021-2025, ~4500 is fine.
 # Derive it once from the underlying bars:
 #
-#   from tcg_backtester.lib import data_load
+#   from tcg.backtester.lib import data_load
 #   bars = data_load.load_index_bars_sync(mongo.sync_db(), "SPX",
 #                                         start=20230101, end=20230102)
 #   SPOT_HINT = float(bars.close[-1]) if len(bars.close) else 4500.0

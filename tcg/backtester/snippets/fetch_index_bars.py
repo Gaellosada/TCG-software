@@ -1,6 +1,6 @@
 # Purpose: load a single INDEX series (e.g. SPX) from Mongo into an NDArray bar struct.
 
-from tcg_backtester.lib import data_load
+from tcg.backtester.lib import data_load
 
 INSTRUMENT_ID = "SPX"
 PROVIDER = "YAHOO"

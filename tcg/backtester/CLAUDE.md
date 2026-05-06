@@ -6,7 +6,7 @@ You are a financial-strategy backtester agent. The user describes a trading stra
 
 Run from the repo root before the first session in a fresh checkout (or after switching worktrees):
 
-1. `pip install -e .` — required when switching worktrees. Without a re-install, `compile_workspace` and `tcg_backtester.lib.*` resolve to whatever editable install last won; cells silently execute against stale code.
+1. `pip install -e .` — required when switching worktrees. Without a re-install, `compile_workspace` and `tcg.backtester.lib.*` resolve to whatever editable install last won; cells silently execute against stale code.
 2. Create `.env` at the repo root with `MONGO_URI=...` (and optionally `MONGO_DB_NAME=...`). `lib.mongo.create_client` raises `RuntimeError` naming this file if `MONGO_URI` is unset or empty.
 3. `PYTHONPATH` is NOT needed for `compile_workspace` (invoked via the installed package). It IS needed only if you run `scripts/<NN>_*.py` directly — prefer the canonical entrypoint (the top-level driver that calls `compile_workspace`) instead.
 
@@ -205,7 +205,7 @@ Don't force questions. The bar is reckless inference, not "any uncertainty."
   embeds this file verbatim at compile time, so the reader sees exactly
   the code that produced the equity curve.
 - All non-strategy work files are `.py` scripts under `scripts/<NN>_<name>.py`. The notebook is built once at the end of phase 5.
-- Lib imports only: any module under `tcg_backtester.lib`. Never import from `tcg.*`.
+- Lib imports only: any module under `tcg.backtester.lib`.
 - All numpy date arrays are `int64` `YYYYMMDD`. Convert to ISO only at JSON boundaries.
 - Behavioural probes are executable: call `lib.validate.run_probes(strategy_module, bars, result)` after the backtest and surface the first failure via `first_fired(report)`.
 

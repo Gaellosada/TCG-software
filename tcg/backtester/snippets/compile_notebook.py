@@ -8,8 +8,8 @@ import json
 import pickle
 from pathlib import Path
 
-from tcg_backtester.lib import compile as cc
-from tcg_backtester.lib.metrics import compute_metrics
+from tcg.backtester.lib import compile as cc
+from tcg.backtester.lib.metrics import compute_metrics
 
 WORKSPACE = Path(".").resolve()
 
