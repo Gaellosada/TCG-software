@@ -5,7 +5,6 @@ Each session gets a UUID-named directory under ``WORKSPACES_ROOT`` containing:
 - ``ASSUMPTIONS.json``   — running list of assumptions the agent surfaces
 - ``meta.json``          — session name, creation timestamp, etc.
 - ``.mcp.json``          — MongoDB MCP server config for the Claude CLI
-- ``.claude/settings.json`` — permissions config for the Claude CLI
 - ``CLAUDE.md``          — agent system instructions for the Claude CLI
 """
 
@@ -21,6 +20,13 @@ from typing import Any
 
 from tcg.core.agent.pipeline_guide import PIPELINE_GUIDE_MD
 
+# tcg/core/agent/workspace.py -> parents[3] = TCG-software/
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+_CLAUDE_MD_CONTENT = (Path(__file__).parent / "claude_md.md").read_text(
+    encoding="utf-8"
+)
+
 
 def _workspaces_root() -> Path:
     """Resolve the root directory for all agent workspaces.
@@ -31,8 +37,7 @@ def _workspaces_root() -> Path:
     env_root = os.environ.get("AGENT_WORKSPACES_ROOT")
     if env_root:
         return Path(env_root)
-    # project root = three levels up from this file (tcg/core/agent/workspace.py)
-    return Path(__file__).resolve().parents[3] / "agent_workspaces"
+    return _PROJECT_ROOT / "agent_workspaces"
 
 
 _META_FILE = "meta.json"
@@ -43,6 +48,8 @@ _ASSUMPTIONS_TEMPLATE: dict[str, Any] = {
     "version": 1,
     "assumptions": [],
 }
+
+_CONVERSATION_SCHEMA_VERSION = 1
 
 
 def _get_mongo_uri() -> str:
@@ -72,150 +79,6 @@ def _build_mcp_json(mongo_uri: str) -> dict[str, Any]:
     }
 
 
-def _build_claude_settings() -> dict[str, Any]:
-    """Build .claude/settings.json with permissions for the backtester agent."""
-    return {
-        "permissions": {
-            "allow": [
-                "Bash(python *)",
-                "Bash(python3 *)",
-                "Bash(ls *)",
-                "Bash(mkdir *)",
-                "Bash(mkdir -p *)",
-                "Bash(cp *)",
-                "Bash(find *)",
-                "Bash(grep *)",
-                "Bash(cat *)",
-                "Bash(head *)",
-                "Bash(tail *)",
-                "Bash(wc *)",
-            ],
-            "deny": [
-                "Bash(rm *)",
-                "Bash(sudo *)",
-                "Bash(curl *)",
-                "Bash(wget *)",
-                "Bash(ssh *)",
-                "Bash(pip *)",
-                "Bash(npm *)",
-                "Bash(git push *)",
-                "Bash(git commit *)",
-                "Bash(git reset *)",
-            ],
-        },
-        "enabledMcpjsonServers": ["mongodb"],
-    }
-
-
-_CLAUDE_MD_CONTENT = """\
-# Backtester Agent
-
-You are a quantitative analyst that turns strategy descriptions into backtested results.
-Given a trading idea, you produce a workspace with scripts, a compiled notebook, and metrics.
-Communicate results, not process.
-
-## Tools
-
-You have access to the Claude CLI built-in tools (Bash, Read, Write, Edit, Glob, Grep) \
-plus the MongoDB MCP server configured in `.mcp.json` (read-only access to market data).
-
-## First Turn Protocol
-
-1. Read `PIPELINE_GUIDE.md` — contains the workflow, decision tree, and API reference.
-2. Check if `ASSUMPTIONS.json` has existing assumptions (resume context from prior turns).
-3. Follow the pipeline decision tree in the guide.
-
-## Strategy Contract (code-first)
-
-Strategies are code-first. Every workspace has a `strategy.py` that defines a top-level \
-`META` dict plus EITHER:
-- `def compute_signal(bars, ctx) -> NDArray[np.float64]` — canonical shape.
-- `def run(ctx) -> BacktestResult` — escape hatch for multi-leg/options strategies.
-
-If both are defined, `run` wins. See `PIPELINE_GUIDE.md` for the full META schema and \
-strategy contract details.
-
-## Library: tcg_backtester.lib
-
-ALL scripts MUST import from this library. Never reimplement what it provides.
-
-```python
-from tcg_backtester.lib import data_load, indicators, engine, metrics, plotting, diagnostics
-from tcg_backtester.lib.engine import BacktestSpec, ExecutionConfig, SizingConfig, run_backtest
-from tcg_backtester.lib.strategy import run_strategy, StrategyContext
-from tcg_backtester.lib.validate import bar_integrity, run_probes, IntegrityReport
-from tcg_backtester.lib.compile import compile_workspace
-from tcg_backtester.lib.indicators import sma, ema, rsi, breakout, rolling_vol, apply_direction, daily_pulse
-from tcg_backtester.lib.options import build_legs, vertical, iron_condor, calendar, straddle, strangle
-```
-
-Key classes:
-- `BacktestSpec` — top-level specification: bars, signal, sizing, execution config
-- `ExecutionConfig` — slippage, commission, fill assumptions
-- `SizingConfig` — position sizing method and parameters
-- `StrategyContext` — frozen context passed to compute_signal/run (bars, meta, load_bars, indicators, options)
-
-Key functions:
-- `data_load.fetch_index_bars(symbol, start, end)` — load price bars from MongoDB
-- `data_load.fetch_futures_bars(symbol, start, end)` — load futures price bars
-- `indicators.sma(close, window)` — simple moving average
-- `indicators.ema(close, span)` — exponential moving average
-- `indicators.rsi(close, window)` — Wilder's RSI
-- `indicators.breakout(high, low, close, lookback)` — Donchian breakout signal
-- `engine.run_backtest(spec)` — execute a backtest from a BacktestSpec
-- `metrics.compute_metrics(result)` — compute performance metrics from backtest result
-- `run_strategy(strategy_module, workspace_path=...)` — drive strategy.py end-to-end
-- `compile_workspace(workspace_path)` — scripts -> notebook + manifest
-
-Key pattern (sync, no asyncio needed):
-```python
-from tcg_backtester.lib import data_load, indicators, engine, metrics
-from tcg_backtester.lib.engine import BacktestSpec, SizingConfig
-
-bars = data_load.fetch_index_bars("IND_SP_500", start=20200101, end=20241231)
-fast = indicators.sma(bars.close, 50)
-slow = indicators.sma(bars.close, 200)
-sig = (fast > slow).astype(float)
-spec = BacktestSpec(
-    bars=bars,
-    signal=sig,
-    sizing=SizingConfig(method="fixed_fraction", fraction=1.0),
-)
-result = engine.run_backtest(spec)
-m = metrics.compute_metrics(result)
-print(m.to_dict())
-```
-
-## Critical Rules
-
-- `BacktestSpec` takes `bars` (PriceSeries), NOT separate dates/close arrays.
-- `fetch_*` functions are sync — no `asyncio.run` needed. They manage their own DB connection.
-- Signal arrays must be same length as `bars.dates`. NaN warm-up is normal.
-- Engine fires entries on signal transitions (0->nonzero or sign change), not on every nonzero bar.
-- Use `Path.cwd()` in scripts, never `Path(__file__)`.
-- NEVER fabricate data or results. If data is missing, stop and report.
-- On ANY failure: write to `PROBLEMS.md`, explain plainly, wait for the user.
-
-## Communication Style
-
-Speak as a quant to a portfolio manager. Report what you found, what you built, what the \
-numbers say. When you need input, ask one clear question about the strategy itself.
-
-## Workspace Files
-
-| Path | Purpose |
-|------|---------|
-| `strategy.py` | Code-first strategy (META + compute_signal or run) |
-| `scripts/` | Generated Python scripts (numbered: `01_data.py`, `02_signal.py`, etc.) |
-| `results/` | Outputs — notebook.ipynb, metrics JSON, manifest.json, plots/ |
-| `snippets/` | Reusable code templates — read before writing new code |
-| `ASSUMPTIONS.json` | Tracked assumptions — update when inferring strategy parameters |
-| `PIPELINE_GUIDE.md` | Workflow instructions and decision tree |
-| `ITERATIONS.md` | Append-only iteration log |
-| `PROBLEMS.md` | Failure log — write here when something goes wrong |
-"""
-
-
 class AgentWorkspace:
     """Manages on-disk session directories for the agent feature."""
 
@@ -243,7 +106,10 @@ class AgentWorkspace:
             "created_at": now,
         }
         self._write_json(session_dir / _META_FILE, meta)
-        self._write_json(session_dir / _CONVERSATION_FILE, [])
+        self._write_json(
+            session_dir / _CONVERSATION_FILE,
+            {"schema_version": _CONVERSATION_SCHEMA_VERSION, "messages": []},
+        )
         self._write_json(session_dir / _ASSUMPTIONS_FILE, _ASSUMPTIONS_TEMPLATE)
 
         # Write pipeline guide for the agent to read on first turn
@@ -251,10 +117,15 @@ class AgentWorkspace:
             PIPELINE_GUIDE_MD, encoding="utf-8"
         )
 
+        # Copy backtester CLAUDE.md as BACKTESTER_GUIDE.md for full API reference
+        backtester_guide_src = _PROJECT_ROOT / "tcg" / "backtester" / "CLAUDE.md"
+        if backtester_guide_src.exists():
+            (session_dir / "BACKTESTER_GUIDE.md").write_text(
+                backtester_guide_src.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
         # Copy snippet templates into the workspace
-        snippets_src = (
-            Path(__file__).resolve().parents[3] / "tcg" / "backtester" / "snippets"
-        )
+        snippets_src = _PROJECT_ROOT / "tcg" / "backtester" / "snippets"
         if snippets_src.exists():
             snippets_dst = session_dir / "snippets"
             snippets_dst.mkdir(exist_ok=True)
@@ -268,11 +139,6 @@ class AgentWorkspace:
         # .mcp.json — MongoDB MCP server config
         mongo_uri = _get_mongo_uri()
         self._write_json(session_dir / ".mcp.json", _build_mcp_json(mongo_uri))
-
-        # .claude/settings.json — permissions config
-        claude_dir = session_dir / ".claude"
-        claude_dir.mkdir(exist_ok=True)
-        self._write_json(claude_dir / "settings.json", _build_claude_settings())
 
         # CLAUDE.md — agent system instructions
         (session_dir / "CLAUDE.md").write_text(_CLAUDE_MD_CONTENT, encoding="utf-8")
@@ -340,12 +206,22 @@ class AgentWorkspace:
     # ------------------------------------------------------------------
 
     def load_conversation(self, session_id: str) -> list[dict[str, Any]]:
-        """Load the saved conversation history for a session."""
+        """Load the saved conversation history for a session.
+
+        Handles both the legacy format (raw JSON array) and the current
+        envelope format ({"schema_version": 1, "messages": [...]}).
+        """
         conv_path = self.root / session_id / _CONVERSATION_FILE
         if not conv_path.exists():
             return []
         data = self._read_json(conv_path)
-        return data if isinstance(data, list) else []
+        if isinstance(data, list):
+            # Legacy format: raw array written by older versions
+            return data
+        if isinstance(data, dict) and "messages" in data:
+            messages = data["messages"]
+            return messages if isinstance(messages, list) else []
+        return []
 
     def save_conversation(
         self, session_id: str, messages: list[dict[str, Any]]
@@ -353,7 +229,11 @@ class AgentWorkspace:
         """Persist the full conversation history to disk."""
         session_dir = self.root / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
-        self._write_json(session_dir / _CONVERSATION_FILE, messages)
+        envelope = {
+            "schema_version": _CONVERSATION_SCHEMA_VERSION,
+            "messages": messages,
+        }
+        self._write_json(session_dir / _CONVERSATION_FILE, envelope)
 
     # ------------------------------------------------------------------
     # Assumptions file

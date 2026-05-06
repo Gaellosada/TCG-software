@@ -5,6 +5,9 @@
  *  - Fenced code blocks (```) with optional language annotation
  *  - Inline code (`)
  *  - Bold (**)
+ *  - Headings: # h1, ## h2, ### h3
+ *  - Unordered lists: - item / * item
+ *  - Ordered lists: 1. item
  *  - Line breaks (\n → <br>)
  *
  * Returns an HTML string intended for use with dangerouslySetInnerHTML.
@@ -17,6 +20,19 @@ function escapeHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+/**
+ * Apply inline formatting (inline code, bold) to a raw (unescaped) string.
+ * Escapes HTML first, then applies patterns.
+ */
+function applyInline(raw) {
+  let s = escapeHtml(raw);
+  // Inline code (single backtick, non-greedy)
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  return s;
 }
 
 export default function renderMarkdown(text) {
@@ -48,19 +64,63 @@ export default function renderMarkdown(text) {
         return `<pre><code${cls}>${code}</code></pre>`;
       }
 
-      // Normal text — apply inline formatting
-      let escaped = escapeHtml(part);
+      // Normal text — process line-by-line for block-level constructs
+      // (headings, lists), then apply inline formatting within each line.
+      const lines = part.split('\n');
+      const outputParts = [];
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
 
-      // Inline code (single backtick, non-greedy)
-      escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Headings: check ### before ## before # to avoid short-circuit errors
+        const h3 = line.match(/^### (.+)$/);
+        const h2 = !h3 && line.match(/^## (.+)$/);
+        const h1 = !h3 && !h2 && line.match(/^# (.+)$/);
+        if (h3) {
+          outputParts.push(`<h3>${applyInline(h3[1])}</h3>`);
+          i++;
+          continue;
+        }
+        if (h2) {
+          outputParts.push(`<h2>${applyInline(h2[1])}</h2>`);
+          i++;
+          continue;
+        }
+        if (h1) {
+          outputParts.push(`<h1>${applyInline(h1[1])}</h1>`);
+          i++;
+          continue;
+        }
 
-      // Bold
-      escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        // Unordered list: consecutive lines starting with "- " or "* "
+        if (/^[-*] /.test(line)) {
+          const items = [];
+          while (i < lines.length && /^[-*] /.test(lines[i])) {
+            items.push(`<li>${applyInline(lines[i].slice(2))}</li>`);
+            i++;
+          }
+          outputParts.push(`<ul>${items.join('')}</ul>`);
+          continue;
+        }
 
-      // Line breaks
-      escaped = escaped.replace(/\n/g, '<br>');
+        // Ordered list: consecutive lines starting with "N. "
+        if (/^\d+\. /.test(line)) {
+          const items = [];
+          while (i < lines.length && /^\d+\. /.test(lines[i])) {
+            const content = lines[i].replace(/^\d+\. /, '');
+            items.push(`<li>${applyInline(content)}</li>`);
+            i++;
+          }
+          outputParts.push(`<ol>${items.join('')}</ol>`);
+          continue;
+        }
 
-      return escaped;
+        // Plain line — apply inline formatting
+        outputParts.push(applyInline(line));
+        i++;
+      }
+
+      return outputParts.join('<br>');
     })
     .join('');
 

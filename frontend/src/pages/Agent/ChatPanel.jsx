@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import renderMarkdown from './renderMarkdown';
+import { AGENT_MODELS } from '../../constants/agent';
 import styles from './ChatPanel.module.css';
 
 /**
@@ -11,11 +12,11 @@ import styles from './ChatPanel.module.css';
  *   sendMessage     {Function}  (content: string) => void
  *   stopAgent       {Function}  () => void
  *   interruptAgent  {Function}  (content: string) => void
- *   isStreaming     {boolean}   Last message is still streaming
+ *   isProcessing    {boolean}   Agent is currently processing (thinking, streaming, tool loops)
  *   selectedModel   {string}    Current model id
  *   onModelChange   {Function}  (modelId: string) => void
  */
-function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAgent, isStreaming, selectedModel, onModelChange }) {
+function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAgent, isProcessing, selectedModel, onModelChange }) {
   const [draft, setDraft] = useState('');
   const [busyDialogText, setBusyDialogText] = useState(null);
   const listRef = useRef(null);
@@ -53,7 +54,7 @@ function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAge
     const text = draft.trim();
     if (!text || !isConnected) return;
 
-    if (isStreaming) {
+    if (isProcessing) {
       // Agent is busy — show dialog
       setBusyDialogText(text);
       return;
@@ -95,13 +96,14 @@ function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAge
   }
 
   function renderMessage(msg, idx) {
+    const msgKey = `msg-${idx}-${msg.role}`;
     if (msg.role === 'tool') {
-      return <ToolMessage key={idx} msg={msg} />;
+      return <ToolMessage key={msgKey} msg={msg} />;
     }
 
     if (msg.role === 'error') {
       return (
-        <div key={idx} className={styles.errorMsg}>
+        <div key={msgKey} className={styles.errorMsg}>
           <span className={styles.errorLabel}>Error</span>
           <span>{msg.content}</span>
         </div>
@@ -113,7 +115,7 @@ function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAge
 
     return (
       <div
-        key={idx}
+        key={msgKey}
         className={`${styles.msgRow} ${isUser ? styles.msgRowUser : styles.msgRowAssistant}`}
       >
         <div className={bubbleClass}>
@@ -137,7 +139,7 @@ function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAge
   // This covers: initial thinking, tool execution, between tool loops.
   const lastMsg = messages[messages.length - 1];
   const isActivelyStreaming = lastMsg?.role === 'assistant' && lastMsg.streaming && lastMsg.content;
-  const showThinking = isStreaming && !isActivelyStreaming;
+  const showThinking = isProcessing && !isActivelyStreaming;
 
   return (
     <div className={styles.panel}>
@@ -168,7 +170,7 @@ function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAge
           disabled={!isConnected}
           rows={1}
         />
-        {isStreaming ? (
+        {isProcessing ? (
           <button
             type="button"
             className={`${styles.sendBtn} ${styles.stopBtn}`}
@@ -208,10 +210,7 @@ function ChatPanel({ messages, isConnected, sendMessage, stopAgent, interruptAge
   );
 }
 
-const MODELS = [
-  { id: 'claude-sonnet-4-6', label: 'Sonnet' },
-  { id: 'claude-opus-4-6', label: 'Opus' },
-];
+// Model list is defined once in constants/agent.js and imported as AGENT_AGENT_MODELS.
 
 /**
  * Claude-style model picker — compact pill dropdown below the input.
@@ -230,7 +229,7 @@ function ModelPicker({ selected, onChange }) {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
 
-  const current = MODELS.find((m) => m.id === selected) || MODELS[0];
+  const current = AGENT_MODELS.find((m) => m.id === selected) || AGENT_MODELS[0];
 
   return (
     <div className={styles.modelPicker} ref={ref}>
@@ -248,7 +247,7 @@ function ModelPicker({ selected, onChange }) {
       </button>
       {open && (
         <div className={styles.modelDropdown}>
-          {MODELS.map(({ id, label }) => (
+          {AGENT_MODELS.map(({ id, label }) => (
             <button
               key={id}
               type="button"

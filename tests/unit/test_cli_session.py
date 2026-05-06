@@ -109,6 +109,7 @@ class FakeProcess:
     def __init__(self, stdout_data: bytes, returncode: int = 0) -> None:
         self._stdout_data = stdout_data
         self.returncode = returncode
+        self.pid = 99999
         self.stdout = self._make_reader(stdout_data)
         self.stderr = self._make_reader(b"")
 
@@ -123,6 +124,9 @@ class FakeProcess:
 
     async def wait(self):
         return self.returncode
+
+    async def communicate(self):
+        return b"", b""
 
     def kill(self):
         pass
@@ -374,16 +378,17 @@ class TestCLISessionMultiTurn:
 
 class TestCLISessionCancel:
     async def test_cancel_terminates_process(self, tmp_path: Path) -> None:
-        """cancel() should terminate a running subprocess."""
+        """cancel() should kill the process group via os.killpg."""
         on_event = AsyncMock()
         session = CLISession("cancel-sess", tmp_path, on_event)
 
         mock_proc = MagicMock()
         mock_proc.returncode = None
-        mock_proc.terminate = MagicMock()
+        mock_proc.pid = 12345
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock(return_value=0)
         session._process = mock_proc
 
-        await session.cancel()
-        mock_proc.terminate.assert_called_once()
+        with patch("tcg.core.agent.session.os.killpg") as mock_killpg:
+            await session.cancel()
+            mock_killpg.assert_called_once_with(12345, __import__("signal").SIGTERM)

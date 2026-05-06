@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,13 @@ logger = logging.getLogger(__name__)
 
 # The CLI accepts full model names directly
 ALLOWED_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6"}
+
+# Maximum number of messages that can be queued while a turn is running
+MAX_QUEUE_SIZE = 10
+
+# Registry of active WebSocket connections per session_id.
+# Prevents concurrent connections from corrupting session state.
+_active_connections: dict[str, WebSocket] = {}
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -156,7 +165,12 @@ async def get_notebook(request: Request, session_id: str) -> Any:
     try:
         content = notebook_path.read_text(encoding="utf-8")
         return json.loads(content)
-    except (json.JSONDecodeError, OSError) as exc:
+    except OSError as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "notebook_read_failed", "message": str(exc)},
+        )
+    except json.JSONDecodeError as exc:
         return JSONResponse(
             status_code=500,
             content={"error": "notebook_read_failed", "message": str(exc)},
@@ -202,22 +216,74 @@ async def agent_health(request: Request) -> dict[str, Any]:
 # rather than via the router, to avoid FastAPI WebSocket prefix issues.
 
 
-async def _keepalive(
-    websocket: WebSocket, session: CLISession, interval: int = 30
-) -> None:
-    """Send periodic status events to keep the WebSocket alive.
+async def _keepalive(websocket: WebSocket, interval: int = 30) -> None:
+    """Send periodic heartbeat events to keep the WebSocket alive.
 
-    During long CLI tool executions, no data flows on the wire.  Proxies
-    (Vite http-proxy defaults to ~120 s) and browsers may drop the idle
-    connection.  This heartbeat keeps traffic flowing.
+    APPLICATION-LEVEL keepalive only -- this is independent of the
+    WebSocket-protocol ping/pong handled by uvicorn (default
+    ``ws_ping_interval=20``, ``ws_ping_timeout=20``). The protocol-level
+    ping is automatically answered by browsers without JS involvement,
+    so even very long-running turns (>10 min) do NOT require this
+    heartbeat to stay connected. Its purpose is to (a) keep
+    intermediary proxies/load balancers from idle-closing the
+    connection and (b) feed the frontend a periodic
+    ``{"type":"status","status":"processing"}`` so the UI can
+    differentiate "still working" from "frozen". No turn timeout is
+    derived from it.
+
+    Designed to be run as a child asyncio.Task that is cancelled when the
+    turn ends.  Uses only ``asyncio.CancelledError`` for shutdown -- no
+    flag polling -- so cancellation of the parent naturally stops this.
     """
-    while not session._cancelled:
-        await asyncio.sleep(interval)
-        try:
+    try:
+        while True:
+            await asyncio.sleep(interval)
             await websocket.send_json({"type": "status", "status": "processing"})
-        except Exception:
-            session._cancelled = True
-            break
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # WebSocket is dead -- let the caller handle it via task cancellation
+        pass
+
+
+async def _execute_single_turn(
+    session: CLISession,
+    content: str,
+    model: str,
+    ws: WebSocket,
+    workspace: AgentWorkspace,
+    session_id: str,
+    request_id: str,
+) -> None:
+    """Run one turn: spawn heartbeat, execute, cancel heartbeat, save.
+
+    Extracted to eliminate DRY violation between the initial turn and
+    queued-message processing.
+    """
+    logger.info(
+        "[%s] Executing turn for session %s (model=%s)",
+        request_id,
+        session_id,
+        model,
+    )
+    session.is_cancelled = False
+    heartbeat = asyncio.create_task(_keepalive(ws, interval=30))
+    try:
+        await session.run_turn(content, model=model)
+    finally:
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
+
+    # Persist conversation after each turn
+    try:
+        workspace.save_conversation(session_id, session.conversation_history)
+    except Exception:
+        logger.warning(
+            "[%s] Failed to save conversation for %s", request_id, session_id
+        )
 
 
 async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
@@ -225,12 +291,12 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
 
     Protocol (JSON messages):
     - Client sends:  ``{"type": "message"|"stop"|"interrupt", ...}``
-    - Server sends:  ``{"type": "token"|"tool_call"|"tool_result"|"message_complete"|"error"|"history"|"stopped"|"queued"|"interrupted", ...}``
+    - Server sends:  ``{"type": "token"|"tool_call"|"tool_result"|"message_complete"|"error"|"history"|"stopped"|"queued"|"interrupted"|"status", ...}``
 
     Flow control:
-    - ``stop``      — cancel the running turn and clear the queue.
-    - ``interrupt``  — cancel the running turn, then start a new one.
-    - ``message`` while busy — queue it; auto-processed after the current turn.
+    - ``stop``      -- cancel the running turn and clear the queue.
+    - ``interrupt``  -- cancel the running turn, then start a new one.
+    - ``message`` while busy -- queue it; auto-processed after the current turn.
     """
     # Check that claude CLI is available
     if not cli_available():
@@ -247,7 +313,17 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=1008, reason=f"Session {session_id} not found")
         return
 
+    # --- Concurrent connection guard (#4) ---
+    # If another WebSocket is already connected to this session, close it.
+    old_ws = _active_connections.get(session_id)
+    if old_ws is not None:
+        try:
+            await old_ws.close(code=1008, reason="Superseded by new connection")
+        except Exception:
+            pass  # Already dead
+
     await websocket.accept()
+    _active_connections[session_id] = websocket
 
     workspace_path = Path(session_meta["workspace_path"])
 
@@ -256,9 +332,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         try:
             await websocket.send_json(event)
         except Exception:
-            # WebSocket is dead — cancel the session so the parse loop stops
+            # WebSocket is dead -- cancel the session so the parse loop stops
             logger.warning("WebSocket dead for session %s, cancelling", session_id)
-            session._cancelled = True
+            session.is_cancelled = True
 
     # Create the CLI session
     session = CLISession(
@@ -286,51 +362,52 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
     # ------------------------------------------------------------------
 
     turn_task: asyncio.Task[None] | None = None
-    queued_messages: list[dict[str, Any]] = []
+    queued_messages: deque[dict[str, Any]] = deque()
 
     def _on_turn_done(task: asyncio.Task[None]) -> None:
         """Log uncaught exceptions from turn tasks (avoids 'never retrieved')."""
         if not task.cancelled():
             exc = task.exception()
             if exc:
-                logger.error("Turn task error for session %s: %s", session_id, exc)
+                # Use logger.exception to include the full traceback (#25)
+                logger.exception(
+                    "Turn task error for session %s", session_id, exc_info=exc
+                )
 
     async def _run_turn_wrapper(content: str, model: str) -> None:
-        """Run a single turn with keepalive, persist, then drain the queue."""
-        session._cancelled = False
-        heartbeat = asyncio.create_task(_keepalive(websocket, session, interval=30))
-        try:
-            await session.run_turn(content, model=model)
-        finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
-
-        # Persist conversation after each turn
-        try:
-            workspace.save_conversation(session_id, session.conversation_history)
-        except Exception:
-            logger.warning("Failed to save conversation for %s", session_id)
+        """Run a single turn, then drain the queue."""
+        request_id = uuid.uuid4().hex[:8]
+        logger.info("[%s] Starting turn for session %s", request_id, session_id)
+        await _execute_single_turn(
+            session, content, model, websocket, workspace, session_id, request_id
+        )
 
         # Process queued messages automatically
-        while queued_messages and not session._cancelled:
-            next_msg = queued_messages.pop(0)
-            session._cancelled = False
-            heartbeat = asyncio.create_task(_keepalive(websocket, session, interval=30))
-            try:
-                await session.run_turn(next_msg["content"], model=next_msg["model"])
-            finally:
-                heartbeat.cancel()
-                try:
-                    await heartbeat
-                except asyncio.CancelledError:
-                    pass
-            try:
-                workspace.save_conversation(session_id, session.conversation_history)
-            except Exception:
-                logger.warning("Failed to save conversation for %s", session_id)
+        while queued_messages and not session.is_cancelled:
+            next_msg = queued_messages.popleft()
+            rid = uuid.uuid4().hex[:8]
+            logger.info(
+                "[%s] Dequeued message for session %s (remaining=%d)",
+                rid,
+                session_id,
+                len(queued_messages),
+            )
+            await _execute_single_turn(
+                session,
+                next_msg["content"],
+                next_msg["model"],
+                websocket,
+                workspace,
+                session_id,
+                rid,
+            )
+
+        # All turns complete -- emit idle status so the frontend
+        # can clear its "processing" badge (#20)
+        try:
+            await websocket.send_json({"type": "status", "status": "idle"})
+        except Exception:
+            pass
 
     async def _cancel_turn() -> None:
         """Cancel the running turn task and clear the queue."""
@@ -345,7 +422,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
             except Exception:
                 pass
         turn_task = None
-        session._cancelled = False
+        session.is_cancelled = False
 
     async def _start_turn(content: str, model: str) -> None:
         """Launch a new turn as a background asyncio task."""
@@ -405,8 +482,29 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
 
                 # Queue if a turn is already running
                 if turn_task and not turn_task.done():
+                    # Enforce queue size limit (#3)
+                    if len(queued_messages) >= MAX_QUEUE_SIZE:
+                        try:
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "message": (
+                                        "Queue full — maximum "
+                                        f"{MAX_QUEUE_SIZE} pending messages"
+                                    ),
+                                }
+                            )
+                        except Exception:
+                            break
+                        continue
+
                     queued_messages.append(
                         {"content": content, "model": requested_model}
+                    )
+                    logger.info(
+                        "Message queued for session %s (queue_size=%d)",
+                        session_id,
+                        len(queued_messages),
                     )
                     try:
                         await websocket.send_json({"type": "queued"})
@@ -428,6 +526,8 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
     except Exception:
         logger.exception("WebSocket error for session %s", session_id)
     finally:
+        # Remove from active connections registry
+        _active_connections.pop(session_id, None)
         queued_messages.clear()
         await _cancel_turn()
         # Persist conversation on disconnect

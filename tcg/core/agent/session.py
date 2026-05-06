@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
 import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -75,6 +77,15 @@ class CLISession:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def is_cancelled(self) -> bool:
+        """Whether this session has been cancelled."""
+        return self._cancelled
+
+    @is_cancelled.setter
+    def is_cancelled(self, value: bool) -> None:
+        self._cancelled = bool(value)
+
     async def run_turn(self, user_message: str, model: str = "opus") -> None:
         """Execute one user turn by spawning the CLI and parsing stream output.
 
@@ -100,25 +111,27 @@ class CLISession:
             )
             logger.debug("CLI command: %s", " ".join(cmd))
 
-            # Spawn subprocess
+            # Spawn subprocess in its own process group so we can kill
+            # the entire tree (MCP servers, child shells, etc.)
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.DEVNULL,
                 cwd=str(self.workspace_path),
+                preexec_fn=os.setsid,
             )
 
-            # Parse stream output
+            # Parse stream output (consumes stdout)
             assistant_content = await self._parse_stream()
 
-            # Wait for process to finish
-            await self._process.wait()
+            # Drain stderr via communicate() to avoid pipe-buffer deadlock.
+            # stdout is already consumed by _parse_stream(), so communicate()
+            # only drains stderr here.
+            _, stderr_bytes = await self._process.communicate()
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
 
             if self._process.returncode != 0:
-                stderr_bytes = await self._process.stderr.read()
-                stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-
                 # If --resume failed (session not found), retry with --session-id
                 if (
                     not self._first_turn
@@ -164,9 +177,6 @@ class CLISession:
             # After first successful turn, switch to --resume for subsequent turns
             self._first_turn = False
 
-            # Post-turn file change detection (fallback for writes via Bash/Python)
-            await self._check_file_changes()
-
         except asyncio.CancelledError:
             # Kill subprocess on cancellation
             if self._process and self._process.returncode is None:
@@ -177,19 +187,39 @@ class CLISession:
             await self.on_event({"type": "error", "message": str(exc)})
         finally:
             self._process = None
+            # Post-turn file change detection fires on ALL exit paths
+            # (success, error, retry) because the agent may write
+            # ASSUMPTIONS.json even during a turn that ultimately errors.
+            try:
+                await self._check_file_changes()
+            except Exception:
+                logger.debug("File change check failed for session %s", self.session_id)
 
     async def cancel(self) -> None:
-        """Kill the running subprocess if any (e.g., on WebSocket disconnect)."""
+        """Kill the running subprocess and its entire process group.
+
+        Uses ``os.killpg`` to terminate MCP servers and child shells
+        that the CLI may have spawned.
+        """
         self._cancelled = True
         if self._process and self._process.returncode is None:
             try:
-                self._process.terminate()
-                # Give it a moment to clean up
+                # Kill the entire process group (subprocess + children)
+                os.killpg(self._process.pid, signal.SIGTERM)
+                # Defensive 3s SIGTERM->SIGKILL grace period. This bounds
+                # how long cancellation can hang on a misbehaving CLI/MCP
+                # tree; it does NOT affect normal turn duration because
+                # cancel() only runs after the user explicitly stops or
+                # interrupts. Safe to keep short.
                 try:
                     await asyncio.wait_for(self._process.wait(), timeout=3.0)
                 except asyncio.TimeoutError:
-                    self._process.kill()
-            except ProcessLookupError:
+                    try:
+                        os.killpg(self._process.pid, signal.SIGKILL)
+                    except OSError:
+                        self._process.kill()
+            except OSError:
+                # Process or group already dead
                 pass
 
     # ------------------------------------------------------------------
@@ -211,13 +241,14 @@ class CLISession:
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
             cwd=str(self.workspace_path),
+            preexec_fn=os.setsid,
         )
         assistant_content = await self._parse_stream()
-        await self._process.wait()
+        # Drain stderr via communicate() to avoid pipe-buffer deadlock
+        _, stderr_bytes = await self._process.communicate()
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
 
         if self._process.returncode != 0 and not assistant_content:
-            stderr_bytes = await self._process.stderr.read()
-            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
             error_msg = f"CLI retry failed (exit {self._process.returncode})"
             if stderr_text:
                 error_msg += f": {stderr_text[:500]}"
@@ -293,9 +324,12 @@ class CLISession:
         if self._cancelled:
             logger.info("Stream parsing cancelled for session %s", self.session_id)
 
-        # Emit message_complete with the accumulated text
+        # Emit message_complete with the accumulated text — but only if
+        # the turn was not cancelled (avoids confusing the frontend with
+        # a completion event after a stop/interrupt).
         final_text = "".join(full_text_parts)
-        await self.on_event({"type": "message_complete", "content": final_text})
+        if not self._cancelled:
+            await self.on_event({"type": "message_complete", "content": final_text})
 
         # If no explicit 'assistant' event populated content, build from streamed deltas
         if not assistant_content and final_text:

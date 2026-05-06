@@ -48,8 +48,8 @@ class MockWebSocket {
     this._emit('message', { data: JSON.stringify(payload) });
   }
 
-  _simulateClose() {
-    this._emit('close', {});
+  _simulateClose(code = 1006) {
+    this._emit('close', { code });
   }
 }
 

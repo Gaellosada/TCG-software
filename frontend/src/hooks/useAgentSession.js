@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { getAssumptions } from '../api/agent';
 
 const MAX_RETRIES = 5;
 const RECONNECT_DELAY_MS = 3000;
@@ -107,20 +108,39 @@ function useAgentSession(sessionId) {
     ws.addEventListener('open', () => {
       setIsConnected(true);
       retriesRef.current = 0;
+      // Pre-load existing assumptions so they survive page refresh / session switch
+      getAssumptions(sessionId)
+        .then((data) => {
+          if (wsRef.current !== ws) return; // Guard: this connection may already be stale
+          const list = Array.isArray(data) ? data : (data?.assumptions ?? []);
+          setAssumptions(list);
+        })
+        .catch(() => {
+          // Non-fatal: assumptions will still arrive via WebSocket events
+        });
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (event) => {
+      // Guard: ignore close events from a superseded connection
+      if (wsRef.current !== ws) return;
+
       setIsConnected(false);
       setIsProcessing(false);
       wsRef.current = null;
 
-      if (retriesRef.current < MAX_RETRIES) {
+      // Only reconnect on abnormal closure codes.
+      // Code 1000 = normal close, 1008 = policy violation (e.g. server rejects
+      // duplicate connection). Both indicate an intentional close — do not retry.
+      const RECONNECT_CODES = new Set([1006, 1011, 1012, 1013]);
+      if (RECONNECT_CODES.has(event.code) && retriesRef.current < MAX_RETRIES) {
         retriesRef.current += 1;
         reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
       }
     });
 
     ws.addEventListener('error', () => {
+      // Guard: ignore error events from a superseded connection
+      if (wsRef.current !== ws) return;
       // The close event will fire after error, which handles reconnect.
     });
 
@@ -276,6 +296,7 @@ function useAgentSession(sessionId) {
 
     return () => {
       clearReconnectTimer();
+      retriesRef.current = 0;
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;

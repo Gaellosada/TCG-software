@@ -168,6 +168,7 @@ function SessionPanel({ selectedId, onSelect }) {
                     onBlur={commitRename}
                     onKeyDown={handleRenameKeyDown}
                     onClick={(e) => e.stopPropagation()}
+                    aria-label="Rename session"
                   />
                 ) : (
                   <span

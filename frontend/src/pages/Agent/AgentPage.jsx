@@ -4,6 +4,7 @@ import SessionPanel from './SessionPanel';
 import ChatPanel from './ChatPanel';
 import AssumptionsPanel from './AssumptionsPanel';
 import NotebookPanel from './NotebookPanel';
+import { DEFAULT_MODEL } from '../../constants/agent';
 import styles from './AgentPage.module.css';
 
 const TABS = [
@@ -14,12 +15,10 @@ const TABS = [
 function AgentPage() {
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
-  const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-6');
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
 
   const { messages, assumptions, status, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady } =
     useAgentSession(selectedSessionId);
-
-  const isStreaming = isProcessing;
 
   // Wrap sendMessage to include the selected model
   const handleSendMessage = useCallback(
@@ -74,7 +73,7 @@ function AgentPage() {
                 sendMessage={handleSendMessage}
                 stopAgent={stopAgent}
                 interruptAgent={handleInterruptAgent}
-                isStreaming={isStreaming}
+                isProcessing={isProcessing}
                 selectedModel={selectedModel}
                 onModelChange={setSelectedModel}
               />
