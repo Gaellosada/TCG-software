@@ -40,14 +40,24 @@ describe('<AssumptionsPanel>', () => {
     expect(screen.getByText('trades')).toBeTruthy();
   });
 
-  it('renders source badges', () => {
+  it('applies source stripe class per row (Option B — no badge text)', () => {
+    // Option B uses a 3 px left-border stripe for source, not a text badge.
+    // Verify the stripe CSS class is applied to each row instead.
     const assumptions = [
       { field: 'db', value: 'prod', source: 'inferred', confidence: 'high', group: 'General' },
       { field: 'user_pref', value: 'dark', source: 'user', confidence: 'high', group: 'General' },
     ];
-    render(<AssumptionsPanel assumptions={assumptions} />);
-    expect(screen.getByText('inferred')).toBeTruthy();
-    expect(screen.getByText('user')).toBeTruthy();
+    const { container } = render(<AssumptionsPanel assumptions={assumptions} />);
+
+    // The raw source name text must NOT appear in the DOM (badge removed in Option B)
+    expect(screen.queryByText('inferred')).toBeNull();
+    expect(screen.queryByText('user')).toBeNull();
+
+    // Each row must have a stripe class matching the source
+    const inferredRow = container.querySelector('[class*="stripeInferred"]');
+    expect(inferredRow).toBeTruthy();
+    const userRow = container.querySelector('[class*="stripeUser"]');
+    expect(userRow).toBeTruthy();
   });
 
   it('shows count badge when assumptions exist', () => {

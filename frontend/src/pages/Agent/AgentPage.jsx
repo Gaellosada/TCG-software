@@ -17,7 +17,7 @@ function AgentPage() {
   const [activeTab, setActiveTab] = useState('chat');
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
 
-  const { messages, assumptions, status, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady } =
+  const { messages, assumptions, status, warningMessage, compactBanner, processExitInfo, clearProcessExit, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady } =
     useAgentSession(selectedSessionId);
 
   // Wrap sendMessage to include the selected model
@@ -64,7 +64,33 @@ function AgentPage() {
             {status && status !== 'idle' && (
               <span className={styles.statusBadge}>{status}</span>
             )}
+            {warningMessage && (
+              <span className={`${styles.statusBadge} ${styles.statusBadgeWarning}`}>{warningMessage}</span>
+            )}
+            {compactBanner && (
+              <span className={`${styles.statusBadge} ${styles.statusBadgeCompact}`}>{compactBanner}</span>
+            )}
           </div>
+          {processExitInfo && (
+            <div className={styles.processExitBanner}>
+              <span>
+                Agent process exited unexpectedly. Returncode {processExitInfo.returncode ?? 'null'}.
+              </span>
+              {processExitInfo.stderrTail && (
+                <details className={styles.processExitDetails}>
+                  <summary>stderr</summary>
+                  <pre className={styles.processExitPre}>{processExitInfo.stderrTail}</pre>
+                </details>
+              )}
+              <button
+                className={styles.processExitDismiss}
+                onClick={clearProcessExit}
+                aria-label="Dismiss"
+              >
+                &times;
+              </button>
+            </div>
+          )}
           <div className={styles.contentArea}>
             {activeTab === 'chat' ? (
               <ChatPanel

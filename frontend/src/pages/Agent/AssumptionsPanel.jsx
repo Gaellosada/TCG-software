@@ -1,26 +1,25 @@
 import { useMemo } from 'react';
 import styles from './AssumptionsPanel.module.css';
 
-const SOURCE_CLASSES = {
-  default: styles.badgeDefault,
-  inferred: styles.badgeInferred,
-  user: styles.badgeUser,
-};
-
-const CONFIDENCE_CLASSES = {
-  high: styles.dotHigh,
-  medium: styles.dotMedium,
-  low: styles.dotLow,
+const SOURCE_STRIPE = {
+  user: styles.stripeUser,
+  inferred: styles.stripeInferred,
+  default: styles.stripeDefault,
 };
 
 /**
  * Displays live ASSUMPTIONS.json content grouped by field group.
  *
+ * Option B layout: compact key-value rows with a 3 px left-border stripe
+ * per row colored by `source` (user=green, inferred=blue, default=dim).
+ * Rationale is always visible inline beneath each row.
+ * Group label is a thin divider — no heavy section box.
+ *
  * Props:
  *   assumptions  {Array}  [{field, value, source, confidence, rationale, group}]
  */
 function AssumptionsPanel({ assumptions }) {
-  // Group assumptions by their `group` field
+  // Group assumptions by their `group` field, preserving insertion order
   const groups = useMemo(() => {
     const map = new Map();
     for (const a of assumptions) {
@@ -55,31 +54,27 @@ function AssumptionsPanel({ assumptions }) {
 
         {[...groups.entries()].map(([groupName, items]) => (
           <div key={groupName} className={styles.group}>
-            <div className={styles.groupHeader}>{groupName}</div>
-            {items.map((a) => (
-              <div key={a.field} className={styles.assumption}>
-                <div className={styles.assumptionTop}>
-                  <span className={styles.fieldName}>{a.field}</span>
-                  <div className={styles.badges}>
-                    <span
-                      className={`${styles.sourceBadge} ${SOURCE_CLASSES[a.source] || styles.badgeDefault}`}
-                    >
-                      {a.source || 'default'}
-                    </span>
-                    {a.confidence && (
-                      <span
-                        className={`${styles.confidenceDot} ${CONFIDENCE_CLASSES[a.confidence] || ''}`}
-                        title={`Confidence: ${a.confidence}`}
-                      />
-                    )}
+            {/* Thin divider label — no heavy section box */}
+            <div className={styles.groupDivider}>
+              <span className={styles.groupLabel}>{groupName}</span>
+            </div>
+
+            {items.map((a) => {
+              const stripeClass = SOURCE_STRIPE[a.source] || styles.stripeDefault;
+              return (
+                <div key={a.field} className={`${styles.assumption} ${stripeClass}`}>
+                  {/* Row: fieldName + value on same line */}
+                  <div className={styles.row}>
+                    <span className={styles.fieldName}>{a.field}</span>
+                    <span className={styles.value}>{formatValue(a.value)}</span>
                   </div>
+                  {/* Rationale always visible beneath, inheriting the left stripe */}
+                  {a.rationale && (
+                    <div className={styles.rationale}>{a.rationale}</div>
+                  )}
                 </div>
-                <div className={styles.value}>{formatValue(a.value)}</div>
-                {a.rationale && (
-                  <div className={styles.rationale}>{a.rationale}</div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         ))}
       </div>

@@ -115,6 +115,77 @@
   letter-spacing: 0.02em;
 }
 
+/* Amber warning badge — used for oversized_line events */
+.statusBadgeWarning {
+  color: var(--accent-warm);
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+/* Success/green badge — used for compact_done banner */
+.statusBadgeCompact {
+  color: var(--success);
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.25);
+}
+
+/* Process exit error banner — shown when the agent subprocess exits unexpectedly */
+.processExitBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(239, 68, 68, 0.12);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--error, #ef4444);
+  font-size: 0.78rem;
+  font-weight: 500;
+  border-radius: 0;
+  flex-shrink: 0;
+}
+
+.processExitDetails {
+  flex: 1;
+  font-size: 0.75rem;
+}
+
+.processExitDetails summary {
+  cursor: pointer;
+  margin-top: 2px;
+  opacity: 0.8;
+}
+
+.processExitPre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 4px;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--error-text, #fca5a5);
+}
+
+.processExitDismiss {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--error, #ef4444);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0.7;
+  font-family: inherit;
+}
+
+.processExitDismiss:hover {
+  opacity: 1;
+}
+
 .contentArea {
   flex: 1;
   min-height: 0;

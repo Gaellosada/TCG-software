@@ -71,6 +71,10 @@ function transformHistory(apiMessages) {
  *   messages: Array,
  *   assumptions: Array,
  *   status: string,
+ *   warningMessage: string|null,
+ *   compactBanner: string|null,
+ *   processExitInfo: {returncode: int|null, stderrTail: string|null, sessionId: string}|null,
+ *   clearProcessExit: () => void,
  *   isConnected: boolean,
  *   sendMessage: (content: string) => void,
  *   notebookReady: boolean,
@@ -84,6 +88,15 @@ function useAgentSession(sessionId) {
   const [notebookReady, setNotebookReady] = useState(false);
   // True from user send until message_complete (covers thinking + streaming + tool loops)
   const [isProcessing, setIsProcessing] = useState(false);
+  // Transient warning set by oversized_line events; cleared on next non-warning status
+  const [warningMessage, setWarningMessage] = useState(null);
+  // Transient banner shown briefly after compact_done; auto-clears after 2s
+  const [compactBanner, setCompactBanner] = useState(null);
+  const compactBannerTimerRef = useRef(null);
+  // Non-null when the agent subprocess exited unexpectedly (process_exit event).
+  // Shape: { returncode: int|null, stderrTail: string|null, sessionId: string }
+  // Cleared by user dismiss (clearProcessExit) or next sendMessage/interruptAgent.
+  const [processExitInfo, setProcessExitInfo] = useState(null);
 
   const wsRef = useRef(null);
   const retriesRef = useRef(0);
@@ -108,6 +121,17 @@ function useAgentSession(sessionId) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+  }, []);
+
+  const clearCompactBannerTimer = useCallback(() => {
+    if (compactBannerTimerRef.current !== null) {
+      clearTimeout(compactBannerTimerRef.current);
+      compactBannerTimerRef.current = null;
+    }
+  }, []);
+
+  const clearProcessExit = useCallback(() => {
+    setProcessExitInfo(null);
   }, []);
 
   const connect = useCallback(() => {
@@ -244,10 +268,30 @@ function useAgentSession(sessionId) {
             // 'processing' if the turn is still in flight (compaction always
             // happens mid-turn), else 'idle'.
             setStatus(hasInFlightTurnRef.current ? 'processing' : 'idle');
+            // Surface a transient banner with compaction metadata.
+            // trigger: 'auto' | 'manual' (undefined falls back to 'auto' label)
+            const preTokens = data.pre_tokens;
+            const trigger = data.trigger;
+            const verb = trigger === 'manual' ? 'Compacted on request' : 'Auto-compacted';
+            const tokenLabel = Number.isFinite(Number(preTokens))
+              ? ` — ${Math.round(Number(preTokens) / 1000)}k tokens freed`
+              : '';
+            clearCompactBannerTimer();
+            setCompactBanner(`${verb}${tokenLabel}`);
+            compactBannerTimerRef.current = setTimeout(() => {
+              setCompactBanner(null);
+              compactBannerTimerRef.current = null;
+            }, 2000);
             break;
           }
           if (compactingRef.current) {
             // Drop heartbeat / idle / oversized noise during compaction.
+            break;
+          }
+          if (next === 'oversized_line') {
+            // Surface a human-readable warning instead of the raw event name.
+            // The warning is transient (cleared on next non-warning status).
+            setWarningMessage('⚠ Line too long — skipped');
             break;
           }
           if (next === 'idle_warning') {
@@ -261,9 +305,12 @@ function useAgentSession(sessionId) {
             const label = Number.isFinite(seconds)
               ? `Agent silent for ${seconds}s…`
               : 'Agent silent…';
+            setWarningMessage(null);
             setStatus(label);
             break;
           }
+          // Clear any stale oversized_line warning when a new normal status arrives
+          setWarningMessage(null);
           setStatus(next);
           break;
         }
@@ -338,11 +385,25 @@ function useAgentSession(sessionId) {
           break;
         }
 
+        case 'process_exit': {
+          // Agent subprocess exited without a result (saw_result is always false here).
+          // Clear in-flight state so the UI is no longer frozen.
+          // Do NOT auto-clear: the banner stays until user dismisses or sends a new message.
+          setIsProcessing(false);
+          hasInFlightTurnRef.current = false;
+          setProcessExitInfo({
+            returncode: data.returncode ?? null,
+            stderrTail: data.stderr_tail ?? null,
+            sessionId: data.session_id,
+          });
+          break;
+        }
+
         default:
           break;
       }
     });
-  }, [sessionId]);
+  }, [sessionId, clearCompactBannerTimer]);
 
   // Connect / disconnect when sessionId changes
   useEffect(() => {
@@ -353,11 +414,15 @@ function useAgentSession(sessionId) {
     setIsConnected(false);
     setIsProcessing(false);
     setNotebookReady(false);
+    setWarningMessage(null);
+    setCompactBanner(null);
+    setProcessExitInfo(null);
     streamingRef.current = null;
     compactingRef.current = false;
     hasInFlightTurnRef.current = false;
     retriesRef.current = 0;
     clearReconnectTimer();
+    clearCompactBannerTimer();
 
     if (!sessionId) {
       if (wsRef.current) {
@@ -371,17 +436,20 @@ function useAgentSession(sessionId) {
 
     return () => {
       clearReconnectTimer();
+      clearCompactBannerTimer();
       retriesRef.current = 0;
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
     };
-  }, [sessionId, connect, clearReconnectTimer]);
+  }, [sessionId, connect, clearReconnectTimer, clearCompactBannerTimer]);
 
   const sendMessage = useCallback(
     (content, { model } = {}) => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // Clear any stale process_exit banner — new user message supersedes it.
+        setProcessExitInfo(null);
         // Add the user message to local state immediately (optimistic)
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
@@ -405,6 +473,8 @@ function useAgentSession(sessionId) {
   const interruptAgent = useCallback(
     (content, { model } = {}) => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // Clear any stale process_exit banner — new user message supersedes it.
+        setProcessExitInfo(null);
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
         hasInFlightTurnRef.current = true;
@@ -416,7 +486,7 @@ function useAgentSession(sessionId) {
     [],
   );
 
-  return { messages, assumptions, status, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady };
+  return { messages, assumptions, status, warningMessage, compactBanner, processExitInfo, clearProcessExit, isConnected, isProcessing, sendMessage, stopAgent, interruptAgent, notebookReady };
 }
 
 export default useAgentSession;

@@ -325,6 +325,113 @@ describe('useAgentSession', () => {
     expect(result.current.status).toBe('Agent silent…');
   });
 
+  /* ---------- oversized_line warning ---------- */
+
+  it('oversized_line sets warningMessage and does NOT touch status', () => {
+    const { result } = renderHook(() => useAgentSession('sess-oversized-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'processing' }));
+    expect(result.current.status).toBe('processing');
+    expect(result.current.warningMessage).toBeNull();
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'oversized_line' }));
+    // status must not become the raw event name
+    expect(result.current.status).toBe('processing');
+    // warningMessage is set to the human-readable label
+    expect(result.current.warningMessage).toBe('⚠ Line too long — skipped');
+  });
+
+  it('warningMessage is cleared when a subsequent normal status arrives', () => {
+    const { result } = renderHook(() => useAgentSession('sess-oversized-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'oversized_line' }));
+    expect(result.current.warningMessage).toBe('⚠ Line too long — skipped');
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'processing' }));
+    expect(result.current.warningMessage).toBeNull();
+  });
+
+  /* ---------- compact_done transient banner ---------- */
+
+  it('compact_done sets compactBanner with auto trigger label', () => {
+    const { result } = renderHook(() => useAgentSession('sess-banner-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'compacting' }));
+    act(() =>
+      ws._simulateMessage({
+        type: 'status',
+        status: 'compact_done',
+        trigger: 'auto',
+        pre_tokens: 120000,
+      }),
+    );
+    expect(result.current.compactBanner).toBe('Auto-compacted — 120k tokens freed');
+  });
+
+  it('compact_done sets compactBanner with manual trigger label', () => {
+    const { result } = renderHook(() => useAgentSession('sess-banner-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'compacting' }));
+    act(() =>
+      ws._simulateMessage({
+        type: 'status',
+        status: 'compact_done',
+        trigger: 'manual',
+        pre_tokens: 50000,
+      }),
+    );
+    expect(result.current.compactBanner).toBe('Compacted on request — 50k tokens freed');
+  });
+
+  it('compact_done banner auto-clears after 2 seconds', () => {
+    const { result } = renderHook(() => useAgentSession('sess-banner-3'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'compacting' }));
+    act(() =>
+      ws._simulateMessage({
+        type: 'status',
+        status: 'compact_done',
+        trigger: 'auto',
+        pre_tokens: 80000,
+      }),
+    );
+    expect(result.current.compactBanner).toBe('Auto-compacted — 80k tokens freed');
+
+    // Advance to just before 2s — banner still visible
+    act(() => vi.advanceTimersByTime(1999));
+    expect(result.current.compactBanner).toBe('Auto-compacted — 80k tokens freed');
+
+    // Advance past 2s — banner auto-clears
+    act(() => vi.advanceTimersByTime(1));
+    expect(result.current.compactBanner).toBeNull();
+  });
+
+  it('compact_done banner shows without token count when pre_tokens missing', () => {
+    const { result } = renderHook(() => useAgentSession('sess-banner-4'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'status', status: 'compacting' }));
+    act(() =>
+      ws._simulateMessage({
+        type: 'status',
+        status: 'compact_done',
+      }),
+    );
+    // Falls back to 'auto' label, no token count
+    expect(result.current.compactBanner).toBe('Auto-compacted');
+  });
+
   /* ---------- history-clobber guard on reconnect mid-turn ---------- */
 
   it('drops history replay when a user turn is in flight (reconnect-clobber guard)', () => {
@@ -422,5 +529,103 @@ describe('useAgentSession', () => {
     );
     // Last setMessages from history replaces all → just the after-error user.
     expect(result.current.messages).toEqual([{ role: 'user', content: 'after-error' }]);
+  });
+
+  /* ---------- process_exit event ---------- */
+
+  it('process_exit event sets processExitInfo with returncode, stderrTail, sessionId', () => {
+    const { result } = renderHook(() => useAgentSession('sess-exit-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    expect(result.current.processExitInfo).toBeNull();
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'process_exit',
+        returncode: 1,
+        saw_result: false,
+        session_id: 'sess-exit-1',
+        had_content: false,
+        stderr_tail: 'Traceback (most recent call last):\n  File "run.py", line 5\nKeyError: x',
+      }),
+    );
+
+    expect(result.current.processExitInfo).toEqual({
+      returncode: 1,
+      stderrTail: 'Traceback (most recent call last):\n  File "run.py", line 5\nKeyError: x',
+      sessionId: 'sess-exit-1',
+    });
+    // isProcessing must be cleared
+    expect(result.current.isProcessing).toBe(false);
+  });
+
+  it('process_exit does NOT auto-clear (no timer fires)', () => {
+    const { result } = renderHook(() => useAgentSession('sess-exit-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'process_exit',
+        returncode: -1,
+        saw_result: false,
+        session_id: 'sess-exit-2',
+        had_content: false,
+        stderr_tail: null,
+      }),
+    );
+
+    expect(result.current.processExitInfo).not.toBeNull();
+
+    // Advance timers well past any plausible auto-clear threshold
+    act(() => vi.advanceTimersByTime(30000));
+
+    // Banner must still be set — only explicit dismiss or new message clears it
+    expect(result.current.processExitInfo).not.toBeNull();
+    expect(result.current.processExitInfo.returncode).toBe(-1);
+  });
+
+  it('clearProcessExit callback resets processExitInfo to null', () => {
+    const { result } = renderHook(() => useAgentSession('sess-exit-3'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'process_exit',
+        returncode: 137,
+        saw_result: false,
+        session_id: 'sess-exit-3',
+        had_content: true,
+        stderr_tail: 'killed',
+      }),
+    );
+    expect(result.current.processExitInfo).not.toBeNull();
+
+    act(() => result.current.clearProcessExit());
+    expect(result.current.processExitInfo).toBeNull();
+  });
+
+  it('sending a new user message clears processExitInfo', () => {
+    const { result } = renderHook(() => useAgentSession('sess-exit-4'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'process_exit',
+        returncode: 1,
+        saw_result: false,
+        session_id: 'sess-exit-4',
+        had_content: false,
+        stderr_tail: null,
+      }),
+    );
+    expect(result.current.processExitInfo).not.toBeNull();
+
+    // Sending a new message should clear the banner
+    act(() => result.current.sendMessage('try again'));
+    expect(result.current.processExitInfo).toBeNull();
   });
 });
