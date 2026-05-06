@@ -19,6 +19,7 @@ import signal
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -180,6 +181,13 @@ class CLISession:
         # Snapshot file state before turn for change detection
         self._snapshot_file_state()
 
+        # Issue 16(b): wall-clock entry timestamp for the ``turn_complete``
+        # event emitted on the clean-end branch below. Mutually exclusive
+        # with ``process_exit`` (silent-EOF path) -- a turn emits exactly
+        # one of them. Internal-only attribute -- no FakeCLISession
+        # parity needed (G5 lockstep grep verified clean).
+        turn_start_time = datetime.now(timezone.utc)
+
         # Issue 6 / 7: per-turn bookkeeping reset. ``_saw_result`` gates
         # the post-turn ``_first_turn = False`` flip; the partial-text
         # buffer feeds the cancel/error flush; the appended flags are
@@ -299,6 +307,23 @@ class CLISession:
             # the next user message starts a clean CLI session.
             if self._saw_result:
                 self._first_turn = False
+                # Issue 16(b): POSITIVE end-of-turn marker. Paired with
+                # Round-3's ``process_exit`` (NEGATIVE silent-fail
+                # marker) -- mutually exclusive. Emitted ONLY on the
+                # clean ``result`` path, AFTER any partial-flush save.
+                # Transient: not buffered on reconnect (unlike Round-4
+                # ``turn_aborted``); FE missing it is non-fatal.
+                elapsed = (
+                    datetime.now(timezone.utc) - turn_start_time
+                ).total_seconds()
+                await self.on_event(
+                    {
+                        "type": "turn_complete",
+                        "session_id": self.session_id,
+                        "elapsed_seconds": round(elapsed, 1),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             elif self._process.returncode is not None:
                 # No ``result`` observed but the process is gone --
                 # the silent-EOF path. Surface as a visible state.

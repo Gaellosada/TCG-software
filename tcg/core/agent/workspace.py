@@ -153,6 +153,22 @@ class AgentWorkspace:
         mongo_uri = _get_mongo_uri()
         self._write_json(session_dir / ".mcp.json", _build_mcp_json(mongo_uri))
 
+        # Issue 17: write a workspace-local ``.env`` so that scripts the
+        # agent runs from the session workspace pick up MONGO_URI via
+        # ``tcg.backtester.lib.mongo.resolve_env()``'s file-walk path,
+        # not just via inherited ``os.environ``. The CWD-walk path
+        # otherwise finds no ``.env`` in the session workspace and
+        # falls through to a default placeholder when env inheritance
+        # is unreliable. Reuses the SAME ``mongo_uri`` resolved above
+        # for ``.mcp.json`` -- single source of truth at session-create
+        # time. The MCP server's runtime override
+        # (``MDB_MCP_CONNECTION_STRING`` set in ``_build_subprocess_env``)
+        # remains the canonical source for the MCP child; this ``.env``
+        # is for agent-spawned Python scripts only.
+        (session_dir / ".env").write_text(
+            f"MONGO_URI={mongo_uri}\n", encoding="utf-8"
+        )
+
         # CLAUDE.md — agent system instructions
         (session_dir / "CLAUDE.md").write_text(_CLAUDE_MD_CONTENT, encoding="utf-8")
 

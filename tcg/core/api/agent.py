@@ -358,7 +358,13 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
 
     workspace_path = Path(session_meta["workspace_path"])
 
-    # Event callback that sends to WebSocket
+    # Event callback that sends to WebSocket. Passes through every
+    # event type unchanged: ``token``, ``tool_call``, ``tool_result``,
+    # ``message_complete``, ``status``, ``error``, ``process_exit``,
+    # ``turn_complete`` (Issue 16b -- positive end-of-turn marker),
+    # ``token_usage``, ``subagent_count``, etc. No special handling
+    # needed for ``turn_complete`` -- it ships as plain JSON like
+    # ``result``-derived events.
     async def on_event(event: dict[str, Any]) -> None:
         try:
             await websocket.send_json(event)

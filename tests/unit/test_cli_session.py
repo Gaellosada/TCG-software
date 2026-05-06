@@ -1957,3 +1957,209 @@ class TestCLISessionMdbMcpConnectionStringInjection:
             " so the spawned mongodb-mcp-server reads the live URI"
             " rather than the (potentially stale) .mcp.json snapshot"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue 16(b) -- turn_complete event. POSITIVE end-of-turn marker, paired
+# with Round-3's process_exit (NEGATIVE silent-fail marker). Mutually
+# exclusive: a clean turn emits turn_complete; a silent-EOF turn emits
+# process_exit; never both. Transient -- not buffered on reconnect.
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionTurnCompleteEvent:
+    """Issue 16(b): turn_complete contract (see turn_complete_contract.md):
+    shape = {type, session_id, elapsed_seconds, timestamp}; one-shot per
+    turn; emitted ONLY on the clean ``result`` path; mutually exclusive
+    with ``process_exit``."""
+
+    async def test_turn_complete_emitted_after_clean_turn(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("clean-tc-sess", tmp_path, on_event)
+
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("hi"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("ping", model="opus")
+
+        tc_events = [e for e in events if e.get("type") == "turn_complete"]
+        assert len(tc_events) == 1, (
+            f"a clean turn must emit exactly one turn_complete event;"
+            f" got events={events!r}"
+        )
+        ev = tc_events[0]
+        # Contract shape (turn_complete_contract.md):
+        assert ev["session_id"] == session.session_id
+        assert isinstance(ev["elapsed_seconds"], float)
+        assert ev["elapsed_seconds"] >= 0.0
+        assert isinstance(ev["timestamp"], str)
+        # ISO 8601 sanity: parse it.
+        from datetime import datetime as _dt
+        _ = _dt.fromisoformat(ev["timestamp"])
+
+    async def test_turn_complete_emitted_after_message_complete(
+        self, tmp_path: Path
+    ) -> None:
+        """The contract says turn_complete is emitted AFTER the result
+        event has been forwarded and any partial-flush save. In the
+        event stream the FE observes, message_complete (which is the
+        final piece of the streamed assistant text) must precede
+        turn_complete."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("order-sess", tmp_path, on_event)
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("ok"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("ping", model="opus")
+
+        types_in_order = [e.get("type") for e in events]
+        assert "message_complete" in types_in_order
+        assert "turn_complete" in types_in_order
+        # turn_complete must come AFTER message_complete.
+        mc_idx = types_in_order.index("message_complete")
+        tc_idx = types_in_order.index("turn_complete")
+        assert tc_idx > mc_idx, (
+            f"turn_complete must follow message_complete in the stream;"
+            f" got order={types_in_order!r}"
+        )
+
+    async def test_turn_complete_not_emitted_on_silent_eof(
+        self, tmp_path: Path
+    ) -> None:
+        """Mutually exclusive with process_exit: a silent-EOF turn (no
+        ``result`` event) must emit process_exit and NOT turn_complete."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("eof-tc-sess", tmp_path, on_event)
+        # Stream a tool_use block then EOF -- no ``result`` event.
+        fake_proc = FakeProcess(_tool_use_block(), returncode=1)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("draft", model="opus")
+
+        process_exits = [e for e in events if e.get("type") == "process_exit"]
+        turn_completes = [
+            e for e in events if e.get("type") == "turn_complete"
+        ]
+        assert len(process_exits) == 1, (
+            "silent EOF must emit process_exit"
+        )
+        assert turn_completes == [], (
+            "silent EOF must NOT emit turn_complete -- mutually exclusive"
+            f" with process_exit; got events={events!r}"
+        )
+
+    async def test_turn_complete_not_emitted_on_process_crash_no_content(
+        self, tmp_path: Path
+    ) -> None:
+        """Process exits non-zero with no content -> error event + early
+        return. Must NOT emit turn_complete."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("crash-tc-sess", tmp_path, on_event)
+        fake_proc = FakeProcess(b"", returncode=1)
+        fake_proc.communicate = AsyncMock(  # type: ignore[method-assign]
+            return_value=(b"", b"some failure")
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("crash", model="opus")
+
+        turn_completes = [
+            e for e in events if e.get("type") == "turn_complete"
+        ]
+        assert turn_completes == [], (
+            "no clean ``result`` was observed -- turn_complete must NOT"
+            f" fire on the early-error-return path; got events={events!r}"
+        )
+
+    async def test_turn_complete_elapsed_seconds_is_positive_float(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("elapsed-sess", tmp_path, on_event)
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("ok"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc = FakeProcess(stdout_data, returncode=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+            await session.run_turn("ping", model="opus")
+
+        tc = next(e for e in events if e.get("type") == "turn_complete")
+        # elapsed_seconds is a float (per contract; round(_, 1) result).
+        assert isinstance(tc["elapsed_seconds"], float)
+        # Real elapsed time -- positive (could be 0.0 only if the clock
+        # didn't advance; we tolerate the >= 0 bound rather than > 0).
+        assert tc["elapsed_seconds"] >= 0.0
+        # Sanity upper bound -- a fast unit-test turn should be sub-30s.
+        assert tc["elapsed_seconds"] < 30.0
+
+    async def test_turn_complete_emitted_once_per_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Across two clean turns, turn_complete fires exactly twice
+        (once per turn -- not cumulative)."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("multi-tc-sess", tmp_path, on_event)
+        stdout_data = _make_stream_lines(
+            _content_block_start_text(0),
+            _text_delta_event("ok"),
+            _content_block_stop(0),
+            _result_success(""),
+        )
+        fake_proc_factory = lambda: FakeProcess(stdout_data, returncode=0)
+
+        async def fake_subprocess(*_args: Any, **_kwargs: Any) -> Any:
+            return fake_proc_factory()
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await session.run_turn("turn 1", model="opus")
+            await session.run_turn("turn 2", model="opus")
+
+        tcs = [e for e in events if e.get("type") == "turn_complete"]
+        assert len(tcs) == 2, (
+            f"turn_complete must fire once per turn; got {len(tcs)}"
+            f" across two clean turns; events={events!r}"
+        )
