@@ -1602,3 +1602,358 @@ class TestCLISessionIncrementalPersistence:
         # Turn completed despite the failing persist.
         assert session._first_turn is False
         assert len(session.conversation_history) == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue 10 -- subagent_count: emit count-change events as Task/Agent
+# tool_uses start and complete. Renders a running-subagent badge on
+# the FE (clears at 0).
+# ---------------------------------------------------------------------------
+
+
+def _assistant_tool_use_event(tool_id: str, name: str) -> dict[str, Any]:
+    """Top-level ``assistant`` event carrying a single tool_use block.
+
+    Mirrors the live CLI shape (subagent spawn arrives in the
+    ``assistant`` message content)."""
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": name,
+                    "input": {"description": "..."},
+                }
+            ]
+        },
+    }
+
+
+def _user_tool_result_event(tool_id: str) -> dict[str, Any]:
+    """Top-level ``user`` event carrying a tool_result block.
+
+    Mirrors the CLI's synthetic tool-response message shape."""
+    return {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": [{"type": "text", "text": "subagent done"}],
+                }
+            ]
+        },
+    }
+
+
+class TestCLISessionSubagentCount:
+    """Issue 10: BE emits ``subagent_count`` events on Task/Agent
+    tool_use start (count up) and matching tool_result (count down).
+    Only emits on changes; does NOT spam duplicate values."""
+
+    async def test_two_subagents_then_one_resolves(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("subagent-sess", tmp_path, on_event)
+
+        # Two Task tool_uses, then one tool_result -- final count = 1.
+        await session._handle_event(
+            _assistant_tool_use_event("t1", "Task"), [], [], {}
+        )
+        await session._handle_event(
+            _assistant_tool_use_event("t2", "Task"), [], [], {}
+        )
+        await session._handle_event(_user_tool_result_event("t1"), [], [], {})
+
+        counts = [
+            e["count"]
+            for e in events
+            if e.get("type") == "subagent_count"
+        ]
+        assert counts == [1, 2, 1], (
+            f"expected count transitions 1 -> 2 -> 1; got {counts!r}"
+        )
+
+    async def test_no_emit_on_non_subagent_tool(self, tmp_path: Path) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("subagent-sess", tmp_path, on_event)
+        # Read is not a subagent tool -- must not emit.
+        await session._handle_event(
+            _assistant_tool_use_event("r1", "Read"), [], [], {}
+        )
+        assert [e for e in events if e.get("type") == "subagent_count"] == []
+
+    async def test_agent_name_also_tracked(self, tmp_path: Path) -> None:
+        """The brief flagged uncertainty whether the CLI uses 'Task' or
+        'Agent'. We accept both defensively. CLI 2.1.85 emits 'Task'
+        -- this is the future-proofing guard."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("subagent-sess", tmp_path, on_event)
+        await session._handle_event(
+            _assistant_tool_use_event("a1", "Agent"), [], [], {}
+        )
+        counts = [
+            e["count"]
+            for e in events
+            if e.get("type") == "subagent_count"
+        ]
+        assert counts == [1]
+
+    async def test_count_returns_to_zero_on_completion(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("subagent-sess", tmp_path, on_event)
+        await session._handle_event(
+            _assistant_tool_use_event("t1", "Task"), [], [], {}
+        )
+        await session._handle_event(_user_tool_result_event("t1"), [], [], {})
+        counts = [
+            e["count"]
+            for e in events
+            if e.get("type") == "subagent_count"
+        ]
+        assert counts == [1, 0], (
+            f"badge must clear (count=0) when last subagent finishes;"
+            f" got {counts!r}"
+        )
+
+    async def test_no_duplicate_emits_for_same_count(
+        self, tmp_path: Path
+    ) -> None:
+        """A spurious tool_result for an unknown id must NOT emit a
+        redundant count event."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("subagent-sess", tmp_path, on_event)
+        await session._handle_event(
+            _assistant_tool_use_event("t1", "Task"), [], [], {}
+        )
+        # Tool result for an id we never tracked -- no-op.
+        await session._handle_event(
+            _user_tool_result_event("unknown-id"), [], [], {}
+        )
+        counts = [
+            e["count"]
+            for e in events
+            if e.get("type") == "subagent_count"
+        ]
+        assert counts == [1], (
+            f"unknown tool_use_id must not emit a redundant count;"
+            f" got {counts!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue 11 -- token_usage: cumulative session totals emitted after each
+# ``result`` event. Field shape verified against CLI 2.1.85 stream-json.
+# ---------------------------------------------------------------------------
+
+
+def _result_with_usage(
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation: int = 0,
+    cache_read: int = 0,
+) -> dict[str, Any]:
+    """Build a top-level ``result`` event with the exact ``usage`` shape
+    the CLI 2.1.85 emits (verified by capturing live stream-json output)."""
+    return {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "ok",
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+        },
+    }
+
+
+class TestCLISessionTokenUsage:
+    """Issue 11: BE accumulates input/output tokens from each ``result``
+    event's ``usage`` block and emits a ``token_usage`` event with
+    cumulative session totals. Cache creation + cache read fold into
+    the input total so the FE footer reflects full billed input."""
+
+    async def test_single_result_emits_token_usage(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("tok-sess", tmp_path, on_event)
+        await session._handle_event(
+            _result_with_usage(input_tokens=5, output_tokens=10), [], [], {}
+        )
+
+        usage_events = [
+            e for e in events if e.get("type") == "token_usage"
+        ]
+        assert len(usage_events) == 1
+        ev = usage_events[0]
+        assert ev["session_input"] == 5
+        assert ev["session_output"] == 10
+        assert ev["session_total"] == 15
+
+    async def test_cumulative_across_two_turns(self, tmp_path: Path) -> None:
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("tok-sess", tmp_path, on_event)
+        await session._handle_event(
+            _result_with_usage(input_tokens=2, output_tokens=14), [], [], {}
+        )
+        await session._handle_event(
+            _result_with_usage(input_tokens=3, output_tokens=20), [], [], {}
+        )
+
+        usage_events = [
+            e for e in events if e.get("type") == "token_usage"
+        ]
+        assert len(usage_events) == 2
+        # Monotonic non-decreasing.
+        assert usage_events[0]["session_input"] == 2
+        assert usage_events[0]["session_output"] == 14
+        assert usage_events[1]["session_input"] == 5
+        assert usage_events[1]["session_output"] == 34
+        assert usage_events[1]["session_total"] == 39
+
+    async def test_cache_tokens_folded_into_input(
+        self, tmp_path: Path
+    ) -> None:
+        """``cache_creation_input_tokens`` and ``cache_read_input_tokens``
+        contribute to ``session_input`` -- the FE footer should
+        reflect the total billed input volume, not just the
+        non-cached portion."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("tok-sess", tmp_path, on_event)
+        await session._handle_event(
+            _result_with_usage(
+                input_tokens=2,
+                output_tokens=14,
+                cache_creation=9668,
+                cache_read=11370,
+            ),
+            [],
+            [],
+            {},
+        )
+        usage_events = [
+            e for e in events if e.get("type") == "token_usage"
+        ]
+        assert len(usage_events) == 1
+        # 2 + 9668 + 11370 = 21040
+        assert usage_events[0]["session_input"] == 21040
+        assert usage_events[0]["session_output"] == 14
+
+    async def test_missing_usage_is_safe(self, tmp_path: Path) -> None:
+        """A ``result`` event without ``usage`` field must not crash and
+        must not emit a ``token_usage`` with negative/garbage totals.
+
+        The current implementation emits a 0/0/0 token_usage event in
+        that case. This is acceptable: it confirms the result event
+        was processed AND keeps the FE's cumulative state honest."""
+        events: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        session = CLISession("tok-sess", tmp_path, on_event)
+        await session._handle_event(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "ok",
+            },
+            [],
+            [],
+            {},
+        )
+        # Implementation choice: emit 0/0/0 (cumulative unchanged).
+        usage_events = [
+            e for e in events if e.get("type") == "token_usage"
+        ]
+        assert len(usage_events) == 1
+        assert usage_events[0]["session_input"] == 0
+        assert usage_events[0]["session_output"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue 14 -- MDB_MCP_CONNECTION_STRING injection. The agent's spawned CLI
+# (and hence the workspace's mongodb-mcp-server child) must see the same
+# URI as the Python lib at runtime, regardless of when the .mcp.json was
+# written.
+# ---------------------------------------------------------------------------
+
+
+class TestCLISessionMdbMcpConnectionStringInjection:
+    """Issue 14: ``MDB_MCP_CONNECTION_STRING`` must be set in the
+    spawned subprocess env to mirror ``MONGO_URI``. Closes the
+    temporal gap between session-creation-time .mcp.json snapshots
+    and runtime .env reads (A14 §3 Path A vs B)."""
+
+    async def test_subprocess_exec_receives_mdb_mcp_connection_string(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_event = AsyncMock()
+        session = CLISession("mdb-sess", tmp_path, on_event)
+
+        monkeypatch.setenv(
+            "MONGO_URI", "mongodb://prod-host:27017/?replicaSet=rs0"
+        )
+
+        captured_kwargs: dict[str, Any] = {}
+
+        async def fake_subprocess(*_args: Any, **kwargs: Any) -> Any:
+            captured_kwargs.update(kwargs)
+            return FakeProcess(b"", returncode=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=fake_subprocess
+        ):
+            await session.run_turn("ping", model="opus")
+
+        env = captured_kwargs.get("env", {})
+        assert env.get("MONGO_URI") == (
+            "mongodb://prod-host:27017/?replicaSet=rs0"
+        )
+        assert env.get("MDB_MCP_CONNECTION_STRING") == env.get("MONGO_URI"), (
+            "Issue 14: MDB_MCP_CONNECTION_STRING must mirror MONGO_URI"
+            " so the spawned mongodb-mcp-server reads the live URI"
+            " rather than the (potentially stale) .mcp.json snapshot"
+        )

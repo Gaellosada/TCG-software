@@ -136,6 +136,21 @@ class CLISession:
         self._partial_text_parts: list[str] = []
         self._turn_user_appended: bool = False
         self._turn_assistant_appended: bool = False
+        # Issue 10 (subagent_count): track in-flight Task/Agent subagent
+        # tool_uses by id. Emit ``subagent_count`` events only when the
+        # cardinality changes (no spam). Cleared on cancel so a stuck
+        # task doesn't leave a stale badge after the parse loop exits.
+        self._subagent_ids: set[str] = set()
+        self._last_subagent_count: int = 0
+        # Issue 11 (token_usage): cumulative session-level totals,
+        # accumulated from every ``result`` event's ``usage`` block.
+        # Monotonic non-decreasing: cleared only on session
+        # destruction (i.e. never, within a CLISession's lifetime).
+        # ``session_total`` = ``session_input + session_output`` --
+        # cache_creation/cache_read are folded into ``session_input``
+        # so the FE footer reflects the full billed input volume.
+        self._session_input_tokens: int = 0
+        self._session_output_tokens: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -299,6 +314,15 @@ class CLISession:
                     }
                 )
                 self._mint_fresh_session_id(reason="silent_eof")
+                # Issue 10: silent EOF kills the subprocess group;
+                # any tracked Task/Agent subagents are gone too.
+                try:
+                    await self._reset_subagent_tracking()
+                except Exception:
+                    logger.debug(
+                        "Subagent reset on silent_eof failed for %s",
+                        self.session_id,
+                    )
 
         except asyncio.CancelledError:
             # Issue 7: flush whatever assistant content streamed before
@@ -323,6 +347,16 @@ class CLISession:
                         logger.debug(
                             "Persist on cancel failed for %s", self.session_id
                         )
+            # Issue 10: any in-flight Task/Agent subagents are
+            # terminated together with the CLI subprocess group.
+            # Clear the badge so the FE doesn't show a phantom
+            # running-subagent count after the cancel banner.
+            try:
+                await self._reset_subagent_tracking()
+            except Exception:
+                logger.debug(
+                    "Subagent reset on cancel failed for %s", self.session_id
+                )
             # Kill subprocess on cancellation
             if self._process and self._process.returncode is None:
                 self._process.kill()
@@ -431,6 +465,52 @@ class CLISession:
         )
         self.session_id = new_id
         self._first_turn = True
+
+    # Issue 10: tool names that, when invoked, count as a "subagent"
+    # for the purposes of the FE running-subagent badge. The CLI
+    # 2.1.85 dispatches subagents under the ``Task`` tool name (see
+    # `system/init.tools`). We also accept ``Agent`` defensively
+    # because Anthropic SDK transcripts have used that name in the
+    # past and the brief flagged the uncertainty.
+    _SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({"Task", "Agent"})
+
+    async def _emit_subagent_count_if_changed(self) -> None:
+        """Emit a ``subagent_count`` event iff the count has changed.
+
+        Issue 10: the FE renders a badge from the latest count value;
+        emitting only on transitions avoids flooding the WS with
+        redundant events while a single subagent is running.
+        """
+        count = len(self._subagent_ids)
+        if count != self._last_subagent_count:
+            self._last_subagent_count = count
+            await self.on_event({"type": "subagent_count", "count": count})
+
+    async def _track_subagent_tool_use(self, tool_id: str, tool_name: str) -> None:
+        """Add a subagent tool_use to the in-flight set + emit if changed."""
+        if not tool_id or tool_name not in self._SUBAGENT_TOOL_NAMES:
+            return
+        if tool_id in self._subagent_ids:
+            return
+        self._subagent_ids.add(tool_id)
+        await self._emit_subagent_count_if_changed()
+
+    async def _track_subagent_tool_result(self, tool_id: str) -> None:
+        """Remove a subagent tool_use from the in-flight set on result."""
+        if not tool_id or tool_id not in self._subagent_ids:
+            return
+        self._subagent_ids.discard(tool_id)
+        await self._emit_subagent_count_if_changed()
+
+    async def _reset_subagent_tracking(self) -> None:
+        """Clear the in-flight set and emit count=0 if needed.
+
+        Called on cancel / turn-end paths so a stuck Task doesn't
+        leave a stale badge after the CLI subprocess is killed.
+        """
+        if self._subagent_ids:
+            self._subagent_ids.clear()
+            await self._emit_subagent_count_if_changed()
 
     async def _persist(self) -> None:
         """Trigger the persistence callback if wired.
@@ -566,6 +646,14 @@ class CLISession:
         env = dict(os.environ)
         try:
             env["MONGO_URI"] = _get_mongo_uri()
+            # Issue 14: the spawned CLI's mongodb-mcp-server reads
+            # MDB_MCP_CONNECTION_STRING from its process env. Without
+            # this override the MCP would fall back to the value
+            # frozen into the workspace's .mcp.json at session-create
+            # time, which can drift from the live MONGO_URI when the
+            # repo .env changes after session creation. Setting it
+            # here keeps Python lib + MCP in lockstep.
+            env["MDB_MCP_CONNECTION_STRING"] = env["MONGO_URI"]
         except Exception:
             # If env resolution itself fails, propagate whatever was
             # already in os.environ (may be empty -- the agent will see
@@ -736,6 +824,17 @@ class CLISession:
                             "id": block.get("id", ""),
                         }
                     )
+                    # Issue 10: a Task/Agent tool_use arriving in a
+                    # top-level ``assistant`` event is the canonical
+                    # subagent-spawn signal. Tracking from the
+                    # streamed ``content_block_start`` would be
+                    # earlier, but the input json isn't yet known --
+                    # tracking here keeps the contract simple
+                    # (``id`` is the stable join key with future
+                    # tool_results).
+                    await self._track_subagent_tool_use(
+                        block.get("id", ""), block.get("name", "")
+                    )
                 elif block_type == "tool_result":
                     # The CLI sometimes includes tool_result blocks in the stream
                     tool_name = block.get("name", "tool")
@@ -767,6 +866,44 @@ class CLISession:
             # flip ``_first_turn`` to False or to mint a fresh
             # session_id.
             self._saw_result = True
+
+            # Issue 11 (token_usage): accumulate usage from this
+            # result event into session-level totals and emit a
+            # ``token_usage`` event. Verified field shape from CLI
+            # 2.1.85 stream-json output:
+            #   result.usage.input_tokens (int)
+            #   result.usage.output_tokens (int)
+            #   result.usage.cache_creation_input_tokens (int)
+            #   result.usage.cache_read_input_tokens (int)
+            # We fold cache_creation + cache_read into ``session_input``
+            # so the FE footer reflects the FULL billed input volume
+            # (cached reads are still billed at a discount, but the
+            # number of input tokens processed includes them).
+            usage = event.get("usage") or {}
+            if isinstance(usage, dict):
+                input_t = int(usage.get("input_tokens", 0) or 0)
+                cache_create = int(
+                    usage.get("cache_creation_input_tokens", 0) or 0
+                )
+                cache_read = int(
+                    usage.get("cache_read_input_tokens", 0) or 0
+                )
+                output_t = int(usage.get("output_tokens", 0) or 0)
+                self._session_input_tokens += (
+                    input_t + cache_create + cache_read
+                )
+                self._session_output_tokens += output_t
+                await self.on_event(
+                    {
+                        "type": "token_usage",
+                        "session_input": self._session_input_tokens,
+                        "session_output": self._session_output_tokens,
+                        "session_total": (
+                            self._session_input_tokens
+                            + self._session_output_tokens
+                        ),
+                    }
+                )
 
             # Final result event
             subtype = event.get("subtype", "")
@@ -861,6 +998,25 @@ class CLISession:
                     "Synthetic user continuation event (post-compact) on session %s",
                     self.session_id,
                 )
+
+            # Issue 10: tool_results arrive via top-level ``user``
+            # events (the CLI's synthetic tool-response messages).
+            # Walk the message content for blocks with
+            # ``type == "tool_result"`` and decrement the in-flight
+            # subagent set when ``tool_use_id`` matches a tracked
+            # Task/Agent invocation. Bare ``user`` events without a
+            # message field (compact filler etc.) fall through.
+            message = event.get("message", {}) or {}
+            content_blocks = message.get("content", []) or []
+            if isinstance(content_blocks, list):
+                for block in content_blocks:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_result"
+                    ):
+                        await self._track_subagent_tool_result(
+                            block.get("tool_use_id", "")
+                        )
 
         else:
             # Unknown top-level event type. CLI 2.1.85 emits at least

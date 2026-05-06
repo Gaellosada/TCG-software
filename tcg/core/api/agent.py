@@ -37,6 +37,15 @@ MAX_QUEUE_SIZE = 10
 # Prevents concurrent connections from corrupting session state.
 _active_connections: dict[str, WebSocket] = {}
 
+# Issue 9 (Option B): pending ``turn_aborted`` notifications keyed by
+# session_id. Populated in the WS handler ``finally`` block when a
+# turn was in flight at the moment the WS dropped (cancel-mid-turn).
+# Drained on the next connect for the same session_id, immediately
+# AFTER the ``history`` payload, then deleted. One-shot per
+# cancelled-mid-turn event; never accumulates over time. Single
+# FastAPI event loop -> serialized access -> no lock required.
+_pending_abort_notifications: dict[str, dict[str, Any]] = {}
+
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
@@ -397,6 +406,29 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         except Exception:
             logger.warning("Failed to send history for session %s", session_id)
 
+    # Issue 9 (Option B): if the prior connection for THIS session_id
+    # was killed mid-turn (cancel-on-WS-disconnect), surface it now
+    # as a sibling event to ``process_exit`` so the FE can clear
+    # ``hasInFlightTurnRef`` and show a banner. One-shot: drained
+    # and removed after a single emit.
+    pending_abort = _pending_abort_notifications.pop(session_id, None)
+    if pending_abort is not None:
+        try:
+            await websocket.send_json(
+                {
+                    "type": "turn_aborted",
+                    "reason": pending_abort.get("reason", "ws_disconnect"),
+                    "session_id": session_id,
+                    "had_partial_content": bool(
+                        pending_abort.get("had_partial_content", False)
+                    ),
+                }
+            )
+        except Exception:
+            logger.warning(
+                "Failed to send turn_aborted for session %s", session_id
+            )
+
     # ------------------------------------------------------------------
     # Task-based turn management
     # ------------------------------------------------------------------
@@ -566,9 +598,34 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
     except Exception:
         logger.exception("WebSocket error for session %s", session_id)
     finally:
-        # Remove from active connections registry
-        _active_connections.pop(session_id, None)
+        # Remove from active connections registry. Only remove if WE
+        # are the registered connection -- a superseding handler may
+        # have already overwritten the slot.
+        if _active_connections.get(session_id) is websocket:
+            _active_connections.pop(session_id, None)
         queued_messages.clear()
+
+        # Issue 9 (Option B): if a turn is still running at the
+        # moment we tear down, the upcoming ``_cancel_turn`` will
+        # SIGTERM the CLI subprocess and the in-flight turn's events
+        # are lost (the WS is already dead). Record a one-shot
+        # ``turn_aborted`` notification so the next connect for the
+        # same session_id can surface it AFTER history. Done BEFORE
+        # _cancel_turn so we capture the partial-content hint while
+        # the session state is still intact. No new kill timers are
+        # introduced (G3): we only annotate the existing cancel.
+        if turn_task is not None and not turn_task.done():
+            had_partial = bool(
+                getattr(session, "_partial_text_parts", None)
+            ) or any(
+                isinstance(m, dict) and m.get("interrupted") is True
+                for m in session.conversation_history
+            )
+            _pending_abort_notifications[session_id] = {
+                "reason": "ws_disconnect",
+                "had_partial_content": had_partial,
+            }
+
         await _cancel_turn()
         # Persist conversation on disconnect
         try:

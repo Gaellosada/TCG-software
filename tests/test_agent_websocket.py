@@ -158,11 +158,19 @@ def _drain_until(
 
 @pytest.fixture(autouse=True)
 def _reset_module_state():
-    """Clear the module-level connection registry and instance list before each test."""
+    """Clear the module-level connection registry and instance list before each test.
+
+    Issue 9 (Option B) added ``_pending_abort_notifications``; we
+    reset it here too so a turn-aborted notification dropped by one
+    test (WS torn down mid-turn) does not bleed into the next test
+    that reuses the same ``session_id``.
+    """
     agent_module._active_connections.clear()
+    agent_module._pending_abort_notifications.clear()
     FakeCLISession.instances.clear()
     yield
     agent_module._active_connections.clear()
+    agent_module._pending_abort_notifications.clear()
     FakeCLISession.instances.clear()
 
 
@@ -538,3 +546,136 @@ class TestMessageCompleteSuppressedAfterCancel:
         # process some output before the cancel)
         token_events = [e for e in events if e.get("type") == "token"]
         assert len(token_events) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Issue 9 (Option B) -- WS-drop mid-turn surfaces as a turn_aborted event
+# on the next connect for the same session_id, immediately AFTER the
+# history payload. The FE handler clears hasInFlightTurnRef and surfaces
+# a banner. No new kill timers introduced (G3); process_exit invariant
+# preserved (G12) -- turn_aborted is a sibling event, not a replacement.
+# ---------------------------------------------------------------------------
+
+
+class TestTurnAbortedOnReconnect:
+    """Issue 9 (Option B): a WS dropped mid-turn must produce a one-shot
+    ``turn_aborted`` event on the next connect for the same session_id."""
+
+    def test_ws_drop_mid_turn_yields_turn_aborted_on_reconnect(
+        self, patched_env
+    ):
+        workspace = patched_env
+        workspace.register("s9")
+        # Pre-populate a prior assistant message with interrupted=True so
+        # load_conversation returns history AND the BE sees a partial-
+        # content hint. Easier than driving a real cancel-mid-stream
+        # through FakeCLISession (which doesn't append interrupted entries).
+        workspace.saved.append(
+            (
+                "s9",
+                [
+                    {"role": "user", "content": "first"},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "partial"}],
+                        "interrupted": True,
+                    },
+                ],
+            )
+        )
+
+        # Override load_conversation to return the prior history.
+        workspace.load_conversation = lambda sid: (  # type: ignore[method-assign]
+            [
+                {"role": "user", "content": "first"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "partial"}],
+                    "interrupted": True,
+                },
+            ]
+            if sid == "s9"
+            else []
+        )
+
+        app = _build_app(workspace)
+        client = TestClient(app)
+
+        # First connect: start a turn, then drop the WS without finishing.
+        # The handler's finally must record a pending abort notification
+        # because turn_task is still in flight.
+        with client.websocket_connect("/ws/agent/s9") as ws:
+            # On first connect, history is sent (because we returned
+            # prior_messages). Drain it.
+            first = ws.receive_json()
+            assert first["type"] == "history", (
+                f"expected history on connect, got {first!r}"
+            )
+            ws.send_json({"type": "message", "content": "running"})
+            # Now drop the WS while the FakeCLISession.run_turn is
+            # blocking on its complete_event -- the context manager
+            # exit closes the WS, the BE finally runs.
+
+        # After the WS context exits, the BE finally should have
+        # captured a pending abort notification. Verify directly to
+        # tighten the contract before the second connect.
+        assert "s9" in agent_module._pending_abort_notifications, (
+            "BE must record a pending turn_aborted notification when WS"
+            " drops while a turn is in flight"
+        )
+        pending = agent_module._pending_abort_notifications["s9"]
+        assert pending["reason"] == "ws_disconnect"
+        assert pending["had_partial_content"] is True, (
+            "had_partial_content must be True when conversation_history"
+            " contains an interrupted assistant entry"
+        )
+
+        # Second connect to the SAME session_id: history fires first,
+        # then the one-shot turn_aborted. The slot is cleared after.
+        with client.websocket_connect("/ws/agent/s9") as ws2:
+            msg1 = ws2.receive_json()
+            assert msg1["type"] == "history"
+            msg2 = ws2.receive_json()
+            assert msg2["type"] == "turn_aborted", (
+                f"expected turn_aborted after history, got {msg2!r}"
+            )
+            assert msg2["reason"] == "ws_disconnect"
+            assert msg2["session_id"] == "s9"
+            assert msg2["had_partial_content"] is True
+
+        # One-shot: the slot must be empty after the emit.
+        assert "s9" not in agent_module._pending_abort_notifications, (
+            "turn_aborted must be one-shot -- the registry slot must"
+            " be cleared after a single emit"
+        )
+
+    def test_clean_disconnect_no_turn_in_flight_does_not_record(
+        self, patched_env
+    ):
+        """If no turn was running at WS-drop, no notification is recorded
+        and the next connect must NOT emit a spurious turn_aborted."""
+        workspace = patched_env
+        workspace.register("s9b")
+        app = _build_app(workspace)
+        client = TestClient(app)
+
+        # Open + close immediately -- no message sent, no turn started.
+        with client.websocket_connect("/ws/agent/s9b"):
+            pass
+
+        assert (
+            "s9b" not in agent_module._pending_abort_notifications
+        ), "no notification must be recorded when no turn was in flight"
+
+        # Reconnect: must NOT see a turn_aborted event.
+        with client.websocket_connect("/ws/agent/s9b") as ws:
+            # No prior messages -> no history payload either. Send a
+            # ping (empty message) to draw an error response and
+            # confirm the receive loop is alive without a stale
+            # turn_aborted in the pipeline.
+            ws.send_json({"type": "message", "content": ""})
+            got = ws.receive_json()
+            assert got["type"] == "error", (
+                f"unexpected pre-error message (suspect stale turn_aborted):"
+                f" {got!r}"
+            )
