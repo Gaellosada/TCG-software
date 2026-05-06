@@ -902,6 +902,131 @@ describe('useAgentSession', () => {
     expect(formatElapsed(-100)).toBe('0s');
   });
 
+  /* ---------- turn_complete event (Issue 16b) ---------- */
+
+  it('turn_complete event sets lastTurnComplete with at and elapsedSeconds', () => {
+    const { result } = renderHook(() => useAgentSession('sess-tc-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    expect(result.current.lastTurnComplete).toBeNull();
+
+    const timestamp = '2026-05-07T12:34:56.789Z';
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_complete',
+        session_id: 'sess-tc-1',
+        elapsed_seconds: 83.4,
+        timestamp,
+      }),
+    );
+
+    expect(result.current.lastTurnComplete).not.toBeNull();
+    expect(result.current.lastTurnComplete.elapsedSeconds).toBeCloseTo(83.4, 1);
+    expect(result.current.lastTurnComplete.at).toBeInstanceOf(Date);
+    expect(result.current.lastTurnComplete.at.toISOString()).toBe(timestamp);
+  });
+
+  it('turn_complete elapsed_seconds is a positive number', () => {
+    const { result } = renderHook(() => useAgentSession('sess-tc-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_complete',
+        session_id: 'sess-tc-2',
+        elapsed_seconds: 5.7,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    expect(result.current.lastTurnComplete.elapsedSeconds).toBeGreaterThan(0);
+    expect(typeof result.current.lastTurnComplete.elapsedSeconds).toBe('number');
+  });
+
+  it('turn_complete replaces prior lastTurnComplete (not cumulative)', () => {
+    const { result } = renderHook(() => useAgentSession('sess-tc-3'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_complete',
+        session_id: 'sess-tc-3',
+        elapsed_seconds: 10,
+        timestamp: '2026-05-07T10:00:00.000Z',
+      }),
+    );
+    expect(result.current.lastTurnComplete.elapsedSeconds).toBe(10);
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_complete',
+        session_id: 'sess-tc-3',
+        elapsed_seconds: 25,
+        timestamp: '2026-05-07T10:01:00.000Z',
+      }),
+    );
+    // Second event replaces first — not additive.
+    expect(result.current.lastTurnComplete.elapsedSeconds).toBe(25);
+    expect(result.current.lastTurnComplete.at.toISOString()).toBe('2026-05-07T10:01:00.000Z');
+  });
+
+  it('turn_complete clears hasInFlightTurnRef (defence-in-depth)', () => {
+    // Indirect test: after turn_complete, a subsequent history replay is
+    // applied (proving hasInFlightTurnRef was cleared).
+    const { result } = renderHook(() => useAgentSession('sess-tc-4'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // Put a turn in flight.
+    act(() => result.current.sendMessage('do work'));
+    expect(result.current.messages).toHaveLength(1);
+
+    // BE emits turn_complete (clean turn ended).
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_complete',
+        session_id: 'sess-tc-4',
+        elapsed_seconds: 4.2,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    // In-flight ref is cleared → subsequent history replay must be applied.
+    act(() =>
+      ws._simulateMessage({
+        type: 'history',
+        messages: [{ role: 'user', content: 'persisted' }],
+      }),
+    );
+    expect(result.current.messages).toEqual([{ role: 'user', content: 'persisted' }]);
+  });
+
+  it('turn_complete is reset on session change', () => {
+    const { result, rerender } = renderHook(
+      ({ id }) => useAgentSession(id),
+      { initialProps: { id: 'sess-tc-5a' } },
+    );
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_complete',
+        session_id: 'sess-tc-5a',
+        elapsed_seconds: 8,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+    expect(result.current.lastTurnComplete).not.toBeNull();
+
+    // Switch session → must reset.
+    rerender({ id: 'sess-tc-5b' });
+    expect(result.current.lastTurnComplete).toBeNull();
+  });
+
   it('sending a new user message clears processExitInfo', () => {
     const { result } = renderHook(() => useAgentSession('sess-exit-4'));
     const ws = MockWebSocket.instances[0];

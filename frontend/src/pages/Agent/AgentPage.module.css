@@ -147,6 +147,29 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Turn-complete badge (Issue 16b) — positive confirmation, warm-neutral
+   tone to distinguish it from: the processing/elapsed badge (muted neutral)
+   and the process_exit banner (red). NOT a flashing alert. */
+.statusBadgeTurnComplete {
+  color: var(--accent-warm, #f59e0b);
+  background: rgba(245, 158, 11, 0.10);
+  border-color: rgba(245, 158, 11, 0.25);
+  font-variant-numeric: tabular-nums;
+  transition: opacity 300ms ease-out;
+}
+
+/* Fully visible state — opacity 1 for the first 3 s after receipt. */
+.statusBadgeTurnCompleteVisible {
+  opacity: 1;
+}
+
+/* Faded state — badge stays in DOM so layout is stable, but visually
+   recedes. The 300ms transition on .statusBadgeTurnComplete handles
+   the smooth fade. */
+.statusBadgeTurnCompleteFaded {
+  opacity: 0.35;
+}
+
 /* Process exit error banner — shown when the agent subprocess exits unexpectedly */
 .processExitBanner {
   display: flex;
@@ -245,6 +268,17 @@
 
 .tokenFooterValue {
   color: var(--text-secondary);
+}
+
+/* Persistent "Last turn: HH:MM:SS" label (Issue 16b) — sits in the token
+   footer row at the left, using tabular numerals to prevent digit jitter.
+   Muted compared to the transient badge: this is ambient info, not a prompt
+   for action. */
+.tokenFooterTurnComplete {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.68rem;
 }
 
 .contentArea {

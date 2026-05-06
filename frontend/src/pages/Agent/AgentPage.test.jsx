@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, act } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import AgentPage from './AgentPage';
 
@@ -20,6 +20,7 @@ const mockHookReturn = {
   tokenUsage: { input: 0, output: 0, total: 0 },
   elapsedMs: 0,
   turnStartTimestamp: null,
+  lastTurnComplete: null,
   isConnected: false,
   isProcessing: false,
   sendMessage: vi.fn(),
@@ -96,6 +97,7 @@ describe('<AgentPage>', () => {
       tokenUsage: { input: 0, output: 0, total: 0 },
       elapsedMs: 0,
       turnStartTimestamp: null,
+      lastTurnComplete: null,
       isConnected: false,
       isProcessing: false,
       sendMessage: vi.fn(),
@@ -264,5 +266,85 @@ describe('<AgentPage>', () => {
     const dismissBtn = banner.querySelector('button');
     fireEvent.click(dismissBtn);
     expect(clearFn).toHaveBeenCalledTimes(1);
+  });
+
+  /* ---------- turn_complete indicator (Issue 16b) ---------- */
+
+  it('does not render turn-complete badge when lastTurnComplete is null', () => {
+    mockHookReturn.lastTurnComplete = null;
+    mockHookReturn.isProcessing = false;
+    render(<AgentPage />);
+    expect(screen.queryByTestId('turn-complete-badge')).toBeNull();
+  });
+
+  it('renders turn-complete badge when lastTurnComplete is set and not processing', () => {
+    mockHookReturn.lastTurnComplete = {
+      at: new Date('2026-05-07T12:00:00Z'),
+      elapsedSeconds: 83.4,
+    };
+    mockHookReturn.isProcessing = false;
+    render(<AgentPage />);
+    const badge = screen.getByTestId('turn-complete-badge');
+    expect(badge).toBeTruthy();
+    // Text includes "Turn complete" and formatted seconds (83.4s → "1m 23s")
+    expect(badge.textContent).toContain('Turn complete');
+    expect(badge.textContent).toContain('1m 23s');
+  });
+
+  it('renders turn-complete badge with short format for sub-60s turns', () => {
+    mockHookReturn.lastTurnComplete = {
+      at: new Date('2026-05-07T12:00:00Z'),
+      elapsedSeconds: 12,
+    };
+    mockHookReturn.isProcessing = false;
+    render(<AgentPage />);
+    const badge = screen.getByTestId('turn-complete-badge');
+    expect(badge.textContent).toContain('12s');
+  });
+
+  it('hides turn-complete badge while a new turn is processing', () => {
+    mockHookReturn.lastTurnComplete = {
+      at: new Date('2026-05-07T12:00:00Z'),
+      elapsedSeconds: 5,
+    };
+    // Simulates new turn started after prior turn_complete
+    mockHookReturn.isProcessing = true;
+    render(<AgentPage />);
+    // Badge should not show while processing
+    expect(screen.queryByTestId('turn-complete-badge')).toBeNull();
+  });
+
+  it('renders turn-complete footer when lastTurnComplete is set and not processing', () => {
+    mockHookReturn.lastTurnComplete = {
+      at: new Date('2026-05-07T12:34:56Z'),
+      elapsedSeconds: 10,
+    };
+    mockHookReturn.isProcessing = false;
+    render(<AgentPage />);
+    const footer = screen.getByTestId('turn-complete-footer');
+    expect(footer).toBeTruthy();
+    expect(footer.textContent).toContain('Last turn:');
+  });
+
+  it('does not render turn-complete footer when lastTurnComplete is null', () => {
+    mockHookReturn.lastTurnComplete = null;
+    mockHookReturn.tokenUsage = { input: 0, output: 0, total: 0 };
+    mockHookReturn.isProcessing = false;
+    render(<AgentPage />);
+    expect(screen.queryByTestId('turn-complete-footer')).toBeNull();
+  });
+
+  it('token footer renders with both turn-complete and token usage', () => {
+    mockHookReturn.lastTurnComplete = {
+      at: new Date('2026-05-07T12:34:56Z'),
+      elapsedSeconds: 10,
+    };
+    mockHookReturn.tokenUsage = { input: 5000, output: 2000, total: 7000 };
+    mockHookReturn.isProcessing = false;
+    render(<AgentPage />);
+    const footer = screen.getByTestId('token-footer');
+    expect(footer.textContent).toContain('Last turn:');
+    expect(footer.textContent).toContain('5.0k');
+    expect(footer.textContent).toContain('2.0k');
   });
 });

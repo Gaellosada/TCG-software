@@ -1,11 +1,15 @@
-import { useState, useCallback } from 'react';
-import useAgentSession, { formatTokens, formatElapsed } from '../../hooks/useAgentSession';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import useAgentSession, { formatTokens, formatElapsed, formatElapsedSeconds } from '../../hooks/useAgentSession';
 import SessionPanel from './SessionPanel';
 import ChatPanel from './ChatPanel';
 import AssumptionsPanel from './AssumptionsPanel';
 import NotebookPanel from './NotebookPanel';
 import { DEFAULT_MODEL } from '../../constants/agent';
 import styles from './AgentPage.module.css';
+
+// Duration (ms) the "Turn complete" momentary badge stays fully visible before
+// fading out. The CSS transition handles the visual fade over ~300ms after this.
+const TURN_COMPLETE_VISIBLE_MS = 3000;
 
 const TABS = [
   { id: 'chat', label: 'Chat' },
@@ -30,6 +34,7 @@ function AgentPage() {
     subagentCount,
     tokenUsage,
     elapsedMs,
+    lastTurnComplete,
     isConnected,
     isProcessing,
     sendMessage,
@@ -37,6 +42,36 @@ function AgentPage() {
     interruptAgent,
     notebookReady,
   } = useAgentSession(selectedSessionId);
+
+  // Issue 16(b): momentary indicator state — true while the badge is fully
+  // visible (first 3s after turn_complete). After the timeout, flips to false
+  // which triggers the CSS fade-out. lastTurnComplete remains set (persistent
+  // footer in the token area) until the next session reset.
+  const [turnCompleteBadgeVisible, setTurnCompleteBadgeVisible] = useState(false);
+  const turnCompleteTimerRef = useRef(null);
+
+  useEffect(() => {
+    if (!lastTurnComplete) {
+      setTurnCompleteBadgeVisible(false);
+      return undefined;
+    }
+    // New turn_complete arrived — show badge immediately.
+    setTurnCompleteBadgeVisible(true);
+    // Clear any prior timer before starting a new one.
+    if (turnCompleteTimerRef.current !== null) {
+      clearTimeout(turnCompleteTimerRef.current);
+    }
+    turnCompleteTimerRef.current = setTimeout(() => {
+      setTurnCompleteBadgeVisible(false);
+      turnCompleteTimerRef.current = null;
+    }, TURN_COMPLETE_VISIBLE_MS);
+    return () => {
+      if (turnCompleteTimerRef.current !== null) {
+        clearTimeout(turnCompleteTimerRef.current);
+        turnCompleteTimerRef.current = null;
+      }
+    };
+  }, [lastTurnComplete]);
 
   // Wrap sendMessage to include the selected model
   const handleSendMessage = useCallback(
@@ -104,6 +139,14 @@ function AgentPage() {
                 {`Working for ${formatElapsed(elapsedMs)}`}
               </span>
             )}
+            {lastTurnComplete && !isProcessing && (
+              <span
+                className={`${styles.statusBadge} ${styles.statusBadgeTurnComplete} ${turnCompleteBadgeVisible ? styles.statusBadgeTurnCompleteVisible : styles.statusBadgeTurnCompleteFaded}`}
+                data-testid="turn-complete-badge"
+              >
+                {`Turn complete (${formatElapsedSeconds(lastTurnComplete.elapsedSeconds)})`}
+              </span>
+            )}
           </div>
           {processExitInfo && (
             <div className={styles.processExitBanner}>
@@ -158,12 +201,21 @@ function AgentPage() {
               />
             )}
           </div>
-          {tokenUsage && tokenUsage.total > 0 && (
+          {(tokenUsage.total > 0 || (lastTurnComplete && !isProcessing)) && (
             <div className={styles.tokenFooter} data-testid="token-footer">
-              <span className={styles.tokenFooterLabel}>Session:</span>
-              <span className={styles.tokenFooterValue}>
-                {`${formatTokens(tokenUsage.input)} in / ${formatTokens(tokenUsage.output)} out`}
-              </span>
+              {lastTurnComplete && !isProcessing && (
+                <span className={styles.tokenFooterTurnComplete} data-testid="turn-complete-footer">
+                  {`Last turn: ${lastTurnComplete.at.toLocaleTimeString()}`}
+                </span>
+              )}
+              {tokenUsage.total > 0 && (
+                <>
+                  <span className={styles.tokenFooterLabel}>Session:</span>
+                  <span className={styles.tokenFooterValue}>
+                    {`${formatTokens(tokenUsage.input)} in / ${formatTokens(tokenUsage.output)} out`}
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>

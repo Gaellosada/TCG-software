@@ -46,6 +46,15 @@ export function formatElapsed(ms) {
 }
 
 /**
+ * Format elapsed_seconds from turn_complete payload to a compact label (Issue 16b).
+ * Delegates to formatElapsed by converting seconds → ms.
+ * < 60 s → "12s"; 60+ s → "1m 23s"; 3600+ s → "1h 02m".
+ */
+export function formatElapsedSeconds(seconds) {
+  return formatElapsed(Math.round(Number(seconds) * 1000));
+}
+
+/**
  * Build the WebSocket URL for an agent session.
  *
  * Priority:
@@ -122,6 +131,7 @@ function transformHistory(apiMessages) {
  *   tokenUsage: {input: number, output: number, total: number},
  *   elapsedMs: number,
  *   turnStartTimestamp: number|null,
+ *   lastTurnComplete: {at: Date, elapsedSeconds: number}|null,
  *   isConnected: boolean,
  *   sendMessage: (content: string) => void,
  *   notebookReady: boolean,
@@ -163,6 +173,12 @@ function useAgentSession(sessionId) {
   const turnStartTimestampRef = useRef(null);
   const [turnStartTimestamp, setTurnStartTimestamp] = useState(null);
   const [elapsedMs, setElapsedMs] = useState(0);
+  // Issue 16(b): positive end-of-turn marker (turn_complete event). Non-null
+  // when the most recent turn ended cleanly. Shape:
+  //   { at: Date, elapsedSeconds: number }
+  // Replaced on every new turn_complete event; stays set until next session
+  // reset (session switch or explicit sendMessage clears it via session reset).
+  const [lastTurnComplete, setLastTurnComplete] = useState(null);
 
   const wsRef = useRef(null);
   const retriesRef = useRef(0);
@@ -530,6 +546,22 @@ function useAgentSession(sessionId) {
           break;
         }
 
+        case 'turn_complete': {
+          // Issue 16(b): positive end-of-turn marker. Emitted by BE exactly
+          // once after a clean turn (mutually exclusive with process_exit).
+          // Store at + elapsedSeconds so AgentPage can render a momentary
+          // "Turn complete (Xs)" indicator. Also clears hasInFlightTurnRef
+          // defence-in-depth (belt-and-suspenders — message_complete already
+          // clears it, but turn_complete is the canonical clean-turn signal).
+          const elapsed = Number(data.elapsed_seconds);
+          setLastTurnComplete({
+            at: new Date(data.timestamp),
+            elapsedSeconds: Number.isFinite(elapsed) ? elapsed : 0,
+          });
+          hasInFlightTurnRef.current = false;
+          break;
+        }
+
         default:
           break;
       }
@@ -553,6 +585,7 @@ function useAgentSession(sessionId) {
     setTokenUsage({ input: 0, output: 0, total: 0 });
     setTurnStartTimestamp(null);
     setElapsedMs(0);
+    setLastTurnComplete(null);
     streamingRef.current = null;
     compactingRef.current = false;
     hasInFlightTurnRef.current = false;
@@ -673,6 +706,7 @@ function useAgentSession(sessionId) {
     tokenUsage,
     elapsedMs,
     turnStartTimestamp,
+    lastTurnComplete,
     isConnected,
     isProcessing,
     sendMessage,
