@@ -120,13 +120,31 @@ class TestGetNotebook:
     ) -> None:
         create_resp = await client.post("/api/agent/sessions", json={"name": "WithNB"})
         session_id = create_resp.json()["id"]
-        # Write a fake notebook
+        # Write a fake notebook with an executed code cell so the R7
+        # 422 gate (Issue 27 F1) lets it through.
         ws = app.state.agent_workspace
         session_dir = Path(ws.get_session(session_id)["workspace_path"])
         results_dir = session_dir / "results"
         results_dir.mkdir(parents=True)
 
-        nb = {"nbformat": 4, "cells": []}
+        nb = {
+            "nbformat": 4,
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "execution_count": 1,
+                    "source": "print('hi')",
+                    "outputs": [
+                        {
+                            "output_type": "stream",
+                            "name": "stdout",
+                            "text": "hi\n",
+                        }
+                    ],
+                    "metadata": {},
+                }
+            ],
+        }
         (results_dir / "notebook.ipynb").write_text(json.dumps(nb))
         resp = await client.get(f"/api/agent/sessions/{session_id}/notebook")
         assert resp.status_code == 200

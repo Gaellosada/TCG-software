@@ -80,10 +80,24 @@ _DONE_MARKER_SUFFIX_CHARS: int = 100
 # production agent conversations. The original list (write|build|run|…)
 # matched 0 of 22 future-tense intent occurrences found in production.
 # Leading-clause group also extended with observed real-world prefixes.
+#
+# R7 (Issue 25 BETA) extension:
+# - ``re.IGNORECASE`` so post-tool-result phrasings like ``"Now let me
+#   write..."`` match (verified in production conversation cc96f2b4 msg[1]
+#   tail; lowercase ``l`` after ``Now `` was the empirical miss).
+# - Leading-clause group broadened to include ``"Now let me"``,
+#   ``"And let me"``, ``"OK let me"``, ``"So let me"``, ``"Alright[,] let
+#   me"`` -- empirically observed bridge phrases agents use after a tool
+#   result returns and they pivot to the next action.
 _UNMET_INTENT_REGEX = re.compile(
     r"\b(I'?ll"
     r"|Let me"
     r"|Now I'?ll"
+    r"|Now Let me"
+    r"|And Let me"
+    r"|OK,?\s*Let me"
+    r"|So Let me"
+    r"|Alright,?\s*Let me"
     r"|Next I'?ll"
     r"|First,?\s*I'?ll"
     r"|Then I'?ll"
@@ -100,7 +114,110 @@ _UNMET_INTENT_REGEX = re.compile(
     r"|generate|implement|inspect|investigate|look|process|produce"
     r"|query|read|report|rewrite|run|search|set|start|test|try"
     r"|validate|verify|write)"
-    r"\b"
+    r"\b",
+    re.IGNORECASE,
+)
+
+
+# R7 (Issue 25 BETA): tool-aware verb -> tool-name allowlist. The
+# pre-R7 heuristic treated ANY tool_use block as satisfying the
+# announced intent -- so "I'll write a script and run it" with only a
+# Write tool_use would (incorrectly) satisfy. The empirical scan of 26
+# production conversations (A25 Phase 2b) showed:
+#   - Write       -> verbs {write, create, build, generate, implement,
+#                            rewrite, fix} (43 occurrences)
+#   - Bash        -> verbs {run, execute, test, verify, check, compile,
+#                            compute, process, finalize, complete, finish,
+#                            report, deploy, start, continue, try} (137 occ)
+#   - NotebookEdit-> verbs {write, build, generate} (8 occ)
+#   - Read        -> verbs {read, inspect, examine, look} (52 occ)
+#   - Grep / Glob -> verbs {search, look, examine, explore, read,
+#                            inspect, investigate} (mid-tens occ)
+#   - WebFetch    -> verbs {fetch, download} (rare)
+#   - WebSearch   -> verbs {search} (rare)
+#   - mcp__*      -> verbs {query, read, search, fetch, inspect, look,
+#                            examine} -- MongoDB MCP dominates this column
+#                            (89 occ across query/check/inspect/look)
+# The map below encodes that bidirection (verb -> set of tools that
+# satisfy it). Tools are matched by exact name; MCP tools have
+# hyphenated/underscored names like ``mcp__mongodb__find`` so verbs in
+# ``_MCP_VERB_SET`` ALSO accept any tool name starting with ``mcp__``.
+_VERB_TOOL_MAP: dict[str, set[str]] = {
+    # write/create -- produces files
+    "write": {"Write", "NotebookEdit"},
+    "create": {"Write", "NotebookEdit"},
+    "build": {"Write", "NotebookEdit", "Bash"},
+    "generate": {"Write", "NotebookEdit", "Bash"},
+    "implement": {"Write", "Edit"},
+    "rewrite": {"Edit", "Write"},
+    "fix": {"Edit", "Write"},
+    # run/execute -- invokes code
+    "run": {"Bash"},
+    "execute": {"Bash"},
+    "test": {"Bash"},
+    "verify": {"Bash"},
+    "validate": {"Bash"},
+    "check": {"Bash", "Read", "Grep", "Glob"},
+    "compile": {"Bash"},
+    "compute": {"Bash"},
+    "process": {"Bash"},
+    "finalize": {"Bash"},
+    "complete": {"Bash"},
+    "finish": {"Bash"},
+    "report": {"Bash"},
+    "deploy": {"Bash"},
+    "start": {"Bash"},
+    "continue": {"Bash"},
+    "try": {"Bash", "Edit", "Write"},
+    # query/read/inspect -- reads sources (incl. MCP tools)
+    "fetch": {"Read", "WebFetch"},
+    "download": {"Bash", "WebFetch"},
+    "query": {"Bash"},  # plus mcp__* via _MCP_VERB_SET below
+    "read": {"Read", "Grep"},
+    "search": {"Grep", "Glob", "WebSearch"},
+    "inspect": {"Read", "Grep", "Bash"},
+    "examine": {"Read", "Grep"},
+    "look": {"Read", "Grep", "Glob"},
+    "investigate": {"Read", "Grep", "Bash"},
+    "explore": {"Read", "Grep", "Glob"},
+    "set": {"Bash", "Edit", "Write"},
+    "ensure": {"Bash", "Edit"},
+    "produce": {"Write", "Bash", "NotebookEdit"},
+}
+
+# Verbs whose announced action is also satisfied by any MCP tool call
+# (tool name starts with ``mcp__``). Keeps the map size manageable
+# without enumerating every MCP server x verb combination.
+_MCP_VERB_SET: set[str] = {
+    "query",
+    "read",
+    "search",
+    "fetch",
+    "inspect",
+    "look",
+    "examine",
+    "investigate",
+    "check",
+    "explore",
+}
+
+
+# Coordinator regex: catches a SECOND (or later) verb in a multi-verb
+# intent phrase like ``"I'll write a script and run it"`` -- the lead
+# clause covers ``write`` but ``run`` would otherwise not be flagged
+# because it has no leading clause prefix. Only the verb list from
+# ``_UNMET_INTENT_REGEX`` is allowed -- everyday "and run" mentions
+# OUTSIDE an intent phrase still go undetected, which is the desired
+# precision.
+_INTENT_COORDINATOR_REGEX = re.compile(
+    r"\b(?:and|then|,|;)\s+(?:\w+\s+){0,2}"
+    r"(build|check|complete|compute|continue|create|deploy|download"
+    r"|ensure|examine|execute|explore|fetch|finalize|finish|fix"
+    r"|generate|implement|inspect|investigate|look|process|produce"
+    r"|query|read|report|rewrite|run|search|set|start|test|try"
+    r"|validate|verify|write)"
+    r"\b",
+    re.IGNORECASE,
 )
 
 
@@ -154,28 +271,97 @@ def _detect_unmet_intent(
     """Return ``(matched, phrase)`` for unmet future-tense intent.
 
     ``text`` is the concatenated text of the assistant message;
-    ``content_blocks`` is the original ``content`` list (needed to check
-    whether a tool_use block follows the matched intent in the same
-    message). Heuristic: if the regex matches AND any tool_use block
-    exists in the message, treat it as satisfied (any subsequent tool
-    call covers the announced work). Returns ``(False, "")`` otherwise
-    and ``(True, <matched substring>)`` on a real unmet-intent hit.
+    ``content_blocks`` is the original ``content`` list. The R7
+    heuristic is **tool-aware**: every announced verb is mapped to a
+    set of tool names that would satisfy it (see ``_VERB_TOOL_MAP``).
+    For every matched verb in ``text``, at least one ``tool_use`` block
+    in ``content_blocks`` must use a tool from that verb's allowlist.
+    Multi-verb intent ("I'll write a script and run it") is satisfied
+    only when ALL verbs are covered (Write covers ``write``; Bash
+    covers ``run``).
+
+    Returns ``(False, "")`` when the regex finds no match or every
+    matched verb is covered by a corresponding tool_use; returns
+    ``(True, <phrase>)`` for the first uncovered verb's match.
     """
     if not isinstance(text, str) or not text:
         return False, ""
-    match = _UNMET_INTENT_REGEX.search(text)
-    if match is None:
+    # Use ``finditer`` so multi-verb intents are evaluated verb-by-verb,
+    # not just on the first match. The pre-R7 ``search`` only saw the
+    # first match -- so "I'll write and run it" with Write only would
+    # short-circuit on ``write`` and miss the unmet ``run`` verb.
+    primary_matches = list(_UNMET_INTENT_REGEX.finditer(text))
+    if not primary_matches:
         return False, ""
-    # If the message contains any tool_use block, treat it as
-    # satisfying the announced intent (heuristic per contract).
+
+    # Collect tool names used in this assistant message.
+    used_tool_names: set[str] = set()
     if isinstance(content_blocks, list):
         for block in content_blocks:
             if isinstance(block, dict) and block.get("type") == "tool_use":
-                return False, ""
-    phrase = match.group(0)
-    if len(phrase) > 80:
-        phrase = phrase[:80].rstrip() + "..."
-    return True, phrase
+                name = block.get("name", "")
+                if isinstance(name, str) and name:
+                    used_tool_names.add(name)
+    has_mcp_tool = any(name.startswith("mcp__") for name in used_tool_names)
+
+    # Walk every announced verb in order: primary matches (with leading
+    # clause) plus coordinator matches ("and run", ", run", "then run")
+    # that fall AFTER a primary match in the same span. The first
+    # uncovered verb wins as the surfaced phrase.
+    verb_hits: list[tuple[int, str, str]] = []  # (start, verb, phrase)
+    for match in primary_matches:
+        verb_hits.append(
+            (match.start(), (match.group(3) or "").lower(), match.group(0))
+        )
+
+    # Coordinator scan: only count coordinator hits that appear AFTER
+    # the first primary intent clause -- otherwise a stray "and run"
+    # in unrelated text could trigger. Scope: from the first primary
+    # match's start to the next sentence terminator (or end of text).
+    if primary_matches:
+        first = primary_matches[0]
+        # Find a reasonable end-of-clause boundary: the next sentence
+        # terminator (``.`` / ``!`` / ``?``) AFTER the first primary
+        # match, or end of text. Keep the scope narrow so we do not
+        # misread "I'll write the script. Tomorrow we run it" as a
+        # multi-verb intent.
+        rest = text[first.end():]
+        # Sentence-ish terminator: period/exclamation/question +
+        # whitespace, or a paragraph break.
+        terminator = re.search(r"[.!?]\s|\n\n", rest)
+        scope = rest if terminator is None else rest[: terminator.start()]
+        for cmatch in _INTENT_COORDINATOR_REGEX.finditer(scope):
+            verb = (cmatch.group(1) or "").lower()
+            verb_hits.append(
+                (
+                    first.end() + cmatch.start(),
+                    verb,
+                    cmatch.group(0).strip(),
+                )
+            )
+
+    # Sort by position so we surface the first unsatisfied verb in
+    # text order.
+    verb_hits.sort(key=lambda h: h[0])
+
+    for _start, verb, raw_phrase in verb_hits:
+        allowed = _VERB_TOOL_MAP.get(verb, set())
+        if used_tool_names & allowed:
+            continue
+        if verb in _MCP_VERB_SET and has_mcp_tool:
+            continue
+        # Verb is not in the map at all? Fall back to the pre-R7
+        # behavior: ANY tool_use satisfies it (conservative -- avoids
+        # false positives on out-of-map verbs we forgot to enumerate).
+        if verb not in _VERB_TOOL_MAP and used_tool_names:
+            continue
+        # Unsatisfied match -- surface this phrase.
+        phrase = raw_phrase
+        if len(phrase) > 80:
+            phrase = phrase[:80].rstrip() + "..."
+        return True, phrase
+
+    return False, ""
 
 
 def _notebook_has_outputs(notebook_path: Path) -> bool:
@@ -220,6 +406,49 @@ def _notebook_has_outputs(notebook_path: Path) -> bool:
         if isinstance(outputs, list) and len(outputs) > 0:
             return True
     return False
+
+
+def _inspect_notebook(notebook_path: Path) -> tuple[bool, bool]:
+    """Return ``(has_outputs, parse_ok)`` for ``notebook_path``.
+
+    Distinguishes:
+    - file missing or unreadable     -> ``(False, False)`` (parse_ok False
+      so the caller can either ignore or emit ``parse_error`` -- callers
+      typically gate on ``notebook_path.exists()`` first).
+    - file present, malformed JSON   -> ``(False, False)``.
+    - file present, valid JSON, no code cell with non-empty ``outputs``
+                                     -> ``(False, True)``.
+    - file present, at least one code cell with non-empty ``outputs``
+                                     -> ``(True, True)``.
+
+    Used by R7 ``_check_file_changes`` to emit a ``notebook_failed``
+    event distinguishing ``no_outputs`` from ``parse_error``. The
+    legacy ``_notebook_has_outputs`` is preserved as a thin wrapper
+    for callers that only care about the boolean.
+    """
+    try:
+        raw = notebook_path.read_text(encoding="utf-8")
+    except OSError:
+        return False, False
+    try:
+        nb = json.loads(raw)
+    except json.JSONDecodeError:
+        return False, False
+    cells = nb.get("cells") if isinstance(nb, dict) else None
+    if not isinstance(cells, list):
+        # Valid JSON but not a notebook structure -- treat as a parse
+        # failure for the user-visible event (they wrote something
+        # that is not a notebook).
+        return False, False
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        if cell.get("cell_type") != "code":
+            continue
+        outputs = cell.get("outputs")
+        if isinstance(outputs, list) and len(outputs) > 0:
+            return True, True
+    return False, True
 
 
 def _cli_model_arg(model: str) -> str:
@@ -279,6 +508,14 @@ class CLISession:
         # Track file state for change detection
         self._assumptions_snapshot: str | None = None
         self._notebook_exists: bool = False
+        # R7 (Issue 27 F2): per-turn set of notebook paths for which a
+        # ``notebook_failed`` WS event has already been emitted in the
+        # CURRENT turn. Cleared at every ``_snapshot_file_state`` (turn
+        # start) so a subsequent turn that lands the SAME failed
+        # notebook can re-emit if the user restarts work. Mutex with
+        # ``notebook_ready``: each turn emits AT MOST one of
+        # {ready, failed} for a given path.
+        self._notebook_failed_emitted_paths: set[str] = set()
         # Issue 3 watchdog state for live ASSUMPTIONS.json streaming.
         # Mtime-gated sha256 lets us re-snapshot ASSUMPTIONS.json after
         # every parsed CLI event without paying a full hash on each tick
@@ -1314,7 +1551,25 @@ class CLISession:
         self._current_status = "processing"
 
         notebook_path = self.workspace_path / "results" / "notebook.ipynb"
-        self._notebook_exists = notebook_path.exists()
+        # R7: align the baseline with the R6 doc-comment ("A notebook
+        # that exists pre-turn with no outputs is treated as 'not
+        # ready' so a later execution still triggers the event"). The
+        # pre-R7 line was ``self._notebook_exists = notebook_path.exists()``,
+        # which set the baseline True for a 0-output notebook -- so a
+        # later turn that landed outputs would NOT re-fire
+        # ``notebook_ready``. Using ``_notebook_has_outputs`` here
+        # makes the baseline mean "ready", not "exists on disk", which
+        # is what the R6 comment intended.
+        self._notebook_exists = (
+            notebook_path.exists() and _notebook_has_outputs(notebook_path)
+        )
+
+        # R7 (Issue 27 F2): clear the per-turn ``notebook_failed`` guard
+        # so a fresh user-driven turn can re-emit if the same path is
+        # still bad. Without this clear, a session that lands a bad
+        # notebook on turn 1 would suppress the event on every later
+        # turn -- breaking the "user retries; harness re-warns" loop.
+        self._notebook_failed_emitted_paths.clear()
 
     async def _check_assumptions_changed(self) -> None:
         """Issue 3: re-snapshot ASSUMPTIONS.json mid-turn and emit on delta.
@@ -1410,13 +1665,62 @@ class CLISession:
         # triggers the event.
         notebook_path = self.workspace_path / "results" / "notebook.ipynb"
         if notebook_path.exists():
-            if _notebook_has_outputs(notebook_path):
+            has_outputs, parse_ok = _inspect_notebook(notebook_path)
+            if has_outputs:
                 if not self._notebook_exists:
                     await self.on_event({"type": "notebook_ready"})
                     self._notebook_exists = True
+                # Mutex with notebook_failed: a subsequent retry that
+                # lands a notebook with outputs implicitly clears any
+                # prior turn's failed state. The FE handler clears
+                # notebookFailedInfo on notebook_ready.
+            elif not parse_ok:
+                # File exists but is malformed JSON / not a notebook.
+                # Emit notebook_failed:parse_error once per turn per
+                # path. Mutex with notebook_ready: this branch never
+                # runs alongside the ready emit above.
+                await self._emit_notebook_failed(
+                    notebook_path, reason="parse_error"
+                )
+            else:
+                # Valid notebook with no executed code cells -- the
+                # most common bypass shape (Write + NotebookEdit
+                # without nbclient.execute(); custom scripts that
+                # call nbformat.write() directly). R7 (Issue 27 F2):
+                # emit notebook_failed:no_outputs once per turn so
+                # the FE can mark the tab as "failed" rather than
+                # silently keeping it disabled.
+                await self._emit_notebook_failed(
+                    notebook_path, reason="no_outputs"
+                )
             # If the file exists but has no outputs yet, leave
             # ``_notebook_exists`` False so a future tick that sees
-            # populated outputs still fires the event once.
+            # populated outputs still fires ``notebook_ready`` once.
+
+    async def _emit_notebook_failed(
+        self, notebook_path: Path, reason: str
+    ) -> None:
+        """Emit a ``notebook_failed`` WS event once per (turn, path).
+
+        Contract: see ``workspace/tasks/.../notebook_failed_contract.md``.
+        Per-turn idempotent via ``_notebook_failed_emitted_paths`` (set
+        cleared at every turn start in ``_snapshot_file_state``).
+        Mutex with ``notebook_ready``: callers gate on
+        ``_notebook_has_outputs`` first; the failed-state branch only
+        fires when no outputs were detected.
+        """
+        key = str(notebook_path)
+        if key in self._notebook_failed_emitted_paths:
+            return
+        self._notebook_failed_emitted_paths.add(key)
+        await self.on_event(
+            {
+                "type": "notebook_failed",
+                "session_id": self.session_id,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
     async def _handle_stream_event(
         self,

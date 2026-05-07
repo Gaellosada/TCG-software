@@ -29,6 +29,7 @@ from tcg.core.agent.session import (
     _concat_text_blocks,
     _detect_unmet_intent,
     _has_done_marker,
+    _notebook_has_outputs,
     cli_available,
 )
 from tcg.core.agent.workspace import AgentWorkspace
@@ -222,6 +223,29 @@ async def get_notebook(request: Request, session_id: str) -> Any:
             content={
                 "error": "notebook_not_found",
                 "message": "No notebook compiled yet",
+            },
+        )
+
+    # R7 (Issue 27 F1): the FE's HEAD-probe in
+    # ``frontend/src/hooks/useAgentSession.js`` (lines ~714-728) sets
+    # ``notebookReady=true`` on any 200 response. If a session
+    # contains a 0-output notebook (agent bypassed compile_workspace
+    # via direct Write+NotebookEdit, or wrote a custom build script
+    # that calls nbformat.write() without nbclient.execute()), the
+    # tab opens with blank code cells and no plots. Reject 0-output
+    # notebooks at the endpoint with 422 so the FE's ``.catch()``
+    # path keeps the tab disabled. The WS ``notebook_failed`` event
+    # (emitted from session.py:_check_file_changes) gives the live
+    # FE a separate failed-state signal.
+    if not _notebook_has_outputs(notebook_path):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "notebook_no_outputs",
+                "message": (
+                    "Notebook exists but contains no executed cells "
+                    "(compile_workspace was bypassed)."
+                ),
             },
         )
 
