@@ -88,9 +88,15 @@ describe('<SessionPanel>', () => {
       expect(screen.getByText('SPX SMA Backtest')).toBeTruthy();
     });
 
-    // Click the delete button (×) for the first session
+    // Click the delete button (×) — opens the ConfirmDialog (added in a prior round).
     const deleteBtn = screen.getByRole('button', { name: /delete session spx/i });
     fireEvent.click(deleteBtn);
+
+    // The ConfirmDialog is now rendered; confirm the deletion.
+    await waitFor(() => {
+      expect(screen.getByTestId('confirm-dialog-confirm')).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
 
     await waitFor(() => {
       expect(deleteSession).toHaveBeenCalledWith('sess-1');

@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import useAgentSession, { formatTokens, formatElapsed, formatElapsedSeconds } from '../../hooks/useAgentSession';
+import { useUnfocusedTitleAlert } from '../../hooks/useUnfocusedTitleAlert';
 import SessionPanel from './SessionPanel';
 import ChatPanel from './ChatPanel';
 import AssumptionsPanel from './AssumptionsPanel';
@@ -62,9 +63,18 @@ function AgentPage() {
     stopAgent,
     interruptAgent,
     notebookReady,
+    notebookFailedInfo,
     autoContinueInfo,
     autoContinueCapped,
   } = useAgentSession(selectedSessionId);
+
+  // Issue 28b: tab title + OS Notifications when page is unfocused.
+  useUnfocusedTitleAlert({
+    lastTurnComplete,
+    autoContinueCapped,
+    notebookReady,
+    notebookFailedInfo,
+  });
 
   // Issue 16(b): momentary indicator state — true while the badge is fully
   // visible (first 3s after turn_complete). After the timeout, flips to false
@@ -147,22 +157,50 @@ function AgentPage() {
         <div className={styles.rightColumn}>
           <div className={styles.tabBar}>
             {TABS.map(({ id, label }) => {
-              // Issue 22: notebook tab is disabled when no notebook is available.
+              // Issue 22 + Issue 27 F3: notebook tab state machine:
+              //   ready    → teal dot + clickable (G-INVAR #22)
+              //   failed   → amber dot + clickable + data-state="failed"
+              //   disabled → greyed + cursor:not-allowed
               const isNotebookTab = id === 'notebook';
-              const isDisabled = isNotebookTab && !notebookReady;
+              const isNotebookFailed = isNotebookTab && !!notebookFailedInfo && !notebookReady;
+              // Disabled only when no notebook info at all (neither ready nor failed).
+              const isDisabled = isNotebookTab && !notebookReady && !isNotebookFailed;
               const isActive = activeTab === id;
+              const tabClassName = [
+                styles.tab,
+                isActive ? styles.tabActive : '',
+                isDisabled ? styles.tabDisabled : '',
+                isNotebookTab && notebookReady ? styles.tabNotebookReady : '',
+                isNotebookFailed ? styles.tabNotebookFailed : '',
+              ].filter(Boolean).join(' ');
+
+              // Failed tooltip (overrides the generic disabled tooltip).
+              let titleAttr;
+              let ariaLabel;
+              if (isNotebookFailed) {
+                titleAttr = 'Notebook compilation failed — no outputs detected';
+                ariaLabel = `${label} — compilation failed, no outputs detected`;
+              } else if (isDisabled) {
+                titleAttr = 'No notebook available for this session';
+              }
+
               return (
                 <button
                   key={id}
-                  className={`${styles.tab} ${isActive ? styles.tabActive : ''} ${isDisabled ? styles.tabDisabled : ''} ${isNotebookTab && notebookReady ? styles.tabNotebookReady : ''}`}
+                  className={tabClassName}
                   onClick={() => !isDisabled && setActiveTab(id)}
                   disabled={isDisabled}
                   aria-disabled={isDisabled}
-                  title={isDisabled ? 'No notebook available for this session' : undefined}
+                  aria-label={ariaLabel}
+                  data-state={isNotebookFailed ? 'failed' : undefined}
+                  title={titleAttr}
                 >
                   {label}
                   {isNotebookTab && notebookReady && (
                     <span className={styles.tabNotebookDot} aria-hidden="true" />
+                  )}
+                  {isNotebookFailed && (
+                    <span className={styles.tabNotebookFailedDot} aria-hidden="true" />
                   )}
                 </button>
               );
@@ -287,6 +325,7 @@ function AgentPage() {
               <NotebookPanel
                 sessionId={selectedSessionId}
                 notebookReady={notebookReady}
+                notebookFailedInfo={notebookFailedInfo}
               />
             )}
           </div>

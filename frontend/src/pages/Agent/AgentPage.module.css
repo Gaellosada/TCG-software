@@ -138,6 +138,35 @@
   top: -1px;
 }
 
+/* Issue 27 F3: notebook tab failed state — amber/warning indicator.
+   Uses --warning-amber token. The tab remains CLICKABLE (not disabled) so the
+   user can open the panel and see the failure explanation.
+   data-state="failed" enables a11y tooling to detect the state.
+   G-INVAR #22 extension — does NOT replace the existing disabled affordance. */
+.tabNotebookFailed {
+  color: var(--warning-amber, #f59e0b);
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.06);
+  cursor: pointer; /* explicitly clickable */
+}
+
+.tabNotebookFailed:hover {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning-amber, #f59e0b);
+}
+
+.tabNotebookFailedDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning-amber, #f59e0b);
+  margin-left: 5px;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+
 .statusBadge {
   font-size: 0.7rem;
   font-weight: 500;

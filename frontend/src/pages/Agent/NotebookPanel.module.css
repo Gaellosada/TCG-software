@@ -89,6 +89,39 @@
   to { transform: rotate(360deg); }
 }
 
+/* ── Notebook failed state (Issue 27 F3) ─────────── */
+
+.failedState {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 24px;
+  flex: 1;
+  color: var(--warning-amber, #f59e0b);
+  font-size: 0.85rem;
+}
+
+.failedIcon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.failedDetail {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.failedHint {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  font-style: italic;
+}
+
 /* ── Markdown cells ───────────────────────────────── */
 
 .mdCell {

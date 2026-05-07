@@ -169,6 +169,7 @@ function transformHistory(apiMessages) {
  *   isConnected: boolean,
  *   sendMessage: (content: string) => void,
  *   notebookReady: boolean,
+ *   notebookFailedInfo: {reason: string, detail: string|null, timestamp: string}|null,
  *   autoContinueInfo: {iter: number, max: number, reason: string}|null,
  *   autoContinueCapped: {iter: number, max: number}|null,
  * }}
@@ -179,6 +180,11 @@ function useAgentSession(sessionId) {
   const [status, setStatus] = useState('idle');
   const [isConnected, setIsConnected] = useState(false);
   const [notebookReady, setNotebookReady] = useState(false);
+  // Issue 27 F3: notebook_failed event state.
+  // Non-null when the BE emitted a notebook_failed event (no outputs / parse error).
+  // Shape: { reason: "no_outputs"|"parse_error", detail: string|null, timestamp: string }
+  // Cleared by a subsequent notebook_ready event (agent retried successfully).
+  const [notebookFailedInfo, setNotebookFailedInfo] = useState(null);
   // Issue 23: auto-continue UX state.
   // autoContinueInfo: set on auto_continue event; cleared on next turn_complete
   //   AFTER it was set, or on any user message. Shape: {iter, max, reason}|null.
@@ -470,6 +476,23 @@ function useAgentSession(sessionId) {
         case 'notebook_ready': {
           setNotebookReady(true);
           notebookReadyRef.current = true;
+          // Clear any prior failed-state — agent retried and produced outputs.
+          setNotebookFailedInfo(null);
+          break;
+        }
+
+        case 'notebook_failed': {
+          // Issue 27 F3: BE detected that the notebook has no executed outputs
+          // (or is malformed). Mark notebook as NOT ready and record the failure
+          // reason so the tab can render a warning affordance.
+          // G-EVENT contract: reason ∈ {"no_outputs", "parse_error"}.
+          setNotebookFailedInfo({
+            reason: data.reason ?? 'no_outputs',
+            detail: data.detail ?? null,
+            timestamp: data.timestamp ?? new Date().toISOString(),
+          });
+          setNotebookReady(false);
+          notebookReadyRef.current = false;
           break;
         }
 
@@ -664,6 +687,7 @@ function useAgentSession(sessionId) {
     setIsProcessing(false);
     setNotebookReady(false);
     notebookReadyRef.current = false;
+    setNotebookFailedInfo(null);
     setWarningMessage(null);
     setCompactBanner(null);
     setProcessExitInfo(null);
@@ -722,7 +746,9 @@ function useAgentSession(sessionId) {
         }
       })
       .catch(() => {
-        // 404 or network error — no notebook available; tab stays disabled.
+        // 404, 422 (no_outputs gate), or network error — no notebook
+        // available; tab stays disabled. notebook_failed WS event (if it
+        // arrives in-session) will populate notebookFailedInfo separately.
       });
     return () => { cancelled = true; };
   }, [sessionId]);
@@ -833,6 +859,7 @@ function useAgentSession(sessionId) {
     stopAgent,
     interruptAgent,
     notebookReady,
+    notebookFailedInfo,
     autoContinueInfo,
     autoContinueCapped,
   };

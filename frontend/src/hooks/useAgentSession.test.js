@@ -1426,3 +1426,181 @@ describe('auto_continue events (Issue 23)', () => {
     expect(result.current.autoContinueCapped).toBeNull();
   });
 });
+
+/* ============================================================
+   Issue 27 F3 — notebook_failed event handler tests
+   ============================================================ */
+
+describe('notebook_failed event (Issue 27 F3)', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('notebook_failed event sets notebookFailedInfo and clears notebookReady', () => {
+    const { result } = renderHook(() => useAgentSession('sess-nf-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    expect(result.current.notebookFailedInfo).toBeNull();
+    expect(result.current.notebookReady).toBe(false);
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'notebook_failed',
+        session_id: 'sess-nf-1',
+        reason: 'no_outputs',
+        detail: 'Notebook has 7 code cells, all with empty outputs[].',
+        timestamp: '2026-05-07T16:00:00Z',
+      }),
+    );
+
+    expect(result.current.notebookFailedInfo).toEqual({
+      reason: 'no_outputs',
+      detail: 'Notebook has 7 code cells, all with empty outputs[].',
+      timestamp: '2026-05-07T16:00:00Z',
+    });
+    expect(result.current.notebookReady).toBe(false);
+  });
+
+  it('notebook_failed parse_error reason is stored correctly', () => {
+    const { result } = renderHook(() => useAgentSession('sess-nf-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'notebook_failed',
+        session_id: 'sess-nf-2',
+        reason: 'parse_error',
+        detail: 'JSON parse error at position 142',
+        timestamp: '2026-05-07T16:01:00Z',
+      }),
+    );
+
+    expect(result.current.notebookFailedInfo.reason).toBe('parse_error');
+    expect(result.current.notebookFailedInfo.detail).toBe('JSON parse error at position 142');
+  });
+
+  it('notebook_failed with missing optional fields uses defaults', () => {
+    const { result } = renderHook(() => useAgentSession('sess-nf-3'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'notebook_failed',
+        session_id: 'sess-nf-3',
+        // reason and timestamp omitted to test defaults
+      }),
+    );
+
+    expect(result.current.notebookFailedInfo.reason).toBe('no_outputs');
+    expect(result.current.notebookFailedInfo.detail).toBeNull();
+    expect(typeof result.current.notebookFailedInfo.timestamp).toBe('string');
+  });
+
+  it('notebook_failed sets notebookReady=false even if it was previously true', () => {
+    const { result } = renderHook(() => useAgentSession('sess-nf-4'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // First mark as ready.
+    act(() =>
+      ws._simulateMessage({ type: 'notebook_ready', session_id: 'sess-nf-4' }),
+    );
+    expect(result.current.notebookReady).toBe(true);
+    expect(result.current.notebookFailedInfo).toBeNull();
+
+    // Then fail.
+    act(() =>
+      ws._simulateMessage({
+        type: 'notebook_failed',
+        session_id: 'sess-nf-4',
+        reason: 'no_outputs',
+        timestamp: '2026-05-07T16:02:00Z',
+      }),
+    );
+    expect(result.current.notebookReady).toBe(false);
+    expect(result.current.notebookFailedInfo).not.toBeNull();
+  });
+
+  it('subsequent notebook_ready clears notebookFailedInfo (mutex)', () => {
+    const { result } = renderHook(() => useAgentSession('sess-nf-5'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // Fail first.
+    act(() =>
+      ws._simulateMessage({
+        type: 'notebook_failed',
+        session_id: 'sess-nf-5',
+        reason: 'no_outputs',
+        timestamp: '2026-05-07T16:03:00Z',
+      }),
+    );
+    expect(result.current.notebookFailedInfo).not.toBeNull();
+
+    // Then notebook_ready clears it.
+    act(() =>
+      ws._simulateMessage({ type: 'notebook_ready', session_id: 'sess-nf-5' }),
+    );
+    expect(result.current.notebookReady).toBe(true);
+    expect(result.current.notebookFailedInfo).toBeNull();
+  });
+
+  it('notebookFailedInfo is reset on session change', () => {
+    const { result, rerender } = renderHook(
+      ({ id }) => useAgentSession(id),
+      { initialProps: { id: 'sess-nf-6a' } },
+    );
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'notebook_failed',
+        session_id: 'sess-nf-6a',
+        reason: 'no_outputs',
+        timestamp: '2026-05-07T16:04:00Z',
+      }),
+    );
+    expect(result.current.notebookFailedInfo).not.toBeNull();
+
+    // Switch session — must reset.
+    rerender({ id: 'sess-nf-6b' });
+    expect(result.current.notebookFailedInfo).toBeNull();
+  });
+});
+
+/* ============================================================
+   Issue 28b — useUnfocusedTitleAlert hook tests
+   (tested in isolation via the hook's own test file)
+   Minimal smoke tests here to validate document.title integration.
+   ============================================================ */
+
+describe('useAgentSession notebookReady returns correct shape', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('hook return includes notebookFailedInfo field', () => {
+    const { result } = renderHook(() => useAgentSession('sess-shape-1'));
+    // notebookFailedInfo should be present and null by default.
+    expect('notebookFailedInfo' in result.current).toBe(true);
+    expect(result.current.notebookFailedInfo).toBeNull();
+  });
+});

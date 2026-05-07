@@ -20,10 +20,12 @@ function ansiStrip(text) {
  * Renders a Jupyter notebook fetched from the agent backend.
  *
  * Props:
- *   sessionId      {string|null}  Active session id
- *   notebookReady  {boolean}      Becomes true when backend signals notebook availability
+ *   sessionId          {string|null}  Active session id
+ *   notebookReady      {boolean}      Becomes true when backend signals notebook availability
+ *   notebookFailedInfo {object|null}  Non-null when notebook_failed WS event received.
+ *                                     Shape: { reason, detail, timestamp }
  */
-function NotebookPanel({ sessionId, notebookReady }) {
+function NotebookPanel({ sessionId, notebookReady, notebookFailedInfo = null }) {
   const [notebook, setNotebook] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -78,6 +80,31 @@ function NotebookPanel({ sessionId, notebookReady }) {
     return (
       <div className={styles.panel}>
         <div className={styles.error}>{error}</div>
+      </div>
+    );
+  }
+
+  // Issue 27 F3: notebook_failed state — show explanation before the pending spinner.
+  if (notebookFailedInfo && !notebookReady) {
+    const reasonLabel =
+      notebookFailedInfo.reason === 'parse_error'
+        ? 'The notebook file could not be parsed (malformed JSON).'
+        : 'The notebook was written without executing cells — no outputs available.';
+    return (
+      <div className={styles.panel}>
+        <div className={styles.failedState} data-testid="notebook-failed-panel">
+          <span className={styles.failedIcon} aria-hidden="true">⚠</span>
+          <div>
+            <strong>Notebook compilation failed</strong>
+            <div className={styles.failedDetail}>{reasonLabel}</div>
+            {notebookFailedInfo.detail && (
+              <div className={styles.failedDetail}>{notebookFailedInfo.detail}</div>
+            )}
+            <div className={styles.failedHint}>
+              To get outputs, send a new message asking the agent to re-run the notebook via <code>compile_workspace</code>.
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
