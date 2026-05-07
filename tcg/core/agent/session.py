@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import shutil
 import uuid
@@ -51,6 +52,174 @@ IDLE_TIMEOUT: float = 120.0
 # chunk is longer than limit"). 10 MiB is large enough for realistic
 # MCP payloads while still bounding memory if a child floods stdout.
 STREAM_READER_LIMIT: int = 10 * 1024 * 1024
+
+
+# Issue 23 (Round 6): structured DONE marker the agent emits at the end
+# of its final assistant message to signal "this turn's work is fully
+# done". The harness inspects the just-completed assistant message for
+# the marker after each clean CLI turn (see
+# ``tcg.core.api.agent._run_turn_wrapper``). Absent marker -> the harness
+# auto-continues by re-dispatching with a continuation prompt, up to
+# ``MAX_AUTO_CONTINUE`` iterations.
+TURN_HANDOFF_DONE_MARKER: str = "<<<TURN_HANDOFF_DONE>>>"
+
+# Suffix-anchor window: the marker must appear within the last N chars
+# of the concatenated final-text-blocks of the assistant message. This
+# anchors it as an end-of-turn signal -- not a marker emitted earlier
+# in the turn (e.g. inside an explanation or code-block sample).
+_DONE_MARKER_SUFFIX_CHARS: int = 100
+
+# Issue 23 (Round 6) intent-parser fallback. Catches the narrow case
+# where the agent emits the DONE marker but the same message also
+# announces future work that was never actually performed via tool_use.
+# Compiled once at import time; case-sensitive ASCII (regex-only,
+# locale-agnostic).
+#
+# B3 (C2-recurrence-audit M-DURABILITY): verb list broadened from
+# original 13 verbs to 35+ verbs based on empirical scan of 13
+# production agent conversations. The original list (write|build|run|…)
+# matched 0 of 22 future-tense intent occurrences found in production.
+# Leading-clause group also extended with observed real-world prefixes.
+_UNMET_INTENT_REGEX = re.compile(
+    r"\b(I'?ll"
+    r"|Let me"
+    r"|Now I'?ll"
+    r"|Next I'?ll"
+    r"|First,?\s*I'?ll"
+    r"|Then I'?ll"
+    r"|(?:I'?m\s+)?going to"
+    r"|gonna"
+    r"|about to"
+    r"|I want to"
+    r"|I need to"
+    r"|I should"
+    r")"
+    r"\s+(\w+\s+){0,3}"
+    r"(build|check|complete|compute|continue|create|deploy|download"
+    r"|ensure|examine|execute|explore|fetch|finalize|finish|fix"
+    r"|generate|implement|inspect|investigate|look|process|produce"
+    r"|query|read|report|rewrite|run|search|set|start|test|try"
+    r"|validate|verify|write)"
+    r"\b"
+)
+
+
+def _concat_text_blocks(content: Any) -> str:
+    """Concatenate the ``text`` of every text content-block, in order.
+
+    ``content`` is the ``content`` field of a ``conversation_history``
+    entry (either a bare string -- legacy shape -- or a list of
+    content-block dicts). Non-text blocks (``tool_use``, ``tool_result``,
+    ...) are skipped. Returns "" if no text was found.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text = block.get("text", "")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
+def _has_done_marker(text: str) -> bool:
+    """Return True iff ``text`` ends with the structured DONE marker.
+
+    Suffix-anchored: the marker must appear within the last
+    ``_DONE_MARKER_SUFFIX_CHARS`` characters of ``text`` after stripping
+    trailing whitespace and minor punctuation (newlines, periods,
+    exclamation marks, question marks). This matches the contract:
+    the marker is the END-of-turn signal, not a token sprinkled in the
+    middle of an explanation.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    # Strip trailing whitespace/punctuation so the marker can sit on its
+    # own line followed by a newline, or be followed by a stray period.
+    stripped = text.rstrip(" \t\r\n.!?")
+    if not stripped:
+        return False
+    suffix = stripped[-_DONE_MARKER_SUFFIX_CHARS:]
+    return TURN_HANDOFF_DONE_MARKER in suffix
+
+
+def _detect_unmet_intent(
+    text: str, content_blocks: Any
+) -> tuple[bool, str]:
+    """Return ``(matched, phrase)`` for unmet future-tense intent.
+
+    ``text`` is the concatenated text of the assistant message;
+    ``content_blocks`` is the original ``content`` list (needed to check
+    whether a tool_use block follows the matched intent in the same
+    message). Heuristic: if the regex matches AND any tool_use block
+    exists in the message, treat it as satisfied (any subsequent tool
+    call covers the announced work). Returns ``(False, "")`` otherwise
+    and ``(True, <matched substring>)`` on a real unmet-intent hit.
+    """
+    if not isinstance(text, str) or not text:
+        return False, ""
+    match = _UNMET_INTENT_REGEX.search(text)
+    if match is None:
+        return False, ""
+    # If the message contains any tool_use block, treat it as
+    # satisfying the announced intent (heuristic per contract).
+    if isinstance(content_blocks, list):
+        for block in content_blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                return False, ""
+    phrase = match.group(0)
+    if len(phrase) > 80:
+        phrase = phrase[:80].rstrip() + "..."
+    return True, phrase
+
+
+def _notebook_has_outputs(notebook_path: Path) -> bool:
+    """Return True iff the notebook on disk has any executed code-cell output.
+
+    Issue 24 (Round 6 RCA-1): the renderer is fine, but the agent's
+    notebook reaches disk with ``outputs: []`` and ``execution_count:
+    null`` on every code cell -- meaning ``compile_workspace`` was
+    either skipped, called with ``execute=False``, or failed silently.
+    Surfacing that empty notebook to the FE is worse than not surfacing
+    it: the user sees the tab clickable but the notebook is blank.
+    Gate ``notebook_ready`` on at least one code cell having a
+    non-empty ``outputs`` list.
+
+    Failures (file unreadable, malformed JSON, missing keys) return
+    False -- the conservative default. The next post-turn tick will
+    re-check; nothing is permanently lost.
+
+    Note on empty-stream outputs: a code cell with ``outputs: [{"output_type":
+    "stream", "text": ""}]`` IS counted as "executed" (returns True) because
+    nbclient produced an output object, even if the printed content was empty.
+    The gate distinguishes "executed" from "not executed", not "has non-trivial
+    output" from "has trivial output". This is intentional.
+    """
+    try:
+        raw = notebook_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        nb = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    cells = nb.get("cells") if isinstance(nb, dict) else None
+    if not isinstance(cells, list):
+        return False
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        if cell.get("cell_type") != "code":
+            continue
+        outputs = cell.get("outputs")
+        if isinstance(outputs, list) and len(outputs) > 0:
+            return True
+    return False
 
 
 def _cli_model_arg(model: str) -> str:
@@ -97,6 +266,13 @@ class CLISession:
         # wires this to ``workspace.save_conversation``.
         self._on_persist = on_persist
         self._first_turn = True
+        # Issue 23 (Round 6): auto-continue iteration counter. Incremented
+        # by the harness wrapper in ``tcg.core.api.agent._run_turn_wrapper``
+        # before each re-dispatch. Reset to 0 on every user ``message`` or
+        # ``interrupt`` so a fresh user-driven turn always starts a clean
+        # auto-continue loop. Capped by ``MAX_AUTO_CONTINUE`` (default 5;
+        # override via ``TCG_AGENT_MAX_AUTO_CONTINUE`` env var).
+        self._continue_iters: int = 0
         self._cancelled = False
         self.conversation_history: list[dict[str, Any]] = []
         self._process: asyncio.subprocess.Process | None = None
@@ -550,6 +726,23 @@ class CLISession:
         if self._subagent_ids:
             self._subagent_ids.clear()
             await self._emit_subagent_count_if_changed()
+
+    async def append_assistant_message(self, text: str) -> None:
+        """Append an in-band assistant message to ``conversation_history``.
+
+        Issue 23 (Round 6): used by the harness wrapper after the auto-
+        continue cap is reached. Mirrors the shape used elsewhere in
+        ``run_turn`` (``[{"type": "text", "text": ...}]``) and persists
+        via the existing ``_on_persist`` callback so the entry survives
+        a reload. Idempotent w.r.t. failure: persistence errors are
+        logged and swallowed (same policy as ``_persist``).
+        """
+        if not isinstance(text, str) or not text:
+            return
+        self.conversation_history.append(
+            {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        )
+        await self._persist()
 
     async def _persist(self) -> None:
         """Trigger the persistence callback if wired.
@@ -1201,11 +1394,29 @@ class CLISession:
                 except json.JSONDecodeError:
                     pass
 
-        # Check notebook
+        # Check notebook. Issue 24 (Round 6): only emit ``notebook_ready``
+        # if the notebook on disk has at least one code cell with non-empty
+        # ``outputs[]``. Real-world failure mode (RCA-1): the agent writes
+        # the notebook via a code path that bypasses ``compile_workspace``
+        # (or runs it with ``execute=False``), leaving every code cell
+        # with ``outputs: []`` and ``execution_count: null``. Surfacing
+        # such a notebook to the FE shows code with no results / plots,
+        # which is worse than not surfacing it at all -- the user sees
+        # the "Notebook" tab become clickable but the contents are blank.
+        # The ``_notebook_exists`` baseline ensures we still re-check on
+        # subsequent turns: once outputs land, the next post-turn check
+        # fires the event. A notebook that exists pre-turn with no
+        # outputs is treated as "not ready" so a later execution still
+        # triggers the event.
         notebook_path = self.workspace_path / "results" / "notebook.ipynb"
-        if notebook_path.exists() and not self._notebook_exists:
-            # Notebook was created during this turn
-            await self.on_event({"type": "notebook_ready"})
+        if notebook_path.exists():
+            if _notebook_has_outputs(notebook_path):
+                if not self._notebook_exists:
+                    await self.on_event({"type": "notebook_ready"})
+                    self._notebook_exists = True
+            # If the file exists but has no outputs yet, leave
+            # ``_notebook_exists`` False so a future tick that sees
+            # populated outputs still fires the event once.
 
     async def _handle_stream_event(
         self,

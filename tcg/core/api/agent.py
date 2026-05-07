@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from collections import deque
 from pathlib import Path
@@ -22,7 +24,13 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from tcg.core.agent.session import CLISession, cli_available
+from tcg.core.agent.session import (
+    CLISession,
+    _concat_text_blocks,
+    _detect_unmet_intent,
+    _has_done_marker,
+    cli_available,
+)
 from tcg.core.agent.workspace import AgentWorkspace
 
 logger = logging.getLogger(__name__)
@@ -32,6 +40,52 @@ ALLOWED_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6"}
 
 # Maximum number of messages that can be queued while a turn is running
 MAX_QUEUE_SIZE = 10
+
+
+def _resolve_max_auto_continue() -> int:
+    """Resolve ``MAX_AUTO_CONTINUE`` from env (fallback 5; clamp [1, 50]).
+
+    Issue 23 (Round 6): the iteration cap for the auto-continue harness
+    loop is ``5`` by default. Operators can override via the environment
+    variable ``TCG_AGENT_MAX_AUTO_CONTINUE``. Parse failures fall back
+    to the default; values outside the safe range ``[1, 50]`` are
+    clamped (1 below, 50 above) so a pathological env does not
+    silently disable the cap or produce a runaway loop.
+    """
+    raw = os.environ.get("TCG_AGENT_MAX_AUTO_CONTINUE")
+    if raw is None:
+        return 5
+    try:
+        value = int(raw)
+    except ValueError:
+        return 5
+    if value < 1:
+        return 1
+    if value > 50:
+        return 50
+    return value
+
+
+# Issue 23 (Round 6): max auto-continue iterations per user-driven turn.
+# Read from env at import time -- tests that need to override this
+# patch the module attribute directly (no live env-var reload).
+MAX_AUTO_CONTINUE: int = _resolve_max_auto_continue()
+
+# Issue 23 (Round 6): build the in-band assistant message appended once
+# the auto-continue cap is reached.  Persisted to disk via the existing
+# ``_on_persist`` callback so it survives a reload.
+# N2 fix: dynamic cap value (not hardcoded "5") so operator overrides
+# via TCG_AGENT_MAX_AUTO_CONTINUE are reflected in the message.
+def _build_auto_continue_cap_message(max_iters: int) -> str:
+    return (
+        f"Auto-continue cap ({max_iters}) reached. The task may not be complete. "
+        "Please redirect via the input box if more work is needed."
+    )
+
+
+# Module-level alias resolved at import time (used by tests that check the
+# message text without knowing the current MAX_AUTO_CONTINUE value).
+_AUTO_CONTINUE_CAP_MESSAGE: str = _build_auto_continue_cap_message(MAX_AUTO_CONTINUE)
 
 # Registry of active WebSocket connections per session_id.
 # Prevents concurrent connections from corrupting session state.
@@ -277,6 +331,64 @@ async def _keepalive(
         pass
 
 
+def _build_continuation_message(reason: str, phrase: str = "") -> str:
+    """Compose the continuation prompt sent to the CLI by the wrapper.
+
+    Issue 23 (Round 6): two reason codes per the contract --
+    ``"missing_done_marker"`` (primary, marker absent) and
+    ``"unmet_intent"`` (fallback, marker present but text announces
+    work that was not performed via ``tool_use``). The continuation
+    text is plain English -- no JSON, no marker -- so the agent treats
+    it as ordinary user feedback rather than a synthetic event.
+    """
+    if reason == "unmet_intent":
+        # Inline the matched phrase if we have one -- helps the agent
+        # locate the offending sentence in its own prior message.
+        excerpt = phrase if phrase else "future work"
+        return (
+            f"Your message announced future work ('{excerpt}') but the "
+            "marker is present. Either complete that work and re-emit "
+            "the marker, or restate that the work is intentionally "
+            "deferred."
+        )
+    # Default / "missing_done_marker"
+    return (
+        "Your last response did not end with the handoff marker "
+        "`<<<TURN_HANDOFF_DONE>>>`. If you are truly done, end with "
+        "the marker on its own line. Otherwise continue your task and "
+        "emit the marker only when complete."
+    )
+
+
+def _evaluate_auto_continue(
+    session: CLISession,
+) -> tuple[bool, str, str]:
+    """Decide whether to auto-continue based on the last assistant message.
+
+    Returns ``(should_continue, reason, phrase)``:
+    - ``should_continue=False`` if the last message has the marker AND
+      no unmet intent (clean end), or there is no assistant message at
+      all (defensive). The wrapper falls through and emits ``idle``.
+    - ``should_continue=True`` otherwise; ``reason`` is one of
+      ``"missing_done_marker"`` / ``"unmet_intent"``.
+    """
+    history = session.conversation_history
+    if not history:
+        return False, "", ""
+    last = history[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return False, "", ""
+    content = last.get("content")
+    text = _concat_text_blocks(content)
+    has_marker = _has_done_marker(text)
+    if not has_marker:
+        return True, "missing_done_marker", ""
+    unmet, phrase = _detect_unmet_intent(text, content)
+    if unmet:
+        return True, "unmet_intent", phrase
+    return False, "", ""
+
+
 async def _execute_single_turn(
     session: CLISession,
     content: str,
@@ -452,6 +564,127 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
                     "Turn task error for session %s", session_id, exc_info=exc
                 )
 
+    async def _maybe_auto_continue(model: str) -> None:
+        """Issue 23 (Round 6): auto-continue loop wrapped around a CLI turn.
+
+        Inspects the just-completed assistant message after each clean
+        CLI turn (``_saw_result=True``) and re-dispatches with a
+        continuation prompt if the structured DONE marker is absent
+        OR the message contains unmet future-tense intent. Capped by
+        ``MAX_AUTO_CONTINUE`` (default 5; env override
+        ``TCG_AGENT_MAX_AUTO_CONTINUE``). Honors ``session.is_cancelled``
+        between iterations -- a user interrupt mid-loop terminates
+        immediately.
+
+        Mutex / contract:
+        - Not entered if ``_saw_result=False`` (silent EOF; the
+          ``process_exit`` path already covers that case).
+        - Not entered if ``is_cancelled=True`` (user interrupt).
+        - Each iteration emits exactly one ``auto_continue`` event
+          BEFORE the re-dispatched ``_execute_single_turn``.
+        - At cap, emits exactly one ``auto_continue_capped`` event AND
+          appends an in-band assistant message to ``conversation_history``
+          (persisted via the existing ``_on_persist`` callback).
+        """
+        while True:
+            # Round-6 G-AUTO-INTERRUPT: re-check between iterations so
+            # an interrupt arriving in the post-turn micro-window does
+            # not trigger one extra spurious continuation.
+            if session.is_cancelled:
+                return
+            # Silent EOF -- the ``process_exit`` path already surfaced
+            # the abnormal termination; do NOT auto-continue.
+            if not getattr(session, "_saw_result", False):
+                return
+            # Cap check BEFORE incrementing so the cap event fires once
+            # at iter==MAX, not iter==MAX+1.
+            if session._continue_iters >= MAX_AUTO_CONTINUE:
+                try:
+                    await websocket.send_json(
+                        {
+                            "type": "auto_continue_capped",
+                            "session_id": session_id,
+                            "iter": session._continue_iters,
+                            "max": MAX_AUTO_CONTINUE,
+                            "reason": "cap_reached",
+                            "timestamp": time.time(),
+                        }
+                    )
+                except Exception:
+                    pass
+                # R-3 fix: stream the cap message as a synthetic token + message_complete
+                # so it renders in the live transcript immediately (not only on reload).
+                # The token event starts a new streaming bubble; message_complete seals it.
+                _cap_text = _build_auto_continue_cap_message(MAX_AUTO_CONTINUE)
+                try:
+                    await websocket.send_json(
+                        {
+                            "type": "token",
+                            "session_id": session_id,
+                            "content": _cap_text,
+                            "timestamp": time.time(),
+                        }
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "message_complete",
+                            "session_id": session_id,
+                            "timestamp": time.time(),
+                        }
+                    )
+                except Exception:
+                    pass
+                # In-band assistant message, persisted to disk via the
+                # existing ``_on_persist`` callback. Survives reload.
+                # N2 fix: use dynamic message with actual MAX_AUTO_CONTINUE.
+                try:
+                    await session.append_assistant_message(_cap_text)
+                except Exception:
+                    logger.warning(
+                        "Failed to append cap message for session %s",
+                        session_id,
+                    )
+                return
+
+            should_continue, reason, phrase = _evaluate_auto_continue(session)
+            if not should_continue:
+                return
+
+            session._continue_iters += 1
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "auto_continue",
+                        "session_id": session_id,
+                        "iter": session._continue_iters,
+                        "max": MAX_AUTO_CONTINUE,
+                        "reason": reason,
+                        "timestamp": time.time(),
+                    }
+                )
+            except Exception:
+                pass
+
+            continuation = _build_continuation_message(reason, phrase)
+            rid = uuid.uuid4().hex[:8]
+            logger.info(
+                "[%s] auto-continue iter=%d reason=%s for session %s",
+                rid,
+                session._continue_iters,
+                reason,
+                session_id,
+            )
+            await _execute_single_turn(
+                session,
+                continuation,
+                model,
+                websocket,
+                workspace,
+                session_id,
+                rid,
+            )
+            # Loop re-checks is_cancelled / _saw_result / cap on next iter.
+
     async def _run_turn_wrapper(content: str, model: str) -> None:
         """Run a single turn, then drain the queue."""
         request_id = uuid.uuid4().hex[:8]
@@ -459,6 +692,12 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
         await _execute_single_turn(
             session, content, model, websocket, workspace, session_id, request_id
         )
+
+        # Issue 23 (Round 6): auto-continue loop after the user's
+        # initial turn completes cleanly. Re-dispatches up to
+        # ``MAX_AUTO_CONTINUE`` times if the agent forgot the DONE
+        # marker or announced unmet future work.
+        await _maybe_auto_continue(model)
 
         # Process queued messages automatically
         while queued_messages and not session.is_cancelled:
@@ -470,6 +709,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
                 session_id,
                 len(queued_messages),
             )
+            # Issue 23: queued user messages start a fresh auto-continue
+            # loop -- counter reset here so the queued message gets its
+            # own MAX_AUTO_CONTINUE budget.
+            session._continue_iters = 0
             await _execute_single_turn(
                 session,
                 next_msg["content"],
@@ -479,6 +722,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
                 session_id,
                 rid,
             )
+            await _maybe_auto_continue(next_msg["model"])
 
         # All turns complete -- emit idle status so the frontend
         # can clear its "processing" badge (#20)
@@ -540,6 +784,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
 
                 queued_messages.clear()
                 await _cancel_turn()
+                # Issue 23 (Round 6): user interrupt resets the
+                # auto-continue counter so the new user-driven turn
+                # starts a clean loop.
+                session._continue_iters = 0
                 try:
                     await websocket.send_json({"type": "interrupted"})
                 except Exception:
@@ -590,6 +838,11 @@ async def agent_websocket(websocket: WebSocket, session_id: str) -> None:
                         break
                     continue
 
+                # Issue 23 (Round 6): user-driven message resets the
+                # auto-continue counter. (The queued-drain path inside
+                # ``_run_turn_wrapper`` handles its own reset for
+                # already-running-turn queue cases.)
+                session._continue_iters = 0
                 await _start_turn(content, requested_model)
                 continue
 

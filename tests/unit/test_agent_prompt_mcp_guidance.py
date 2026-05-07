@@ -249,3 +249,57 @@ class TestSchemaMdScaffolded:
         assert content == src.read_text(encoding="utf-8"), (
             "SCHEMA.md content must match the source tcg/backtester/lib/data/SCHEMA.md"
         )
+
+
+# ---------------------------------------------------------------------------
+# R-1 (B3, C2-recurrence-audit): Pin End-of-turn handoff marker section
+#
+# A future prompt edit that removes the End-of-turn handoff marker section
+# or the literal <<<TURN_HANDOFF_DONE>>> token would cause the agent to
+# silently stop emitting the marker. The harness would then re-dispatch on
+# every single turn until the cap fires. These tests fail loudly if any of
+# the pinned sections is removed.
+# ---------------------------------------------------------------------------
+
+
+class TestHandoffMarkerPromptSection:
+    """R-1: End-of-turn handoff marker section must be present in claude_md.md."""
+
+    def test_handoff_marker_section_present(self) -> None:
+        """Both the section header and the literal marker token must appear."""
+        assert "End-of-turn handoff marker" in _CLAUDE_MD_CONTENT, (
+            "claude_md.md must contain a section titled 'End-of-turn handoff marker'. "
+            "Removing it causes the agent to never emit the marker -> cap fires every turn."
+        )
+        assert "<<<TURN_HANDOFF_DONE>>>" in _CLAUDE_MD_CONTENT, (
+            "claude_md.md must contain the literal marker token '<<<TURN_HANDOFF_DONE>>>'. "
+            "Removing it means the agent has no canonical token to emit."
+        )
+
+    def test_action_honesty_section_present(self) -> None:
+        """The Critical Rules / action-honesty section must still be present.
+
+        Key phrase pinned: 'Action honesty' within the Critical Rules block.
+        This is the Round-5 action-honesty rule that prevents the agent from
+        announcing work and then ending the turn without doing it.
+        """
+        lower = _CLAUDE_MD_CONTENT.lower()
+        assert "critical rules" in lower, (
+            "claude_md.md must contain a 'Critical Rules' section. "
+            "Removing it silently drops the action-honesty prohibition."
+        )
+        assert "action honesty" in lower, (
+            "Critical Rules must include an 'Action honesty' rule. "
+            "This is the Round-5 prompt-paired defense against announce-and-skip."
+        )
+
+    def test_first_turn_protocol_present(self) -> None:
+        """The First-Turn-Protocol heading must be present.
+
+        The First-Turn-Protocol drives bulk discovery on turn 1; removing it
+        degrades session startup quality without any observable error.
+        """
+        assert "First Turn Protocol" in _CLAUDE_MD_CONTENT, (
+            "claude_md.md must contain a 'First Turn Protocol' section heading. "
+            "Removing it silently regresses bulk-discovery behavior on session start."
+        )
