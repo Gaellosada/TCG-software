@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getAssumptions } from '../api/agent';
+import { getAssumptions, getNotebook } from '../api/agent';
 
 const MAX_RETRIES = 5;
 const RECONNECT_DELAY_MS = 3000;
@@ -73,10 +73,28 @@ function buildWsUrl(sessionId) {
 }
 
 /**
+ * Strip the DONE handoff marker from a displayed text string.
+ * The token `<<<TURN_HANDOFF_DONE>>>` plus a single trailing newline/space
+ * is removed from wherever it appears. Persistence keeps the raw marker —
+ * this function is display-only.
+ */
+export function stripDoneMarker(text) {
+  // Remove the marker token and an optional single trailing whitespace/newline.
+  return text.replace(/<<<TURN_HANDOFF_DONE>>>\n?/g, '');
+}
+
+/**
  * Transform Anthropic API-format conversation history into display messages.
  *
  * API format: assistant content is [{type:"text",text:...},{type:"tool_use",...}]
  * Display format: flat array of {role:"assistant",content:string} and {role:"tool",...}
+ *
+ * Fix for Issue 21: walk content array IN ORDER so tool_use entries appear
+ * at their correct position (interleaved with text), not after all text.
+ * Adjacent text blocks may be coalesced; non-adjacent blocks (separated by a
+ * tool_use) remain separate display entries.
+ *
+ * Also strips DONE marker from displayed text (display-only; raw data unchanged).
  */
 function transformHistory(apiMessages) {
   const display = [];
@@ -90,23 +108,39 @@ function transformHistory(apiMessages) {
       continue;
     }
     if (msg.role === 'assistant') {
-      // content is an array of content blocks
       if (Array.isArray(msg.content)) {
-        const textParts = msg.content
-          .filter((b) => b.type === 'text')
-          .map((b) => b.text || '');
-        const text = textParts.join('');
-        if (text) {
-          display.push({ role: 'assistant', content: text, streaming: false });
-        }
-        // Surface tool_use blocks as tool messages
+        // Walk content blocks IN ORDER, coalescing adjacent text blocks but
+        // keeping non-adjacent text (separated by tool_use) as separate entries.
+        let pendingText = null; // accumulated adjacent text
         for (const block of msg.content) {
-          if (block.type === 'tool_use') {
+          if (block.type === 'text') {
+            // Coalesce into pending text accumulator
+            pendingText = (pendingText ?? '') + (block.text || '');
+          } else if (block.type === 'tool_use') {
+            // Flush pending text before this tool entry (preserves order)
+            if (pendingText !== null) {
+              const stripped = stripDoneMarker(pendingText);
+              if (stripped) {
+                display.push({ role: 'assistant', content: stripped, streaming: false });
+              }
+              pendingText = null;
+            }
             display.push({ role: 'tool', name: block.name, input: block.input });
+          }
+          // other block types (tool_result, etc.) are skipped
+        }
+        // Flush any remaining pending text
+        if (pendingText !== null) {
+          const stripped = stripDoneMarker(pendingText);
+          if (stripped) {
+            display.push({ role: 'assistant', content: stripped, streaming: false });
           }
         }
       } else if (typeof msg.content === 'string') {
-        display.push({ role: 'assistant', content: msg.content, streaming: false });
+        const stripped = stripDoneMarker(msg.content);
+        if (stripped) {
+          display.push({ role: 'assistant', content: stripped, streaming: false });
+        }
       }
     }
   }
@@ -135,6 +169,8 @@ function transformHistory(apiMessages) {
  *   isConnected: boolean,
  *   sendMessage: (content: string) => void,
  *   notebookReady: boolean,
+ *   autoContinueInfo: {iter: number, max: number, reason: string}|null,
+ *   autoContinueCapped: {iter: number, max: number}|null,
  * }}
  */
 function useAgentSession(sessionId) {
@@ -143,6 +179,16 @@ function useAgentSession(sessionId) {
   const [status, setStatus] = useState('idle');
   const [isConnected, setIsConnected] = useState(false);
   const [notebookReady, setNotebookReady] = useState(false);
+  // Issue 23: auto-continue UX state.
+  // autoContinueInfo: set on auto_continue event; cleared on next turn_complete
+  //   AFTER it was set, or on any user message. Shape: {iter, max, reason}|null.
+  // autoContinueCapped: S2 fix — changed from boolean to {iter, max}|null so the
+  //   cap badge can display the actual dynamic max (e.g. 2× when env-overridden to 2).
+  //   Cleared on next user message or interrupt. null when no cap reached.
+  const [autoContinueInfo, setAutoContinueInfo] = useState(null);
+  const [autoContinueCapped, setAutoContinueCapped] = useState(null);
+  // Ref tracks whether autoContinueInfo was set so turn_complete can clear it.
+  const autoContinueWasSetRef = useRef(false);
   // True from user send until message_complete (covers thinking + streaming + tool loops)
   const [isProcessing, setIsProcessing] = useState(false);
   // Transient warning set by oversized_line events; cleared on next non-warning status
@@ -183,6 +229,9 @@ function useAgentSession(sessionId) {
   const wsRef = useRef(null);
   const retriesRef = useRef(0);
   const reconnectTimerRef = useRef(null);
+  // Issue 22: ref mirror of notebookReady so the history probe callback can
+  // read the latest value without needing it in connect's closure dep list.
+  const notebookReadyRef = useRef(false);
   // Track the current streaming (partial) assistant message
   const streamingRef = useRef(null);
   // Sticky flag: true between BE 'compacting' status and 'compact_done'.
@@ -312,7 +361,11 @@ function useAgentSession(sessionId) {
             setMessages((prev) => {
               if (prev.length === 0) return prev;
               const last = prev[prev.length - 1];
-              return [...prev.slice(0, -1), { ...last, streaming: false }];
+              // Strip DONE marker from displayed text on finalize (live path).
+              const strippedContent = typeof last.content === 'string'
+                ? stripDoneMarker(last.content)
+                : last.content;
+              return [...prev.slice(0, -1), { ...last, content: strippedContent, streaming: false }];
             });
           }
           break;
@@ -416,6 +469,7 @@ function useAgentSession(sessionId) {
 
         case 'notebook_ready': {
           setNotebookReady(true);
+          notebookReadyRef.current = true;
           break;
         }
 
@@ -559,6 +613,38 @@ function useAgentSession(sessionId) {
             elapsedSeconds: Number.isFinite(elapsed) ? elapsed : 0,
           });
           hasInFlightTurnRef.current = false;
+          // Issue 23: clear autoContinueInfo if it was set (loop iteration ended).
+          if (autoContinueWasSetRef.current) {
+            setAutoContinueInfo(null);
+            autoContinueWasSetRef.current = false;
+          }
+          break;
+        }
+
+        case 'auto_continue': {
+          // Issue 23: harness is auto-continuing after a clean turn.
+          // Shape: {type, session_id, iter, max, reason, timestamp}
+          const info = {
+            iter: Number(data.iter),
+            max: Number(data.max),
+            reason: data.reason ?? 'missing_done_marker',
+          };
+          setAutoContinueInfo(info);
+          autoContinueWasSetRef.current = true;
+          break;
+        }
+
+        case 'auto_continue_capped': {
+          // Issue 23: harness hit max iterations; loop ended.
+          // S2 fix: store {iter, max} (not boolean) so cap badge displays the
+          // actual dynamic max from the BE event (avoids hardcoded "5×").
+          // The BE now includes "max" in the capped event payload.
+          setAutoContinueCapped({
+            iter: Number(data.iter),
+            max: Number(data.max ?? 5),
+          });
+          setAutoContinueInfo(null);
+          autoContinueWasSetRef.current = false;
           break;
         }
 
@@ -577,6 +663,7 @@ function useAgentSession(sessionId) {
     setIsConnected(false);
     setIsProcessing(false);
     setNotebookReady(false);
+    notebookReadyRef.current = false;
     setWarningMessage(null);
     setCompactBanner(null);
     setProcessExitInfo(null);
@@ -586,9 +673,12 @@ function useAgentSession(sessionId) {
     setTurnStartTimestamp(null);
     setElapsedMs(0);
     setLastTurnComplete(null);
+    setAutoContinueInfo(null);
+    setAutoContinueCapped(null);
     streamingRef.current = null;
     compactingRef.current = false;
     hasInFlightTurnRef.current = false;
+    autoContinueWasSetRef.current = false;
     turnStartTimestampRef.current = null;
     retriesRef.current = 0;
     clearReconnectTimer();
@@ -614,6 +704,28 @@ function useAgentSession(sessionId) {
       }
     };
   }, [sessionId, connect, clearReconnectTimer, clearCompactBannerTimer]);
+
+  // Issue 22: probe for an existing notebook when a session is opened.
+  // The `notebook_ready` WS event does not replay on reconnect, so a saved
+  // session that already has a notebook would show the notebook tab as
+  // disabled indefinitely. On session mount, fire a GET probe: 200 → set
+  // notebookReady=true so the tab becomes enabled. Non-fatal on any failure
+  // (404 = no notebook; network errors treated as no-notebook).
+  useEffect(() => {
+    if (!sessionId) return undefined;
+    let cancelled = false;
+    getNotebook(sessionId)
+      .then(() => {
+        if (!cancelled) {
+          setNotebookReady(true);
+          notebookReadyRef.current = true;
+        }
+      })
+      .catch(() => {
+        // 404 or network error — no notebook available; tab stays disabled.
+      });
+    return () => { cancelled = true; };
+  }, [sessionId]);
 
   // Issue 12: tick elapsed time every ELAPSED_TICK_MS while a turn is in
   // flight. Cleared on unmount AND whenever the conditions go false (turn
@@ -644,6 +756,10 @@ function useAgentSession(sessionId) {
         // message supersedes them.
         setProcessExitInfo(null);
         setTurnAbortedInfo(null);
+        // Issue 23: clear auto-continue state on new user message.
+        setAutoContinueInfo(null);
+        setAutoContinueCapped(null);
+        autoContinueWasSetRef.current = false;
         // Add the user message to local state immediately (optimistic)
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
@@ -676,6 +792,10 @@ function useAgentSession(sessionId) {
         // message supersedes them.
         setProcessExitInfo(null);
         setTurnAbortedInfo(null);
+        // Issue 23: clear auto-continue state on interrupt.
+        setAutoContinueInfo(null);
+        setAutoContinueCapped(null);
+        autoContinueWasSetRef.current = false;
         setMessages((prev) => [...prev, { role: 'user', content }]);
         setIsProcessing(true);
         hasInFlightTurnRef.current = true;
@@ -713,6 +833,8 @@ function useAgentSession(sessionId) {
     stopAgent,
     interruptAgent,
     notebookReady,
+    autoContinueInfo,
+    autoContinueCapped,
   };
 }
 

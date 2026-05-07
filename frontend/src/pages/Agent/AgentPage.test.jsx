@@ -27,6 +27,8 @@ const mockHookReturn = {
   stopAgent: vi.fn(),
   interruptAgent: vi.fn(),
   notebookReady: false,
+  autoContinueInfo: null,
+  autoContinueCapped: null,
 };
 
 vi.mock('../../hooks/useAgentSession', async (importOriginal) => {
@@ -104,6 +106,8 @@ describe('<AgentPage>', () => {
       stopAgent: vi.fn(),
       interruptAgent: vi.fn(),
       notebookReady: false,
+      autoContinueInfo: null,
+      autoContinueCapped: null,
     });
     useAgentSession.mockImplementation(() => mockHookReturn);
   });
@@ -133,7 +137,9 @@ describe('<AgentPage>', () => {
     expect(typeof capturedSessionPanelProps.onSelect).toBe('function');
   });
 
-  it('tab switching — Chat to Notebook and back', () => {
+  it('tab switching — Chat to Notebook and back (when notebookReady=true)', () => {
+    // Notebook tab is only clickable when notebookReady is true (Issue 22).
+    mockHookReturn.notebookReady = true;
     render(<AgentPage />);
 
     // Chat visible by default
@@ -494,6 +500,153 @@ describe('<AgentPage>', () => {
       const twoHoursAgo = new Date('2026-05-07T12:00:00Z');
       expect(formatAgo(twoHoursAgo)).toBe(' (2h ago)');
       vi.useRealTimers();
+    });
+  });
+
+  /* ---------- Issue 22 — notebook tab affordance ---------- */
+
+  describe('Issue 22 — notebook tab disabled/enabled state', () => {
+    it('notebook tab is disabled when notebookReady is false', () => {
+      mockHookReturn.notebookReady = false;
+      render(<AgentPage />);
+      const notebookBtn = screen.getByRole('button', { name: /notebook/i });
+      expect(notebookBtn.disabled).toBe(true);
+      expect(notebookBtn.getAttribute('aria-disabled')).toBe('true');
+    });
+
+    it('notebook tab is not disabled when notebookReady is true', () => {
+      mockHookReturn.notebookReady = true;
+      render(<AgentPage />);
+      const notebookBtn = screen.getByRole('button', { name: /notebook/i });
+      expect(notebookBtn.disabled).toBe(false);
+    });
+
+    it('disabled notebook tab click does not switch panel', () => {
+      mockHookReturn.notebookReady = false;
+      render(<AgentPage />);
+      fireEvent.click(screen.getByRole('button', { name: /notebook/i }));
+      // Chat panel should still be visible
+      expect(screen.getByTestId('chat-panel')).toBeTruthy();
+      expect(screen.queryByTestId('notebook-panel')).toBeNull();
+    });
+
+    it('disabled notebook tab has title tooltip', () => {
+      mockHookReturn.notebookReady = false;
+      render(<AgentPage />);
+      const notebookBtn = screen.getByRole('button', { name: /notebook/i });
+      expect(notebookBtn.title).toBeTruthy();
+      expect(notebookBtn.title.toLowerCase()).toContain('no notebook');
+    });
+
+    it('notebook tab has no title tooltip when notebookReady is true', () => {
+      mockHookReturn.notebookReady = true;
+      render(<AgentPage />);
+      const notebookBtn = screen.getByRole('button', { name: /notebook/i });
+      expect(notebookBtn.title).toBeFalsy();
+    });
+
+    it('shows notebook indicator dot when notebook is ready (S1 Issue 22 coverage)', () => {
+      mockHookReturn.notebookReady = true;
+      render(<AgentPage />);
+      // The tabNotebookDot span is rendered inside the Notebook button when ready.
+      // We locate it by the aria-hidden attribute used on the indicator dot.
+      const notebookBtn = screen.getByRole('button', { name: /notebook/i });
+      const dot = notebookBtn.querySelector('[aria-hidden="true"]');
+      expect(dot).not.toBeNull();
+    });
+
+    it('transitions notebook tab from disabled to enabled when notebookReady changes (S1 Issue 22 coverage)', () => {
+      mockHookReturn.notebookReady = false;
+      const { rerender } = render(<AgentPage />);
+      const notebookBtn = screen.getByRole('button', { name: /notebook/i });
+      expect(notebookBtn.disabled).toBe(true);
+
+      // Simulate notebookReady becoming true (e.g. WS event or probe response)
+      mockHookReturn.notebookReady = true;
+      rerender(<AgentPage />);
+      expect(notebookBtn.disabled).toBe(false);
+    });
+  });
+
+  /* ---------- Issue 23 — auto-continue badge ---------- */
+
+  describe('Issue 23 — auto-continue badge', () => {
+    it('auto-continue badge is not shown when autoContinueInfo is null', () => {
+      mockHookReturn.autoContinueInfo = null;
+      render(<AgentPage />);
+      expect(screen.queryByTestId('auto-continue-badge')).toBeNull();
+    });
+
+    it('auto-continue badge shows "Continuing… (N/5)" when autoContinueInfo is set', () => {
+      mockHookReturn.autoContinueInfo = { iter: 2, max: 5, reason: 'missing_done_marker' };
+      mockHookReturn.autoContinueCapped = null;
+      render(<AgentPage />);
+      const badge = screen.getByTestId('auto-continue-badge');
+      expect(badge.textContent).toContain('Continuing…');
+      expect(badge.textContent).toContain('2/5');
+    });
+
+    it('auto-continue badge has aria-live="polite" (G-INVAR row 13)', () => {
+      mockHookReturn.autoContinueInfo = { iter: 1, max: 5, reason: 'missing_done_marker' };
+      render(<AgentPage />);
+      const badge = screen.getByTestId('auto-continue-badge');
+      expect(badge.getAttribute('aria-live')).toBe('polite');
+      expect(badge.getAttribute('role')).toBe('status');
+    });
+
+    it('auto-continue badge has tooltip with human-readable reason for missing_done_marker', () => {
+      mockHookReturn.autoContinueInfo = { iter: 1, max: 5, reason: 'missing_done_marker' };
+      render(<AgentPage />);
+      const badge = screen.getByTestId('auto-continue-badge');
+      expect(badge.title).toContain("didn't signal completion");
+    });
+
+    it('auto-continue badge has tooltip with human-readable reason for unmet_intent', () => {
+      mockHookReturn.autoContinueInfo = { iter: 1, max: 5, reason: 'unmet_intent' };
+      render(<AgentPage />);
+      const badge = screen.getByTestId('auto-continue-badge');
+      expect(badge.title).toContain("announced work that wasn't done");
+    });
+
+    it('auto-continue badge is hidden when autoContinueCapped is set (capped badge replaces it)', () => {
+      mockHookReturn.autoContinueInfo = null;
+      // S2 fix: autoContinueCapped is now {iter, max} not boolean
+      mockHookReturn.autoContinueCapped = { iter: 5, max: 5 };
+      render(<AgentPage />);
+      // auto-continue badge should not show (capped badge replaces it)
+      expect(screen.queryByTestId('auto-continue-badge')).toBeNull();
+    });
+
+    it('capped badge shows warning text and dynamic max when autoContinueCapped is set', () => {
+      // S2 fix: cap badge displays autoContinueCapped.max (dynamic, not hardcoded 5)
+      mockHookReturn.autoContinueCapped = { iter: 2, max: 2 };
+      mockHookReturn.autoContinueInfo = null;
+      render(<AgentPage />);
+      const badge = screen.getByTestId('auto-continue-capped-badge');
+      expect(badge.textContent).toContain('may be incomplete');
+      // Verify the dynamic max (2) is shown, not the hardcoded fallback (5)
+      expect(badge.textContent).toContain('2×');
+    });
+
+    it('capped badge has aria-live="polite"', () => {
+      mockHookReturn.autoContinueCapped = { iter: 5, max: 5 };
+      render(<AgentPage />);
+      const badge = screen.getByTestId('auto-continue-capped-badge');
+      expect(badge.getAttribute('aria-live')).toBe('polite');
+    });
+
+    it('turn-complete badge is hidden while autoContinueInfo is set (mutually exclusive)', () => {
+      mockHookReturn.lastTurnComplete = {
+        at: new Date('2026-05-07T12:00:00Z'),
+        elapsedSeconds: 10,
+      };
+      mockHookReturn.isProcessing = false;
+      mockHookReturn.autoContinueInfo = { iter: 1, max: 5, reason: 'missing_done_marker' };
+      render(<AgentPage />);
+      // turn-complete badge must not show during auto-continue loop
+      expect(screen.queryByTestId('turn-complete-badge')).toBeNull();
+      // auto-continue badge must show
+      expect(screen.getByTestId('auto-continue-badge')).toBeTruthy();
     });
   });
 });

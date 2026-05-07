@@ -31,6 +31,12 @@ const TABS = [
   { id: 'notebook', label: 'Notebook' },
 ];
 
+// Issue 23: human-readable tooltip text for auto_continue reason tokens.
+const AUTO_CONTINUE_REASON_LABELS = {
+  missing_done_marker: "Continuing because the agent didn't signal completion.",
+  unmet_intent: "Continuing because the agent announced work that wasn't done.",
+};
+
 function AgentPage() {
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
@@ -56,6 +62,8 @@ function AgentPage() {
     stopAgent,
     interruptAgent,
     notebookReady,
+    autoContinueInfo,
+    autoContinueCapped,
   } = useAgentSession(selectedSessionId);
 
   // Issue 16(b): momentary indicator state — true while the badge is fully
@@ -92,6 +100,20 @@ function AgentPage() {
     };
   }, [lastTurnComplete]);
 
+  // Issue 23: auto-continue badge visibility — analogous to turn-complete badge.
+  // true while autoContinueInfo is non-null (shown immediately on first receive).
+  const [autoContinueBadgeVisible, setAutoContinueBadgeVisible] = useState(false);
+
+  // G-INVAR row 12: useLayoutEffect so badge enters DOM at opacity 1 from first paint.
+  useLayoutEffect(() => {
+    if (!autoContinueInfo) {
+      setAutoContinueBadgeVisible(false);
+      return undefined;
+    }
+    setAutoContinueBadgeVisible(true);
+    return undefined;
+  }, [autoContinueInfo]);
+
   // Wrap sendMessage to include the selected model
   const handleSendMessage = useCallback(
     (content) => sendMessage(content, { model: selectedModel }),
@@ -124,15 +146,27 @@ function AgentPage() {
         </div>
         <div className={styles.rightColumn}>
           <div className={styles.tabBar}>
-            {TABS.map(({ id, label }) => (
-              <button
-                key={id}
-                className={`${styles.tab} ${activeTab === id ? styles.tabActive : ''}`}
-                onClick={() => setActiveTab(id)}
-              >
-                {label}
-              </button>
-            ))}
+            {TABS.map(({ id, label }) => {
+              // Issue 22: notebook tab is disabled when no notebook is available.
+              const isNotebookTab = id === 'notebook';
+              const isDisabled = isNotebookTab && !notebookReady;
+              const isActive = activeTab === id;
+              return (
+                <button
+                  key={id}
+                  className={`${styles.tab} ${isActive ? styles.tabActive : ''} ${isDisabled ? styles.tabDisabled : ''} ${isNotebookTab && notebookReady ? styles.tabNotebookReady : ''}`}
+                  onClick={() => !isDisabled && setActiveTab(id)}
+                  disabled={isDisabled}
+                  aria-disabled={isDisabled}
+                  title={isDisabled ? 'No notebook available for this session' : undefined}
+                >
+                  {label}
+                  {isNotebookTab && notebookReady && (
+                    <span className={styles.tabNotebookDot} aria-hidden="true" />
+                  )}
+                </button>
+              );
+            })}
             {status && status !== 'idle' && (
               <span className={styles.statusBadge}>{status}</span>
             )}
@@ -160,8 +194,9 @@ function AgentPage() {
             )}
             {/* M2 fix: role="status" + aria-live="polite" so screen readers
                 announce the badge text when it appears dynamically. aria-atomic
-                ensures the full label is read, not just the changed portion. */}
-            {lastTurnComplete && !isProcessing && (
+                ensures the full label is read, not just the changed portion.
+                Issue 23: mutually exclusive with auto-continue badge during loop. */}
+            {lastTurnComplete && !isProcessing && !autoContinueInfo && (
               <span
                 role="status"
                 aria-live="polite"
@@ -170,6 +205,35 @@ function AgentPage() {
                 data-testid="turn-complete-badge"
               >
                 {`Turn complete (${formatElapsedSeconds(lastTurnComplete.elapsedSeconds)})`}
+              </span>
+            )}
+            {/* Issue 23: auto-continue badge — shown during loop iteration.
+                Mutually exclusive with turn-complete badge.
+                G-INVAR row 13: aria-live="polite". G-INVAR row 14: --accent-teal. */}
+            {autoContinueInfo && !autoContinueCapped && (
+              <span
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                className={`${styles.statusBadge} ${styles.statusBadgeAutoContinue} ${autoContinueBadgeVisible ? styles.statusBadgeAutoContinueVisible : ''}`}
+                data-testid="auto-continue-badge"
+                title={AUTO_CONTINUE_REASON_LABELS[autoContinueInfo.reason] ?? autoContinueInfo.reason}
+              >
+                {`Continuing… (${autoContinueInfo.iter}/${autoContinueInfo.max})`}
+              </span>
+            )}
+            {/* Issue 23: cap badge — shown when max iterations reached.
+                S2 fix: autoContinueCapped is now {iter, max}|null (not boolean)
+                so badge displays the actual dynamic max (e.g. 2× when env-overridden). */}
+            {autoContinueCapped && (
+              <span
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                className={`${styles.statusBadge} ${styles.statusBadgeAutoContinueCapped}`}
+                data-testid="auto-continue-capped-badge"
+              >
+                {`Continued ${autoContinueCapped.max}×; task may be incomplete`}
               </span>
             )}
           </div>

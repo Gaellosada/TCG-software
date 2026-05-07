@@ -5,6 +5,8 @@
  *  - Fenced code blocks (```) with optional language annotation
  *  - Inline code (`)
  *  - Bold (**)
+ *  - Italic (_text_ or *text*)
+ *  - Links ([text](url)) — XSS-safe: only http:// and https:// URLs
  *  - Headings: # h1, ## h2, ### h3
  *  - Unordered lists: - item / * item
  *  - Ordered lists: 1. item
@@ -23,15 +25,43 @@ function escapeHtml(str) {
 }
 
 /**
- * Apply inline formatting (inline code, bold) to a raw (unescaped) string.
- * Escapes HTML first, then applies patterns.
+ * Apply inline formatting (inline code, bold, italic, links) to a raw
+ * (unescaped) string. Escapes HTML first, then applies patterns.
+ *
+ * Precedence (applied in this order, each on the already-transformed string):
+ *  1. Inline code — protects content from further substitution
+ *  2. Links [text](url) — XSS guard: only http:// or https:// URLs
+ *  3. Bold **text**
+ *  4. Italic _text_ or *text* (single delimiters, not inside word boundaries)
  */
 function applyInline(raw) {
   let s = escapeHtml(raw);
-  // Inline code (single backtick, non-greedy)
+  // Inline code (single backtick, non-greedy) — applied first so its content
+  // is not touched by subsequent patterns.
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
+  // Links: [text](url) — RCA-3 fix.
+  // XSS guard: only permit http:// or https:// URLs. The URL is already HTML-
+  // escaped at this point (&amp; etc.), so we check for the raw prefix after
+  // unescaping ampersands in the url part temporarily — simpler: just check
+  // the literal text starts with http:// or https:// (escapeHtml does not
+  // touch these characters).
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+    if (/^https?:\/\//.test(url)) {
+      return `<a href="${url}" rel="noopener noreferrer" target="_blank">${text}</a>`;
+    }
+    // Unsafe URL — render as plain text (keep the markdown syntax stripped).
+    return text;
+  });
+  // Bold (**text**) — before italic so ** is not partially matched by * patterns
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic _text_ — RCA-2 fix. Non-greedy, no nesting.
+  // Word-boundary lookarounds prevent false positives on snake_case identifiers
+  // (e.g. my_var_name must NOT render as my<em>var</em>name).
+  s = s.replace(/(?<!\w)_([^_]+)_(?!\w)/g, '<em>$1</em>');
+  // Italic *text* — single asterisk. Must not match remaining ** (bold already
+  // replaced above, but guard against edge cases with a non-greedy match that
+  // does not start/end with another *).
+  s = s.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
   return s;
 }
 

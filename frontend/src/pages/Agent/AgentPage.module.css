@@ -104,6 +104,40 @@
   border-color: var(--border-accent);
 }
 
+/* Issue 22: notebook tab disabled state — greyed out, not-allowed cursor.
+   Uses --text-muted token (G-INVAR row 14 lineage: same color family). */
+.tabDisabled {
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: auto; /* keep pointer-events so title tooltip works */
+}
+
+.tabDisabled:hover {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+/* Issue 22: notebook tab active (notebook exists) — teal dot indicator.
+   Uses --accent-teal token (G-INVAR row 14). */
+.tabNotebookReady {
+  color: var(--accent-teal, #0d9488);
+  border-color: rgba(13, 148, 136, 0.35);
+  background: rgba(13, 148, 136, 0.06);
+}
+
+.tabNotebookDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-teal, #0d9488);
+  margin-left: 5px;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+
 .statusBadge {
   font-size: 0.7rem;
   font-weight: 500;
@@ -173,6 +207,30 @@
    WCAG AA contrast (2.07:1). At 0.7 computed contrast is ≥4.5:1. */
 .statusBadgeTurnCompleteFaded {
   opacity: 0.7;
+}
+
+/* Issue 23: auto-continue badge — uses --accent-teal for visual lineage with
+   turn-complete badge (G-INVAR row 14). Slightly pulsing to signal activity.
+   Mutually exclusive with turn-complete badge during loop iterations. */
+.statusBadgeAutoContinue {
+  color: var(--accent-teal, #0d9488);
+  background: rgba(13, 148, 136, 0.12);
+  border-color: rgba(13, 148, 136, 0.40);
+  font-variant-numeric: tabular-nums;
+  transition: opacity 200ms ease-in;
+  opacity: 0;
+}
+
+.statusBadgeAutoContinueVisible {
+  opacity: 1;
+}
+
+/* Issue 23: cap badge — warning hue (--accent-warm) signals incompleteness. */
+.statusBadgeAutoContinueCapped {
+  color: var(--accent-warm, #f0a030);
+  background: rgba(240, 160, 48, 0.12);
+  border-color: rgba(240, 160, 48, 0.35);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Process exit error banner — shown when the agent subprocess exits unexpectedly */

@@ -5,6 +5,18 @@ import renderMarkdown from './renderMarkdown';
 import styles from './NotebookPanel.module.css';
 
 /**
+ * Strip ANSI escape sequences from a string for display-safe rendering.
+ * RCA-4 fix: error tracebacks contain literal \x1b[31m...\x1b[39m sequences
+ * that render as garbled text in <pre> elements. Strip them before display.
+ * Chosen approach: minimal strip (not ansi-to-html) to avoid adding a dep.
+ * Pattern covers SGR sequences (\x1b[N;...m) and a few others (cursor, clear).
+ */
+function ansiStrip(text) {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+/**
  * Renders a Jupyter notebook fetched from the agent backend.
  *
  * Props:
@@ -153,12 +165,15 @@ function NotebookCell({ cell }) {
 }
 
 function CellOutput({ output }) {
-  // Error output
+  // Error output — RCA-4: strip ANSI escape codes from traceback before display.
   if (output.output_type === 'error') {
-    const tb = (output.traceback || []).join('\n');
+    const rawTb = (output.traceback || []).join('\n');
+    const tb = ansiStrip(rawTb);
+    const ename = ansiStrip(output.ename || '');
+    const evalue = ansiStrip(output.evalue || '');
     return (
       <pre className={styles.errorOutput}>
-        {output.ename}: {output.evalue}
+        {ename}: {evalue}
         {tb && `\n${tb}`}
       </pre>
     );

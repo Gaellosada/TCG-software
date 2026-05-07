@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import useAgentSession, { formatTokens, formatElapsed } from './useAgentSession';
+import useAgentSession, { formatTokens, formatElapsed, stripDoneMarker } from './useAgentSession';
 
 /* ---------- Minimal WebSocket mock ---------- */
 
@@ -1047,5 +1047,382 @@ describe('useAgentSession', () => {
     // Sending a new message should clear the banner
     act(() => result.current.sendMessage('try again'));
     expect(result.current.processExitInfo).toBeNull();
+  });
+});
+
+/* ============================================================
+   Issue 21 — transformHistory rewrite tests
+   ============================================================ */
+
+describe('transformHistory (Issue 21 — via history event)', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('preserves interleaved text/tool_use ordering on replay', () => {
+    const { result } = renderHook(() => useAgentSession('sess-i21-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // API format: text → tool → text → tool → text (5 blocks)
+    const apiHistory = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Step 1 text.' },
+          { type: 'tool_use', name: 'Bash', input: { cmd: 'ls' } },
+          { type: 'text', text: 'Step 2 text.' },
+          { type: 'tool_use', name: 'Read', input: { file: 'foo.py' } },
+          { type: 'text', text: 'Step 3 text.' },
+        ],
+      },
+    ];
+    act(() => ws._simulateMessage({ type: 'history', messages: apiHistory }));
+
+    const msgs = result.current.messages;
+    // 5 content blocks → 5 display entries (3 text + 2 tool)
+    expect(msgs).toHaveLength(5);
+    expect(msgs[0]).toEqual({ role: 'assistant', content: 'Step 1 text.', streaming: false });
+    expect(msgs[1]).toEqual({ role: 'tool', name: 'Bash', input: { cmd: 'ls' } });
+    expect(msgs[2]).toEqual({ role: 'assistant', content: 'Step 2 text.', streaming: false });
+    expect(msgs[3]).toEqual({ role: 'tool', name: 'Read', input: { file: 'foo.py' } });
+    expect(msgs[4]).toEqual({ role: 'assistant', content: 'Step 3 text.', streaming: false });
+  });
+
+  it('non-adjacent text blocks remain separate display entries', () => {
+    const { result } = renderHook(() => useAgentSession('sess-i21-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    const apiHistory = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Before tool.' },
+          { type: 'tool_use', name: 'Bash', input: {} },
+          { type: 'text', text: 'After tool.' },
+        ],
+      },
+    ];
+    act(() => ws._simulateMessage({ type: 'history', messages: apiHistory }));
+
+    const msgs = result.current.messages;
+    expect(msgs).toHaveLength(3);
+    expect(msgs[0].content).toBe('Before tool.');
+    expect(msgs[1].role).toBe('tool');
+    expect(msgs[2].content).toBe('After tool.');
+  });
+
+  it('adjacent text blocks are coalesced (acceptable behavior)', () => {
+    const { result } = renderHook(() => useAgentSession('sess-i21-3'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // Two adjacent text blocks (no tool_use between them) — may be coalesced.
+    const apiHistory = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'First. ' },
+          { type: 'text', text: 'Second.' },
+        ],
+      },
+    ];
+    act(() => ws._simulateMessage({ type: 'history', messages: apiHistory }));
+
+    const msgs = result.current.messages;
+    // Either 1 or 2 entries is acceptable; content must be present.
+    expect(msgs.length).toBeGreaterThanOrEqual(1);
+    const combinedText = msgs.map((m) => m.content).join('');
+    expect(combinedText).toContain('First.');
+    expect(combinedText).toContain('Second.');
+  });
+
+  it('DONE marker is stripped from displayed text (replay path)', () => {
+    const { result } = renderHook(() => useAgentSession('sess-i21-4'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    const apiHistory = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'All done.\n<<<TURN_HANDOFF_DONE>>>\n' },
+        ],
+      },
+    ];
+    act(() => ws._simulateMessage({ type: 'history', messages: apiHistory }));
+
+    const msgs = result.current.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].content).toBe('All done.\n');
+    expect(msgs[0].content).not.toContain('<<<TURN_HANDOFF_DONE>>>');
+  });
+
+  it('raw stored data is unmodified (persistence keeps marker)', () => {
+    // Verify that the raw API history object passed to transformHistory is not
+    // mutated — the marker strip only creates new display strings.
+    const { result } = renderHook(() => useAgentSession('sess-i21-5'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    const rawMsg = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Done.<<<TURN_HANDOFF_DONE>>>' }],
+    };
+    const apiHistory = [rawMsg];
+    act(() => ws._simulateMessage({ type: 'history', messages: apiHistory }));
+
+    // The display text should have marker stripped.
+    expect(result.current.messages[0].content).not.toContain('<<<TURN_HANDOFF_DONE>>>');
+    // The original object must not be mutated.
+    expect(rawMsg.content[0].text).toContain('<<<TURN_HANDOFF_DONE>>>');
+  });
+});
+
+/* ============================================================
+   stripDoneMarker unit tests
+   ============================================================ */
+
+describe('stripDoneMarker', () => {
+  it('strips marker and trailing newline', () => {
+    expect(stripDoneMarker('All done.\n<<<TURN_HANDOFF_DONE>>>\n'))
+      .toBe('All done.\n');
+  });
+
+  it('strips marker without trailing newline', () => {
+    expect(stripDoneMarker('Done.<<<TURN_HANDOFF_DONE>>>'))
+      .toBe('Done.');
+  });
+
+  it('leaves text unchanged when marker is absent', () => {
+    expect(stripDoneMarker('No marker here.')).toBe('No marker here.');
+  });
+
+  it('strips marker mid-text (multiple occurrences)', () => {
+    const result = stripDoneMarker('A<<<TURN_HANDOFF_DONE>>>B<<<TURN_HANDOFF_DONE>>>C');
+    expect(result).toBe('ABC');
+  });
+
+  it('does not strip adjacent punctuation before marker', () => {
+    expect(stripDoneMarker('Complete!\n<<<TURN_HANDOFF_DONE>>>'))
+      .toBe('Complete!\n');
+  });
+});
+
+/* ============================================================
+   DONE marker stripping in live token stream (message_complete path)
+   ============================================================ */
+
+describe('DONE marker stripping — live path (message_complete)', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('strips marker from streaming bubble on message_complete', () => {
+    const { result } = renderHook(() => useAgentSession('sess-strip-live-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() => ws._simulateMessage({ type: 'token', content: 'Work done.' }));
+    act(() => ws._simulateMessage({ type: 'token', content: '<<<TURN_HANDOFF_DONE>>>' }));
+    act(() => ws._simulateMessage({ type: 'message_complete' }));
+
+    const msgs = result.current.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].content).toBe('Work done.');
+    expect(msgs[0].streaming).toBe(false);
+    expect(msgs[0].content).not.toContain('<<<TURN_HANDOFF_DONE>>>');
+  });
+});
+
+/* ============================================================
+   Issue 23 — auto-continue UX tests
+   ============================================================ */
+
+describe('auto_continue events (Issue 23)', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('auto_continue event sets autoContinueInfo', () => {
+    const { result } = renderHook(() => useAgentSession('sess-ac-1'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    expect(result.current.autoContinueInfo).toBeNull();
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'auto_continue',
+        session_id: 'sess-ac-1',
+        iter: 1,
+        max: 5,
+        reason: 'missing_done_marker',
+        timestamp: Date.now() / 1000,
+      }),
+    );
+
+    expect(result.current.autoContinueInfo).toEqual({
+      iter: 1,
+      max: 5,
+      reason: 'missing_done_marker',
+    });
+  });
+
+  it('auto_continue_capped event sets autoContinueCapped to {iter, max} (S2 fix)', () => {
+    const { result } = renderHook(() => useAgentSession('sess-ac-2'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // S2 fix: initial state is null (not false)
+    expect(result.current.autoContinueCapped).toBeNull();
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'auto_continue_capped',
+        session_id: 'sess-ac-2',
+        iter: 2,
+        max: 2,
+        reason: 'cap_reached',
+        timestamp: Date.now() / 1000,
+      }),
+    );
+
+    // S2 fix: autoContinueCapped is now {iter, max} not boolean true
+    expect(result.current.autoContinueCapped).toEqual({ iter: 2, max: 2 });
+    // Capped event clears autoContinueInfo
+    expect(result.current.autoContinueInfo).toBeNull();
+  });
+
+  it('user message clears autoContinueInfo and autoContinueCapped', () => {
+    const { result } = renderHook(() => useAgentSession('sess-ac-3'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    // Set up capped state
+    act(() =>
+      ws._simulateMessage({
+        type: 'auto_continue',
+        session_id: 'sess-ac-3',
+        iter: 2,
+        max: 5,
+        reason: 'unmet_intent',
+        timestamp: Date.now() / 1000,
+      }),
+    );
+    act(() =>
+      ws._simulateMessage({
+        type: 'auto_continue_capped',
+        session_id: 'sess-ac-3',
+        iter: 5,
+        max: 5,
+        reason: 'cap_reached',
+        timestamp: Date.now() / 1000,
+      }),
+    );
+    // S2 fix: autoContinueCapped is {iter, max} not boolean
+    expect(result.current.autoContinueCapped).toEqual({ iter: 5, max: 5 });
+
+    // User sends a new message → both should clear
+    act(() => result.current.sendMessage('try again'));
+    expect(result.current.autoContinueInfo).toBeNull();
+    expect(result.current.autoContinueCapped).toBeNull();
+  });
+
+  it('turn_complete after auto_continue clears autoContinueInfo', () => {
+    const { result } = renderHook(() => useAgentSession('sess-ac-4'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'auto_continue',
+        session_id: 'sess-ac-4',
+        iter: 1,
+        max: 5,
+        reason: 'missing_done_marker',
+        timestamp: Date.now() / 1000,
+      }),
+    );
+    expect(result.current.autoContinueInfo).not.toBeNull();
+
+    // Simulate the continuation turn completing
+    act(() =>
+      ws._simulateMessage({
+        type: 'turn_complete',
+        session_id: 'sess-ac-4',
+        elapsed_seconds: 5,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    // turn_complete after autoContinueInfo was set should clear it
+    expect(result.current.autoContinueInfo).toBeNull();
+  });
+
+  it('auto_continue sets correct reason field', () => {
+    const { result } = renderHook(() => useAgentSession('sess-ac-5'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'auto_continue',
+        session_id: 'sess-ac-5',
+        iter: 2,
+        max: 5,
+        reason: 'unmet_intent',
+        timestamp: Date.now() / 1000,
+      }),
+    );
+
+    expect(result.current.autoContinueInfo.reason).toBe('unmet_intent');
+    expect(result.current.autoContinueInfo.iter).toBe(2);
+    expect(result.current.autoContinueInfo.max).toBe(5);
+  });
+
+  it('interrupt (interruptAgent) clears auto-continue state', () => {
+    const { result } = renderHook(() => useAgentSession('sess-ac-6'));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws._simulateOpen());
+
+    act(() =>
+      ws._simulateMessage({
+        type: 'auto_continue',
+        session_id: 'sess-ac-6',
+        iter: 1,
+        max: 5,
+        reason: 'missing_done_marker',
+        timestamp: Date.now() / 1000,
+      }),
+    );
+    expect(result.current.autoContinueInfo).not.toBeNull();
+
+    act(() => result.current.interruptAgent('stop'));
+    expect(result.current.autoContinueInfo).toBeNull();
+    // S2 fix: cleared to null (not false)
+    expect(result.current.autoContinueCapped).toBeNull();
   });
 });

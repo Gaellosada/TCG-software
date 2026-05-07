@@ -153,11 +153,17 @@ test.describe('Agent page', () => {
     // Chat content visible (empty state or textarea)
     await expect(page.getByText('Start a conversation...')).toBeVisible();
 
+    // S1 fix (Issue 22): notebook tab is now disabled until a session with a
+    // notebook is selected. Select a session first so the probe resolves (mock
+    // returns 200 for /notebook → notebookReady=true → tab enabled).
+    await page.getByText('SPX SMA Backtest').click();
+    await expect(notebookTab).toBeEnabled({ timeout: 10000 });
+
     // Switch to Notebook tab
     await notebookTab.click();
 
-    // With no session selected, notebook shows "Select a session to view the notebook."
-    await expect(page.getByText('Select a session to view the notebook.')).toBeVisible();
+    // Notebook panel is visible (empty notebook — cells:[]); header shows Refresh button
+    await expect(page.getByRole('button', { name: /refresh/i })).toBeVisible({ timeout: 10000 });
 
     // Switch back to Chat
     await chatTab.click();
@@ -196,13 +202,12 @@ test.describe('Agent page', () => {
   test('notebook panel shows select-session state when no session', async ({ page }) => {
     await page.goto(`${BASE}/agent`);
 
-    // Switch to notebook tab without selecting a session
+    // S1 fix (Issue 22): notebook tab is disabled when no session is selected.
+    // The tab carries a tooltip "No notebook available" to convey the disabled state.
+    // We verify the disabled affordance rather than clicking a disabled button.
     const notebookTab = page.getByRole('button', { name: /notebook/i });
-    await notebookTab.click();
-
-    // Should show "Select a session to view the notebook." or "Pending..."
-    const selectMsg = page.getByText(/select a session|pending/i);
-    await expect(selectMsg).toBeVisible();
+    await expect(notebookTab).toBeDisabled();
+    await expect(notebookTab).toHaveAttribute('aria-disabled', 'true');
   });
 
   test('sidebar navigation structure', async ({ page }) => {
