@@ -297,29 +297,19 @@ function Block({
       aria-label={section === 'entries' ? `Entry block ${blockIdx + 1} (${block.id || ''})` : undefined}
     >
       {!isFirst && <div className={styles.blockOrLabel}>OR</div>}
-      <div className={styles.blockEnableRow}>
-        <input
-          type="checkbox"
-          className={styles.blockEnableToggle}
-          checked={enabled}
-          onChange={handleToggleEnabled}
-          aria-label="Enable block"
-          data-testid={`block-enable-${blockIdx}`}
-        />
-        <div className={styles.blockHeaderSpacer}>
-          <BlockHeader
-            block={block}
-            section={section}
-            inputs={inputs}
-            entryBlocks={entryBlocks}
-            onChange={onUpdateBlock}
-            onDelete={onRemoveBlock}
-            blockIndex={blockIdx + 1}
-            status={runnable ? 'ok' : 'warn'}
-            blockIdx={blockIdx}
-          />
-        </div>
-      </div>
+      <BlockHeader
+        block={block}
+        section={section}
+        inputs={inputs}
+        entryBlocks={entryBlocks}
+        onChange={onUpdateBlock}
+        onDelete={onRemoveBlock}
+        blockIndex={blockIdx + 1}
+        status={runnable ? 'ok' : 'warn'}
+        blockIdx={blockIdx}
+        enabled={enabled}
+        onToggleEnabled={handleToggleEnabled}
+      />
       {conditions.length === 0 ? (
         <div className={styles.blockEmpty}>
           Empty block — add a condition below.

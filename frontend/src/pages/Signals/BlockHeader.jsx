@@ -22,7 +22,7 @@ import styles from './Signals.module.css';
  *   status      {string}   'ok' | 'warn' (optional)
  *   blockIdx    {number}   0-based index for data-testid (optional)
  */
-function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, blockIndex, status, blockIdx }) {
+function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, blockIndex, status, blockIdx, enabled, onToggleEnabled }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
   // Local draft for the weight input so the user can type freely before blur
@@ -141,6 +141,17 @@ function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, 
             ✎
           </button>
         </>
+      )}
+
+      {typeof onToggleEnabled === 'function' && (
+        <input
+          type="checkbox"
+          className={styles.blockEnableToggle}
+          checked={enabled !== false}
+          onChange={onToggleEnabled}
+          aria-label="Enable block"
+          data-testid={`block-enable-${blockIdx}`}
+        />
       )}
 
       <span className={styles.blockDirectionLabel}>

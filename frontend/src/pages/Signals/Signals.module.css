@@ -336,17 +336,6 @@
   border-color: var(--border-accent, var(--accent, #2563eb));
 }
 
-.blockEnableRow {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.blockHeaderSpacer {
-  flex: 1;
-  min-width: 0;
-}
-
 .blockEnableToggle {
   flex-shrink: 0;
   width: calc(var(--signal-control-height) / 2);
