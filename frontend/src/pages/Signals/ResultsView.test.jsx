@@ -22,7 +22,15 @@ vi.mock('../../components/Chart', () => {
   return { default: ChartStub };
 });
 
+// Stub the Statistics fetch so we don't hit the network. The
+// component itself still mounts and renders — we just want to observe
+// the props it was given.
+vi.mock('../../api/statistics', () => ({
+  fetchStatistics: vi.fn(() => new Promise(() => {})),
+}));
+
 import ResultsView from './ResultsView';
+import { fetchStatistics } from '../../api/statistics';
 
 function makeResult(overrides = {}) {
   return {
@@ -51,6 +59,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   chartCalls.length = 0;
+  vi.mocked(fetchStatistics).mockClear();
   consoleErrorSpy.mockRestore();
 });
 
@@ -208,6 +217,60 @@ describe('<ResultsView>', () => {
       // With no valid marker indices, the event-marker trace is dropped.
       const markers = eventMarkerTrace(chartCalls[0].traces);
       expect(markers).toBeUndefined();
+    });
+  });
+
+  // --- Statistics integration ------------------------------------------
+  describe('Statistics integration', () => {
+    it('mounts the Statistics panel directly below the chart when there is data', () => {
+      render(<ResultsView result={makeResult()} loading={false} error={null} />);
+      expect(screen.getByTestId('signal-statistics')).toBeDefined();
+      // Statistics renders a section titled "Statistics" — proves the
+      // component mounted, not just a placeholder wrapper.
+      expect(screen.getByText('Statistics')).toBeDefined();
+    });
+
+    it('does NOT mount Statistics in the empty/loading/error states', () => {
+      const { rerender } = render(
+        <ResultsView result={null} loading={false} error={null} />,
+      );
+      expect(screen.queryByTestId('signal-statistics')).toBeNull();
+
+      rerender(<ResultsView result={null} loading error={null} />);
+      expect(screen.queryByTestId('signal-statistics')).toBeNull();
+
+      rerender(
+        <ResultsView
+          result={null}
+          loading={false}
+          error={{ error_type: 'validation', message: 'bad' }}
+        />,
+      );
+      expect(screen.queryByTestId('signal-statistics')).toBeNull();
+    });
+
+    it('passes YYYYMMDD-integer dates and a capital-scaled equity curve to fetchStatistics', () => {
+      // timestamps in makeResult() are: 2020-01-02, 2020-01-03, 2020-01-06 UTC.
+      // realized_pnl[0] = [0, 1, 2] → equity = capital + v*capital
+      render(
+        <ResultsView
+          result={makeResult()}
+          loading={false}
+          error={null}
+          capital={1000}
+        />,
+      );
+      expect(fetchStatistics).toHaveBeenCalled();
+      const args = vi.mocked(fetchStatistics).mock.calls[0][0];
+      expect(args.dates).toEqual([20200102, 20200103, 20200106]);
+      expect(args.equity).toEqual([1000, 2000, 3000]);
+      expect(args.riskFreeRate).toBeCloseTo(0.04, 6);
+    });
+
+    it('does not mount Statistics when realized_pnl is absent', () => {
+      const result = makeResult({ realized_pnl: undefined });
+      render(<ResultsView result={result} loading={false} error={null} />);
+      expect(screen.queryByTestId('signal-statistics')).toBeNull();
     });
   });
 

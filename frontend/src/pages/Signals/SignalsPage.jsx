@@ -351,6 +351,7 @@ function SignalsPage() {
             capital={capital}
             noRepeat={selectedSignal?.settings?.dont_repeat ?? true}
             signalRules={selectedSignal?.rules ?? null}
+            signalId={selectedSignal?.id ?? null}
           />
         </Card>
       </div>

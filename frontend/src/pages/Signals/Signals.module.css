@@ -1147,11 +1147,15 @@
   flex: 1;
   min-height: 0;
   gap: 8px;
+  /* Statistics panel mounts below the unified chart; allow vertical
+     scroll so the stats are reachable when the row min-height isn't
+     enough to fit both. */
+  overflow-y: auto;
 }
 
 .resultsPlotUnified {
   flex: 1;
-  min-height: 0;
+  min-height: 400px;
   position: relative;
 }
 

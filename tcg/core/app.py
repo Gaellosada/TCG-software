@@ -15,6 +15,7 @@ from tcg.core.api.indicators import router as indicators_router
 from tcg.core.api.options import router as options_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
+from tcg.core.api.statistics import router as statistics_router
 from tcg.core.config import load_config
 from tcg.data import create_services
 from tcg.types.errors import TCGError
@@ -65,6 +66,7 @@ def create_app() -> FastAPI:
     app.include_router(indicators_router)
     app.include_router(signals_router)
     app.include_router(options_router)
+    app.include_router(statistics_router)
     return app
 
 
