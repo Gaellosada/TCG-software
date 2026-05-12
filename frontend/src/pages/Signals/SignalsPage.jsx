@@ -4,6 +4,7 @@ import BlockEditor from './BlockEditor';
 import ParamsPanel from './ParamsPanel';
 import ResultsView from './ResultsView';
 import Statistics from '../../components/Statistics';
+import TradeLog from './TradeLog';
 import { buildSignalStatsInputs } from './signalStatsInputs';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
@@ -274,6 +275,19 @@ function SignalsPage() {
     ? `${selectedSignal?.id ?? 'signal'}|${capital}|${statsInputs.dates.length}|${statsInputs.dates[0]}|${statsInputs.dates[statsInputs.dates.length - 1]}`
     : null;
 
+  // Map exit block id → description so the Trades panel can render the
+  // reason tooltip without threading the full rules object through.
+  const exitDescriptions = useMemo(() => {
+    const out = {};
+    const exits = selectedSignal?.rules?.exits;
+    if (Array.isArray(exits)) {
+      for (const b of exits) {
+        if (b && b.id) out[b.id] = typeof b.description === 'string' ? b.description : '';
+      }
+    }
+    return out;
+  }, [selectedSignal]);
+
   return (
     <div className={styles.page} style={{ '--results-row-min': `${resultsRowMin}px` }}>
       <div className={styles.listPanel}>
@@ -370,6 +384,16 @@ function SignalsPage() {
             key={statsKey}
             dates={statsInputs.dates}
             equity={statsInputs.equity}
+          />
+        </div>
+      )}
+      {lastResult && (
+        <div className={styles.tradesPanel}>
+          <TradeLog
+            trades={Array.isArray(lastResult.trades) ? lastResult.trades : []}
+            timestamps={Array.isArray(lastResult.timestamps) ? lastResult.timestamps : []}
+            positions={Array.isArray(lastResult.positions) ? lastResult.positions : []}
+            exitDescriptions={exitDescriptions}
           />
         </div>
       )}

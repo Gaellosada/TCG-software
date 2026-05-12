@@ -31,6 +31,9 @@ vi.mock('./ResultsView', () => ({
 vi.mock('../../components/Statistics', () => ({
   default: () => <div data-testid="statistics-stub" />,
 }));
+vi.mock('./TradeLog', () => ({
+  default: () => <div data-testid="trade-log-stub" />,
+}));
 vi.mock('../../api/statistics', () => ({
   fetchStatistics: vi.fn(),
 }));
@@ -66,5 +69,12 @@ describe('<SignalsPage> — Statistics wiring', () => {
     // requires a successful run. Initial state must be empty.
     expect(screen.queryByTestId('signal-statistics')).toBeNull();
     expect(screen.getByTestId('results-view-stub')).toBeTruthy();
+  });
+
+  it('does NOT mount the TradeLog when lastResult is null', async () => {
+    await act(async () => {
+      render(<SignalsPage />);
+    });
+    expect(screen.queryByTestId('trade-log-stub')).toBeNull();
   });
 });
