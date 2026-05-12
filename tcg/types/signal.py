@@ -249,6 +249,29 @@ class Block:
     id: str = ""
     name: str = ""
     target_entry_block_name: str | None = None
+    enabled: bool = True
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class Trade:
+    """A single round-trip (or still-open) trade.
+
+    Derived from the engine's entry/exit latch pairing at end of run. One
+    record per latch-open event on an enabled entry block; ``exit_*`` and
+    ``close_bar`` are ``None`` when the position is still open at the
+    last bar.
+    """
+
+    input_id: str
+    entry_block_id: str
+    entry_block_name: str
+    exit_block_id: str | None
+    exit_block_name: str | None
+    open_bar: int
+    close_bar: int | None
+    direction: str
+    signed_weight: float
 
 
 @dataclass(frozen=True)
@@ -292,4 +315,5 @@ __all__ = [
     "RollingCondition",
     "Signal",
     "SignalRules",
+    "Trade",
 ]

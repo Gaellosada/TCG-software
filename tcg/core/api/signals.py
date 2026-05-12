@@ -182,6 +182,8 @@ class _BlockIn(BaseModel):
     input_id: str = ""
     weight: float = 0.0
     target_entry_block_name: str | None = None
+    enabled: bool = True
+    description: str = ""
     # DEPRECATED (v4): kept so Pydantic does not silently drop it; API
     # validation rejects any request that sets this field. Remove once
     # no legacy clients remain (target: v5 or 2026-Q3).
@@ -481,6 +483,8 @@ def _parse_blocks(
                 input_id=iid,
                 weight=weight,
                 target_entry_block_name=tgt_name,
+                enabled=bool(blk.enabled),
+                description=str(blk.description or ""),
             )
         )
     return tuple(out)
@@ -897,12 +901,28 @@ async def compute_signal(
             entry["params_override"] = ind.params_override
         indicators_out.append(entry)
 
+    trades_out: list[dict] = [
+        {
+            "input_id": tr.input_id,
+            "entry_block_id": tr.entry_block_id,
+            "entry_block_name": tr.entry_block_name,
+            "exit_block_id": tr.exit_block_id,
+            "exit_block_name": tr.exit_block_name,
+            "open_bar": tr.open_bar,
+            "close_bar": tr.close_bar,
+            "direction": tr.direction,
+            "signed_weight": float(tr.signed_weight),
+        }
+        for tr in result.trades
+    ]
+
     return {
         "timestamps": timestamps,
         "positions": positions_out,
         "realized_pnl": realized_pnl_out,
         "events": events_out,
         "indicators": indicators_out,
+        "trades": trades_out,
         "clipped": bool(result.clipped),
         "diagnostics": dict(result.diagnostics),
     }

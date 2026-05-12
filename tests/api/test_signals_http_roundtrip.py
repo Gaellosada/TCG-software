@@ -401,3 +401,152 @@ async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
     assert pnl[0] == 0.0
 
     assert data["indicators"] == []
+
+
+# ---------------------------------------------------------------------------
+# enabled / description block-schema additions and derived trades[] payload
+# ---------------------------------------------------------------------------
+
+
+async def test_http_roundtrip_block_description_and_enabled_default(
+    client: AsyncClient,
+):
+    """A block omitting ``enabled`` and ``description`` hydrates to
+    ``True``/``""`` and runs identically. The description echo is not
+    required in the response — only that the request body is accepted."""
+    body = {
+        "spec": {
+            "id": "desc-demo",
+            "name": "desc",
+            "inputs": [
+                {
+                    "id": "X",
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "INDEX",
+                        "instrument_id": "SPX",
+                    },
+                }
+            ],
+            "rules": {
+                "entries": [
+                    {
+                        "id": "E1",
+                        "name": "EntryE1",
+                        "input_id": "X",
+                        "weight": 100.0,
+                        "description": "buy on breakout — arbitrary text 漢字",
+                        "conditions": [
+                            {
+                                "op": "gt",
+                                "lhs": {
+                                    "kind": "instrument",
+                                    "input_id": "X",
+                                    "field": "close",
+                                },
+                                "rhs": {"kind": "constant", "value": 0.0},
+                            }
+                        ],
+                    }
+                ],
+                "exits": [],
+            },
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+    resp = await client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+
+
+async def test_http_roundtrip_disabled_block_equivalent_to_deletion(
+    latch_client: AsyncClient,
+):
+    """A signal with a disabled second entry must produce numerically
+    identical position values to the same signal with that block removed."""
+
+    def _body(include_disabled: bool) -> dict:
+        entries = [_eq_block("A", "X", 60.0, 11.0, name="EntryA")]
+        if include_disabled:
+            blk = _eq_block("B", "X", -40.0, 44.0, name="EntryB")
+            blk["enabled"] = False
+            entries.append(blk)
+        return {
+            "spec": {
+                "id": "enabled-demo",
+                "name": "enabled",
+                "inputs": [
+                    {
+                        "id": "X",
+                        "instrument": {
+                            "type": "spot",
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        },
+                    }
+                ],
+                "rules": {"entries": entries, "exits": []},
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+
+    r_with = await latch_client.post("/api/signals/compute", json=_body(True))
+    r_without = await latch_client.post("/api/signals/compute", json=_body(False))
+    assert r_with.status_code == 200, r_with.text
+    assert r_without.status_code == 200, r_without.text
+    assert r_with.json()["positions"][0]["values"] == (
+        r_without.json()["positions"][0]["values"]
+    )
+    assert r_with.json()["trades"] == r_without.json()["trades"]
+
+
+async def test_http_roundtrip_trades_payload_shape(latch_client: AsyncClient):
+    """One entry that fires at t=1 and t=5, with an exit that targets it
+    at close=33 (t=3). Expected: trade #1 opens t=1 closes t=3; trade #2
+    opens t=5 and remains open at end."""
+    body = {
+        "spec": {
+            "id": "trades-demo",
+            "name": "trades",
+            "inputs": [
+                {
+                    "id": "X",
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "INDEX",
+                        "instrument_id": "SPX",
+                    },
+                }
+            ],
+            "rules": {
+                "entries": [_eq_block("A", "X", 60.0, 11.0, name="EntryA")],
+                "exits": [_eq_block("XA", "X", 0.0, 33.0, target="EntryA")],
+            },
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+    resp = await latch_client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    trades = data["trades"]
+    assert len(trades) == 2
+
+    t0, t1 = trades
+    assert t0["entry_block_id"] == "A"
+    assert t0["entry_block_name"] == "EntryA"
+    assert t0["exit_block_id"] == "XA"
+    assert t0["open_bar"] == 1
+    assert t0["close_bar"] == 3
+    assert t0["direction"] == "long"
+    assert t0["signed_weight"] == pytest.approx(0.6)
+    assert t0["input_id"] == "X"
+
+    assert t1["entry_block_id"] == "A"
+    assert t1["exit_block_id"] is None
+    assert t1["exit_block_name"] is None
+    assert t1["open_bar"] == 5
+    assert t1["close_bar"] is None
+    assert t1["direction"] == "long"
+    assert t1["signed_weight"] == pytest.approx(0.6)

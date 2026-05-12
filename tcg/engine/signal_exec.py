@@ -79,6 +79,7 @@ from tcg.types.signal import (
     Operand,
     RollingCondition,
     Signal,
+    Trade,
 )
 
 
@@ -557,7 +558,9 @@ def _eval_condition(
 
 def _usable_entry(block: Block, inputs: dict[str, Input]) -> bool:
     """Entry block is usable iff it has id + input_id + conditions +
-    signed weight in (−100..0) ∪ (0..100]."""
+    signed weight in (−100..0) ∪ (0..100] and is enabled."""
+    if not block.enabled:
+        return False
     if not block.id:
         return False
     if not block.conditions:
@@ -574,11 +577,13 @@ def _usable_entry(block: Block, inputs: dict[str, Input]) -> bool:
 
 def _usable_exit(block: Block, inputs: dict[str, Input], entry_names: set[str]) -> bool:
     """Exit block is usable iff it has id + conditions AND
-    target_entry_block_name references a usable entry's name.
+    target_entry_block_name references a usable entry's name AND is enabled.
 
     Exit blocks do not carry their own ``input_id``; the operating input
     is derived from the target entry at execution time.
     """
+    if not block.enabled:
+        return False
     if not block.id:
         return False
     if not block.conditions:
@@ -689,6 +694,7 @@ class SignalEvalResult:
     events: tuple[BlockEvent, ...]
     indicator_series: tuple[IndicatorSeriesResult, ...]
     diagnostics: dict[str, object]
+    trades: tuple[Trade, ...] = ()
 
 
 async def evaluate_signal(
@@ -847,6 +853,15 @@ async def evaluate_signal(
     exit_fired: dict[str, list[int]] = {b.id: [] for b in exit_blocks}
     exit_latched: dict[str, list[int]] = {b.id: [] for b in exit_blocks}
 
+    # Per-entry trade ledger — parallel lists keyed by entry block id.
+    # ``opens[i]`` pairs with ``closes[i]`` (when present) to form one
+    # trade. ``closes[i]`` records (close_bar, exit_block_id) for the
+    # exit that actually cleared this latch open.
+    trade_opens: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
+    trade_closes: dict[str, list[tuple[int, str]]] = {
+        b.id: [] for b in entry_blocks
+    }
+
     for t in range(T):
         # --- (a) record fired-indices ---
         for b in entry_blocks:
@@ -866,6 +881,7 @@ async def evaluate_signal(
             if target_entry and latched.get(target_entry.id, False):
                 latched[target_entry.id] = False
                 exit_latched[b.id].append(t)
+                trade_closes[target_entry.id].append((t, b.id))
 
         # --- (c) entry pass: declaration order; leverage allowed ---
         for b in entry_blocks:
@@ -875,6 +891,7 @@ async def evaluate_signal(
                 continue
             latched[b.id] = True
             entry_latched[b.id].append(t)
+            trade_opens[b.id].append(t)
 
         # --- (d) emit per-input net position at t ---
         for rid in referenced_ids:
@@ -996,6 +1013,49 @@ async def evaluate_signal(
         "inputs": len(referenced_ids),
     }
 
+    # ── 9. Derive trades by pairing each entry latch-open with its
+    #       matching close (same entry, k-th open ↔ k-th close).
+    exit_by_id: dict[str, Block] = {b.id: b for b in exit_blocks}
+    trades: list[Trade] = []
+    for b in entry_blocks:
+        opens = trade_opens[b.id]
+        closes = trade_closes[b.id]
+        direction = "long" if b.weight > 0 else "short"
+        sw = signed_weight[b.id]
+        for k, open_bar in enumerate(opens):
+            if k < len(closes):
+                close_bar, exit_id = closes[k]
+                exit_blk = exit_by_id.get(exit_id)
+                exit_name = exit_blk.name if exit_blk is not None else ""
+                trades.append(
+                    Trade(
+                        input_id=b.input_id,
+                        entry_block_id=b.id,
+                        entry_block_name=b.name,
+                        exit_block_id=exit_id,
+                        exit_block_name=exit_name,
+                        open_bar=int(open_bar),
+                        close_bar=int(close_bar),
+                        direction=direction,
+                        signed_weight=float(sw),
+                    )
+                )
+            else:
+                trades.append(
+                    Trade(
+                        input_id=b.input_id,
+                        entry_block_id=b.id,
+                        entry_block_name=b.name,
+                        exit_block_id=None,
+                        exit_block_name=None,
+                        open_bar=int(open_bar),
+                        close_bar=None,
+                        direction=direction,
+                        signed_weight=float(sw),
+                    )
+                )
+    trades.sort(key=lambda tr: (tr.open_bar, tr.entry_block_id))
+
     return SignalEvalResult(
         index=index,
         positions=tuple(results),
@@ -1003,6 +1063,7 @@ async def evaluate_signal(
         events=tuple(events),
         indicator_series=tuple(indicator_series),
         diagnostics=diagnostics,
+        trades=tuple(trades),
     )
 
 
