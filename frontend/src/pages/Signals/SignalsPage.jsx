@@ -332,8 +332,6 @@ function SignalsPage() {
           runDisabledReason={runDisabledReason}
           capital={capital}
           onCapitalChange={setCapital}
-          noRepeat={selectedSignal?.settings?.dont_repeat ?? true}
-          onNoRepeatChange={handleDontRepeatChange}
         />
       </div>
       <div className={styles.chartPanel}>

@@ -46,7 +46,13 @@ import { newBlockId, MAX_ABS_WEIGHT } from './storage';
  * @param {'entries'|'exits'} section
  */
 export function defaultBlock(section = 'entries') {
-  const base = { id: newBlockId(), name: '', conditions: [] };
+  const base = {
+    id: newBlockId(),
+    name: '',
+    conditions: [],
+    enabled: true,
+    description: '',
+  };
   if (section === 'exits') {
     base.target_entry_block_name = '';
   } else {

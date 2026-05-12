@@ -134,6 +134,8 @@ describe('Signals storage (v5)', () => {
                     rhs: { kind: 'constant', value: 0 },
                   },
                 ],
+                enabled: true,
+                description: '',
               },
             ],
             exits: [
@@ -148,6 +150,8 @@ describe('Signals storage (v5)', () => {
                     rhs: { kind: 'constant', value: 100 },
                   },
                 ],
+                enabled: true,
+                description: '',
               },
             ],
           },
@@ -239,7 +243,7 @@ describe('Signals storage (v5)', () => {
     expect(out.signals[0].inputs[0].instrument).toBe(null);
   });
 
-  it('preserves a stored dont_repeat=false even when the default is true', () => {
+  it('coerces a stored dont_repeat=false to true on load', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [{
@@ -248,7 +252,7 @@ describe('Signals storage (v5)', () => {
       }],
     }));
     const out = loadState();
-    expect(out.signals[0].settings).toEqual({ dont_repeat: false });
+    expect(out.signals[0].settings).toEqual({ dont_repeat: true });
   });
 
   it('applies dont_repeat=true default when settings are missing', () => {
@@ -549,6 +553,82 @@ describe('Signals storage (v5)', () => {
     const ex = out.signals[0].rules.exits[0];
     expect(ex.target_entry_block_name).toBe('Momentum');
     expect('target_entry_block_id' in ex).toBe(false);
+  });
+
+  it('hydrates enabled to true when field is missing from a block', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 's1', inputs: [],
+        rules: {
+          entries: [{ id: 'b1', input_id: 'X', weight: 50, conditions: [] }],
+          exits: [],
+        },
+      }],
+    }));
+    const block = loadState().signals[0].rules.entries[0];
+    expect(block.enabled).toBe(true);
+  });
+
+  it('preserves enabled=false when explicitly stored', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 's1', inputs: [],
+        rules: {
+          entries: [{ id: 'b1', input_id: 'X', weight: 50, conditions: [], enabled: false }],
+          exits: [],
+        },
+      }],
+    }));
+    const block = loadState().signals[0].rules.entries[0];
+    expect(block.enabled).toBe(false);
+  });
+
+  it('hydrates description to "" when field is missing from a block', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 's1', inputs: [],
+        rules: {
+          entries: [{ id: 'b1', input_id: 'X', weight: 50, conditions: [] }],
+          exits: [],
+        },
+      }],
+    }));
+    const block = loadState().signals[0].rules.entries[0];
+    expect(block.description).toBe('');
+  });
+
+  it('preserves a non-empty description string when stored', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 's1', inputs: [],
+        rules: {
+          entries: [{ id: 'b1', input_id: 'X', weight: 50, conditions: [], description: 'Fires on RSI dip' }],
+          exits: [],
+        },
+      }],
+    }));
+    const block = loadState().signals[0].rules.entries[0];
+    expect(block.description).toBe('Fires on RSI dip');
+  });
+
+  it('hydrates enabled and description on exit blocks too', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 's1', inputs: [],
+        rules: {
+          entries: [],
+          exits: [{ id: 'x1', target_entry_block_name: 'Alpha', conditions: [] }],
+        },
+      }],
+    }));
+    const exit = loadState().signals[0].rules.exits[0];
+    expect(exit.enabled).toBe(true);
+    expect(exit.description).toBe('');
   });
 
   it('tolerates setItem throwing on save', () => {
