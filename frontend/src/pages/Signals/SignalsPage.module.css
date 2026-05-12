@@ -15,7 +15,7 @@
    * vertical stack (top: inputs + realized P&L; bottom: inputs +
    * indicators + entry/exit markers). Was ``minmax(486px, 2.7fr)``.
    */
-  grid-template-rows: minmax(504px, 1fr) var(--results-row-min, 972px) auto;
+  grid-template-rows: minmax(504px, 1fr) var(--results-row-min, 972px) auto auto;
   min-height: 100%;
   position: relative;
 }
@@ -100,6 +100,12 @@
   grid-column: 1 / -1;
   grid-row: 3;
   padding: 16px;
+}
+
+.tradesPanel {
+  grid-column: 1 / -1;
+  grid-row: 4;
+  padding: 0 16px 16px;
 }
 
 .resultsCard {
