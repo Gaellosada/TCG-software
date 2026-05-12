@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import PillToggle from '../PillToggle';
 import styles from './TradeLog.module.css';
 
 /**
@@ -117,27 +118,16 @@ function TradeLog({
           <span className={styles.title}>Trades</span>
           <span className={styles.count} data-testid="trade-log-count">({count})</span>
         </button>
-        <div
-          className={styles.pnlToggle}
-          onClick={(e) => e.stopPropagation()}
-          data-testid="pnl-mode-toggle"
-        >
-          <button
-            type="button"
-            className={`${styles.pnlPill} ${pnlMode === 'realised' ? styles.pnlPillActive : ''}`}
-            onClick={() => setPnlMode('realised')}
-            data-testid="pnl-pill-realised"
-          >
-            Realised
-          </button>
-          <button
-            type="button"
-            className={`${styles.pnlPill} ${pnlMode === 'log' ? styles.pnlPillActive : ''}`}
-            onClick={() => setPnlMode('log')}
-            data-testid="pnl-pill-log"
-          >
-            Log
-          </button>
+        <div data-testid="pnl-mode-toggle">
+          <PillToggle
+            options={[
+              { value: 'realised', label: 'Realised' },
+              { value: 'log', label: 'Log' },
+            ]}
+            value={pnlMode}
+            onChange={setPnlMode}
+            ariaLabel="P&L display mode"
+          />
         </div>
       </div>
       {open && (

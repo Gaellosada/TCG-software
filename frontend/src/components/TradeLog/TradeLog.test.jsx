@@ -249,13 +249,13 @@ describe('<TradeLog>', () => {
     expect(rows[0].textContent).toContain('+10.00%');
 
     // Switch to Log
-    fireEvent.click(screen.getByTestId('pnl-pill-log'));
+    fireEvent.click(screen.getByRole('button', { name: 'Log' }));
     expect(screen.getByTestId('pnl-col-header').textContent).toBe('Log P&L');
     // ln(110/100) ≈ 0.09531, *100 = 9.531 → "+9.53%"
     expect(rows[0].textContent).toContain('+9.53%');
 
     // Switch back to Realised
-    fireEvent.click(screen.getByTestId('pnl-pill-realised'));
+    fireEvent.click(screen.getByRole('button', { name: 'Realised' }));
     expect(screen.getByTestId('pnl-col-header').textContent).toBe('Realised P&L');
     expect(rows[0].textContent).toContain('+10.00%');
   });
@@ -266,9 +266,9 @@ describe('<TradeLog>', () => {
     expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
 
     // Click one of the toggle pills — panel must stay open.
-    fireEvent.click(screen.getByTestId('pnl-pill-log'));
+    fireEvent.click(screen.getByRole('button', { name: 'Log' }));
     expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
-    fireEvent.click(screen.getByTestId('pnl-pill-realised'));
+    fireEvent.click(screen.getByRole('button', { name: 'Realised' }));
     expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
   });
 
