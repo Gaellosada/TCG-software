@@ -74,6 +74,7 @@ async def test_happy_path_returns_full_shape(client):
     assert set(payload["return"].keys()) == {
         "total_return",
         "cagr",
+        "excess_return",
         "annualized_volatility",
         "best_day",
         "worst_day",

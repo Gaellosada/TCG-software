@@ -82,7 +82,7 @@
 .columns {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 18px;
+  gap: 36px;
 }
 
 @media (max-width: 900px) {

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 class ReturnStats:
     total_return: float
     cagr: float
+    excess_return: float
     annualized_volatility: float
     best_day: float
     worst_day: float

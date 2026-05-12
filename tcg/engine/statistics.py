@@ -65,7 +65,7 @@ def compute_statistics(
     daily_returns = np.diff(equity) / equity[:-1]
     n_returns = len(daily_returns)
 
-    return_stats = _compute_return_stats(dates, equity, daily_returns)
+    return_stats = _compute_return_stats(dates, equity, daily_returns, risk_free_rate)
     drawdown_stats = _compute_drawdown_stats(equity)
     risk_stats = _compute_risk_adjusted_stats(
         daily_returns,
@@ -89,6 +89,7 @@ def _compute_return_stats(
     dates: npt.NDArray[np.int64],
     equity: npt.NDArray[np.float64],
     daily_returns: npt.NDArray[np.float64],
+    risk_free_rate: float,
 ) -> ReturnStats:
     n = len(equity)
     total_return = float(equity[-1] / equity[0] - 1.0)
@@ -97,6 +98,8 @@ def _compute_return_stats(
     cagr = float(
         (equity[-1] / equity[0]) ** (_TRADING_DAYS_PER_YEAR / n_days) - 1.0
     )
+
+    excess_return = cagr - float(risk_free_rate)
 
     if len(daily_returns) > 1:
         annualized_volatility = float(
@@ -113,6 +116,7 @@ def _compute_return_stats(
     return ReturnStats(
         total_return=total_return,
         cagr=cagr,
+        excess_return=excess_return,
         annualized_volatility=annualized_volatility,
         best_day=best_day,
         worst_day=worst_day,

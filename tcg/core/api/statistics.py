@@ -46,6 +46,7 @@ def _serialize_suite(suite: StatisticsSuite) -> dict[str, Any]:
         "return": {
             "total_return": suite.return_.total_return,
             "cagr": suite.return_.cagr,
+            "excess_return": suite.return_.excess_return,
             "annualized_volatility": suite.return_.annualized_volatility,
             "best_day": suite.return_.best_day,
             "worst_day": suite.return_.worst_day,
