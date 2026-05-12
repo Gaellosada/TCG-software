@@ -1159,6 +1159,11 @@
   position: relative;
 }
 
+.statisticsSection {
+  flex: 0 0 auto;
+  margin-top: 16px;
+}
+
 .chartState {
   padding: 18px;
   color: var(--text-secondary);

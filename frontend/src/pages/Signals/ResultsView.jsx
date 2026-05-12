@@ -143,7 +143,7 @@ function ResultsView({ result, loading, error, capital = 1000, noRepeat = false,
         />
       </div>
       {statsInputs && (
-        <div data-testid="signal-statistics">
+        <div className={styles.statisticsSection} data-testid="signal-statistics">
           <Statistics
             key={statsKey}
             dates={statsInputs.dates}
