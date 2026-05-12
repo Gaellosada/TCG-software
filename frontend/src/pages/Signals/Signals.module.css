@@ -349,8 +349,8 @@
 
 .blockEnableToggle {
   flex-shrink: 0;
-  width: var(--signal-control-height);
-  height: var(--signal-control-height);
+  width: calc(var(--signal-control-height) / 2);
+  height: calc(var(--signal-control-height) / 2);
   display: flex;
   align-items: center;
   justify-content: center;
