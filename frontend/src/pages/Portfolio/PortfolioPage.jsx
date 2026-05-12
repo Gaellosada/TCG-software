@@ -287,6 +287,11 @@ function PortfolioPage() {
               if (!statDates || !Array.isArray(statEquity) || statEquity.length < 2) {
                 return null;
               }
+              // Backend rejects non-finite or non-positive equity — skip
+              // mounting Statistics rather than surfacing a 400 inside it.
+              if (statEquity.some((v) => !Number.isFinite(v) || v <= 0)) {
+                return null;
+              }
               const legsSig = portfolio.legs
                 .map((l) => `${l.label}:${l.weight}`)
                 .join('|');

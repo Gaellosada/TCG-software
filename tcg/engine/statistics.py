@@ -59,6 +59,10 @@ def compute_statistics(
         )
     if n < 2:
         raise ValueError("equity must have at least 2 observations")
+    # ``np.all(equity > 0)`` is True for +Infinity and propagates NaN
+    # silently — guard finiteness explicitly before the positivity check.
+    if not np.all(np.isfinite(equity)):
+        raise ValueError("equity values must all be finite")
     if not np.all(equity > 0):
         raise ValueError("equity values must all be strictly positive")
 

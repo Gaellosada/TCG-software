@@ -14,13 +14,18 @@ from tcg.engine.statistics import compute_statistics
 @pytest.fixture
 def app():
     from fastapi import FastAPI
+    from fastapi.exceptions import RequestValidationError
 
     from tcg.core.api.errors import tcg_error_handler
     from tcg.core.api.statistics import router as statistics_router
+    from tcg.core.app import _request_validation_error_handler
     from tcg.types.errors import TCGError
 
     application = FastAPI()
     application.add_exception_handler(TCGError, tcg_error_handler)
+    application.add_exception_handler(
+        RequestValidationError, _request_validation_error_handler
+    )
     application.include_router(statistics_router)
     return application
 
@@ -191,6 +196,57 @@ async def test_negative_equity_400(client):
             "dates": [20240101, 20240102],
             "equity": [100.0, -50.0],
         },
+    )
+    assert resp.status_code == 400
+
+
+async def test_pydantic_validation_returns_project_envelope(client):
+    # ``null`` inside the equity list trips the Pydantic float coercion
+    # before our hand-rolled checks. Must come back as the project's
+    # ``{error_type, message}`` envelope with status 400 — NOT FastAPI's
+    # default ``{"detail": [...]}`` 422.
+    resp = await client.post(
+        "/api/statistics",
+        json={"dates": [20240101, 20240102], "equity": [None, 2.0]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error_type"] == "validation_error"
+    assert isinstance(body["message"], str) and body["message"]
+    assert "detail" not in body
+
+
+async def test_positive_infinity_equity_400(client):
+    # ``Infinity`` / ``NaN`` are non-standard JSON literals but the
+    # JS frontend can emit them and Python's parser accepts them by
+    # default. Send raw to mirror the real-world failure mode.
+    resp = await client.post(
+        "/api/statistics",
+        content='{"dates":[20240101,20240102,20240103],"equity":[100.0,Infinity,110.0]}',
+        headers={"content-type": "application/json"},
+    )
+    # ``+inf`` reaches the route (Pydantic accepts it as a float). Our
+    # finite-guard must reject — without it ``np.all(equity > 0)`` is True
+    # and downstream metrics stamp NaN.
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error_type"] == "validation_error"
+
+
+async def test_negative_infinity_equity_400(client):
+    resp = await client.post(
+        "/api/statistics",
+        content='{"dates":[20240101,20240102],"equity":[100.0,-Infinity]}',
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+async def test_nan_equity_400(client):
+    resp = await client.post(
+        "/api/statistics",
+        content='{"dates":[20240101,20240102],"equity":[100.0,NaN]}',
+        headers={"content-type": "application/json"},
     )
     assert resp.status_code == 400
 

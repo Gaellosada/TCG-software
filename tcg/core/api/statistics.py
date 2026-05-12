@@ -85,8 +85,13 @@ async def compute_statistics_endpoint(body: StatisticsRequest) -> dict[str, Any]
         )
     if len(body.equity) < 2:
         raise ValidationError("equity must have at least 2 observations")
-    if any(v <= 0 for v in body.equity):
-        raise ValidationError("equity values must all be strictly positive")
+    # Reject non-finite equity (NaN, +inf, -inf) explicitly — ``v <= 0``
+    # is False for +inf and NaN, so without this guard those values
+    # propagate downstream and stamp the response with NaNs.
+    if any((not np.isfinite(v)) or v <= 0 for v in body.equity):
+        raise ValidationError("equity values must all be finite and strictly positive")
+    if any((not isinstance(d, int)) or d < 0 for d in body.dates):
+        raise ValidationError("dates must all be non-negative integers")
 
     rf = body.risk_free_rate if body.risk_free_rate is not None else _DEFAULT_RISK_FREE_RATE
 

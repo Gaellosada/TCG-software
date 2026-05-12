@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from tcg.core.api.data import router as data_router
@@ -51,6 +53,29 @@ async def lifespan(app: FastAPI):
     client.close()
 
 
+async def _request_validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Project envelope for Pydantic body/query validation failures.
+
+    FastAPI's default 422 payload (``{"detail": [...]}``) breaks the
+    frontend, which reads ``body.message``. Map to the same shape
+    ``ValidationError`` uses so callers see a unified error contract.
+    """
+    errors = exc.errors()
+    if errors:
+        first = errors[0]
+        loc = ".".join(str(p) for p in first.get("loc", ()) if p != "body")
+        msg = first.get("msg", "invalid request body")
+        message = f"{loc}: {msg}" if loc else msg
+    else:
+        message = "invalid request body"
+    return JSONResponse(
+        status_code=400,
+        content={"error_type": "validation_error", "message": message},
+    )
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI application with all routers and middleware."""
     app = FastAPI(title="TCG Platform", version="0.1.0", lifespan=lifespan)
@@ -61,6 +86,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_exception_handler(TCGError, tcg_error_handler)
+    app.add_exception_handler(RequestValidationError, _request_validation_error_handler)
     app.include_router(data_router)
     app.include_router(portfolio_router)
     app.include_router(indicators_router)

@@ -23,5 +23,10 @@ export function buildSignalStatsInputs(result, capital) {
   if (!pnlRaw) return null;
   const cap = Number.isFinite(capital) ? capital : 1;
   const equity = pnlRaw.map((v) => cap + v * cap);
+  // Backend rejects non-finite or non-positive equity. A losing signal
+  // can drive equity to zero or below — short-circuit here so the
+  // Statistics panel is never mounted in that pathological case, instead
+  // of letting the user see a backend validation error inside the panel.
+  if (equity.some((v) => !Number.isFinite(v) || v <= 0)) return null;
   return { dates, equity };
 }

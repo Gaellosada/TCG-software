@@ -23,6 +23,7 @@ const RESPONSE = {
   return: {
     total_return: 0.234,
     cagr: 0.121,
+    excess_return: 0.081,
     annualized_volatility: 0.183,
     best_day: 0.045,
     worst_day: -0.063,
@@ -78,6 +79,7 @@ describe('<Statistics> — rendering', () => {
     // A sample of labels across all four sections
     expect(screen.getByText('Total Return')).toBeTruthy();
     expect(screen.getByText('CAGR')).toBeTruthy();
+    expect(screen.getByText('Excess Return')).toBeTruthy();
     expect(screen.getByText('Ann. Vol')).toBeTruthy();
     expect(screen.getByText('Best Day')).toBeTruthy();
     expect(screen.getByText('Worst Day')).toBeTruthy();
@@ -100,6 +102,7 @@ describe('<Statistics> — rendering', () => {
     // Formatted values
     expect(screen.getByText('+23.40%')).toBeTruthy();     // total_return
     expect(screen.getByText('+12.10%')).toBeTruthy();     // cagr
+    expect(screen.getByText('+8.10%')).toBeTruthy();      // excess_return
     expect(screen.getByText('+18.30%')).toBeTruthy();     // annualized_volatility
     expect(screen.getByText('-6.30%')).toBeTruthy();      // worst_day
     expect(screen.getByText('1.23')).toBeTruthy();        // sharpe

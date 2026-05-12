@@ -57,6 +57,20 @@ class TestValidation:
                 np.array([100.0, 0.0], dtype=np.float64),
             )
 
+    def test_positive_infinity_equity_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            compute_statistics(
+                np.array([20240101, 20240102], dtype=np.int64),
+                np.array([100.0, np.inf], dtype=np.float64),
+            )
+
+    def test_nan_equity_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            compute_statistics(
+                np.array([20240101, 20240102], dtype=np.int64),
+                np.array([100.0, np.nan], dtype=np.float64),
+            )
+
 
 # ── Return stats ───────────────────────────────────────────────────────
 
@@ -102,6 +116,17 @@ class TestReturnStats:
         )
         assert math.isclose(suite.return_.best_day, 0.10, abs_tol=1e-12)
         assert math.isclose(suite.return_.worst_day, -0.08, abs_tol=1e-12)
+
+    def test_excess_return_equals_cagr_minus_rf(self):
+        # 253 daily samples → exactly 1 trading year. CAGR is exact, so
+        # excess_return must equal CAGR - Rf to machine precision.
+        n = 253
+        dates = _yyyymmdd_range(2020, 1, n)
+        equity = np.linspace(100.0, 200.0, n)
+        rf = 0.04
+        suite = compute_statistics(dates, equity, risk_free_rate=rf)
+        expected = suite.return_.cagr - rf
+        assert math.isclose(suite.return_.excess_return, expected, abs_tol=1e-12)
 
     def test_best_worst_month(self):
         # Three months: Jan up 10%, Feb down 5%, Mar up 2%
