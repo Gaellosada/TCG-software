@@ -3,15 +3,13 @@ import PillToggle from '../PillToggle';
 import styles from './TradeLog.module.css';
 
 /**
- * Collapsible Trades panel rendered below the page-level Statistics
- * panel. Reads `response.trades` and joins each row with the matching
- * position's price series for open/close prices. P&L is derived
- * frontend-side per the Wave-2 locked contract (CONTRACT.md §2).
+ * Collapsible Trades panel. Reads `response.trades` and joins each row
+ * with the matching position's price series for open/close prices.
+ * P&L is derived frontend-side: realised = (close/open - 1) * signed_weight;
+ * log = ln(close/open) * signed_weight. The mode toggle picks between them.
  *
- * `exitDescriptions` — `{ [exit_block_id]: description }` built by
- * the caller from the selected signal's `rules.exits[]`.
- * `entryDescriptions` — `{ [entry_block_id]: description }` built by
- * the caller from the selected signal's `rules.entries[]`.
+ * `entryDescriptions` / `exitDescriptions` are maps `{ [block_id]: description }`
+ * supplied by the caller from the selected signal's rules.
  */
 
 function formatTs(ts) {
