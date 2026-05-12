@@ -20,8 +20,8 @@ const SECTIONS = [
     title: 'Return',
     metrics: [
       { key: 'total_return',          label: 'Total Return',  format: 'percent', tooltip: 'Cumulative return over the period.' },
-      { key: 'cagr',                  label: 'CAGR',          format: 'percent', tooltip: 'Compound Annual Growth Rate.' },
       { key: 'excess_return',         label: 'Excess Return', format: 'percent', tooltip: 'CAGR minus the risk-free rate.' },
+      { key: 'cagr',                  label: 'CAGR',          format: 'percent', tooltip: 'Compound Annual Growth Rate.' },
       { key: 'annualized_volatility', label: 'Ann. Vol',      format: 'percent', tooltip: 'Annualized standard deviation of daily returns.' },
       { key: 'best_day',              label: 'Best Day',      format: 'percent', tooltip: 'Largest single-day return.' },
       { key: 'worst_day',             label: 'Worst Day',     format: 'percent', tooltip: 'Smallest single-day return.' },
