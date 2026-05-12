@@ -198,6 +198,8 @@ function sanitiseBlock(raw, section) {
   const conditions = Array.isArray(raw.conditions)
     ? raw.conditions.filter((c) => c && typeof c === 'object' && typeof c.op === 'string')
     : [];
+  const enabled = typeof raw.enabled === 'boolean' ? raw.enabled : true;
+  const description = typeof raw.description === 'string' ? raw.description : '';
   if (section === 'exits') {
     // Exit blocks carry no block-level input_id or weight — the
     // operating input is derived from the target entry. Legacy
@@ -208,6 +210,8 @@ function sanitiseBlock(raw, section) {
       id,
       name,
       conditions,
+      enabled,
+      description,
       target_entry_block_name: typeof raw.target_entry_block_name === 'string'
         ? raw.target_entry_block_name
         : '',
@@ -215,19 +219,14 @@ function sanitiseBlock(raw, section) {
   }
   const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
   const weight = sanitiseWeight(raw.weight);
-  return { id, input_id, weight, name, conditions };
+  return { id, input_id, weight, name, conditions, enabled, description };
 }
 
-function sanitiseSettings(raw) {
-  const out = defaultSettings();
-  if (raw && typeof raw === 'object') {
-    // Preserve stored value if explicitly present (honouring user's prior
-    // choice on v4-saved signals). Default applies only when absent.
-    if (typeof raw.dont_repeat === 'boolean') {
-      out.dont_repeat = raw.dont_repeat;
-    }
-  }
-  return out;
+function sanitiseSettings(_raw) {
+  // dont_repeat is always true — the engine is correct and arrows
+  // always mark strict position transitions. Legacy signals stored
+  // with dont_repeat=false are normalised to true on load.
+  return defaultSettings();
 }
 
 function sanitiseSignal(raw) {

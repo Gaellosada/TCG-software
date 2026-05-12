@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import OperandSlot from './OperandSlot';
 import BlockHeader from './BlockHeader';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -267,7 +267,18 @@ function Block({
   inputs,
   indicators,
 }) {
+  const [descOpen, setDescOpen] = useState(false);
   const conditions = block.conditions || [];
+  const enabled = block.enabled !== false;
+
+  const handleToggleEnabled = useCallback((e) => {
+    onUpdateBlock({ ...block, enabled: e.target.checked });
+  }, [block, onUpdateBlock]);
+
+  const handleDescriptionChange = useCallback((e) => {
+    onUpdateBlock({ ...block, description: e.target.value });
+  }, [block, onUpdateBlock]);
+
   // For exits we pass the entry blocks themselves to isBlockRunnable so
   // it can verify the target entry's input is configured (exits inherit
   // the input from their target entry).
@@ -280,7 +291,7 @@ function Block({
 
   return (
     <div
-      className={styles.block}
+      className={`${styles.block}${enabled ? '' : ` ${styles.blockDisabled}`}`}
       data-testid={`block-${blockIdx}`}
       data-block-id={block.id || ''}
       aria-label={section === 'entries' ? `Entry block ${blockIdx + 1} (${block.id || ''})` : undefined}
@@ -296,6 +307,8 @@ function Block({
         blockIndex={blockIdx + 1}
         status={runnable ? 'ok' : 'warn'}
         blockIdx={blockIdx}
+        enabled={enabled}
+        onToggleEnabled={handleToggleEnabled}
       />
       {conditions.length === 0 ? (
         <div className={styles.blockEmpty}>
@@ -324,6 +337,30 @@ function Block({
       >
         + Add condition (AND)
       </button>
+      <div className={styles.blockDescriptionSection}>
+        <button
+          type="button"
+          className={styles.blockDescriptionToggle}
+          aria-expanded={descOpen}
+          onClick={() => setDescOpen((v) => !v)}
+          data-testid={`block-desc-toggle-${blockIdx}`}
+        >
+          <span className={`${styles.blockDescriptionCaret}${descOpen ? ` ${styles.blockDescriptionCaretOpen}` : ''}`}>
+            ▶
+          </span>
+          Description
+        </button>
+        {descOpen && (
+          <textarea
+            className={styles.blockDescriptionTextarea}
+            value={block.description || ''}
+            onChange={handleDescriptionChange}
+            placeholder="Optional block description…"
+            aria-label="Block description"
+            data-testid={`block-desc-textarea-${blockIdx}`}
+          />
+        )}
+      </div>
     </div>
   );
 }

@@ -25,6 +25,8 @@ function seededEntry(overrides = {}) {
     weight: 50,
     name: overrides.name || '',
     conditions: overrides.conditions || [],
+    enabled: overrides.enabled !== undefined ? overrides.enabled : true,
+    description: overrides.description || '',
     ...overrides,
   };
 }
@@ -35,6 +37,8 @@ function seededExit(overrides = {}) {
     name: overrides.name || '',
     conditions: overrides.conditions || [],
     target_entry_block_name: overrides.target_entry_block_name ?? '',
+    enabled: overrides.enabled !== undefined ? overrides.enabled : true,
+    description: overrides.description || '',
     ...overrides,
   };
 }
@@ -93,6 +97,8 @@ describe('BlockEditor (v4 / two-section model)', () => {
     expect(b.input_id).toBe('');
     expect(b.weight).toBe(0);
     expect(b.conditions).toEqual([]);
+    expect(b.enabled).toBe(true);
+    expect(b.description).toBe('');
     // Stable id stamped by defaultBlock
     expect(typeof b.id).toBe('string');
     expect(b.id.length).toBeGreaterThan(0);
@@ -256,6 +262,56 @@ describe('BlockEditor (v4 / two-section model)', () => {
     renderEditor(seeded);
     const blk = screen.getByTestId('block-0');
     expect(blk.getAttribute('data-block-id')).toBe(id);
+  });
+
+  it('enable toggle renders checked=true by default and unchecking calls onRulesChange with enabled:false', () => {
+    const seeded = { entries: [seededEntry({ enabled: true })], exits: [] };
+    const { onRulesChange } = renderEditor(seeded);
+    const toggle = screen.getByTestId('block-enable-0');
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(toggle);
+    const next = onRulesChange.mock.calls[0][0];
+    expect(next.entries[0].enabled).toBe(false);
+  });
+
+  it('enable toggle renders unchecked when block.enabled is false', () => {
+    const seeded = { entries: [seededEntry({ enabled: false })], exits: [] };
+    renderEditor(seeded);
+    const toggle = screen.getByTestId('block-enable-0');
+    expect(toggle.checked).toBe(false);
+  });
+
+  it('checking the enable toggle sets enabled:true on an initially disabled block', () => {
+    const seeded = { entries: [seededEntry({ enabled: false })], exits: [] };
+    const { onRulesChange } = renderEditor(seeded);
+    const toggle = screen.getByTestId('block-enable-0');
+    fireEvent.click(toggle);
+    const next = onRulesChange.mock.calls[0][0];
+    expect(next.entries[0].enabled).toBe(true);
+  });
+
+  it('description disclosure is collapsed by default', () => {
+    const seeded = { entries: [seededEntry()], exits: [] };
+    renderEditor(seeded);
+    expect(screen.queryByTestId('block-desc-textarea-0')).toBeNull();
+    expect(screen.getByTestId('block-desc-toggle-0').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('clicking description toggle reveals textarea', () => {
+    const seeded = { entries: [seededEntry({ description: '' })], exits: [] };
+    renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('block-desc-toggle-0'));
+    expect(screen.getByTestId('block-desc-textarea-0')).toBeDefined();
+    expect(screen.getByTestId('block-desc-toggle-0').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('typing in the description textarea calls onRulesChange with updated description', () => {
+    const seeded = { entries: [seededEntry({ description: '' })], exits: [] };
+    const { onRulesChange } = renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('block-desc-toggle-0'));
+    fireEvent.change(screen.getByTestId('block-desc-textarea-0'), { target: { value: 'Entry on RSI dip' } });
+    const next = onRulesChange.mock.calls[0][0];
+    expect(next.entries[0].description).toBe('Entry on RSI dip');
   });
 
   it('clicking × on a filled operand opens the ConfirmDialog', () => {

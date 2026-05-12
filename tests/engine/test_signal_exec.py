@@ -731,3 +731,221 @@ async def test_exit_firing_on_closed_entry_is_not_effective():
     x = events_by[("X1", "exit")]
     assert len(x.fired_indices) == 5
     assert x.latched_indices == ()  # never actually closed anything
+
+
+# ---------------------------------------------------------------------------
+# enabled-flag parity and trades[] derivation
+# ---------------------------------------------------------------------------
+
+
+def _gt(threshold: float):
+    return CompareCondition(
+        op="gt",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=threshold),
+    )
+
+
+def _lt(threshold: float):
+    return CompareCondition(
+        op="lt",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=threshold),
+    )
+
+
+@pytest.mark.asyncio
+async def test_disabled_entry_block_equivalent_to_deletion():
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    enabled_block = Block(
+        id="e1", name="A", input_id="X", weight=50.0, conditions=(_gt(0.0),)
+    )
+    disabled_block = Block(
+        id="e2",
+        name="B",
+        input_id="X",
+        weight=50.0,
+        conditions=(_gt(0.0),),
+        enabled=False,
+    )
+
+    with_disabled = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(enabled_block, disabled_block)),
+    )
+    without = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(enabled_block,)),
+    )
+
+    r1 = await evaluate_signal(with_disabled, indicators={}, fetcher=fetcher)
+    r2 = await evaluate_signal(without, indicators={}, fetcher=fetcher)
+
+    assert list(r1.positions[0].values) == list(r2.positions[0].values)
+    assert {(ev.block_id, ev.kind) for ev in r1.events} == {
+        (ev.block_id, ev.kind) for ev in r2.events
+    }
+    assert r1.trades == r2.trades
+
+
+@pytest.mark.asyncio
+async def test_disabled_exit_block_equivalent_to_deletion():
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    entry = Block(
+        id="E", name="Entry", input_id="X", weight=100.0, conditions=(_gt(0.0),)
+    )
+    enabled_exit = Block(
+        id="X1", weight=0.0, conditions=(_gt(12.5),),
+        target_entry_block_name="Entry",
+    )
+    disabled_exit = Block(
+        id="X2", weight=0.0, conditions=(_gt(10.5),),
+        target_entry_block_name="Entry", enabled=False,
+    )
+
+    with_disabled = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(enabled_exit, disabled_exit)),
+    )
+    without = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(enabled_exit,)),
+    )
+
+    r1 = await evaluate_signal(with_disabled, indicators={}, fetcher=fetcher)
+    r2 = await evaluate_signal(without, indicators={}, fetcher=fetcher)
+    assert list(r1.positions[0].values) == list(r2.positions[0].values)
+    assert r1.trades == r2.trades
+
+
+@pytest.mark.asyncio
+async def test_trades_two_round_trips_back_to_back():
+    # Entry condition: close > 0 (always true).
+    # Exit at t=1 and t=3 (close == 11 or 13).
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    entry = Block(
+        id="E", name="Entry", input_id="X", weight=100.0, conditions=(_gt(0.0),)
+    )
+    exit_b = Block(
+        id="X1", weight=0.0,
+        conditions=(
+            CompareCondition(
+                op="eq",
+                lhs=InstrumentOperand(input_id="X"),
+                rhs=ConstantOperand(value=11.0),
+            ),
+        ),
+        target_entry_block_name="Entry",
+    )
+    exit_c = Block(
+        id="X2", weight=0.0,
+        conditions=(
+            CompareCondition(
+                op="eq",
+                lhs=InstrumentOperand(input_id="X"),
+                rhs=ConstantOperand(value=13.0),
+            ),
+        ),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_b, exit_c)),
+    )
+
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # Expected trades:
+    #   t=0 open, t=1 close (exit X1), then re-entry same bar t=1 (intrabar exit→entry),
+    #   close at t=3 (exit X2), then re-entry same bar t=3, still open at end.
+    assert len(result.trades) == 3
+    t0, t1, t2 = result.trades
+    assert (t0.open_bar, t0.close_bar, t0.exit_block_id) == (0, 1, "X1")
+    assert (t1.open_bar, t1.close_bar, t1.exit_block_id) == (1, 3, "X2")
+    assert (t2.open_bar, t2.close_bar, t2.exit_block_id) == (3, None, None)
+    for tr in result.trades:
+        assert tr.direction == "long"
+        assert tr.signed_weight == pytest.approx(1.0)
+        assert tr.entry_block_id == "E"
+        assert tr.entry_block_name == "Entry"
+        assert tr.input_id == "X"
+    assert t0.exit_block_name == "" and t1.exit_block_name == ""
+
+
+@pytest.mark.asyncio
+async def test_trades_open_at_end():
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    entry = Block(
+        id="E", name="Entry", input_id="X", weight=-25.0,
+        conditions=(_gt(11.5),),
+    )
+    signal = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    assert len(result.trades) == 1
+    tr = result.trades[0]
+    assert tr.open_bar == 2
+    assert tr.close_bar is None
+    assert tr.exit_block_id is None
+    assert tr.exit_block_name is None
+    assert tr.direction == "short"
+    assert tr.signed_weight == pytest.approx(-0.25)
+
+
+@pytest.mark.asyncio
+async def test_trades_disabled_block_yields_no_trades():
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    entry = Block(
+        id="E", name="Entry", input_id="X", weight=100.0,
+        conditions=(_gt(0.0),),
+        enabled=False,
+    )
+    signal = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    assert result.trades == ()
+
+
+@pytest.mark.asyncio
+async def test_trades_same_bar_entry_then_exit_then_reentry():
+    """Engine intrabar order = exit first, then entry. So an exit at the
+    same bar as an open creates one closed trade and an immediate
+    re-entry on the same bar."""
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    entry = Block(
+        id="E", name="Entry", input_id="X", weight=100.0,
+        conditions=(_gt(0.0),),  # fires every bar
+    )
+    exit_b = Block(
+        id="X1", weight=0.0,
+        conditions=(_gt(0.0),),  # fires every bar
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_b,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # Bar 0: entry opens (no prior latch to clear). Bars 1..4: exit clears
+    # at start, entry re-opens. So trades: (open=0, close=1), (1,2), (2,3),
+    # (3,4), then open at 4 with no close.
+    assert len(result.trades) == 5
+    opens = [t.open_bar for t in result.trades]
+    closes_arr = [t.close_bar for t in result.trades]
+    assert opens == [0, 1, 2, 3, 4]
+    assert closes_arr == [1, 2, 3, 4, None]

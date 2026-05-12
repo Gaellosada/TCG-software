@@ -280,6 +280,68 @@ describe('computeSignal request body shape (v4)', () => {
   });
 });
 
+describe('enabled and description round-trip through normaliseBlock (B1 regression)', () => {
+  const baseEntry = {
+    id: 'e1', name: 'E1', input_id: 'X', weight: 50,
+    conditions: [],
+  };
+  const baseExit = {
+    id: 'x1', name: 'X1', target_entry_block_name: 'E1',
+    conditions: [],
+  };
+
+  it('entry block with enabled:false reaches the wire body as enabled:false', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: { entries: [{ ...baseEntry, enabled: false }], exits: [] },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].enabled).toBe(false);
+  });
+
+  it('entry block with description:"hello world" reaches the wire body intact', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: { entries: [{ ...baseEntry, description: 'hello world' }], exits: [] },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].description).toBe('hello world');
+  });
+
+  it('exit block with enabled:false reaches the wire body as enabled:false', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: { entries: [baseEntry], exits: [{ ...baseExit, enabled: false }] },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.exits[0].enabled).toBe(false);
+  });
+
+  it('exit block with description:"hello world" reaches the wire body intact', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: { entries: [baseEntry], exits: [{ ...baseExit, description: 'hello world' }] },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.exits[0].description).toBe('hello world');
+  });
+
+  it('block with neither field set defaults to enabled:true and description:""', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: {
+        entries: [{ ...baseEntry }],
+        exits: [{ ...baseExit }],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].enabled).toBe(true);
+    expect(body.spec.rules.entries[0].description).toBe('');
+    expect(body.spec.rules.exits[0].enabled).toBe(true);
+    expect(body.spec.rules.exits[0].description).toBe('');
+  });
+});
+
 describe('normaliseSpecForRequest does not mutate caller data', () => {
   it('produces a new rules object without touching the original operand shape', () => {
     const operand = { kind: 'indicator', indicator_id: 'sma', input_id: 'X', output: 'default' };
