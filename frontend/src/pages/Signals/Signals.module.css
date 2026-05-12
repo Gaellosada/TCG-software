@@ -1146,23 +1146,12 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  gap: 8px;
-  /* Statistics panel mounts below the unified chart; allow vertical
-     scroll so the stats are reachable when the row min-height isn't
-     enough to fit both. */
-  overflow-y: auto;
 }
 
 .resultsPlotUnified {
-  flex: 1 1 auto;
+  flex: 1;
   min-height: 400px;
   position: relative;
-  overflow: hidden;
-}
-
-.statisticsSection {
-  flex: 0 0 auto;
-  margin-top: 16px;
 }
 
 .chartState {

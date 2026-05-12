@@ -3,6 +3,8 @@ import SignalsList from './SignalsList';
 import BlockEditor from './BlockEditor';
 import ParamsPanel from './ParamsPanel';
 import ResultsView from './ResultsView';
+import Statistics from '../../components/Statistics';
+import { buildSignalStatsInputs } from './signalStatsInputs';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
 import { loadState, saveState, emptyRules, defaultSettings, SECTIONS } from './storage';
@@ -264,6 +266,14 @@ function SignalsPage() {
   const ownPanelCount = useMemo(() => countOwnPanelIndicators(lastResult), [lastResult]);
   const resultsRowMin = 972 + ownPanelCount * 250;
 
+  const statsInputs = useMemo(
+    () => buildSignalStatsInputs(lastResult, capital),
+    [lastResult, capital],
+  );
+  const statsKey = statsInputs
+    ? `${selectedSignal?.id ?? 'signal'}|${capital}|${statsInputs.dates.length}|${statsInputs.dates[0]}|${statsInputs.dates[statsInputs.dates.length - 1]}`
+    : null;
+
   return (
     <div className={styles.page} style={{ '--results-row-min': `${resultsRowMin}px` }}>
       <div className={styles.listPanel}>
@@ -351,10 +361,18 @@ function SignalsPage() {
             capital={capital}
             noRepeat={selectedSignal?.settings?.dont_repeat ?? true}
             signalRules={selectedSignal?.rules ?? null}
-            signalId={selectedSignal?.id ?? null}
           />
         </Card>
       </div>
+      {statsInputs && (
+        <div className={styles.statsPanel} data-testid="signal-statistics">
+          <Statistics
+            key={statsKey}
+            dates={statsInputs.dates}
+            equity={statsInputs.equity}
+          />
+        </div>
+      )}
       <ConfirmDialog
         open={confirmDeleteId !== null}
         title="Delete signal?"

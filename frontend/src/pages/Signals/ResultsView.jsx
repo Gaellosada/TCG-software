@@ -1,31 +1,9 @@
 import { useMemo } from 'react';
 import Chart from '../../components/Chart';
 import ErrorCard from '../../components/ErrorCard/ErrorCard';
-import Statistics from '../../components/Statistics';
 import styles from './Signals.module.css';
-import { aggregateRealizedPnl, buildResultsPlot } from './resultsPlotTraces';
+import { buildResultsPlot } from './resultsPlotTraces';
 import { computeEffectiveTrace } from './runGate';
-
-// Signals returns ``timestamps`` as unix-ms integers (see signals.py
-// ``_int_yyyymmdd_to_unix_ms``). Statistics expects YYYYMMDD ints, so
-// convert at the call site rather than bending the shared contract.
-function unixMsToYYYYMMDD(timestamps) {
-  if (!Array.isArray(timestamps)) return null;
-  const out = new Array(timestamps.length);
-  for (let i = 0; i < timestamps.length; i++) {
-    const ms = timestamps[i];
-    if (!Number.isFinite(ms)) return null;
-    const d = new Date(ms);
-    // UTC components — timestamps were produced from UTC midnight on the
-    // backend, so reading local-time components would slip days in
-    // negative-offset zones.
-    const y = d.getUTCFullYear();
-    const m = d.getUTCMonth() + 1;
-    const day = d.getUTCDate();
-    out[i] = y * 10000 + m * 100 + day;
-  }
-  return out;
-}
 
 /**
  * Results section — unified subplot chart.
@@ -52,7 +30,7 @@ const ERROR_HEADINGS = {
   offline: "You're offline",
 };
 
-function ResultsView({ result, loading, error, capital = 1000, noRepeat = false, signalRules = null, signalId = null }) {
+function ResultsView({ result, loading, error, capital = 1000, noRepeat = false, signalRules = null }) {
   // Effective-only display: when dont_repeat is active we rewrite each
   // event's ``fired_indices`` to its ``latched_indices`` (the
   // backend-authoritative effective set) via ``computeEffectiveTrace``,
@@ -72,22 +50,6 @@ function ResultsView({ result, loading, error, capital = 1000, noRepeat = false,
     () => buildResultsPlot(effectiveResult, { capital, signalRules }),
     [effectiveResult, capital, signalRules],
   );
-
-  // Derive the equity curve for Statistics. Same construction as the
-  // top subplot's "capital" trace: aggregated realized P&L summed across
-  // inputs, scaled by capital, then added to capital. We compute it
-  // unconditionally (cheap) — the consumers below decide whether to
-  // render it.
-  const statsInputs = useMemo(() => {
-    if (!result || !Array.isArray(result.timestamps)) return null;
-    const dates = unixMsToYYYYMMDD(result.timestamps);
-    if (!dates || dates.length < 2) return null;
-    const pnlRaw = aggregateRealizedPnl(result.realized_pnl, result.timestamps.length);
-    if (!pnlRaw) return null;
-    const cap = Number.isFinite(capital) ? capital : 1;
-    const equity = pnlRaw.map((v) => cap + v * cap);
-    return { dates, equity };
-  }, [result, capital]);
 
   if (loading) {
     return (
@@ -120,14 +82,6 @@ function ResultsView({ result, loading, error, capital = 1000, noRepeat = false,
     );
   }
 
-  // Statistics' inputsKey only tracks length/endpoints, but a same-length
-  // run with a tweaked rule could produce a same-endpoint curve with
-  // different middle values. Force-remount the panel whenever the signal
-  // id or capital changes so the metrics always reflect the latest run.
-  const statsKey = statsInputs
-    ? `${signalId ?? 'signal'}|${capital}|${statsInputs.dates.length}|${statsInputs.dates[0]}|${statsInputs.dates[statsInputs.dates.length - 1]}`
-    : null;
-
   return (
     <div className={styles.resultsViewBody} data-testid="results-view">
       <div
@@ -142,15 +96,6 @@ function ResultsView({ result, loading, error, capital = 1000, noRepeat = false,
           downloadFilename="signal-results"
         />
       </div>
-      {statsInputs && (
-        <div className={styles.statisticsSection} data-testid="signal-statistics">
-          <Statistics
-            key={statsKey}
-            dates={statsInputs.dates}
-            equity={statsInputs.equity}
-          />
-        </div>
-      )}
     </div>
   );
 }
