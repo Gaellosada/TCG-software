@@ -7,7 +7,7 @@ import Statistics from '../../components/Statistics';
 import { buildSignalStatsInputs } from './signalStatsInputs';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
-import { loadState, saveState, emptyRules, defaultSettings, SECTIONS } from './storage';
+import { loadState, saveState, emptyRules, defaultSettings } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import { buildComputeRequestBody } from './requestBuilder';
@@ -48,11 +48,6 @@ function SignalsPage() {
   const [signals, setSignals] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState('');
-  // v4 bullet #1: two section tabs — 'entries' | 'exits'. The active tab
-  // drives which section of blocks BlockEditor renders. Tab state lives
-  // here (not in BlockEditor) so it persists across block edits and maps
-  // one-to-one to the v4 rules shape.
-  const [activeTab, setActiveTab] = useState(SECTIONS[0]);
   const { run: runAbortable, running, abort: abortRun } = useAbortableAction();
   const [error, setError] = useState(null);
   const [lastResult, setLastResult] = useState(null);
@@ -295,13 +290,7 @@ function SignalsPage() {
               inputs={selectedSignal.inputs || []}
               onChange={handleInputsChange}
             />
-            {/* v4 bullet #1: BlockEditor renders the two section tabs
-                (Entries / Exits) itself. SignalsPage owns the active-tab
-                state and passes it down so the tab choice survives block
-                edits and cross-signal navigation. */}
             <BlockEditor
-              section={activeTab}
-              onSectionChange={setActiveTab}
               rules={selectedSignal.rules}
               onRulesChange={handleRulesChange}
               inputs={selectedSignal.inputs || []}
