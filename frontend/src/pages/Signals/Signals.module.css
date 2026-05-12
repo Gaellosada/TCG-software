@@ -1154,9 +1154,10 @@
 }
 
 .resultsPlotUnified {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 400px;
   position: relative;
+  overflow: hidden;
 }
 
 .statisticsSection {
