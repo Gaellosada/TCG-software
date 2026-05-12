@@ -297,7 +297,7 @@ function Block({
       aria-label={section === 'entries' ? `Entry block ${blockIdx + 1} (${block.id || ''})` : undefined}
     >
       {!isFirst && <div className={styles.blockOrLabel}>OR</div>}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+      <div className={styles.blockEnableRow}>
         <input
           type="checkbox"
           className={styles.blockEnableToggle}
@@ -306,7 +306,7 @@ function Block({
           aria-label="Enable block"
           data-testid={`block-enable-${blockIdx}`}
         />
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className={styles.blockHeaderSpacer}>
           <BlockHeader
             block={block}
             section={section}

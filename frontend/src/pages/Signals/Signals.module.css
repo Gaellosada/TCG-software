@@ -336,6 +336,17 @@
   border-color: var(--border-accent, var(--accent, #2563eb));
 }
 
+.blockEnableRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.blockHeaderSpacer {
+  flex: 1;
+  min-width: 0;
+}
+
 .blockEnableToggle {
   flex-shrink: 0;
   width: var(--signal-control-height);
@@ -1190,28 +1201,6 @@
   font-size: 0.8rem;
   padding: 3px 6px;
   text-align: right;
-}
-
-.noRepeatRow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  cursor: pointer;
-}
-
-.noRepeatLabel {
-  font-size: 0.78rem;
-  color: var(--text-secondary);
-}
-
-.noRepeatInfo {
-  font-size: 0.82rem;
-  color: var(--text-secondary);
-  opacity: 0.6;
-  cursor: help;
-  text-decoration: underline dotted;
-  text-underline-offset: 2px;
 }
 
 /* ---------- Results (iter-5 ask #6) ---------- */

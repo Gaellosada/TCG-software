@@ -10,7 +10,8 @@
 //   - Input = { id, instrument: InputInstrument }
 //   - rules = { entries: Block[], exits: Block[] }
 //   - Block = {
-//       id, name, input_id, weight (signed, [-100, +100]),
+//       id, name, enabled, description,
+//       input_id, weight (signed, [-100, +100]),
 //       conditions, [exits only] target_entry_block_name
 //     }
 //   - settings = { dont_repeat: boolean }
@@ -25,6 +26,11 @@
 // ``params_override`` and ``series_override`` are always present as
 // explicit keys — null if absent. The backend relies on the keys being
 // there to run its override-merge step with a deterministic shape.
+//
+// IMPORTANT: ``normaliseBlock`` is a WHITELIST — every block field that
+// must reach the backend MUST be explicitly copied here. Adding a new
+// field to the Block schema requires a corresponding line in
+// ``normaliseBlock`` AND a new round-trip test in ``requestShape.test.js``.
 
 import { collectIndicatorIds } from '../../api/signals';
 import { MAX_ABS_WEIGHT, SECTIONS } from './storage';
@@ -81,6 +87,8 @@ function normaliseBlock(block, section) {
     return {
       id: typeof block.id === 'string' ? block.id : '',
       name: typeof block.name === 'string' ? block.name : '',
+      enabled: block.enabled !== false,
+      description: typeof block.description === 'string' ? block.description : '',
       conditions,
       target_entry_block_name: typeof block.target_entry_block_name === 'string'
         ? block.target_entry_block_name
@@ -90,6 +98,8 @@ function normaliseBlock(block, section) {
   return {
     id: typeof block.id === 'string' ? block.id : '',
     name: typeof block.name === 'string' ? block.name : '',
+    enabled: block.enabled !== false,
+    description: typeof block.description === 'string' ? block.description : '',
     input_id: typeof block.input_id === 'string' ? block.input_id : '',
     weight: clampWeight(block.weight),
     conditions,

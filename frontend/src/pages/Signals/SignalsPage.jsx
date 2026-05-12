@@ -189,18 +189,6 @@ function SignalsPage() {
     setSignals((prev) => prev.map((s) => (s.id !== selectedId ? s : { ...s, doc: nextDoc })));
   }, [selectedId]);
 
-  // v4 bullet #7/#8: toggling dont_repeat mutates the selected signal's
-  // persisted settings, so the choice round-trips through localStorage
-  // and drives the Results-view effective-only filter.
-  const handleDontRepeatChange = useCallback((next) => {
-    setSignals((prev) => prev.map((s) => (
-      s.id !== selectedId ? s : {
-        ...s,
-        settings: { ...defaultSettings(), ...(s.settings || {}), dont_repeat: !!next },
-      }
-    )));
-  }, [selectedId]);
-
   // --- Validation + run ----------------------------------------------------
   // Run gate checks inputs too — every input must be configured
   // (instrument picked), every block's input_id must resolve to one of
@@ -252,9 +240,11 @@ function SignalsPage() {
     });
   }, [selectedSignal, availableIndicators, runAbortable]);
 
-  // Cancel any in-flight signal run when the user switches signals.
+  // Cancel any in-flight run and clear stale results when switching signals.
   useEffect(() => {
-    return () => abortRun();
+    abortRun();
+    setLastResult(null);
+    setError(null);
   }, [selectedId, abortRun]);
 
   // Drive the grid results-row height from the number of ownPanel indicators
