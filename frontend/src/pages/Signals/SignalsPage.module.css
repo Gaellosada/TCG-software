@@ -100,7 +100,6 @@
   grid-column: 1 / -1;
   grid-row: 3;
   padding: 16px;
-  border-top: 1px solid var(--border-primary);
 }
 
 .resultsCard {
