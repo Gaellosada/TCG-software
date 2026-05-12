@@ -12,7 +12,7 @@ import styles from './Signals.module.css';
  *   capital            {number}       display-only initial capital for P&L scaling
  *   onCapitalChange    {Function}     (number) => void
  */
-function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange, noRepeat, onNoRepeatChange }) {
+function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange }) {
   // v4: rules shape is now `{ entries, exits }` (section model); weight sign
   // carries long/short on each entry block.
   const rules = signal?.rules || {};
@@ -55,21 +55,6 @@ function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capita
             data-testid="initial-capital"
           />
         </div>
-        <label className={styles.noRepeatRow}>
-          <input
-            type="checkbox"
-            checked={noRepeat}
-            onChange={(e) => onNoRepeatChange(e.target.checked)}
-            data-testid="no-repeat-checkbox"
-          />
-          <span className={styles.noRepeatLabel}>Don&apos;t repeat entries/exits</span>
-          <span
-            className={styles.noRepeatInfo}
-            title="When checked, only show effective entries and exits — consecutive duplicate markers are hidden. Computation is unchanged."
-          >
-            &#9432;
-          </span>
-        </label>
         <button
           type="button"
           className={styles.runBtn}

@@ -48,19 +48,23 @@ const IND_OP_NO_INPUT = { kind: 'indicator', indicator_id: 'sma', input_id: '', 
 const IND_OP_UNKNOWN_INPUT = { kind: 'indicator', indicator_id: 'sma', input_id: 'NONE', output: null };
 
 describe('defaultBlock (v5)', () => {
-  it('entry block defaults: id, input_id: "", weight: 0, conditions: []', () => {
+  it('entry block defaults: id, input_id: "", weight: 0, conditions: [], enabled: true, description: ""', () => {
     const b = defaultBlock('entries');
     expect(typeof b.id).toBe('string');
     expect(b.id.length).toBeGreaterThan(0);
     expect(b.input_id).toBe('');
     expect(b.weight).toBe(0);
     expect(b.conditions).toEqual([]);
+    expect(b.enabled).toBe(true);
+    expect(b.description).toBe('');
     expect('target_entry_block_id' in b).toBe(false);
   });
 
   it('exit block adds target_entry_block_name: "" and omits block-level input_id/weight', () => {
     const b = defaultBlock('exits');
     expect(b.target_entry_block_name).toBe('');
+    expect(b.enabled).toBe(true);
+    expect(b.description).toBe('');
     expect('target_entry_block_id' in b).toBe(false);
     expect('input_id' in b).toBe(false);
     expect('weight' in b).toBe(false);
@@ -70,6 +74,8 @@ describe('defaultBlock (v5)', () => {
     const b = defaultBlock();
     expect('target_entry_block_name' in b).toBe(false);
     expect('target_entry_block_id' in b).toBe(false);
+    expect(b.enabled).toBe(true);
+    expect(b.description).toBe('');
   });
 
   it('returns a fresh object each call with a distinct id', () => {
