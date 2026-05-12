@@ -40,8 +40,14 @@ vi.mock('./ResultsView', () => ({
 vi.mock('../../components/Statistics', () => ({
   default: () => <div data-testid="statistics-stub" />,
 }));
-vi.mock('./TradeLog', () => ({
-  default: () => <div data-testid="trade-log-stub" />,
+vi.mock('../../components/TradeLog', () => ({
+  default: ({ entryDescriptions, exitDescriptions }) => (
+    <div
+      data-testid="trade-log-stub"
+      data-entry-desc-keys={Object.keys(entryDescriptions || {}).join(',')}
+      data-exit-desc-keys={Object.keys(exitDescriptions || {}).join(',')}
+    />
+  ),
 }));
 vi.mock('../../api/statistics', () => ({
   fetchStatistics: vi.fn(),
@@ -177,5 +183,41 @@ describe('<SignalsPage> — M1 regression: lastResult cleared on signal switch',
 
     // TradeLog must be unmounted — no stale results from the previous signal.
     expect(screen.queryByTestId('trade-log-stub')).toBeNull();
+  });
+});
+
+describe('<SignalsPage> — entryDescriptions + exitDescriptions wiring', () => {
+  it('threads both description maps to TradeLog after a completed run', async () => {
+    const SIG_WITH_BLOCKS = {
+      id: 'sig-c', name: 'Signal C',
+      inputs: [],
+      rules: {
+        entries: [{ id: 'entry-1', description: 'RSI < 30', conditions: [] }],
+        exits: [{ id: 'exit-1', description: 'RSI > 70', conditions: [] }],
+      },
+      settings: { dont_repeat: true },
+      doc: '',
+    };
+    mockLoadState.mockReturnValue({ signals: [SIG_WITH_BLOCKS] });
+
+    const fakeResult = {
+      timestamps: [1000, 2000],
+      positions: [],
+      events: [],
+      trades: [{
+        input_id: 'X', entry_block_id: 'entry-1', entry_block_name: 'My Entry',
+        exit_block_id: 'exit-1', exit_block_name: 'My Exit',
+        open_bar: 0, close_bar: 1, direction: 'long', signed_weight: 0.5,
+      }],
+    };
+    mockComputeSignal.mockResolvedValue(fakeResult);
+
+    await act(async () => { render(<SignalsPage />); });
+
+    await act(async () => { await capturedOnRun(); });
+
+    const stub = screen.getByTestId('trade-log-stub');
+    expect(stub.getAttribute('data-entry-desc-keys')).toBe('entry-1');
+    expect(stub.getAttribute('data-exit-desc-keys')).toBe('exit-1');
   });
 });
