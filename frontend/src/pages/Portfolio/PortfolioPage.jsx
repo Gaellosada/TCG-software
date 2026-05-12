@@ -8,7 +8,25 @@ import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
 import SaveControls from '../../components/SaveControls';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import Statistics from '../../components/Statistics';
 import styles from './PortfolioPage.module.css';
+
+// Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
+// Statistics endpoint expects YYYYMMDD integers (existing project
+// convention). Convert at the call site — the Statistics contract is
+// shared and must not bend to one caller's format.
+function isoDatesToYYYYMMDD(isoDates) {
+  if (!Array.isArray(isoDates)) return null;
+  const out = new Array(isoDates.length);
+  for (let i = 0; i < isoDates.length; i++) {
+    const s = isoDates[i];
+    if (typeof s !== 'string' || s.length !== 10) return null;
+    const n = Number(s.slice(0, 4) + s.slice(5, 7) + s.slice(8, 10));
+    if (!Number.isFinite(n)) return null;
+    out[i] = n;
+  }
+  return out;
+}
 
 const REBALANCE_OPTIONS = [
   { value: 'none', label: 'None' },
@@ -256,6 +274,38 @@ function PortfolioPage() {
                 legs={portfolio.legs}
               />
             </div>
+
+            {/* Statistics — needs an integer-YYYYMMDD date array and the
+                portfolio equity curve. Statistics' internal inputsKey
+                only tracks length/endpoints, so we force a remount via
+                ``key`` whenever the rebalance frequency or holdings
+                identity change — those produce same-length, same-endpoint
+                curves with different middle values. */}
+            {(() => {
+              const statDates = isoDatesToYYYYMMDD(portfolio.results.dates);
+              const statEquity = portfolio.results.portfolio_equity;
+              if (!statDates || !Array.isArray(statEquity) || statEquity.length < 2) {
+                return null;
+              }
+              // Backend rejects non-finite or non-positive equity — skip
+              // mounting Statistics rather than surfacing a 400 inside it.
+              if (statEquity.some((v) => !Number.isFinite(v) || v <= 0)) {
+                return null;
+              }
+              const legsSig = portfolio.legs
+                .map((l) => `${l.label}:${l.weight}`)
+                .join('|');
+              const remountKey = `${portfolio.results.rebalance || 'none'}|${statDates.length}|${legsSig}`;
+              return (
+                <div className={styles.section}>
+                  <Statistics
+                    key={remountKey}
+                    dates={statDates}
+                    equity={statEquity}
+                  />
+                </div>
+              );
+            })()}
 
             {/* Returns grid */}
             <div className={styles.section}>

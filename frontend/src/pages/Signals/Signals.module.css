@@ -1146,12 +1146,11 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  gap: 8px;
 }
 
 .resultsPlotUnified {
   flex: 1;
-  min-height: 0;
+  min-height: 400px;
   position: relative;
 }
 
