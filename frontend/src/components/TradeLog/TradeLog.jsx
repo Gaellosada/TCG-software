@@ -33,7 +33,9 @@ function formatSignedPercent(fraction) {
   if (typeof fraction !== 'number' || !Number.isFinite(fraction)) return '—';
   const pct = fraction * 100;
   const sign = pct > 0 ? '+' : '';
-  return `${sign}${pct.toFixed(pct === Math.trunc(pct) ? 0 : 2)}%`;
+  // Always two decimals: integer-detection via === is FP-fragile
+  // (e.g. (110/100 - 1) * 100 = 10.000000000000009).
+  return `${sign}${pct.toFixed(2)}%`;
 }
 
 function priceAtBar(positionsByInputId, inputId, bar) {
@@ -61,6 +63,7 @@ function TradeLog({
   positions = [],
   exitDescriptions = {},
   entryDescriptions = {},
+  showHoldingColumn = false,
 }) {
   const [open, setOpen] = useState(false);
   const [pnlMode, setPnlMode] = useState('realised');
@@ -140,6 +143,9 @@ function TradeLog({
                     <th scope="col">Open</th>
                     <th scope="col">Close</th>
                     <th scope="col">Input</th>
+                    {showHoldingColumn && (
+                      <th scope="col" data-testid="holding-col-header">Holding</th>
+                    )}
                     <th scope="col">Direction</th>
                     <th scope="col">Size</th>
                     <th scope="col">Open price</th>
@@ -173,10 +179,19 @@ function TradeLog({
                       : '';
 
                     return (
-                      <tr key={`${tr.entry_block_id}|${tr.open_bar}`} data-testid="trade-row">
+                      <tr
+                        key={`${tr.entry_block_id}|${tr.open_bar}`}
+                        data-testid="trade-row"
+                        data-open-bar={tr.open_bar}
+                      >
                         <td>{formatTs(tr._openTs)}</td>
                         <td>{isClosed ? formatTs(tr._closeTs) : <span className={styles.openTag}>open</span>}</td>
                         <td>{tr.input_id}</td>
+                        {showHoldingColumn && (
+                          <td data-testid="trade-holding">
+                            {tr.holding_name ?? tr.holding_id ?? '—'}
+                          </td>
+                        )}
                         <td>
                           <span className={`${styles.dirPill} ${directionClass}`}>
                             {tr.direction}

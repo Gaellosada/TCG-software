@@ -99,7 +99,7 @@ describe('<TradeLog>', () => {
 
     // Row 2: short, open=102, close=108, realised = (108/102 - 1)*(-0.4) ≈ -0.0235 → "-2.35%"
     expect(rows[1].textContent).toContain('short');
-    expect(rows[1].textContent).toContain('-40%');
+    expect(rows[1].textContent).toContain('-40.00%');
 
     // Row 3: open trade — no close price, no realised P&L
     expect(rows[2].textContent).toContain('open');
@@ -309,12 +309,96 @@ describe('<TradeLog>', () => {
     fireEvent.click(screen.getByTestId('trade-log-toggle'));
     const rows = screen.getAllByTestId('trade-row');
     expect(rows).toHaveLength(3);
-    // Ascending by open_bar → a, c, b
-    expect(rows[0].getAttribute('data-testid')).toBe('trade-row');
-    // Check ordering via entry_block_id embedded in the key — easier: each row's
-    // first column is the timestamp at the open_bar. Verify the column order.
+    // Ascending by open_bar → a (1), c (2), b (3). Assert non-decreasing
+    // open_bar order across all rows (the previous version was vacuous).
+    const openBars = rows.map((r) => Number(r.getAttribute('data-open-bar')));
+    for (let i = 1; i < openBars.length; i++) {
+      expect(openBars[i]).toBeGreaterThanOrEqual(openBars[i - 1]);
+    }
+    expect(openBars).toEqual([1, 2, 3]);
+    // Each row's first column is the timestamp at open_bar — sanity-check it
+    // matches the expected dates.
     expect(rows[0].querySelectorAll('td')[0].textContent).toContain('2024-01-02');
     expect(rows[1].querySelectorAll('td')[0].textContent).toContain('2024-01-03');
     expect(rows[2].querySelectorAll('td')[0].textContent).toContain('2024-01-04');
+  });
+
+  it('holding column hidden by default (showHoldingColumn omitted/false)', () => {
+    const trades = [{
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'E',
+      exit_block_id: 'x1',
+      exit_block_name: 'X',
+      open_bar: 0,
+      close_bar: 1,
+      direction: 'long',
+      signed_weight: 0.5,
+      holding_id: 'LegA',
+      holding_name: 'LegA',
+    }];
+    const positions = [pos('X', [100, 105])];
+    render(<TradeLog trades={trades} timestamps={TS} positions={positions} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    expect(screen.queryByTestId('holding-col-header')).toBeNull();
+    expect(screen.queryByTestId('trade-holding')).toBeNull();
+  });
+
+  it('holding column visible when showHoldingColumn=true and renders holding_name', () => {
+    const trades = [{
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'E',
+      exit_block_id: 'x1',
+      exit_block_name: 'X',
+      open_bar: 0,
+      close_bar: 1,
+      direction: 'long',
+      signed_weight: 0.5,
+      holding_id: 'LegA',
+      holding_name: 'LegA',
+    }];
+    const positions = [pos('X', [100, 105])];
+    render(<TradeLog
+      trades={trades}
+      timestamps={TS}
+      positions={positions}
+      showHoldingColumn
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    expect(screen.getByTestId('holding-col-header').textContent).toBe('Holding');
+    const cell = screen.getByTestId('trade-holding');
+    expect(cell.textContent).toBe('LegA');
+  });
+
+  it('holding column falls back to holding_id, then em-dash when both missing', () => {
+    const trades = [
+      {
+        input_id: 'X', entry_block_id: 'e1', entry_block_name: 'E',
+        exit_block_id: 'x1', exit_block_name: 'X',
+        open_bar: 0, close_bar: 1,
+        direction: 'long', signed_weight: 0.5,
+        holding_id: 'IdOnly', holding_name: null,
+      },
+      {
+        input_id: 'X', entry_block_id: 'e2', entry_block_name: 'E',
+        exit_block_id: 'x2', exit_block_name: 'X',
+        open_bar: 1, close_bar: null,
+        direction: 'long', signed_weight: 0.5,
+        // neither field present
+      },
+    ];
+    const positions = [pos('X', [100, 105, 110])];
+    render(<TradeLog
+      trades={trades}
+      timestamps={TS}
+      positions={positions}
+      showHoldingColumn
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const cells = screen.getAllByTestId('trade-holding');
+    expect(cells).toHaveLength(2);
+    expect(cells[0].textContent).toBe('IdOnly');
+    expect(cells[1].textContent).toBe('—');
   });
 });
