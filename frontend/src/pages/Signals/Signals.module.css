@@ -285,10 +285,18 @@
   color: var(--text-secondary) !important;
 }
 
-.blockDescriptionSection {
+.blockFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-top: 4px;
   border-top: 1px solid var(--border-secondary);
   padding-top: 4px;
+}
+
+.blockFooter .addCondBtn {
+  margin-top: 0;
 }
 
 .blockDescriptionToggle {

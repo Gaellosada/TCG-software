@@ -337,15 +337,15 @@ function Block({
           />
         ))
       )}
-      <button
-        type="button"
-        className={styles.addCondBtn}
-        onClick={onAddCondition}
-        data-testid={`add-condition-${blockIdx}`}
-      >
-        + Add condition (AND)
-      </button>
-      <div className={styles.blockDescriptionSection}>
+      <div className={styles.blockFooter}>
+        <button
+          type="button"
+          className={styles.addCondBtn}
+          onClick={onAddCondition}
+          data-testid={`add-condition-${blockIdx}`}
+        >
+          + Add condition (AND)
+        </button>
         <button
           type="button"
           className={styles.blockDescriptionToggle}
@@ -358,17 +358,17 @@ function Block({
           </span>
           Description
         </button>
-        {descOpen && (
-          <textarea
-            className={styles.blockDescriptionTextarea}
-            value={block.description || ''}
-            onChange={handleDescriptionChange}
-            placeholder="Optional block description…"
-            aria-label="Block description"
-            data-testid={`block-desc-textarea-${blockIdx}`}
-          />
-        )}
       </div>
+      {descOpen && (
+        <textarea
+          className={styles.blockDescriptionTextarea}
+          value={block.description || ''}
+          onChange={handleDescriptionChange}
+          placeholder="Optional block description…"
+          aria-label="Block description"
+          data-testid={`block-desc-textarea-${blockIdx}`}
+        />
+      )}
     </div>
   );
 }
