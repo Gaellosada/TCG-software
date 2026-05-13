@@ -342,3 +342,36 @@ describe('<PortfolioPage> TradeLog integration', () => {
     expect(exit.getAttribute('data-reason-tooltip')).toBe('');
   });
 });
+
+describe('<PortfolioPage> — TC4.9: default risk-free rate from localStorage', () => {
+  // TC4.9: when localStorage has "5", Statistics receives defaultRiskFreeRate=0.05
+  // which means the first fetchStatistics call uses riskFreeRate ≈ 0.05.
+  it('uses 0.05 as the risk-free rate when localStorage stores "5"', () => {
+    localStorage.setItem('tcg-risk-free-rate', '5');
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{ id: 1, label: 'SPY', weight: 100 }],
+        results: resultsFixture(),
+      }),
+    );
+    render(<PortfolioPage />);
+    expect(fetchStatistics).toHaveBeenCalled();
+    const args = vi.mocked(fetchStatistics).mock.calls[0][0];
+    expect(args.riskFreeRate).toBeCloseTo(0.05, 6);
+    localStorage.removeItem('tcg-risk-free-rate');
+  });
+
+  it('uses 0.04 as the risk-free rate when localStorage is empty', () => {
+    localStorage.removeItem('tcg-risk-free-rate');
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{ id: 1, label: 'SPY', weight: 100 }],
+        results: resultsFixture(),
+      }),
+    );
+    render(<PortfolioPage />);
+    expect(fetchStatistics).toHaveBeenCalled();
+    const args = vi.mocked(fetchStatistics).mock.calls[0][0];
+    expect(args.riskFreeRate).toBeCloseTo(0.04, 6);
+  });
+});

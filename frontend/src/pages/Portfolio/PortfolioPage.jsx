@@ -11,6 +11,7 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
+import { getRiskFreeRateFraction } from '../../lib/userSettings';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
 // Statistics endpoint expects YYYYMMDD integers (existing project
@@ -303,6 +304,7 @@ function PortfolioPage() {
                     key={remountKey}
                     dates={statDates}
                     equity={statEquity}
+                    defaultRiskFreeRate={getRiskFreeRateFraction()}
                   />
                 </div>
               );
