@@ -246,12 +246,12 @@ describe('<PortfolioPage> TradeLog integration', () => {
     expect(toggle).toBeDefined();
     expect(screen.getByTestId('trade-log-count').textContent).toBe('(1)');
 
-    // DOM order: Statistics title before trade-log, trade-log before returns-grid
+    // DOM order: Statistics title before returns-grid, returns-grid before trade-log
     const statsTitle = screen.getByText('Statistics');
     const tradeLog = screen.getByTestId('trade-log');
     const grid = screen.getByTestId('returns-grid');
-    expect(statsTitle.compareDocumentPosition(tradeLog) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(tradeLog.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(statsTitle.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(grid.compareDocumentPosition(tradeLog) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // Expand and verify the Holding column shows the leg label, plus the
     // ISO→ms timestamp conversion renders the open date correctly.

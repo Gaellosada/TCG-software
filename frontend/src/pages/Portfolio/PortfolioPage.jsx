@@ -308,6 +308,14 @@ function PortfolioPage() {
               );
             })()}
 
+            {/* Returns grid */}
+            <div className={styles.section}>
+              <ReturnsGrid
+                monthlyReturns={portfolio.results.monthly_returns}
+                yearlyReturns={portfolio.results.yearly_returns}
+              />
+            </div>
+
             {/* Trade log — Portfolio response emits dates as ISO strings
                 but TradeLog expects unix-ms timestamps; convert at the call
                 site. entry/exitDescriptions are a union across all signal
@@ -357,14 +365,6 @@ function PortfolioPage() {
                 </div>
               );
             })()}
-
-            {/* Returns grid */}
-            <div className={styles.section}>
-              <ReturnsGrid
-                monthlyReturns={portfolio.results.monthly_returns}
-                yearlyReturns={portfolio.results.yearly_returns}
-              />
-            </div>
           </div>
         )}
 
