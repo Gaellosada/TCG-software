@@ -1,11 +1,14 @@
-"""Tests for portfolio trade log aggregation (§5.4 of CONTRACT).
+"""Tests for portfolio trade log aggregation (§5.4 of CONTRACT, Sign 10/11).
 
 Covers:
   1. ``Trade`` dataclass extension with optional ``holding_id``/``holding_name``.
   2. Portfolio aggregation surfaces ``trades`` + ``positions`` keys.
   3. Mixed-axis legs: per-signal bar indices are re-mapped to ``common_dates``
      and out-of-window trades are DROPPED (not clamped).
-  4. No-signal portfolios still emit empty ``trades`` / ``positions`` arrays.
+  4. Direct (non-signal) legs each synthesize one open "Holding" trade with
+     their price series bubbled up into positions[].
+  5. Signal-leg trade ``signed_weight`` is scaled by the signal leg's
+     allocation weight before holding_id stamping.
 """
 
 from __future__ import annotations
@@ -433,11 +436,13 @@ class TestPortfolioAggregation:
         holding_ids = {t["holding_id"] for t in out_trades}
         assert holding_ids == {"leg_a", "leg_b"}
 
-    async def test_no_signal_portfolio_emits_empty_trades_and_positions(
+    async def test_direct_only_portfolio_emits_holding_trades(
         self, client: AsyncClient
     ):
-        """Portfolio with only direct (instrument) legs: ``trades`` and
-        ``positions`` keys are present and empty."""
+        """Portfolio with only direct (instrument) legs: each leg now
+        contributes one synthesized Holding open trade, and its price
+        series is bubbled up into positions[] (Sign 10 supersedes Sign 5).
+        """
         body = {
             "legs": {
                 "SPX": {
@@ -451,5 +456,241 @@ class TestPortfolioAggregation:
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["trades"] == []
-        assert data["positions"] == []
+        assert len(data["trades"]) == 1
+        tr = data["trades"][0]
+        assert tr["entry_block_id"] == "holding"
+        assert tr["entry_block_name"] == "Holding"
+        assert tr["exit_block_id"] is None
+        assert tr["exit_block_name"] is None
+        assert tr["open_bar"] == 0
+        assert tr["close_bar"] is None
+        assert tr["direction"] == "long"
+        assert tr["signed_weight"] == 100.0
+        assert tr["holding_id"] == "SPX"
+        assert tr["holding_name"] == "SPX"
+        assert tr["input_id"] == "SPX"
+        # Positions: SPX price bubbled up.
+        assert len(data["positions"]) == 1
+        pos = data["positions"][0]
+        assert pos["input_id"] == "SPX"
+        assert pos["price"] is not None
+        assert len(pos["price"]["values"]) == len(data["dates"])
+
+
+# ── Holding-trade synthesis for non-signal legs (Sign 10/11) ----------------
+
+
+class TestHoldingTradeSynthesis:
+    async def test_holding_trade_for_instrument_leg_long(
+        self, client: AsyncClient
+    ):
+        """Single direct instrument leg at weight 0.7 emits one Holding
+        open trade pointing at the SPX positions entry."""
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "instrument",
+                    "collection": "INDEX",
+                    "symbol": "SPX",
+                }
+            },
+            "weights": {"SPX": 0.7},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["trades"]) == 1
+        tr = data["trades"][0]
+        assert tr["entry_block_name"] == "Holding"
+        assert tr["entry_block_id"] == "holding"
+        assert tr["close_bar"] is None
+        assert tr["signed_weight"] == pytest.approx(0.7)
+        assert tr["direction"] == "long"
+        assert tr["holding_id"] == "SPX"
+        assert tr["holding_name"] == "SPX"
+        assert tr["input_id"] == "SPX"
+        # input_id appears in positions.
+        position_ids = {p["input_id"] for p in data["positions"]}
+        assert "SPX" in position_ids
+
+    async def test_holding_trade_for_instrument_leg_short(
+        self, client: AsyncClient
+    ):
+        """Negative weight → direction='short', signed_weight preserves sign."""
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "instrument",
+                    "collection": "INDEX",
+                    "symbol": "SPX",
+                }
+            },
+            "weights": {"SPX": -0.4},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["trades"]) == 1
+        tr = data["trades"][0]
+        assert tr["direction"] == "short"
+        assert tr["signed_weight"] == pytest.approx(-0.4)
+        assert tr["holding_id"] == "SPX"
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_signal_leg_signed_weight_scaled_by_leg_allocation(
+        self, mock_eval, client: AsyncClient
+    ):
+        """A signal leg at allocation 0.5 emitting trades with internal
+        signed_weight 1.0 yields portfolio trades with signed_weight 0.5."""
+        sig_dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
+        sig_prices = np.array([100.0, 101.0, 103.0], dtype=np.float64)
+        trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry-1",
+                exit_block_id="X1",
+                exit_block_name="exit-1",
+                open_bar=0,
+                close_bar=1,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+        positions_payload = (
+            {
+                "input_id": "X",
+                "price": {
+                    "label": "SPX.close",
+                    "values": [100.0, 101.0, 103.0],
+                },
+            },
+        )
+        mock_eval.return_value = _leg_result(
+            sig_dates, sig_prices, trades, positions_payload
+        )
+
+        body = {
+            "legs": {
+                "sig1": {
+                    "type": "signal",
+                    "signal_spec": _minimal_signal_spec(),
+                }
+            },
+            "weights": {"sig1": 0.5},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        out_trades = data["trades"]
+        assert len(out_trades) == 1
+        assert out_trades[0]["signed_weight"] == pytest.approx(0.5)
+        # holding_id stamped AFTER scaling.
+        assert out_trades[0]["holding_id"] == "sig1"
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_mixed_portfolio_signal_and_direct(
+        self, mock_eval, client: AsyncClient
+    ):
+        """One signal leg at 0.6 + one direct leg at 0.4: response has both
+        a synthesized Holding trade (direct) and scaled signal trades."""
+        sig_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
+        )
+        sig_prices = np.full(5, 100.0, dtype=np.float64)
+        trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry-1",
+                exit_block_id="X1",
+                exit_block_name="exit-1",
+                open_bar=1,
+                close_bar=3,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+        mock_eval.return_value = _leg_result(sig_dates, sig_prices, trades, ())
+
+        body = {
+            "legs": {
+                "sig1": {
+                    "type": "signal",
+                    "signal_spec": _minimal_signal_spec(),
+                },
+                "SPX": {
+                    "type": "instrument",
+                    "collection": "INDEX",
+                    "symbol": "SPX",
+                },
+            },
+            "weights": {"sig1": 0.6, "SPX": 0.4},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        out = data["trades"]
+        assert len(out) == 2
+
+        holdings = {t["holding_id"]: t for t in out}
+        assert "sig1" in holdings and "SPX" in holdings
+
+        holding_direct = holdings["SPX"]
+        assert holding_direct["entry_block_name"] == "Holding"
+        assert holding_direct["close_bar"] is None
+        assert holding_direct["signed_weight"] == pytest.approx(0.4)
+        assert holding_direct["open_bar"] == 0
+
+        signal_trade = holdings["sig1"]
+        assert signal_trade["entry_block_name"] == "entry-1"
+        assert signal_trade["signed_weight"] == pytest.approx(1.0 * 0.6)
+
+        # Sorted by (open_bar, entry_block_id): Holding trade has open_bar=0
+        # and entry_block_id="holding", signal trade has open_bar=1 → Holding
+        # appears first.
+        assert out[0]["holding_id"] == "SPX"
+        assert out[1]["holding_id"] == "sig1"
+
+    async def test_holding_trade_for_continuous_leg(
+        self, mock_app, client: AsyncClient
+    ):
+        """Continuous-futures leg also synthesizes a Holding trade.
+
+        The fixture's AsyncMock get_aligned_prices returns its canned
+        series under key 'SPX' regardless of the leg spec — so the leg
+        label here is 'SPX' to match. The continuous-specific code path
+        is exercised by leg.type == 'continuous' (input_id resolved to
+        leg.collection).
+        """
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "continuous",
+                    "collection": "FUT_VIX",
+                    "strategy": "front_month",
+                }
+            },
+            "weights": {"SPX": 0.6},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["trades"]) == 1
+        tr = data["trades"][0]
+        assert tr["entry_block_name"] == "Holding"
+        assert tr["entry_block_id"] == "holding"
+        assert tr["close_bar"] is None
+        assert tr["direction"] == "long"
+        assert tr["signed_weight"] == pytest.approx(0.6)
+        assert tr["holding_id"] == "SPX"
+        # continuous → input_id = leg.collection
+        assert tr["input_id"] == "FUT_VIX"
+        position_ids = {p["input_id"] for p in data["positions"]}
+        assert "FUT_VIX" in position_ids

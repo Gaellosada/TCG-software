@@ -724,6 +724,7 @@ async def compute_portfolio(
     for label, trades in signal_trades_map.items():
         sig_idx = signal_dates_map[label]
         n_sig = len(sig_idx)
+        leg_weight = float(body.weights[label])
         for tr in trades:
             sig_open_date = int(sig_idx[tr.open_bar])
             new_open = cd_index.get(sig_open_date)
@@ -753,11 +754,39 @@ async def compute_portfolio(
                     "open_bar": new_open,
                     "close_bar": new_close,
                     "direction": tr.direction,
-                    "signed_weight": tr.signed_weight,
+                    "signed_weight": tr.signed_weight * leg_weight,
                     "holding_id": label,
                     "holding_name": label,
                 }
             )
+
+    # Synthesize one open "Holding" Trade per non-signal leg (Sign 10).
+    for label, leg in body.legs.items():
+        if leg.type == "signal":
+            continue
+        if leg.type == "instrument":
+            direct_input_id = leg.symbol or label
+        elif leg.type == "continuous":
+            direct_input_id = leg.collection or label
+        else:
+            direct_input_id = label
+        leg_weight = float(body.weights[label])
+        aggregated_trades.append(
+            {
+                "input_id": direct_input_id,
+                "entry_block_id": "holding",
+                "entry_block_name": "Holding",
+                "exit_block_id": None,
+                "exit_block_name": None,
+                "open_bar": 0,
+                "close_bar": None,
+                "direction": "long" if leg_weight >= 0 else "short",
+                "signed_weight": leg_weight,
+                "holding_id": label,
+                "holding_name": label,
+            }
+        )
+
     aggregated_trades.sort(
         key=lambda t: (t["open_bar"], t["entry_block_id"])
     )
@@ -795,6 +824,35 @@ async def compute_portfolio(
                     "price": {"label": price["label"], "values": remapped},
                 }
             )
+
+    # Direct (non-signal) leg price series → positions[]. Reuse the already-
+    # aligned closes (length == len(common_dates)); first-leg-wins dedup.
+    for label, leg in body.legs.items():
+        if leg.type == "signal":
+            continue
+        if label not in aligned_closes:
+            continue
+        if leg.type == "instrument":
+            direct_input_id = leg.symbol or label
+            price_label = f"{leg.symbol}.close" if leg.symbol else f"{label}.close"
+        elif leg.type == "continuous":
+            direct_input_id = leg.collection or label
+            price_label = f"{leg.collection}.close" if leg.collection else f"{label}.close"
+        else:
+            direct_input_id = label
+            price_label = f"{label}.close"
+        if direct_input_id in seen_inputs:
+            continue
+        seen_inputs.add(direct_input_id)
+        aggregated_positions.append(
+            {
+                "input_id": direct_input_id,
+                "price": {
+                    "label": price_label,
+                    "values": nan_safe_floats(aligned_closes[label]),
+                },
+            }
+        )
 
     # ── 11. Build response ──
 
