@@ -13,6 +13,8 @@ import {
   buildEventMarkerTraces,
   buildIndicatorTraces,
   buildBlockWeightSignMap,
+  buildBlockDisplayNameMap,
+  formatIndicatorTraceNames,
   EVENT_MARKER,
 } from './resultsPlotTraces';
 
@@ -479,8 +481,11 @@ describe('buildResultsPlot', () => {
     // Bottom subplot price traces should be on y2
     const bottomPrices = traces.filter((t) => t.name.includes('X') && t.yaxis === 'y2');
     expect(bottomPrices.length).toBeGreaterThanOrEqual(1);
-    // Indicator traces on y2
-    const indTraces = traces.filter((t) => t.name && t.name.startsWith('ind:'));
+    // Indicator traces on y2 (legend format is now "<DisplayType>(<params>)"
+    // — no "ind:" prefix, no input_id suffix when group is size 1).
+    const indTraces = traces.filter(
+      (t) => t.legendgroup && typeof t.legendgroup === 'string' && t.legendgroup.startsWith('ind-'),
+    );
     expect(indTraces.length).toBeGreaterThanOrEqual(1);
     for (const t of indTraces) {
       expect(t.yaxis).toBe('y2');
@@ -622,5 +627,320 @@ describe('countOwnPanelIndicators', () => {
       ],
     };
     expect(countOwnPanelIndicators(result)).toBe(2);
+  });
+});
+
+/* ================================================================== */
+/*  formatIndicatorTraceNames (group-aware legend labels)              */
+/* ================================================================== */
+
+describe('formatIndicatorTraceNames', () => {
+  const SMA_DEF = { id: 'sma', name: 'SMA' };
+  const RSI_DEF = { id: 'rsi', name: 'RSI' };
+
+  it('TC2.1 — distinct names for SMA(20) and SMA(50) on the same input', () => {
+    const inds = [
+      { input_id: 'X', indicator_id: 'sma', params_override: { window: 20 }, series: [] },
+      { input_id: 'X', indicator_id: 'sma', params_override: { window: 50 }, series: [] },
+    ];
+    const names = formatIndicatorTraceNames(inds, [SMA_DEF]);
+    expect(names).toEqual(['SMA(window=20)', 'SMA(window=50)']);
+  });
+
+  it('TC2.2 — appends " on <input_id>" when same (type, params) appears on different inputs', () => {
+    const inds = [
+      { input_id: 'A', indicator_id: 'sma', params_override: { window: 20 }, series: [] },
+      { input_id: 'B', indicator_id: 'sma', params_override: { window: 20 }, series: [] },
+    ];
+    const names = formatIndicatorTraceNames(inds, [SMA_DEF]);
+    expect(names).toEqual(['SMA(window=20) on A', 'SMA(window=20) on B']);
+  });
+
+  it('TC2.3 — does NOT append " on <input_id>" when each group is size 1', () => {
+    const inds = [
+      { input_id: 'X', indicator_id: 'sma', params_override: { window: 20 }, series: [] },
+      { input_id: 'X', indicator_id: 'rsi', params_override: { window: 14 }, series: [] },
+    ];
+    const names = formatIndicatorTraceNames(inds, [SMA_DEF, RSI_DEF]);
+    expect(names).toEqual(['SMA(window=20)', 'RSI(window=14)']);
+  });
+
+  it('TC2.4 — uses availableIndicators[].name when id matches; falls back to raw indicator_id when no match', () => {
+    const inds = [
+      { input_id: 'X', indicator_id: 'sma', params_override: { window: 20 }, series: [] },
+      { input_id: 'X', indicator_id: 'mystery', params_override: { foo: 1 }, series: [] },
+    ];
+    const names = formatIndicatorTraceNames(inds, [SMA_DEF]);
+    expect(names[0]).toBe('SMA(window=20)');
+    expect(names[1]).toBe('mystery(foo=1)');
+  });
+
+  it('TC2.5 — four-case edge-table matrix', () => {
+    // Case A: SMA(20) + SMA(50), same input → no suffix
+    expect(
+      formatIndicatorTraceNames(
+        [
+          { input_id: 'X', indicator_id: 'sma', params_override: { window: 20 } },
+          { input_id: 'X', indicator_id: 'sma', params_override: { window: 50 } },
+        ],
+        [SMA_DEF],
+      ),
+    ).toEqual(['SMA(window=20)', 'SMA(window=50)']);
+    // Case B: SMA(20) + RSI(14), same input → no suffix
+    expect(
+      formatIndicatorTraceNames(
+        [
+          { input_id: 'X', indicator_id: 'sma', params_override: { window: 20 } },
+          { input_id: 'X', indicator_id: 'rsi', params_override: { window: 14 } },
+        ],
+        [SMA_DEF, RSI_DEF],
+      ),
+    ).toEqual(['SMA(window=20)', 'RSI(window=14)']);
+    // Case C: SMA(20) on A + SMA(20) on B → suffix
+    expect(
+      formatIndicatorTraceNames(
+        [
+          { input_id: 'A', indicator_id: 'sma', params_override: { window: 20 } },
+          { input_id: 'B', indicator_id: 'sma', params_override: { window: 20 } },
+        ],
+        [SMA_DEF],
+      ),
+    ).toEqual(['SMA(window=20) on A', 'SMA(window=20) on B']);
+    // Case D: identical refs upstream-dedup'd → one row → no suffix
+    expect(
+      formatIndicatorTraceNames(
+        [{ input_id: 'X', indicator_id: 'sma', params_override: { window: 20 } }],
+        [SMA_DEF],
+      ),
+    ).toEqual(['SMA(window=20)']);
+  });
+
+  it('emits no params when params_override is empty or absent', () => {
+    const inds = [
+      { input_id: 'X', indicator_id: 'sma', params_override: null },
+      { input_id: 'X', indicator_id: 'rsi' },
+    ];
+    const names = formatIndicatorTraceNames(inds, [SMA_DEF, RSI_DEF]);
+    expect(names).toEqual(['SMA', 'RSI']);
+  });
+
+  it('returns [] for non-array / empty input', () => {
+    expect(formatIndicatorTraceNames(null)).toEqual([]);
+    expect(formatIndicatorTraceNames([])).toEqual([]);
+  });
+
+  it('buildIndicatorTraces consumes formatIndicatorTraceNames via opts.availableIndicators', () => {
+    const inds = [
+      { input_id: 'X', indicator_id: 'sma', params_override: { window: 20 }, series: [1, 2, 3] },
+      { input_id: 'X', indicator_id: 'sma', params_override: { window: 50 }, series: [4, 5, 6] },
+    ];
+    const traces = buildIndicatorTraces(inds, dates, 0, 'y2', { availableIndicators: [SMA_DEF] });
+    expect(traces).toHaveLength(2);
+    expect(traces[0].name).toBe('SMA(window=20)');
+    expect(traces[1].name).toBe('SMA(window=50)');
+  });
+});
+
+/* ================================================================== */
+/*  buildBlockDisplayNameMap + marker block-name plumbing              */
+/* ================================================================== */
+
+describe('buildBlockDisplayNameMap', () => {
+  it('TC3.1 — returns "Entry 1" for an unnamed entry at index 0', () => {
+    const rules = { entries: [{ id: 'e1', name: '', conditions: [] }], exits: [] };
+    expect(buildBlockDisplayNameMap(rules)).toEqual({ e1: 'Entry 1' });
+  });
+
+  it('TC3.2 — returns "Exit 2" for an unnamed exit at index 1', () => {
+    const rules = {
+      entries: [],
+      exits: [
+        { id: 'x1', name: 'Closer', conditions: [] },
+        { id: 'x2', name: '', conditions: [] },
+      ],
+    };
+    const map = buildBlockDisplayNameMap(rules);
+    expect(map.x1).toBe('Closer');
+    expect(map.x2).toBe('Exit 2');
+  });
+
+  it('TC3.3 — returns "Reset 1" for an unnamed reset at index 0', () => {
+    const rules = { entries: [], exits: [], resets: [{ id: 'r1', name: '', conditions: [] }] };
+    expect(buildBlockDisplayNameMap(rules)).toEqual({ r1: 'Reset 1' });
+  });
+
+  it('TC3.4 — trims whitespace-only names to the section-prefixed fallback', () => {
+    const rules = { entries: [{ id: 'e1', name: '   \t  ', conditions: [] }], exits: [] };
+    expect(buildBlockDisplayNameMap(rules)).toEqual({ e1: 'Entry 1' });
+  });
+
+  it('TC3.5 — uses block.name verbatim when non-empty', () => {
+    const rules = {
+      entries: [{ id: 'e1', name: 'MyAlpha', conditions: [] }],
+      exits: [{ id: 'x1', name: 'TakeProfit', conditions: [] }],
+      resets: [{ id: 'r1', name: 'WeeklyArm', conditions: [] }],
+    };
+    expect(buildBlockDisplayNameMap(rules)).toEqual({
+      e1: 'MyAlpha',
+      x1: 'TakeProfit',
+      r1: 'WeeklyArm',
+    });
+  });
+
+  it('returns {} for null / malformed / empty rules', () => {
+    expect(buildBlockDisplayNameMap(null)).toEqual({});
+    expect(buildBlockDisplayNameMap(undefined)).toEqual({});
+    expect(buildBlockDisplayNameMap({})).toEqual({});
+    expect(buildBlockDisplayNameMap({ entries: 'not an array' })).toEqual({});
+  });
+});
+
+describe('buildEventMarkerTraces — block display names', () => {
+  const positions = [positionWithPrice('X', [100, 101, 102])];
+
+  it('TC3.6 — embeds the display name (not the raw UUID) in trace.name', () => {
+    const events = [
+      { input_id: 'X', block_id: 'uuid-123', kind: 'entry', fired_indices: [1] },
+    ];
+    const [trace] = buildEventMarkerTraces(events, positions, dates, undefined, {
+      blockWeightSigns: { 'uuid-123': 1 },
+      blockDisplayNames: { 'uuid-123': 'MyAlpha' },
+    });
+    expect(trace.name).toBe('long entry • X • MyAlpha');
+    expect(trace.name).not.toMatch(/uuid-123/);
+  });
+
+  it('TC3.7 — embeds display name in hovertemplate', () => {
+    const events = [
+      { input_id: 'X', block_id: 'uuid-123', kind: 'entry', fired_indices: [1] },
+    ];
+    const [trace] = buildEventMarkerTraces(events, positions, dates, undefined, {
+      blockWeightSigns: { 'uuid-123': 1 },
+      blockDisplayNames: { 'uuid-123': 'MyAlpha' },
+    });
+    expect(trace.hovertemplate).toContain('MyAlpha');
+    expect(trace.hovertemplate).toContain('long entry on X');
+  });
+
+  it('TC3.8 — falls back to "block <UUID>" when blockDisplayNames is absent', () => {
+    const events = [
+      { input_id: 'X', block_id: 'uuid-abc', kind: 'entry', fired_indices: [1] },
+    ];
+    const [trace] = buildEventMarkerTraces(events, positions, dates, undefined, {
+      blockWeightSigns: { 'uuid-abc': 1 },
+    });
+    expect(trace.name).toContain('block uuid-abc');
+  });
+
+  it('TC3.9 — kind="reset" with input_id="" omits the per-input bullet (no double-bullet)', () => {
+    const events = [
+      { input_id: '', block_id: 'r1', kind: 'reset', fired_indices: [1], latched_indices: [1] },
+    ];
+    const [trace] = buildEventMarkerTraces(events, positions, dates, undefined, {
+      blockDisplayNames: { r1: 'Reset 1' },
+    });
+    // Format MUST be "reset • Reset 1" — NOT "reset •  • Reset 1".
+    expect(trace.name).toBe('reset • Reset 1');
+    expect(trace.name).not.toMatch(/•\s+•/); // no adjacent bullets
+    // Hovertemplate: no spurious " on " either.
+    expect(trace.hovertemplate).not.toMatch(/on \s/);
+    expect(trace.hovertemplate).toContain('reset');
+    expect(trace.hovertemplate).toContain('Reset 1');
+  });
+
+  it('reset markers use the reset EVENT_MARKER style', () => {
+    const events = [
+      { input_id: '', block_id: 'r1', kind: 'reset', fired_indices: [0], latched_indices: [0] },
+    ];
+    const [trace] = buildEventMarkerTraces(events, positions, dates, undefined, {
+      blockDisplayNames: { r1: 'Reset 1' },
+    });
+    expect(trace.marker.symbol).toBe(EVENT_MARKER.reset[0].symbol);
+    expect(trace.marker.color).toBe(EVENT_MARKER.reset[0].color);
+  });
+
+  it('named reset block renders block.name in the legend (no double-bullet)', () => {
+    const events = [
+      { input_id: '', block_id: 'r1', kind: 'reset', fired_indices: [1] },
+    ];
+    const [trace] = buildEventMarkerTraces(events, positions, dates, undefined, {
+      blockDisplayNames: { r1: 'WeeklyArm' },
+    });
+    expect(trace.name).toBe('reset • WeeklyArm');
+  });
+
+  it('reset event still rides on the first priced input when input_id is empty', () => {
+    const events = [
+      { input_id: '', block_id: 'r1', kind: 'reset', fired_indices: [0, 2] },
+    ];
+    const [trace] = buildEventMarkerTraces(events, positions, dates, undefined, {
+      blockDisplayNames: { r1: 'Reset 1' },
+    });
+    expect(trace.x).toHaveLength(2);
+    expect(trace.y).toEqual([100, 102]);
+  });
+});
+
+describe('buildResultsPlot — Tasks 2 & 3 integration', () => {
+  it('plumbs opts.availableIndicators through to indicator trace names', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [
+        { input_id: 'X', indicator_id: 'sma', params_override: { window: 20 }, series: [1, 2, 3] },
+        { input_id: 'X', indicator_id: 'sma', params_override: { window: 50 }, series: [4, 5, 6] },
+      ],
+      events: [],
+    };
+    const { traces } = buildResultsPlot(result, {
+      availableIndicators: [{ id: 'sma', name: 'SMA' }],
+    });
+    const inds = traces.filter(
+      (t) => t.legendgroup && typeof t.legendgroup === 'string' && t.legendgroup.startsWith('ind-'),
+    );
+    const names = inds.map((t) => t.name);
+    expect(names).toContain('SMA(window=20)');
+    expect(names).toContain('SMA(window=50)');
+  });
+
+  it('TC3.10 — plumbs opts.signalRules to marker display names (integration)', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [],
+      events: [
+        { input_id: 'X', block_id: 'e1', kind: 'entry', fired_indices: [0], latched_indices: [0] },
+        { input_id: 'X', block_id: 'x1', kind: 'exit', fired_indices: [2], latched_indices: [2] },
+      ],
+    };
+    const signalRules = {
+      entries: [{ id: 'e1', name: 'GoldenCross', input_id: 'X', weight: 40, conditions: [] }],
+      exits: [{ id: 'x1', name: '', input_id: 'X', weight: 0, target_entry_block_name: 'GoldenCross', conditions: [] }],
+    };
+    const { traces } = buildResultsPlot(result, { signalRules });
+    const entryTrace = traces.find((t) => t.name && t.name.startsWith('long entry'));
+    const exitTrace = traces.find((t) => t.name && t.name.startsWith('long exit'));
+    expect(entryTrace.name).toBe('long entry • X • GoldenCross');
+    expect(exitTrace.name).toBe('long exit • X • Exit 1');
+  });
+
+  it('reset markers appear with section-prefixed fallback when block name is empty', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [],
+      events: [
+        { input_id: '', block_id: 'r1', kind: 'reset', fired_indices: [1], latched_indices: [1] },
+      ],
+    };
+    const signalRules = {
+      entries: [],
+      exits: [],
+      resets: [{ id: 'r1', name: '', conditions: [] }],
+    };
+    const { traces } = buildResultsPlot(result, { signalRules });
+    const resetTrace = traces.find((t) => t.name && t.name.startsWith('reset'));
+    expect(resetTrace).toBeDefined();
+    expect(resetTrace.name).toBe('reset • Reset 1');
   });
 });

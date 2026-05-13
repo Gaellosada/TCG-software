@@ -30,7 +30,15 @@ const ERROR_HEADINGS = {
   offline: "You're offline",
 };
 
-function ResultsView({ result, loading, error, capital = 1000, noRepeat = false, signalRules = null }) {
+function ResultsView({
+  result,
+  loading,
+  error,
+  capital = 1000,
+  noRepeat = false,
+  signalRules = null,
+  availableIndicators = null,
+}) {
   // Effective-only display: when dont_repeat is active we rewrite each
   // event's ``fired_indices`` to its ``latched_indices`` (the
   // backend-authoritative effective set) via ``computeEffectiveTrace``,
@@ -47,8 +55,8 @@ function ResultsView({ result, loading, error, capital = 1000, noRepeat = false,
   // (exits colour by their target-entry's weight). When omitted all
   // markers fall back to neutral styling.
   const plot = useMemo(
-    () => buildResultsPlot(effectiveResult, { capital, signalRules }),
-    [effectiveResult, capital, signalRules],
+    () => buildResultsPlot(effectiveResult, { capital, signalRules, availableIndicators }),
+    [effectiveResult, capital, signalRules, availableIndicators],
   );
 
   if (loading) {

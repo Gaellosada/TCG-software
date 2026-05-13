@@ -103,7 +103,10 @@ describe('<ResultsView>', () => {
     render(<ResultsView result={result} loading={false} error={null} signalRules={signalRules} />);
     expect(chartCalls).toHaveLength(1);
     const names = chartCalls[0].traces.map((t) => t.name);
-    expect(names.some((n) => n.startsWith('ind:'))).toBe(true);
+    // Indicator legend is now "<DisplayType>(<params>)" without the
+    // "ind:" prefix — fall back to raw indicator_id when no
+    // availableIndicators registry is passed.
+    expect(names.some((n) => n === 'sma')).toBe(true);
     expect(names.some((n) => n.startsWith('long entry'))).toBe(true);
   });
 

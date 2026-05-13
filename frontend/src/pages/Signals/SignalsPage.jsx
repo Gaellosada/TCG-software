@@ -362,6 +362,7 @@ function SignalsPage() {
             capital={capital}
             noRepeat={selectedSignal?.settings?.dont_repeat ?? true}
             signalRules={selectedSignal?.rules ?? null}
+            availableIndicators={availableIndicators}
           />
         </Card>
       </div>
