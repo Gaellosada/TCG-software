@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import logging
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from typing import Literal
 
@@ -51,7 +52,36 @@ from tcg.types.market import (
     RollStrategy,
 )
 from tcg.types.portfolio import RebalanceFreq
-from tcg.types.signal import Trade
+from tcg.types.signal import (
+    InstrumentContinuous,
+    InstrumentOptionStream,
+    InstrumentSpot,
+    Trade,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+def _signal_input_underlying_id(instrument: object) -> str | None:
+    """Resolve a signal Input's bound instrument to the underlying instrument
+    identifier used elsewhere in the portfolio response.
+
+    Mirrors the direct-leg conventions:
+      * spot       → ``instrument_id`` (matches ``LegSpec.symbol``)
+      * continuous → ``collection``    (matches ``LegSpec.collection``)
+      * option_stream → ``collection``
+
+    Returns ``None`` for unknown instrument variants so the caller can fall
+    back to the signal-local input id rather than crash.
+    """
+    if isinstance(instrument, InstrumentSpot):
+        return instrument.instrument_id
+    if isinstance(instrument, InstrumentContinuous):
+        return instrument.collection
+    if isinstance(instrument, InstrumentOptionStream):
+        return instrument.collection
+    return None
 
 
 @dataclass(frozen=True)
@@ -334,7 +364,45 @@ async def _evaluate_signal_leg(
     # 6. Convert to synthetic prices (starting at 100)
     synthetic = 100.0 * (1.0 + aggregated_pnl)
 
-    # 7. Build per-input price payloads in the signals-API shape so the
+    # 7. Build the signal-local → underlying instrument id remap. Trades
+    #    and per-input positions are keyed by the signal-LOCAL input name
+    #    (e.g. "index"); at the portfolio layer we want the actual
+    #    underlying instrument id (e.g. "SPX") so signal-leg trades line
+    #    up with direct-leg trades in the TradeLog. Missing entries fall
+    #    back to the signal-local id with a warning (would indicate a
+    #    bug or stale data).
+    underlying_by_local: dict[str, str] = {}
+    for inp in signal.inputs:
+        underlying = _signal_input_underlying_id(inp.instrument)
+        if underlying is None:
+            logger.warning(
+                "portfolio: signal %r input %r has unrecognised instrument "
+                "variant %r — keeping signal-local id for trade/position "
+                "remap",
+                label,
+                inp.id,
+                type(inp.instrument).__name__,
+            )
+            continue
+        underlying_by_local[inp.id] = underlying
+
+    def _remap_id(local_id: str) -> str:
+        mapped = underlying_by_local.get(local_id)
+        if mapped is None:
+            logger.warning(
+                "portfolio: signal %r emitted input_id %r with no matching "
+                "Input — keeping original id",
+                label,
+                local_id,
+            )
+            return local_id
+        return mapped
+
+    remapped_trades = tuple(
+        replace(tr, input_id=_remap_id(tr.input_id)) for tr in result.trades
+    )
+
+    # 8. Build per-input price payloads in the signals-API shape so the
     #    portfolio TradeLog can look up open/close prices by input_id.
     positions_payload: list[dict] = []
     for pos in result.positions:
@@ -346,13 +414,13 @@ async def _evaluate_signal_leg(
                 "values": nan_safe_floats(pos.price_values),
             }
         positions_payload.append(
-            {"input_id": pos.input_id, "price": price_payload}
+            {"input_id": _remap_id(pos.input_id), "price": price_payload}
         )
 
     return _SignalLegEvalResult(
         index=result.index,
         synthetic=synthetic,
-        trades=result.trades,
+        trades=remapped_trades,
         positions_payload=tuple(positions_payload),
     )
 
@@ -724,7 +792,11 @@ async def compute_portfolio(
     for label, trades in signal_trades_map.items():
         sig_idx = signal_dates_map[label]
         n_sig = len(sig_idx)
-        leg_weight = float(body.weights[label])
+        # ``body.weights[label]`` is the user-facing PERCENT allocation
+        # (frontend default 100). For trade-size scaling we need the
+        # FRACTION form (0.0 … 1.0+) so ``signed_weight`` stays in
+        # fraction units across direct + signal legs.
+        leg_fraction = float(body.weights[label]) / 100.0
         for tr in trades:
             sig_open_date = int(sig_idx[tr.open_bar])
             new_open = cd_index.get(sig_open_date)
@@ -754,7 +826,7 @@ async def compute_portfolio(
                     "open_bar": new_open,
                     "close_bar": new_close,
                     "direction": tr.direction,
-                    "signed_weight": tr.signed_weight * leg_weight,
+                    "signed_weight": tr.signed_weight * leg_fraction,
                     "holding_id": label,
                     "holding_name": label,
                 }
@@ -770,7 +842,9 @@ async def compute_portfolio(
             direct_input_id = leg.collection or label
         else:
             direct_input_id = label
-        leg_weight = float(body.weights[label])
+        # See note above: convert PERCENT allocation → FRACTION for the
+        # trade's signed_weight (trades use fraction units uniformly).
+        leg_fraction = float(body.weights[label]) / 100.0
         aggregated_trades.append(
             {
                 "input_id": direct_input_id,
@@ -780,8 +854,8 @@ async def compute_portfolio(
                 "exit_block_name": None,
                 "open_bar": 0,
                 "close_bar": None,
-                "direction": "long" if leg_weight >= 0 else "short",
-                "signed_weight": leg_weight,
+                "direction": "long" if leg_fraction >= 0 else "short",
+                "signed_weight": leg_fraction,
                 "holding_id": label,
                 "holding_name": label,
             }

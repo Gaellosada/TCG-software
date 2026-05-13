@@ -19,10 +19,17 @@ import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from tcg.core.api.portfolio import _SignalLegEvalResult
+from tcg.core.api.portfolio import (
+    _SignalLegEvalResult,
+    _signal_input_underlying_id,
+)
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.types.market import PriceSeries
-from tcg.types.signal import Trade
+from tcg.types.signal import (
+    InstrumentContinuous,
+    InstrumentSpot,
+    Trade,
+)
 
 
 # ── Trade schema -----------------------------------------------------------
@@ -465,7 +472,8 @@ class TestPortfolioAggregation:
         assert tr["open_bar"] == 0
         assert tr["close_bar"] is None
         assert tr["direction"] == "long"
-        assert tr["signed_weight"] == 100.0
+        # weight 100 (percent) → 1.0 (fraction).
+        assert tr["signed_weight"] == pytest.approx(1.0)
         assert tr["holding_id"] == "SPX"
         assert tr["holding_name"] == "SPX"
         assert tr["input_id"] == "SPX"
@@ -494,7 +502,9 @@ class TestHoldingTradeSynthesis:
                     "symbol": "SPX",
                 }
             },
-            "weights": {"SPX": 0.7},
+            # body.weights is in PERCENT units (frontend default 100).
+            # 70 percent → signed_weight 0.7 (FRACTION) on the trade.
+            "weights": {"SPX": 70},
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200
@@ -525,7 +535,8 @@ class TestHoldingTradeSynthesis:
                     "symbol": "SPX",
                 }
             },
-            "weights": {"SPX": -0.4},
+            # -40 percent → signed_weight -0.4 (FRACTION).
+            "weights": {"SPX": -40},
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200
@@ -543,8 +554,9 @@ class TestHoldingTradeSynthesis:
     async def test_signal_leg_signed_weight_scaled_by_leg_allocation(
         self, mock_eval, client: AsyncClient
     ):
-        """A signal leg at allocation 0.5 emitting trades with internal
-        signed_weight 1.0 yields portfolio trades with signed_weight 0.5."""
+        """A signal leg at allocation 50 percent emitting trades with
+        internal signed_weight 1.0 yields portfolio trades with
+        signed_weight 0.5 (FRACTION units)."""
         sig_dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
         sig_prices = np.array([100.0, 101.0, 103.0], dtype=np.float64)
         trades = (
@@ -580,7 +592,7 @@ class TestHoldingTradeSynthesis:
                     "signal_spec": _minimal_signal_spec(),
                 }
             },
-            "weights": {"sig1": 0.5},
+            "weights": {"sig1": 50},
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200
@@ -598,8 +610,9 @@ class TestHoldingTradeSynthesis:
     async def test_mixed_portfolio_signal_and_direct(
         self, mock_eval, client: AsyncClient
     ):
-        """One signal leg at 0.6 + one direct leg at 0.4: response has both
-        a synthesized Holding trade (direct) and scaled signal trades."""
+        """One signal leg at 60% + one direct leg at 40%: response has both
+        a synthesized Holding trade (direct) and scaled signal trades.
+        Trade signed_weights are FRACTIONS (0.6, 0.4 * 1.0)."""
         sig_dates = np.array(
             [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
         )
@@ -631,7 +644,7 @@ class TestHoldingTradeSynthesis:
                     "symbol": "SPX",
                 },
             },
-            "weights": {"sig1": 0.6, "SPX": 0.4},
+            "weights": {"sig1": 60, "SPX": 40},
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200
@@ -677,7 +690,8 @@ class TestHoldingTradeSynthesis:
                     "strategy": "front_month",
                 }
             },
-            "weights": {"SPX": 0.6},
+            # 60 percent → 0.6 fraction on the synthesized Holding trade.
+            "weights": {"SPX": 60},
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200
@@ -694,3 +708,316 @@ class TestHoldingTradeSynthesis:
         assert tr["input_id"] == "FUT_VIX"
         position_ids = {p["input_id"] for p in data["positions"]}
         assert "FUT_VIX" in position_ids
+
+
+# ── Weight unit conversion (PERCENT → FRACTION on signed_weight) -----------
+
+
+class TestWeightAsFraction:
+    """``body.weights[label]`` is in PERCENT units. Trade ``signed_weight``
+    is always in FRACTION units. The aggregation layer divides by 100."""
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_signal_trade_signed_weight_at_60pct_is_fraction(
+        self, mock_eval, client: AsyncClient
+    ):
+        """Leg weight 60 (percent), signal trade signed_weight 1.0 →
+        portfolio trade signed_weight exactly 0.6 (FRACTION)."""
+        sig_dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
+        sig_prices = np.array([100.0, 101.0, 103.0], dtype=np.float64)
+        trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry-1",
+                exit_block_id="X1",
+                exit_block_name="exit-1",
+                open_bar=0,
+                close_bar=1,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+        mock_eval.return_value = _leg_result(sig_dates, sig_prices, trades, ())
+
+        body = {
+            "legs": {
+                "sig1": {
+                    "type": "signal",
+                    "signal_spec": _minimal_signal_spec(),
+                }
+            },
+            "weights": {"sig1": 60},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        out_trades = resp.json()["trades"]
+        assert len(out_trades) == 1
+        # 60 percent × 1.0 = 0.6 — guard against forgetting the /100 div.
+        assert out_trades[0]["signed_weight"] == pytest.approx(0.6)
+        # Belt-and-braces: NOT 60.0 (the percent form).
+        assert out_trades[0]["signed_weight"] != pytest.approx(60.0)
+
+    async def test_holding_trade_signed_weight_at_40pct_is_fraction(
+        self, client: AsyncClient
+    ):
+        """Direct leg at weight 40 (percent) → Holding trade
+        signed_weight = 0.4 (FRACTION)."""
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "instrument",
+                    "collection": "INDEX",
+                    "symbol": "SPX",
+                }
+            },
+            "weights": {"SPX": 40},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        tr = resp.json()["trades"][0]
+        assert tr["signed_weight"] == pytest.approx(0.4)
+        assert tr["direction"] == "long"
+
+    async def test_holding_trade_short_at_neg_25pct(
+        self, client: AsyncClient
+    ):
+        """Direct leg at weight -25 (percent) → Holding trade
+        signed_weight = -0.25, direction='short'."""
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "instrument",
+                    "collection": "INDEX",
+                    "symbol": "SPX",
+                }
+            },
+            "weights": {"SPX": -25},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        tr = resp.json()["trades"][0]
+        assert tr["signed_weight"] == pytest.approx(-0.25)
+        assert tr["direction"] == "short"
+
+
+# ── Signal input_id → underlying instrument id remap (Fix B) ---------------
+
+
+class TestSignalInputUnderlyingHelper:
+    def test_spot_returns_instrument_id(self):
+        inst = InstrumentSpot(collection="INDEX", instrument_id="SPX")
+        assert _signal_input_underlying_id(inst) == "SPX"
+
+    def test_continuous_returns_collection(self):
+        inst = InstrumentContinuous(collection="FUT_VIX", adjustment="none")
+        assert _signal_input_underlying_id(inst) == "FUT_VIX"
+
+    def test_unknown_variant_returns_none(self):
+        # Helper is defensive: returns None so caller can fall back.
+        assert _signal_input_underlying_id(object()) is None
+
+
+class TestSignalTradeInputIdRemap:
+    """Signal-leg trades carry the signal-INTERNAL ``input_id`` (e.g.
+    "index"). At the portfolio layer we remap to the underlying
+    instrument id (e.g. "SPX") so the TradeLog can lookup prices and
+    so signal trades line up with direct-leg trades.
+
+    These tests exercise the REAL ``_evaluate_signal_leg`` by mocking
+    only the engine boundary (``evaluate_signal`` +
+    ``compute_input_overlap`` + ``make_signal_fetcher``).
+    """
+
+    @staticmethod
+    def _spx_signal_spec() -> dict:
+        """Signal with a single Input bound to spot SPX (one trade)."""
+        return {
+            "spec": {
+                "id": "s1",
+                "name": "Test",
+                "inputs": [
+                    {
+                        "id": "index",
+                        "instrument": {
+                            "type": "spot",
+                            "collection": "INDEX",
+                            "instrument_id": "SPX",
+                        },
+                    }
+                ],
+                "rules": {"entries": [], "exits": []},
+            },
+            "indicators": [],
+        }
+
+    @patch("tcg.core.api.portfolio.make_signal_fetcher")
+    @patch("tcg.core.api.portfolio.compute_input_overlap", new_callable=AsyncMock)
+    @patch("tcg.core.api.portfolio.evaluate_signal", new_callable=AsyncMock)
+    async def test_signal_trade_input_id_remapped_to_underlying(
+        self,
+        mock_eval_signal,
+        mock_overlap,
+        mock_fetcher,
+        client: AsyncClient,
+    ):
+        from datetime import date as date_t
+
+        from tcg.engine.signal_exec import (
+            InstrumentPositionResult,
+            SignalEvalResult,
+        )
+
+        sig_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108],
+            dtype=np.int64,
+        )
+        T = len(sig_dates)
+        pos_values = np.zeros(T, dtype=np.float64)
+        clipped = np.zeros(T, dtype=np.bool_)
+        realized_pnl = np.zeros(T, dtype=np.float64)
+        price_vals = np.array(
+            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
+        )
+
+        # The engine emits the trade keyed by signal-local input id "index".
+        engine_trade = Trade(
+            input_id="index",
+            entry_block_id="E1",
+            entry_block_name="entry-1",
+            exit_block_id="X1",
+            exit_block_name="exit-1",
+            open_bar=0,
+            close_bar=2,
+            direction="long",
+            signed_weight=1.0,
+        )
+        engine_position = InstrumentPositionResult(
+            input_id="index",
+            instrument=InstrumentSpot(collection="INDEX", instrument_id="SPX"),
+            values=pos_values,
+            clipped_mask=clipped,
+            realized_pnl=realized_pnl,
+            price_label="SPX.close",
+            price_values=price_vals,
+        )
+        mock_eval_signal.return_value = SignalEvalResult(
+            index=sig_dates,
+            positions=(engine_position,),
+            clipped=False,
+            events=(),
+            indicator_series=(),
+            diagnostics={},
+            trades=(engine_trade,),
+        )
+        mock_overlap.return_value = (date_t(2024, 1, 2), date_t(2024, 1, 8))
+        mock_fetcher.return_value = MagicMock()
+
+        body = {
+            "legs": {
+                "sig1": {
+                    "type": "signal",
+                    "signal_spec": self._spx_signal_spec(),
+                }
+            },
+            "weights": {"sig1": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+        # Trade input_id remapped from signal-local "index" → underlying "SPX".
+        out_trades = data["trades"]
+        assert len(out_trades) == 1
+        assert out_trades[0]["input_id"] == "SPX"
+        # And positions[] mirrors the same remap.
+        position_ids = {p["input_id"] for p in data["positions"]}
+        assert "SPX" in position_ids
+        assert "index" not in position_ids
+
+    @patch("tcg.core.api.portfolio.make_signal_fetcher")
+    @patch("tcg.core.api.portfolio.compute_input_overlap", new_callable=AsyncMock)
+    @patch("tcg.core.api.portfolio.evaluate_signal", new_callable=AsyncMock)
+    async def test_shared_underlying_dedups_across_signal_and_direct(
+        self,
+        mock_eval_signal,
+        mock_overlap,
+        mock_fetcher,
+        client: AsyncClient,
+    ):
+        """A signal whose "index" input binds to SPX + a direct SPX leg →
+        positions[] has EXACTLY ONE entry for SPX (first-leg-wins on the
+        underlying id, not the signal-local id)."""
+        from datetime import date as date_t
+
+        from tcg.engine.signal_exec import (
+            InstrumentPositionResult,
+            SignalEvalResult,
+        )
+
+        sig_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108],
+            dtype=np.int64,
+        )
+        T = len(sig_dates)
+        pos_values = np.zeros(T, dtype=np.float64)
+        clipped = np.zeros(T, dtype=np.bool_)
+        realized_pnl = np.zeros(T, dtype=np.float64)
+        # Distinctive price series so we can tell which leg won the dedup.
+        sig_price_vals = np.array(
+            [999.0, 999.0, 999.0, 999.0, 999.0], dtype=np.float64
+        )
+
+        engine_position = InstrumentPositionResult(
+            input_id="index",
+            instrument=InstrumentSpot(collection="INDEX", instrument_id="SPX"),
+            values=pos_values,
+            clipped_mask=clipped,
+            realized_pnl=realized_pnl,
+            price_label="SPX.close",
+            price_values=sig_price_vals,
+        )
+        mock_eval_signal.return_value = SignalEvalResult(
+            index=sig_dates,
+            positions=(engine_position,),
+            clipped=False,
+            events=(),
+            indicator_series=(),
+            diagnostics={},
+            trades=(),
+        )
+        mock_overlap.return_value = (date_t(2024, 1, 2), date_t(2024, 1, 8))
+        mock_fetcher.return_value = MagicMock()
+
+        # Signal leg processed FIRST (dict insertion order) — its remapped
+        # SPX positions entry wins. Then the direct SPX leg sees "SPX" in
+        # ``seen_inputs`` and skips.
+        body = {
+            "legs": {
+                "sig1": {
+                    "type": "signal",
+                    "signal_spec": self._spx_signal_spec(),
+                },
+                "SPX": {
+                    "type": "instrument",
+                    "collection": "INDEX",
+                    "symbol": "SPX",
+                },
+            },
+            "weights": {"sig1": 50, "SPX": 50},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+        spx_positions = [p for p in data["positions"] if p["input_id"] == "SPX"]
+        assert len(spx_positions) == 1, (
+            "expected exactly one SPX position entry after dedup, "
+            f"got {len(data['positions'])}: {data['positions']}"
+        )
+        # Signal leg won → its 999.0 price values are kept.
+        assert spx_positions[0]["price"]["values"][0] == pytest.approx(999.0)
+
