@@ -101,11 +101,14 @@ describe('<TradeLog>', () => {
     expect(rows[1].textContent).toContain('short');
     expect(rows[1].textContent).toContain('-40.00%');
 
-    // Row 3: open trade — no close price, no realised P&L
+    // Row 3: open trade — close price is em-dash, but P&L uses last price (105 at bar 4)
+    // open_bar=4, open_price=105, last_price=105 → PnL=(105/105-1)*0.5=0 → "0.00%"
     expect(rows[2].textContent).toContain('open');
-    // P&L cell in an open trade is "—"
     const cells = rows[2].querySelectorAll('td');
-    expect(cells[7].textContent).toBe('—');
+    // Close price column (cells[6]) stays as em-dash for open trades
+    expect(cells[6].textContent).toBe('—');
+    // P&L column (cells[7]) is computed using last price, not em-dash
+    expect(cells[7].textContent).toBe('0.00%');
   });
 
   it('entry reason and exit reason are separate columns on a closed trade', () => {
@@ -400,6 +403,107 @@ describe('<TradeLog>', () => {
     expect(cells).toHaveLength(2);
     expect(cells[0].textContent).toBe('IdOnly');
     expect(cells[1].textContent).toBe('—');
+  });
+});
+
+describe('open-trade PnL using last available price', () => {
+  it('open trade with valid price series — PnL uses last price; close-price cell shows em-dash', () => {
+    // open_bar=0 → open_price=100; last price=120; PnL=(120/100-1)*0.5=0.1 → "+10.00%"
+    const trades = [{
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'EntryA',
+      exit_block_id: null,
+      exit_block_name: null,
+      open_bar: 0,
+      close_bar: null,
+      direction: 'long',
+      signed_weight: 0.5,
+    }];
+    const positions = [pos('X', [100, 110, 120])];
+    render(<TradeLog trades={trades} timestamps={TS} positions={positions} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const rows = screen.getAllByTestId('trade-row');
+    expect(rows).toHaveLength(1);
+    const cells = rows[0].querySelectorAll('td');
+    // Close price column (index 6 without showHoldingColumn): should be em-dash
+    expect(cells[6].textContent).toBe('—');
+    // PnL column (index 7): (120/100 - 1) * 0.5 = 0.10 → "+10.00%"
+    expect(cells[7].textContent).toBe('+10.00%');
+  });
+
+  it('open trade with no positions entry for input_id — PnL is em-dash', () => {
+    const trades = [{
+      input_id: 'UNKNOWN',
+      entry_block_id: 'e1',
+      entry_block_name: 'EntryA',
+      exit_block_id: null,
+      exit_block_name: null,
+      open_bar: 0,
+      close_bar: null,
+      direction: 'long',
+      signed_weight: 0.5,
+    }];
+    // Positions contain 'X', not 'UNKNOWN'
+    const positions = [pos('X', [100, 110, 120])];
+    render(<TradeLog trades={trades} timestamps={TS} positions={positions} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const rows = screen.getAllByTestId('trade-row');
+    const cells = rows[0].querySelectorAll('td');
+    // Both close price and PnL should be em-dash (no price data)
+    expect(cells[6].textContent).toBe('—');
+    expect(cells[7].textContent).toBe('—');
+  });
+
+  it('open trade where last price is null but a prior price is finite — PnL uses last finite price', () => {
+    // Price series ends with nulls; last finite value is at index 2 (value=115)
+    // open_bar=0 → open_price=100; last finite price=115; PnL=(115/100-1)*1.0=0.15 → "+15.00%"
+    const trades = [{
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'EntryA',
+      exit_block_id: null,
+      exit_block_name: null,
+      open_bar: 0,
+      close_bar: null,
+      direction: 'long',
+      signed_weight: 1.0,
+    }];
+    const positions = [pos('X', [100, 110, 115, null, null])];
+    render(<TradeLog trades={trades} timestamps={TS} positions={positions} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const rows = screen.getAllByTestId('trade-row');
+    const cells = rows[0].querySelectorAll('td');
+    // Close price column: em-dash (open trade)
+    expect(cells[6].textContent).toBe('—');
+    // PnL uses last finite price = 115: (115/100 - 1) * 1.0 = 0.15 → "+15.00%"
+    expect(cells[7].textContent).toBe('+15.00%');
+  });
+
+  it('closed trade behavior unchanged (regression) — PnL uses actual close bar price', () => {
+    // open_bar=0 → price=100; close_bar=2 → price=110; signed_weight=1.0
+    // PnL = (110/100 - 1) * 1.0 = 0.10 → "+10.00%"
+    const trades = [{
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'EntryA',
+      exit_block_id: 'x1',
+      exit_block_name: 'ExitA',
+      open_bar: 0,
+      close_bar: 2,
+      direction: 'long',
+      signed_weight: 1.0,
+    }];
+    // Price series has more values beyond close_bar to ensure we don't accidentally use last price
+    const positions = [pos('X', [100, 108, 110, 130, 150])];
+    render(<TradeLog trades={trades} timestamps={TS} positions={positions} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const rows = screen.getAllByTestId('trade-row');
+    const cells = rows[0].querySelectorAll('td');
+    // Close price column: shows actual close price (110), not em-dash
+    expect(cells[6].textContent).toContain('110');
+    // PnL uses close_bar price (110), not last price (150): "+10.00%"
+    expect(cells[7].textContent).toBe('+10.00%');
   });
 });
 
