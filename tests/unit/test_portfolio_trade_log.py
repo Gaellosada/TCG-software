@@ -1,4 +1,4 @@
-"""Tests for portfolio trade log aggregation (§5.4 of CONTRACT, Sign 10/11).
+"""Tests for portfolio trade log aggregation.
 
 Covers:
   1. ``Trade`` dataclass extension with optional ``holding_id``/``holding_name``.

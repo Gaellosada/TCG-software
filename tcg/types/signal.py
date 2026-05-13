@@ -267,6 +267,10 @@ class Trade:
     legs). The portfolio aggregation layer converts the user-facing
     percent allocation to a fraction before stamping it onto a Trade —
     do not mix percent and fraction across this boundary.
+
+    ``holding_id`` / ``holding_name`` are stamped by the portfolio
+    aggregation layer when a Trade is surfaced through a multi-leg
+    response; both remain ``None`` for the single-signal response shape.
     """
 
     input_id: str
@@ -278,8 +282,6 @@ class Trade:
     close_bar: int | None
     direction: str
     signed_weight: float
-    # Optional: None when Trade spans a single signal; set to the leg label
-    # when aggregated across a multi-leg portfolio.
     holding_id: str | None = None
     holding_name: str | None = None
 
