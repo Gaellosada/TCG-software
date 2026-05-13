@@ -251,6 +251,13 @@ class Block:
     target_entry_block_name: str | None = None
     enabled: bool = True
     description: str = ""
+    # Per-block reset binding (entries/exits only — reset blocks MUST keep
+    # this None; the API rejects otherwise). When non-None, references the
+    # ``id`` of a reset block in the same signal's ``rules.resets``: after
+    # this block fires, its per-block arm is disarmed and re-armed only
+    # when the bound reset fires. Default ``None`` means "no gate" (the
+    # pre-Task-1 unconditional firing behavior).
+    requires_reset_block_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -288,16 +295,21 @@ class Trade:
 
 @dataclass(frozen=True)
 class SignalRules:
-    """Unified entries/exits + optional signal-global reset gate.
+    """Unified entries/exits + optional per-block reset bindings.
 
-    ``resets`` is an additive extension: a list of OR-blocks whose
-    firing arms the per-bar ``reset_armed`` gate guarding the entry
-    pass. When ``resets == ()`` the gate short-circuits to permanently
-    on, yielding byte-identical engine behavior to the pre-reset path
-    (legacy parity). Reset blocks reuse :class:`Block` verbatim but
-    only honour ``id``/``name``/``conditions``/``enabled``/``description`` —
-    they must not carry ``input_id``, ``weight``, or
-    ``target_entry_block_name`` (the API layer rejects such payloads).
+    ``resets`` is a list of named OR-blocks that entries and exits may
+    bind to via ``Block.requires_reset_block_id``. Each bound block has
+    its own per-block arm (``block_arm[block.id]``); after that block
+    fires, its arm is disarmed and re-armed only when the bound reset
+    fires. Blocks without a binding have NO reset gate. A reset block
+    that no entry/exit binds to fires decoratively (its ``fired_indices``
+    still records bars) but its ``latched_indices`` records ONLY bars
+    where ≥1 bound block transitioned False→True via this fire.
+
+    Reset blocks reuse :class:`Block` verbatim but only honour
+    ``id``/``name``/``conditions``/``enabled``/``description`` — they
+    must not carry ``input_id``, ``weight``, ``target_entry_block_name``,
+    or ``requires_reset_block_id`` (the API layer rejects such payloads).
     """
 
     entries: tuple[Block, ...] = ()

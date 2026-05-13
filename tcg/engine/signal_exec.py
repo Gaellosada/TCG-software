@@ -680,8 +680,9 @@ class BlockEvent:
     * ``latched_indices``: for entries, bars where the latch transitioned
       False→True ("effective entry"); for exits, bars where the exit
       actually cleared a previously-open entry latch ("effective exit");
-      for resets, bars where the signal-global ``reset_armed`` flipped
-      False→True ("effective arm").
+      for resets, bars where AT LEAST ONE bound block (entry or exit)
+      had its per-block arm flipped False→True by this reset's fire
+      ("effective arm" — one entry per reset fire that armed ≥1 block).
     * ``active_indices``: entries only — bars where this entry's latch
       was True *at emission time* (i.e. contributed to position[t]).
       Empty for exit and reset blocks.
@@ -761,10 +762,6 @@ async def evaluate_signal(
     reset_blocks: list[Block] = [
         b for b in signal.rules.resets if _usable_reset(b)
     ]
-    # ``gate_active`` short-circuits the reset_armed bit when there is no
-    # usable reset block: behavior becomes byte-identical to the pre-reset
-    # path for legacy signals (resets=() or all-disabled).
-    gate_active: bool = len(reset_blocks) > 0
 
     # Referenced inputs = union of usable blocks' input_ids, in
     # declaration order (entries then exits). Exits contribute the
@@ -901,10 +898,17 @@ async def evaluate_signal(
     reset_fired: dict[str, list[int]] = {b.id: [] for b in reset_blocks}
     reset_latched: dict[str, list[int]] = {b.id: [] for b in reset_blocks}
 
-    # Signal-global reset gate. Initialised to True so the very first
-    # entry latches without requiring a prior reset (legacy parity when
-    # ``gate_active`` is False — see contract §1.3).
-    reset_armed: bool = True
+    # ``bound_target`` only contains entries/exits with a non-None
+    # ``requires_reset_block_id``; unbound blocks short-circuit the
+    # arm check via the ``b.id in block_arm`` membership test.
+    bound_target: dict[str, str] = {
+        b.id: b.requires_reset_block_id
+        for b in (entry_blocks + exit_blocks)
+        if b.requires_reset_block_id is not None
+    }
+    # All bound blocks start armed — first fire of a bound block does
+    # NOT require a prior reset (it consumes the initial arm).
+    block_arm: dict[str, bool] = {b_id: True for b_id in bound_target}
 
     # Per-entry trade ledger — parallel lists keyed by entry block id.
     # ``opens[i]`` pairs with ``closes[i]`` (when present) to form one
@@ -933,44 +937,58 @@ async def evaluate_signal(
         for b in exit_blocks:
             if not bool(exit_truth[b.id][t]):
                 continue
+            # Per-block arm gate (Sign 1): bound exits need their arm
+            # True. Unbound exits short-circuit via membership test.
+            if b.id in block_arm and not block_arm[b.id]:
+                continue
             target_name = b.target_entry_block_name
             target_entry = entries_by_name.get(target_name)
-            # Effective exit = only when the target was actually open.
+            # Position-state guard (Sign 3) preserved INDEPENDENTLY of
+            # the arm — only an actually-open target latch can clear.
             if target_entry and latched.get(target_entry.id, False):
                 latched[target_entry.id] = False
                 exit_latched[b.id].append(t)
                 trade_closes[target_entry.id].append((t, b.id))
+                # Disarm AFTER a successful fire — bound exits only.
+                if b.id in block_arm:
+                    block_arm[b.id] = False
 
         # --- (c) entry pass: declaration order; leverage allowed ---
-        # Gated by ``reset_armed`` when at least one reset block is usable.
-        # ONE arm permits ALL eligible entries to latch on the same bar
-        # (multi-entry arm-sharing, contract §1.3); the arm is consumed at
-        # END OF entry pass, not per-latch.
-        entry_pass_open = (not gate_active) or reset_armed
-        if entry_pass_open:
-            any_latched_this_bar = False
-            for b in entry_blocks:
-                if not bool(entry_truth[b.id][t]):
-                    continue
-                if latched[b.id]:
-                    continue
-                latched[b.id] = True
-                entry_latched[b.id].append(t)
-                trade_opens[b.id].append(t)
-                any_latched_this_bar = True
-            if gate_active and any_latched_this_bar:
-                reset_armed = False
+        # Bound entries gated by their own per-block arm. Unbound entries
+        # short-circuit via membership (pre-Task-1 unconditional firing).
+        for b in entry_blocks:
+            if not bool(entry_truth[b.id][t]):
+                continue
+            if b.id in block_arm and not block_arm[b.id]:
+                continue
+            # Position-state guard (Sign 3): a bound entry whose arm is
+            # True still cannot double-latch.
+            if latched[b.id]:
+                continue
+            latched[b.id] = True
+            entry_latched[b.id].append(t)
+            trade_opens[b.id].append(t)
+            # Disarm AFTER a successful latch — bound entries only.
+            if b.id in block_arm:
+                block_arm[b.id] = False
 
-        # --- (c.5) reset pass: signal-global arm flip (runs AFTER entries
-        # so same-bar entry+reset → entry-at-t, reset-arms-for-t+1).
-        if gate_active:
-            for b in reset_blocks:
-                if not bool(reset_truth[b.id][t]) or bool(reset_nan[b.id][t]):
+        # --- (c.5) reset pass: per-fire effectiveness (Sign 2).
+        # Runs AFTER entries so same-bar entry+reset → entry-at-t,
+        # reset-arms-for-t+1. ``latched_indices`` records the bar iff
+        # ≥1 bound block transitioned False→True via this fire.
+        for r in reset_blocks:
+            if not bool(reset_truth[r.id][t]) or bool(reset_nan[r.id][t]):
+                continue
+            armed_at_least_one = False
+            for b_id in block_arm:
+                if bound_target[b_id] != r.id:
                     continue
-                if not reset_armed:
-                    reset_armed = True
-                    reset_latched[b.id].append(t)
-                # else: arm already on — trace ``fired`` only.
+                if not block_arm[b_id]:
+                    block_arm[b_id] = True
+                    armed_at_least_one = True
+                # else: already armed → no transition → ineffective.
+            if armed_at_least_one:
+                reset_latched[r.id].append(t)
 
         # --- (d) emit per-input net position at t ---
         for rid in referenced_ids:
