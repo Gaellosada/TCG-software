@@ -11,7 +11,7 @@
 //   - the statistics fetch so the Statistics panel doesn't hit the network
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
 vi.mock('./usePortfolio', () => ({
   default: vi.fn(),
@@ -195,5 +195,150 @@ describe('<PortfolioPage> Statistics integration', () => {
     render(<PortfolioPage />);
     expect(screen.queryByText('Statistics')).toBeNull();
     expect(fetchStatistics).not.toHaveBeenCalled();
+  });
+});
+
+describe('<PortfolioPage> TradeLog integration', () => {
+  it('mounts TradeLog below Statistics and renders trade rows with Holding column', () => {
+    const trade = {
+      input_id: 'SPY',
+      entry_block_id: 'e1',
+      entry_block_name: 'Entry',
+      exit_block_id: 'x1',
+      exit_block_name: 'Exit',
+      open_bar: 0,
+      close_bar: 2,
+      direction: 'long',
+      signed_weight: 0.5,
+      holding_id: 'SigA',
+      holding_name: 'SigA',
+    };
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{
+          id: 1,
+          label: 'SigA',
+          type: 'signal',
+          signalId: 's1',
+          signalName: 'SigA',
+          signalSpec: {
+            rules: {
+              entries: [{ id: 'e1', description: 'RSI<30' }],
+              exits: [{ id: 'x1', description: 'RSI>70' }],
+            },
+          },
+          weight: 100,
+        }],
+        results: resultsFixture({
+          trades: [trade],
+          positions: [{
+            input_id: 'SPY',
+            price: { label: 'close', values: [100, 102, 110] },
+          }],
+        }),
+      }),
+    );
+
+    render(<PortfolioPage />);
+
+    // TradeLog header is present
+    const toggle = screen.getByTestId('trade-log-toggle');
+    expect(toggle).toBeDefined();
+    expect(screen.getByTestId('trade-log-count').textContent).toBe('(1)');
+
+    // DOM order: Statistics title before returns-grid, returns-grid before trade-log
+    const statsTitle = screen.getByText('Statistics');
+    const tradeLog = screen.getByTestId('trade-log');
+    const grid = screen.getByTestId('returns-grid');
+    expect(statsTitle.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(grid.compareDocumentPosition(tradeLog) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Expand and verify the Holding column shows the leg label, plus the
+    // ISO→ms timestamp conversion renders the open date correctly.
+    fireEvent.click(toggle);
+    expect(screen.getByTestId('holding-col-header').textContent).toBe('Holding');
+    expect(screen.getByTestId('trade-holding').textContent).toBe('SigA');
+    const row = screen.getByTestId('trade-row');
+    // Open cell = 2024-01-02 (from results.dates[0])
+    expect(row.querySelectorAll('td')[0].textContent).toContain('2024-01-02');
+  });
+
+  it('renders TradeLog with empty trades array without crashing', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{ id: 1, label: 'SPY', weight: 100 }],
+        results: resultsFixture({ trades: [], positions: [] }),
+      }),
+    );
+    render(<PortfolioPage />);
+    expect(screen.getByTestId('trade-log-count').textContent).toBe('(0)');
+    // Expand and verify the empty state message.
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    expect(screen.getByTestId('trade-log-empty').textContent).toBe('No trades');
+  });
+
+  it('ISO→ms timestamp conversion: dates string array becomes parseable timestamps in TradeLog', () => {
+    const trade = {
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'E',
+      exit_block_id: null,
+      exit_block_name: null,
+      open_bar: 0,
+      close_bar: null,
+      direction: 'long',
+      signed_weight: 1.0,
+      holding_id: 'L', holding_name: 'L',
+    };
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{ id: 1, label: 'L', type: 'signal', signalSpec: { rules: { entries: [], exits: [] } }, weight: 100 }],
+        results: resultsFixture({
+          dates: ['2025-01-15', '2025-01-16'],
+          portfolio_equity: [100.0, 101.0],
+          trades: [trade],
+          positions: [{ input_id: 'X', price: { label: 'close', values: [50, 51] } }],
+        }),
+      }),
+    );
+    render(<PortfolioPage />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const row = screen.getByTestId('trade-row');
+    // First column = open timestamp formatted YYYY-MM-DD; verifies that
+    // new Date('2025-01-15').getTime() round-trips correctly into TradeLog.
+    expect(row.querySelectorAll('td')[0].textContent).toContain('2025-01-15');
+  });
+
+  it('degrades to empty descriptions when a signal leg has no signalSpec', () => {
+    const trade = {
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'EntryName',
+      exit_block_id: 'x1',
+      exit_block_name: 'ExitName',
+      open_bar: 0,
+      close_bar: 1,
+      direction: 'long',
+      signed_weight: 0.5,
+      holding_id: 'L', holding_name: 'L',
+    };
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({
+        legs: [{ id: 1, label: 'L', type: 'signal', weight: 100 /* no signalSpec */ }],
+        results: resultsFixture({
+          trades: [trade],
+          positions: [{ input_id: 'X', price: { label: 'close', values: [100, 105, 110] } }],
+        }),
+      }),
+    );
+    render(<PortfolioPage />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    // Entry/exit reason fall back to the block name; tooltip is empty.
+    const entry = screen.getByTestId('trade-entry-reason');
+    const exit = screen.getByTestId('trade-exit-reason');
+    expect(entry.textContent).toBe('EntryName');
+    expect(entry.getAttribute('data-reason-tooltip')).toBe('');
+    expect(exit.textContent).toBe('ExitName');
+    expect(exit.getAttribute('data-reason-tooltip')).toBe('');
   });
 });

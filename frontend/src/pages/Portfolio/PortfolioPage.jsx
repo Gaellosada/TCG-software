@@ -9,6 +9,7 @@ import ReturnsGrid from './ReturnsGrid';
 import SaveControls from '../../components/SaveControls';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import Statistics from '../../components/Statistics';
+import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
@@ -314,6 +315,56 @@ function PortfolioPage() {
                 yearlyReturns={portfolio.results.yearly_returns}
               />
             </div>
+
+            {/* Trade log — Portfolio response emits dates as ISO strings
+                but TradeLog expects unix-ms timestamps; convert at the call
+                site. entry/exitDescriptions are a union across all signal
+                legs' specs; legs that lack a loaded spec contribute nothing
+                (TradeLog falls back to the block name). */}
+            {(() => {
+              const trades = Array.isArray(portfolio.results.trades)
+                ? portfolio.results.trades
+                : [];
+              const positions = Array.isArray(portfolio.results.positions)
+                ? portfolio.results.positions
+                : [];
+              const timestamps = Array.isArray(portfolio.results.dates)
+                ? portfolio.results.dates.map((d) => new Date(d).getTime())
+                : [];
+              const signalLegs = portfolio.legs.filter((l) => l.type === 'signal');
+              const entryDescriptions = {};
+              const exitDescriptions = {};
+              for (const leg of signalLegs) {
+                const entries = leg.signalSpec?.rules?.entries;
+                if (Array.isArray(entries)) {
+                  for (const b of entries) {
+                    if (b && b.id) {
+                      entryDescriptions[b.id] = typeof b.description === 'string' ? b.description : '';
+                    }
+                  }
+                }
+                const exits = leg.signalSpec?.rules?.exits;
+                if (Array.isArray(exits)) {
+                  for (const b of exits) {
+                    if (b && b.id) {
+                      exitDescriptions[b.id] = typeof b.description === 'string' ? b.description : '';
+                    }
+                  }
+                }
+              }
+              return (
+                <div className={styles.section}>
+                  <TradeLog
+                    trades={trades}
+                    timestamps={timestamps}
+                    positions={positions}
+                    entryDescriptions={entryDescriptions}
+                    exitDescriptions={exitDescriptions}
+                    showHoldingColumn
+                  />
+                </div>
+              );
+            })()}
           </div>
         )}
 

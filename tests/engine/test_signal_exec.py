@@ -949,3 +949,98 @@ async def test_trades_same_bar_entry_then_exit_then_reentry():
     closes_arr = [t.close_bar for t in result.trades]
     assert opens == [0, 1, 2, 3, 4]
     assert closes_arr == [1, 2, 3, 4, None]
+
+
+# ---------------------------------------------------------------------------
+# Regression: disabled blocks must not contribute references in _walk_operands.
+# A disabled block referencing a broken indicator/input must be skipped at
+# the walk so the run still succeeds.
+# ---------------------------------------------------------------------------
+
+
+INPUT_BROKEN = Input(
+    id="B",
+    instrument=InstrumentSpot(collection="INDEX", instrument_id="MISSING"),
+)
+
+
+@pytest.mark.asyncio
+async def test_disabled_block_does_not_trigger_operand_fetch():
+    """If a disabled block references a broken input, the run must still
+    complete — the disabled block's operands are NOT walked, so the
+    fetcher is never asked for the missing instrument.
+
+    Negative control below proves the test isn't vacuously passing.
+    """
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    # Fetcher knows about SPX only — MISSING raises SignalDataError.
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    enabled_block = Block(
+        id="A", name="A", input_id="X", weight=50.0,
+        conditions=(_gt(0.0),),  # references INPUT_X (SPX) only
+    )
+    disabled_broken_block = Block(
+        id="B", name="B", input_id="B", weight=50.0,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id="B"),  # broken input
+                rhs=ConstantOperand(value=0.0),
+            ),
+        ),
+        enabled=False,
+    )
+
+    signal = Signal(
+        id="s", name="s", inputs=(INPUT_X, INPUT_BROKEN),
+        rules=SignalRules(entries=(enabled_block, disabled_broken_block)),
+    )
+
+    # Must NOT raise — disabled block is skipped at the walk.
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # Only block A's behavior is reflected.
+    enabled_only = Signal(
+        id="s", name="s", inputs=(INPUT_X,),
+        rules=SignalRules(entries=(enabled_block,)),
+    )
+    expected = await evaluate_signal(enabled_only, indicators={}, fetcher=fetcher)
+    assert result.trades == expected.trades
+    spx_pos = [p for p in result.positions if p.input_id == "X"][0]
+    exp_pos = [p for p in expected.positions if p.input_id == "X"][0]
+    assert list(spx_pos.values) == list(exp_pos.values)
+
+
+@pytest.mark.asyncio
+async def test_disabled_block_negative_control_broken_when_enabled():
+    """Negative control: flip which block is disabled. Now the broken
+    block is enabled — the run MUST raise SignalDataError, proving the
+    test above isn't vacuously passing on an unreachable fetch path.
+    """
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    disabled_ok_block = Block(
+        id="A", name="A", input_id="X", weight=50.0,
+        conditions=(_gt(0.0),),
+        enabled=False,  # flipped vs above
+    )
+    enabled_broken_block = Block(
+        id="B", name="B", input_id="B", weight=50.0,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id="B"),
+                rhs=ConstantOperand(value=0.0),
+            ),
+        ),
+        enabled=True,  # flipped vs above
+    )
+
+    signal = Signal(
+        id="s", name="s", inputs=(INPUT_X, INPUT_BROKEN),
+        rules=SignalRules(entries=(disabled_ok_block, enabled_broken_block)),
+    )
+
+    with pytest.raises(SignalDataError):
+        await evaluate_signal(signal, indicators={}, fetcher=fetcher)

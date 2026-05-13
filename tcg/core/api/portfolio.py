@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+import logging
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from typing import Literal
 
@@ -51,6 +52,52 @@ from tcg.types.market import (
     RollStrategy,
 )
 from tcg.types.portfolio import RebalanceFreq
+from tcg.types.signal import (
+    InstrumentContinuous,
+    InstrumentOptionStream,
+    InstrumentSpot,
+    Trade,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+def _signal_input_underlying_id(instrument: object) -> str | None:
+    """Resolve a signal Input's bound instrument to the underlying instrument
+    identifier used elsewhere in the portfolio response.
+
+    Mirrors the direct-leg conventions:
+      * spot       → ``instrument_id`` (matches ``LegSpec.symbol``)
+      * continuous → ``collection``    (matches ``LegSpec.collection``)
+      * option_stream → ``collection``
+
+    Returns ``None`` for unknown instrument variants so the caller can fall
+    back to the signal-local input id rather than crash.
+    """
+    if isinstance(instrument, InstrumentSpot):
+        return instrument.instrument_id
+    if isinstance(instrument, InstrumentContinuous):
+        return instrument.collection
+    if isinstance(instrument, InstrumentOptionStream):
+        return instrument.collection
+    return None
+
+
+@dataclass(frozen=True)
+class _SignalLegEvalResult:
+    """Internal aggregate of what a signal leg produces for the portfolio.
+
+    ``index`` and ``synthetic`` keep the existing aggregation contract;
+    ``trades`` and ``positions_payload`` are bubbled up for the trade log.
+    Each entry in ``positions_payload`` mirrors the signals-API positions
+    shape: ``{input_id, price: {label, values} | None}``.
+    """
+
+    index: npt.NDArray[np.int64]
+    synthetic: npt.NDArray[np.float64]
+    trades: tuple[Trade, ...] = ()
+    positions_payload: tuple[dict, ...] = ()
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
@@ -241,8 +288,8 @@ async def _evaluate_signal_leg(
     svc: MarketDataService,
     start_date: date | None,
     end_date: date | None,
-) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
-    """Evaluate a signal leg and return (dates, synthetic_prices).
+) -> _SignalLegEvalResult:
+    """Evaluate a signal leg and bubble up everything the portfolio path needs.
 
     The synthetic price series starts at 100 and accumulates the sum of
     all per-input realized_pnl arrays from the signal evaluation:
@@ -250,7 +297,11 @@ async def _evaluate_signal_leg(
         synthetic = 100.0 * (1.0 + aggregated_pnl)
 
     Returns:
-        Tuple of (YYYYMMDD int dates, synthetic price array).
+        ``_SignalLegEvalResult`` carrying the YYYYMMDD int date index, the
+        synthetic price series, the raw per-signal ``Trade`` tuple (bar
+        indices in the signal's own index space, NOT the portfolio's
+        common_dates — caller is responsible for re-mapping), and the
+        per-input price payloads matching the signals-API positions shape.
     """
     if leg.signal_spec is None:
         raise ValidationError(f"Leg '{label}': signal legs require 'signal_spec'")
@@ -313,7 +364,65 @@ async def _evaluate_signal_leg(
     # 6. Convert to synthetic prices (starting at 100)
     synthetic = 100.0 * (1.0 + aggregated_pnl)
 
-    return result.index, synthetic
+    # 7. Build the signal-local → underlying instrument id remap. Trades
+    #    and per-input positions are keyed by the signal-LOCAL input name
+    #    (e.g. "index"); at the portfolio layer we want the actual
+    #    underlying instrument id (e.g. "SPX") so signal-leg trades line
+    #    up with direct-leg trades in the TradeLog. Missing entries fall
+    #    back to the signal-local id with a warning (would indicate a
+    #    bug or stale data).
+    underlying_by_local: dict[str, str] = {}
+    for inp in signal.inputs:
+        underlying = _signal_input_underlying_id(inp.instrument)
+        if underlying is None:
+            logger.warning(
+                "portfolio: signal %r input %r has unrecognised instrument "
+                "variant %r — keeping signal-local id for trade/position "
+                "remap",
+                label,
+                inp.id,
+                type(inp.instrument).__name__,
+            )
+            continue
+        underlying_by_local[inp.id] = underlying
+
+    def _remap_id(local_id: str) -> str:
+        mapped = underlying_by_local.get(local_id)
+        if mapped is None:
+            logger.warning(
+                "portfolio: signal %r emitted input_id %r with no matching "
+                "Input — keeping original id",
+                label,
+                local_id,
+            )
+            return local_id
+        return mapped
+
+    remapped_trades = tuple(
+        replace(tr, input_id=_remap_id(tr.input_id)) for tr in result.trades
+    )
+
+    # 8. Build per-input price payloads in the signals-API shape so the
+    #    portfolio TradeLog can look up open/close prices by input_id.
+    positions_payload: list[dict] = []
+    for pos in result.positions:
+        if pos.price_label is None or pos.price_values is None:
+            price_payload: dict | None = None
+        else:
+            price_payload = {
+                "label": pos.price_label,
+                "values": nan_safe_floats(pos.price_values),
+            }
+        positions_payload.append(
+            {"input_id": _remap_id(pos.input_id), "price": price_payload}
+        )
+
+    return _SignalLegEvalResult(
+        index=result.index,
+        synthetic=synthetic,
+        trades=remapped_trades,
+        positions_payload=tuple(positions_payload),
+    )
 
 
 def _compute_level_metrics(values: npt.NDArray[np.float64]) -> dict:
@@ -509,18 +618,24 @@ async def compute_portfolio(
     # signal_dates[label] = YYYYMMDD array, signal_closes[label] = synthetic prices
     signal_dates_map: dict[str, npt.NDArray[np.int64]] = {}
     signal_closes: dict[str, npt.NDArray[np.float64]] = {}
+    # Per-leg trade + positions payloads bubbled up from _evaluate_signal_leg
+    # for portfolio-level trade log aggregation (see §10 below).
+    signal_trades_map: dict[str, tuple[Trade, ...]] = {}
+    signal_positions_map: dict[str, tuple[dict, ...]] = {}
 
     for label, leg in signal_legs.items():
-        sig_dates, sig_prices = await _evaluate_signal_leg(
+        leg_result = await _evaluate_signal_leg(
             label,
             leg,
             svc,
             start_date,
             end_date,
         )
-        signal_dates_map[label] = sig_dates
-        signal_closes[label] = sig_prices
-        all_date_grids.append(sig_dates)
+        signal_dates_map[label] = leg_result.index
+        signal_closes[label] = leg_result.synthetic
+        signal_trades_map[label] = leg_result.trades
+        signal_positions_map[label] = leg_result.positions_payload
+        all_date_grids.append(leg_result.index)
 
     # ── 4.5. Evaluate option_stream legs (if any) ──
 
@@ -660,7 +775,162 @@ async def compute_portfolio(
         "yearly",
     )
 
-    # ── 10. Build response ──
+    # ── 10. Aggregate trades + per-input positions across signal legs ──
+    #
+    # Each signal leg evaluates against its own date overlap (per-signal
+    # ``result.index``). Trade bar indices and positions price arrays are
+    # therefore in that per-signal axis, NOT the portfolio's common_dates.
+    # We re-map every trade endpoint onto common_dates via a date→index
+    # dict; trades whose endpoints fall outside common_dates are DROPPED
+    # (not clamped) — they refer to bars the user can't see in the
+    # portfolio chart, so they'd index out of bounds on the frontend.
+
+    cd_index: dict[int, int] = {int(d): i for i, d in enumerate(common_dates)}
+
+    aggregated_trades: list[dict] = []
+    for label, trades in signal_trades_map.items():
+        sig_idx = signal_dates_map[label]
+        # ``body.weights[label]`` is the user-facing PERCENT allocation
+        # (frontend default 100). For trade-size scaling we need the
+        # FRACTION form (0.0 … 1.0+) so ``signed_weight`` stays in
+        # fraction units across direct + signal legs.
+        leg_fraction = float(body.weights[label]) / 100.0
+        for tr in trades:
+            # Re-map the open bar (signal-axis index → common_dates index).
+            # If the trade's open date isn't part of common_dates, DROP —
+            # the trade can't be placed on the portfolio's date axis.
+            sig_open_date = int(sig_idx[tr.open_bar])
+            new_open = cd_index.get(sig_open_date)
+            if new_open is None:
+                continue
+            if tr.close_bar is None:
+                # Open trade: open date is in common_dates → keep with
+                # close_bar=None. The frontend renders an effective close
+                # price using the last finite value from positions[].
+                # ``open_bar`` is NOT restricted to the signal's last bar;
+                # the engine emits open trades wherever an entry block
+                # latched and never closed (see engine
+                # test_trades_open_at_end).
+                new_close: int | None = None
+            else:
+                sig_close_date = int(sig_idx[tr.close_bar])
+                mapped_close = cd_index.get(sig_close_date)
+                if mapped_close is None:
+                    continue
+                new_close = mapped_close
+            aggregated_trades.append(
+                {
+                    "input_id": tr.input_id,
+                    "entry_block_id": tr.entry_block_id,
+                    "entry_block_name": tr.entry_block_name,
+                    "exit_block_id": tr.exit_block_id,
+                    "exit_block_name": tr.exit_block_name,
+                    "open_bar": new_open,
+                    "close_bar": new_close,
+                    "direction": tr.direction,
+                    "signed_weight": tr.signed_weight * leg_fraction,
+                    "holding_id": label,
+                    "holding_name": label,
+                }
+            )
+
+    # Synthesize one open "Holding" Trade per non-signal leg (Sign 10).
+    for label, leg in body.legs.items():
+        if leg.type == "signal":
+            continue
+        if leg.type == "instrument":
+            direct_input_id = leg.symbol or label
+        elif leg.type == "continuous":
+            direct_input_id = leg.collection or label
+        else:
+            direct_input_id = label
+        # See note above: convert PERCENT allocation → FRACTION for the
+        # trade's signed_weight (trades use fraction units uniformly).
+        leg_fraction = float(body.weights[label]) / 100.0
+        aggregated_trades.append(
+            {
+                "input_id": direct_input_id,
+                "entry_block_id": "holding",
+                "entry_block_name": "Holding",
+                "exit_block_id": None,
+                "exit_block_name": None,
+                "open_bar": 0,
+                "close_bar": None,
+                "direction": "long" if leg_fraction >= 0 else "short",
+                "signed_weight": leg_fraction,
+                "holding_id": label,
+                "holding_name": label,
+            }
+        )
+
+    aggregated_trades.sort(
+        key=lambda t: (t["open_bar"], t["entry_block_id"])
+    )
+
+    # Build top-level positions payload (matches signals response shape).
+    # First leg that references a given input_id wins; downstream conflicts
+    # (same input_id, different prices across legs) are not expected and
+    # would surface here.
+    aggregated_positions: list[dict] = []
+    seen_inputs: set[str] = set()
+    for label, pos_list in signal_positions_map.items():
+        sig_idx = signal_dates_map[label]
+        # Projection from common_dates onto signal-bar indices: -1 marks
+        # portfolio bars where the signal has no data (rendered as null).
+        sig_index_of_date: dict[int, int] = {
+            int(d): j for j, d in enumerate(sig_idx)
+        }
+        proj = [sig_index_of_date.get(int(d), -1) for d in common_dates]
+        for pos in pos_list:
+            iid = pos["input_id"]
+            if iid in seen_inputs:
+                continue
+            seen_inputs.add(iid)
+            price = pos.get("price")
+            if price is None:
+                aggregated_positions.append({"input_id": iid, "price": None})
+                continue
+            src_values = price["values"]
+            remapped: list[float | None] = [
+                (src_values[j] if j >= 0 else None) for j in proj
+            ]
+            aggregated_positions.append(
+                {
+                    "input_id": iid,
+                    "price": {"label": price["label"], "values": remapped},
+                }
+            )
+
+    # Direct (non-signal) leg price series → positions[]. Reuse the already-
+    # aligned closes (length == len(common_dates)); first-leg-wins dedup.
+    for label, leg in body.legs.items():
+        if leg.type == "signal":
+            continue
+        if label not in aligned_closes:
+            continue
+        if leg.type == "instrument":
+            direct_input_id = leg.symbol or label
+            price_label = f"{leg.symbol}.close" if leg.symbol else f"{label}.close"
+        elif leg.type == "continuous":
+            direct_input_id = leg.collection or label
+            price_label = f"{leg.collection}.close" if leg.collection else f"{label}.close"
+        else:
+            direct_input_id = label
+            price_label = f"{label}.close"
+        if direct_input_id in seen_inputs:
+            continue
+        seen_inputs.add(direct_input_id)
+        aggregated_positions.append(
+            {
+                "input_id": direct_input_id,
+                "price": {
+                    "label": price_label,
+                    "values": nan_safe_floats(aligned_closes[label]),
+                },
+            }
+        )
+
+    # ── 11. Build response ──
 
     dates_iso = [int_to_iso(int(d)) for d in common_dates]
 
@@ -683,4 +953,6 @@ async def compute_portfolio(
         "rebalance": rebalance_freq.value,
         "return_type": body.return_type,
         "tracking_series": tracking_series,
+        "trades": aggregated_trades,
+        "positions": aggregated_positions,
     }

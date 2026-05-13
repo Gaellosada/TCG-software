@@ -12,8 +12,23 @@ import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from tcg.core.api.portfolio import _SignalLegEvalResult
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.types.market import PriceSeries
+
+
+def _leg_result(
+    dates: np.ndarray,
+    prices: np.ndarray,
+    trades: tuple = (),
+    positions_payload: tuple = (),
+) -> _SignalLegEvalResult:
+    return _SignalLegEvalResult(
+        index=dates,
+        synthetic=prices,
+        trades=trades,
+        positions_payload=positions_payload,
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -149,7 +164,7 @@ class TestSignalEvaluationMocked:
         """Portfolio with only signal legs returns valid structure."""
         sig_dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
         sig_prices = np.array([100.0, 101.0, 103.0], dtype=np.float64)
-        mock_eval_signal.return_value = (sig_dates, sig_prices)
+        mock_eval_signal.return_value = _leg_result(sig_dates, sig_prices)
 
         body = {
             "legs": {
@@ -199,7 +214,7 @@ class TestSignalEvaluationMocked:
              102.5, 103.0, 103.5, 104.0, 104.5],
             dtype=np.float64,
         )
-        mock_eval_signal.return_value = (sig_dates, sig_prices)
+        mock_eval_signal.return_value = _leg_result(sig_dates, sig_prices)
 
         body = {
             "legs": {
@@ -258,7 +273,7 @@ class TestSignalEvaluationMocked:
             [20200101, 20200102, 20200103, 20200106], dtype=np.int64,
         )
         sig_prices = np.array([100.0, 101.0, 103.0, 98.0], dtype=np.float64)
-        mock_eval_signal.return_value = (sig_dates, sig_prices)
+        mock_eval_signal.return_value = _leg_result(sig_dates, sig_prices)
 
         body = {
             "legs": {
@@ -334,7 +349,7 @@ class TestSignalEdgeCases:
             [20250203, 20250204, 20250205], dtype=np.int64,
         )
         sig_prices = np.array([100.0, 101.0, 102.0], dtype=np.float64)
-        mock_eval_signal.return_value = (sig_dates, sig_prices)
+        mock_eval_signal.return_value = _leg_result(sig_dates, sig_prices)
 
         body = {
             "legs": {
@@ -366,7 +381,7 @@ class TestSignalEdgeCases:
         sig_dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
         # Zero PnL -> all 100.0
         sig_prices = np.full(3, 100.0, dtype=np.float64)
-        mock_eval_signal.return_value = (sig_dates, sig_prices)
+        mock_eval_signal.return_value = _leg_result(sig_dates, sig_prices)
 
         body = {
             "legs": {
@@ -401,8 +416,8 @@ class TestSignalEdgeCases:
 
         # Return different series for each call.
         mock_eval_signal.side_effect = [
-            (common, np.array([100.0, 102.0, 104.0], dtype=np.float64)),
-            (common, np.array([100.0, 99.0, 98.0], dtype=np.float64)),
+            _leg_result(common, np.array([100.0, 102.0, 104.0], dtype=np.float64)),
+            _leg_result(common, np.array([100.0, 99.0, 98.0], dtype=np.float64)),
         ]
 
         body = {

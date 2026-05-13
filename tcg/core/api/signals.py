@@ -176,6 +176,8 @@ class _BlockIn(BaseModel):
     it unset.
     """
 
+    # API accepts orphaned target_entry_block_name for persistence flexibility; engine no-ops them via _usable_exit.
+
     id: str = ""
     name: str = ""
     conditions: list[_ConditionIn] = Field(default_factory=list)

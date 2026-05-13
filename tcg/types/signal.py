@@ -261,6 +261,12 @@ class Trade:
     record per latch-open event on an enabled entry block; ``exit_*`` and
     ``close_bar`` are ``None`` when the position is still open at the
     last bar.
+
+    ``signed_weight`` is always in FRACTION units (typically 0.0 … 1.0 for
+    unleveraged exposure, possibly outside that range for leveraged
+    legs). The portfolio aggregation layer converts the user-facing
+    percent allocation to a fraction before stamping it onto a Trade —
+    do not mix percent and fraction across this boundary.
     """
 
     input_id: str
@@ -272,6 +278,10 @@ class Trade:
     close_bar: int | None
     direction: str
     signed_weight: float
+    # Optional: None when Trade spans a single signal; set to the leg label
+    # when aggregated across a multi-leg portfolio.
+    holding_id: str | None = None
+    holding_name: str | None = None
 
 
 @dataclass(frozen=True)

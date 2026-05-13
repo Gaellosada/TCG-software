@@ -301,9 +301,14 @@ def _operand_key(
 
 
 def _walk_operands(signal: Signal) -> list[Operand]:
+    # Skip disabled blocks so a disabled block referencing a broken
+    # indicator does not trigger a fetch — matches the "disabled ≡ deleted"
+    # parity invariant from _usable_entry / _usable_exit.
     out: list[Operand] = []
     for rules in (signal.rules.entries, signal.rules.exits):
         for block in rules:
+            if not block.enabled:
+                continue
             for cond in block.conditions:
                 if isinstance(cond, (CompareCondition, CrossCondition)):
                     out.append(cond.lhs)
@@ -1037,7 +1042,7 @@ async def evaluate_signal(
                         open_bar=int(open_bar),
                         close_bar=int(close_bar),
                         direction=direction,
-                        signed_weight=float(sw),
+                        signed_weight=sw,
                     )
                 )
             else:
@@ -1051,7 +1056,7 @@ async def evaluate_signal(
                         open_bar=int(open_bar),
                         close_bar=None,
                         direction=direction,
-                        signed_weight=float(sw),
+                        signed_weight=sw,
                     )
                 )
     trades.sort(key=lambda tr: (tr.open_bar, tr.entry_block_id))

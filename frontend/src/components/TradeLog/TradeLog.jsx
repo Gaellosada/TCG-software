@@ -29,11 +29,13 @@ function formatPrice(p) {
   return p.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-function formatSignedPercent(fraction) {
+export function formatSignedPercent(fraction) {
   if (typeof fraction !== 'number' || !Number.isFinite(fraction)) return '—';
   const pct = fraction * 100;
   const sign = pct > 0 ? '+' : '';
-  return `${sign}${pct.toFixed(pct === Math.trunc(pct) ? 0 : 2)}%`;
+  // Always two decimals: integer-detection via === is FP-fragile
+  // (e.g. (110/100 - 1) * 100 = 10.000000000000009).
+  return `${sign}${pct.toFixed(2)}%`;
 }
 
 function priceAtBar(positionsByInputId, inputId, bar) {
@@ -42,6 +44,22 @@ function priceAtBar(positionsByInputId, inputId, bar) {
   if (!pos || !pos.price || !Array.isArray(pos.price.values)) return null;
   const v = pos.price.values[bar];
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Returns the last finite price value in the position's price series,
+ * walking back from the end to skip trailing nulls/NaN.
+ * Returns null if no finite value is found.
+ */
+function lastFinitePrice(positionsByInputId, inputId) {
+  const pos = positionsByInputId.get(inputId);
+  if (!pos || !pos.price || !Array.isArray(pos.price.values)) return null;
+  const values = pos.price.values;
+  for (let i = values.length - 1; i >= 0; i--) {
+    const v = values[i];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return null;
 }
 
 function computePnl(mode, openPrice, closePrice, signedWeight) {
@@ -61,6 +79,7 @@ function TradeLog({
   positions = [],
   exitDescriptions = {},
   entryDescriptions = {},
+  showHoldingColumn = false,
 }) {
   const [open, setOpen] = useState(false);
   const [pnlMode, setPnlMode] = useState('realised');
@@ -85,12 +104,20 @@ function TradeLog({
       const closeTs = Number.isInteger(tr.close_bar) ? timestamps[tr.close_bar] : null;
       const openPrice = priceAtBar(positionsByInputId, tr.input_id, tr.open_bar);
       const closePrice = priceAtBar(positionsByInputId, tr.input_id, tr.close_bar);
+      // For open trades (close_bar == null), use the last finite price in the
+      // position series as the effective close price for PnL ONLY.
+      // The displayed close-price column stays as em-dash for open trades.
+      const isOpen = tr.close_bar === null || tr.close_bar === undefined;
+      const pnlClosePrice = isOpen
+        ? lastFinitePrice(positionsByInputId, tr.input_id)
+        : closePrice;
       return {
         ...tr,
         _openTs: openTs,
         _closeTs: closeTs,
         _openPrice: openPrice,
         _closePrice: closePrice,
+        _pnlClosePrice: pnlClosePrice,
       };
     });
   }, [trades, timestamps, positionsByInputId]);
@@ -140,6 +167,9 @@ function TradeLog({
                     <th scope="col">Open</th>
                     <th scope="col">Close</th>
                     <th scope="col">Input</th>
+                    {showHoldingColumn && (
+                      <th scope="col" data-testid="holding-col-header">Holding</th>
+                    )}
                     <th scope="col">Direction</th>
                     <th scope="col">Size</th>
                     <th scope="col">Open price</th>
@@ -155,7 +185,7 @@ function TradeLog({
                     const directionClass = tr.direction === 'long'
                       ? styles.dirLong
                       : styles.dirShort;
-                    const pnl = computePnl(pnlMode, tr._openPrice, tr._closePrice, tr.signed_weight);
+                    const pnl = computePnl(pnlMode, tr._openPrice, tr._pnlClosePrice, tr.signed_weight);
                     const pnlClass = pnl === null
                       ? ''
                       : pnl >= 0
@@ -173,10 +203,19 @@ function TradeLog({
                       : '';
 
                     return (
-                      <tr key={`${tr.entry_block_id}|${tr.open_bar}`} data-testid="trade-row">
+                      <tr
+                        key={`${tr.entry_block_id}|${tr.open_bar}`}
+                        data-testid="trade-row"
+                        data-open-bar={tr.open_bar}
+                      >
                         <td>{formatTs(tr._openTs)}</td>
                         <td>{isClosed ? formatTs(tr._closeTs) : <span className={styles.openTag}>open</span>}</td>
                         <td>{tr.input_id}</td>
+                        {showHoldingColumn && (
+                          <td data-testid="trade-holding">
+                            {tr.holding_name ?? tr.holding_id ?? '—'}
+                          </td>
+                        )}
                         <td>
                           <span className={`${styles.dirPill} ${directionClass}`}>
                             {tr.direction}

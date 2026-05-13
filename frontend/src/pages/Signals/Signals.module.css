@@ -276,7 +276,12 @@
   opacity: 0.45;
 }
 
-.blockDisabled * {
+/* Grey the block body (conditions, add-condition button, description) but
+   leave the header row untouched so the enable toggle and rename controls
+   stay visually interactive — without this, users can't see the toggle that
+   re-enables the block. */
+.blockDisabled > :not(.blockHeaderRow),
+.blockDisabled > :not(.blockHeaderRow) * {
   color: var(--text-secondary) !important;
 }
 
