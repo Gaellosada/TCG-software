@@ -952,9 +952,9 @@ async def test_trades_same_bar_entry_then_exit_then_reentry():
 
 
 # ---------------------------------------------------------------------------
-# Task 1a — disabled blocks must NOT trigger operand fetches.
-# Regression for PR #37 follow-up: a disabled block referencing a broken
-# indicator/input should be skipped at the walk so the run still succeeds.
+# Regression: disabled blocks must not contribute references in _walk_operands.
+# A disabled block referencing a broken indicator/input must be skipped at
+# the walk so the run still succeeds.
 # ---------------------------------------------------------------------------
 
 

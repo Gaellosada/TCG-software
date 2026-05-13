@@ -345,6 +345,94 @@ class TestPortfolioAggregation:
         opens = [t["open_bar"] for t in out]
         assert opens == sorted(opens)
 
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_cross_leg_shared_input_id_deduplicates_positions(
+        self, mock_eval, client: AsyncClient
+    ):
+        """Two signal legs both referencing the same input_id 'AAPL'.
+        Positions must be de-duplicated (first-leg-wins per §5.3.2 step 5);
+        trades from both legs must appear with distinct holding_ids."""
+        # Both legs share the full common_dates window so bar indices align 1:1.
+        shared_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
+        )
+        shared_prices = np.array(
+            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
+        )
+        leg_a_price_values = [100.0, 101.0, 102.0, 103.0, 104.0]
+        leg_b_price_values = [200.0, 201.0, 202.0, 203.0, 204.0]  # different — first wins
+
+        leg_a_trades = (
+            Trade(
+                input_id="AAPL",
+                entry_block_id="EA",
+                entry_block_name="entry-a",
+                exit_block_id="XA",
+                exit_block_name="exit-a",
+                open_bar=0,
+                close_bar=2,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+        leg_b_trades = (
+            Trade(
+                input_id="AAPL",
+                entry_block_id="EB",
+                entry_block_name="entry-b",
+                exit_block_id="XB",
+                exit_block_name="exit-b",
+                open_bar=3,
+                close_bar=4,
+                direction="long",
+                signed_weight=0.5,
+            ),
+        )
+
+        leg_a_result = _leg_result(
+            shared_dates,
+            shared_prices,
+            leg_a_trades,
+            ({"input_id": "AAPL", "price": {"label": "AAPL.close", "values": leg_a_price_values}},),
+        )
+        leg_b_result = _leg_result(
+            shared_dates,
+            shared_prices,
+            leg_b_trades,
+            ({"input_id": "AAPL", "price": {"label": "AAPL.close", "values": leg_b_price_values}},),
+        )
+        mock_eval.side_effect = [leg_a_result, leg_b_result]
+
+        body = {
+            "legs": {
+                "leg_a": {"type": "signal", "signal_spec": _minimal_signal_spec()},
+                "leg_b": {"type": "signal", "signal_spec": _minimal_signal_spec()},
+            },
+            "weights": {"leg_a": 50, "leg_b": 50},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Positions: exactly one entry for AAPL (de-duplicated).
+        out_positions = data["positions"]
+        assert len(out_positions) == 1
+        assert out_positions[0]["input_id"] == "AAPL"
+
+        # Price values come from the first leg (leg_a).
+        price_vals = out_positions[0]["price"]["values"]
+        # Projection is identity (leg shares common_dates fully) — values match leg_a.
+        assert price_vals == leg_a_price_values
+
+        # Trades: both legs contribute — two rows, distinct holding_ids.
+        out_trades = data["trades"]
+        assert len(out_trades) == 2
+        holding_ids = {t["holding_id"] for t in out_trades}
+        assert holding_ids == {"leg_a", "leg_b"}
+
     async def test_no_signal_portfolio_emits_empty_trades_and_positions(
         self, client: AsyncClient
     ):

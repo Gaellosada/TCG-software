@@ -29,7 +29,7 @@ function formatPrice(p) {
   return p.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-function formatSignedPercent(fraction) {
+export function formatSignedPercent(fraction) {
   if (typeof fraction !== 'number' || !Number.isFinite(fraction)) return '—';
   const pct = fraction * 100;
   const sign = pct > 0 ? '+' : '';

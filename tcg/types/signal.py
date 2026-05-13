@@ -272,10 +272,8 @@ class Trade:
     close_bar: int | None
     direction: str
     signed_weight: float
-    # Portfolio-path attribution. ``None`` on the signals path so existing
-    # call sites stay unchanged; stamped with the leg label on the portfolio
-    # aggregation path. Two fields reserve room for future divergence
-    # without a schema migration.
+    # Optional: None when Trade spans a single signal; set to the leg label
+    # when aggregated across a multi-leg portfolio.
     holding_id: str | None = None
     holding_name: str | None = None
 

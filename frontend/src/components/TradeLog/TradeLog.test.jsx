@@ -3,7 +3,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
-import TradeLog from './TradeLog';
+import TradeLog, { formatSignedPercent } from './TradeLog';
 
 afterEach(cleanup);
 
@@ -400,5 +400,20 @@ describe('<TradeLog>', () => {
     expect(cells).toHaveLength(2);
     expect(cells[0].textContent).toBe('IdOnly');
     expect(cells[1].textContent).toBe('—');
+  });
+});
+
+describe('formatSignedPercent', () => {
+  it('formats +0.1 as "+10.00%" without FP truncation artefacts', () => {
+    // Regression: (0.1 * 100) === 10.000000000000009 under Math.trunc — toFixed avoids it.
+    expect(formatSignedPercent(0.1)).toBe('+10.00%');
+  });
+
+  it('formats -0.1 as "-10.00%"', () => {
+    expect(formatSignedPercent(-0.1)).toBe('-10.00%');
+  });
+
+  it('formats 0 as "0.00%"', () => {
+    expect(formatSignedPercent(0)).toBe('0.00%');
   });
 });

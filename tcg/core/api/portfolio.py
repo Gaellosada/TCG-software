@@ -753,7 +753,7 @@ async def compute_portfolio(
                     "open_bar": new_open,
                     "close_bar": new_close,
                     "direction": tr.direction,
-                    "signed_weight": float(tr.signed_weight),
+                    "signed_weight": tr.signed_weight,
                     "holding_id": label,
                     "holding_name": label,
                 }
@@ -766,7 +766,6 @@ async def compute_portfolio(
     # First leg that references a given input_id wins; downstream conflicts
     # (same input_id, different prices across legs) are not expected and
     # would surface here.
-    cd_len = len(common_dates)
     aggregated_positions: list[dict] = []
     seen_inputs: set[str] = set()
     for label, pos_list in signal_positions_map.items():
