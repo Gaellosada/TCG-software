@@ -18,25 +18,33 @@ import styles from './Signals.module.css';
 const SECTION_LABELS = {
   entries: 'Entries',
   exits: 'Exits',
+  resets: 'Resets',
+};
+
+const ADD_BLOCK_LABELS = {
+  entries: '+ Add block (OR)',
+  exits: '+ Add block (OR)',
+  resets: '+ Add reset block',
 };
 
 /**
  * Middle panel — block/condition editor (v4 / signals-refactor-v4).
  *
- * Two-section model: `entries` and `exits`. A block in the exits section
- * additionally picks a `target_entry_block_name` from the signal's entry
- * blocks. Entry deletion cascades through `cascadeDeleteEntry` from
- * storage.js so referencing exits are removed and a brief inline banner
- * surfaces above the Exits list.
+ * Three-section model: `entries`, `exits`, and `resets`. A block in the
+ * exits section additionally picks a `target_entry_block_name` from the
+ * signal's entry blocks. Reset blocks are signal-global (no per-block
+ * input or target). Entry deletion cascades through `cascadeDeleteEntry`
+ * from storage.js so referencing exits are removed and a brief inline
+ * banner surfaces above the Exits list.
  *
  * Props:
- *   rules              {Object}     { entries: [], exits: [] }
+ *   rules              {Object}     { entries: [], exits: [], resets: [] }
  *   onRulesChange      {Function}
  *   inputs             {Array}      the signal's declared inputs
  *   indicators         {Array}
  *   doc                {string}
  *   onDocChange        {Function}
- *   section?           {'entries'|'exits'} — if provided, parent controls the tab
+ *   section?           {'entries'|'exits'|'resets'} — if provided, parent controls the tab
  *   onSectionChange?   {Function}   — parent-controlled tab setter
  */
 function BlockEditor({
@@ -50,7 +58,7 @@ function BlockEditor({
   onSectionChange,
 }) {
   // Internal tab state is used when the parent does NOT control section.
-  // Supports 'entries' | 'exits' | 'doc'.
+  // Supports 'entries' | 'exits' | 'resets' | 'doc'.
   const [internalTab, setInternalTab] = useState('entries');
   const activeTab = sectionProp || internalTab;
   const isDocTab = activeTab === 'doc';
@@ -243,7 +251,7 @@ function BlockEditor({
               onClick={handleAddBlock}
               data-testid="add-block-btn"
             >
-              + Add block (OR)
+              {ADD_BLOCK_LABELS[section] || '+ Add block (OR)'}
             </button>
           </div>
         </>

@@ -305,7 +305,7 @@ def _walk_operands(signal: Signal) -> list[Operand]:
     # indicator does not trigger a fetch — matches the "disabled ≡ deleted"
     # parity invariant from _usable_entry / _usable_exit.
     out: list[Operand] = []
-    for rules in (signal.rules.entries, signal.rules.exits):
+    for rules in (signal.rules.entries, signal.rules.exits, signal.rules.resets):
         for block in rules:
             if not block.enabled:
                 continue
@@ -580,6 +580,23 @@ def _usable_entry(block: Block, inputs: dict[str, Input]) -> bool:
     return True
 
 
+def _usable_reset(block: Block) -> bool:
+    """Reset block is usable iff it has id + ≥1 condition AND is enabled.
+
+    Reset blocks are signal-global: they carry no ``input_id``, no
+    ``weight``, no ``target_entry_block_name``. Those fields, if
+    present, are ignored at the engine layer (API layer rejects them
+    at parse time).
+    """
+    if not block.enabled:
+        return False
+    if not block.id:
+        return False
+    if not block.conditions:
+        return False
+    return True
+
+
 def _usable_exit(block: Block, inputs: dict[str, Input], entry_names: set[str]) -> bool:
     """Exit block is usable iff it has id + conditions AND
     target_entry_block_name references a usable entry's name AND is enabled.
@@ -658,16 +675,19 @@ class InstrumentPositionResult:
 class BlockEvent:
     """Per-block firing / latching / active record (v4 trace schema).
 
-    * ``kind``: ``"entry"`` or ``"exit"``.
+    * ``kind``: ``"entry"``, ``"exit"`` or ``"reset"``.
     * ``fired_indices``: bars where the block's AND-condition was True.
     * ``latched_indices``: for entries, bars where the latch transitioned
       False→True ("effective entry"); for exits, bars where the exit
-      actually cleared a previously-open entry latch ("effective exit").
+      actually cleared a previously-open entry latch ("effective exit");
+      for resets, bars where the signal-global ``reset_armed`` flipped
+      False→True ("effective arm").
     * ``active_indices``: entries only — bars where this entry's latch
       was True *at emission time* (i.e. contributed to position[t]).
-      Empty for exit blocks.
+      Empty for exit and reset blocks.
     * ``target_entry_block_name``: exits only — the name of the entry
-      this exit targets. ``None`` on entries.
+      this exit targets. ``None`` on entries and resets. For resets the
+      ``input_id`` field is always ``""`` (resets are signal-global).
 
     The frontend computes the "don't repeat" effective filter directly
     from these: effective entry bars = ``latched_indices`` on entry
@@ -676,7 +696,7 @@ class BlockEvent:
 
     input_id: str
     block_id: str
-    kind: Literal["entry", "exit"]
+    kind: Literal["entry", "exit", "reset"]
     fired_indices: tuple[int, ...]
     latched_indices: tuple[int, ...]
     active_indices: tuple[int, ...] = ()
@@ -737,6 +757,14 @@ async def evaluate_signal(
     ]
     # Exits may have duplicate ids across entries; but distinct ids from
     # each other are preferred for trace clarity — not enforced here.
+
+    reset_blocks: list[Block] = [
+        b for b in signal.rules.resets if _usable_reset(b)
+    ]
+    # ``gate_active`` short-circuits the reset_armed bit when there is no
+    # usable reset block: behavior becomes byte-identical to the pre-reset
+    # path for legacy signals (resets=() or all-disabled).
+    gate_active: bool = len(reset_blocks) > 0
 
     # Referenced inputs = union of usable blocks' input_ids, in
     # declaration order (entries then exits). Exits contribute the
@@ -818,6 +846,19 @@ async def evaluate_signal(
         exit_truth[blk.id] = active
         exit_nan[blk.id] = blk_nan
 
+    # Reset blocks evaluate the same condition vocabulary. Their nan-mask
+    # poisons the resets' own ``fired``/``latched`` traces but is NOT
+    # aggregated into ``nan_poison`` (which zeroes per-input positions),
+    # because resets are signal-global and don't bind to an input.
+    reset_truth: dict[str, npt.NDArray[np.bool_]] = {}
+    reset_nan: dict[str, npt.NDArray[np.bool_]] = {}
+    for blk in reset_blocks:
+        active, blk_nan = _eval_block_activity(
+            blk, indicators, inputs, values_by_key, T
+        )
+        reset_truth[blk.id] = active
+        reset_nan[blk.id] = blk_nan
+
     # Per-input nan-poison mask: union of every usable block's nan mask
     # bound to that input (preserves v3 semantics — nan bar zeroes output
     # but does NOT clear latches).
@@ -857,6 +898,13 @@ async def evaluate_signal(
     entry_active: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
     exit_fired: dict[str, list[int]] = {b.id: [] for b in exit_blocks}
     exit_latched: dict[str, list[int]] = {b.id: [] for b in exit_blocks}
+    reset_fired: dict[str, list[int]] = {b.id: [] for b in reset_blocks}
+    reset_latched: dict[str, list[int]] = {b.id: [] for b in reset_blocks}
+
+    # Signal-global reset gate. Initialised to True so the very first
+    # entry latches without requiring a prior reset (legacy parity when
+    # ``gate_active`` is False — see contract §1.3).
+    reset_armed: bool = True
 
     # Per-entry trade ledger — parallel lists keyed by entry block id.
     # ``opens[i]`` pairs with ``closes[i]`` (when present) to form one
@@ -875,6 +923,11 @@ async def evaluate_signal(
         for b in exit_blocks:
             if bool(exit_truth[b.id][t]):
                 exit_fired[b.id].append(t)
+        for b in reset_blocks:
+            # Reset firing inherits the same nan-poison semantics as
+            # entries/exits — operands with NaN at t do not count as fired.
+            if bool(reset_truth[b.id][t]) and not bool(reset_nan[b.id][t]):
+                reset_fired[b.id].append(t)
 
         # --- (b) clear pass: exits clear their target-entry latch only ---
         for b in exit_blocks:
@@ -889,14 +942,35 @@ async def evaluate_signal(
                 trade_closes[target_entry.id].append((t, b.id))
 
         # --- (c) entry pass: declaration order; leverage allowed ---
-        for b in entry_blocks:
-            if not bool(entry_truth[b.id][t]):
-                continue
-            if latched[b.id]:
-                continue
-            latched[b.id] = True
-            entry_latched[b.id].append(t)
-            trade_opens[b.id].append(t)
+        # Gated by ``reset_armed`` when at least one reset block is usable.
+        # ONE arm permits ALL eligible entries to latch on the same bar
+        # (multi-entry arm-sharing, contract §1.3); the arm is consumed at
+        # END OF entry pass, not per-latch.
+        entry_pass_open = (not gate_active) or reset_armed
+        if entry_pass_open:
+            any_latched_this_bar = False
+            for b in entry_blocks:
+                if not bool(entry_truth[b.id][t]):
+                    continue
+                if latched[b.id]:
+                    continue
+                latched[b.id] = True
+                entry_latched[b.id].append(t)
+                trade_opens[b.id].append(t)
+                any_latched_this_bar = True
+            if gate_active and any_latched_this_bar:
+                reset_armed = False
+
+        # --- (c.5) reset pass: signal-global arm flip (runs AFTER entries
+        # so same-bar entry+reset → entry-at-t, reset-arms-for-t+1).
+        if gate_active:
+            for b in reset_blocks:
+                if not bool(reset_truth[b.id][t]) or bool(reset_nan[b.id][t]):
+                    continue
+                if not reset_armed:
+                    reset_armed = True
+                    reset_latched[b.id].append(t)
+                # else: arm already on — trace ``fired`` only.
 
         # --- (d) emit per-input net position at t ---
         for rid in referenced_ids:
@@ -985,6 +1059,18 @@ async def evaluate_signal(
                 latched_indices=tuple(exit_latched[b.id]),
                 active_indices=(),
                 target_entry_block_name=b.target_entry_block_name,
+            )
+        )
+    for b in reset_blocks:
+        events.append(
+            BlockEvent(
+                input_id="",
+                block_id=b.id,
+                kind="reset",
+                fired_indices=tuple(reset_fired[b.id]),
+                latched_indices=tuple(reset_latched[b.id]),
+                active_indices=(),
+                target_entry_block_name=None,
             )
         )
 

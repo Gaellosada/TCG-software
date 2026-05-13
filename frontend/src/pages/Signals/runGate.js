@@ -40,6 +40,7 @@ export function computeRunGate(selectedSignal, availableIndicators) {
   const rules = selectedSignal.rules || {};
   const entries = Array.isArray(rules.entries) ? rules.entries : [];
   const exits = Array.isArray(rules.exits) ? rules.exits : [];
+  const resets = Array.isArray(rules.resets) ? rules.resets : [];
 
   const entryIds = collectEntryIds(entries);
 
@@ -60,14 +61,17 @@ export function computeRunGate(selectedSignal, availableIndicators) {
   const blocksWithSection = [
     ...entries.map((b) => ({ block: b, section: 'entries' })),
     ...exits.map((b) => ({ block: b, section: 'exits' })),
+    ...resets.map((b) => ({ block: b, section: 'resets' })),
   ];
   // A block is "non-empty" if the user has interacted with it at all.
   // For entries that means any condition or picked input; for exits it
-  // means any condition or picked target (exits no longer carry input_id).
+  // means any condition or picked target (exits no longer carry input_id);
+  // for resets it means any condition (resets carry nothing else).
   const nonEmpty = blocksWithSection.filter(({ block: b, section }) => {
     if (!b) return false;
     const hasCond = (b.conditions || []).length > 0;
     if (section === 'entries') return hasCond || !!b.input_id;
+    if (section === 'resets') return hasCond;
     return hasCond || !!b.target_entry_block_name;
   });
   if (nonEmpty.length === 0) {
@@ -139,7 +143,8 @@ export function computeRunGate(selectedSignal, availableIndicators) {
     }
     // For exits we pass the entry blocks themselves so isBlockRunnable
     // can additionally verify the resolved target entry has a configured
-    // input (exits inherit their input from the target entry).
+    // input (exits inherit their input from the target entry). Entries
+    // and resets only need the simpler entryIds set.
     const entryArg = section === 'exits' ? entries : entryIds;
     if (!isBlockRunnable(b, section, inputs, entryArg)) {
       return {

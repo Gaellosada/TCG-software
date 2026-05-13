@@ -30,6 +30,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, 
   const nameRef = useRef(null);
 
   const isEntry = section === 'entries';
+  const isReset = section === 'resets';
 
   const list = Array.isArray(inputs) ? inputs : [];
   const selectedId = typeof block.input_id === 'string' ? block.input_id : '';
@@ -154,10 +155,12 @@ function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, 
         />
       )}
 
+      {!isReset && (
       <span className={styles.blockDirectionLabel}>
         {isEntry ? 'entry on' : 'exit on'}
       </span>
-      {isEntry ? (
+      )}
+      {isReset ? null : isEntry ? (
         <div className={styles.blockInstrumentCell}>
           <select
             className={styles.blockInputSelect}

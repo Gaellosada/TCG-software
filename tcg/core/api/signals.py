@@ -195,6 +195,7 @@ class _BlockIn(BaseModel):
 class _SignalRulesIn(BaseModel):
     entries: list[_BlockIn] = Field(default_factory=list)
     exits: list[_BlockIn] = Field(default_factory=list)
+    resets: list[_BlockIn] = Field(default_factory=list)
 
 
 class SignalIn(BaseModel):
@@ -375,6 +376,7 @@ def _parse_blocks(
     section: str,
     is_entry: bool,
     entry_names: set[str] | None = None,
+    is_reset: bool = False,
 ) -> tuple[Block, ...]:
     """Parse request-shape blocks into typed :class:`Block` tuples.
 
@@ -415,7 +417,29 @@ def _parse_blocks(
         if not placeholder:
             if not bid:
                 raise SignalValidationError(f"{path}: block id is required")
-            if is_entry:
+            if is_reset:
+                # Reset blocks are signal-global: they must NOT carry
+                # entry/exit-only fields. We reject (rather than silently
+                # strip) so malformed payloads surface clearly. Error
+                # messages are part of the LOCKED API contract — do not
+                # paraphrase.
+                if iid:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set input_id"
+                    )
+                if weight != 0.0:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set weight"
+                    )
+                if tgt_name is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set target_entry_block_name"
+                    )
+                if legacy_tgt is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set target_entry_block_name"
+                    )
+            elif is_entry:
                 if tgt_name is not None:
                     raise SignalValidationError(
                         f"{path}: entry blocks must not set 'target_entry_block_name'"
@@ -506,7 +530,13 @@ def parse_signal(raw: SignalIn) -> Signal:
         is_entry=False,
         entry_names=entry_names,
     )
-    rules = SignalRules(entries=entries, exits=exits)
+    resets = _parse_blocks(
+        raw.rules.resets,
+        section="resets",
+        is_entry=False,
+        is_reset=True,
+    )
+    rules = SignalRules(entries=entries, exits=exits, resets=resets)
     return Signal(id=raw.id, name=raw.name, inputs=inputs, rules=rules)
 
 

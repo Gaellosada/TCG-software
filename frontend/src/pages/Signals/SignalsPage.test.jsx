@@ -221,3 +221,23 @@ describe('<SignalsPage> — entryDescriptions + exitDescriptions wiring', () => 
     expect(stub.getAttribute('data-exit-desc-keys')).toBe('exit-1');
   });
 });
+
+describe('<SignalsPage> — legacy v5 hydration (reset blocks)', () => {
+  // T19: a v5 payload that lacks rules.resets must hydrate cleanly with
+  // rules.resets defaulting to [] — no crash, no missing-key errors.
+  it('hydrates a legacy v5 signal without rules.resets, defaulting to []', async () => {
+    const legacy = {
+      id: 'legacy-sig',
+      name: 'Legacy Sig',
+      inputs: [],
+      rules: { entries: [], exits: [] },
+      settings: { dont_repeat: true },
+      doc: '',
+    };
+    mockLoadState.mockReturnValue({ signals: [legacy] });
+    await act(async () => { render(<SignalsPage />); });
+    // ResultsView stub renders unconditionally — its presence proves the
+    // page hydrated without throwing on the missing rules.resets field.
+    expect(screen.getByTestId('results-view-stub')).toBeTruthy();
+  });
+});

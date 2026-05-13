@@ -286,10 +286,21 @@ class Trade:
 
 @dataclass(frozen=True)
 class SignalRules:
-    """Unified entries/exits (v4): two OR-lists of AND-blocks."""
+    """Unified entries/exits + optional signal-global reset gate.
+
+    ``resets`` is an additive extension: a list of OR-blocks whose
+    firing arms the per-bar ``reset_armed`` gate guarding the entry
+    pass. When ``resets == ()`` the gate short-circuits to permanently
+    on, yielding byte-identical engine behavior to the pre-reset path
+    (legacy parity). Reset blocks reuse :class:`Block` verbatim but
+    only honour ``id``/``name``/``conditions``/``enabled``/``description`` —
+    they must not carry ``input_id``, ``weight``, or
+    ``target_entry_block_name`` (the API layer rejects such payloads).
+    """
 
     entries: tuple[Block, ...] = ()
     exits: tuple[Block, ...] = ()
+    resets: tuple[Block, ...] = ()
 
 
 @dataclass(frozen=True)

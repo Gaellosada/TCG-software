@@ -49,8 +49,8 @@ describe('Signals storage (v5)', () => {
     expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v5');
   });
 
-  it('SECTIONS are exactly ["entries", "exits"]', () => {
-    expect([...SECTIONS]).toEqual(['entries', 'exits']);
+  it('SECTIONS are exactly ["entries", "exits", "resets"]', () => {
+    expect([...SECTIONS]).toEqual(['entries', 'exits', 'resets']);
   });
 
   it('returns empty signals when nothing persisted', () => {
@@ -154,6 +154,7 @@ describe('Signals storage (v5)', () => {
                 description: '',
               },
             ],
+            resets: [],
           },
           settings: { dont_repeat: true },
         },
@@ -741,5 +742,121 @@ describe('cascadeDeleteEntry', () => {
     // Entry removed, but exits untouched because deleted name is empty
     expect(next.rules.entries.map((b) => b.id)).toEqual(['e2']);
     expect(next.rules.exits).toHaveLength(2);
+  });
+  // Regression: cascadeDeleteEntry must preserve all other rules sections
+  // (notably rules.resets), otherwise the next autosave round-trips them
+  // through sanitiseSignal and silently drops user data.
+  it('preserves rules.resets and any other rules.* section unchanged', () => {
+    const r1 = { id: 'r1', name: 'Arm-A', conditions: [], enabled: true, description: '' };
+    const r2 = { id: 'r2', name: 'Arm-B', conditions: [], enabled: true, description: '' };
+    const sigWithResets = {
+      ...sig,
+      rules: {
+        entries: sig.rules.entries,
+        exits: sig.rules.exits,
+        resets: [r1, r2],
+      },
+    };
+    const next = cascadeDeleteEntry(sigWithResets, 'e1');
+    // Existing cascade behaviour still holds.
+    expect(next.rules.entries.map((b) => b.id)).toEqual(['e2']);
+    expect(next.rules.exits.map((b) => b.id)).toEqual(['x2']);
+    // The bug under test: resets must survive untouched.
+    expect(next.rules.resets).toEqual([r1, r2]);
+  });
+});
+
+describe('Reset blocks — soft-migration + sanitiser', () => {
+  // T15
+  it('round-trips a v5 signal carrying rules.resets', () => {
+    const sig = {
+      id: 's1',
+      name: 'Reset signal',
+      doc: '',
+      inputs: [
+        { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
+      ],
+      rules: {
+        entries: [],
+        exits: [],
+        resets: [
+          {
+            id: 'r1',
+            name: 'Arm',
+            conditions: [
+              {
+                op: 'gt',
+                lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+                rhs: { kind: 'constant', value: 100 },
+              },
+            ],
+            enabled: true,
+            description: '',
+          },
+        ],
+      },
+      settings: { dont_repeat: true },
+    };
+    saveState({ signals: [sig] });
+    const loaded = loadState();
+    expect(loaded.signals).toHaveLength(1);
+    expect(loaded.signals[0].rules.resets).toEqual(sig.rules.resets);
+  });
+
+  it('sanitiseBlock strips disallowed fields on reset blocks', () => {
+    const dirty = {
+      id: 's1', name: '', doc: '',
+      inputs: [],
+      rules: {
+        entries: [],
+        exits: [],
+        resets: [
+          {
+            id: 'r1',
+            name: 'Arm',
+            input_id: 'X',           // disallowed — must be stripped
+            weight: 42,              // disallowed — must be stripped
+            target_entry_block_name: 'something',  // disallowed — must be stripped
+            conditions: [],
+            enabled: true,
+            description: '',
+          },
+        ],
+      },
+      settings: { dont_repeat: true },
+    };
+    saveState({ signals: [dirty] });
+    const loaded = loadState();
+    const reset = loaded.signals[0].rules.resets[0];
+    expect(reset.id).toBe('r1');
+    expect(reset.name).toBe('Arm');
+    expect('input_id' in reset).toBe(false);
+    expect('weight' in reset).toBe(false);
+    expect('target_entry_block_name' in reset).toBe(false);
+  });
+
+  // T19 — legacy v5 payload without `resets` loads with `resets: []`
+  it('legacy v5 payload without rules.resets loads with resets: []', () => {
+    const legacy = {
+      version: 5,
+      signals: [
+        {
+          id: 's1',
+          name: 'Legacy',
+          doc: '',
+          inputs: [],
+          rules: {
+            entries: [],
+            exits: [],
+            // no resets field
+          },
+          settings: { dont_repeat: true },
+        },
+      ],
+    };
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify(legacy));
+    const loaded = loadState();
+    expect(loaded.signals).toHaveLength(1);
+    expect(loaded.signals[0].rules.resets).toEqual([]);
   });
 });

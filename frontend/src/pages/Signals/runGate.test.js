@@ -371,3 +371,55 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
     expect(out.events[0].fired_indices).toEqual([0, 1, 2]);
   });
 });
+
+describe('computeRunGate — reset block validation', () => {
+  // T18
+  it('flags a reset block whose condition has an incomplete operand', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        entries: [
+          entryBlock({ id: 'e1', conditions: [GT_COND], name: 'Alpha' }),
+        ],
+        exits: [
+          exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] }),
+        ],
+        resets: [
+          {
+            id: 'r1', name: 'Arm', conditions: [
+              // Incomplete: rhs is null/missing.
+              { op: 'gt', lhs: INST_OP_X, rhs: null },
+            ],
+            enabled: true,
+          },
+        ],
+      },
+    };
+    const result = computeRunGate(sig, []);
+    expect(result.runDisabledReason).not.toBeNull();
+    // The generic operand-incomplete reason is fine — surfaces a
+    // disabled-run state to the user.
+    expect(result.runDisabledReason).toMatch(/operand/i);
+  });
+
+  it('accepts a signal where all reset conditions are complete', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        entries: [
+          entryBlock({ id: 'e1', conditions: [GT_COND], name: 'Alpha' }),
+        ],
+        exits: [
+          exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] }),
+        ],
+        resets: [
+          { id: 'r1', name: 'Arm', conditions: [GT_COND], enabled: true },
+        ],
+      },
+    };
+    const result = computeRunGate(sig, []);
+    expect(result.runDisabledReason).toBeNull();
+  });
+});

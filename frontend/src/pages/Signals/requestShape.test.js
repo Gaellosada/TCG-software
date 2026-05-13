@@ -11,7 +11,7 @@ const V4_INPUTS = [
 ];
 
 describe('computeSignal request body shape (v4)', () => {
-  it('top level has exactly {spec, indicators}; rules carry entries/exits only', () => {
+  it('top level has exactly {spec, indicators}; rules carry entries/exits/resets', () => {
     const signal = {
       id: 's1',
       name: 'S1',
@@ -45,8 +45,8 @@ describe('computeSignal request body shape (v4)', () => {
     expect(Array.isArray(body.indicators)).toBe(true);
     expect(Array.isArray(body.spec.inputs)).toBe(true);
     expect(body.spec.inputs).toEqual(V4_INPUTS);
-    // Rules keys are exactly entries+exits — no legacy direction keys.
-    expect(Object.keys(body.spec.rules).sort()).toEqual(['entries', 'exits']);
+    // Rules keys are exactly entries+exits+resets — no legacy direction keys.
+    expect(Object.keys(body.spec.rules).sort()).toEqual(['entries', 'exits', 'resets']);
     // Settings flow through.
     expect(body.spec.settings).toEqual({ dont_repeat: true });
   });
@@ -361,5 +361,48 @@ describe('normaliseSpecForRequest does not mutate caller data', () => {
     const normLhs = normalised.rules.entries[0].conditions[0].lhs;
     expect(normLhs.params_override).toBe(null);
     expect(normLhs.series_override).toBe(null);
+  });
+
+  // T16
+  it('normaliseBlock for resets emits the whitelist + POST body has rules.resets', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [],
+        resets: [
+          {
+            id: 'r1',
+            name: 'Arm',
+            // Smuggled fields — must NOT appear on the wire.
+            input_id: 'X',
+            weight: 42,
+            target_entry_block_name: 'Alpha',
+            conditions: [
+              {
+                op: 'gt',
+                lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+                rhs: { kind: 'constant', value: 100 },
+              },
+            ],
+            enabled: true,
+            description: 'desc',
+          },
+        ],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(Array.isArray(body.spec.rules.resets)).toBe(true);
+    const r = body.spec.rules.resets[0];
+    expect(r.id).toBe('r1');
+    expect(r.name).toBe('Arm');
+    expect(r.enabled).toBe(true);
+    expect(r.description).toBe('desc');
+    expect(Array.isArray(r.conditions)).toBe(true);
+    expect(r.conditions).toHaveLength(1);
+    // Whitelist enforcement: forbidden fields must be absent.
+    expect('input_id' in r).toBe(false);
+    expect('weight' in r).toBe(false);
+    expect('target_entry_block_name' in r).toBe(false);
   });
 });

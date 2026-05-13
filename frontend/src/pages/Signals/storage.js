@@ -57,14 +57,14 @@ import { SIGNALS_STORAGE_KEY } from './storageKeys';
 export const SCHEMA_VERSION = 5;
 
 /** Canonical list of rule sections. */
-export const SECTIONS = Object.freeze(['entries', 'exits']);
+export const SECTIONS = Object.freeze(['entries', 'exits', 'resets']);
 
 /** Max absolute percentage weight — no leverage. */
 export const MAX_ABS_WEIGHT = 100;
 
-/** Produce an empty rules map with both sections present. */
+/** Produce an empty rules map with all sections present. */
 export function emptyRules() {
-  return { entries: [], exits: [] };
+  return { entries: [], exits: [], resets: [] };
 }
 
 /** Default settings applied to a brand-new signal. */
@@ -200,6 +200,12 @@ function sanitiseBlock(raw, section) {
     : [];
   const enabled = typeof raw.enabled === 'boolean' ? raw.enabled : true;
   const description = typeof raw.description === 'string' ? raw.description : '';
+  if (section === 'resets') {
+    // Reset blocks are signal-global: no block-level input_id, no weight,
+    // no target_entry_block_name. Legacy payloads that smuggle these
+    // fields have them stripped here so saved state stays canonical.
+    return { id, name, conditions, enabled, description };
+  }
   if (section === 'exits') {
     // Exit blocks carry no block-level input_id or weight — the
     // operating input is derived from the target entry. Legacy
@@ -321,8 +327,11 @@ export function cascadeDeleteEntry(signal, entryId) {
   const nextExits = deletedName
     ? exits.filter((b) => b && b.target_entry_block_name !== deletedName)
     : exits;
+  // Spread the existing rules so sections like ``resets`` (and any future
+  // section listed in ``SECTIONS``) survive the cascade — otherwise the
+  // next autosave would silently drop them via sanitiseSignal.
   return {
     ...signal,
-    rules: { entries: nextEntries, exits: nextExits },
+    rules: { ...rules, entries: nextEntries, exits: nextExits },
   };
 }

@@ -63,10 +63,11 @@ function renderEditor(initialRules = emptyRules(), extra = {}) {
 }
 
 describe('BlockEditor (v4 / two-section model)', () => {
-  it('renders two section tabs (entries / exits) plus doc tab', () => {
+  it('renders three section tabs (entries / exits / resets) plus doc tab', () => {
     renderEditor();
     expect(screen.getByTestId('section-tab-entries')).toBeDefined();
     expect(screen.getByTestId('section-tab-exits')).toBeDefined();
+    expect(screen.getByTestId('section-tab-resets')).toBeDefined();
     expect(screen.getByTestId('section-tab-doc')).toBeDefined();
   });
 
@@ -326,5 +327,49 @@ describe('BlockEditor (v4 / two-section model)', () => {
     renderEditor(seeded);
     act(() => { fireEvent.click(screen.getAllByTestId('operand-clear-btn')[0]); });
     expect(screen.getByTestId('confirm-dialog')).toBeDefined();
+  });
+
+  // T17 — reset tab end-to-end
+  describe('Reset tab', () => {
+    it('clicking the resets tab renders the resets section with the add-reset-block button', () => {
+      renderEditor();
+      fireEvent.click(screen.getByTestId('section-tab-resets'));
+      const addBtn = screen.getByTestId('add-block-btn');
+      expect(addBtn.textContent).toContain('Add reset block');
+    });
+
+    it('Add block in resets section emits a block via defaultBlock("resets") — no input_id, no weight, no target', () => {
+      const { onRulesChange } = renderEditor();
+      fireEvent.click(screen.getByTestId('section-tab-resets'));
+      fireEvent.click(screen.getByTestId('add-block-btn'));
+      const next = onRulesChange.mock.calls[0][0];
+      expect(Array.isArray(next.resets)).toBe(true);
+      expect(next.resets).toHaveLength(1);
+      const block = next.resets[0];
+      expect(typeof block.id).toBe('string');
+      expect(block.id.length).toBeGreaterThan(0);
+      expect('input_id' in block).toBe(false);
+      expect('weight' in block).toBe(false);
+      expect('target_entry_block_name' in block).toBe(false);
+    });
+
+    it('reset block header hides input picker, weight input, and target-entry picker', () => {
+      const reset = {
+        id: 'r1',
+        name: 'Arm',
+        conditions: [],
+        enabled: true,
+        description: '',
+      };
+      renderEditor({ entries: [], exits: [], resets: [reset] }, { section: 'resets' });
+      // No input picker
+      expect(screen.queryByTestId('block-input-select-0')).toBeNull();
+      // No weight input
+      expect(screen.queryByTestId('block-weight-0')).toBeNull();
+      // No target entry picker
+      expect(screen.queryByTestId('target-entry-select-0')).toBeNull();
+      // The block IS rendered (header with status dot + name)
+      expect(screen.getByTestId('block-header-0')).toBeDefined();
+    });
   });
 });
