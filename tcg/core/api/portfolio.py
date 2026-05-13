@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Literal
 
@@ -51,6 +51,23 @@ from tcg.types.market import (
     RollStrategy,
 )
 from tcg.types.portfolio import RebalanceFreq
+from tcg.types.signal import Trade
+
+
+@dataclass(frozen=True)
+class _SignalLegEvalResult:
+    """Internal aggregate of what a signal leg produces for the portfolio.
+
+    ``index`` and ``synthetic`` keep the existing aggregation contract;
+    ``trades`` and ``positions_payload`` are bubbled up for the trade log.
+    Each entry in ``positions_payload`` mirrors the signals-API positions
+    shape: ``{input_id, price: {label, values} | None}``.
+    """
+
+    index: npt.NDArray[np.int64]
+    synthetic: npt.NDArray[np.float64]
+    trades: tuple[Trade, ...] = ()
+    positions_payload: tuple[dict, ...] = ()
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
@@ -241,8 +258,8 @@ async def _evaluate_signal_leg(
     svc: MarketDataService,
     start_date: date | None,
     end_date: date | None,
-) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
-    """Evaluate a signal leg and return (dates, synthetic_prices).
+) -> _SignalLegEvalResult:
+    """Evaluate a signal leg and bubble up everything the portfolio path needs.
 
     The synthetic price series starts at 100 and accumulates the sum of
     all per-input realized_pnl arrays from the signal evaluation:
@@ -250,7 +267,11 @@ async def _evaluate_signal_leg(
         synthetic = 100.0 * (1.0 + aggregated_pnl)
 
     Returns:
-        Tuple of (YYYYMMDD int dates, synthetic price array).
+        ``_SignalLegEvalResult`` carrying the YYYYMMDD int date index, the
+        synthetic price series, the raw per-signal ``Trade`` tuple (bar
+        indices in the signal's own index space, NOT the portfolio's
+        common_dates — caller is responsible for re-mapping), and the
+        per-input price payloads matching the signals-API positions shape.
     """
     if leg.signal_spec is None:
         raise ValidationError(f"Leg '{label}': signal legs require 'signal_spec'")
@@ -313,7 +334,27 @@ async def _evaluate_signal_leg(
     # 6. Convert to synthetic prices (starting at 100)
     synthetic = 100.0 * (1.0 + aggregated_pnl)
 
-    return result.index, synthetic
+    # 7. Build per-input price payloads in the signals-API shape so the
+    #    portfolio TradeLog can look up open/close prices by input_id.
+    positions_payload: list[dict] = []
+    for pos in result.positions:
+        if pos.price_label is None or pos.price_values is None:
+            price_payload: dict | None = None
+        else:
+            price_payload = {
+                "label": pos.price_label,
+                "values": nan_safe_floats(pos.price_values),
+            }
+        positions_payload.append(
+            {"input_id": pos.input_id, "price": price_payload}
+        )
+
+    return _SignalLegEvalResult(
+        index=result.index,
+        synthetic=synthetic,
+        trades=result.trades,
+        positions_payload=tuple(positions_payload),
+    )
 
 
 def _compute_level_metrics(values: npt.NDArray[np.float64]) -> dict:
@@ -509,18 +550,24 @@ async def compute_portfolio(
     # signal_dates[label] = YYYYMMDD array, signal_closes[label] = synthetic prices
     signal_dates_map: dict[str, npt.NDArray[np.int64]] = {}
     signal_closes: dict[str, npt.NDArray[np.float64]] = {}
+    # Per-leg trade + positions payloads bubbled up from _evaluate_signal_leg
+    # for portfolio-level trade log aggregation (see §10 below).
+    signal_trades_map: dict[str, tuple[Trade, ...]] = {}
+    signal_positions_map: dict[str, tuple[dict, ...]] = {}
 
     for label, leg in signal_legs.items():
-        sig_dates, sig_prices = await _evaluate_signal_leg(
+        leg_result = await _evaluate_signal_leg(
             label,
             leg,
             svc,
             start_date,
             end_date,
         )
-        signal_dates_map[label] = sig_dates
-        signal_closes[label] = sig_prices
-        all_date_grids.append(sig_dates)
+        signal_dates_map[label] = leg_result.index
+        signal_closes[label] = leg_result.synthetic
+        signal_trades_map[label] = leg_result.trades
+        signal_positions_map[label] = leg_result.positions_payload
+        all_date_grids.append(leg_result.index)
 
     # ── 4.5. Evaluate option_stream legs (if any) ──
 
@@ -660,7 +707,97 @@ async def compute_portfolio(
         "yearly",
     )
 
-    # ── 10. Build response ──
+    # ── 10. Aggregate trades + per-input positions across signal legs ──
+    #
+    # Each signal leg evaluates against its own date overlap (per-signal
+    # ``result.index``). Trade bar indices and positions price arrays are
+    # therefore in that per-signal axis, NOT the portfolio's common_dates.
+    # We re-map every trade endpoint onto common_dates via a date→index
+    # dict; trades whose endpoints fall outside common_dates are DROPPED
+    # (not clamped) — they refer to bars the user can't see in the
+    # portfolio chart, so they'd index out of bounds on the frontend.
+
+    cd_index: dict[int, int] = {int(d): i for i, d in enumerate(common_dates)}
+    cd_last_idx = len(common_dates) - 1
+
+    aggregated_trades: list[dict] = []
+    for label, trades in signal_trades_map.items():
+        sig_idx = signal_dates_map[label]
+        n_sig = len(sig_idx)
+        for tr in trades:
+            sig_open_date = int(sig_idx[tr.open_bar])
+            new_open = cd_index.get(sig_open_date)
+            if new_open is None:
+                continue
+            if tr.close_bar is None:
+                # Open trade — keep iff the open bar maps to the LAST
+                # portfolio bar (i.e. trade is still open at the displayed
+                # window's edge). Otherwise the trade extends past the
+                # window and cannot be represented.
+                if tr.open_bar != n_sig - 1 or new_open != cd_last_idx:
+                    continue
+                new_close: int | None = None
+            else:
+                sig_close_date = int(sig_idx[tr.close_bar])
+                mapped_close = cd_index.get(sig_close_date)
+                if mapped_close is None:
+                    continue
+                new_close = mapped_close
+            aggregated_trades.append(
+                {
+                    "input_id": tr.input_id,
+                    "entry_block_id": tr.entry_block_id,
+                    "entry_block_name": tr.entry_block_name,
+                    "exit_block_id": tr.exit_block_id,
+                    "exit_block_name": tr.exit_block_name,
+                    "open_bar": new_open,
+                    "close_bar": new_close,
+                    "direction": tr.direction,
+                    "signed_weight": float(tr.signed_weight),
+                    "holding_id": label,
+                    "holding_name": label,
+                }
+            )
+    aggregated_trades.sort(
+        key=lambda t: (t["open_bar"], t["entry_block_id"])
+    )
+
+    # Build top-level positions payload (matches signals response shape).
+    # First leg that references a given input_id wins; downstream conflicts
+    # (same input_id, different prices across legs) are not expected and
+    # would surface here.
+    cd_len = len(common_dates)
+    aggregated_positions: list[dict] = []
+    seen_inputs: set[str] = set()
+    for label, pos_list in signal_positions_map.items():
+        sig_idx = signal_dates_map[label]
+        # Projection from common_dates onto signal-bar indices: -1 marks
+        # portfolio bars where the signal has no data (rendered as null).
+        sig_index_of_date: dict[int, int] = {
+            int(d): j for j, d in enumerate(sig_idx)
+        }
+        proj = [sig_index_of_date.get(int(d), -1) for d in common_dates]
+        for pos in pos_list:
+            iid = pos["input_id"]
+            if iid in seen_inputs:
+                continue
+            seen_inputs.add(iid)
+            price = pos.get("price")
+            if price is None:
+                aggregated_positions.append({"input_id": iid, "price": None})
+                continue
+            src_values = price["values"]
+            remapped: list[float | None] = [
+                (src_values[j] if j >= 0 else None) for j in proj
+            ]
+            aggregated_positions.append(
+                {
+                    "input_id": iid,
+                    "price": {"label": price["label"], "values": remapped},
+                }
+            )
+
+    # ── 11. Build response ──
 
     dates_iso = [int_to_iso(int(d)) for d in common_dates]
 
@@ -683,4 +820,6 @@ async def compute_portfolio(
         "rebalance": rebalance_freq.value,
         "return_type": body.return_type,
         "tracking_series": tracking_series,
+        "trades": aggregated_trades,
+        "positions": aggregated_positions,
     }
