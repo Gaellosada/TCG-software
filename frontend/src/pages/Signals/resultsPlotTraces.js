@@ -539,7 +539,25 @@ export function buildResultsPlot(result, opts = {}) {
     (ind) => Array.isArray(ind.series) && ind.series.length > 0,
   );
 
-  const domains = computeSubplotDomains(ownPanelWithData.length);
+  // Group ownPanel indicators by indicator_id so multiple instances of the
+  // same indicator (e.g. HV(20) and HV(100)) share one subplot. Each group
+  // becomes one panel; group members render as distinct traces on it.
+  const ownPanelGroups = [];
+  {
+    const byId = new Map();
+    for (let i = 0; i < ownPanelWithData.length; i++) {
+      const ind = ownPanelWithData[i];
+      let g = byId.get(ind.indicator_id);
+      if (!g) {
+        g = { indicator_id: ind.indicator_id, memberIndices: [] };
+        byId.set(ind.indicator_id, g);
+        ownPanelGroups.push(g);
+      }
+      g.memberIndices.push(i);
+    }
+  }
+
+  const domains = computeSubplotDomains(ownPanelGroups.length);
   const traces = [];
 
   // --- Subplot 1 (top): prices + P&L + capital, uses yaxis 'y' ---
@@ -600,23 +618,26 @@ export function buildResultsPlot(result, opts = {}) {
   });
   traces.push(...eventTraces);
 
-  // --- Subplots 3..N: one per ownPanel indicator ---
+  // --- Subplots 3..N: one per ownPanel indicator_id group ---
   // Offset colours past the price + overlay traces to avoid shared colours.
   const ownPanelColorOffset = bottomInputTraces.length + overlayTraces.length;
   const ownPanelNames = formatIndicatorTraceNames(ownPanelWithData, opts.availableIndicators);
-  ownPanelWithData.forEach((ind, i) => {
-    const axisRef = `y${i + 3}`;
-    traces.push({
-      x: dates,
-      y: ind.series,
-      type: 'scatter',
-      mode: 'lines',
-      name: ownPanelNames[i] ?? '',
-      line: { color: TRACE_COLORS[(ownPanelColorOffset + i) % TRACE_COLORS.length], width: 1.5 },
-      yaxis: axisRef,
-      connectgaps: false,
-      hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
-    });
+  ownPanelGroups.forEach((g, gi) => {
+    const axisRef = `y${gi + 3}`;
+    for (const i of g.memberIndices) {
+      const m = ownPanelWithData[i];
+      traces.push({
+        x: dates,
+        y: m.series,
+        type: 'scatter',
+        mode: 'lines',
+        name: ownPanelNames[i] ?? '',
+        line: { color: TRACE_COLORS[(ownPanelColorOffset + i) % TRACE_COLORS.length], width: 1.5 },
+        yaxis: axisRef,
+        connectgaps: false,
+        hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
+      });
+    }
   });
 
   // --- Layout ---
@@ -629,8 +650,8 @@ export function buildResultsPlot(result, opts = {}) {
       showgrid: true,
       gridcolor: 'rgba(150,150,150,0.15)',
       // Anchor to the bottom-most yaxis so ticks appear at the bottom.
-      anchor: ownPanelWithData.length > 0
-        ? `y${ownPanelWithData.length + 2}`
+      anchor: ownPanelGroups.length > 0
+        ? `y${ownPanelGroups.length + 2}`
         : 'y2',
     },
     // Top subplot y-axis
@@ -649,13 +670,17 @@ export function buildResultsPlot(result, opts = {}) {
     },
   };
 
-  // ownPanel y-axes
-  ownPanelWithData.forEach((ind, i) => {
-    const key = `yaxis${i + 3}`;
-    lo[key] = {
+  // ownPanel y-axes — one per indicator_id group; title prefers the
+  // user-facing display name from availableIndicators, falling back to
+  // the raw indicator_id when no match.
+  const registry = Array.isArray(opts.availableIndicators) ? opts.availableIndicators : [];
+  ownPanelGroups.forEach((g, gi) => {
+    const def = registry.find((d) => d && d.id === g.indicator_id);
+    const title = (def && def.name) || g.indicator_id;
+    lo[`yaxis${gi + 3}`] = {
       ...SUBPLOT_YAXIS_BASE,
-      domain: domains[i + 2],
-      title: { text: ind.indicator_id },
+      domain: domains[gi + 2],
+      title: { text: title },
       anchor: 'x',
     };
   });

@@ -599,6 +599,65 @@ describe('buildResultsPlot', () => {
       expect(t.yaxis).not.toBe('y2');
     }
   });
+
+  it('groups multiple ownPanel instances of the same indicator_id onto one subplot', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [
+        {
+          input_id: 'X',
+          indicator_id: 'historical-vol',
+          series: [0.1, 0.12, 0.11],
+          ownPanel: true,
+          params_override: { window: 20 },
+        },
+        {
+          input_id: 'X',
+          indicator_id: 'historical-vol',
+          series: [0.15, 0.16, 0.14],
+          ownPanel: true,
+          params_override: { window: 100 },
+        },
+      ],
+      events: [],
+    };
+    const availableIndicators = [{ id: 'historical-vol', name: 'HV' }];
+    const { traces, layoutOverrides } = buildResultsPlot(result, { availableIndicators });
+    const hvTraces = traces.filter((t) => t.name && t.name.startsWith('HV'));
+    expect(hvTraces).toHaveLength(2);
+    // Both HV traces share the same y-axis (one subplot).
+    expect(hvTraces[0].yaxis).toBe('y3');
+    expect(hvTraces[1].yaxis).toBe('y3');
+    // Only one ownPanel subplot exists (yaxis3), not two.
+    expect(layoutOverrides.yaxis3).toBeDefined();
+    expect(layoutOverrides.yaxis4).toBeUndefined();
+    // Subplot title uses the registry display name.
+    expect(layoutOverrides.yaxis3.title.text).toBe('HV');
+  });
+
+  it('keeps distinct indicator_ids on separate ownPanel subplots even when grouping kicks in', () => {
+    const result = {
+      timestamps: ts,
+      positions: [positionWithPrice('X', [1, 2, 3])],
+      indicators: [
+        { input_id: 'X', indicator_id: 'historical-vol', series: [0.1, 0.12, 0.11], ownPanel: true, params_override: { window: 20 } },
+        { input_id: 'X', indicator_id: 'historical-vol', series: [0.15, 0.16, 0.14], ownPanel: true, params_override: { window: 100 } },
+        { input_id: 'X', indicator_id: 'rsi', series: [50, 60, 70], ownPanel: true },
+      ],
+      events: [],
+    };
+    const { traces, layoutOverrides } = buildResultsPlot(result);
+    const hvTraces = traces.filter((t) => t.name && t.name.includes('historical-vol'));
+    const rsiTrace = traces.find((t) => t.name && t.name.startsWith('rsi'));
+    expect(hvTraces).toHaveLength(2);
+    expect(hvTraces[0].yaxis).toBe('y3');
+    expect(hvTraces[1].yaxis).toBe('y3');
+    expect(rsiTrace.yaxis).toBe('y4');
+    expect(layoutOverrides.yaxis3.title.text).toBe('historical-vol');
+    expect(layoutOverrides.yaxis4.title.text).toBe('rsi');
+    expect(layoutOverrides.yaxis5).toBeUndefined();
+  });
 });
 
 /* ================================================================== */
