@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchStatistics } from '../../api/statistics';
+import RiskFreeRateInput from '../RiskFreeRateInput';
 import styles from './Statistics.module.css';
 
 // Debounce window (ms) before a new Rf input value triggers a refetch.
@@ -208,19 +209,12 @@ export default function Statistics({ dates, equity, defaultRiskFreeRate = DEFAUL
             <span className={styles.obsCount}>{data.num_observations} obs</span>
           )}
         </div>
-        <label className={styles.rfControl}>
-          <span className={styles.rfLabel}>Risk-free rate:</span>
-          <input
-            type="number"
-            step="0.01"
-            min="0"
-            value={rfPct}
-            onChange={onRfChange}
-            className={styles.rfInput}
-            aria-label="Risk-free rate (annualized, percent)"
-          />
-          <span className={styles.rfUnit}>%</span>
-        </label>
+        <RiskFreeRateInput
+          valuePct={rfPct}
+          onChange={onRfChange}
+          ariaLabel="Risk-free rate (annualized, percent)"
+          label="Risk-free rate:"
+        />
       </div>
 
       {loading && <div className={styles.statusRow}>Loading…</div>}

@@ -44,39 +44,6 @@
   color: var(--text-muted);
 }
 
-.rfControl {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-
-.rfLabel {
-  white-space: nowrap;
-}
-
-.rfInput {
-  width: 64px;
-  padding: 4px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-primary);
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 0.8rem;
-  font-family: 'JetBrains Mono', monospace;
-  text-align: right;
-}
-
-.rfInput:focus {
-  border-color: var(--accent);
-  outline: none;
-}
-
-.rfUnit {
-  color: var(--text-muted);
-}
-
 /* Four-column body. Each column owns one section. The columns are
  * equal-width; below ~900px they wrap to two and below ~600px to one. */
 .columns {

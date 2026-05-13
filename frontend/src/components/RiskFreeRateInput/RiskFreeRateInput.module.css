@@ -1,0 +1,32 @@
+.control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.label {
+  white-space: nowrap;
+}
+
+.input {
+  width: 64px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  font-family: 'JetBrains Mono', monospace;
+  text-align: right;
+}
+
+.input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.unit {
+  color: var(--text-muted);
+}

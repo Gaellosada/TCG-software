@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import Icon from '../../components/Icon';
+import RiskFreeRateInput from '../../components/RiskFreeRateInput';
 import styles from './SettingsPage.module.css';
 import { DEFAULT_RISK_FREE_RATE_PCT } from '../../lib/userSettings';
 
@@ -134,17 +135,11 @@ function SettingsPage() {
       <div className={styles.settingRow}>
         <span className={styles.settingLabel}>Default risk-free rate</span>
         <div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={rfPct}
-              onChange={(e) => handleRfChange(e.target.value)}
-              aria-label="Default risk-free rate (percent)"
-            />
-            <span>%</span>
-          </label>
+          <RiskFreeRateInput
+            valuePct={rfPct}
+            onChange={(e) => handleRfChange(e.target.value)}
+            ariaLabel="Default risk-free rate (percent)"
+          />
           <div className={styles.settingHint}>Used for Sharpe, Sortino, and Calmar ratios.</div>
         </div>
       </div>
