@@ -192,6 +192,13 @@ function sanitiseWeight(raw) {
   return n;
 }
 
+function sanitiseRequiresResetBlockId(raw) {
+  // Anything but a non-empty string collapses to null — the sanitiser
+  // is field-local; cross-section validity is runGate's job.
+  if (typeof raw === 'string' && raw) return raw;
+  return null;
+}
+
 function sanitiseBlock(raw, section) {
   const id = (typeof raw.id === 'string' && raw.id) ? raw.id : newBlockId();
   const name = typeof raw.name === 'string' ? raw.name : '';
@@ -202,8 +209,9 @@ function sanitiseBlock(raw, section) {
   const description = typeof raw.description === 'string' ? raw.description : '';
   if (section === 'resets') {
     // Reset blocks are signal-global: no block-level input_id, no weight,
-    // no target_entry_block_name. Legacy payloads that smuggle these
-    // fields have them stripped here so saved state stays canonical.
+    // no target_entry_block_name, no requires_reset_block_id. Legacy
+    // payloads that smuggle these fields have them stripped here so
+    // saved state stays canonical.
     return { id, name, conditions, enabled, description };
   }
   if (section === 'exits') {
@@ -221,11 +229,21 @@ function sanitiseBlock(raw, section) {
       target_entry_block_name: typeof raw.target_entry_block_name === 'string'
         ? raw.target_entry_block_name
         : '',
+      requires_reset_block_id: sanitiseRequiresResetBlockId(raw.requires_reset_block_id),
     };
   }
   const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
   const weight = sanitiseWeight(raw.weight);
-  return { id, input_id, weight, name, conditions, enabled, description };
+  return {
+    id,
+    input_id,
+    weight,
+    name,
+    conditions,
+    enabled,
+    description,
+    requires_reset_block_id: sanitiseRequiresResetBlockId(raw.requires_reset_block_id),
+  };
 }
 
 function sanitiseSettings(_raw) {

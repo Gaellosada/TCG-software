@@ -13,16 +13,17 @@ import styles from './Signals.module.css';
  * Props:
  *   block       {Object}   { id, [input_id, weight on entries,
  *                            target_entry_block_name on exits] }
- *   section     {string}   'entries' | 'exits'
+ *   section     {string}   'entries' | 'exits' | 'resets'
  *   inputs      {Array}    the signal's declared inputs
  *   entryBlocks {Array}    the signal's entry blocks (used by exits to list targets)
+ *   resetBlocks {Array}    the signal's reset blocks (used by entries+exits to bind a require-reset gate)
  *   onChange    {Function} (nextBlock) => void
  *   onDelete    {Function} () => void
  *   blockIndex  {number}   1-based index shown in the label
  *   status      {string}   'ok' | 'warn' (optional)
  *   blockIdx    {number}   0-based index for data-testid (optional)
  */
-function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, blockIndex, status, blockIdx, enabled, onToggleEnabled }) {
+function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChange, onDelete, blockIndex, status, blockIdx, enabled, onToggleEnabled }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
   // Local draft for the weight input so the user can type freely before blur
@@ -227,6 +228,34 @@ function BlockHeader({ block, section, inputs, entryBlocks, onChange, onDelete, 
             </div>
           );
         })()
+      )}
+
+      {!isReset && (
+        <>
+          <label className={styles.blockDirectionLabel} htmlFor={`require-reset-${blockIndex}`}>
+            require reset
+          </label>
+          <div className={styles.blockInstrumentCell}>
+            <select
+              id={`require-reset-${blockIndex}`}
+              className={styles.blockInputSelect}
+              value={block.requires_reset_block_id || ''}
+              onChange={(e) => onChange({
+                ...block,
+                requires_reset_block_id: e.target.value || null,
+              })}
+              aria-label={`Require reset for block ${blockIndex}`}
+              data-testid={`require-reset-select-${blockIndex - 1}`}
+            >
+              <option value="">None</option>
+              {(Array.isArray(resetBlocks) ? resetBlocks : []).map((r, i) => (
+                <option key={r.id || i} value={r.id}>
+                  {(r.name && r.name.trim()) || `Reset ${i + 1}`}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
       )}
 
       {isEntry && (

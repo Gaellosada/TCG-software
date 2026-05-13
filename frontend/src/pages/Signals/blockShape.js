@@ -55,11 +55,15 @@ export function defaultBlock(section = 'entries') {
   };
   if (section === 'exits') {
     base.target_entry_block_name = '';
+    // Optional per-block reset binding; null = no gate.
+    base.requires_reset_block_id = null;
   } else if (section === 'resets') {
-    // Reset blocks are signal-global: no input_id, no weight, no target.
+    // Reset blocks are signal-global: no input_id, no weight, no target,
+    // and no requires_reset_block_id (a reset cannot gate itself).
   } else {
     base.input_id = '';
     base.weight = 0;
+    base.requires_reset_block_id = null;
   }
   return base;
 }

@@ -136,6 +136,7 @@ describe('Signals storage (v5)', () => {
                 ],
                 enabled: true,
                 description: '',
+                requires_reset_block_id: null,
               },
             ],
             exits: [
@@ -152,6 +153,7 @@ describe('Signals storage (v5)', () => {
                 ],
                 enabled: true,
                 description: '',
+                requires_reset_block_id: null,
               },
             ],
             resets: [],
@@ -764,6 +766,33 @@ describe('cascadeDeleteEntry', () => {
     // The bug under test: resets must survive untouched.
     expect(next.rules.resets).toEqual([r1, r2]);
   });
+
+  // Cascade-delete must preserve requires_reset_block_id on SURVIVING
+  // entries/exits — otherwise deleting any entry silently strips bindings.
+  it('preserves requires_reset_block_id on surviving entries and exits', () => {
+    const r1 = { id: 'r1', name: 'Arm', conditions: [], enabled: true, description: '' };
+    const survivingEntry = {
+      ...sig.rules.entries[1],
+      requires_reset_block_id: 'r1',
+    };
+    const survivingExit = {
+      ...sig.rules.exits[1],
+      requires_reset_block_id: 'r1',
+    };
+    const sigBound = {
+      ...sig,
+      rules: {
+        entries: [sig.rules.entries[0], survivingEntry],
+        exits: [sig.rules.exits[0], survivingExit],
+        resets: [r1],
+      },
+    };
+    const next = cascadeDeleteEntry(sigBound, 'e1');
+    const e2 = next.rules.entries.find((b) => b.id === 'e2');
+    const x2 = next.rules.exits.find((b) => b.id === 'x2');
+    expect(e2.requires_reset_block_id).toBe('r1');
+    expect(x2.requires_reset_block_id).toBe('r1');
+  });
 });
 
 describe('Reset blocks — soft-migration + sanitiser', () => {
@@ -858,5 +887,98 @@ describe('Reset blocks — soft-migration + sanitiser', () => {
     const loaded = loadState();
     expect(loaded.signals).toHaveLength(1);
     expect(loaded.signals[0].rules.resets).toEqual([]);
+  });
+});
+
+// Per CONTRACT §6.1 — per-block requires_reset_block_id round-trips on
+// entries+exits, defaults null when missing, and is STRIPPED from resets.
+describe('Signals storage — per-block requires_reset_block_id (v5)', () => {
+  it('round-trips requires_reset_block_id on entry blocks', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [{
+            id: 'e1', input_id: 'X', weight: 10, name: '', conditions: [],
+            enabled: true, description: '',
+            requires_reset_block_id: 'reset-uuid-7',
+          }],
+          exits: [],
+          resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const out = loadState();
+    expect(out.signals[0].rules.entries[0].requires_reset_block_id).toBe('reset-uuid-7');
+  });
+
+  it('round-trips requires_reset_block_id on exit blocks', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [],
+          exits: [{
+            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            conditions: [], enabled: true, description: '',
+            requires_reset_block_id: 'reset-uuid-9',
+          }],
+          resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const out = loadState();
+    expect(out.signals[0].rules.exits[0].requires_reset_block_id).toBe('reset-uuid-9');
+  });
+
+  it('missing requires_reset_block_id defaults to null on entries+exits', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [{
+            id: 'e1', input_id: 'X', weight: 10, name: '', conditions: [],
+            enabled: true, description: '',
+            // requires_reset_block_id omitted
+          }],
+          exits: [{
+            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            conditions: [], enabled: true, description: '',
+            // requires_reset_block_id omitted
+          }],
+          resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const out = loadState();
+    expect(out.signals[0].rules.entries[0].requires_reset_block_id).toBe(null);
+    expect(out.signals[0].rules.exits[0].requires_reset_block_id).toBe(null);
+  });
+
+  it('strips requires_reset_block_id from reset blocks (Sign 4)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [],
+          exits: [],
+          resets: [{
+            id: 'r1', name: '', conditions: [], enabled: true, description: '',
+            // Tampered legacy payload — must be stripped on load.
+            requires_reset_block_id: 'should-not-survive',
+          }],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const out = loadState();
+    expect('requires_reset_block_id' in out.signals[0].rules.resets[0]).toBe(false);
   });
 });

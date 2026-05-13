@@ -69,6 +69,7 @@ function BlockEditor({
 
   const blocks = Array.isArray(rules?.[section]) ? rules[section] : [];
   const entryBlocks = Array.isArray(rules?.entries) ? rules.entries : [];
+  const resetBlocks = Array.isArray(rules?.resets) ? rules.resets : [];
   const entryIds = collectEntryIds(entryBlocks);
 
   function setTab(next) {
@@ -234,6 +235,7 @@ function BlockEditor({
                   section={section}
                   entryBlocks={entryBlocks}
                   entryIds={entryIds}
+                  resetBlocks={resetBlocks}
                   isFirst={blockIdx === 0}
                   onUpdateBlock={(next) => handleUpdateBlock(blockIdx, next)}
                   onAddCondition={() => handleAddCondition(blockIdx)}
@@ -266,6 +268,7 @@ function Block({
   section,
   entryBlocks,
   entryIds,
+  resetBlocks,
   isFirst,
   onUpdateBlock,
   onAddCondition,
@@ -310,6 +313,7 @@ function Block({
         section={section}
         inputs={inputs}
         entryBlocks={entryBlocks}
+        resetBlocks={resetBlocks}
         onChange={onUpdateBlock}
         onDelete={onRemoveBlock}
         blockIndex={blockIdx + 1}

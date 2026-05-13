@@ -85,6 +85,28 @@ describe('defaultBlock (v5)', () => {
     expect(a.id).not.toBe(b.id);
     expect(a.conditions).not.toBe(b.conditions);
   });
+
+  // Per CONTRACT §6.4 — per-block require-reset binding defaults to null
+  // on entries+exits and is ABSENT on resets (a reset cannot gate itself).
+  it('entry defaultBlock includes requires_reset_block_id: null', () => {
+    const b = defaultBlock('entries');
+    expect('requires_reset_block_id' in b).toBe(true);
+    expect(b.requires_reset_block_id).toBe(null);
+  });
+
+  it('exit defaultBlock includes requires_reset_block_id: null', () => {
+    const b = defaultBlock('exits');
+    expect('requires_reset_block_id' in b).toBe(true);
+    expect(b.requires_reset_block_id).toBe(null);
+  });
+
+  it('reset defaultBlock does NOT include requires_reset_block_id', () => {
+    const b = defaultBlock('resets');
+    expect('requires_reset_block_id' in b).toBe(false);
+    expect('input_id' in b).toBe(false);
+    expect('weight' in b).toBe(false);
+    expect('target_entry_block_name' in b).toBe(false);
+  });
 });
 
 describe('isInputConfigured', () => {

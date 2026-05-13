@@ -243,3 +243,95 @@ describe('BlockHeader — delete button', () => {
     expect(screen.getByTestId('confirm-dialog')).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// require-reset <select> — per CONTRACT §5
+// Dropdown appears on entries+exits and is suppressed on resets.
+// ---------------------------------------------------------------------------
+
+describe('BlockHeader — require-reset select', () => {
+  const RESET_BLOCKS = [
+    { id: 'r1', name: 'Arm Long' },
+    { id: 'r2', name: '' },           // unnamed → "Reset 2" label
+    { id: 'r3', name: '   ' },        // whitespace-only → "Reset 3" label
+  ];
+
+  function renderEntryWithResets(blockOverrides = {}, resetBlocks = RESET_BLOCKS) {
+    const block = { ...entryBlock(50), ...blockOverrides };
+    const onChange = vi.fn();
+    render(
+      <BlockHeader
+        block={block}
+        section="entries"
+        inputs={NO_INPUTS}
+        resetBlocks={resetBlocks}
+        onChange={onChange}
+        onDelete={noop}
+        blockIndex={1}
+      />,
+    );
+    return { onChange };
+  }
+
+  it('renders the require-reset select on entry blocks', () => {
+    renderEntryWithResets();
+    expect(screen.getByTestId('require-reset-select-0')).toBeDefined();
+  });
+
+  it('renders the require-reset select on exit blocks', () => {
+    render(
+      <BlockHeader
+        block={exitBlock()}
+        section="exits"
+        inputs={NO_INPUTS}
+        entryBlocks={[]}
+        resetBlocks={RESET_BLOCKS}
+        onChange={noop}
+        onDelete={noop}
+        blockIndex={1}
+      />,
+    );
+    expect(screen.getByTestId('require-reset-select-0')).toBeDefined();
+  });
+
+  it('does NOT render the require-reset select on reset blocks (Sign 4)', () => {
+    render(
+      <BlockHeader
+        block={{ id: 'r1', conditions: [] }}
+        section="resets"
+        inputs={NO_INPUTS}
+        resetBlocks={RESET_BLOCKS}
+        onChange={noop}
+        onDelete={noop}
+        blockIndex={1}
+      />,
+    );
+    expect(screen.queryByTestId('require-reset-select-0')).toBeNull();
+  });
+
+  it('selecting an option sets requires_reset_block_id to the reset id (not its name)', () => {
+    const { onChange } = renderEntryWithResets();
+    const sel = screen.getByTestId('require-reset-select-0');
+    fireEvent.change(sel, { target: { value: 'r1' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ requires_reset_block_id: 'r1' }),
+    );
+  });
+
+  it('selecting "None" sets requires_reset_block_id to null (not empty string)', () => {
+    const { onChange } = renderEntryWithResets({ requires_reset_block_id: 'r1' });
+    const sel = screen.getByTestId('require-reset-select-0');
+    fireEvent.change(sel, { target: { value: '' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ requires_reset_block_id: null }),
+    );
+  });
+
+  it('falls back to "Reset N" (1-based) when a reset block has no name', () => {
+    renderEntryWithResets();
+    const sel = screen.getByTestId('require-reset-select-0');
+    const labels = Array.from(sel.querySelectorAll('option')).map((o) => o.textContent);
+    // Index 0 is "None"; r1 has a name; r2 + r3 use the fallback.
+    expect(labels).toEqual(['None', 'Arm Long', 'Reset 2', 'Reset 3']);
+  });
+});

@@ -105,6 +105,10 @@ function normaliseBlock(block, section) {
       target_entry_block_name: typeof block.target_entry_block_name === 'string'
         ? block.target_entry_block_name
         : '',
+      requires_reset_block_id: typeof block.requires_reset_block_id === 'string'
+        && block.requires_reset_block_id
+        ? block.requires_reset_block_id
+        : null,
     };
   }
   return {
@@ -115,6 +119,10 @@ function normaliseBlock(block, section) {
     input_id: typeof block.input_id === 'string' ? block.input_id : '',
     weight: clampWeight(block.weight),
     conditions,
+    requires_reset_block_id: typeof block.requires_reset_block_id === 'string'
+      && block.requires_reset_block_id
+      ? block.requires_reset_block_id
+      : null,
   };
 }
 
