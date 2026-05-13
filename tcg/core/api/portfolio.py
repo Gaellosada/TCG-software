@@ -786,29 +786,31 @@ async def compute_portfolio(
     # portfolio chart, so they'd index out of bounds on the frontend.
 
     cd_index: dict[int, int] = {int(d): i for i, d in enumerate(common_dates)}
-    cd_last_idx = len(common_dates) - 1
 
     aggregated_trades: list[dict] = []
     for label, trades in signal_trades_map.items():
         sig_idx = signal_dates_map[label]
-        n_sig = len(sig_idx)
         # ``body.weights[label]`` is the user-facing PERCENT allocation
         # (frontend default 100). For trade-size scaling we need the
         # FRACTION form (0.0 … 1.0+) so ``signed_weight`` stays in
         # fraction units across direct + signal legs.
         leg_fraction = float(body.weights[label]) / 100.0
         for tr in trades:
+            # Re-map the open bar (signal-axis index → common_dates index).
+            # If the trade's open date isn't part of common_dates, DROP —
+            # the trade can't be placed on the portfolio's date axis.
             sig_open_date = int(sig_idx[tr.open_bar])
             new_open = cd_index.get(sig_open_date)
             if new_open is None:
                 continue
             if tr.close_bar is None:
-                # Open trade — keep iff the open bar maps to the LAST
-                # portfolio bar (i.e. trade is still open at the displayed
-                # window's edge). Otherwise the trade extends past the
-                # window and cannot be represented.
-                if tr.open_bar != n_sig - 1 or new_open != cd_last_idx:
-                    continue
+                # Open trade: open date is in common_dates → keep with
+                # close_bar=None. The frontend renders an effective close
+                # price using the last finite value from positions[].
+                # ``open_bar`` is NOT restricted to the signal's last bar;
+                # the engine emits open trades wherever an entry block
+                # latched and never closed (see engine
+                # test_trades_open_at_end).
                 new_close: int | None = None
             else:
                 sig_close_date = int(sig_idx[tr.close_bar])

@@ -484,6 +484,208 @@ class TestPortfolioAggregation:
         assert pos["price"] is not None
         assert len(pos["price"]["values"]) == len(data["dates"])
 
+    # ── Open-trade aggregation (iter-4 regression) -------------------------
+    #
+    # The engine emits open trades wherever an entry block latched and
+    # never closed — ``open_bar`` can be ANYWHERE in [0, n_sig-1], not
+    # only at the signal's last bar (cf. engine
+    # ``test_trades_open_at_end`` which produces open_bar=2 in a 5-bar
+    # signal). Portfolio aggregation must keep these open trades as long
+    # as their open date falls inside ``common_dates``.
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_signal_open_trade_with_open_bar_before_signal_end_is_kept(
+        self, mock_eval, client: AsyncClient
+    ):
+        """An open trade whose open_bar is NOT the signal's last bar but
+        whose open date IS in common_dates must be kept (close_bar=None)
+        — this is the realistic case the engine actually emits (e.g.
+        ``test_trades_open_at_end`` produces open_bar=2 in 5-bar input).
+        """
+        # Signal's per-leg index spans the full mock common_dates (5 bars).
+        sig_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108],
+            dtype=np.int64,
+        )
+        sig_prices = np.array(
+            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
+        )
+        # Single open trade with open_bar=1 (NOT the last bar, which is 4).
+        trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry-1",
+                exit_block_id=None,
+                exit_block_name=None,
+                open_bar=1,
+                close_bar=None,
+                direction="short",
+                signed_weight=-0.25,
+            ),
+        )
+        mock_eval.return_value = _leg_result(sig_dates, sig_prices, trades)
+
+        body = {
+            "legs": {
+                "sig1": {
+                    "type": "signal",
+                    "signal_spec": _minimal_signal_spec(),
+                }
+            },
+            "weights": {"sig1": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        out = data["trades"]
+        assert len(out) == 1, (
+            "open trade with open_bar < n_sig-1 must NOT be dropped"
+        )
+        tr = out[0]
+        assert tr["close_bar"] is None
+        # Signal index aligns 1:1 with common_dates, so open_bar=1 maps to 1.
+        assert tr["open_bar"] == 1
+        assert tr["direction"] == "short"
+        # weight 100% → fraction 1.0; signed_weight scaled by leg fraction.
+        assert tr["signed_weight"] == pytest.approx(-0.25)
+        assert tr["entry_block_id"] == "E1"
+        assert tr["holding_id"] == "sig1"
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_signal_open_trade_with_open_bar_outside_common_dates_is_dropped(
+        self, mock_eval, client: AsyncClient
+    ):
+        """An open trade whose open date is OUTSIDE common_dates must be
+        dropped — we can't place it on the portfolio's date axis.
+
+        Use two signal legs with different per-signal date grids so the
+        intersection (= common_dates) excludes 20231229. Leg A emits the
+        problematic open trade at 20231229 (its own bar 0) — this date
+        is not in common_dates and the trade must be dropped. Leg B
+        emits no trades, so the response's ``trades`` list is empty.
+        """
+        # Leg A index includes 20231229 (which falls outside common_dates
+        # since Leg B does not have it).
+        a_dates = np.array(
+            [20231229, 20240102, 20240103, 20240104, 20240105],
+            dtype=np.int64,
+        )
+        a_prices = np.array(
+            [99.0, 100.0, 101.0, 102.0, 103.0], dtype=np.float64
+        )
+        # Leg B index: starts at 20240102 (so 20231229 is NOT in common).
+        b_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108],
+            dtype=np.int64,
+        )
+        b_prices = np.array(
+            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
+        )
+        # common_dates = [20240102, 20240103, 20240104, 20240105].
+
+        # Leg A open trade at its own bar 0 (date 20231229 — OUTSIDE
+        # common_dates). Must be dropped.
+        a_trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry-1",
+                exit_block_id=None,
+                exit_block_name=None,
+                open_bar=0,
+                close_bar=None,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+
+        mock_eval.side_effect = [
+            _leg_result(a_dates, a_prices, a_trades),
+            _leg_result(b_dates, b_prices, ()),
+        ]
+
+        body = {
+            "legs": {
+                "leg_a": {
+                    "type": "signal",
+                    "signal_spec": _minimal_signal_spec(),
+                },
+                "leg_b": {
+                    "type": "signal",
+                    "signal_spec": _minimal_signal_spec(),
+                },
+            },
+            "weights": {"leg_a": 50, "leg_b": 50},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # The leg-A open trade is dropped (open date 20231229 isn't in
+        # common_dates); leg-B emits no trades. No signal-leg trades survive.
+        assert data["trades"] == []
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_signal_open_trade_at_signal_last_bar_still_works(
+        self, mock_eval, client: AsyncClient
+    ):
+        """Regression: the case the OLD condition already handled —
+        ``open_bar == n_sig - 1`` with the open date being the last
+        common_date — must continue to be kept after the fix."""
+        sig_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108],
+            dtype=np.int64,
+        )
+        sig_prices = np.array(
+            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
+        )
+        # Open trade at the signal's LAST bar (index 4 == n_sig - 1).
+        trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry-1",
+                exit_block_id=None,
+                exit_block_name=None,
+                open_bar=4,
+                close_bar=None,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+        mock_eval.return_value = _leg_result(sig_dates, sig_prices, trades)
+
+        body = {
+            "legs": {
+                "sig1": {
+                    "type": "signal",
+                    "signal_spec": _minimal_signal_spec(),
+                }
+            },
+            "weights": {"sig1": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        out = data["trades"]
+        assert len(out) == 1
+        tr = out[0]
+        assert tr["close_bar"] is None
+        assert tr["open_bar"] == 4  # last index of common_dates
+        assert tr["signed_weight"] == pytest.approx(1.0)
+
 
 # ── Holding-trade synthesis for non-signal legs (Sign 10/11) ----------------
 
