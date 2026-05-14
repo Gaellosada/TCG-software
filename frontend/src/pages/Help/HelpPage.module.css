@@ -80,27 +80,6 @@
   margin-bottom: 16px;
 }
 
-.card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-md, 6px);
-  padding: 16px 20px;
-  margin-bottom: 12px;
-}
-
-.card h3 {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 4px;
-}
-
-.card p {
-  font-size: 14px;
-  color: var(--text-secondary);
-  line-height: 1.6;
-}
-
 .conceptTitle {
   font-size: 14px;
   font-weight: 600;
