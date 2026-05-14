@@ -109,7 +109,8 @@ def mock_app(monkeypatch):
         d = np.array(DATES, dtype=np.int64)
         v = np.array(values, dtype=np.float64)
         diagnostics: list[str | None] = [None] * len(values)
-        return {label: (d, v, diagnostics)}
+        contracts: list = [None] * len(values)
+        return {label: (d, v, diagnostics, contracts)}
 
     monkeypatch.setattr(
         "tcg.core.api.portfolio.materialise_option_streams",
@@ -218,7 +219,7 @@ class TestPortfolioOptionStream:
             label = refs_with_labels[0][0]
             d = np.array(DATES, dtype=np.int64)
             v = np.full(len(DATES), np.nan, dtype=np.float64)
-            return {label: (d, v, [None] * len(DATES))}
+            return {label: (d, v, [None] * len(DATES), [None] * len(DATES))}
 
         monkeypatch.setattr(
             "tcg.core.api.portfolio.materialise_option_streams",
@@ -243,7 +244,7 @@ class TestPortfolioOptionStream:
             label = refs_with_labels[0][0]
             d = np.array(DATES, dtype=np.int64)
             v = np.array([5.0, np.nan, np.nan, 5.3, 5.4], dtype=np.float64)
-            return {label: (d, v, [None] * len(DATES))}
+            return {label: (d, v, [None] * len(DATES), [None] * len(DATES))}
 
         monkeypatch.setattr(
             "tcg.core.api.portfolio.materialise_option_streams",

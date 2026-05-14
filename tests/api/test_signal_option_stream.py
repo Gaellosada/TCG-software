@@ -45,7 +45,7 @@ def _price_series() -> PriceSeries:
     )
 
 
-# Fake resolve_option_stream return: (values, diagnostics)
+# Fake resolve_option_stream return: (values, diagnostics, contracts)
 OPTION_VALUES = np.array([0.25, 0.26, 0.27, 0.28, 0.29], dtype=np.float64)
 OPTION_DATES_PY = [
     date(2024, 1, 2),
@@ -136,9 +136,12 @@ def mock_app(monkeypatch):
         lambda svc: mock_wiring,
     )
 
-    # Mock resolve_option_stream
+    # Mock resolve_option_stream — 3-tuple (values, diagnostics, contracts).
+    # contracts list is all-None: signals path doesn't consume rolls,
+    # but the unpacking would crash on a 2-tuple after the engine change.
     async def fake_resolve(**kwargs):
-        return (OPTION_VALUES.copy(), list(OPTION_DIAGNOSTICS))
+        n = len(OPTION_VALUES)
+        return (OPTION_VALUES.copy(), list(OPTION_DIAGNOSTICS), [None] * n)
 
     monkeypatch.setattr(
         "tcg.engine.options.series.stream_resolver.resolve_option_stream",

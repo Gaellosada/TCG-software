@@ -32,6 +32,31 @@ describe('buildCsv', () => {
     expect(csv).toBe('date,Price\nd1,1\n');
   });
 
+  it('excludes traces that opt out via meta.skipCsv (e.g. marker overlays)', () => {
+    const csv = buildCsv([
+      { type: 'scatter', name: 'Price', x: ['d1', 'd2'], y: [10, 20] },
+      // Mirrors the shape emitted by chartMarkers.js for option-roll markers:
+      // legend-visible (so users can toggle), but not user data.
+      {
+        type: 'scatter',
+        mode: 'markers',
+        name: 'Roll — sell',
+        x: ['d2'],
+        y: [20],
+        meta: { skipCsv: true },
+      },
+      {
+        type: 'scatter',
+        mode: 'markers',
+        name: 'Roll — buy',
+        x: ['d2'],
+        y: [20],
+        meta: { skipCsv: true },
+      },
+    ]);
+    expect(csv).toBe('date,Price\nd1,10\nd2,20\n');
+  });
+
   it('unions x values across traces with different dates', () => {
     const csv = buildCsv([
       { type: 'scatter', name: 'A', x: ['d1', 'd3'], y: [10, 30] },

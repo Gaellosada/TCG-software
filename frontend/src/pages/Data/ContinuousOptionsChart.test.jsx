@@ -6,11 +6,20 @@ import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-libra
 // Mocks — declared before the component import so vitest hoists them.
 // ---------------------------------------------------------------------------
 
-// Mock Chart — just renders a placeholder.
+// Mock Chart — captures props so tests can assert on them. Also stamps
+// the trace count and marker count onto the DOM for quick assertions.
+let capturedChartProps = null;
 vi.mock('../../components/Chart', () => ({
-  default: vi.fn(({ traces }) => (
-    <div data-testid="chart" data-trace-count={traces.length} />
-  )),
+  default: vi.fn((props) => {
+    capturedChartProps = props;
+    return (
+      <div
+        data-testid="chart"
+        data-trace-count={props.traces.length}
+        data-marker-count={Array.isArray(props.markers) ? props.markers.length : -1}
+      />
+    );
+  }),
 }));
 
 // Mock OptionStreamForm — captures value/onChange for test driving.
@@ -87,6 +96,7 @@ beforeEach(() => {
   capturedFormProps = null;
   capturedDateRangeProps = null;
   capturedResolveArgs = null;
+  capturedChartProps = null;
   mockGetOptionRoots.mockImplementation(() => Promise.resolve(mockRoots));
   mockResolveOptionStream.mockImplementation((...args) => {
     capturedResolveArgs = args;
@@ -293,6 +303,181 @@ describe('ContinuousOptionsChart — button states', () => {
     await act(async () => {
       resolvePromise(mockResolveResult);
     });
+  });
+});
+
+describe('ContinuousOptionsChart — roll markers', () => {
+  function sold(overrides = {}) {
+    return {
+      contract_id: 'OPT_OLD',
+      root: 'IND_SP_500',
+      expiration: '2024-04-19',
+      strike: 4500,
+      type: 'C',
+      value: 12.35,
+      ...overrides,
+    };
+  }
+  function bought(overrides = {}) {
+    return {
+      contract_id: 'OPT_NEW',
+      root: 'IND_SP_500',
+      expiration: '2024-05-17',
+      strike: 4500,
+      type: 'C',
+      value: 13.10,
+      ...overrides,
+    };
+  }
+
+  it('passes an empty markers array when result has no rolls field', async () => {
+    // mockResolveResult already has no `rolls` field by default.
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('resolve-button')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('resolve-button'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chart')).toBeTruthy();
+    });
+
+    expect(capturedChartProps).not.toBeNull();
+    expect(Array.isArray(capturedChartProps.markers)).toBe(true);
+    expect(capturedChartProps.markers).toHaveLength(0);
+  });
+
+  it('flattens a single roll event into two markers (sell + buy)', async () => {
+    mockResolveResult = {
+      ...mockResolveResult,
+      rolls: {
+        'MID / Call / by moneyness': [
+          { date: '2025-01-03', sold: sold(), bought: bought() },
+        ],
+      },
+    };
+
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('resolve-button')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('resolve-button'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chart')).toBeTruthy();
+    });
+
+    const markers = capturedChartProps.markers;
+    expect(markers).toHaveLength(2);
+
+    const sell = markers.find((m) => m.kind === 'sell');
+    const buy = markers.find((m) => m.kind === 'buy');
+    expect(sell).toBeTruthy();
+    expect(buy).toBeTruthy();
+
+    expect(sell.x).toBe('2025-01-03');
+    expect(sell.y).toBe(12.35);
+    expect(sell.tooltip.contract_id).toBe('OPT_OLD');
+
+    expect(buy.x).toBe('2025-01-03');
+    expect(buy.y).toBe(13.10);
+    expect(buy.tooltip.contract_id).toBe('OPT_NEW');
+  });
+
+  it('skips marker entries whose value is null (cannot pin a Y position)', async () => {
+    mockResolveResult = {
+      ...mockResolveResult,
+      rolls: {
+        'MID / Call / by moneyness': [
+          // Sell side has null value → only the buy-side marker is emitted.
+          { date: '2025-01-03', sold: sold({ value: null }), bought: bought() },
+          // Both sides have null value → no markers emitted.
+          { date: '2025-01-06', sold: sold({ value: null }), bought: bought({ value: null }) },
+        ],
+      },
+    };
+
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('resolve-button')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('resolve-button'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chart')).toBeTruthy();
+    });
+
+    const markers = capturedChartProps.markers;
+    expect(markers).toHaveLength(1);
+    expect(markers[0].kind).toBe('buy');
+    expect(markers[0].x).toBe('2025-01-03');
+  });
+
+  it('flattens rolls across multiple stream labels into one flat array', async () => {
+    mockResolveResult = {
+      dates: ['2025-01-02', '2025-01-03', '2025-01-06'],
+      streams: {
+        'Stream A': { values: [100.5, 101.2, 99.8], diagnostics: ['ok', 'ok', 'ok'] },
+        'Stream B': { values: [50.1, 51.0, 49.5], diagnostics: ['ok', 'ok', 'ok'] },
+      },
+      rolls: {
+        'Stream A': [{ date: '2025-01-03', sold: sold(), bought: bought() }],
+        'Stream B': [{ date: '2025-01-06', sold: sold(), bought: bought() }],
+      },
+    };
+
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('resolve-button')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('resolve-button'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chart')).toBeTruthy();
+    });
+
+    expect(capturedChartProps.markers).toHaveLength(4);
+  });
+
+  it('passes empty markers when rolls is present but empty for every label', async () => {
+    mockResolveResult = {
+      ...mockResolveResult,
+      rolls: {
+        'MID / Call / by moneyness': [],
+      },
+    };
+
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('resolve-button')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('resolve-button'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chart')).toBeTruthy();
+    });
+
+    expect(capturedChartProps.markers).toHaveLength(0);
   });
 });
 

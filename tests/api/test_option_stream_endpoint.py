@@ -54,15 +54,22 @@ _ROOT_NO_GREEKS = OptionRootInfo(
 
 def _fake_materialise_result(
     labels: list[str],
-) -> dict[str, tuple[np.ndarray, np.ndarray, list[str | None]]]:
-    """Build a synthetic materialise_option_streams result for N labels."""
+) -> dict[str, tuple[np.ndarray, np.ndarray, list[str | None], list]]:
+    """Build a synthetic materialise_option_streams result for N labels.
+
+    Returns the 4-tuple per CONTRACT (dates, values, diagnostics,
+    contracts).  Contracts list is all-None so derived ``rolls`` is
+    empty — tests that need real roll behaviour live in
+    ``test_option_stream_rolls.py``.
+    """
     dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
     result = {}
     for i, label in enumerate(labels):
         base = 0.20 + i * 0.10
         values = np.array([base, base + 0.01, base + 0.02], dtype=np.float64)
         diagnostics: list[str | None] = [None, None, None]
-        result[label] = (dates, values, diagnostics)
+        contracts: list = [None, None, None]
+        result[label] = (dates, values, diagnostics, contracts)
     return result
 
 

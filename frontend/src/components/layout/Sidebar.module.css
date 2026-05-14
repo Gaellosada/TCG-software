@@ -87,12 +87,12 @@
 
 .sectionDivider {
   border-top: 1px solid var(--border-primary);
+  /* width: 80% gives a 10%-side inset; at --sidebar-width: 200px that lands on
+     20px and aligns with .sectionLabel's `padding: 14px 20px 4px`. If
+     --sidebar-width is retuned the alignment will drift — retune the divider
+     width here (e.g. `calc(var(--sidebar-width) - 40px)`) to lock it. */
   width: 80%;
   margin: 4px auto 6px;
-}
-
-.collapsed .sectionDivider {
-  width: 80%;
 }
 
 .navList {

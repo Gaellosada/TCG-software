@@ -307,7 +307,7 @@ async def _resolve_bulk(
     last_trade_date: date | None,
     progress_callback: Callable[[], None] | None,
     available_expirations: Sequence[date] | None,
-) -> tuple[NDArray[np.float64], list[str | None]]:
+) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
 
@@ -321,11 +321,19 @@ async def _resolve_bulk(
     Phase C: per-date selection + stream extraction against the
              pre-fetched chain index (no I/O except underlying-price
              lookups for ByMoneyness).
+
+    Returns
+    -------
+    Tuple ``(values, error_codes, contracts)`` where ``contracts[i]`` is
+    the ``OptionContractDoc`` chosen on date ``dates[i]`` (or ``None``
+    when selection failed / chain missing).  Roll-event derivation is
+    done at the API layer over the parallel ``contracts`` array.
     """
     attr_name = _STREAM_TO_ATTR[stream]
     n = len(dates)
     values: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
     error_codes: list[str | None] = [None] * n
+    contracts: list[OptionContractDoc | None] = [None] * n
 
     # Wrap bulk reader with cycle injection.
     bulk_reader = _CycleInjectingBulkReader(bulk_chain_reader, cycle)
@@ -550,6 +558,12 @@ async def _resolve_bulk(
                 error_codes[idx] = "no_chain_for_date"
                 return
 
+            # Capture the selected contract for downstream roll-event
+            # derivation.  Set BEFORE reading the stream so a missing
+            # stream value still records the contract identity (the
+            # selection itself succeeded).
+            contracts[idx] = result.contract
+
             raw = getattr(row, attr_name, None)
             if raw is None:
                 error_codes[idx] = _missing_code_for(stream)
@@ -604,6 +618,10 @@ async def _resolve_bulk(
                     error_codes[idx] = "no_chain_for_date"
                     return
 
+                # Capture the selected contract for downstream roll-event
+                # derivation.  See _resolve_one_sync for rationale.
+                contracts[idx] = result.contract
+
                 raw = getattr(row, attr_name, None)
                 if raw is None:
                     error_codes[idx] = _missing_code_for(stream)
@@ -654,7 +672,7 @@ async def _resolve_bulk(
                 except Exception:  # pragma: no cover (defensive)
                     pass
 
-    return values, error_codes
+    return values, error_codes, contracts
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +696,7 @@ async def resolve_option_stream(
     progress_callback: Callable[[], None] | None = None,
     bulk_chain_reader: _CycleAwareBulkReader | None = None,
     available_expirations: Sequence[date] | None = None,
-) -> tuple[NDArray[np.float64], list[str | None]]:
+) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
 
     Parameters
@@ -737,6 +755,13 @@ async def resolve_option_stream(
         ``SelectionResult.error_code`` when selection fails, or
         ``f"missing_{stream}"`` when selection succeeded but the row's
         stream field was ``None``.
+    contracts:
+        Parallel list of ``OptionContractDoc | None``, one entry per
+        date.  ``None`` when chain was missing or the selection match
+        itself failed; the selected ``OptionContractDoc`` otherwise
+        (including the case where the contract row had a missing
+        stream value — selection itself succeeded).  Used by the API
+        layer to derive roll events at ``contract_id`` transitions.
     """
     if stream not in _STREAM_TO_ATTR:
         raise ValueError(f"unknown stream label {stream!r}")
@@ -775,6 +800,7 @@ async def resolve_option_stream(
     n = len(dates)
     values: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
     error_codes: list[str | None] = [None] * n
+    contracts: list[OptionContractDoc | None] = [None] * n
     attr_name = _STREAM_TO_ATTR[stream]
 
     # Bounded concurrency: every per-date task takes the semaphore for
@@ -825,6 +851,11 @@ async def resolve_option_stream(
                     error_codes[i] = "no_chain_for_date"
                     return
 
+                # Capture the selected contract for downstream roll-event
+                # derivation.  Set BEFORE reading the stream so a missing
+                # stream value still records the contract identity.
+                contracts[i] = result.contract
+
                 raw = getattr(row, attr_name, None)
                 if raw is None:
                     error_codes[i] = _missing_code_for(stream)
@@ -848,7 +879,7 @@ async def resolve_option_stream(
 
     await asyncio.gather(*(_resolve_one(i, d) for i, d in enumerate(dates)))
 
-    return values, error_codes
+    return values, error_codes, contracts
 
 
 __all__ = ["resolve_option_stream", "StreamLabel"]
