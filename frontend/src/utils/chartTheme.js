@@ -26,8 +26,8 @@ const DARK_PALETTE = {
   volumeBar: 'rgba(14, 165, 233, 0.3)',
   modebarColor: '#636b80',
   modebarActiveColor: '#e4e8f0',
-  markerSell: '#ef4444',
-  markerBuy: '#10b981',
+  markerSell: 'rgba(59, 130, 246, 0.5)',
+  markerBuy: 'rgba(59, 130, 246, 0.5)',
 };
 
 const LIGHT_PALETTE = {
@@ -47,8 +47,8 @@ const LIGHT_PALETTE = {
   volumeBar: 'rgba(2, 132, 199, 0.25)',
   modebarColor: '#9ca3af',
   modebarActiveColor: '#1f2937',
-  markerSell: '#dc2626',
-  markerBuy: '#059669',
+  markerSell: 'rgba(37, 99, 235, 0.5)',
+  markerBuy: 'rgba(37, 99, 235, 0.5)',
 };
 
 const AXIS_KEYS = ['xaxis', 'xaxis2', 'xaxis3', 'yaxis', 'yaxis2', 'yaxis3'];
