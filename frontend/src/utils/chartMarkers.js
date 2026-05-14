@@ -38,8 +38,8 @@ import { getChartColors } from './chartTheme';
 // is hollow-over-filled must also be inserted AFTER the kind it should
 // overlay. See guardrails.md "Trace render order (Plotly z-order)".
 const MARKER_STYLE = {
-  buy:  { symbol: 'circle',      name: 'Roll — open',  verb: 'Open',  lineWidth: 0,   colorKey: 'markerBuy'  },
-  sell: { symbol: 'circle-open', name: 'Roll — close', verb: 'Close', lineWidth: 1.5, colorKey: 'markerSell' },
+  buy:  { symbol: 'circle',      name: 'Roll — buy',  verb: 'Buy',  lineWidth: 0,   colorKey: 'markerBuy'  },
+  sell: { symbol: 'circle-open', name: 'Roll — sell', verb: 'Sell', lineWidth: 1.5, colorKey: 'markerSell' },
 };
 
 /**

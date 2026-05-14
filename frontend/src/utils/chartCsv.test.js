@@ -40,7 +40,7 @@ describe('buildCsv', () => {
       {
         type: 'scatter',
         mode: 'markers',
-        name: 'Roll — close',
+        name: 'Roll — sell',
         x: ['d2'],
         y: [20],
         meta: { skipCsv: true },
@@ -48,7 +48,7 @@ describe('buildCsv', () => {
       {
         type: 'scatter',
         mode: 'markers',
-        name: 'Roll — open',
+        name: 'Roll — buy',
         x: ['d2'],
         y: [20],
         meta: { skipCsv: true },

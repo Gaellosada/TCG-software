@@ -36,16 +36,16 @@ function makeMarker(kind, overrides = {}) {
 }
 
 describe('buildMarkerHovertemplate', () => {
-  it('returns a string starting with "<b>Close</b>" for sell kind', () => {
+  it('returns a string starting with "<b>Sell</b>" for sell kind', () => {
     const tpl = buildMarkerHovertemplate('sell');
     expect(typeof tpl).toBe('string');
-    expect(tpl.startsWith('<b>Close</b>')).toBe(true);
+    expect(tpl.startsWith('<b>Sell</b>')).toBe(true);
   });
 
-  it('returns a string starting with "<b>Open</b>" for buy kind', () => {
+  it('returns a string starting with "<b>Buy</b>" for buy kind', () => {
     const tpl = buildMarkerHovertemplate('buy');
     expect(typeof tpl).toBe('string');
-    expect(tpl.startsWith('<b>Open</b>')).toBe(true);
+    expect(tpl.startsWith('<b>Buy</b>')).toBe(true);
   });
 
   it('references all 5 customdata indices (root, expiration, strike, type, value)', () => {
@@ -86,7 +86,7 @@ describe('buildMarkerTrace', () => {
     expect(trace.marker.symbol).toBe('circle-open');
     expect(trace.marker.size).toBe(8);
     expect(trace.marker.line.width).toBe(1.5);
-    expect(trace.name).toBe('Roll — close');
+    expect(trace.name).toBe('Roll — sell');
   });
 
   it('produces a filled circle trace for buy markers', () => {
@@ -95,7 +95,7 @@ describe('buildMarkerTrace', () => {
     expect(trace.marker.symbol).toBe('circle');
     expect(trace.marker.size).toBe(8);
     expect(trace.marker.line.width).toBe(0);
-    expect(trace.name).toBe('Roll — open');
+    expect(trace.name).toBe('Roll — buy');
   });
 
   it('emits legend wiring (legendgroup + showlegend) on every trace', () => {
@@ -185,8 +185,8 @@ describe('buildAllMarkerTraces', () => {
     );
     expect(traces).toHaveLength(2);
     const names = traces.map((t) => t.name);
-    expect(names).toContain('Roll — close');
-    expect(names).toContain('Roll — open');
+    expect(names).toContain('Roll — sell');
+    expect(names).toContain('Roll — buy');
   });
 
   it('omits the kind when only the other side is present', () => {
@@ -228,9 +228,9 @@ describe('buildAllMarkerTraces', () => {
     );
     expect(traces).toHaveLength(2);
     expect(traces[traces.length - 1].marker.symbol).toBe('circle-open');
-    expect(traces[traces.length - 1].name).toBe('Roll — close');
+    expect(traces[traces.length - 1].name).toBe('Roll — sell');
     expect(traces[0].marker.symbol).toBe('circle');
-    expect(traces[0].name).toBe('Roll — open');
+    expect(traces[0].name).toBe('Roll — buy');
   });
 
   it('order is independent of input array order — driven by MARKER_STYLE only', () => {
@@ -250,8 +250,8 @@ describe('MARKER_STYLE modularity (verb in map, Object.keys iteration)', () => {
     // Sanity: distinct kinds produce distinct verbs that originate from the
     // map. (This is structurally guaranteed by the implementation; the test
     // pins the contract so a regression to inline branching is loud.)
-    expect(buildMarkerHovertemplate('sell')).toContain('<b>Close</b>');
-    expect(buildMarkerHovertemplate('buy')).toContain('<b>Open</b>');
+    expect(buildMarkerHovertemplate('sell')).toContain('<b>Sell</b>');
+    expect(buildMarkerHovertemplate('buy')).toContain('<b>Buy</b>');
     // Unknown kind → empty string (NOT a fallback verb).
     expect(buildMarkerHovertemplate('mystery')).toBe('');
   });

@@ -158,7 +158,7 @@ describe('Chart — markers prop', () => {
     // Existing traces still pass through verbatim.
     expect(plotProps[0].data[0]).toBe(traces[0]);
     expect(plotProps[0].data[1].marker.symbol).toBe('circle-open');
-    expect(plotProps[0].data[1].name).toBe('Roll — close');
+    expect(plotProps[0].data[1].name).toBe('Roll — sell');
   });
 
   it('appends one extra trace when only buy markers are provided', () => {
@@ -167,7 +167,7 @@ describe('Chart — markers prop', () => {
     expect(plotProps[0].data).toHaveLength(traces.length + 1);
     expect(plotProps[0].data[0]).toBe(traces[0]);
     expect(plotProps[0].data[1].marker.symbol).toBe('circle');
-    expect(plotProps[0].data[1].name).toBe('Roll — open');
+    expect(plotProps[0].data[1].name).toBe('Roll — buy');
   });
 
   it('appends two extra traces when both sells and buys are provided', () => {
@@ -203,10 +203,10 @@ describe('Chart — markers prop', () => {
     const data = plotProps[0].data;
     // Last trace must be the sell (hollow) so it renders on top.
     expect(data[data.length - 1].marker.symbol).toBe('circle-open');
-    expect(data[data.length - 1].name).toBe('Roll — close');
+    expect(data[data.length - 1].name).toBe('Roll — sell');
     // And the buy (filled) sits one slot earlier, underneath.
     expect(data[data.length - 2].marker.symbol).toBe('circle');
-    expect(data[data.length - 2].name).toBe('Roll — open');
+    expect(data[data.length - 2].name).toBe('Roll — buy');
   });
 
   it('wires both marker traces into the same legendgroup with showlegend', () => {
