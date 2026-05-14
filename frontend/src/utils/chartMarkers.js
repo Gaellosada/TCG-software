@@ -29,9 +29,17 @@
 
 import { getChartColors } from './chartTheme';
 
+// Key insertion order matters: it pins the Plotly trace render order. Plotly
+// draws later traces ON TOP of earlier ones, and CONTRACT §C requires the
+// hollow `circle-open` (sell) to render on top of the filled `circle` (buy)
+// at overlapping (x, y) so the "ring-around-dot" visual is visible. So `buy`
+// MUST be declared BEFORE `sell` here, and `buildAllMarkerTraces` iterates
+// `Object.keys(MARKER_STYLE)` to preserve that order. Any future kind that
+// is hollow-over-filled must also be inserted AFTER the kind it should
+// overlay. See guardrails.md "Trace render order (Plotly z-order)".
 const MARKER_STYLE = {
-  sell: { symbol: 'circle-open', name: 'Roll — close', lineWidth: 1.5, colorKey: 'markerSell' },
-  buy:  { symbol: 'circle',      name: 'Roll — open',  lineWidth: 0,   colorKey: 'markerBuy'  },
+  buy:  { symbol: 'circle',      name: 'Roll — open',  verb: 'Open',  lineWidth: 0,   colorKey: 'markerBuy'  },
+  sell: { symbol: 'circle-open', name: 'Roll — close', verb: 'Close', lineWidth: 1.5, colorKey: 'markerSell' },
 };
 
 /**
@@ -40,12 +48,15 @@ const MARKER_STYLE = {
  * Customdata layout (per point): [root, expiration, strike, type, value].
  * `<extra></extra>` suppresses Plotly's default trace-name box.
  *
+ * Returns `''` for unknown kinds so callers can safely template-interpolate.
+ *
  * @param {'sell'|'buy'} kind
  * @returns {string}
  */
 export function buildMarkerHovertemplate(kind) {
-  const verb = kind === 'sell' ? 'Close' : 'Open';
-  return `<b>${verb}</b><br>%{customdata[0]} %{customdata[1]} %{customdata[3]} %{customdata[2]}<br>Value: %{customdata[4]:,.4f}<extra></extra>`;
+  const style = MARKER_STYLE[kind];
+  if (!style) return '';
+  return `<b>${style.verb}</b><br>%{customdata[0]} %{customdata[1]} %{customdata[3]} %{customdata[2]}<br>Value: %{customdata[4]:,.4f}<extra></extra>`;
 }
 
 /**
@@ -102,12 +113,16 @@ export function buildMarkerTrace(markersOfKind, kind, theme) {
  */
 export function buildAllMarkerTraces(markers, theme) {
   if (!markers || markers.length === 0) return [];
-  const byKind = { sell: [], buy: [] };
+  // Iterate MARKER_STYLE so adding a new kind is a SINGLE map-entry edit.
+  // Insertion order of MARKER_STYLE pins the resulting trace render order
+  // (later traces render on top) — see the MARKER_STYLE declaration above.
+  const byKind = Object.fromEntries(
+    Object.keys(MARKER_STYLE).map((k) => [k, []]),
+  );
   for (const m of markers) {
     if (byKind[m.kind]) byKind[m.kind].push(m);
   }
-  return [
-    buildMarkerTrace(byKind.sell, 'sell', theme),
-    buildMarkerTrace(byKind.buy, 'buy', theme),
-  ].filter(Boolean);
+  return Object.keys(MARKER_STYLE)
+    .map((kind) => buildMarkerTrace(byKind[kind], kind, theme))
+    .filter(Boolean);
 }
