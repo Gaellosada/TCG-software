@@ -955,7 +955,7 @@ async def evaluate_signal(
 
         # --- (c) entry pass: declaration order; leverage allowed ---
         # Bound entries gated by their own per-block arm. Unbound entries
-        # short-circuit via membership (pre-Task-1 unconditional firing).
+        # short-circuit via membership (unconditional firing, no gate).
         for b in entry_blocks:
             if not bool(entry_truth[b.id][t]):
                 continue

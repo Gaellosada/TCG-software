@@ -60,26 +60,39 @@
   background: var(--bg-hover);
 }
 
-.topNav {
-  padding: 12px 0;
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
 }
 
-.spacer {
-  flex: 1;
+.sectionBottom {
+  margin-top: auto;
 }
 
-.divider {
-  height: 1px;
-  background: var(--border-primary);
-  margin: 0 16px;
+.sectionLabel {
+  font-size: 9px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  padding: 14px 20px 4px;
 }
 
-.collapsed .divider {
-  margin: 0 8px;
+.collapsed .sectionLabel {
+  display: none;
 }
 
-.bottomNav {
-  padding: 12px 0;
+.sectionDivider {
+  border-top: 1px solid var(--border-primary);
+  width: 80%;
+  margin: 4px auto 6px;
+}
+
+.collapsed .sectionDivider {
+  width: 80%;
 }
 
 .navList {

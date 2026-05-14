@@ -255,8 +255,8 @@ class Block:
     # this None; the API rejects otherwise). When non-None, references the
     # ``id`` of a reset block in the same signal's ``rules.resets``: after
     # this block fires, its per-block arm is disarmed and re-armed only
-    # when the bound reset fires. Default ``None`` means "no gate" (the
-    # pre-Task-1 unconditional firing behavior).
+    # when the bound reset fires. Default ``None`` means "no gate" (unconditional
+    # firing — entry triggers whenever its condition is true).
     requires_reset_block_id: str | None = None
 
 

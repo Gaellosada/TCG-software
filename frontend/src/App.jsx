@@ -9,6 +9,9 @@ import IndicatorsPage from './pages/Indicators/IndicatorsPage';
 import SignalsPage from './pages/Signals/SignalsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
 import SettingsPage from './pages/Settings/SettingsPage';
+import RunningSignalsPage from './pages/RunningSignals/RunningSignalsPage';
+import MongoDBAgentPage from './pages/MongoDBAgent/MongoDBAgentPage';
+import TicketsPage from './pages/Tickets/TicketsPage';
 import './App.css';
 
 function App() {
@@ -87,6 +90,30 @@ function App() {
               element={
                 <PageContainer>
                   <SettingsPage />
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/running-signals"
+              element={
+                <PageContainer>
+                  <RunningSignalsPage />
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/mongodb-agent"
+              element={
+                <PageContainer>
+                  <MongoDBAgentPage />
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/tickets"
+              element={
+                <PageContainer>
+                  <TicketsPage />
                 </PageContainer>
               }
             />
