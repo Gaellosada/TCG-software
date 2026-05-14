@@ -220,6 +220,66 @@ describe('ContinuousChart — markers transformation', () => {
   });
 });
 
+describe('ContinuousChart — adjustment-mode invariance (parametric)', () => {
+  // The FE is mode-agnostic: it just reads `close[i-1]` and `close[i]` from the
+  // payload. The backend has ALREADY applied any ratio/difference adjustment
+  // before serialising, so:
+  //   - none       → raw close → sell.y != buy.y at a real roll (gap visible)
+  //   - ratio      → adjusted close → sell.y == buy.y (continuous line)
+  //   - difference → adjusted close → sell.y == buy.y (continuous line)
+  //
+  // This regression guard makes the mode-agnostic invariant on the
+  // close-derivation path explicit.
+  const cases = [
+    { mode: 'none',       sellClose: 101, buyClose: 200, expectGap: true  },
+    { mode: 'ratio',      sellClose: 150, buyClose: 150, expectGap: false },
+    { mode: 'difference', sellClose: 150, buyClose: 150, expectGap: false },
+  ];
+
+  it.each(cases)(
+    'adjustment=$mode → markers read from close[i-1]/close[i] verbatim (gap=$expectGap)',
+    async ({ mode, sellClose, buyClose, expectGap }) => {
+      mockSeriesResult = {
+        ...makePayload({
+          dates: [20240101, 20240102, 20240103, 20240104],
+          close: [100, sellClose, buyClose, 201],
+          roll_dates: [20240103],
+          contracts: ['ESH24', 'ESM24'],
+        }),
+        adjustment: mode,
+      };
+
+      render(<ContinuousChart collection="FUT_ES" />);
+
+      await waitFor(() => {
+        expect(capturedChartProps).not.toBeNull();
+        expect(capturedChartProps.markers.length).toBeGreaterThan(0);
+      });
+
+      const markers = capturedChartProps.markers;
+      expect(markers).toHaveLength(2);
+
+      const sell = markers.find((m) => m.kind === 'sell');
+      const buy = markers.find((m) => m.kind === 'buy');
+
+      expect(sell).toBeTruthy();
+      expect(buy).toBeTruthy();
+
+      // Mode-agnostic invariant: FE reads exactly close[i-1] / close[i].
+      expect(sell.y).toBe(sellClose);
+      expect(buy.y).toBe(buyClose);
+
+      if (expectGap) {
+        // Raw close: sell and buy diverge — the price gap is visible.
+        expect(sell.y).not.toBe(buy.y);
+      } else {
+        // Adjusted close: sell and buy overlap — ring-around-dot at the roll.
+        expect(sell.y).toBe(buy.y);
+      }
+    },
+  );
+});
+
 describe('ContinuousChart — vertical-line removal (regression guards)', () => {
   it('emits NO trace with yaxis: "y3" (the old vertical-line overlay axis)', async () => {
     // Pre-removal the futures roll dates were drawn as a gray dotted polyline
