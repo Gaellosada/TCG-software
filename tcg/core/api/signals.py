@@ -186,6 +186,10 @@ class _BlockIn(BaseModel):
     target_entry_block_name: str | None = None
     enabled: bool = True
     description: str = ""
+    # Per-block reset binding (entries/exits only). When non-empty,
+    # references a reset block's ``id`` in the same signal's
+    # ``rules.resets``. Validated at parse time after resets are parsed.
+    requires_reset_block_id: str | None = None
     # DEPRECATED (v4): kept so Pydantic does not silently drop it; API
     # validation rejects any request that sets this field. Remove once
     # no legacy clients remain (target: v5 or 2026-Q3).
@@ -195,6 +199,7 @@ class _BlockIn(BaseModel):
 class _SignalRulesIn(BaseModel):
     entries: list[_BlockIn] = Field(default_factory=list)
     exits: list[_BlockIn] = Field(default_factory=list)
+    resets: list[_BlockIn] = Field(default_factory=list)
 
 
 class SignalIn(BaseModel):
@@ -375,6 +380,8 @@ def _parse_blocks(
     section: str,
     is_entry: bool,
     entry_names: set[str] | None = None,
+    is_reset: bool = False,
+    reset_ids: set[str] | None = None,
 ) -> tuple[Block, ...]:
     """Parse request-shape blocks into typed :class:`Block` tuples.
 
@@ -406,6 +413,7 @@ def _parse_blocks(
         weight = float(blk.weight)
         tgt_name = blk.target_entry_block_name or None
         legacy_tgt = blk.target_entry_block_id or None
+        rrb = blk.requires_reset_block_id or None
 
         # Placeholder blocks (no conditions + no input) are accepted
         # as sentinels; they skip evaluation. Otherwise full validation.
@@ -415,7 +423,36 @@ def _parse_blocks(
         if not placeholder:
             if not bid:
                 raise SignalValidationError(f"{path}: block id is required")
-            if is_entry:
+            if is_reset:
+                # Reset blocks are signal-global: they must NOT carry
+                # entry/exit-only fields. We reject (rather than silently
+                # strip) so malformed payloads surface clearly. Error
+                # messages are part of the LOCKED API contract — do not
+                # paraphrase.
+                if iid:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set input_id"
+                    )
+                if weight != 0.0:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set weight"
+                    )
+                if tgt_name is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set target_entry_block_name"
+                    )
+                if legacy_tgt is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set target_entry_block_name"
+                    )
+                # Reset blocks are the binding TARGETS — they cannot
+                # themselves bind to another reset. Reject loudly to
+                # surface malformed payloads.
+                if blk.requires_reset_block_id is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set requires_reset_block_id"
+                    )
+            elif is_entry:
                 if tgt_name is not None:
                     raise SignalValidationError(
                         f"{path}: entry blocks must not set 'target_entry_block_name'"
@@ -476,6 +513,22 @@ def _parse_blocks(
                         f"signal's rules; declared entry names: "
                         f"{sorted(entry_names)!r}"
                     )
+            # Per-block reset binding (entries+exits only). The
+            # ``is_reset`` branch already rejects non-None values; here
+            # we enforce type + cross-reference against the signal's
+            # reset ids (collected by ``parse_signal`` before this call).
+            if not is_reset and rrb is not None:
+                if not isinstance(rrb, str) or not rrb:
+                    raise SignalValidationError(
+                        f"{path}: requires_reset_block_id must be a "
+                        f"non-empty string or null"
+                    )
+                if reset_ids is not None and rrb not in reset_ids:
+                    raise SignalValidationError(
+                        f"{path}: requires_reset_block_id {rrb!r} does "
+                        f"not match any reset block id in this signal's "
+                        f"rules.resets"
+                    )
 
         out.append(
             Block(
@@ -487,6 +540,7 @@ def _parse_blocks(
                 target_entry_block_name=tgt_name,
                 enabled=bool(blk.enabled),
                 description=str(blk.description or ""),
+                requires_reset_block_id=rrb,
             )
         )
     return tuple(out)
@@ -494,10 +548,20 @@ def _parse_blocks(
 
 def parse_signal(raw: SignalIn) -> Signal:
     inputs = tuple(_parse_input(i) for i in raw.inputs)
+    # Parse resets FIRST so we can collect their ids for cross-validating
+    # entries' and exits' requires_reset_block_id bindings.
+    resets = _parse_blocks(
+        raw.rules.resets,
+        section="resets",
+        is_entry=False,
+        is_reset=True,
+    )
+    reset_ids: set[str] = {b.id for b in resets if b.id}
     entries = _parse_blocks(
         raw.rules.entries,
         section="entries",
         is_entry=True,
+        reset_ids=reset_ids,
     )
     entry_names: set[str] = {b.name for b in entries if b.name}
     exits = _parse_blocks(
@@ -505,8 +569,9 @@ def parse_signal(raw: SignalIn) -> Signal:
         section="exits",
         is_entry=False,
         entry_names=entry_names,
+        reset_ids=reset_ids,
     )
-    rules = SignalRules(entries=entries, exits=exits)
+    rules = SignalRules(entries=entries, exits=exits, resets=resets)
     return Signal(id=raw.id, name=raw.name, inputs=inputs, rules=rules)
 
 

@@ -40,6 +40,7 @@ export function computeRunGate(selectedSignal, availableIndicators) {
   const rules = selectedSignal.rules || {};
   const entries = Array.isArray(rules.entries) ? rules.entries : [];
   const exits = Array.isArray(rules.exits) ? rules.exits : [];
+  const resets = Array.isArray(rules.resets) ? rules.resets : [];
 
   const entryIds = collectEntryIds(entries);
 
@@ -56,18 +57,23 @@ export function computeRunGate(selectedSignal, availableIndicators) {
     if (n) seenNames.add(n);
   }
 
-  // Flatten to a tagged list we can walk uniformly.
+  // Flatten to a tagged list we can walk uniformly. Section-local 1-based
+  // index is preserved on each entry so diagnostics can label unnamed
+  // blocks consistently ("Block N" within their section).
   const blocksWithSection = [
-    ...entries.map((b) => ({ block: b, section: 'entries' })),
-    ...exits.map((b) => ({ block: b, section: 'exits' })),
+    ...entries.map((b, i) => ({ block: b, section: 'entries', sectionIndex: i })),
+    ...exits.map((b, i) => ({ block: b, section: 'exits', sectionIndex: i })),
+    ...resets.map((b, i) => ({ block: b, section: 'resets', sectionIndex: i })),
   ];
   // A block is "non-empty" if the user has interacted with it at all.
   // For entries that means any condition or picked input; for exits it
-  // means any condition or picked target (exits no longer carry input_id).
+  // means any condition or picked target (exits no longer carry input_id);
+  // for resets it means any condition (resets carry nothing else).
   const nonEmpty = blocksWithSection.filter(({ block: b, section }) => {
     if (!b) return false;
     const hasCond = (b.conditions || []).length > 0;
     if (section === 'entries') return hasCond || !!b.input_id;
+    if (section === 'resets') return hasCond;
     return hasCond || !!b.target_entry_block_name;
   });
   if (nonEmpty.length === 0) {
@@ -139,7 +145,8 @@ export function computeRunGate(selectedSignal, availableIndicators) {
     }
     // For exits we pass the entry blocks themselves so isBlockRunnable
     // can additionally verify the resolved target entry has a configured
-    // input (exits inherit their input from the target entry).
+    // input (exits inherit their input from the target entry). Entries
+    // and resets only need the simpler entryIds set.
     const entryArg = section === 'exits' ? entries : entryIds;
     if (!isBlockRunnable(b, section, inputs, entryArg)) {
       return {
@@ -149,6 +156,21 @@ export function computeRunGate(selectedSignal, availableIndicators) {
       };
     }
   }
+  // Stale require-reset binding: an entry/exit bound to a reset id that
+  // no longer exists in rules.resets cannot be safely run — the backend
+  // would 400. Surface UI-side so the user can rebind to a current reset.
+  for (const { block: b, section, sectionIndex } of nonEmpty) {
+    if ((section === 'entries' || section === 'exits') && b.requires_reset_block_id) {
+      const bound = (rules.resets || []).find((r) => r && r.id === b.requires_reset_block_id);
+      if (!bound) {
+        return {
+          runDisabledReason: `stale-reset-binding: block "${b.name || `Block ${sectionIndex + 1}`}" requires a reset that no longer exists. Pick a current reset or "None".`,
+          missingIds: [],
+        };
+      }
+    }
+  }
+
   const { missing } = buildComputeRequestBody(selectedSignal, availableIndicators);
   if (missing.length > 0) {
     return {

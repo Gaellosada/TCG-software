@@ -50,7 +50,7 @@ import { MAX_ABS_WEIGHT, SECTIONS } from './storage';
 export function normaliseSpecForRequest(signal) {
   if (!signal || typeof signal !== 'object') return signal;
   const rules = signal.rules || {};
-  const outRules = { entries: [], exits: [] };
+  const outRules = { entries: [], exits: [], resets: [] };
   for (const section of SECTIONS) {
     const blocks = Array.isArray(rules[section]) ? rules[section] : [];
     outRules[section] = blocks.map((b) => normaliseBlock(b, section));
@@ -80,6 +80,18 @@ function normaliseBlock(block, section) {
   const conditions = Array.isArray(block.conditions)
     ? block.conditions.map(normaliseCondition)
     : [];
+  if (section === 'resets') {
+    // Reset blocks: whitelist {id, name, conditions, enabled, description}.
+    // input_id/weight/target_entry_block_name are signal-global concerns
+    // — backend rejects payloads carrying them.
+    return {
+      id: typeof block.id === 'string' ? block.id : '',
+      name: typeof block.name === 'string' ? block.name : '',
+      enabled: block.enabled !== false,
+      description: typeof block.description === 'string' ? block.description : '',
+      conditions,
+    };
+  }
   if (section === 'exits') {
     // Exit blocks omit block-level input_id entirely (not empty-string)
     // so the backend invariant "exits must not carry input_id" is met.
@@ -93,6 +105,10 @@ function normaliseBlock(block, section) {
       target_entry_block_name: typeof block.target_entry_block_name === 'string'
         ? block.target_entry_block_name
         : '',
+      requires_reset_block_id: typeof block.requires_reset_block_id === 'string'
+        && block.requires_reset_block_id
+        ? block.requires_reset_block_id
+        : null,
     };
   }
   return {
@@ -103,6 +119,10 @@ function normaliseBlock(block, section) {
     input_id: typeof block.input_id === 'string' ? block.input_id : '',
     weight: clampWeight(block.weight),
     conditions,
+    requires_reset_block_id: typeof block.requires_reset_block_id === 'string'
+      && block.requires_reset_block_id
+      ? block.requires_reset_block_id
+      : null,
   };
 }
 

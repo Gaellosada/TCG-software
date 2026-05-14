@@ -43,7 +43,7 @@ import { newBlockId, MAX_ABS_WEIGHT } from './storage';
  *   - exits:   target_entry_block_name: '' (user must pick);
  *              NO input_id (derived from target entry).
  *
- * @param {'entries'|'exits'} section
+ * @param {'entries'|'exits'|'resets'} section
  */
 export function defaultBlock(section = 'entries') {
   const base = {
@@ -55,9 +55,15 @@ export function defaultBlock(section = 'entries') {
   };
   if (section === 'exits') {
     base.target_entry_block_name = '';
+    // Optional per-block reset binding; null = no gate.
+    base.requires_reset_block_id = null;
+  } else if (section === 'resets') {
+    // Reset blocks are signal-global: no input_id, no weight, no target,
+    // and no requires_reset_block_id (a reset cannot gate itself).
   } else {
     base.input_id = '';
     base.weight = 0;
+    base.requires_reset_block_id = null;
   }
   return base;
 }
@@ -206,6 +212,12 @@ export function isBlockRunnable(block, section, inputs, entryIdsOrBlocks) {
   if (!Array.isArray(block.conditions) || block.conditions.length === 0) return false;
   for (const c of block.conditions) {
     if (!isConditionComplete(c, byId)) return false;
+  }
+  if (section === 'resets') {
+    // Reset blocks need ≥1 complete condition; no input_id, weight,
+    // or target_entry_block_name. The condition completeness check
+    // above already validates operands resolve against declared inputs.
+    return true;
   }
   if (section === 'entries') {
     if (typeof block.input_id !== 'string' || !block.input_id) return false;

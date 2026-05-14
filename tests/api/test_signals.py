@@ -934,3 +934,180 @@ class TestComputeEndpointV4:
         assert data["error_type"] == "validation"
         assert "target_entry_block_name" in data["message"]
         assert "DoesNotExist" in data["message"]
+
+
+class TestResetBlocksAPI:
+    """Reset block parsing + strict rejection (CONTRACT §1.5)."""
+
+    async def test_t20_empty_resets_equals_omitted(self, client: AsyncClient):
+        """``rules.resets: []`` produces an identical result to omitting
+        the field entirely.
+
+        The shape of the per-position values + events must match
+        byte-for-byte across both wire encodings; we capture the response
+        body and compare.
+        """
+        base_spec = {
+            "id": "sig",
+            "name": "",
+            "inputs": [SPX_INPUT],
+            "rules": {
+                "entries": [
+                    {
+                        "id": "E1",
+                        "name": "Entry1",
+                        "input_id": "X",
+                        "weight": 100.0,
+                        "conditions": [
+                            {
+                                "op": "gt",
+                                "lhs": {
+                                    "kind": "instrument",
+                                    "input_id": "X",
+                                },
+                                "rhs": {"kind": "constant", "value": 0.0},
+                            }
+                        ],
+                    }
+                ],
+                "exits": [],
+            },
+        }
+        body_no_field = {
+            "spec": base_spec,
+            "indicators": [],
+            "instruments": {},
+        }
+        spec_with_empty = dict(base_spec)
+        spec_with_empty["rules"] = dict(base_spec["rules"])
+        spec_with_empty["rules"]["resets"] = []
+        body_with_empty = {
+            "spec": spec_with_empty,
+            "indicators": [],
+            "instruments": {},
+        }
+
+        r1 = await client.post("/api/signals/compute", json=body_no_field)
+        r2 = await client.post("/api/signals/compute", json=body_with_empty)
+        assert r1.status_code == 200, r1.text
+        assert r2.status_code == 200, r2.text
+        assert r1.json()["positions"] == r2.json()["positions"]
+        assert r1.json()["events"] == r2.json()["events"]
+
+    async def test_t21_reset_with_input_id_rejected(self, client: AsyncClient):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [],
+                    "exits": [],
+                    "resets": [
+                        {
+                            "id": "R1",
+                            "name": "Reset1",
+                            "input_id": "X",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "reset blocks must not set input_id" in data["message"]
+
+    async def test_t22_reset_with_target_entry_block_name_rejected(
+        self, client: AsyncClient
+    ):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [],
+                    "exits": [],
+                    "resets": [
+                        {
+                            "id": "R1",
+                            "name": "Reset1",
+                            "target_entry_block_name": "abc",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert (
+            "reset blocks must not set target_entry_block_name"
+            in data["message"]
+        )
+
+    async def test_t23_reset_with_nonzero_weight_rejected(
+        self, client: AsyncClient
+    ):
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [],
+                    "exits": [],
+                    "resets": [
+                        {
+                            "id": "R1",
+                            "name": "Reset1",
+                            "weight": 1.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "reset blocks must not set weight" in data["message"]

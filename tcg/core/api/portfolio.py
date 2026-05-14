@@ -99,6 +99,7 @@ class _SignalLegEvalResult:
     trades: tuple[Trade, ...] = ()
     positions_payload: tuple[dict, ...] = ()
 
+
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
 
@@ -834,7 +835,8 @@ async def compute_portfolio(
                 }
             )
 
-    # Synthesize one open "Holding" Trade per non-signal leg (Sign 10).
+    # Direct legs have no engine trades; surface them as a single open Holding
+    # so they appear in the trade log alongside signal-leg trades.
     for label, leg in body.legs.items():
         if leg.type == "signal":
             continue

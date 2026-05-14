@@ -371,3 +371,97 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
     expect(out.events[0].fired_indices).toEqual([0, 1, 2]);
   });
 });
+
+describe('computeRunGate — reset block validation', () => {
+  // T18
+  it('flags a reset block whose condition has an incomplete operand', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        entries: [
+          entryBlock({ id: 'e1', conditions: [GT_COND], name: 'Alpha' }),
+        ],
+        exits: [
+          exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] }),
+        ],
+        resets: [
+          {
+            id: 'r1', name: 'Arm', conditions: [
+              // Incomplete: rhs is null/missing.
+              { op: 'gt', lhs: INST_OP_X, rhs: null },
+            ],
+            enabled: true,
+          },
+        ],
+      },
+    };
+    const result = computeRunGate(sig, []);
+    expect(result.runDisabledReason).not.toBeNull();
+    // The generic operand-incomplete reason is fine — surfaces a
+    // disabled-run state to the user.
+    expect(result.runDisabledReason).toMatch(/operand/i);
+  });
+
+  it('accepts a signal where all reset conditions are complete', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        entries: [
+          entryBlock({ id: 'e1', conditions: [GT_COND], name: 'Alpha' }),
+        ],
+        exits: [
+          exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] }),
+        ],
+        resets: [
+          { id: 'r1', name: 'Arm', conditions: [GT_COND], enabled: true },
+        ],
+      },
+    };
+    const result = computeRunGate(sig, []);
+    expect(result.runDisabledReason).toBeNull();
+  });
+});
+
+// Per CONTRACT §6.3 — stale require-reset binding flags the signal as
+// not runnable (option b: prevent run, don't silently un-bind).
+describe('computeRunGate — stale require-reset binding', () => {
+  it('flags non-runnable when an entry binds to a reset id that no longer exists', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        entries: [{
+          ...entryBlock({ id: 'e1', name: 'Alpha', conditions: [GT_COND] }),
+          requires_reset_block_id: 'reset-that-was-deleted',
+        }],
+        exits: [exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] })],
+        resets: [{ id: 'r-other', name: 'Other', conditions: [GT_COND], enabled: true }],
+      },
+    };
+    const result = computeRunGate(sig, []);
+    expect(result.runDisabledReason).toBe(
+      'stale-reset-binding: block "Alpha" requires a reset that no longer exists. '
+      + 'Pick a current reset or "None".',
+    );
+    expect(result.missingIds).toEqual([]);
+  });
+
+  it('happy path: binding to an existing reset id does NOT trigger stale-binding', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        entries: [{
+          ...entryBlock({ id: 'e1', name: 'Alpha', conditions: [GT_COND] }),
+          requires_reset_block_id: 'r1',
+        }],
+        exits: [exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] })],
+        resets: [{ id: 'r1', name: 'Arm', conditions: [GT_COND], enabled: true }],
+      },
+    };
+    const result = computeRunGate(sig, []);
+    expect(result.runDisabledReason).toBeNull();
+  });
+});

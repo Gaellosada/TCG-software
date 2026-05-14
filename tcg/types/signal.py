@@ -251,6 +251,13 @@ class Block:
     target_entry_block_name: str | None = None
     enabled: bool = True
     description: str = ""
+    # Per-block reset binding (entries/exits only — reset blocks MUST keep
+    # this None; the API rejects otherwise). When non-None, references the
+    # ``id`` of a reset block in the same signal's ``rules.resets``: after
+    # this block fires, its per-block arm is disarmed and re-armed only
+    # when the bound reset fires. Default ``None`` means "no gate" (the
+    # pre-Task-1 unconditional firing behavior).
+    requires_reset_block_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +274,10 @@ class Trade:
     legs). The portfolio aggregation layer converts the user-facing
     percent allocation to a fraction before stamping it onto a Trade —
     do not mix percent and fraction across this boundary.
+
+    ``holding_id`` / ``holding_name`` are stamped by the portfolio
+    aggregation layer when a Trade is surfaced through a multi-leg
+    response; both remain ``None`` for the single-signal response shape.
     """
 
     input_id: str
@@ -278,18 +289,32 @@ class Trade:
     close_bar: int | None
     direction: str
     signed_weight: float
-    # Optional: None when Trade spans a single signal; set to the leg label
-    # when aggregated across a multi-leg portfolio.
     holding_id: str | None = None
     holding_name: str | None = None
 
 
 @dataclass(frozen=True)
 class SignalRules:
-    """Unified entries/exits (v4): two OR-lists of AND-blocks."""
+    """Unified entries/exits + optional per-block reset bindings.
+
+    ``resets`` is a list of named OR-blocks that entries and exits may
+    bind to via ``Block.requires_reset_block_id``. Each bound block has
+    its own per-block arm (``block_arm[block.id]``); after that block
+    fires, its arm is disarmed and re-armed only when the bound reset
+    fires. Blocks without a binding have NO reset gate. A reset block
+    that no entry/exit binds to fires decoratively (its ``fired_indices``
+    still records bars) but its ``latched_indices`` records ONLY bars
+    where ≥1 bound block transitioned False→True via this fire.
+
+    Reset blocks reuse :class:`Block` verbatim but only honour
+    ``id``/``name``/``conditions``/``enabled``/``description`` — they
+    must not carry ``input_id``, ``weight``, ``target_entry_block_name``,
+    or ``requires_reset_block_id`` (the API layer rejects such payloads).
+    """
 
     entries: tuple[Block, ...] = ()
     exits: tuple[Block, ...] = ()
+    resets: tuple[Block, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -11,7 +11,7 @@ const V4_INPUTS = [
 ];
 
 describe('computeSignal request body shape (v4)', () => {
-  it('top level has exactly {spec, indicators}; rules carry entries/exits only', () => {
+  it('top level has exactly {spec, indicators}; rules carry entries/exits/resets', () => {
     const signal = {
       id: 's1',
       name: 'S1',
@@ -45,8 +45,8 @@ describe('computeSignal request body shape (v4)', () => {
     expect(Array.isArray(body.indicators)).toBe(true);
     expect(Array.isArray(body.spec.inputs)).toBe(true);
     expect(body.spec.inputs).toEqual(V4_INPUTS);
-    // Rules keys are exactly entries+exits — no legacy direction keys.
-    expect(Object.keys(body.spec.rules).sort()).toEqual(['entries', 'exits']);
+    // Rules keys are exactly entries+exits+resets — no legacy direction keys.
+    expect(Object.keys(body.spec.rules).sort()).toEqual(['entries', 'exits', 'resets']);
     // Settings flow through.
     expect(body.spec.settings).toEqual({ dont_repeat: true });
   });
@@ -361,5 +361,126 @@ describe('normaliseSpecForRequest does not mutate caller data', () => {
     const normLhs = normalised.rules.entries[0].conditions[0].lhs;
     expect(normLhs.params_override).toBe(null);
     expect(normLhs.series_override).toBe(null);
+  });
+
+  // T16
+  it('normaliseBlock for resets emits the whitelist + POST body has rules.resets', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [],
+        resets: [
+          {
+            id: 'r1',
+            name: 'Arm',
+            // Smuggled fields — must NOT appear on the wire.
+            input_id: 'X',
+            weight: 42,
+            target_entry_block_name: 'Alpha',
+            conditions: [
+              {
+                op: 'gt',
+                lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+                rhs: { kind: 'constant', value: 100 },
+              },
+            ],
+            enabled: true,
+            description: 'desc',
+          },
+        ],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(Array.isArray(body.spec.rules.resets)).toBe(true);
+    const r = body.spec.rules.resets[0];
+    expect(r.id).toBe('r1');
+    expect(r.name).toBe('Arm');
+    expect(r.enabled).toBe(true);
+    expect(r.description).toBe('desc');
+    expect(Array.isArray(r.conditions)).toBe(true);
+    expect(r.conditions).toHaveLength(1);
+    // Whitelist enforcement: forbidden fields must be absent.
+    expect('input_id' in r).toBe(false);
+    expect('weight' in r).toBe(false);
+    expect('target_entry_block_name' in r).toBe(false);
+  });
+});
+
+// Per CONTRACT §6.2 — requires_reset_block_id is whitelisted on
+// entries+exits and OMITTED from resets (backend rejects payloads
+// where a reset block carries the field).
+describe('normaliseBlock — requires_reset_block_id whitelist', () => {
+  const RESET_ID = 'reset-uuid-42';
+
+  it('emits requires_reset_block_id on entries (verbatim id)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: '',
+          conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
+          requires_reset_block_id: RESET_ID,
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].requires_reset_block_id).toBe(RESET_ID);
+  });
+
+  it('emits requires_reset_block_id on exits (verbatim id)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [{
+          id: 'x1', name: '', target_entry_block_name: 'Alpha',
+          conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
+          requires_reset_block_id: RESET_ID,
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.exits[0].requires_reset_block_id).toBe(RESET_ID);
+  });
+
+  it('emits explicit null when missing/empty/non-string on entries+exits', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [],
+          // field absent
+        }],
+        exits: [{
+          id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [],
+          requires_reset_block_id: '',  // empty string → null
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].requires_reset_block_id).toBe(null);
+    expect(body.spec.rules.exits[0].requires_reset_block_id).toBe(null);
+  });
+
+  it('OMITS requires_reset_block_id from reset blocks (Sign 4)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [],
+        resets: [{
+          id: 'r1', name: 'Arm', conditions: [],
+          // Tampered upstream payload — must not leak to the wire.
+          requires_reset_block_id: 'tampered',
+        }],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect('requires_reset_block_id' in body.spec.rules.resets[0]).toBe(false);
   });
 });

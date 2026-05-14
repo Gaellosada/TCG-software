@@ -18,6 +18,7 @@ import { classifyFetchError } from '../../utils/fetchError';
 import { fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
+import { getRiskFreeRateFraction } from '../../lib/userSettings';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import InlineNameInput from '../../components/InlineNameInput';
@@ -361,6 +362,7 @@ function SignalsPage() {
             capital={capital}
             noRepeat={selectedSignal?.settings?.dont_repeat ?? true}
             signalRules={selectedSignal?.rules ?? null}
+            availableIndicators={availableIndicators}
           />
         </Card>
       </div>
@@ -370,6 +372,7 @@ function SignalsPage() {
             key={statsKey}
             dates={statsInputs.dates}
             equity={statsInputs.equity}
+            defaultRiskFreeRate={getRiskFreeRateFraction()}
           />
         </div>
       )}

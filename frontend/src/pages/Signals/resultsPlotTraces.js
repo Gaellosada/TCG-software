@@ -42,6 +42,13 @@ const COLOR_NEUTRAL = '#9ca3af';
  * or ``0`` (zero / unknown — defensive fallback only; backend rejects
  * zero-weight entries and exits with dangling targets).
  */
+// Reset markers use a neutral indigo and a distinctive star-diamond symbol
+// so they read as "arming events" — visually different from triangle-based
+// entry/exit markers. Sign is irrelevant for resets (signal-global), so the
+// same style is used for all three sign keys.
+const COLOR_RESET = '#6366f1';
+const RESET_STYLE = { symbol: 'star-diamond', color: COLOR_RESET, open: false, label: 'reset' };
+
 export const EVENT_MARKER = {
   entry: {
     1: { symbol: 'triangle-up',   color: COLOR_LONG,    open: false, label: 'long entry'  },
@@ -52,6 +59,11 @@ export const EVENT_MARKER = {
     1: { symbol: 'triangle-down', color: COLOR_LONG,    open: true, label: 'long exit'   },
     '-1': { symbol: 'triangle-up',   color: COLOR_SHORT, open: true, label: 'short exit'  },
     0: { symbol: 'triangle-down', color: COLOR_NEUTRAL, open: true, label: 'exit'        },
+  },
+  reset: {
+    1: RESET_STYLE,
+    '-1': RESET_STYLE,
+    0: RESET_STYLE,
   },
 };
 
@@ -84,6 +96,36 @@ function resolveMarker(ev, blockWeightSigns) {
  * is missing or whose weight is zero map to ``0`` (neutral) — a
  * defensive value the marker table falls back on.
  */
+/**
+ * Build a block-id → display-name map from a v4 signal's rules.
+ *
+ * Display name falls back to a section-prefixed label using the block's
+ * 1-based index WITHIN its section: ``"Entry 1"``, ``"Exit 2"``,
+ * ``"Reset 1"``. Whitespace-only ``name`` is treated as empty and the
+ * fallback is used.
+ *
+ * The fallback intentionally differs from the editor's cross-section
+ * ``"Block N"`` (BlockHeader.jsx) — the chart benefits from explicit
+ * section context for marker legend readability.
+ */
+export function buildBlockDisplayNameMap(rules) {
+  const map = {};
+  if (!rules || typeof rules !== 'object') return map;
+  const sec = (list, label) => {
+    if (!Array.isArray(list)) return;
+    list.forEach((b, i) => {
+      if (b && b.id) {
+        const trimmed = typeof b.name === 'string' ? b.name.trim() : '';
+        map[b.id] = trimmed || `${label} ${i + 1}`;
+      }
+    });
+  };
+  sec(rules.entries, 'Entry');
+  sec(rules.exits, 'Exit');
+  sec(rules.resets, 'Reset');
+  return map;
+}
+
 export function buildBlockWeightSignMap(rules) {
   const map = {};
   if (!rules || typeof rules !== 'object') return map;
@@ -207,7 +249,7 @@ export function buildEventMarkerTraces(
   positions,
   dates,
   yaxis,
-  { blockWeightSigns } = {},
+  { blockWeightSigns, blockDisplayNames } = {},
 ) {
   if (!Array.isArray(events) || events.length === 0) return [];
   const byInput = new Map();
@@ -219,7 +261,14 @@ export function buildEventMarkerTraces(
     if (!ev || !ev.kind) continue;
     const style = resolveMarker(ev, blockWeightSigns);
     if (!style) continue; // unknown kind — skip gracefully
-    const position = byInput.get(ev.input_id);
+
+    // Reset events are signal-global (input_id === ''); they ride on the
+    // first input that has price data so the marker still has somewhere
+    // to land on the bottom subplot.
+    const positionKey = ev.input_id === '' || ev.input_id == null
+      ? (positions.find((p) => p && p.price && Array.isArray(p.price.values))?.input_id)
+      : ev.input_id;
+    const position = byInput.get(positionKey);
     if (!position || !position.price || !Array.isArray(position.price.values)) continue;
     const indices = Array.isArray(ev.fired_indices) ? ev.fired_indices : [];
     if (indices.length === 0) continue;
@@ -233,20 +282,26 @@ export function buildEventMarkerTraces(
       ys.push(priceAtBar);
     }
     if (xs.length === 0) continue;
-    const blockLabel = ev.block_id ? ` (block ${ev.block_id})` : '';
+    const displayName = (blockDisplayNames && blockDisplayNames[ev.block_id])
+      || (ev.block_id ? `block ${ev.block_id}` : '');
+    const suffix = displayName ? ` • ${displayName}` : '';
+    // Signal-global events (resets) omit the per-input bullet so the
+    // legend doesn't read "reset •  • Reset 1".
+    const inputBullet = ev.input_id ? ` • ${ev.input_id}` : '';
+    const inputHover = ev.input_id ? ` on ${ev.input_id}` : '';
     const trace = {
       x: xs,
       y: ys,
       type: 'scatter',
       mode: 'markers',
-      name: `${style.label} • ${ev.input_id}${blockLabel}`,
+      name: `${style.label}${inputBullet}${suffix}`,
       marker: {
         symbol: style.open ? `${style.symbol}-open` : style.symbol,
         color: style.color,
         size: 11,
         line: { color: style.color, width: 1.5 },
       },
-      hovertemplate: `%{x}<br>${style.label} on ${ev.input_id}<extra></extra>`,
+      hovertemplate: `%{x}<br>${style.label}${inputHover}${suffix}<extra></extra>`,
       legendgroup: `events-${ev.block_id || ev.kind}`,
       showlegend: true,
     };
@@ -258,14 +313,71 @@ export function buildEventMarkerTraces(
 
 /**
  * Format a short params suffix for an indicator trace label.
- * E.g. ``{ window: 3 }`` → ``" (window=3)"``, ``null`` → ``""``.
+ * E.g. ``{ window: 3 }`` → ``"(window=3)"``, ``null`` → ``""``.
+ * NOTE: no leading space — the caller concatenates directly onto the
+ * indicator display name, so ``SMA(window=20)`` is the resulting form.
  */
 function paramsLabel(paramsOverride) {
   if (!paramsOverride || typeof paramsOverride !== 'object') return '';
   const entries = Object.entries(paramsOverride);
   if (entries.length === 0) return '';
   const inner = entries.map(([k, v]) => `${k}=${v}`).join(', ');
-  return ` (${inner})`;
+  return `(${inner})`;
+}
+
+/**
+ * Compose a parallel array of legend names for indicator traces.
+ *
+ * The decision to append ``" on <input_id>"`` is GROUP-AWARE: a suffix
+ * is added only when the same ``(indicator_id, params_override)`` pair
+ * appears more than once AND spans multiple distinct ``input_id``
+ * values. Otherwise the name is just ``"<DisplayType>(<params>)"`` —
+ * the input_id is omitted because it would be redundant.
+ *
+ * ``availableIndicators`` (optional) is the frontend hydrated registry
+ * (`[{id, name, ...}, ...]`). When ``id`` matches we use the
+ * user-facing display name; otherwise we fall back to the raw
+ * ``indicator_id`` (kebab-case from the backend).
+ *
+ * @param {Array<object>} indicators        v4 ``result.indicators`` entries
+ * @param {Array<object>} [availableIndicators]  registry from hydrateIndicators
+ * @returns {string[]}                      parallel name array
+ */
+export function formatIndicatorTraceNames(indicators, availableIndicators) {
+  if (!Array.isArray(indicators) || indicators.length === 0) return [];
+  // Stable param-key by sorted-entry stringification so { a:1, b:2 } and
+  // { b:2, a:1 } collide into the same group.
+  const paramKey = (p) => {
+    if (!p || typeof p !== 'object') return '';
+    return Object.entries(p)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${k}=${v}`)
+      .join(',');
+  };
+  // Group by (indicator_id, paramKey) → list of indices.
+  const groups = new Map();
+  indicators.forEach((ind, i) => {
+    const key = `${ind?.indicator_id ?? ''}|${paramKey(ind?.params_override)}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(i);
+    else groups.set(key, [i]);
+  });
+  const lookupName = (id) => {
+    if (!Array.isArray(availableIndicators)) return id;
+    const hit = availableIndicators.find((d) => d && d.id === id);
+    return (hit && hit.name) || id;
+  };
+  return indicators.map((ind, i) => {
+    if (!ind) return '';
+    const displayType = lookupName(ind.indicator_id);
+    const params = paramsLabel(ind.params_override);
+    const key = `${ind.indicator_id ?? ''}|${paramKey(ind.params_override)}`;
+    const groupIdxs = groups.get(key) || [i];
+    const groupInputs = new Set(groupIdxs.map((j) => indicators[j]?.input_id));
+    const appendInput = groupIdxs.length >= 2 && groupInputs.size >= 2 && ind.input_id;
+    const suffix = appendInput ? ` on ${ind.input_id}` : '';
+    return `${displayType}${params}${suffix}`;
+  });
 }
 
 /**
@@ -280,16 +392,21 @@ function paramsLabel(paramsOverride) {
  *                           for backward compat with the old bottom-plot
  *                           callers.
  */
-export function buildIndicatorTraces(indicators, dates, colorOffset = 0, yaxis = 'y2') {
+export function buildIndicatorTraces(indicators, dates, colorOffset = 0, yaxis = 'y2', opts = {}) {
   if (!Array.isArray(indicators) || indicators.length === 0) return [];
-  return indicators
-    .filter((ind) => ind && Array.isArray(ind.series))
-    .map((ind, i) => ({
+  const filtered = indicators.filter((ind) => ind && Array.isArray(ind.series));
+  // Group-aware naming must see all rows to decide whether to disambiguate
+  // by input_id, so we compute names against the unfiltered set then index
+  // into the filtered subset.
+  const allNames = formatIndicatorTraceNames(indicators, opts.availableIndicators);
+  return filtered.map((ind, i) => {
+    const origIndex = indicators.indexOf(ind);
+    return {
       x: dates,
       y: ind.series,
       type: 'scatter',
       mode: 'lines',
-      name: `ind: ${ind.indicator_id}${paramsLabel(ind.params_override)}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
+      name: allNames[origIndex] ?? '',
       line: {
         color: TRACE_COLORS[(colorOffset + i) % TRACE_COLORS.length],
         width: 1,
@@ -299,7 +416,8 @@ export function buildIndicatorTraces(indicators, dates, colorOffset = 0, yaxis =
       connectgaps: false,
       hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
       legendgroup: `ind-${ind.indicator_id}-${i}`,
-    }));
+    };
+  });
 }
 
 /**
@@ -397,9 +515,15 @@ export function computeSubplotDomains(ownPanelCount) {
  * @param {object} result  compute-signal response payload
  * @param {object} [opts]
  * @param {number}  [opts.capital=1]   equity-curve scaling
- * @param {object}  [opts.signalRules] v4 ``rules`` ({entries, exits}) used to
- *        resolve per-block weight signs for marker colouring. If omitted
- *        every marker falls back to the neutral style.
+ * @param {object}  [opts.signalRules] v4 ``rules`` ({entries, exits, resets})
+ *        used to resolve per-block weight signs for marker colouring and
+ *        per-block display names for marker legend/hover text. If omitted
+ *        every marker falls back to the neutral style and the raw UUID
+ *        block id is shown.
+ * @param {Array<object>} [opts.availableIndicators]  hydrated indicator
+ *        registry ({id, name, ...}); used to render legend labels with
+ *        the user-facing display name instead of the kebab-case
+ *        ``indicator_id``.
  */
 export function buildResultsPlot(result, opts = {}) {
   if (!result || !Array.isArray(result.timestamps) || result.timestamps.length === 0) {
@@ -415,7 +539,25 @@ export function buildResultsPlot(result, opts = {}) {
     (ind) => Array.isArray(ind.series) && ind.series.length > 0,
   );
 
-  const domains = computeSubplotDomains(ownPanelWithData.length);
+  // Group ownPanel indicators by indicator_id so multiple instances of the
+  // same indicator (e.g. HV(20) and HV(100)) share one subplot. Each group
+  // becomes one panel; group members render as distinct traces on it.
+  const ownPanelGroups = [];
+  {
+    const byId = new Map();
+    for (let i = 0; i < ownPanelWithData.length; i++) {
+      const ind = ownPanelWithData[i];
+      let g = byId.get(ind.indicator_id);
+      if (!g) {
+        g = { indicator_id: ind.indicator_id, memberIndices: [] };
+        byId.set(ind.indicator_id, g);
+        ownPanelGroups.push(g);
+      }
+      g.memberIndices.push(i);
+    }
+  }
+
+  const domains = computeSubplotDomains(ownPanelGroups.length);
   const traces = [];
 
   // --- Subplot 1 (top): prices + P&L + capital, uses yaxis 'y' ---
@@ -458,34 +600,44 @@ export function buildResultsPlot(result, opts = {}) {
 
   // Overlay indicators share y2 with price (no separate right axis).
   // Offset colours past the input traces to avoid collisions.
-  const overlayTraces = buildIndicatorTraces(overlay, dates, bottomInputTraces.length, 'y2');
+  const overlayTraces = buildIndicatorTraces(overlay, dates, bottomInputTraces.length, 'y2', {
+    availableIndicators: opts.availableIndicators,
+  });
   traces.push(...overlayTraces);
 
   const events = Array.isArray(result.events) ? result.events : [];
   const blockWeightSigns = opts.signalRules
     ? buildBlockWeightSignMap(opts.signalRules)
     : undefined;
+  const blockDisplayNames = opts.signalRules
+    ? buildBlockDisplayNameMap(opts.signalRules)
+    : undefined;
   const eventTraces = buildEventMarkerTraces(events, positions, dates, 'y2', {
     blockWeightSigns,
+    blockDisplayNames,
   });
   traces.push(...eventTraces);
 
-  // --- Subplots 3..N: one per ownPanel indicator ---
+  // --- Subplots 3..N: one per ownPanel indicator_id group ---
   // Offset colours past the price + overlay traces to avoid shared colours.
   const ownPanelColorOffset = bottomInputTraces.length + overlayTraces.length;
-  ownPanelWithData.forEach((ind, i) => {
-    const axisRef = `y${i + 3}`;
-    traces.push({
-      x: dates,
-      y: ind.series,
-      type: 'scatter',
-      mode: 'lines',
-      name: `ind: ${ind.indicator_id}${paramsLabel(ind.params_override)}${ind.input_id ? ` • ${ind.input_id}` : ''}`,
-      line: { color: TRACE_COLORS[(ownPanelColorOffset + i) % TRACE_COLORS.length], width: 1.5 },
-      yaxis: axisRef,
-      connectgaps: false,
-      hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
-    });
+  const ownPanelNames = formatIndicatorTraceNames(ownPanelWithData, opts.availableIndicators);
+  ownPanelGroups.forEach((g, gi) => {
+    const axisRef = `y${gi + 3}`;
+    for (const i of g.memberIndices) {
+      const m = ownPanelWithData[i];
+      traces.push({
+        x: dates,
+        y: m.series,
+        type: 'scatter',
+        mode: 'lines',
+        name: ownPanelNames[i] ?? '',
+        line: { color: TRACE_COLORS[(ownPanelColorOffset + i) % TRACE_COLORS.length], width: 1.5 },
+        yaxis: axisRef,
+        connectgaps: false,
+        hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
+      });
+    }
   });
 
   // --- Layout ---
@@ -498,8 +650,8 @@ export function buildResultsPlot(result, opts = {}) {
       showgrid: true,
       gridcolor: 'rgba(150,150,150,0.15)',
       // Anchor to the bottom-most yaxis so ticks appear at the bottom.
-      anchor: ownPanelWithData.length > 0
-        ? `y${ownPanelWithData.length + 2}`
+      anchor: ownPanelGroups.length > 0
+        ? `y${ownPanelGroups.length + 2}`
         : 'y2',
     },
     // Top subplot y-axis
@@ -518,13 +670,17 @@ export function buildResultsPlot(result, opts = {}) {
     },
   };
 
-  // ownPanel y-axes
-  ownPanelWithData.forEach((ind, i) => {
-    const key = `yaxis${i + 3}`;
-    lo[key] = {
+  // ownPanel y-axes — one per indicator_id group; title prefers the
+  // user-facing display name from availableIndicators, falling back to
+  // the raw indicator_id when no match.
+  const registry = Array.isArray(opts.availableIndicators) ? opts.availableIndicators : [];
+  ownPanelGroups.forEach((g, gi) => {
+    const def = registry.find((d) => d && d.id === g.indicator_id);
+    const title = (def && def.name) || g.indicator_id;
+    lo[`yaxis${gi + 3}`] = {
       ...SUBPLOT_YAXIS_BASE,
-      domain: domains[i + 2],
-      title: { text: ind.indicator_id },
+      domain: domains[gi + 2],
+      title: { text: title },
       anchor: 'x',
     };
   });
