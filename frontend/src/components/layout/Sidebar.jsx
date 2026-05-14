@@ -1,20 +1,13 @@
 import { NavLink } from 'react-router-dom';
 import Icon from '../Icon';
+import { NAV_SECTIONS } from './navConfig';
 import styles from './Sidebar.module.css';
 
-const MAIN_NAV = [
-  { to: '/data', label: 'Data', icon: 'data' },
-  { to: '/indicators', label: 'Indicators', icon: 'indicators' },
-  { to: '/signals', label: 'Signals', icon: 'signals' },
-  { to: '/portfolio', label: 'Portfolio', icon: 'portfolio' },
-];
-
-const BOTTOM_NAV = [
-  { to: '/help', label: 'Help', icon: 'help' },
-  { to: '/settings', label: 'Settings', icon: 'settings' },
-];
-
 function Sidebar({ collapsed, onToggle }) {
+  // Index of the first section flagged as bottom-anchored; that section
+  // (and any after it) gets pushed to the bottom via margin-top: auto.
+  const firstBottomIdx = NAV_SECTIONS.findIndex((s) => s.anchor === 'bottom');
+
   return (
     <aside className={`${styles.sidebar} ${collapsed ? styles.collapsed : ''}`}>
       <div className={styles.logo}>
@@ -29,44 +22,49 @@ function Sidebar({ collapsed, onToggle }) {
           <Icon name={collapsed ? 'chevron-right' : 'chevron-left'} size={16} />
         </button>
       </div>
-      <nav className={styles.topNav}>
-        <ul className={styles.navList}>
-          {MAIN_NAV.map(({ to, label, icon }) => (
-            <li key={to} className={styles.navItem}>
-              <NavLink
-                to={to}
-                className={({ isActive }) =>
-                  `${styles.navLink} ${isActive ? styles.active : ''}`
-                }
-                title={collapsed ? label : undefined}
-              >
-                <span className={styles.navIcon}><Icon name={icon} size={18} /></span>
-                {!collapsed && <span className={styles.navLabel}>{label}</span>}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
-      </nav>
-      <div className={styles.spacer} />
-      <div className={styles.divider} />
-      <nav className={styles.bottomNav}>
-        <ul className={styles.navList}>
-          {BOTTOM_NAV.map(({ to, label, icon }) => (
-            <li key={to} className={styles.navItem}>
-              <NavLink
-                to={to}
-                className={({ isActive }) =>
-                  `${styles.navLink} ${isActive ? styles.active : ''}`
-                }
-                title={collapsed ? label : undefined}
-              >
-                <span className={styles.navIcon}><Icon name={icon} size={18} /></span>
-                {!collapsed && <span className={styles.navLabel}>{label}</span>}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
-      </nav>
+      {NAV_SECTIONS.map((section, idx) => {
+        const isFirstBottom = idx === firstBottomIdx;
+        const sectionClass = [
+          styles.section,
+          isFirstBottom ? styles.sectionBottom : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        return (
+          <div
+            key={section.id}
+            className={sectionClass}
+            data-section-id={section.id}
+          >
+            {isFirstBottom && <div className={styles.sectionDivider} />}
+            {!collapsed && (
+              <span className={styles.sectionLabel}>{section.label}</span>
+            )}
+            <nav>
+              <ul className={styles.navList}>
+                {section.items.map(({ path, label, icon }) => (
+                  <li key={path} className={styles.navItem}>
+                    <NavLink
+                      to={path}
+                      className={({ isActive }) =>
+                        `${styles.navLink} ${isActive ? styles.active : ''}`
+                      }
+                      title={collapsed ? label : undefined}
+                    >
+                      <span className={styles.navIcon}>
+                        <Icon name={icon} size={18} />
+                      </span>
+                      {!collapsed && (
+                        <span className={styles.navLabel}>{label}</span>
+                      )}
+                    </NavLink>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          </div>
+        );
+      })}
     </aside>
   );
 }
