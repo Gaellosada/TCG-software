@@ -190,7 +190,7 @@ async def test_all_nan_iv_missing():
         ),
     ]
     reader = FakeChainReader({d: chain})
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -220,7 +220,7 @@ async def test_missing_underlying_price():
         ),
     ]
     reader = FakeChainReader({d: chain})
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_ETH",
         option_type="C",
@@ -255,7 +255,7 @@ async def test_zero_underlying_price_treated_as_missing():
 
     # -- Legacy per-date path (no bulk_chain_reader) --
     reader = FakeChainReader({d: chain})
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -273,7 +273,7 @@ async def test_zero_underlying_price_treated_as_missing():
     # -- Bulk pre-fetch path --
     reader_b = FakeChainReader({d: chain})
     bulk_reader = FakeBulkChainReader({d: chain})
-    values_b, errors_b = await resolve_option_stream(
+    values_b, errors_b, _contracts_b = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -327,7 +327,7 @@ async def test_atm_tie_lower_strike_wins():
         ),
     ]
     reader_m = FakeChainReader({d: chain_moneyness})
-    values_m, errors_m = await resolve_option_stream(
+    values_m, errors_m, _contracts_m = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -362,7 +362,7 @@ async def test_atm_tie_lower_strike_wins():
         (contract_b, _row(row_date=d, iv=0.32)),
     ]
     reader_s = FakeChainReader({d: chain_strike})
-    values_s, errors_s = await resolve_option_stream(
+    values_s, errors_s, _contracts_s = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -408,7 +408,7 @@ async def test_multi_cycle_filter():
 
     # cycle="W" — only W visible.
     reader_w = FakeChainReader({d: chain})
-    values_w, errors_w = await resolve_option_stream(
+    values_w, errors_w, _contracts_w = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -425,7 +425,7 @@ async def test_multi_cycle_filter():
 
     # cycle="M" — only M visible.
     reader_m = FakeChainReader({d: chain})
-    values_m, errors_m = await resolve_option_stream(
+    values_m, errors_m, _contracts_m = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -469,7 +469,7 @@ async def test_single_day_delisted_gap():
         {d_prev: full_chain, d_gap: chain_no_4500, d_next: full_chain_next}
     )
 
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d_prev, d_gap, d_next],
         collection="OPT_SP_500",
         option_type="C",
@@ -509,7 +509,7 @@ async def test_last_trade_date_truncation():
     ]
     reader = FakeChainReader({d_before: full_chain_before, d_at: full_chain_at})
 
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d_before, d_at, d_after],
         collection="OPT_SP_500",
         option_type="C",
@@ -857,7 +857,7 @@ async def test_bulk_path_by_strike():
     }
     reader = FakeChainReader(chains_by_date)
     bulk_reader = FakeBulkChainReader(chains_by_date)
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
         option_type="C",
@@ -889,7 +889,7 @@ async def test_bulk_path_by_moneyness():
     ]
     reader = FakeChainReader({d: chain})
     bulk_reader = FakeBulkChainReader({d: chain})
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -918,7 +918,7 @@ async def test_bulk_path_by_delta():
     ]
     reader = FakeChainReader({d: chain})
     bulk_reader = FakeBulkChainReader({d: chain})
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -949,7 +949,7 @@ async def test_bulk_path_cycle_filter():
     # cycle="W" — only W visible in bulk path.
     reader = FakeChainReader({d: chain})
     bulk_reader = FakeBulkChainReader({d: chain})
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -978,7 +978,7 @@ async def test_bulk_path_last_trade_date():
     reader = FakeChainReader({d_at: chain_at})
     bulk_reader = FakeBulkChainReader({d_at: chain_at})
 
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d_at, d_after],
         collection="OPT_SP_500",
         option_type="C",
@@ -1009,7 +1009,7 @@ async def test_bulk_path_nearest_to_target():
     }
     reader = FakeChainReader(chains_by_date)
     bulk_reader = FakeBulkChainReader(chains_by_date)
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
         option_type="C",
@@ -1059,7 +1059,7 @@ async def test_bulk_path_nearest_to_target_with_available_expirations():
         date(2027, 12, 19),  # may be beyond far_future depending on probe_days
     ]
 
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
         option_type="C",
@@ -1117,7 +1117,7 @@ async def test_bulk_available_expirations_boundary_filtering():
     # Provide both expirations; exp_before should be filtered out.
     all_expirations = [exp_before, exp_after]
 
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
         option_type="C",
@@ -1161,7 +1161,7 @@ async def test_bulk_available_expirations_picks_nearest_to_target():
     # resolver will issue a bulk query filtered to exp_close).
     bulk_reader = FakeBulkChainReader({d: chain})
 
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -1199,7 +1199,7 @@ async def test_bulk_path_no_chain_for_date():
     }
     reader = FakeChainReader(chains_by_date)
     bulk_reader = FakeBulkChainReader(chains_by_date)
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
         option_type="C",
@@ -1263,7 +1263,7 @@ async def test_bulk_path_missing_iv():
     ]
     reader = FakeChainReader({d: chain})
     bulk_reader = FakeBulkChainReader({d: chain})
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[d],
         collection="OPT_SP_500",
         option_type="C",
@@ -1637,7 +1637,7 @@ async def test_nearest_to_target_includes_expirations_before_first_date():
     # Pre-fetched expirations — includes exp_before.
     all_expirations = [exp_before, exp_far]
 
-    values, errors = await resolve_option_stream(
+    values, errors, _contracts = await resolve_option_stream(
         dates=[first_d, second_d],
         collection="OPT_SP_500",
         option_type="C",

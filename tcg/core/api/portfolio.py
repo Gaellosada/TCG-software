@@ -486,7 +486,7 @@ async def _evaluate_option_stream_leg(
     if isinstance(result, str):
         raise ValidationError(f"Leg '{label}': {result}")
 
-    dates_arr, values, _diagnostics = result["_leg"]
+    dates_arr, values, _diagnostics, _contracts = result["_leg"]
 
     # 3. Determine stream mode
     stream_mode = "price" if leg.stream in PRICE_LIKE_STREAMS else "level"

@@ -772,7 +772,10 @@ def make_signal_fetcher(
                 cycle=instrument.cycle,
             )
 
-            values, diagnostics = await resolve_option_stream(
+            # Signals path: rolls are not consumed here (PR scope is
+            # visualisation only — Phase 1).  Bind contracts to ``_``
+            # but do NOT drop the signature change; 3-tuple is canonical.
+            values, diagnostics, _contracts = await resolve_option_stream(
                 dates=trade_dates,
                 collection=instrument.collection,
                 option_type=instrument.option_type,
