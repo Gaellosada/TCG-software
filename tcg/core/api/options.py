@@ -816,6 +816,7 @@ async def materialise_streams(
     from tcg.core.api._dates import parse_iso_range
     from tcg.core.api._options_materialise import (
         _business_dates_in_range,
+        derive_rolls,
         materialise_option_streams,
     )
     from tcg.data._utils import int_to_iso
@@ -897,15 +898,23 @@ async def materialise_streams(
     dates_iso = [int_to_iso(int(d)) for d in dates_arr]
 
     streams_payload: dict[str, dict] = {}
-    for label, (_, values, diagnostics) in result.items():
+    rolls_payload: dict[str, list] = {}
+    for label, (_, values, diagnostics, contracts) in result.items():
+        nan_safe_values = nan_safe_floats(values)
         streams_payload[label] = {
-            "values": nan_safe_floats(values),
+            "values": nan_safe_values,
             "diagnostics": diagnostics,
         }
+        # ``rolls`` is ALWAYS present in the response — every key in
+        # ``streams`` has a corresponding key in ``rolls`` (possibly
+        # an empty list).  Derived from the per-date contract identity
+        # via ``derive_rolls``; see CONTRACT.md §A.3.
+        rolls_payload[label] = derive_rolls(dates_iso, nan_safe_values, contracts)
 
     return {
         "dates": dates_iso,
         "streams": streams_payload,
+        "rolls": rolls_payload,
     }
 
 
