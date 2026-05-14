@@ -31,6 +31,7 @@ export const NAV_SECTIONS = [
     items: [
       { path: '/settings', label: 'Settings', icon: 'settings' },
       { path: '/help',     label: 'Help',     icon: 'help' },
+      { path: '/tickets',  label: 'Tickets',  icon: 'help' },
     ],
   },
 ];

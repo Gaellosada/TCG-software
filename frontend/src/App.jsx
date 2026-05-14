@@ -11,6 +11,7 @@ import PortfolioPage from './pages/Portfolio/PortfolioPage';
 import SettingsPage from './pages/Settings/SettingsPage';
 import RunningSignalsPage from './pages/RunningSignals/RunningSignalsPage';
 import MongoDBAgentPage from './pages/MongoDBAgent/MongoDBAgentPage';
+import TicketsPage from './pages/Tickets/TicketsPage';
 import './App.css';
 
 function App() {
@@ -105,6 +106,14 @@ function App() {
               element={
                 <PageContainer>
                   <MongoDBAgentPage />
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/tickets"
+              element={
+                <PageContainer>
+                  <TicketsPage />
                 </PageContainer>
               }
             />
