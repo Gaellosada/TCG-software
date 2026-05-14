@@ -177,9 +177,36 @@ describe('Chart — markers prop', () => {
     );
     expect(plotProps[0].data).toHaveLength(traces.length + 2);
     expect(plotProps[0].data[0]).toBe(traces[0]);
-    // Sell comes first per buildAllMarkerTraces ordering, then buy.
-    expect(plotProps[0].data[1].marker.symbol).toBe('circle-open');
-    expect(plotProps[0].data[2].marker.symbol).toBe('circle');
+    // BUY comes first, SELL last — pinned by MARKER_STYLE insertion order so
+    // the hollow sell ring renders ON TOP of the filled buy dot at overlap
+    // (CONTRACT §C "ring-around-dot"). See z-order regression test below.
+    expect(plotProps[0].data[1].marker.symbol).toBe('circle');
+    expect(plotProps[0].data[2].marker.symbol).toBe('circle-open');
+  });
+
+  it('renders the SELL trace LAST so the hollow ring overlays the filled dot at overlap (CONTRACT §C)', () => {
+    // Regression pin for the overlap "ring-around-dot" rule. Plotly draws
+    // later traces in `data` ON TOP, so when a sell and a buy marker share
+    // (x, y) the sell trace must come AFTER the buy trace in `data`,
+    // otherwise the filled circle occludes the hollow ring and the
+    // overlap becomes visually indistinguishable from a buy-only point.
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    // Same x and y for both markers — the overlap case the contract pins.
+    const x = '2024-03-15';
+    const y = 12.35;
+    render(
+      <Chart
+        traces={traces}
+        markers={[sellMarker({ x, y }), buyMarker({ x, y })]}
+      />,
+    );
+    const data = plotProps[0].data;
+    // Last trace must be the sell (hollow) so it renders on top.
+    expect(data[data.length - 1].marker.symbol).toBe('circle-open');
+    expect(data[data.length - 1].name).toBe('Roll — close');
+    // And the buy (filled) sits one slot earlier, underneath.
+    expect(data[data.length - 2].marker.symbol).toBe('circle');
+    expect(data[data.length - 2].name).toBe('Roll — open');
   });
 
   it('wires both marker traces into the same legendgroup with showlegend', () => {
@@ -187,7 +214,8 @@ describe('Chart — markers prop', () => {
     render(
       <Chart traces={traces} markers={[sellMarker(), buyMarker()]} />,
     );
-    const [, sellTrace, buyTrace] = plotProps[0].data;
+    // Order: traces[0] is the user line, then buy, then sell (z-order pin).
+    const [, buyTrace, sellTrace] = plotProps[0].data;
     expect(sellTrace.legendgroup).toBe('roll-markers');
     expect(buyTrace.legendgroup).toBe('roll-markers');
     expect(sellTrace.showlegend).toBe(true);
@@ -202,7 +230,8 @@ describe('Chart — markers prop', () => {
     render(
       <Chart traces={traces} markers={[sellMarker(), buyMarker()]} />,
     );
-    const [, sellTrace, buyTrace] = plotProps[0].data;
+    // Order: user line, then buy, then sell (z-order pin).
+    const [, buyTrace, sellTrace] = plotProps[0].data;
     expect(sellTrace.marker.color).toBe(dark.markerSell);
     expect(buyTrace.marker.color).toBe(dark.markerBuy);
   });
@@ -215,7 +244,8 @@ describe('Chart — markers prop', () => {
     render(
       <Chart traces={traces} markers={[sellMarker(), buyMarker()]} />,
     );
-    const [, sellTrace, buyTrace] = plotProps[0].data;
+    // Order: user line, then buy, then sell (z-order pin).
+    const [, buyTrace, sellTrace] = plotProps[0].data;
     expect(sellTrace.marker.color).toBe(light.markerSell);
     expect(buyTrace.marker.color).toBe(light.markerBuy);
     // Sanity: ensure the light values are not accidentally the dark ones.

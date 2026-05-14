@@ -205,4 +205,44 @@ describe('buildAllMarkerTraces', () => {
     );
     expect(traces).toHaveLength(1);
   });
+
+  it('returns the SELL trace LAST so the hollow ring renders on top at overlap (CONTRACT §C)', () => {
+    // Plotly draws later traces ON TOP. For the overlap case (sell + buy
+    // sharing x,y) the hollow `circle-open` (sell) must render over the
+    // filled `circle` (buy). This pins the MARKER_STYLE insertion order
+    // (buy first, sell last) that drives the iteration in
+    // buildAllMarkerTraces. Any reorder must trip this test.
+    const traces = buildAllMarkerTraces(
+      [makeMarker('sell'), makeMarker('buy')],
+      'dark',
+    );
+    expect(traces).toHaveLength(2);
+    expect(traces[traces.length - 1].marker.symbol).toBe('circle-open');
+    expect(traces[traces.length - 1].name).toBe('Roll — close');
+    expect(traces[0].marker.symbol).toBe('circle');
+    expect(traces[0].name).toBe('Roll — open');
+  });
+
+  it('order is independent of input array order — driven by MARKER_STYLE only', () => {
+    // Input order is buy-then-sell here; output must still be buy, sell.
+    const traces = buildAllMarkerTraces(
+      [makeMarker('buy'), makeMarker('sell')],
+      'dark',
+    );
+    expect(traces).toHaveLength(2);
+    expect(traces[0].marker.symbol).toBe('circle');
+    expect(traces[1].marker.symbol).toBe('circle-open');
+  });
+});
+
+describe('MARKER_STYLE modularity (verb in map, Object.keys iteration)', () => {
+  it('hovertemplate verb is read from MARKER_STYLE — no inline kind branch', () => {
+    // Sanity: distinct kinds produce distinct verbs that originate from the
+    // map. (This is structurally guaranteed by the implementation; the test
+    // pins the contract so a regression to inline branching is loud.)
+    expect(buildMarkerHovertemplate('sell')).toContain('<b>Close</b>');
+    expect(buildMarkerHovertemplate('buy')).toContain('<b>Open</b>');
+    // Unknown kind → empty string (NOT a fallback verb).
+    expect(buildMarkerHovertemplate('mystery')).toBe('');
+  });
 });
