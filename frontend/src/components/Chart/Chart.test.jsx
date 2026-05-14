@@ -33,10 +33,13 @@ vi.mock('react-plotly.js', () => {
 
 // Import AFTER vi.mock so the stub is wired.
 import Chart from './Chart';
+import { getChartColors } from '../../utils/chartTheme';
 
 afterEach(() => {
   cleanup();
   plotProps.length = 0;
+  // Reset theme back to default for isolation across tests.
+  delete document.documentElement.dataset.theme;
 });
 
 describe('Chart — trace pass-through', () => {
@@ -88,5 +91,134 @@ describe('Chart — trace pass-through', () => {
     expect(JSON.stringify(traces)).toBe(snapshot);
     // Marker object reference preserved too.
     expect(plotProps[0].data[0].marker).toBe(marker);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// markers prop — kind-discriminated overlay points (option rolls, etc).
+//
+// The added prop is OPTIONAL. When undefined/empty, the existing
+// pass-through identity invariant above MUST still hold. When non-empty,
+// Chart appends synthesized scatter traces to `traces` before handing
+// off to Plotly. The synthesized traces come from the shared
+// `chartMarkers` helper — Chart itself does no per-kind branching.
+// ---------------------------------------------------------------------------
+
+function sellMarker(overrides = {}) {
+  return {
+    x: '2024-03-15',
+    y: 12.35,
+    kind: 'sell',
+    tooltip: {
+      contract_id: 'OPT_X',
+      root: 'IND_SP_500',
+      expiration: '2024-04-19',
+      strike: 4500,
+      type: 'C',
+      value: 12.35,
+    },
+    ...overrides,
+  };
+}
+function buyMarker(overrides = {}) {
+  return {
+    x: '2024-03-15',
+    y: 13.10,
+    kind: 'buy',
+    tooltip: {
+      contract_id: 'OPT_Y',
+      root: 'IND_SP_500',
+      expiration: '2024-05-17',
+      strike: 4500,
+      type: 'C',
+      value: 13.10,
+    },
+    ...overrides,
+  };
+}
+
+describe('Chart — markers prop', () => {
+  it('preserves the identity invariant when markers is undefined', () => {
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    render(<Chart traces={traces} />);
+    // No `markers` prop → data must be referentially the caller's array.
+    expect(plotProps[0].data).toBe(traces);
+  });
+
+  it('preserves the identity invariant when markers is an empty array', () => {
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    render(<Chart traces={traces} markers={[]} />);
+    expect(plotProps[0].data).toBe(traces);
+  });
+
+  it('appends one extra trace when only sell markers are provided', () => {
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    render(<Chart traces={traces} markers={[sellMarker()]} />);
+    expect(plotProps[0].data).toHaveLength(traces.length + 1);
+    // Existing traces still pass through verbatim.
+    expect(plotProps[0].data[0]).toBe(traces[0]);
+    expect(plotProps[0].data[1].marker.symbol).toBe('circle-open');
+    expect(plotProps[0].data[1].name).toBe('Roll — close');
+  });
+
+  it('appends one extra trace when only buy markers are provided', () => {
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    render(<Chart traces={traces} markers={[buyMarker()]} />);
+    expect(plotProps[0].data).toHaveLength(traces.length + 1);
+    expect(plotProps[0].data[0]).toBe(traces[0]);
+    expect(plotProps[0].data[1].marker.symbol).toBe('circle');
+    expect(plotProps[0].data[1].name).toBe('Roll — open');
+  });
+
+  it('appends two extra traces when both sells and buys are provided', () => {
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    render(
+      <Chart traces={traces} markers={[sellMarker(), buyMarker()]} />,
+    );
+    expect(plotProps[0].data).toHaveLength(traces.length + 2);
+    expect(plotProps[0].data[0]).toBe(traces[0]);
+    // Sell comes first per buildAllMarkerTraces ordering, then buy.
+    expect(plotProps[0].data[1].marker.symbol).toBe('circle-open');
+    expect(plotProps[0].data[2].marker.symbol).toBe('circle');
+  });
+
+  it('wires both marker traces into the same legendgroup with showlegend', () => {
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    render(
+      <Chart traces={traces} markers={[sellMarker(), buyMarker()]} />,
+    );
+    const [, sellTrace, buyTrace] = plotProps[0].data;
+    expect(sellTrace.legendgroup).toBe('roll-markers');
+    expect(buyTrace.legendgroup).toBe('roll-markers');
+    expect(sellTrace.showlegend).toBe(true);
+    expect(buyTrace.showlegend).toBe(true);
+  });
+
+  it('picks marker color from the dark palette when data-theme=dark', () => {
+    // Set BEFORE render so useTheme reads it on mount.
+    document.documentElement.dataset.theme = 'dark';
+    const traces = [{ x: [1], y: [2], type: 'scatter', mode: 'lines' }];
+    const dark = getChartColors('dark');
+    render(
+      <Chart traces={traces} markers={[sellMarker(), buyMarker()]} />,
+    );
+    const [, sellTrace, buyTrace] = plotProps[0].data;
+    expect(sellTrace.marker.color).toBe(dark.markerSell);
+    expect(buyTrace.marker.color).toBe(dark.markerBuy);
+  });
+
+  it('picks marker color from the light palette by default (no data-theme)', () => {
+    // useTheme falls back to 'light' when data-theme is not set.
+    const traces = [{ x: [1], y: [2], type: 'scatter', mode: 'lines' }];
+    const light = getChartColors('light');
+    const dark = getChartColors('dark');
+    render(
+      <Chart traces={traces} markers={[sellMarker(), buyMarker()]} />,
+    );
+    const [, sellTrace, buyTrace] = plotProps[0].data;
+    expect(sellTrace.marker.color).toBe(light.markerSell);
+    expect(buyTrace.marker.color).toBe(light.markerBuy);
+    // Sanity: ensure the light values are not accidentally the dark ones.
+    expect(sellTrace.marker.color).not.toBe(dark.markerSell);
   });
 });

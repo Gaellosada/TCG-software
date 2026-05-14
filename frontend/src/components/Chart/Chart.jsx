@@ -3,6 +3,7 @@ import Plot from 'react-plotly.js';
 import useTheme from '../../hooks/useTheme';
 import ErrorBoundary from '../ErrorBoundary';
 import { buildBaseLayout, CHART_CONFIG } from '../../utils/chartTheme';
+import { buildAllMarkerTraces } from '../../utils/chartMarkers';
 import { buildCsv, downloadCsv } from '../../utils/chartCsv';
 
 // Inlined copy of Plotly's built-in `disk` icon (from plotly.js/src/fonts/ploticon.js).
@@ -28,9 +29,18 @@ const DISK_ICON = {
  * visible traces — legend-hidden series are excluded.
  *
  * Pass `downloadFilename` to name the exported file; defaults to `chart.csv`.
+ *
+ * `markers` (optional) is a flat array of kind-discriminated overlay points
+ * (e.g. option-roll sell/buy circles). When provided and non-empty, Chart
+ * builds the corresponding Plotly scatter traces via `buildAllMarkerTraces`
+ * and appends them to `traces` before handing off to Plotly. When
+ * undefined/empty, the `data` prop Plotly receives is referentially the
+ * caller's `traces` array — this identity invariant is load-bearing for
+ * existing pages and is pinned by Chart.test.jsx.
  */
 export default function Chart({
   traces,
+  markers,
   layoutOverrides,
   className,
   style,
@@ -43,6 +53,16 @@ export default function Chart({
     [layoutOverrides, theme],
   );
 
+  const markerTraces = useMemo(
+    () => buildAllMarkerTraces(markers, theme),
+    [markers, theme],
+  );
+
+  const plotData = useMemo(
+    () => (markerTraces.length === 0 ? traces : [...traces, ...markerTraces]),
+    [traces, markerTraces],
+  );
+
   const config = useMemo(
     () => ({
       ...CHART_CONFIG,
@@ -52,21 +72,21 @@ export default function Chart({
           title: 'Download visible series as CSV',
           icon: DISK_ICON,
           click: (gd) => {
-            const csv = buildCsv(gd?.data || traces);
+            const csv = buildCsv(gd?.data || plotData);
             if (!csv) return;
             downloadCsv(csv, downloadFilename);
           },
         },
       ],
     }),
-    [traces, downloadFilename],
+    [plotData, downloadFilename],
   );
 
   return (
     <div className={className} style={style}>
       <ErrorBoundary>
         <Plot
-          data={traces}
+          data={plotData}
           layout={layout}
           config={config}
           useResizeHandler
