@@ -16,6 +16,7 @@ Public API
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 import numpy as np
 import pandas_market_calendars as mcal
@@ -25,6 +26,7 @@ from tcg.core.api._options_wiring import build_stream_resolver_wiring
 from tcg.data._utils import date_to_int
 from tcg.data.protocols import MarketDataService
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
+from tcg.types.options import OptionContractDoc
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +87,18 @@ async def materialise_option_streams(
     start_date: date | None,
     end_date: date | None,
     progress_callback=None,
-) -> dict[str, tuple[np.ndarray, np.ndarray, list[str | None]]] | str:
+) -> (
+    dict[
+        str,
+        tuple[
+            np.ndarray,
+            np.ndarray,
+            list[str | None],
+            list[OptionContractDoc | None],
+        ],
+    ]
+    | str
+):
     """Materialise one or more ``OptionStreamRef`` into keyed results.
 
     Parameters
@@ -103,8 +116,11 @@ async def materialise_option_streams(
 
     Returns
     -------
-    A dict ``{label: (dates_arr, values, diagnostics)}`` on success,
-    or a string error message when the date range is missing.
+    A dict ``{label: (dates_arr, values, diagnostics, contracts)}`` on
+    success, or a string error message when the date range is missing.
+    ``contracts[i]`` is the ``OptionContractDoc`` selected on date i
+    (or ``None`` when selection failed); used by the API layer to
+    derive ``rolls`` at ``contract_id`` transitions.
     """
     # Lazy import to avoid circular dependency with options.py which
     # defines these converters and also imports from this module.
@@ -121,7 +137,15 @@ async def materialise_option_streams(
         svc
     )
 
-    results: dict[str, tuple[np.ndarray, np.ndarray, list[str | None]]] = {}
+    results: dict[
+        str,
+        tuple[
+            np.ndarray,
+            np.ndarray,
+            list[str | None],
+            list[OptionContractDoc | None],
+        ],
+    ] = {}
     for label, ref in refs_with_labels:
         # Pre-fetch available expirations filtered by the requested type
         # and cycle.  The unfiltered variant returned expirations for ALL
@@ -133,7 +157,7 @@ async def materialise_option_streams(
             option_type=ref.option_type,
             cycle=ref.cycle,
         )
-        values, diagnostics = await resolve_option_stream(
+        values, diagnostics, contracts = await resolve_option_stream(
             dates=trade_dates,
             collection=ref.collection,
             option_type=ref.option_type,
@@ -149,9 +173,90 @@ async def materialise_option_streams(
             available_expirations=all_expirations,
         )
         dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
-        results[label] = (dates_arr, values, diagnostics)
+        results[label] = (dates_arr, values, diagnostics, contracts)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Roll-event derivation
+# ---------------------------------------------------------------------------
+
+
+def _contract_meta(c: OptionContractDoc, v: float | None) -> dict[str, Any]:
+    """Format one side of a roll event (sold or bought).
+
+    Single helper used for both sides — no duplicated formatting.
+    The ``value`` field is the plotted-series value on the relevant
+    date (``values[i-1]`` for sold, ``values[i]`` for bought).  May
+    be ``None`` when the corresponding ``values[i]`` is NaN.
+
+    ``root`` is ``OptionContractDoc.root_underlying`` (e.g.
+    ``"IND_SP_500"``), NOT ``collection`` — the human-readable asset
+    name.  ``contract_id`` is included to disambiguate same-strike
+    same-expiration multi-cycle contracts (SPX vs SPXW).
+    """
+    return {
+        "contract_id": c.contract_id,
+        "root": c.root_underlying,
+        "expiration": c.expiration.isoformat(),
+        "strike": c.strike,
+        "type": c.type,
+        "value": v,
+    }
+
+
+def derive_rolls(
+    dates: list[str],
+    values: list[float | None],
+    contracts: list[OptionContractDoc | None],
+) -> list[dict[str, Any]]:
+    """Derive roll events from a per-date contract-identity array.
+
+    A roll event is emitted on date ``dates[i]`` when both
+    ``contracts[i-1]`` and ``contracts[i]`` are non-None AND their
+    ``contract_id`` differs.  This is the canonical guard: same
+    contract_id ⇒ no roll; missing chain on either side ⇒ no roll.
+
+    Parameters
+    ----------
+    dates:
+        ISO ``YYYY-MM-DD`` strings, one per trade date (parallel to
+        the other two arrays).
+    values:
+        The plotted-series value on each date (``None`` where NaN).
+        Used to populate ``sold.value`` (= ``values[i-1]``) and
+        ``bought.value`` (= ``values[i]``).
+    contracts:
+        ``OptionContractDoc | None``, parallel.  ``None`` where
+        selection failed.
+
+    Returns
+    -------
+    A list of roll-event dicts; see ``_contract_meta`` for side shape.
+    Empty list when no transitions are detected.
+    """
+    out: list[dict[str, Any]] = []
+    n = len(dates)
+    if n != len(values) or n != len(contracts):  # pragma: no cover (defensive)
+        raise ValueError(
+            "derive_rolls: dates, values, contracts must be the same length"
+        )
+    for i in range(1, n):
+        prev = contracts[i - 1]
+        curr = contracts[i]
+        if prev is None or curr is None:
+            continue
+        if prev.contract_id == curr.contract_id:
+            continue
+        out.append(
+            {
+                "date": dates[i],
+                "sold": _contract_meta(prev, values[i - 1]),
+                "bought": _contract_meta(curr, values[i]),
+            }
+        )
+    return out
 
 
 async def _materialise_option_stream(
@@ -179,4 +284,5 @@ async def _materialise_option_stream(
     )
     if isinstance(result, str):
         return result
-    return result["_single"]
+    dates_arr, values, diagnostics, _contracts = result["_single"]
+    return dates_arr, values, diagnostics
