@@ -251,4 +251,27 @@ describe('Chart — markers prop', () => {
     // Sanity: ensure the light values are not accidentally the dark ones.
     expect(sellTrace.marker.color).not.toBe(dark.markerSell);
   });
+
+  it('forwards markerHovertemplates per-kind onto the generated marker traces', () => {
+    // Futures-roll caller passes a sparser hovertemplate (only contract_id +
+    // price) — Chart must thread it through to buildAllMarkerTraces so the
+    // emitted marker traces carry the override instead of the default
+    // options-shape template. Pinned per CONTRACT §B.3.
+    const traces = [{ x: [1, 2], y: [3, 4], type: 'scatter', mode: 'lines' }];
+    const markerHovertemplates = {
+      sell: '<b>Sell</b><br>%{customdata[0]}<br>Close: %{customdata[1]:,.2f}<extra></extra>',
+      buy:  '<b>Buy</b><br>%{customdata[0]}<br>Close: %{customdata[1]:,.2f}<extra></extra>',
+    };
+    render(
+      <Chart
+        traces={traces}
+        markers={[sellMarker(), buyMarker()]}
+        markerHovertemplates={markerHovertemplates}
+      />,
+    );
+    // Order: user line, buy, sell (z-order pin).
+    const [, buyTrace, sellTrace] = plotProps[0].data;
+    expect(sellTrace.hovertemplate).toBe(markerHovertemplates.sell);
+    expect(buyTrace.hovertemplate).toBe(markerHovertemplates.buy);
+  });
 });

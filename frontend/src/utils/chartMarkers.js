@@ -24,7 +24,8 @@
  * @property {string|number} x
  * @property {number} y
  * @property {'sell'|'buy'} kind
- * @property {ContractMeta} tooltip
+ * @property {ContractMeta} [tooltip]   options-shape; ignored if `customdata` is present
+ * @property {any[]} [customdata]       if present, used VERBATIM as Plotly customdata for this point
  */
 
 import { getChartColors } from './chartTheme';
@@ -65,12 +66,25 @@ export function buildMarkerHovertemplate(kind) {
  * Returns `null` when there is nothing to draw (empty input or unknown
  * kind) so the caller can `.filter(Boolean)` without thinking about it.
  *
+ * Customdata resolution per point:
+ *   - If the Marker carries an explicit `customdata` array, it is used VERBATIM
+ *     (caller-controlled shape — e.g. futures rolls pass [contract_id, price]).
+ *   - Otherwise, customdata is derived from the legacy options-shape
+ *     `tooltip: {root, expiration, strike, type, value}` mapping, preserving
+ *     backward-compat with the options-roll caller.
+ *
+ * The optional 4th `hovertemplate` arg overrides the default options-shape
+ * template (`buildMarkerHovertemplate(kind)`). Callers with non-options
+ * customdata layouts (e.g. futures: only contract_id + price) supply their
+ * own template here. When omitted, the default is used.
+ *
  * @param {Marker[]} markersOfKind
  * @param {'sell'|'buy'} kind
  * @param {'dark'|'light'} theme
+ * @param {string} [hovertemplate]   override for the default template
  * @returns {object|null}
  */
-export function buildMarkerTrace(markersOfKind, kind, theme) {
+export function buildMarkerTrace(markersOfKind, kind, theme, hovertemplate) {
   if (!markersOfKind || markersOfKind.length === 0) return null;
   const style = MARKER_STYLE[kind];
   if (!style) return null;
@@ -79,13 +93,13 @@ export function buildMarkerTrace(markersOfKind, kind, theme) {
   return {
     x: markersOfKind.map((m) => m.x),
     y: markersOfKind.map((m) => m.y),
-    customdata: markersOfKind.map((m) => [
-      m.tooltip.root,
-      m.tooltip.expiration,
-      m.tooltip.strike,
-      m.tooltip.type,
-      m.tooltip.value,
-    ]),
+    customdata: markersOfKind.map((m) => {
+      // If the caller supplied an explicit customdata array, use it verbatim.
+      // Otherwise fall back to the options-shape derivation from `tooltip`.
+      if (Array.isArray(m.customdata)) return m.customdata;
+      const tip = m.tooltip || {};
+      return [tip.root, tip.expiration, tip.strike, tip.type, tip.value];
+    }),
     type: 'scatter',
     mode: 'markers',
     name: style.name,
@@ -95,7 +109,7 @@ export function buildMarkerTrace(markersOfKind, kind, theme) {
       color,
       line: { width: style.lineWidth, color },
     },
-    hovertemplate: buildMarkerHovertemplate(kind),
+    hovertemplate: hovertemplate ?? buildMarkerHovertemplate(kind),
     legendgroup: 'roll-markers',
     showlegend: true,
     // Marker traces are a visualization overlay, not user data — exclude them
@@ -112,12 +126,20 @@ export function buildMarkerTrace(markersOfKind, kind, theme) {
  * Markers are grouped by kind; one Plotly scatter trace is emitted per
  * non-empty kind. Returns `[]` when there is nothing to draw.
  *
+ * `opts.hovertemplates` is a per-kind override map. When a kind appears in
+ * the map its trace uses the supplied template INSTEAD of
+ * `buildMarkerHovertemplate(kind)`. Kinds absent from the map fall back to
+ * the default — so the options caller (which passes nothing) is unchanged.
+ *
  * @param {Marker[]|undefined|null} markers
  * @param {'dark'|'light'} theme
+ * @param {Object} [opts]
+ * @param {Partial<Record<'sell'|'buy', string>>} [opts.hovertemplates]
  * @returns {object[]}
  */
-export function buildAllMarkerTraces(markers, theme) {
+export function buildAllMarkerTraces(markers, theme, opts = {}) {
   if (!markers || markers.length === 0) return [];
+  const hovertemplates = opts.hovertemplates || {};
   // Iterate MARKER_STYLE so adding a new kind is a SINGLE map-entry edit.
   // Insertion order of MARKER_STYLE pins the resulting trace render order
   // (later traces render on top) — see the MARKER_STYLE declaration above.
@@ -128,6 +150,6 @@ export function buildAllMarkerTraces(markers, theme) {
     if (byKind[m.kind]) byKind[m.kind].push(m);
   }
   return Object.keys(MARKER_STYLE)
-    .map((kind) => buildMarkerTrace(byKind[kind], kind, theme))
+    .map((kind) => buildMarkerTrace(byKind[kind], kind, theme, hovertemplates[kind]))
     .filter(Boolean);
 }

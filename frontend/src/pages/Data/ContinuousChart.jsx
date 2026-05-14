@@ -4,7 +4,7 @@ import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import Chart from '../../components/Chart';
 import { getContinuousSeries, getAvailableCycles } from '../../api/data';
-import { TRACE_COLORS, getChartColors, createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
+import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
 import styles from './ChartBase.module.css';
@@ -49,6 +49,57 @@ function ContinuousChart({ collection }) {
 
   const rollDates = (data && data.roll_dates) || [];
 
+  // Per-roll marker overlay (sell + buy dot at the roll boundary).
+  //
+  // Derived from the existing endpoint payload (`roll_dates`, `contracts`,
+  // `dates`, `close`) — see CONTRACT §C.2. The sell Y is the OLD contract's
+  // last close (`close[i-1]`); the buy Y is the NEW contract's first close
+  // (`close[i]`) where `i = dates.indexOf(roll_dates[k])`. Adjustment math is
+  // already baked into `close` by the backend — no mode branch needed:
+  //   - `none`        → close[i-1] ≠ close[i] typically (visible vertical gap)
+  //   - `ratio`/`difference` → close[i-1] == close[i] (overlap → ring-on-dot)
+  //
+  // Edge cases (all skip silently — first-bar roll is a backend bug, missing
+  // date implies start/end trimmed the data, null/NaN closes are pathological):
+  //   - roll_dates empty → markers = []
+  //   - dates.indexOf(rollDate) === -1 → skip
+  //   - i === 0 → skip (no predecessor close for sell-side)
+  //   - close[i-1] or close[i] null/NaN → skip
+  //
+  // x uses `formatDateInt` so markers align with the price-line trace's x axis.
+  const markers = useMemo(() => {
+    if (!data || !data.roll_dates?.length) return [];
+    const { roll_dates, contracts, dates, close } = data;
+    const out = [];
+    for (let k = 0; k < roll_dates.length; k++) {
+      const rollDateInt = roll_dates[k];
+      const i = dates.indexOf(rollDateInt);
+      if (i <= 0) continue;
+      const sellPrice = close[i - 1];
+      const buyPrice = close[i];
+      if (!Number.isFinite(sellPrice) || !Number.isFinite(buyPrice)) continue;
+      const oldContract = contracts[k];
+      const newContract = contracts[k + 1];
+      const xLabel = formatDateInt(rollDateInt);
+      out.push({
+        x: xLabel, y: sellPrice, kind: 'sell',
+        customdata: [oldContract, sellPrice],
+      });
+      out.push({
+        x: xLabel, y: buyPrice, kind: 'buy',
+        customdata: [newContract, buyPrice],
+      });
+    }
+    return out;
+  }, [data]);
+
+  // Futures-shaped hovertemplates — sparser than the options default
+  // (no strike/type). customdata[0] = contract id, customdata[1] = price.
+  const markerHovertemplates = useMemo(() => ({
+    sell: '<b>Sell</b><br>%{customdata[0]}<br>Close: %{customdata[1]:,.2f}<extra></extra>',
+    buy:  '<b>Buy</b><br>%{customdata[0]}<br>Close: %{customdata[1]:,.2f}<extra></extra>',
+  }), []);
+
   const { traces, layoutOverrides, hasOHLC } = useMemo(() => {
     if (!data || !data.dates || data.dates.length === 0) {
       return { traces: [], layoutOverrides: {}, hasOHLC: false };
@@ -82,13 +133,6 @@ function ContinuousChart({ collection }) {
       });
     }
 
-    if (rollDates.length > 0) {
-      t.push(createVerticalLineTrace(
-        rollDates.map(formatDateInt),
-        { name: 'Roll', color: 'rgba(160, 160, 160, 0.35)', dash: 'dot', yaxisKey: 'y3' },
-      ));
-    }
-
     const lo = {
       xaxis: {
         ...(prepared.hasVolume ? { anchor: 'y2' } : {}),
@@ -101,11 +145,10 @@ function ContinuousChart({ collection }) {
         yaxis2: { domain: [0, 0.2], zeroline: false, showgrid: true,
           title: { text: 'Volume', font: { size: 11, color: colors.secondaryFont } }, anchor: 'x' },
       } : {}),
-      yaxis3: hiddenOverlayAxis(),
     };
 
     return { traces: t, layoutOverrides: lo, hasOHLC: prepared.hasOHLC };
-  }, [data, rollDates, chartType, colors]);
+  }, [data, chartType, colors]);
 
   const adjustmentLabels = { none: 'None', ratio: 'Ratio', difference: 'Difference' };
 
@@ -215,6 +258,8 @@ function ContinuousChart({ collection }) {
       <div className={styles.chartCard}>
         <Chart
           traces={traces}
+          markers={markers}
+          markerHovertemplates={markerHovertemplates}
           layoutOverrides={layoutOverrides}
           className={styles.chartWrapper}
           downloadFilename={`${collection}-continuous-${adjustment}${cycle ? `-${cycle}` : ''}`}

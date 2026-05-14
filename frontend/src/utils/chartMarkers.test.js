@@ -245,6 +245,77 @@ describe('buildAllMarkerTraces', () => {
   });
 });
 
+describe('hovertemplate override + caller-controlled customdata (futures-roll-markers)', () => {
+  // The chartMarkers API was extended (CONTRACT §B) to support non-options
+  // callers — futures has only {contract_id, price}, options has all 5 fields.
+  // The extension is purely additive: options callers pass no override and
+  // continue to work unchanged (pinned by the existing tests above).
+
+  it('buildMarkerTrace uses the explicit hovertemplate arg instead of the default', () => {
+    const customTpl = '<b>Custom</b><br>%{customdata[0]}<extra></extra>';
+    const trace = buildMarkerTrace([makeMarker('sell')], 'sell', 'dark', customTpl);
+    expect(trace).not.toBeNull();
+    expect(trace.hovertemplate).toBe(customTpl);
+    // And the default is NOT used.
+    expect(trace.hovertemplate).not.toBe(buildMarkerHovertemplate('sell'));
+  });
+
+  it('buildAllMarkerTraces opts.hovertemplates.sell overrides sell only — buy unchanged', () => {
+    const sellTpl = '<b>Sell</b><br>%{customdata[0]}<extra></extra>';
+    const traces = buildAllMarkerTraces(
+      [makeMarker('sell'), makeMarker('buy')],
+      'dark',
+      { hovertemplates: { sell: sellTpl } },
+    );
+    expect(traces).toHaveLength(2);
+    const sell = traces.find((t) => t.name === 'Roll — sell');
+    const buy = traces.find((t) => t.name === 'Roll — buy');
+    expect(sell.hovertemplate).toBe(sellTpl);
+    expect(buy.hovertemplate).toBe(buildMarkerHovertemplate('buy'));
+  });
+
+  it('buildAllMarkerTraces opts.hovertemplates.buy overrides buy only — sell unchanged', () => {
+    const buyTpl = '<b>Buy</b><br>%{customdata[0]}<extra></extra>';
+    const traces = buildAllMarkerTraces(
+      [makeMarker('sell'), makeMarker('buy')],
+      'dark',
+      { hovertemplates: { buy: buyTpl } },
+    );
+    expect(traces).toHaveLength(2);
+    const sell = traces.find((t) => t.name === 'Roll — sell');
+    const buy = traces.find((t) => t.name === 'Roll — buy');
+    expect(buy.hovertemplate).toBe(buyTpl);
+    expect(sell.hovertemplate).toBe(buildMarkerHovertemplate('sell'));
+  });
+
+  it('Marker with explicit customdata array uses it VERBATIM (skips tooltip derivation)', () => {
+    // Futures-style marker: 2-element customdata [contract_id, price]. The
+    // tooltip-derivation path would produce 5 elements — caller-supplied
+    // customdata must win regardless.
+    const marker = {
+      x: '2024-03-15',
+      y: 100.5,
+      kind: 'sell',
+      customdata: ['FUT_OLD', 100.5],
+      // Tooltip also present — must be IGNORED when customdata is supplied.
+      tooltip: { root: 'IGNORED', expiration: 'IGNORED', strike: 999, type: 'X', value: 999 },
+    };
+    const trace = buildMarkerTrace([marker], 'sell', 'dark');
+    expect(trace.customdata).toEqual([['FUT_OLD', 100.5]]);
+  });
+
+  it('Marker with no customdata and no tooltip does not crash — produces [undefined×5]', () => {
+    // Regression guard: a malformed marker (neither tooltip nor customdata)
+    // must NOT throw — it falls back to the options-shape derivation with
+    // every field undefined. The trace is still emitted; Plotly will just
+    // render "undefined" in the tooltip slots, which is loud enough.
+    const marker = { x: '2024-03-15', y: 100.5, kind: 'sell' };
+    expect(() => buildMarkerTrace([marker], 'sell', 'dark')).not.toThrow();
+    const trace = buildMarkerTrace([marker], 'sell', 'dark');
+    expect(trace.customdata).toEqual([[undefined, undefined, undefined, undefined, undefined]]);
+  });
+});
+
 describe('MARKER_STYLE modularity (verb in map, Object.keys iteration)', () => {
   it('hovertemplate verb is read from MARKER_STYLE — no inline kind branch', () => {
     // Sanity: distinct kinds produce distinct verbs that originate from the
