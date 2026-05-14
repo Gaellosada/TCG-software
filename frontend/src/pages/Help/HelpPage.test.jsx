@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Help page regression tests (CONTRACT §8 Task 2).
+// Help page regression tests.
 //
 // Locks in the post-rewrite contract: page mounts, the six kept sections render,
 // the per-block reset binding mention (new from PR #39) is present, and the

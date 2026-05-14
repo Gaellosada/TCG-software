@@ -6,6 +6,7 @@ import styles from './Sidebar.module.css';
 function Sidebar({ collapsed, onToggle }) {
   // Index of the first section flagged as bottom-anchored; that section
   // (and any after it) gets pushed to the bottom via margin-top: auto.
+  // First anchor:'bottom' section gets margin-top:auto; later bottom-anchored sections stack via flex.
   const firstBottomIdx = NAV_SECTIONS.findIndex((s) => s.anchor === 'bottom');
 
   return (
