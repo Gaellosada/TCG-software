@@ -37,10 +37,17 @@ const DISK_ICON = {
  * undefined/empty, the `data` prop Plotly receives is referentially the
  * caller's `traces` array — this identity invariant is load-bearing for
  * existing pages and is pinned by Chart.test.jsx.
+ *
+ * `markerHovertemplates` (optional) is a per-kind hovertemplate override
+ * `{ sell?: string, buy?: string }` forwarded to `buildAllMarkerTraces`.
+ * When omitted, marker traces use the default options-shape template.
+ * Non-options callers (e.g. futures rolls) supply a sparser template here
+ * paired with caller-controlled `Marker.customdata` arrays.
  */
 export default function Chart({
   traces,
   markers,
+  markerHovertemplates,
   layoutOverrides,
   className,
   style,
@@ -54,8 +61,8 @@ export default function Chart({
   );
 
   const markerTraces = useMemo(
-    () => buildAllMarkerTraces(markers, theme),
-    [markers, theme],
+    () => buildAllMarkerTraces(markers, theme, { hovertemplates: markerHovertemplates }),
+    [markers, theme, markerHovertemplates],
   );
 
   const plotData = useMemo(
