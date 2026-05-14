@@ -4,6 +4,8 @@
  * Visibility is read from the live Plotly trace objects (graphDiv.data):
  *   - `visible === false` or `'legendonly'` → excluded
  *   - `hoverinfo === 'skip'` → excluded (decorative overlays like rebalance markers)
+ *   - `meta.skipCsv === true` → excluded (overlay traces that opt out of export,
+ *     e.g. option-roll markers from chartMarkers.js)
  *
  * Supports scatter/line/bar (single `y`) and candlestick/ohlc (4 OHLC columns).
  * The x-axis of all included traces is unioned and sorted to form the row index.
@@ -13,6 +15,7 @@ function isExportable(trace) {
   if (!trace) return false;
   if (trace.visible === false || trace.visible === 'legendonly') return false;
   if (trace.hoverinfo === 'skip') return false;
+  if (trace.meta && trace.meta.skipCsv === true) return false;
   const type = trace.type;
   if (type === 'candlestick' || type === 'ohlc') {
     return Array.isArray(trace.x) && Array.isArray(trace.close);

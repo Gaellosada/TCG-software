@@ -106,6 +106,16 @@ describe('buildMarkerTrace', () => {
     }
   });
 
+  it('opts out of CSV export via meta.skipCsv (overlay, not user data)', () => {
+    // Pinned contract: chartCsv.js#isExportable filters out any trace with
+    // meta.skipCsv === true. Marker traces are a visualization overlay, not
+    // data the user wants in a CSV download.
+    for (const kind of ['sell', 'buy']) {
+      const t = buildMarkerTrace([makeMarker(kind)], kind, 'dark');
+      expect(t.meta).toEqual({ skipCsv: true });
+    }
+  });
+
   it('pulls marker colors from the theme palette (dark)', () => {
     const colors = getChartColors('dark');
     const sell = buildMarkerTrace([makeMarker('sell')], 'sell', 'dark');

@@ -98,6 +98,11 @@ export function buildMarkerTrace(markersOfKind, kind, theme) {
     hovertemplate: buildMarkerHovertemplate(kind),
     legendgroup: 'roll-markers',
     showlegend: true,
+    // Marker traces are a visualization overlay, not user data — exclude them
+    // from CSV export. The generic `meta.skipCsv` flag is the contract any
+    // future overlay (signal markers, dividend markers, etc.) should set so
+    // the Chart's CSV exporter filters them out. See chartCsv.js#isExportable.
+    meta: { skipCsv: true },
   };
 }
 
