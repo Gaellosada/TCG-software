@@ -152,6 +152,42 @@ function ContinuousOptionsChart({ collection }) {
     };
   }, [result]);
 
+  // ── Build roll markers from result.rolls (flat array across labels) ──
+  //
+  // CONTRACT B.7: `result.rolls` is keyed by stream label, each value
+  // is a list of `{ date, sold, bought }` events. Flatten to a flat
+  // marker array Chart can consume. Drop entries where the value is
+  // null on either side — without a Y position we cannot pin the dot
+  // to the price line (CONTRACT C: missing-value ruling).
+  const markers = useMemo(() => {
+    const out = [];
+    const rolls = result?.rolls;
+    if (!rolls) return out;
+    for (const label of Object.keys(rolls)) {
+      const events = rolls[label];
+      if (!Array.isArray(events)) continue;
+      for (const roll of events) {
+        if (roll?.sold?.value != null) {
+          out.push({
+            x: roll.date,
+            y: roll.sold.value,
+            kind: 'sell',
+            tooltip: roll.sold,
+          });
+        }
+        if (roll?.bought?.value != null) {
+          out.push({
+            x: roll.date,
+            y: roll.bought.value,
+            kind: 'buy',
+            tooltip: roll.bought,
+          });
+        }
+      }
+    }
+    return out;
+  }, [result]);
+
   // ── Render ──
 
   if (rootsLoading) {
@@ -226,6 +262,7 @@ function ContinuousOptionsChart({ collection }) {
         <div className={styles.chartCard}>
           <Chart
             traces={traces}
+            markers={markers}
             className={styles.chartWrapper}
             downloadFilename={`${collection}-continuous-options`}
           />
