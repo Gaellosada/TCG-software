@@ -11,11 +11,41 @@ from datetime import date
 from typing import Literal
 
 
-# Roots whose Greeks are structurally blocked in Phase 1 (guardrail #6).
+# Roots whose Greeks are structurally blocked.
+#
+# OPT_ETH stays blocked — no Deribit feed wired yet.
+# OPT_VIX was removed in Phase 2 of the VIX greeks rollout: monthly VIX
+# options now compute under Black-76 using the matching FUT_VIX close as
+# the forward; weeklies (no matching FUT_VIX expiry) still surface
+# ``missing_forward_vix_curve`` but the routing is conditional on the
+# resolver — see :func:`vix_forward_missing` below and the OPT_VIX
+# underlying-resolution branch in ``tcg.engine.options.chain._join``.
 _BLOCKED_ROOTS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "OPT_VIX": ("missing_forward_vix_curve", ("forward_vix_curve",)),
     "OPT_ETH": ("missing_deribit_feed", ("underlying_price",)),
 }
+
+
+# Per-root mapping for "underlying price unavailable" — most roots surface
+# the generic ``missing_underlying_price`` code, but OPT_VIX wants the more
+# specific ``missing_forward_vix_curve`` because the missing input is the
+# forward curve (weeklies), not the spot underlying.
+_MISSING_UNDERLYING_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "OPT_VIX": ("missing_forward_vix_curve", ("forward_vix_curve",)),
+}
+
+
+def missing_underlying_error(collection: str) -> tuple[str, tuple[str, ...]]:
+    """Return the (error_code, missing_inputs) tuple for a missing underlying
+    on the given root collection.
+
+    Default: ``("missing_underlying_price", ("underlying_price",))``.
+    OPT_VIX override: ``("missing_forward_vix_curve", ("forward_vix_curve",))``
+    — the missing input is the FUT_VIX forward (weekly options have no
+    matching FUT_VIX expiration).
+    """
+    return _MISSING_UNDERLYING_OVERRIDES.get(
+        collection, ("missing_underlying_price", ("underlying_price",))
+    )
 
 # Roots whose strike-factor must be verified before Black-76 may run.
 # Mirrors `tcg.data.options._strike_factor.STRIKE_FACTOR_VERIFIED` but lives

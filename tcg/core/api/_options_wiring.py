@@ -254,6 +254,45 @@ class _FuturesDataPortAdapter:
                 return float(series.close[idx])
         return None
 
+    async def get_futures_close_by_expiration(
+        self,
+        collection: str,
+        expiration: date,
+        target_date: date,
+    ) -> float | None:
+        """Find the FUT_* contract whose ``expiration`` field equals
+        ``expiration`` (YYYYMMDD int in Mongo), and return its
+        ``eodDatas.close`` on ``target_date``. Returns ``None`` when no
+        FUT_* contract matches (e.g. weekly VIX option) or the matching
+        contract has no bar for the target date.
+
+        Used by the OPT_VIX branch of the underlying-price resolver in
+        Phase 2 of the VIX greeks rollout. The legacy schema stores
+        ``expiration`` as ``YYYYMMDD`` int per ``_parse_expiration`` in
+        ``tcg.data._mongo.instruments``. We project ``_id`` then delegate
+        to ``get_prices`` to read the bars (re-uses the existing provider
+        / column-extraction logic).
+        """
+        try:
+            mongo_db = self._md._mongo._db  # type: ignore[attr-defined]
+        except AttributeError:
+            return None
+        expiration_int = date_to_int(expiration)
+        try:
+            doc = await mongo_db[collection].find_one(
+                {"expiration": expiration_int}, {"_id": 1}
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if doc is None:
+            return None
+        contract_ref = doc["_id"]
+        if not isinstance(contract_ref, str):
+            contract_ref = str(contract_ref)
+        return await self.get_futures_close_on_date(
+            collection, contract_ref, target_date
+        )
+
 
 # ---------------------------------------------------------------------------
 # Underlying-price resolver (closure over the three ports)

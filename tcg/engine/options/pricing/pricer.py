@@ -10,10 +10,15 @@ index. Module 6 (`tcg.engine.options.chain`) is responsible for the join.
 Invariants (per brief / guardrails):
 - ``r=0.0`` hardcoded, surfaced via ``inputs_used.r=0.0`` on every successful
   compute (guardrail #5).
-- OPT_VIX → ``error_code="missing_forward_vix_curve"`` for all 5 fields
-  (guardrail #6). No Black-76 fallback.
+- OPT_VIX → forward resolved from FUT_VIX (Phase 2): monthly options
+  compute normally under Black-76; weeklies (no matching FUT_VIX
+  expiration) reach the missing-underlying branch and surface
+  ``error_code="missing_forward_vix_curve"`` (more specific than the
+  generic ``missing_underlying_price``).
 - OPT_ETH → ``error_code="missing_deribit_feed"`` for all 5 fields.
-- ``underlying_price is None`` → ``error_code="missing_underlying_price"``.
+- ``underlying_price is None`` → ``error_code="missing_underlying_price"``
+  for most roots; ``missing_forward_vix_curve`` for OPT_VIX (per
+  ``_gating.missing_underlying_error``).
 - TTM ≤ 0 → ``error_code="expired_contract"``.
 - Root in the strike-factor-gated set with ``strike_factor_verified=False`` →
   ``error_code="strike_factor_unverified"``.
@@ -33,6 +38,7 @@ from typing import Sequence
 
 from tcg.engine.options.pricing._gating import (
     is_blocked_root,
+    missing_underlying_error,
     needs_strike_factor_verification,
     sign_for_type,
     time_to_expiry_years,
@@ -122,7 +128,8 @@ class DefaultOptionsPricer(OptionsPricer):
 
         # 3) Underlying price.
         if underlying_price is None:
-            return _all_missing("missing_underlying_price", ("underlying_price",))
+            code, missing = missing_underlying_error(contract.collection)
+            return _all_missing(code, missing)
 
         # 4) Time-to-expiry.
         T = time_to_expiry_years(contract.expiration, row.date)
@@ -221,7 +228,8 @@ class DefaultOptionsPricer(OptionsPricer):
 
         # 3) Underlying price.
         if underlying_price is None:
-            return _missing("missing_underlying_price", ("underlying_price",))
+            code, missing = missing_underlying_error(contract.collection)
+            return _missing(code, missing)
 
         # 4) TTM.
         T = time_to_expiry_years(contract.expiration, row.date)

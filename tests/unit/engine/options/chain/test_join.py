@@ -7,8 +7,10 @@ Three branches:
    inside the INTERNAL provider's eodGreeks row itself — Module 1
    surfaces it on ``OptionDailyRow.underlying_price_stored``.  No data
    port call.
-2. **OPT_VIX** (root_underlying == "IND_VIX"). Look up the INDEX
-   collection ``IND_VIX`` doc and find the row matching ``target_date``.
+2. **OPT_VIX** (root_underlying == "IND_VIX"). Look up the matching
+   ``FUT_VIX`` contract by expiration and return its close on the
+   trade date (the Black-76 forward). Returns ``None`` when no
+   FUT_VIX exists for the option's expiration (weekly options).
 3. **All other roots** (option-on-future). Look up the FUT_* document
    per ``contract.underlying_ref``, find the row matching
    ``target_date``, return the close.
@@ -128,10 +130,16 @@ class TestOptBTCBranch:
 
 
 class TestOptVIXBranch:
-    """OPT_VIX (root_underlying == "IND_VIX") joins to the INDEX collection."""
+    """OPT_VIX joins to the matching FUT_VIX contract by expiration.
+
+    Phase 2 of the VIX greeks rollout — monthly VIX options get a forward
+    from the FUT_VIX close (the Black-76 forward); weekly options (no
+    matching FUT_VIX expiration) get ``None`` so the pricer surfaces
+    ``missing_forward_vix_curve``.
+    """
 
     @pytest.mark.asyncio
-    async def test_opt_vix_returns_index_value(self) -> None:
+    async def test_opt_vix_monthly_returns_fut_vix_close(self) -> None:
         contract = _make_contract(
             collection="OPT_VIX",
             root_underlying="IND_VIX",
@@ -139,8 +147,8 @@ class TestOptVIXBranch:
         )
         row = _make_row(target_date=date(2024, 6, 21))
         index_port = AsyncMock()
-        index_port.get_index_value_on_date.return_value = 18.0
         futures_port = AsyncMock()
+        futures_port.get_futures_close_by_expiration.return_value = 18.0
 
         result = await resolve_underlying_price(
             contract=contract,
@@ -151,13 +159,19 @@ class TestOptVIXBranch:
         )
 
         assert result == 18.0
-        index_port.get_index_value_on_date.assert_awaited_once_with(
-            "IND_VIX", date(2024, 6, 21)
+        futures_port.get_futures_close_by_expiration.assert_awaited_once_with(
+            "FUT_VIX", date(2024, 6, 21), date(2024, 6, 21)
         )
+        # Index port is not used in Phase 2 — FUT_VIX is the forward.
+        index_port.get_index_value_on_date.assert_not_awaited()
         futures_port.get_futures_close_on_date.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_opt_vix_index_miss_returns_none(self) -> None:
+    async def test_opt_vix_weekly_returns_none(self) -> None:
+        """No matching FUT_VIX expiry (weekly) → adapter returns None →
+        resolver propagates None so the pricer surfaces
+        ``missing_forward_vix_curve``.
+        """
         contract = _make_contract(
             collection="OPT_VIX",
             root_underlying="IND_VIX",
@@ -165,8 +179,8 @@ class TestOptVIXBranch:
         )
         row = _make_row(target_date=date(2024, 6, 21))
         index_port = AsyncMock()
-        index_port.get_index_value_on_date.return_value = None
         futures_port = AsyncMock()
+        futures_port.get_futures_close_by_expiration.return_value = None
 
         result = await resolve_underlying_price(
             contract=contract,
@@ -177,6 +191,7 @@ class TestOptVIXBranch:
         )
 
         assert result is None
+        futures_port.get_futures_close_by_expiration.assert_awaited_once()
 
 
 class TestFuturesBranch:

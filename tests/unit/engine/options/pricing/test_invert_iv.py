@@ -118,12 +118,32 @@ def test_above_maximum_invert_failed(pricer: DefaultOptionsPricer) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_invert_iv_opt_vix_blocked(pricer: DefaultOptionsPricer) -> None:
+def test_invert_iv_opt_vix_without_forward_blocked(
+    pricer: DefaultOptionsPricer,
+) -> None:
+    """Phase 2: OPT_VIX with no resolved forward (weekly — resolver
+    returned None) propagates ``missing_forward_vix_curve`` through
+    ``invert_iv`` via the OPT_VIX missing-underlying override.
+    """
     contract = make_contract(collection="OPT_VIX")
     row = make_row()
-    result = pricer.invert_iv(contract, row, underlying_price=20.0)
+    result = pricer.invert_iv(contract, row, underlying_price=None)
     assert result.source == "missing"
     assert result.error_code == "missing_forward_vix_curve"
+
+
+def test_invert_iv_opt_vix_with_forward_computes(
+    pricer: DefaultOptionsPricer,
+) -> None:
+    """Phase 2: OPT_VIX with a resolved FUT_VIX forward inverts IV like
+    any other root.
+    """
+    contract = make_contract(collection="OPT_VIX", strike=15.0)
+    row = make_row()
+    result = pricer.invert_iv(contract, row, underlying_price=18.0)
+    assert result.source == "computed"
+    assert result.value is not None
+    assert result.error_code is None
 
 
 def test_invert_iv_missing_underlying(pricer: DefaultOptionsPricer) -> None:
