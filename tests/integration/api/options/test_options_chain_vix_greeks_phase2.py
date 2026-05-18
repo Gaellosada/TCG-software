@@ -1,8 +1,9 @@
 """Phase-2 integration test for VIX greeks computed via Black-76.
 
-Hermetic — uses a stubbed ``MarketDataService`` (with an embedded mongo-
-shaped stub for the FUT_VIX-by-expiration lookup) + ``StubOptionsReader``
-modelled on ``tests/integration/api/options/test_options_chain_vix_greeks_phase1.py``.
+Hermetic — uses a stubbed ``MarketDataService`` (with the public
+``find_futures_contract_by_expiration`` method stubbed for the FUT_VIX-
+by-expiration lookup) + ``StubOptionsReader`` modelled on
+``tests/integration/api/options/test_options_chain_vix_greeks_phase1.py``.
 
 Three scenarios cover the Phase 2 contract:
 
@@ -163,49 +164,21 @@ class _StubOptionsReader:
         raise NotImplementedError("not exercised by this test")
 
 
-class _StubMongoCollection:
-    """Stub for a Motor collection — answers ``find_one`` synchronously
-    by docstore lookup, awaitable to satisfy the adapter's interface.
+class _FutVixStore:
+    """In-memory store of FUT_VIX documents used by the stub service to
+    implement ``find_futures_contract_by_expiration``. Each doc is a dict
+    with at least ``{"_id": str, "expiration": int (YYYYMMDD)}``.
     """
 
     def __init__(self, docs: list[dict[str, Any]]) -> None:
-        self._docs = docs
+        self._by_expiration: dict[int, str] = {
+            doc["expiration"]: doc["_id"]
+            for doc in docs
+            if "expiration" in doc and "_id" in doc
+        }
 
-    async def find_one(
-        self, query: dict[str, Any], projection: dict[str, Any] | None = None
-    ) -> dict[str, Any] | None:
-        for doc in self._docs:
-            ok = True
-            for k, v in query.items():
-                if doc.get(k) != v:
-                    ok = False
-                    break
-            if ok:
-                # Apply projection if provided (only ``_id: 1`` style).
-                if projection and "_id" in projection:
-                    return {"_id": doc["_id"]}
-                return doc
-        return None
-
-
-class _StubMongoDB:
-    """Dict-style stub for an AsyncIOMotorDatabase — only supports
-    ``db[collection]`` returning a stub collection."""
-
-    def __init__(self, collections: dict[str, _StubMongoCollection]) -> None:
-        self._collections = collections
-
-    def __getitem__(self, name: str) -> _StubMongoCollection:
-        return self._collections[name]
-
-
-class _StubMongoReader:
-    """Stub satisfying the ``self._md._mongo._db`` private attribute path
-    used by ``_FuturesDataPortAdapter.get_futures_close_by_expiration``.
-    """
-
-    def __init__(self, db: _StubMongoDB) -> None:
-        self._db = db
+    def find_by_expiration(self, expiration_int: int) -> str | None:
+        return self._by_expiration.get(expiration_int)
 
 
 async def _build_client(
@@ -245,14 +218,22 @@ async def _build_client(
     else:
         mock_svc.get_prices = AsyncMock(return_value=None)
 
-    # Wire a stub for the private ``_mongo._db`` path used by the
-    # ``_FuturesDataPortAdapter.get_futures_close_by_expiration``
-    # adapter. The test deliberately exercises that private path because
-    # Phase 2 introduced the lookup-by-expiration query.
-    collections: dict[str, _StubMongoCollection] = {}
-    if fut_vix_docs is not None:
-        collections["FUT_VIX"] = _StubMongoCollection(fut_vix_docs)
-    mock_svc._mongo = _StubMongoReader(_StubMongoDB(collections))
+    # Wire the public ``find_futures_contract_by_expiration`` method so
+    # ``_FuturesDataPortAdapter.get_futures_close_by_expiration`` can
+    # call it without reaching into private attributes.
+    fut_vix_store = _FutVixStore(fut_vix_docs or [])
+
+    async def _find_futures_contract(
+        collection: str, expiration_int: int
+    ) -> str | None:
+        # Only FUT_VIX lookup is exercised in these tests.
+        if collection == "FUT_VIX":
+            return fut_vix_store.find_by_expiration(expiration_int)
+        return None
+
+    mock_svc.find_futures_contract_by_expiration = AsyncMock(
+        side_effect=_find_futures_contract
+    )
 
     app.state.market_data = mock_svc
 

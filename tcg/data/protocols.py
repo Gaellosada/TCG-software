@@ -127,6 +127,19 @@ class MarketDataService(Protocol):
         cycle: str | None = None,
     ) -> list[date]: ...
 
+    # --- Futures contract lookup by expiration (Phase 2 VIX greeks) ---
+
+    async def find_futures_contract_by_expiration(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the ``_id`` string of the futures contract whose
+        ``expiration`` field equals *expiration_int* (YYYYMMDD int).
+        Returns ``None`` when no contract matches.
+        """
+        ...
+
     @property
     def options_reader(self) -> OptionsDataReader:
         """Return the underlying options data reader.

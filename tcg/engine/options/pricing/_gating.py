@@ -62,8 +62,10 @@ def is_blocked_root(collection: str) -> tuple[bool, str | None, tuple[str, ...]]
     """Return ``(blocked, error_code, missing_inputs)`` for the root collection.
 
     Examples:
+        >>> is_blocked_root("OPT_ETH")
+        (True, 'missing_deribit_feed', ('underlying_price',))
         >>> is_blocked_root("OPT_VIX")
-        (True, 'missing_forward_vix_curve', ('forward_vix_curve',))
+        (False, None, ())
         >>> is_blocked_root("OPT_SP_500")
         (False, None, ())
     """

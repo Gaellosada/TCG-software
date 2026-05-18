@@ -269,26 +269,19 @@ class _FuturesDataPortAdapter:
         Used by the OPT_VIX branch of the underlying-price resolver in
         Phase 2 of the VIX greeks rollout. The legacy schema stores
         ``expiration`` as ``YYYYMMDD`` int per ``_parse_expiration`` in
-        ``tcg.data._mongo.instruments``. We project ``_id`` then delegate
-        to ``get_prices`` to read the bars (re-uses the existing provider
-        / column-extraction logic).
+        ``tcg.data._mongo.instruments``. Delegates to the public
+        ``MarketDataService.find_futures_contract_by_expiration`` method
+        rather than reaching into private attributes.
         """
-        try:
-            mongo_db = self._md._mongo._db  # type: ignore[attr-defined]
-        except AttributeError:
-            return None
         expiration_int = date_to_int(expiration)
         try:
-            doc = await mongo_db[collection].find_one(
-                {"expiration": expiration_int}, {"_id": 1}
+            contract_ref = await self._md.find_futures_contract_by_expiration(
+                collection, expiration_int
             )
         except Exception:  # noqa: BLE001
             return None
-        if doc is None:
+        if contract_ref is None:
             return None
-        contract_ref = doc["_id"]
-        if not isinstance(contract_ref, str):
-            contract_ref = str(contract_ref)
         return await self.get_futures_close_on_date(
             collection, contract_ref, target_date
         )
