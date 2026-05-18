@@ -95,8 +95,13 @@ async def test_sp500_chain_2024_03_15(options_reader):
 
 
 @pytest.mark.integration
-async def test_vix_chain_no_greeks(options_reader):
-    """OPT_VIX surfaces quotes but never Greeks — Phase 1 gating."""
+async def test_vix_chain_surfaces_quotes(options_reader):
+    """OPT_VIX surfaces CBOE quotes. After the VIX greeks Phase 1
+    rollout the data layer no longer blanket-blocks OPT_VIX greeks —
+    any stored CBOE greeks pass through. We assert chain rows exist;
+    greeks may be None (absent) or populated (stored) depending on
+    what CBOE wrote into ``eodGreeks`` for the chosen date.
+    """
     rows = await options_reader.query_chain(
         "OPT_VIX",
         date(2024, 3, 19),
@@ -106,11 +111,15 @@ async def test_vix_chain_no_greeks(options_reader):
     )
     assert len(rows) > 0, "Expected at least one OPT_VIX row on a liquid date"
     for _contract, row in rows:
-        assert row.delta_stored is None
-        assert row.iv_stored is None
-        assert row.gamma_stored is None
-        assert row.theta_stored is None
-        assert row.vega_stored is None
+        # Each stored greek is either None or a real float — no exceptions.
+        for value in (
+            row.iv_stored,
+            row.delta_stored,
+            row.gamma_stored,
+            row.theta_stored,
+            row.vega_stored,
+        ):
+            assert value is None or isinstance(value, float)
 
 
 @pytest.mark.integration

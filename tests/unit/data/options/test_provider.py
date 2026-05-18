@@ -114,8 +114,17 @@ class TestProviderPriority:
 
 class TestHasGreeksForRoot:
     def test_blocked(self):
-        assert has_greeks_for_root("OPT_VIX") is False
+        # Only OPT_ETH stays blocked at the data layer. OPT_VIX was
+        # unblocked in Phase 1 of the VIX greeks rollout — any stored
+        # CBOE greeks now pass through with ``source="stored"``.
         assert has_greeks_for_root("OPT_ETH") is False
+
+    def test_vix_no_longer_blocked(self):
+        # Phase 1 of VIX greeks rollout: the data-layer blanket that
+        # forced OPT_VIX to has_greeks=False has been lifted. The
+        # engine compute path stays gated independently (see
+        # ``tcg.engine.options.pricing._gating``).
+        assert has_greeks_for_root("OPT_VIX") is True
 
     def test_allowed(self):
         for coll in (
@@ -127,5 +136,6 @@ class TestHasGreeksForRoot:
             "OPT_T_BOND",
             "OPT_EURUSD",
             "OPT_JPYUSD",
+            "OPT_VIX",
         ):
             assert has_greeks_for_root(coll) is True, coll

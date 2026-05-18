@@ -8,9 +8,13 @@ not curated, the row is dropped loudly so the unexpected-vendor case
 is visible (and easy to fix by extending the list) rather than
 silently masked.
 
-Greeks gating: OPT_VIX / OPT_ETH always return ``has_greeks=False``;
-quote data may still surface from ``eodDatas`` (CBOE for VIX,
-COINAPI / DERIBIT for ETH).
+Greeks gating: OPT_ETH always returns ``has_greeks=False`` (no
+curated greeks vendor wired in yet); quote data may still surface
+from ``eodDatas`` (COINAPI / DERIBIT). OPT_VIX is no longer
+blanket-blocked at the data layer — any greeks present under
+``eodDatas.CBOE[*]`` pass through with ``source="stored"``. (The
+engine-side compute path remains blocked until the FUT_VIX
+forward-curve wiring lands; see ``tcg.engine.options.pricing._gating``.)
 """
 
 from __future__ import annotations
@@ -35,7 +39,11 @@ _PRIORITY_BY_ROOT: dict[str, tuple[str, ...]] = {
 }
 
 # Roots whose quotes (eodDatas) may surface but Greeks must NEVER surface.
-_GREEKS_BLOCKED_ROOTS: frozenset[str] = frozenset({"OPT_VIX", "OPT_ETH"})
+# OPT_ETH stays blocked at the data layer until a curated greeks vendor
+# is wired in (Phase 2+ scope). OPT_VIX was unblocked when CBOE greeks
+# pass-through was enabled — engine-side compute remains gated until
+# the FUT_VIX forward-curve resolver is fixed.
+_GREEKS_BLOCKED_ROOTS: frozenset[str] = frozenset({"OPT_ETH"})
 
 
 def select_provider(
@@ -61,7 +69,12 @@ def select_provider(
 
 
 def has_greeks_for_root(collection: str) -> bool:
-    """Return False for roots where Greeks are blocked (VIX / ETH)."""
+    """Return False for roots where Greeks are blocked at the data layer.
+
+    Currently only OPT_ETH is blocked (no curated greeks vendor wired in).
+    OPT_VIX returns True so any CBOE-stored greeks pass through; the
+    engine-side compute path is independently gated.
+    """
     return collection not in _GREEKS_BLOCKED_ROOTS
 
 

@@ -117,7 +117,14 @@ class TestMaterializeChainRow:
         )
         assert pair is None
 
-    def test_vix_no_greeks_surfaced(self, vix_doc):
+    def test_vix_quotes_surface_when_no_stored_greeks(self, vix_doc):
+        """OPT_VIX doc with no ``eodGreeks`` block: quotes surface,
+        greeks remain None (no stored data → no value to pass through).
+
+        Phase 1 of the VIX greeks rollout removed the data-layer
+        blanket; absence of greeks in the doc is now the only reason
+        for the row's stored greeks to be None.
+        """
         pair = _materialize_chain_row(
             doc=vix_doc,
             collection="OPT_VIX",
@@ -132,6 +139,40 @@ class TestMaterializeChainRow:
         assert contract.type == "P"  # normalized
         assert row.delta_stored is None
         assert row.iv_stored is None
+
+    def test_vix_stored_greeks_pass_through(self, vix_doc, make_greek_full):
+        """OPT_VIX doc with CBOE-stored greeks: each greek passes
+        through to the row unchanged (Phase 1 stored-greeks unblock).
+        """
+        vix_doc["eodGreeks"] = {
+            "CBOE": [
+                make_greek_full(
+                    20240315,
+                    iv=0.85,
+                    delta=-0.42,
+                    gamma=0.03,
+                    theta=-0.08,
+                    vega=0.04,
+                    underlying_price=15.5,
+                )
+            ],
+        }
+        pair = _materialize_chain_row(
+            doc=vix_doc,
+            collection="OPT_VIX",
+            target_yyyymmdd=20240315,
+            type_filter="BOTH",
+            strike_min=None,
+            strike_max=None,
+        )
+        assert pair is not None
+        contract, row = pair
+        assert contract.provider == "CBOE"
+        assert row.iv_stored == 0.85
+        assert row.delta_stored == -0.42
+        assert row.gamma_stored == 0.03
+        assert row.theta_stored == -0.08
+        assert row.vega_stored == 0.04
 
     def test_btc_uses_internal(self, btc_doc):
         pair = _materialize_chain_row(
