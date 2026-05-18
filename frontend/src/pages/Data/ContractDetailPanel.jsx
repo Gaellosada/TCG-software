@@ -170,7 +170,10 @@ function computeLifecycleDates(contract, rows) {
 // ---------------------------------------------------------------------------
 
 export default function ContractDetailPanel({ collection, instrumentId, onClose }) {
-  const [computeMissing, setComputeMissing] = useState(false);
+  // Default true (Phase 2): mirrors the chain table default — VIX has no stored
+  // greeks at CBOE, so default-true is needed for them to appear without an
+  // extra toggle. Stored-greek collections short-circuit per row.
+  const [computeMissing, setComputeMissing] = useState(true);
   const [overlayState, setOverlayState] = useState({
     iv: false,
     delta: false,

@@ -77,7 +77,7 @@ describe('useOptionsChain — initial state', () => {
     expect(filters.expirationMax).toBe(addDays(today, 90));
     expect(filters.strikeMin).toBeNull();
     expect(filters.strikeMax).toBeNull();
-    expect(filters.computeMissing).toBe(false);
+    expect(filters.computeMissing).toBe(true);
   });
 
   it('chainData is null before any fetch', () => {
@@ -123,7 +123,7 @@ describe('useOptionsChain — fetchChain happy path', () => {
     expect(getOptionChain).toHaveBeenCalledWith(
       'OPT_SP_500',
       expect.objectContaining({
-        computeMissing: false,
+        computeMissing: true,
         type: 'both',
       }),
     );
@@ -152,7 +152,7 @@ describe('useOptionsChain — updateFilters', () => {
     expect(result.current.filters.root).toBe('OPT_GOLD');
     // Other fields unchanged
     expect(result.current.filters.type).toBe('both');
-    expect(result.current.filters.computeMissing).toBe(false);
+    expect(result.current.filters.computeMissing).toBe(true);
   });
 
   it('uses the updated root when fetchChain is called afterwards', async () => {
@@ -227,19 +227,19 @@ describe('useOptionsChain — expiration_cycle filter', () => {
 });
 
 describe('useOptionsChain — computeMissing toggle is transient (Decision C)', () => {
-  it('computeMissing defaults to false', () => {
+  it('computeMissing defaults to true (Phase 2 — VIX has no stored greeks at CBOE)', () => {
     const { result } = renderHook(() => useOptionsChain());
-    expect(result.current.filters.computeMissing).toBe(false);
+    expect(result.current.filters.computeMissing).toBe(true);
   });
 
-  it('can be toggled to true via updateFilters', () => {
+  it('can be toggled to false via updateFilters', () => {
     const { result } = renderHook(() => useOptionsChain());
 
     act(() => {
-      result.current.updateFilters({ computeMissing: true });
+      result.current.updateFilters({ computeMissing: false });
     });
 
-    expect(result.current.filters.computeMissing).toBe(true);
+    expect(result.current.filters.computeMissing).toBe(false);
   });
 
   it('localStorage.setItem is never called — no persistence (Decision C)', async () => {
