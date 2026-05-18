@@ -87,6 +87,47 @@ def _not_requested() -> ComputeResult:
     return _missing("not_requested", ())
 
 
+def _classify_iv_inversion_failure(
+    exc: BaseException, *, flag: str, F: float, K: float
+) -> ComputeResult:
+    """Map a py_vollib inversion exception to the most informative error code.
+
+    The common case for VIX (and other low-time-value contracts) is
+    ``BelowIntrinsicException`` on a deep-ITM strike — the vendor's EOD
+    settle sits a few cents below the discounted no-arb floor on contracts
+    whose IV is degenerate anyway. We surface a friendlier code + message
+    so the tooltip explains the situation rather than dumping the raw
+    exception text.
+
+    Bounds checked:
+      - ITM put: K > F
+      - ITM call: K < F
+      - "Deep" is anything reaching the BelowIntrinsic boundary; we don't
+        require a moneyness threshold because the lower-bound violation is
+        itself the signal that the option is degenerate-by-data.
+    """
+    exc_name = type(exc).__name__
+    is_below_intrinsic = exc_name == "BelowIntrinsicException"
+    is_itm_put = flag == "p" and K > F
+    is_itm_call = flag == "c" and K < F
+
+    if is_below_intrinsic and (is_itm_put or is_itm_call):
+        # Two-sentence tooltip per UX request — explains why no IV exists
+        # AND tells the user what to use instead (analytic limits).
+        detail = (
+            "Deep ITM: option moves 1:1 with the underlying so IV is "
+            "degenerate. Greek limits at this regime: |delta| approx 1, "
+            "gamma approx theta approx vega approx 0."
+        )
+        return _missing("missing_iv_deep_itm_degenerate", ("iv",), error_detail=detail)
+
+    return _missing(
+        "missing_iv_invert_failed",
+        ("iv",),
+        error_detail=f"{exc_name}: {exc}",
+    )
+
+
 def _all_missing(error_code: str, missing_inputs: tuple[str, ...]) -> ComputedGreeks:
     """Build a ``ComputedGreeks`` whose 5 fields are all the same missing reason."""
     r = _missing(error_code, missing_inputs)
@@ -265,8 +306,7 @@ class DefaultOptionsPricer(OptionsPricer):
                 flag=flag,
             )
         except Exception as exc:  # noqa: BLE001 — py_vollib raises a hierarchy
-            detail = f"{type(exc).__name__}: {exc}"
-            return _missing("missing_iv_invert_failed", ("iv",), error_detail=detail)
+            return _classify_iv_inversion_failure(exc, flag=flag, F=F, K=K)
 
         # Some py_vollib paths return NaN or a sentinel non-finite value rather
         # than raising; treat as failure.

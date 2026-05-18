@@ -89,17 +89,50 @@ def test_mid_zero_no_quote_to_invert(pricer: DefaultOptionsPricer) -> None:
     assert result.error_code == "missing_iv_no_quote_to_invert"
 
 
-def test_below_intrinsic_invert_failed(pricer: DefaultOptionsPricer) -> None:
-    """Price below intrinsic triggers py_vollib's BelowIntrinsicException."""
-    # Deep ITM call F=100, K=80; intrinsic = 20. Price = 1 << 20.
+def test_below_intrinsic_deep_itm_call_uses_degenerate_code(
+    pricer: DefaultOptionsPricer,
+) -> None:
+    """Deep ITM call where mid < intrinsic gets the deep-ITM-degenerate code.
+
+    Common in production VIX chains: vendor EOD settle for deep ITM options
+    sits a few cents below the discounted no-arb floor, py_vollib raises
+    BelowIntrinsicException. We surface a friendlier code + message that
+    explains the degenerate-IV situation rather than dumping the raw
+    exception text.
+    """
+    # F=100, K=80 → deep ITM call, intrinsic ≈ 20. Mid=1 << intrinsic.
     contract = make_contract(strike=80.0, type_="C", expiration=date(2024, 6, 21))
     row = make_row(row_date=date(2024, 3, 22), mid=1.0)
     result = pricer.invert_iv(contract, row, underlying_price=100.0)
     assert result.source == "missing"
-    assert result.error_code == "missing_iv_invert_failed"
-    assert result.error_detail is not None
-    assert len(result.error_detail) > 0
+    assert result.error_code == "missing_iv_deep_itm_degenerate"
     assert result.missing_inputs == ("iv",)
+    # Message stays within 2 sentences and includes the analytic limits the
+    # user wanted in the tooltip.
+    assert result.error_detail is not None
+    assert "Deep ITM" in result.error_detail
+    assert "delta" in result.error_detail.lower()
+    # No raw exception class name leaks into the tooltip.
+    assert "BelowIntrinsicException" not in result.error_detail
+    assert result.error_detail.count(".") <= 2
+
+
+def test_below_intrinsic_deep_itm_put_uses_degenerate_code(
+    pricer: DefaultOptionsPricer,
+) -> None:
+    """Same routing for ITM puts (K > F).
+
+    This is the dominant failure mode in the production VIX chain because
+    OPT_VIX has strikes up to 200 with the front-month future near 15, so
+    most ITM contracts are puts.
+    """
+    # F=15, K=100 → deep ITM put, intrinsic ≈ 85. Mid=80 < 85 by enough to fire.
+    contract = make_contract(strike=100.0, type_="P", expiration=date(2024, 6, 21))
+    row = make_row(row_date=date(2024, 3, 22), mid=80.0)
+    result = pricer.invert_iv(contract, row, underlying_price=15.0)
+    assert result.source == "missing"
+    assert result.error_code == "missing_iv_deep_itm_degenerate"
+    assert "Deep ITM" in (result.error_detail or "")
 
 
 def test_above_maximum_invert_failed(pricer: DefaultOptionsPricer) -> None:
