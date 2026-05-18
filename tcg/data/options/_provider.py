@@ -46,6 +46,43 @@ _PRIORITY_BY_ROOT: dict[str, tuple[str, ...]] = {
 _GREEKS_BLOCKED_ROOTS: frozenset[str] = frozenset({"OPT_ETH"})
 
 
+# Roots whose engine-side Black-76 compute is blocked. MUST stay in sync
+# with `tcg.engine.options.pricing._gating._BLOCKED_ROOTS` (kept here as
+# data-layer metadata because the data layer cannot import the engine —
+# guardrail `engine-data-isolation`). The drift is caught by
+# `tests/unit/data/options/test_provider.py::test_no_compute_roots_mirrors_engine_gate`.
+_NO_COMPUTE_ROOTS: frozenset[str] = frozenset({"OPT_ETH"})
+
+
+# Fraction of docs per root that carry ``eodGreeks`` in the live Mongo,
+# measured 2026-05-18 against `tcg-instrument`. Drives the left-nav badge
+# variant on the frontend (`>=0.9` solid "Greeks", `0.1-0.9` split badge,
+# `<0.1` falls through to the gray "Comp. Greeks" if compute is available).
+#
+# Why hardcoded instead of a live `count_documents` on each /api/options/roots
+# call: counting docs-with-eodGreeks across all ~10 collections at request
+# time is dominated by Mongo round-trip and an unindexed key check; in
+# benchmarks against the production DB it pushed the endpoint past the
+# frontend's 60s timeout. Ratios are vendor-determined and change very
+# slowly (a new vendor would also touch `_PRIORITY_BY_ROOT`, so this stays
+# co-located). Update when vendor coverage changes meaningfully.
+_STORED_GREEKS_RATIO_BY_ROOT: dict[str, float] = {
+    "OPT_SP_500": 0.997,
+    "OPT_NASDAQ_100": 1.0,
+    "OPT_GOLD": 1.0,
+    "OPT_T_NOTE_10_Y": 0.997,
+    "OPT_T_BOND": 1.0,
+    "OPT_EURUSD": 1.0,
+    "OPT_JPYUSD": 0.299,
+    "OPT_BTC": 0.366,
+    # CBOE ships no greeks for VIX (0/59,272 docs as of 2026-05-18); engine
+    # computes via Black-76 + FUT_VIX forward (Phase 2 of the rollout).
+    "OPT_VIX": 0.0,
+    # No Deribit feed wired in; engine is also gated. Badge omitted.
+    "OPT_ETH": 0.0,
+}
+
+
 def select_provider(
     collection: str,
     eod_datas: Mapping[str, Any] | None = None,
@@ -76,6 +113,26 @@ def has_greeks_for_root(collection: str) -> bool:
     engine-side compute path is independently gated.
     """
     return collection not in _GREEKS_BLOCKED_ROOTS
+
+
+def has_computed_greeks_for_root(collection: str) -> bool:
+    """Return True when the engine can compute greeks for this root.
+
+    Mirrors the engine's ``_BLOCKED_ROOTS`` gate (kept in sync via the
+    `_NO_COMPUTE_ROOTS` registry above) because the data layer cannot
+    import from ``tcg.engine`` (engine-data-isolation guardrail).
+    """
+    return collection not in _NO_COMPUTE_ROOTS
+
+
+def stored_greeks_ratio_for_root(collection: str) -> float:
+    """Return the fraction of docs in this collection carrying ``eodGreeks``.
+
+    Returns 0.0 for unknown roots (a new root defaults to "no stored greeks"
+    until measured). See `_STORED_GREEKS_RATIO_BY_ROOT` for the measurement
+    methodology and how to update it.
+    """
+    return _STORED_GREEKS_RATIO_BY_ROOT.get(collection, 0.0)
 
 
 def provider_priority(collection: str) -> tuple[str, ...]:

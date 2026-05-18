@@ -150,6 +150,113 @@ describe('Options expansion', () => {
   });
 });
 
+describe('Greeks badge — stored_greeks_ratio variants', () => {
+  beforeEach(() => {
+    defaultDataMocks();
+  });
+
+  async function renderWithRoots(roots) {
+    vi.mocked(getOptionRoots).mockResolvedValue({ roots });
+    render(<CategoryBrowser selected={null} onSelect={vi.fn()} />);
+    await waitFor(() => {
+      expect(screen.queryByText('Loading instruments...')).toBeNull();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /options/i }));
+  }
+
+  function root(overrides = {}) {
+    return {
+      collection: 'OPT_X',
+      name: 'X',
+      has_greeks: true,
+      providers: ['IVOLATILITY'],
+      expiration_first: '2020-01-01',
+      expiration_last: '2025-12-31',
+      last_trade_date: '2024-12-31',
+      doc_count_estimated: 1,
+      strike_factor_verified: true,
+      stored_greeks_ratio: 1.0,
+      has_computed_greeks: true,
+      ...overrides,
+    };
+  }
+
+  it('solid green "Greeks" when stored_greeks_ratio >= 0.9 (e.g. OPT_SP_500 at 99.7%)', async () => {
+    await renderWithRoots([
+      root({ collection: 'OPT_SP_500', name: 'SP 500', stored_greeks_ratio: 0.997 }),
+    ]);
+    const badge = await screen.findByText('Greeks');
+    expect(badge.className).toMatch(/greeksBadge_/);
+    expect(badge.className).not.toMatch(/greeksBadgePartial|greeksBadgeComputed/);
+  });
+
+  it('split "Greeks" when 0.1 <= ratio < 0.9 (e.g. OPT_BTC at 37%)', async () => {
+    await renderWithRoots([
+      root({ collection: 'OPT_BTC', name: 'BTC', stored_greeks_ratio: 0.37 }),
+    ]);
+    const badge = await screen.findByText('Greeks');
+    expect(badge.className).toMatch(/greeksBadgePartial/);
+  });
+
+  it('split "Greeks" for OPT_JPYUSD at 30%', async () => {
+    await renderWithRoots([
+      root({ collection: 'OPT_JPYUSD', name: 'JPY USD', stored_greeks_ratio: 0.30 }),
+    ]);
+    expect((await screen.findByText('Greeks')).className).toMatch(/greeksBadgePartial/);
+  });
+
+  it('gray "Comp. Greeks" when ratio < 0.1 but has_computed_greeks=true (e.g. OPT_VIX)', async () => {
+    await renderWithRoots([
+      root({
+        collection: 'OPT_VIX',
+        name: 'VIX',
+        stored_greeks_ratio: 0.0,
+        has_computed_greeks: true,
+      }),
+    ]);
+    const badge = await screen.findByText('Comp. Greeks');
+    expect(badge.className).toMatch(/greeksBadgeComputed/);
+    // The plain "Greeks" badge is NOT rendered for VIX.
+    expect(screen.queryByText(/^Greeks$/)).toBeNull();
+  });
+
+  it('no badge when ratio < 0.1 and has_computed_greeks=false (e.g. OPT_ETH)', async () => {
+    await renderWithRoots([
+      root({
+        collection: 'OPT_ETH',
+        name: 'ETH',
+        stored_greeks_ratio: 0.0,
+        has_computed_greeks: false,
+        has_greeks: false,
+      }),
+    ]);
+    // Root rendered, no greek-related badge.
+    expect(await screen.findByText('ETH')).toBeDefined();
+    expect(screen.queryByText(/Greeks/)).toBeNull();
+  });
+
+  it('legacy fallback: has_greeks=true with no ratio fields → solid Greeks badge', async () => {
+    // Older API responses (or tests) without the Phase 3 fields still work.
+    await renderWithRoots([
+      {
+        collection: 'OPT_LEGACY',
+        name: 'Legacy',
+        has_greeks: true,
+        providers: ['IVOLATILITY'],
+        expiration_first: '2020-01-01',
+        expiration_last: '2025-12-31',
+        last_trade_date: '2024-12-31',
+        doc_count_estimated: 1,
+        strike_factor_verified: true,
+        // no stored_greeks_ratio, no has_computed_greeks
+      },
+    ]);
+    const badge = await screen.findByText('Greeks');
+    expect(badge.className).toMatch(/greeksBadge_/);
+    expect(badge.className).not.toMatch(/greeksBadgePartial|greeksBadgeComputed/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 3. Verification-pending badge — intentionally suppressed
 // ---------------------------------------------------------------------------

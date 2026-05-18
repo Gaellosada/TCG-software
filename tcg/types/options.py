@@ -118,7 +118,7 @@ class OptionRootInfo:
     """Per-root metadata returned by /api/options/roots (§5)."""
     collection: str                        # "OPT_SP_500"
     name: str                             # display: "SP 500"
-    has_greeks: bool
+    has_greeks: bool                      # stored_greeks_ratio > 0 OR has_computed_greeks
     providers: tuple[str, ...]            # e.g. ("IVOLATILITY",)
     expiration_first: date | None
     expiration_last: date | None
@@ -129,6 +129,16 @@ class OptionRootInfo:
     # cutoff is typically weeks behind "today"; defaulting to today returns
     # zero rows).
     last_trade_date: date | None = None
+    # Fraction of docs in this collection carrying ``eodGreeks`` (0.0-1.0).
+    # Drives the left-nav badge: >=0.9 → green "Greeks"; 0.1-0.9 → split
+    # "Greeks" (partial coverage); <0.1 → fall through to the computed badge
+    # if `has_computed_greeks` is True. Defaults to 0.0 so legacy fixtures
+    # that don't populate the field render as "no stored greeks".
+    stored_greeks_ratio: float = 0.0
+    # Whether the engine can compute greeks for this root (mirrors
+    # `tcg.engine.options.pricing._gating._BLOCKED_ROOTS`). Drives the gray
+    # "Comp. Greeks" fallback badge when stored coverage is below threshold.
+    has_computed_greeks: bool = False
 
 
 # ---------------------------------------------------------------------------

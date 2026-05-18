@@ -11,6 +11,8 @@ Phase-1 regression notes:
 from __future__ import annotations
 
 from tcg.data.options._provider import (
+    _NO_COMPUTE_ROOTS,
+    has_computed_greeks_for_root,
     has_greeks_for_root,
     provider_priority,
     select_provider,
@@ -139,3 +141,34 @@ class TestHasGreeksForRoot:
             "OPT_VIX",
         ):
             assert has_greeks_for_root(coll) is True, coll
+
+
+class TestHasComputedGreeksForRoot:
+    def test_vix_can_compute(self):
+        # Phase 2: monthly OPT_VIX computes under Black-76 with FUT_VIX forward.
+        assert has_computed_greeks_for_root("OPT_VIX") is True
+
+    def test_sp500_can_compute(self):
+        # Vanilla Black-Scholes path. Not gated.
+        assert has_computed_greeks_for_root("OPT_SP_500") is True
+
+    def test_eth_cannot_compute(self):
+        # No Deribit feed wired yet → engine returns missing_deribit_feed.
+        assert has_computed_greeks_for_root("OPT_ETH") is False
+
+    def test_no_compute_roots_mirrors_engine_gate(self):
+        """`_NO_COMPUTE_ROOTS` MUST stay in sync with the engine gate.
+
+        We import the engine module here even though the data layer cannot;
+        this test exists precisely to catch drift between the two registries
+        (the data layer can't reach the engine at runtime per the
+        ``engine-data-isolation`` import-linter contract — this test is
+        the only seam that crosses the boundary, and it lives in tests).
+        """
+        from tcg.engine.options.pricing._gating import _BLOCKED_ROOTS
+
+        assert _NO_COMPUTE_ROOTS == frozenset(_BLOCKED_ROOTS.keys()), (
+            "Data-layer `_NO_COMPUTE_ROOTS` has drifted from engine "
+            "`_BLOCKED_ROOTS`. Update both to keep the left-nav badge "
+            "consistent with engine behavior."
+        )

@@ -29,7 +29,12 @@ from tcg.data.options._doc_to_dto import (
     doc_to_contract,
     index_greeks_by_date,
 )
-from tcg.data.options._provider import has_greeks_for_root, select_provider
+from tcg.data.options._provider import (
+    has_computed_greeks_for_root,
+    has_greeks_for_root,
+    select_provider,
+    stored_greeks_ratio_for_root,
+)
 from tcg.data.options._strike_factor import STRIKE_FACTOR_VERIFIED
 from tcg.types.errors import OptionsContractNotFound, OptionsDataAccessError
 from tcg.types.options import (
@@ -419,16 +424,33 @@ class MongoOptionsDataReader:
         providers = tuple(await _peek_providers(coll))
         last_trade_date = await _peek_last_trade_date(coll)
 
+        # Vendor-determined coverage ratio, served from a hardcoded registry
+        # rather than a live `count_documents`. The live query was unworkably
+        # slow on production-sized collections (~60s timeout on /api/options/roots).
+        # The registry was measured 2026-05-18 — update when vendor coverage shifts.
+        stored_greeks_ratio = stored_greeks_ratio_for_root(collection)
+        # If the data layer blocks greeks for this root entirely (OPT_ETH), the
+        # registry value still applies — but make it impossible to surface a
+        # positive ratio for a blocked root by AND-ing with the data-layer gate.
+        if not has_greeks_for_root(collection):
+            stored_greeks_ratio = 0.0
+        has_computed = has_computed_greeks_for_root(collection)
+
         return OptionRootInfo(
             collection=collection,
             name=_display_name(collection),
-            has_greeks=has_greeks_for_root(collection),
+            # `has_greeks` retains its historical meaning ("greeks may surface
+            # for this root at all") — true when the vendor stocks some OR the
+            # engine can compute. Used by callers that gate streams/UI logic.
+            has_greeks=stored_greeks_ratio > 0.0 or has_computed,
             providers=providers,
             expiration_first=expiration_first,
             expiration_last=expiration_last,
             doc_count_estimated=int(doc_count),
             strike_factor_verified=STRIKE_FACTOR_VERIFIED.get(collection, False),
             last_trade_date=last_trade_date,
+            stored_greeks_ratio=stored_greeks_ratio,
+            has_computed_greeks=has_computed,
         )
 
     async def _find_document(
