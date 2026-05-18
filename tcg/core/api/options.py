@@ -400,7 +400,27 @@ async def _batch_underlying_prices(
 
     # Decide collection + instrument id for the single bulk fetch.
     if _is_vix(contract):
-        collection, instrument_id = "INDEX", "IND_VIX"
+        # Phase 2 made the chain endpoint resolve the VIX forward as the
+        # matching FUT_VIX close (not spot IND_VIX). The contract-detail
+        # endpoint must match — otherwise the time-series view uses spot
+        # (~14-15) as the forward while the chain uses the front-month
+        # future (~20+), causing the pricer to misclassify slightly-OTM
+        # puts as ITM-below-intrinsic and surface
+        # "deep_itm_degenerate" on rows that should compute cleanly.
+        # Look up the matching FUT_VIX contract by the option's expiration.
+        exp = contract.expiration
+        exp_int = exp.year * 10000 + exp.month * 100 + exp.day
+        try:
+            fut_id = await svc.find_futures_contract_by_expiration("FUT_VIX", exp_int)
+        except Exception:  # noqa: BLE001
+            return {}
+        if fut_id is None:
+            # Weekly VIX option with no matching monthly future. The
+            # engine gate surfaces ``missing_forward_vix_curve`` on every
+            # row — leave the lookup empty so the pricer doesn't get a
+            # wrong forward.
+            return {}
+        collection, instrument_id = "FUT_VIX", fut_id
     elif contract.underlying_ref is not None:
         fut_collection = _futures_collection_for(contract.collection)
         if fut_collection is None:
