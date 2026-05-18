@@ -138,6 +138,9 @@ class TestMaterializeChainRow:
         assert contract.provider == "CBOE"
         assert contract.type == "P"  # normalized
         assert row.delta_stored is None
+        assert row.gamma_stored is None
+        assert row.theta_stored is None
+        assert row.vega_stored is None
         assert row.iv_stored is None
 
     def test_vix_stored_greeks_pass_through(self, vix_doc, make_greek_full):
