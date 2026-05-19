@@ -24,6 +24,15 @@ GET    /api/persistence/portfolios?category= list by category (required)
 GET    /api/persistence/portfolios/{id}      get
 PUT    /api/persistence/portfolios/{id}      update
 DELETE /api/persistence/portfolios/{id}      archive
+
+Signal / portfolio wire shape
+-----------------------------
+The full editable state of a signal or portfolio is persisted by these
+endpoints. For signals: ``inputs`` / ``rules`` / ``settings`` /
+``description`` are carried as opaque payloads (the persistence layer
+does not interpret them). For portfolios: ``legs`` / ``rebalance``
+likewise. Optional fields default to empty values on the backend so
+callers may omit anything that isn't set yet.
 """
 
 from __future__ import annotations
@@ -79,31 +88,46 @@ class IndicatorUpdateIn(_BaseWriteModel):
 
 
 class SignalCreateIn(_BaseWriteModel):
+    """Create-payload for a signal.
+
+    The interesting editable content (``inputs`` / ``rules`` /
+    ``settings`` / ``description``) is OPTIONAL — a freshly created
+    signal can be empty. Defaults are empty list / dict / string.
+    """
+
     id: str = Field(..., min_length=1, max_length=256)
     name: str = Field(..., min_length=1, max_length=512)
-    blocks: list[dict]
     category: Category
+    inputs: list[dict] = Field(default_factory=list)
+    rules: dict = Field(default_factory=dict)
+    settings: dict = Field(default_factory=dict)
+    description: str = ""
 
 
 class SignalUpdateIn(_BaseWriteModel):
+    """Update-payload — full replace. Same shape as create minus ``id``."""
+
     name: str = Field(..., min_length=1, max_length=512)
-    blocks: list[dict]
     category: Category
+    inputs: list[dict] = Field(default_factory=list)
+    rules: dict = Field(default_factory=dict)
+    settings: dict = Field(default_factory=dict)
+    description: str = ""
 
 
 class PortfolioCreateIn(_BaseWriteModel):
     id: str = Field(..., min_length=1, max_length=256)
     name: str = Field(..., min_length=1, max_length=512)
-    instruments: list[dict]
-    rebalance: dict
     category: Category
+    legs: list[dict] = Field(default_factory=list)
+    rebalance: str = "none"
 
 
 class PortfolioUpdateIn(_BaseWriteModel):
     name: str = Field(..., min_length=1, max_length=512)
-    instruments: list[dict]
-    rebalance: dict
     category: Category
+    legs: list[dict] = Field(default_factory=list)
+    rebalance: str = "none"
 
 
 class IndicatorOut(BaseModel):
@@ -120,21 +144,24 @@ class SignalOut(BaseModel):
     id: str
     type: str
     name: str
-    blocks: list[dict]
     category: Category
     created_at: datetime
     updated_at: datetime
+    inputs: list[dict]
+    rules: dict
+    settings: dict
+    description: str
 
 
 class PortfolioOut(BaseModel):
     id: str
     type: str
     name: str
-    instruments: list[dict]
-    rebalance: dict
     category: Category
     created_at: datetime
     updated_at: datetime
+    legs: list[dict]
+    rebalance: str
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +186,13 @@ def _signal_to_out(doc: SignalDoc) -> SignalOut:
         id=doc.id,
         type=doc.type,
         name=doc.name,
-        blocks=doc.blocks,
         category=doc.category,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
+        inputs=list(doc.inputs),
+        rules=doc.rules,
+        settings=doc.settings,
+        description=doc.description,
     )
 
 
@@ -171,11 +201,11 @@ def _portfolio_to_out(doc: PortfolioDoc) -> PortfolioOut:
         id=doc.id,
         type=doc.type,
         name=doc.name,
-        instruments=doc.instruments,
-        rebalance=doc.rebalance,
         category=doc.category,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
+        legs=list(doc.legs),
+        rebalance=doc.rebalance,
     )
 
 
@@ -280,10 +310,13 @@ async def create_signal(body: SignalCreateIn, repo: RepoDep) -> SignalOut:
         id=body.id,
         type="signal",
         name=body.name,
-        blocks=body.blocks,
         category=body.category,
         created_at=now,
         updated_at=now,
+        inputs=tuple(body.inputs),
+        rules=body.rules,
+        settings=body.settings,
+        description=body.description,
     )
     stored = await repo.create(doc)
     assert isinstance(stored, SignalDoc)
@@ -319,10 +352,13 @@ async def update_signal(
         id=doc_id,
         type="signal",
         name=body.name,
-        blocks=body.blocks,
         category=body.category,
         created_at=existing.created_at,
         updated_at=existing.updated_at,
+        inputs=tuple(body.inputs),
+        rules=body.rules,
+        settings=body.settings,
+        description=body.description,
     )
     try:
         stored = await repo.update(updated)
@@ -352,11 +388,11 @@ async def create_portfolio(body: PortfolioCreateIn, repo: RepoDep) -> PortfolioO
         id=body.id,
         type="portfolio",
         name=body.name,
-        instruments=body.instruments,
-        rebalance=body.rebalance,
         category=body.category,
         created_at=now,
         updated_at=now,
+        legs=tuple(body.legs),
+        rebalance=body.rebalance,
     )
     stored = await repo.create(doc)
     assert isinstance(stored, PortfolioDoc)
@@ -396,11 +432,11 @@ async def update_portfolio(
         id=doc_id,
         type="portfolio",
         name=body.name,
-        instruments=body.instruments,
-        rebalance=body.rebalance,
         category=body.category,
         created_at=existing.created_at,
         updated_at=existing.updated_at,
+        legs=tuple(body.legs),
+        rebalance=body.rebalance,
     )
     try:
         stored = await repo.update(updated)

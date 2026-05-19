@@ -121,14 +121,21 @@ def _indicator_docs(draw) -> IndicatorDoc:
 
 @st.composite
 def _signal_docs(draw) -> SignalDoc:
+    # ``inputs`` is tuple-typed on the dataclass — Hypothesis still
+    # produces lists; coerce so we exercise the canonical in-memory
+    # shape (mismatched container types would surface as round-trip
+    # failures).
     return SignalDoc(
         id=draw(_ID_STRATEGY),
         type="signal",
         name=draw(_NAME_STRATEGY),
-        blocks=draw(_payload_list()),
         category=draw(st.sampled_from(list(Category))),
         created_at=draw(_utc_datetimes()),
         updated_at=draw(_utc_datetimes()),
+        inputs=tuple(draw(_payload_list())),
+        rules=draw(_payload_dict()),
+        settings=draw(_payload_dict()),
+        description=draw(st.text(max_size=64)),
     )
 
 
@@ -138,11 +145,11 @@ def _portfolio_docs(draw) -> PortfolioDoc:
         id=draw(_ID_STRATEGY),
         type="portfolio",
         name=draw(_NAME_STRATEGY),
-        instruments=draw(_payload_list()),
-        rebalance=draw(_payload_dict()),
         category=draw(st.sampled_from(list(Category))),
         created_at=draw(_utc_datetimes()),
         updated_at=draw(_utc_datetimes()),
+        legs=tuple(draw(_payload_list())),
+        rebalance=draw(st.sampled_from(["none", "daily", "weekly", "monthly", "quarterly", "annually"])),
     )
 
 

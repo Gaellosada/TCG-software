@@ -144,49 +144,99 @@ async def test_indicator_roundtrip(repo_with_cleanup) -> None:
 
 
 async def test_signal_roundtrip(repo_with_cleanup) -> None:
+    """Full round-trip with NON-EMPTY content for every editable field.
+
+    Regression coverage for the bug where the persistence wiring only
+    stored ``name + category`` — rules/inputs/description survived
+    only in localStorage, not the database.
+    """
     repo = repo_with_cleanup.inner
     doc_id = repo_with_cleanup.id("sig")
     now = _now()
+    inputs = (
+        {"id": "X", "instrument": {"type": "spot", "collection": "spot_daily", "instrument_id": "AAPL"}},
+    )
+    rules = {
+        "entries": [
+            {"id": "blk-1", "name": "Entry 1", "input_id": "X", "weight": 50.0,
+             "conditions": [{"op": ">", "left": {"kind": "instrument", "input_id": "X", "field": "close"}}]},
+        ],
+        "exits": [
+            {"id": "blk-2", "name": "Exit 1", "target_entry_block_name": "Entry 1",
+             "conditions": [{"op": "<", "left": {"kind": "constant", "value": 0}}]},
+        ],
+        "resets": [],
+    }
+    settings = {"dont_repeat": True}
     doc = SignalDoc(
         id=doc_id,
         type="signal",
         name="momentum-v1",
-        blocks=[
-            {"id": "entry", "weight": 1.0, "conditions": [{"k": "rsi<30"}]},
-        ],
         category=Category.DEV,
         created_at=now,
         updated_at=now,
+        inputs=inputs,
+        rules=rules,
+        settings=settings,
+        description="Buy AAPL when close rises.",
     )
 
     stored = await repo.create(doc)
     assert isinstance(stored, SignalDoc)
+    # Crucial: every editable field round-trips intact.
+    assert stored.inputs == inputs
+    assert stored.rules == rules
+    assert stored.settings == settings
+    assert stored.description == "Buy AAPL when close rises."
 
     fetched = await repo.get_by_id("signal", doc_id)
     assert fetched == stored
+    assert isinstance(fetched, SignalDoc)
+    assert fetched.inputs == inputs
+    assert fetched.rules == rules
+    assert fetched.settings == settings
+    assert fetched.description == "Buy AAPL when close rises."
 
     dev_list = await repo.list_by_type_and_category("signal", Category.DEV)
     assert any(d.id == doc_id for d in dev_list)
 
-    # update: promote DEV → PROD and add a block.
+    # update: promote DEV → PROD and edit the rules.
+    new_rules = {
+        **rules,
+        "entries": rules["entries"] + [
+            {"id": "blk-3", "name": "Entry 2", "input_id": "X", "weight": 25.0, "conditions": []},
+        ],
+    }
     promoted = SignalDoc(
         id=doc_id,
         type="signal",
         name="momentum-v1-promoted",
-        blocks=stored.blocks + [{"id": "exit", "weight": 1.0}],
         category=Category.PROD,
         created_at=stored.created_at,
         updated_at=stored.updated_at,
+        inputs=stored.inputs,
+        rules=new_rules,
+        settings=stored.settings,
+        description="Promoted to PROD.",
     )
     after = await repo.update(promoted)
     assert after.category == Category.PROD
-    assert len(after.blocks) == 2
+    assert len(after.rules["entries"]) == 2
+    assert after.description == "Promoted to PROD."
+
+    # Re-fetch to make sure the update landed.
+    refetched = await repo.get_by_id("signal", doc_id)
+    assert isinstance(refetched, SignalDoc)
+    assert len(refetched.rules["entries"]) == 2
+    assert refetched.description == "Promoted to PROD."
 
     # archive: category → ARCHIVE.
     await repo.archive("signal", doc_id)
     archived = await repo.get_by_id("signal", doc_id)
     assert isinstance(archived, SignalDoc)
     assert archived.category == Category.ARCHIVE
+    # Archive must NOT wipe the editable content.
+    assert archived.rules == new_rules
 
     # The DEV list no longer contains us; the ARCHIVE list does.
     dev_after = await repo.list_by_type_and_category("signal", Category.DEV)
@@ -198,54 +248,75 @@ async def test_signal_roundtrip(repo_with_cleanup) -> None:
 
 
 async def test_portfolio_roundtrip(repo_with_cleanup) -> None:
+    """Full round-trip with NON-EMPTY content for every editable field."""
     repo = repo_with_cleanup.inner
     doc_id = repo_with_cleanup.id("ptf")
     now = _now()
+    legs = (
+        {"label": "SPY", "type": "instrument", "collection": "spot_daily",
+         "symbol": "SPY", "weight": 60},
+        {"label": "AGG", "type": "instrument", "collection": "spot_daily",
+         "symbol": "AGG", "weight": 40},
+    )
     doc = PortfolioDoc(
         id=doc_id,
         type="portfolio",
         name="60-40",
-        instruments=[
-            {"symbol": "SPY", "weight": 0.6},
-            {"symbol": "AGG", "weight": 0.4},
-        ],
-        rebalance={"freq": "monthly"},
         category=Category.RESEARCH,
         created_at=now,
         updated_at=now,
+        legs=legs,
+        rebalance="monthly",
     )
 
     stored = await repo.create(doc)
     assert isinstance(stored, PortfolioDoc)
+    assert stored.legs == legs
+    assert stored.rebalance == "monthly"
 
     fetched = await repo.get_by_id("portfolio", doc_id)
     assert fetched == stored
+    assert isinstance(fetched, PortfolioDoc)
+    assert fetched.legs == legs
+    assert fetched.rebalance == "monthly"
 
     research_list = await repo.list_by_type_and_category(
         "portfolio", Category.RESEARCH
     )
     assert any(d.id == doc_id for d in research_list)
 
-    # update: swap to a different rebalance freq, move to DEV.
+    # update: swap to a different rebalance freq + add a leg, move to DEV.
+    new_legs = legs + (
+        {"label": "BIL", "type": "instrument", "collection": "spot_daily",
+         "symbol": "BIL", "weight": 10},
+    )
     rev = PortfolioDoc(
         id=doc_id,
         type="portfolio",
         name="60-40-quarterly",
-        instruments=stored.instruments,
-        rebalance={"freq": "quarterly"},
         category=Category.DEV,
         created_at=stored.created_at,
         updated_at=stored.updated_at,
+        legs=new_legs,
+        rebalance="quarterly",
     )
     after = await repo.update(rev)
-    assert after.rebalance == {"freq": "quarterly"}
+    assert after.rebalance == "quarterly"
     assert after.category == Category.DEV
+    assert len(after.legs) == 3
+
+    # Re-fetch confirms persistence of editable content.
+    refetched = await repo.get_by_id("portfolio", doc_id)
+    assert isinstance(refetched, PortfolioDoc)
+    assert refetched.legs == new_legs
+    assert refetched.rebalance == "quarterly"
 
     # archive.
     await repo.archive("portfolio", doc_id)
     archived = await repo.get_by_id("portfolio", doc_id)
     assert isinstance(archived, PortfolioDoc)
     assert archived.category == Category.ARCHIVE
+    assert archived.legs == new_legs  # archive preserves content
 
 
 async def test_update_on_missing_doc_raises_keyerror(repo_with_cleanup) -> None:
@@ -288,7 +359,6 @@ async def test_get_by_id_does_not_cross_types(repo_with_cleanup) -> None:
         id=doc_id,
         type="signal",
         name="x",
-        blocks=[],
         category=Category.DEV,
         created_at=now,
         updated_at=now,

@@ -8,33 +8,43 @@ not *interpretation* of the inner payloads.
 
 Opacity contract
 ----------------
-``IndicatorDoc.definition`` is an opaque ``dict``. ``SignalDoc.blocks``
-is an opaque ``list[dict]``. ``PortfolioDoc.instruments`` and
-``PortfolioDoc.rebalance`` are opaque ``dict`` / ``list[dict]`` payloads.
+All "interesting" content is carried as opaque dict / tuple payloads.
 The persistence layer makes no claim about the inner shape of those
 payloads — that contract belongs to whichever engine module *consumes*
 them downstream. Adding new payload fields therefore does NOT require
 changes here, by design.
 
+For ``SignalDoc`` the editable content carried verbatim is:
+  * ``inputs``     — tuple of input descriptors (instrument bindings)
+  * ``rules``      — dict of rule sections (entries / exits / resets)
+  * ``settings``   — dict of signal-level settings (e.g. dont_repeat)
+  * ``description``— free-form documentation string
+
+For ``PortfolioDoc`` the editable content carried verbatim is:
+  * ``legs``       — tuple of leg descriptors (instrument or signal legs)
+  * ``rebalance``  — rebalance frequency string (e.g. "none", "monthly")
+
+Frozen-dataclass immutability is preserved by using tuples for the
+list-typed fields (tuples are hashable / immutable). The serializer
+converts tuples ↔ JSON arrays at the Mongo boundary.
+
 Category semantics
 ------------------
 ``Category`` applies to *signals and portfolios only*. Indicators have
 no category and use a separate ``deleted: bool`` flag for soft-delete.
-This split is intentional: indicators are reusable building blocks
-without a workflow stage, while signals and portfolios move through
-``RESEARCH → DEV → PROD`` (or ``ARCHIVE``) as the user iterates.
 
 Serialization
 -------------
 The Mongo ``_id`` field maps to the dataclass ``id`` field on read; the
-serializer emits ``_id`` on write. All other fields round-trip
-verbatim (datetimes stay as ``datetime`` objects — Mongo handles the
-BSON encoding).
+serializer emits ``_id`` on write. Tuples are converted to / from
+lists at the Mongo boundary. All other fields round-trip verbatim
+(datetimes stay as ``datetime`` objects — Mongo handles the BSON
+encoding).
 """
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import MISSING, dataclass, field, fields
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -73,38 +83,42 @@ class IndicatorDoc:
 
 @dataclass(frozen=True, slots=True)
 class SignalDoc:
-    """Persisted signal: an ordered list of weighted condition blocks.
+    """Persisted signal — the full editable state of one signal.
 
-    ``blocks`` is an opaque ``list[dict]``. ``category`` drives the
-    workflow stage and doubles as the soft-archive marker
-    (``Category.ARCHIVE``).
+    Editable payload fields (``inputs`` / ``rules`` / ``settings`` /
+    ``description``) are opaque to this module. The frontend owns
+    their inner shape. Persisted as tuples / dicts so the frozen
+    dataclass stays immutable.
     """
 
     id: str
     type: Literal["signal"]
     name: str
-    blocks: list[dict]
     category: Category
     created_at: datetime
     updated_at: datetime
+    inputs: tuple[dict, ...] = field(default_factory=tuple)
+    rules: dict = field(default_factory=dict)
+    settings: dict = field(default_factory=dict)
+    description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class PortfolioDoc:
-    """Persisted portfolio definition.
+    """Persisted portfolio — the full editable state of one portfolio.
 
-    ``instruments`` and ``rebalance`` are opaque payloads. ``category``
-    drives the workflow stage and the soft-archive marker.
+    Editable payload fields (``legs`` / ``rebalance``) are opaque to
+    this module. The frontend owns their inner shape.
     """
 
     id: str
     type: Literal["portfolio"]
     name: str
-    instruments: list[dict]
-    rebalance: dict
     category: Category
     created_at: datetime
     updated_at: datetime
+    legs: tuple[dict, ...] = field(default_factory=tuple)
+    rebalance: str = "none"
 
 
 PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc
@@ -116,14 +130,25 @@ _TYPE_TO_CLASS: dict[str, type] = {
     "portfolio": PortfolioDoc,
 }
 
+# Fields that store a sequence on the dataclass as a tuple but must be
+# emitted as a JSON list at the Mongo boundary. Keep this list explicit
+# so accidental tuple-typed fields don't get auto-converted.
+_TUPLE_FIELDS_BY_TYPE: dict[str, frozenset[str]] = {
+    "indicator": frozenset(),
+    "signal": frozenset({"inputs"}),
+    "portfolio": frozenset({"legs"}),
+}
+
 
 def to_mongo_dict(doc: PersistenceDoc) -> dict[str, Any]:
     """Serialize a persistence dataclass to a Mongo-ready dict.
 
     The dataclass ``id`` field is renamed to ``_id`` (Mongo's primary
     key). ``Category`` is unwrapped to its string value so Mongo stores
-    a plain string rather than a Python enum.
+    a plain string rather than a Python enum. Tuple-typed fields are
+    converted to JSON-compatible lists.
     """
+    tuple_fields = _TUPLE_FIELDS_BY_TYPE.get(doc.type, frozenset())
     out: dict[str, Any] = {}
     for f in fields(doc):
         value = getattr(doc, f.name)
@@ -131,6 +156,8 @@ def to_mongo_dict(doc: PersistenceDoc) -> dict[str, Any]:
             out["_id"] = value
         elif isinstance(value, Category):
             out[f.name] = value.value
+        elif f.name in tuple_fields and isinstance(value, tuple):
+            out[f.name] = list(value)
         else:
             out[f.name] = value
     return out
@@ -141,7 +168,9 @@ def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
 
     Uses the ``type`` field as the discriminator. ``_id`` maps back to
     ``id``. ``category`` strings are re-wrapped into the ``Category``
-    enum. Raises ``ValueError`` if ``type`` is missing or unknown.
+    enum. List-typed payload fields that map to tuple-typed dataclass
+    fields are coerced to tuples. Raises ``ValueError`` if ``type`` is
+    missing or unknown.
     """
     doc_type = d.get("type")
     if doc_type not in _TYPE_TO_CLASS:
@@ -149,6 +178,7 @@ def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
             f"persistence: unknown or missing 'type' discriminator: {doc_type!r}"
         )
     cls = _TYPE_TO_CLASS[doc_type]
+    tuple_fields = _TUPLE_FIELDS_BY_TYPE.get(doc_type, frozenset())
     kwargs: dict[str, Any] = {}
     for f in fields(cls):
         if f.name == "id":
@@ -160,13 +190,21 @@ def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
         elif f.name == "category":
             kwargs["category"] = Category(d["category"])
         else:
-            # Use the default for optional fields (e.g. IndicatorDoc.deleted)
-            # when absent from the stored document — supports forward-
-            # compatibility with older docs that predate a new field.
+            # Use the default for optional fields when absent from the
+            # stored document — supports forward-compatibility with
+            # older docs that predate a new field.
             if f.name in d:
-                kwargs[f.name] = d[f.name]
+                value = d[f.name]
+                # Coerce stored lists back to tuples for tuple-typed
+                # fields so the round-trip preserves equality of frozen
+                # dataclasses.
+                if f.name in tuple_fields and isinstance(value, list):
+                    value = tuple(value)
+                kwargs[f.name] = value
             elif f.default is not MISSING:
                 kwargs[f.name] = f.default
+            elif f.default_factory is not MISSING:  # type: ignore[misc]
+                kwargs[f.name] = f.default_factory()  # type: ignore[misc]
             else:
                 raise ValueError(
                     f"persistence: document missing required field "
