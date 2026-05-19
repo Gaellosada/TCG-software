@@ -96,7 +96,33 @@ class InstrumentOptionStream:
     kind: Literal["option_stream"] = "option_stream"
 
 
-InputInstrument = InstrumentSpot | InstrumentContinuous | InstrumentOptionStream
+@dataclass(frozen=True)
+class InstrumentBasket:
+    """Basket instrument — a reference to a persisted ``BasketDoc``.
+
+    The basket's legs (``instrument_id`` + ``collection`` + ``weight``)
+    are resolved at evaluation time by the API layer and snapshotted into
+    ``legs`` so the fetcher can compute the weighted price series without
+    a second DB round-trip.
+
+    ``basket_id`` is the ``id`` of the ``BasketDoc`` in the persistence
+    collection.  ``legs`` is a tuple of dicts ``{"instrument_id": str,
+    "collection": str, "weight": float}`` (same shape as ``BasketDoc.legs``).
+    ``collection`` is the MongoDB collection where all leg instruments
+    live — baskets are asset-class-homogeneous, so a single shared
+    collection is well-defined (per-leg ``collection`` inside ``legs``
+    overrides this only as a defensive default).
+    """
+
+    basket_id: str
+    legs: tuple[dict, ...]
+    collection: str
+    kind: Literal["basket"] = "basket"
+
+
+InputInstrument = (
+    InstrumentSpot | InstrumentContinuous | InstrumentOptionStream | InstrumentBasket
+)
 
 
 @dataclass(frozen=True)
@@ -341,6 +367,7 @@ __all__ = [
     "Input",
     "InputInstrument",
     "InRangeCondition",
+    "InstrumentBasket",
     "InstrumentContinuous",
     "InstrumentOperand",
     "InstrumentOptionStream",
