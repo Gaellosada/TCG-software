@@ -363,18 +363,20 @@ function PortfolioPage() {
         )}
 
         {/* ── Persisted portfolios panel ── */}
-        <PersistedPortfolioPanel
-          category={persistedCategory}
-          onCategoryChange={setPersistedCategory}
-          portfolios={persistedPortfolios}
-          loading={persistedLoading}
-          onSaveCurrent={handlePersistSave}
-          saveDisabled={portfolio.legs.length === 0}
-          onChangeItemCat={handleChangePortfolioCat}
-          onArchive={handleArchivePortfolio}
-          selectedId={portfolio.persistedId}
-          onSelect={handleSelectPersisted}
-        />
+        <div className={styles.section}>
+          <PersistedPortfolioPanel
+            category={persistedCategory}
+            onCategoryChange={setPersistedCategory}
+            portfolios={persistedPortfolios}
+            loading={persistedLoading}
+            onSaveCurrent={handlePersistSave}
+            saveDisabled={portfolio.legs.length === 0}
+            onChangeItemCat={handleChangePortfolioCat}
+            onArchive={handleArchivePortfolio}
+            selectedId={portfolio.persistedId}
+            onSelect={handleSelectPersisted}
+          />
+        </div>
 
         {/* ── Holdings section ── */}
         <div className={styles.section}>
