@@ -8,6 +8,7 @@ import DataPage from './pages/Data/DataPage';
 import IndicatorsPage from './pages/Indicators/IndicatorsPage';
 import SignalsPage from './pages/Signals/SignalsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
+import BasketsPage from './pages/Baskets/BasketsPage';
 import SettingsPage from './pages/Settings/SettingsPage';
 import RunningSignalsPage from './pages/RunningSignals/RunningSignalsPage';
 import MongoDBAgentPage from './pages/MongoDBAgent/MongoDBAgentPage';
@@ -81,6 +82,16 @@ function App() {
                 <PageContainer>
                   <ErrorBoundary>
                     <PortfolioPage />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/baskets"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <BasketsPage />
                   </ErrorBoundary>
                 </PageContainer>
               }
