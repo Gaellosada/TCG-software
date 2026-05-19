@@ -180,3 +180,40 @@ async def test_allowed_collection_insert_and_delete_succeed(
         assert fetched["_id"] == probe_id
     finally:
         await coll.delete_one({"_id": probe_id})
+
+
+async def test_cross_namespace_write_blocked_by_mongo_role(
+    scoped_client: AsyncIOMotorClient,
+) -> None:
+    """Defense-in-depth (M5): even if a caller bypasses the Python-level
+    ``__setattr__`` guard via ``object.__setattr__`` and re-points
+    ``WriteRepository._coll`` at a cross-namespace collection, the
+    Mongo ``app-writer`` role still rejects the operation.
+
+    Demonstrates the honest safety boundary: the Python guard catches
+    accidental rebinds; the role catches everything else.
+    """
+    from tcg.persistence.repository import WriteRepository
+
+    repo = WriteRepository(
+        scoped_client,
+        db_name=_WRITE_DB_NAME,
+        collection_name=_ALLOWED_COLLECTION,
+    )
+    # Bypass the __setattr__ guard via object.__setattr__ — Python lets
+    # us reach the slot directly. The Python class cannot prevent this.
+    object.__setattr__(
+        repo, "_coll", scoped_client[_WRITE_DB_NAME]["other"]
+    )
+
+    # The Mongo server-side ACL still rejects the write: ``other`` is not
+    # in the role's privilege list. Code 13 = Unauthorized.
+    with pytest.raises(OperationFailure) as excinfo:
+        # ``get_by_id`` issues a ``find_one`` against the (now-rebound)
+        # collection handle. The role refuses to read from ``other``.
+        await repo.get_by_id("signal", "any-id")
+    assert excinfo.value.code == 13, (
+        f"expected OperationFailure code 13 (Unauthorized) after "
+        f"object.__setattr__ rebind to cross-namespace handle, "
+        f"got {excinfo.value.code} ({excinfo.value.details})"
+    )

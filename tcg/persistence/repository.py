@@ -91,11 +91,28 @@ class WriteRepository:
 
     Immutability of ``_coll``
     -------------------------
-    The instance uses ``__slots__`` to restrict attribute creation to
-    the documented private ``_coll`` slot, and overrides ``__setattr__``
-    to reject re-binding the attribute after ``__init__``. Together
-    these turn the "_coll is bound exactly once" claim into an enforced
-    invariant rather than a convention.
+    ``_coll`` is bound once in ``__init__`` via ``object.__setattr__``.
+    Ordinary attribute writes (``repo._coll = other``, ``repo.alias = x``)
+    are blocked by the combination of ``__slots__`` and an unconditional
+    ``__setattr__`` guard, so accidental rebinds from typos or refactors
+    fail loud rather than silently re-targeting the namespace.
+
+    This is *defense in depth*, not a cryptographic seal: an attacker
+    holding Python-level code execution can still reach the slot via
+    ``object.__setattr__(repo, '_coll', ...)`` (no class can prevent
+    that — base-class ``__setattr__`` is always reachable). The real
+    namespace boundary lives on the Mongo server: the ``app-writer``
+    role grants ``readWrite`` only on the configured collection, so a
+    repo handle pointed at any other database / collection fails the
+    next operation with ``OperationFailure`` regardless of what the
+    Python object thinks it's holding.
+
+    Tests:
+    - ``test_coll_attribute_is_immutable_after_construction``:
+      ordinary writes raise (defense in depth, layer 1).
+    - ``test_cross_namespace_write_blocked_by_mongo_role``
+      (integration, live Mongo): ``object.__setattr__`` rebind followed
+      by a write fails with ``OperationFailure`` (layer 2).
     """
 
     __slots__ = ("_coll",)
@@ -115,12 +132,17 @@ class WriteRepository:
         object.__setattr__(self, "_coll", client[db_name][collection_name])
 
     def __setattr__(self, name: str, value: object) -> None:
-        """Reject any post-construction attribute mutation.
+        """Reject any post-construction attribute mutation via the
+        ordinary attribute-assignment syntax.
 
         Combined with ``__slots__``, this means ``repo._coll = other``
         — or any other attribute assignment — raises rather than
-        silently re-binding the namespace handle. The repository is
-        intended to be effectively frozen after ``__init__`` returns.
+        silently re-binding the namespace handle. This catches
+        accidental rebinds from typos or refactors but is NOT a
+        cryptographic seal: ``object.__setattr__(repo, '_coll', x)``
+        still reaches the slot (no class can intercept that). The
+        ultimate namespace guarantee comes from the Mongo server-side
+        ``app-writer`` role, not from this method.
         """
         raise AttributeError(
             "WriteRepository is immutable after construction; "
