@@ -54,6 +54,15 @@ vi.mock('../../api/statistics', () => ({
   fetchStatistics: vi.fn(() => new Promise(() => {})),
 }));
 
+// Mock persistence API to prevent real HTTP calls.
+const mockListPortfolios = vi.fn(() => Promise.resolve([]));
+vi.mock('../../api/persistence', () => ({
+  listPortfolios: (...args) => mockListPortfolios(...args),
+  createPortfolio: vi.fn(() => Promise.resolve({})),
+  updatePortfolio: vi.fn(() => Promise.resolve({})),
+  archivePortfolio: vi.fn(() => Promise.resolve(null)),
+}));
+
 import PortfolioPage from './PortfolioPage';
 import usePortfolio from './usePortfolio';
 import { fetchStatistics } from '../../api/statistics';
@@ -373,5 +382,69 @@ describe('<PortfolioPage> — TC4.9: default risk-free rate from localStorage', 
     expect(fetchStatistics).toHaveBeenCalled();
     const args = vi.mocked(fetchStatistics).mock.calls[0][0];
     expect(args.riskFreeRate).toBeCloseTo(0.04, 6);
+  });
+});
+
+describe('<PortfolioPage> — persisted portfolios panel', () => {
+  beforeEach(() => {
+    mockListPortfolios.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    mockListPortfolios.mockReset();
+    mockListPortfolios.mockResolvedValue([]);
+  });
+
+  it('renders the persisted portfolio panel', () => {
+    vi.mocked(usePortfolio).mockReturnValue(baseHook());
+    render(<PortfolioPage />);
+    expect(screen.getByTestId('persisted-portfolio-panel')).toBeTruthy();
+  });
+
+  it('renders the category filter dropdown with RESEARCH selected by default', () => {
+    vi.mocked(usePortfolio).mockReturnValue(baseHook());
+    render(<PortfolioPage />);
+    const select = screen.getByTestId('portfolio-category-filter');
+    expect(select.value).toBe('RESEARCH');
+    const options = Array.from(select.querySelectorAll('option')).map((o) => o.value);
+    expect(options).toEqual(['RESEARCH', 'DEV', 'PROD', 'ARCHIVE']);
+  });
+
+  it('shows empty-state message when no portfolios are fetched', async () => {
+    mockListPortfolios.mockResolvedValue([]);
+    vi.mocked(usePortfolio).mockReturnValue(baseHook());
+    const { findByTestId } = render(<PortfolioPage />);
+    // Wait for async fetch to resolve.
+    expect(await findByTestId('persisted-portfolio-empty')).toBeTruthy();
+  });
+
+  it('disables the save button when there are no legs', () => {
+    vi.mocked(usePortfolio).mockReturnValue(baseHook({ legs: [] }));
+    render(<PortfolioPage />);
+    expect(screen.getByTestId('persist-portfolio-btn').disabled).toBe(true);
+  });
+
+  it('enables the save button when there are legs', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({ legs: [{ id: 1, label: 'SPY', weight: 100 }] }),
+    );
+    render(<PortfolioPage />);
+    expect(screen.getByTestId('persist-portfolio-btn').disabled).toBe(false);
+  });
+
+  it('calls listPortfolios with RESEARCH on mount', () => {
+    vi.mocked(usePortfolio).mockReturnValue(baseHook());
+    render(<PortfolioPage />);
+    expect(mockListPortfolios).toHaveBeenCalledWith('RESEARCH');
+  });
+
+  it('re-fetches when category is changed', async () => {
+    mockListPortfolios.mockResolvedValue([]);
+    vi.mocked(usePortfolio).mockReturnValue(baseHook());
+    render(<PortfolioPage />);
+    const select = screen.getByTestId('portfolio-category-filter');
+    fireEvent.change(select, { target: { value: 'DEV' } });
+    // Should now have been called with DEV.
+    expect(mockListPortfolios).toHaveBeenCalledWith('DEV');
   });
 });
