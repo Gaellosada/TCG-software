@@ -293,6 +293,163 @@
   margin-bottom: 12px;
 }
 
+/* ── Persisted portfolio panel ── */
+
+.persistedPanel {
+  background: var(--bg-surface, var(--bg-secondary));
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg, var(--radius-sm));
+  margin-bottom: 16px;
+}
+
+.persistedPanelHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-wrap: wrap;
+}
+
+.persistedPanelTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.persistedCategoryLabel {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.persistedCategorySelect {
+  background: var(--bg-tertiary, var(--bg-primary));
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.78rem;
+  padding: 2px 6px;
+  height: 22px;
+  outline: none;
+}
+
+.persistedCategorySelect:focus {
+  border-color: var(--accent, #2563eb);
+}
+
+.persistedAddBtn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  height: 22px;
+  padding: 0 8px;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.persistedAddBtn:hover {
+  background: var(--bg-hover);
+  color: var(--accent, #2563eb);
+}
+
+.persistedAddBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.persistedList {
+  padding: 4px 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.persistedEmpty {
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.persistedRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  cursor: default;
+}
+
+.persistedRow:hover {
+  background: var(--bg-hover);
+}
+
+.persistedRowName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.persistedRowCatSelect {
+  background: var(--bg-tertiary, var(--bg-primary));
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.68rem;
+  padding: 0 4px;
+  height: 18px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+  outline: none;
+}
+
+.persistedRow:hover .persistedRowCatSelect,
+.persistedRow:focus-within .persistedRowCatSelect {
+  opacity: 1;
+}
+
+.persistedRowDeleteBtn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.persistedRow:hover .persistedRowDeleteBtn,
+.persistedRow:focus-within .persistedRowDeleteBtn {
+  opacity: 1;
+}
+
+.persistedRowDeleteBtn:hover {
+  color: var(--error-text, #ef4444);
+  border-color: var(--error-text, #ef4444);
+}
+
 /* ── Empty state ── */
 
 .emptyState {

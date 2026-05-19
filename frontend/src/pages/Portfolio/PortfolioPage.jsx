@@ -3,6 +3,7 @@ import usePortfolio from './usePortfolio';
 import HoldingsList from './HoldingsList';
 import AddHoldingModal from './AddHoldingModal';
 import SignalPickerModal from './SignalPickerModal';
+import PersistedPortfolioPanel from './PersistedPortfolioPanel';
 import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
@@ -12,6 +13,12 @@ import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
+import {
+  listPortfolios,
+  createPortfolio,
+  updatePortfolio,
+  archivePortfolio,
+} from '../../api/persistence';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
 // Statistics endpoint expects YYYYMMDD integers (existing project
@@ -50,6 +57,79 @@ function PortfolioPage() {
   // clearConfirmOpen gates the clear-all dialog (no payload needed).
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+
+  // --- Persisted portfolio panel -------------------------------------------
+  const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
+  const [persistedPortfolios, setPersistedPortfolios] = useState([]);
+  const [persistedLoading, setPersistedLoading] = useState(false);
+
+  const fetchPersistedPortfolios = useCallback(async (cat) => {
+    setPersistedLoading(true);
+    try {
+      const docs = await listPortfolios(cat);
+      setPersistedPortfolios(docs);
+    } catch {
+      setPersistedPortfolios([]);
+    } finally {
+      setPersistedLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPersistedPortfolios(persistedCategory);
+  }, [persistedCategory, fetchPersistedPortfolios]);
+
+  // Save current portfolio state to backend in the selected category.
+  const handlePersistSave = useCallback(async () => {
+    const name = saveInput.trim() || portfolio.portfolioName || 'Portfolio';
+    const id = `portfolio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const instruments = portfolio.legs.map((l) => ({
+      label: l.label,
+      type: l.type || 'spot',
+      collection: l.collection || '',
+      symbol: l.symbol || '',
+      weight: l.weight || 0,
+    }));
+    try {
+      await createPortfolio({
+        id,
+        name,
+        instruments,
+        rebalance: { frequency: portfolio.rebalance || 'none' },
+        category: persistedCategory,
+      });
+      fetchPersistedPortfolios(persistedCategory);
+    } catch {
+      // Non-fatal — user can retry.
+    }
+  }, [saveInput, portfolio, persistedCategory, fetchPersistedPortfolios]);
+
+  // Move a persisted portfolio to a different category.
+  const handleChangePortfolioCat = useCallback(async (id, newCat) => {
+    const target = persistedPortfolios.find((p) => p.id === id);
+    if (!target) return;
+    try {
+      await updatePortfolio(id, {
+        name: target.name,
+        instruments: target.instruments || [],
+        rebalance: target.rebalance || {},
+        category: newCat,
+      });
+      fetchPersistedPortfolios(persistedCategory);
+    } catch {
+      // Non-fatal.
+    }
+  }, [persistedPortfolios, persistedCategory, fetchPersistedPortfolios]);
+
+  // Archive (soft-delete) a persisted portfolio.
+  const handleArchivePortfolio = useCallback(async (id) => {
+    try {
+      await archivePortfolio(id);
+      fetchPersistedPortfolios(persistedCategory);
+    } catch {
+      // Non-fatal.
+    }
+  }, [persistedCategory, fetchPersistedPortfolios]);
 
   // Pre-fill save input when a portfolio is loaded
   useEffect(() => {
@@ -183,6 +263,18 @@ function PortfolioPage() {
             </button>
           </div>
         )}
+
+        {/* ── Persisted portfolios panel ── */}
+        <PersistedPortfolioPanel
+          category={persistedCategory}
+          onCategoryChange={setPersistedCategory}
+          portfolios={persistedPortfolios}
+          loading={persistedLoading}
+          onSaveCurrent={handlePersistSave}
+          saveDisabled={portfolio.legs.length === 0}
+          onChangeItemCat={handleChangePortfolioCat}
+          onArchive={handleArchivePortfolio}
+        />
 
         {/* ── Holdings section ── */}
         <div className={styles.section}>
