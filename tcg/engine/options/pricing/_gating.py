@@ -75,6 +75,24 @@ def is_blocked_root(collection: str) -> tuple[bool, str | None, tuple[str, ...]]
     return False, None, ()
 
 
+def blocked_roots() -> frozenset[str]:
+    """Return the set of OPT_* roots whose engine compute is blocked.
+
+    This is the **supported public boundary** for non-engine callers that
+    need to know whether the engine can compute greeks for a root —
+    notably the API layer, which injects ``has_computed_greeks`` onto
+    ``OptionRootInfo`` (the data layer cannot reach engine internals
+    per the ``engine-data-isolation`` import-linter contract).
+
+    Returns:
+        Immutable frozenset of root collection names (e.g. ``{"OPT_ETH"}``).
+        Membership in this set means: engine returns the per-root
+        ``error_code`` for every greek attempt and never invokes the
+        pricing kernel.
+    """
+    return frozenset(_BLOCKED_ROOTS.keys())
+
+
 def needs_strike_factor_verification(collection: str) -> bool:
     """Whether the given root requires `strike_factor_verified=True` to compute."""
     return collection in _STRIKE_FACTOR_GATED_ROOTS

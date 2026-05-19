@@ -63,6 +63,7 @@ from tcg.core.api.common import (
 )
 from tcg.data._utils import int_to_date
 from tcg.data.protocols import MarketDataService
+from tcg.engine.options.pricing import blocked_roots
 from tcg.types.errors import (
     OptionsSelectionError,
     OptionsValidationError,
@@ -215,14 +216,30 @@ async def list_roots(
 ) -> dict:
     """List every OPT_* collection with display metadata.
 
+    Injects engine-side metadata onto each ``OptionRootInfo`` before
+    serialization (the data layer can't reach the engine per the
+    ``engine-data-isolation`` import-linter contract):
+
+      * ``has_computed_greeks`` = ``root not in blocked_roots()``.
+      * ``has_greeks`` is widened: ``stored_greeks_ratio > 0 OR has_computed_greeks``.
+
     Errors:
         ``OptionsDataAccessError`` from the reader → 502 via the global
         TCG error handler.
     """
     roots = await svc.list_option_roots()
-    payload = ListRootsResponse.model_validate(
-        {"roots": [dataclasses.asdict(r) for r in roots]}
-    )
+    blocked = blocked_roots()
+    out: list[dict[str, Any]] = []
+    for r in roots:
+        d = dataclasses.asdict(r)
+        has_computed = r.collection not in blocked
+        d["has_computed_greeks"] = has_computed
+        # Widen has_greeks to "stored OR computed" — the semantic that
+        # downstream consumers (frontend badges, stream gating) rely on.
+        stored_positive = (r.stored_greeks_ratio or 0.0) > 0.0
+        d["has_greeks"] = stored_positive or has_computed
+        out.append(d)
+    payload = ListRootsResponse.model_validate({"roots": out})
     return payload.model_dump()
 
 

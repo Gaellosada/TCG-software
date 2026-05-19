@@ -16,6 +16,7 @@ public helpers used by ``DefaultOptionsPricer``:
 from __future__ import annotations
 
 from tcg.engine.options.pricing._gating import (
+    blocked_roots,
     is_blocked_root,
     missing_underlying_error,
 )
@@ -64,3 +65,31 @@ class TestMissingUnderlyingError:
         code, missing = missing_underlying_error("OPT_GOLD")
         assert code == "missing_underlying_price"
         assert missing == ("underlying_price",)
+
+
+class TestBlockedRoots:
+    """Public ``blocked_roots()`` boundary for non-engine callers."""
+
+    def test_returns_frozenset(self) -> None:
+        result = blocked_roots()
+        assert isinstance(result, frozenset)
+
+    def test_contains_opt_eth(self) -> None:
+        assert "OPT_ETH" in blocked_roots()
+
+    def test_excludes_opt_vix(self) -> None:
+        # Phase 2 unblocked OPT_VIX.
+        assert "OPT_VIX" not in blocked_roots()
+
+    def test_excludes_normal_roots(self) -> None:
+        for root in ("OPT_SP_500", "OPT_NASDAQ_100", "OPT_GOLD", "OPT_BTC"):
+            assert root not in blocked_roots(), root
+
+    def test_consistent_with_is_blocked_root(self) -> None:
+        """``blocked_roots()`` is the bulk view of what ``is_blocked_root``
+        reports per-root.
+        """
+        for root in blocked_roots():
+            assert is_blocked_root(root)[0] is True
+        # Sanity: a non-member returns False.
+        assert is_blocked_root("OPT_SP_500")[0] is False

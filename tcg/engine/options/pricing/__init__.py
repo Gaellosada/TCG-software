@@ -3,6 +3,7 @@
 Phase 1B Wave B1.2. See spec §3.2 and ORDERS.md.
 """
 
+from tcg.engine.options.pricing._gating import blocked_roots
 from tcg.engine.options.pricing.kernel import BS76Kernel
 from tcg.engine.options.pricing.pricer import DefaultOptionsPricer
 from tcg.engine.options.pricing.protocol import OptionsPricer, PricingKernel
@@ -12,4 +13,5 @@ __all__ = [
     "DefaultOptionsPricer",
     "OptionsPricer",
     "PricingKernel",
+    "blocked_roots",
 ]
