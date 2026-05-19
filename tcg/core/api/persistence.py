@@ -52,6 +52,7 @@ from tcg.persistence import (
     WriteRepository,
 )
 from tcg.types.persistence import (
+    BasketDoc,
     Category,
     DocType,
     IndicatorDoc,
@@ -139,6 +140,88 @@ def _validate_payload(value: Any, field_name: str) -> Any:
             f"{_MAX_PAYLOAD_SERIALIZED_BYTES}"
         )
     return value
+
+
+# ---------------------------------------------------------------------------
+# Asset-class derivation for basket validation
+# ---------------------------------------------------------------------------
+
+
+def _asset_class_from_collection(collection: str) -> str | None:
+    """Derive an asset-class bucket from a MongoDB collection name.
+
+    Returns one of ``'future'``, ``'index'``, ``'equity'``, or ``None``
+    when the collection is unknown or hosts options (options are not
+    yet supported in baskets — Phase 1 scope).
+
+    Mirrors the bucketing logic used elsewhere (``tcg.data._mongo``) but
+    re-implemented here to avoid importing from the read-only data layer
+    (Sign 2 guardrail).
+    """
+    if collection.startswith("FUT_"):
+        return "future"
+    if collection == "INDEX":
+        return "index"
+    if collection in ("ETF", "FUND", "FOREX"):
+        return "equity"
+    return None
+
+
+def _check_basket_homogeneity(legs: list["BasketLegIn"]) -> None:
+    """Reject baskets whose legs straddle multiple asset classes.
+
+    Raises ``HTTPException(400)`` on:
+
+    * any leg whose ``collection`` resolves to an unknown / unsupported
+      asset class (including ``OPT_*`` option collections), or
+    * a mixture of asset classes across legs.
+
+    Empty baskets are permitted so that the frontend can save partial
+    work (the create dialog ships an empty basket on first save).
+    """
+    if not legs:
+        return
+
+    buckets: dict[str, list[int]] = {}
+    for i, leg in enumerate(legs):
+        ac = _asset_class_from_collection(leg.collection)
+        if ac is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"basket leg {i}: collection {leg.collection!r} has no "
+                    f"supported asset class (unknown or options not yet "
+                    f"supported in baskets)"
+                ),
+            )
+        buckets.setdefault(ac, []).append(i)
+
+    if len(buckets) > 1:
+        parts = "; ".join(
+            f"{ac}=legs{idxs}" for ac, idxs in sorted(buckets.items())
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"basket legs must share the same asset class — "
+                f"got mixed classes: {parts}"
+            ),
+        )
+
+
+def _check_basket_no_duplicates(legs: list["BasketLegIn"]) -> None:
+    """Reject duplicate ``instrument_id`` within the same basket."""
+    seen: set[str] = set()
+    for i, leg in enumerate(legs):
+        if leg.instrument_id in seen:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"basket leg {i}: duplicate instrument_id "
+                    f"{leg.instrument_id!r}"
+                ),
+            )
+        seen.add(leg.instrument_id)
 
 
 # Accepted ``rebalance`` values — mirrors ``tcg.types.portfolio.RebalanceFreq``
@@ -273,6 +356,76 @@ class PortfolioUpdateIn(_BaseWriteModel):
         return _validate_payload(v, "legs")
 
 
+# ---------------------------------------------------------------------------
+# Basket wire models
+# ---------------------------------------------------------------------------
+
+
+class BasketLegIn(BaseModel):
+    """A single leg in a basket create/update payload.
+
+    ``weight`` is a signed fraction: positive = long, negative = short.
+    The API does NOT validate that weights sum to 1.0 — callers may save
+    partial work. Zero weight is rejected (meaningless leg).
+    ``collection`` identifies the MongoDB collection that hosts the
+    instrument so asset class can be derived without a catalogue lookup.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    instrument_id: str = Field(..., min_length=1, max_length=256)
+    collection: str = Field(..., min_length=1, max_length=128)
+    weight: float = Field(...)
+
+    @field_validator("weight")
+    @classmethod
+    def _check_weight_nonzero(cls, v: float) -> float:
+        if v == 0.0:
+            raise ValueError("weight must be non-zero")
+        return v
+
+
+class BasketIn(_BaseWriteModel):
+    """Create-payload for a basket."""
+
+    id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
+    name: str = Field(..., min_length=1, max_length=512)
+    category: Category
+    legs: list[BasketLegIn] = Field(default_factory=list)
+
+    @field_validator("legs")
+    @classmethod
+    def _check_legs(cls, v: list[BasketLegIn]) -> list[BasketLegIn]:
+        # Reuse the shared depth/size guard. Pydantic has already validated
+        # each leg's shape; here we just bound aggregate payload size.
+        _validate_payload([leg.model_dump() for leg in v], "legs")
+        return v
+
+
+class BasketUpdateIn(_BaseWriteModel):
+    """Update-payload — full replace. Same shape as create minus ``id``."""
+
+    name: str = Field(..., min_length=1, max_length=512)
+    category: Category
+    legs: list[BasketLegIn] = Field(default_factory=list)
+
+    @field_validator("legs")
+    @classmethod
+    def _check_legs(cls, v: list[BasketLegIn]) -> list[BasketLegIn]:
+        _validate_payload([leg.model_dump() for leg in v], "legs")
+        return v
+
+
+class BasketOut(BaseModel):
+    id: str
+    type: str
+    name: str
+    category: Category
+    created_at: datetime
+    updated_at: datetime
+    legs: list[dict]
+
+
 class IndicatorOut(BaseModel):
     id: str
     type: str
@@ -349,6 +502,18 @@ def _portfolio_to_out(doc: PortfolioDoc) -> PortfolioOut:
         updated_at=doc.updated_at,
         legs=list(doc.legs),
         rebalance=doc.rebalance,
+    )
+
+
+def _basket_to_out(doc: BasketDoc) -> BasketOut:
+    return BasketOut(
+        id=doc.id,
+        type=doc.type,
+        name=doc.name,
+        category=doc.category,
+        created_at=doc.created_at,
+        updated_at=doc.updated_at,
+        legs=list(doc.legs),
     )
 
 
@@ -655,5 +820,118 @@ async def update_portfolio(
 async def archive_portfolio(doc_id: str, repo: RepoDep) -> None:
     try:
         await repo.archive(DocType.PORTFOLIO.value, doc_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Basket endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/baskets", response_model=BasketOut, status_code=201)
+async def create_basket(body: BasketIn, repo: RepoDep) -> BasketOut:
+    _check_basket_no_duplicates(body.legs)
+    _check_basket_homogeneity(body.legs)
+    now = _now()
+    raw_legs = tuple(
+        {
+            "instrument_id": leg.instrument_id,
+            "collection": leg.collection,
+            "weight": leg.weight,
+        }
+        for leg in body.legs
+    )
+    doc = BasketDoc(
+        id=body.id,
+        type=DocType.BASKET.value,
+        name=body.name,
+        category=body.category,
+        created_at=now,
+        updated_at=now,
+        legs=raw_legs,
+    )
+    try:
+        stored = await repo.create(doc)
+    except pymongo.errors.DuplicateKeyError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"basket with id={body.id!r} already exists"
+        ) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    assert isinstance(stored, BasketDoc)
+    return _basket_to_out(stored)
+
+
+@router.get("/baskets", response_model=list[BasketOut])
+async def list_baskets(
+    repo: RepoDep, category: Category = Query(...)
+) -> list[BasketOut]:
+    docs = await repo.list_by_type_and_category(DocType.BASKET.value, category)
+    out: list[BasketOut] = []
+    for d in docs:
+        assert isinstance(d, BasketDoc)
+        out.append(_basket_to_out(d))
+    return out
+
+
+@router.get("/baskets/{doc_id}", response_model=BasketOut)
+async def get_basket(doc_id: str, repo: RepoDep) -> BasketOut:
+    doc = _expect(
+        await repo.get_by_id(DocType.BASKET.value, doc_id),
+        DocType.BASKET.value,
+        doc_id,
+    )
+    assert isinstance(doc, BasketDoc)
+    return _basket_to_out(doc)
+
+
+@router.put("/baskets/{doc_id}", response_model=BasketOut)
+async def update_basket(
+    doc_id: str, body: BasketUpdateIn, repo: RepoDep
+) -> BasketOut:
+    _check_basket_no_duplicates(body.legs)
+    _check_basket_homogeneity(body.legs)
+    existing = _expect(
+        await repo.get_by_id(DocType.BASKET.value, doc_id),
+        DocType.BASKET.value,
+        doc_id,
+    )
+    assert isinstance(existing, BasketDoc)
+    raw_legs = tuple(
+        {
+            "instrument_id": leg.instrument_id,
+            "collection": leg.collection,
+            "weight": leg.weight,
+        }
+        for leg in body.legs
+    )
+    updated = BasketDoc(
+        id=doc_id,
+        type=DocType.BASKET.value,
+        name=body.name,
+        category=body.category,
+        created_at=existing.created_at,
+        updated_at=existing.updated_at,  # repo bumps it
+        legs=raw_legs,
+    )
+    try:
+        stored = await repo.update(
+            updated, expected_updated_at=existing.updated_at
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    assert isinstance(stored, BasketDoc)
+    return _basket_to_out(stored)
+
+
+@router.delete("/baskets/{doc_id}", status_code=204)
+async def archive_basket(doc_id: str, repo: RepoDep) -> None:
+    try:
+        await repo.archive(DocType.BASKET.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
