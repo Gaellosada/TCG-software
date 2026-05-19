@@ -58,10 +58,14 @@ _COLLECTION_NAME = "2026-app-data"
 def _utcnow() -> datetime:
     """Single source of truth for server-set timestamps.
 
-    Always UTC, always timezone-aware. Mongo preserves the tzinfo on
-    round-trip (Motor encodes as BSON ``datetime`` with UTC offset).
+    Always UTC, always timezone-aware. BSON datetimes are
+    millisecond-resolution, so we truncate sub-millisecond microseconds
+    here — that way the in-memory dataclass returned by ``create`` /
+    ``update`` compares equal to the same doc fetched back from Mongo.
     """
-    return datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    truncated_us = (now.microsecond // 1000) * 1000
+    return now.replace(microsecond=truncated_us)
 
 
 class WriteRepository:
