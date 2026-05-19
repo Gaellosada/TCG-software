@@ -17,18 +17,13 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-let originalFetch;
-beforeEach(() => {
-  originalFetch = globalThis.fetch;
-});
 afterEach(() => {
-  globalThis.fetch = originalFetch;
-  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function mockFetch(response) {
   const fn = vi.fn().mockResolvedValue(response);
-  globalThis.fetch = fn;
+  vi.stubGlobal('fetch', fn);
   return fn;
 }
 
