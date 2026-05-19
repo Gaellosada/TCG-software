@@ -11,6 +11,7 @@ import InputsPanel from './InputsPanel';
 import { loadState, saveState, emptyRules, defaultSettings } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
+import { listSignals, createSignal, updateSignal, archiveSignal } from '../../api/persistence';
 import { buildComputeRequestBody } from './requestBuilder';
 import { computeRunGate } from './runGate';
 import { countOwnPanelIndicators } from './resultsPlotTraces';
@@ -67,6 +68,17 @@ function SignalsPage() {
   const [lastSavedPayload, setLastSavedPayload] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
+  // --- Persistence state ---------------------------------------------------
+  // persistedSignals: list fetched from backend for the current category.
+  // They drive what is shown in the SignalsList panel.
+  // The local `signals` array still holds full editor state (inputs, rules, etc.)
+  // for the currently selected signal only — kept in localStorage so refreshes
+  // survive. When the user selects a persisted signal that isn't in local state,
+  // we add a blank skeleton for it so the editor can open.
+  const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
+  const [persistedSignals, setPersistedSignals] = useState([]);
+  const [persistedLoading, setPersistedLoading] = useState(false);
+
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
 
@@ -105,6 +117,24 @@ function SignalsPage() {
     return () => window.removeEventListener('focus', refresh);
   }, []);
 
+  // --- Fetch persisted signals when category changes -----------------------
+  const fetchPersistedSignals = useCallback(async (cat) => {
+    setPersistedLoading(true);
+    try {
+      const docs = await listSignals(cat);
+      setPersistedSignals(docs);
+    } catch {
+      // Non-fatal — show empty list. Backend may be starting up.
+      setPersistedSignals([]);
+    } finally {
+      setPersistedLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPersistedSignals(persistedCategory);
+  }, [persistedCategory, fetchPersistedSignals]);
+
   const currentPayload = useMemo(() => serializePersistablePayload(signals), [signals]);
   const dirty = lastSavedPayload !== null && currentPayload !== lastSavedPayload;
 
@@ -126,21 +156,44 @@ function SignalsPage() {
     [signals, selectedId],
   );
 
-  const filteredSignals = useMemo(() => {
+  // The SignalsList displays backend-persisted signals, filtered by name search.
+  // persistedSignals provides the authoritative list for the current category.
+  const filteredPersistedSignals = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return signals;
-    return signals.filter((s) => (s.name || '').toLowerCase().includes(q));
-  }, [signals, search]);
+    if (!q) return persistedSignals;
+    return persistedSignals.filter((s) => (s.name || '').toLowerCase().includes(q));
+  }, [persistedSignals, search]);
+
+  // When a persisted signal is selected that has no local editor state yet,
+  // inject a blank skeleton so the editor can open.
+  const handleSelectPersisted = useCallback((id) => {
+    setSelectedId(id);
+    setSignals((prev) => {
+      if (prev.find((s) => s.id === id)) return prev;
+      const persisted = persistedSignals.find((p) => p.id === id);
+      if (!persisted) return prev;
+      const skeleton = {
+        id: persisted.id,
+        name: persisted.name,
+        inputs: [],
+        rules: emptyRules(),
+        settings: defaultSettings(),
+        doc: '',
+      };
+      return [...prev, skeleton];
+    });
+  }, [persistedSignals]);
 
   // --- Mutations -----------------------------------------------------------
   const handleAdd = useCallback(() => {
     setSignals((prev) => {
       const id = (globalThis.crypto && globalThis.crypto.randomUUID)
         ? globalThis.crypto.randomUUID()
-        : `sig-${Date.now()}-${Math.random()}`;
+        : `sig-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const name = nextSignalName(prev);
       const newSig = {
         id,
-        name: nextSignalName(prev),
+        name,
         inputs: [],
         rules: emptyRules(),
         // v4 bullet #7: new signals get dont_repeat=true by default.
@@ -148,11 +201,19 @@ function SignalsPage() {
         doc: '',
       };
       setSelectedId(id);
+      // Fire-and-forget: persist to backend in current category.
+      // If the backend call fails, the signal still exists locally — user
+      // can re-save via the existing save flow. Non-blocking.
+      createSignal({ id, name, blocks: [], category: persistedCategory }).then(() => {
+        fetchPersistedSignals(persistedCategory);
+      }).catch(() => {
+        // ignore — local signal still usable
+      });
       return [...prev, newSig];
     });
     setError(null);
     setLastResult(null);
-  }, []);
+  }, [persistedCategory, fetchPersistedSignals]);
 
   const handleDelete = useCallback((id) => {
     setConfirmDeleteId(id);
@@ -170,11 +231,46 @@ function SignalsPage() {
       });
       return next;
     });
-  }, [confirmDeleteId]);
+    // Archive on backend (soft-delete → ARCHIVE category).
+    archiveSignal(id).then(() => {
+      fetchPersistedSignals(persistedCategory);
+    }).catch(() => {
+      // Local state already removed — backend archive failure is non-fatal.
+    });
+  }, [confirmDeleteId, persistedCategory, fetchPersistedSignals]);
+
+  // Move a persisted signal to a different category.
+  const handleChangeItemCat = useCallback(async (id, newCat) => {
+    const target = persistedSignals.find((s) => s.id === id);
+    if (!target) return;
+    try {
+      await updateSignal(id, {
+        name: target.name,
+        blocks: target.blocks || [],
+        category: newCat,
+      });
+      // If the new category differs from the current filter, the item
+      // disappears from the current view — re-fetch to reflect backend truth.
+      fetchPersistedSignals(persistedCategory);
+    } catch {
+      // Non-fatal — leave the list as-is.
+    }
+  }, [persistedSignals, persistedCategory, fetchPersistedSignals]);
 
   const handleRename = useCallback((id, newName) => {
     setSignals((prev) => prev.map((s) => (s.id !== id ? s : { ...s, name: newName })));
-  }, []);
+    // Sync name to backend if this signal exists in the persisted list.
+    const persisted = persistedSignals.find((s) => s.id === id);
+    if (persisted) {
+      updateSignal(id, {
+        name: newName,
+        blocks: persisted.blocks || [],
+        category: persisted.category,
+      }).then(() => {
+        fetchPersistedSignals(persistedCategory);
+      }).catch(() => {/* non-fatal */});
+    }
+  }, [persistedSignals, persistedCategory, fetchPersistedSignals]);
 
   const handleInputsChange = useCallback((nextInputs) => {
     setSignals((prev) => prev.map((s) => (
@@ -287,14 +383,18 @@ function SignalsPage() {
     <div className={styles.page} style={{ '--results-row-min': `${resultsRowMin}px` }}>
       <div className={styles.listPanel}>
         <SignalsList
-          signals={filteredSignals}
+          signals={filteredPersistedSignals}
           selectedId={selectedId}
-          onSelect={setSelectedId}
+          onSelect={handleSelectPersisted}
           onAdd={handleAdd}
           onDelete={handleDelete}
           onRename={handleRename}
           search={search}
           onSearchChange={setSearch}
+          category={persistedCategory}
+          onCategoryChange={setPersistedCategory}
+          onChangeItemCat={handleChangeItemCat}
+          loading={persistedLoading}
         />
       </div>
       <div className={styles.editorPanel}>
