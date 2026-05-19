@@ -98,6 +98,10 @@ function baseHook(overrides = {}) {
     loadPortfolio: vi.fn(),
     deleteSavedPortfolio: vi.fn(),
     getSavedPortfolios: vi.fn(() => []),
+    setPortfolioName: vi.fn(),
+    persistedId: null,
+    setPersistedId: vi.fn(),
+    loadFromPersisted: vi.fn(),
     ...overrides,
   };
 }

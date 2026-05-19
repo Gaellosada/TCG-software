@@ -1,6 +1,6 @@
 // PersistedPortfolioPanel — panel that shows backend-persisted portfolios
 // filtered by category, with category selector, + Save current, per-row
-// category chip, and row-level archive.
+// category chip, row-level select, and row-level archive.
 //
 // Props:
 //   category              {string}   currently selected category
@@ -11,6 +11,8 @@
 //   saveDisabled          {boolean}  disable the save button
 //   onChangeItemCat       {Function} (id, newCat) => void
 //   onArchive             {Function} (id) => void
+//   selectedId            {string|null} id of the currently loaded portfolio
+//   onSelect              {Function} (id) => void — load this portfolio into editor
 
 import styles from './PortfolioPage.module.css';
 import { CATEGORIES } from '../../api/persistence';
@@ -24,6 +26,8 @@ function PersistedPortfolioPanel({
   saveDisabled,
   onChangeItemCat,
   onArchive,
+  selectedId,
+  onSelect,
 }) {
   return (
     <div className={styles.persistedPanel} data-testid="persisted-portfolio-panel">
@@ -64,37 +68,49 @@ function PersistedPortfolioPanel({
             No saved portfolios in {category} — click &quot;+ Save current&quot; to add one.
           </div>
         ) : (
-          portfolios.map((p) => (
-            <div
-              key={p.id}
-              className={styles.persistedRow}
-              data-testid={`persisted-portfolio-row-${p.id}`}
-            >
-              <span className={styles.persistedRowName} title={p.name}>{p.name}</span>
-              <select
-                className={styles.persistedRowCatSelect}
-                value={p.category}
-                onChange={(e) => onChangeItemCat(p.id, e.target.value)}
-                aria-label={`Category for ${p.name}`}
-                data-testid={`portfolio-cat-select-${p.id}`}
-                title="Move to category"
+          portfolios.map((p) => {
+            const isSelected = p.id === selectedId;
+            return (
+              <div
+                key={p.id}
+                className={`${styles.persistedRow} ${isSelected ? styles.persistedRowActive || '' : ''}`}
+                data-testid={`persisted-portfolio-row-${p.id}`}
+                data-selected={isSelected ? 'true' : 'false'}
               >
-                {CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>{cat}</option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className={styles.persistedRowDeleteBtn}
-                onClick={() => onArchive(p.id)}
-                title="Archive portfolio"
-                aria-label={`Archive ${p.name}`}
-                data-testid={`archive-portfolio-${p.id}`}
-              >
-                ×
-              </button>
-            </div>
-          ))
+                <button
+                  type="button"
+                  className={styles.persistedRowName}
+                  title={`Load ${p.name}`}
+                  onClick={() => onSelect && onSelect(p.id)}
+                  data-testid={`load-portfolio-${p.id}`}
+                >
+                  {p.name}
+                </button>
+                <select
+                  className={styles.persistedRowCatSelect}
+                  value={p.category}
+                  onChange={(e) => onChangeItemCat(p.id, e.target.value)}
+                  aria-label={`Category for ${p.name}`}
+                  data-testid={`portfolio-cat-select-${p.id}`}
+                  title="Move to category"
+                >
+                  {CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className={styles.persistedRowDeleteBtn}
+                  onClick={() => onArchive(p.id)}
+                  title="Archive portfolio"
+                  aria-label={`Archive ${p.name}`}
+                  data-testid={`archive-portfolio-${p.id}`}
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })
         )}
       </div>
     </div>

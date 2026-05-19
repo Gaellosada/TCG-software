@@ -50,6 +50,11 @@ export default function usePortfolio() {
   const [autosave, setAutosaveState] = useState(
     () => localStorage.getItem(AUTOSAVE_KEY) === 'true',
   );
+  // ID of the backend-persisted portfolio doc currently loaded into the
+  // editor. When non-null, every editable change is debounce-PUT to
+  // /api/persistence/portfolios/{persistedId}. Null when working on an
+  // unpersisted/local-only portfolio.
+  const [persistedId, setPersistedId] = useState(null);
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -226,7 +231,38 @@ export default function usePortfolio() {
     setEndDate('');
     setPortfolioName('');
     setDirty(false);
+    setPersistedId(null);
   }, [abortCalculate]);
+
+  /**
+   * Hydrate the editor from a backend-persisted portfolio doc. Replaces
+   * legs / rebalance / name / persistedId. After this, the backend
+   * autosave (managed at the page level) takes over.
+   */
+  const loadFromPersisted = useCallback((doc) => {
+    if (!doc || typeof doc !== 'object') return;
+    const backendLegs = Array.isArray(doc.legs) ? doc.legs : [];
+    // Stamp local-only id onto each leg so React keys remain unique.
+    // We do NOT round-trip the id back to the backend — the id is
+    // assigned per-load, not stored.
+    const restoredLegs = backendLegs.map((l) => ({ ...l, id: nextId++ }));
+    abortCalculate();
+    setLegs(restoredLegs);
+    setRebalance(typeof doc.rebalance === 'string' ? doc.rebalance : 'none');
+    setPortfolioName(doc.name || '');
+    setPersistedId(doc.id);
+    setResults(null);
+    setError(null);
+    setLegDateRanges({});
+    setOverlapRange(null);
+    setStartDate('');
+    setEndDate('');
+    setDirty(false);
+  }, [abortCalculate]);
+
+  const setPersistedIdExternal = useCallback((id) => {
+    setPersistedId(id);
+  }, []);
 
   /* ── Calculate ── */
 
@@ -412,7 +448,12 @@ export default function usePortfolio() {
     deleteSavedPortfolio,
     getSavedPortfolios,
     portfolioName,
+    setPortfolioName,
     autosave,
     setAutosave,
+    // Backend persistence wiring.
+    persistedId,
+    setPersistedId: setPersistedIdExternal,
+    loadFromPersisted,
   };
 }

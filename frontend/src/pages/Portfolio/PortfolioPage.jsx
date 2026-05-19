@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import usePortfolio from './usePortfolio';
 import HoldingsList from './HoldingsList';
 import AddHoldingModal from './AddHoldingModal';
@@ -8,6 +8,8 @@ import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
 import SaveControls from '../../components/SaveControls';
+import SaveStatus from '../../components/SaveStatus/SaveStatus';
+import useBackendAutosave from '../../hooks/useBackendAutosave';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
@@ -79,41 +81,65 @@ function PortfolioPage() {
     fetchPersistedPortfolios(persistedCategory);
   }, [persistedCategory, fetchPersistedPortfolios]);
 
+  // Serialize the portfolio leg list into the wire shape — strip the
+  // local-only ``id`` (which we assign on load and never persist) and
+  // null-out missing fields so the backend receives a clean shape.
+  const legsToWire = useCallback((legs) => legs.map((l) => ({
+    label: l.label,
+    type: l.type || 'instrument',
+    collection: l.collection || null,
+    symbol: l.symbol || null,
+    strategy: l.strategy || null,
+    adjustment: l.adjustment || null,
+    cycle: l.cycle || null,
+    rollOffset: l.rollOffset ?? 0,
+    weight: l.weight ?? 0,
+    signalId: l.signalId || null,
+    signalName: l.signalName || null,
+    signalSpec: l.signalSpec || null,
+    option_type: l.option_type || null,
+    maturity: l.maturity || null,
+    selection: l.selection || null,
+    stream: l.stream || null,
+  })), []);
+
   // Save current portfolio state to backend in the selected category.
+  // After a successful create, takes over autosave by setting
+  // ``persistedId`` so ongoing edits get debounced PUTs.
   const handlePersistSave = useCallback(async () => {
     const name = saveInput.trim() || portfolio.portfolioName || 'Portfolio';
     const id = `portfolio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const instruments = portfolio.legs.map((l) => ({
-      label: l.label,
-      type: l.type || 'spot',
-      collection: l.collection || '',
-      symbol: l.symbol || '',
-      weight: l.weight || 0,
-    }));
     try {
       await createPortfolio({
         id,
         name,
-        instruments,
-        rebalance: { frequency: portfolio.rebalance || 'none' },
         category: persistedCategory,
+        legs: legsToWire(portfolio.legs),
+        rebalance: portfolio.rebalance || 'none',
       });
+      portfolio.setPersistedId(id);
+      // Make sure the portfolioName state reflects what we just saved
+      // so subsequent autosaves include it.
+      if (name !== portfolio.portfolioName) {
+        portfolio.setPortfolioName(name);
+      }
       fetchPersistedPortfolios(persistedCategory);
     } catch {
       // Non-fatal — user can retry.
     }
-  }, [saveInput, portfolio, persistedCategory, fetchPersistedPortfolios]);
+  }, [saveInput, portfolio, persistedCategory, fetchPersistedPortfolios, legsToWire]);
 
-  // Move a persisted portfolio to a different category.
+  // Move a persisted portfolio to a different category. Preserves all
+  // editable content via the full-replace PUT.
   const handleChangePortfolioCat = useCallback(async (id, newCat) => {
     const target = persistedPortfolios.find((p) => p.id === id);
     if (!target) return;
     try {
       await updatePortfolio(id, {
         name: target.name,
-        instruments: target.instruments || [],
-        rebalance: target.rebalance || {},
         category: newCat,
+        legs: target.legs || [],
+        rebalance: target.rebalance || 'none',
       });
       fetchPersistedPortfolios(persistedCategory);
     } catch {
@@ -125,11 +151,94 @@ function PortfolioPage() {
   const handleArchivePortfolio = useCallback(async (id) => {
     try {
       await archivePortfolio(id);
+      // If we were editing this exact portfolio, drop the persistedId
+      // so further edits don't try to autosave to an archived row.
+      if (portfolio.persistedId === id) {
+        portfolio.setPersistedId(null);
+      }
       fetchPersistedPortfolios(persistedCategory);
     } catch {
       // Non-fatal.
     }
-  }, [persistedCategory, fetchPersistedPortfolios]);
+  }, [persistedCategory, fetchPersistedPortfolios, portfolio]);
+
+  // Load a backend-persisted portfolio into the editor.
+  const handleSelectPersisted = useCallback((id) => {
+    const doc = persistedPortfolios.find((p) => p.id === id);
+    if (!doc) return;
+    portfolio.loadFromPersisted(doc);
+    setSaveInput(doc.name || '');
+  }, [persistedPortfolios, portfolio]);
+
+  // --- Backend debounced auto-save for the loaded persisted portfolio -----
+  const cloudPayload = useMemo(() => {
+    if (!portfolio.persistedId) return null;
+    const persisted = persistedPortfolios.find((p) => p.id === portfolio.persistedId);
+    if (!persisted) return null; // safety — list not yet loaded
+    return JSON.stringify({
+      name: portfolio.portfolioName || persisted.name || 'Portfolio',
+      category: persisted.category,
+      legs: legsToWire(portfolio.legs),
+      rebalance: portfolio.rebalance || 'none',
+    });
+  }, [
+    portfolio.persistedId,
+    portfolio.portfolioName,
+    portfolio.legs,
+    portfolio.rebalance,
+    persistedPortfolios,
+    legsToWire,
+  ]);
+
+  // Track the snapshot we last received from the backend so we don't
+  // immediately PUT back the freshly-hydrated content.
+  const lastSeenPayloadRef = useRef({ id: null, payload: null });
+  useEffect(() => {
+    if (!portfolio.persistedId) {
+      lastSeenPayloadRef.current = { id: null, payload: null };
+      return;
+    }
+    const persisted = persistedPortfolios.find((p) => p.id === portfolio.persistedId);
+    if (!persisted) return;
+    if (lastSeenPayloadRef.current.id !== portfolio.persistedId) {
+      lastSeenPayloadRef.current = {
+        id: portfolio.persistedId,
+        payload: JSON.stringify({
+          name: persisted.name,
+          category: persisted.category,
+          legs: persisted.legs || [],
+          rebalance: persisted.rebalance || 'none',
+        }),
+      };
+    }
+  }, [portfolio.persistedId, persistedPortfolios]);
+
+  const cloudDirty = !!cloudPayload
+    && (lastSeenPayloadRef.current.id !== portfolio.persistedId
+        || lastSeenPayloadRef.current.payload !== cloudPayload);
+
+  const handleCloudSave = useCallback(async (payloadStr) => {
+    if (!portfolio.persistedId || !payloadStr) return;
+    const body = JSON.parse(payloadStr);
+    await updatePortfolio(portfolio.persistedId, body);
+    lastSeenPayloadRef.current = {
+      id: portfolio.persistedId,
+      payload: payloadStr,
+    };
+    fetchPersistedPortfolios(persistedCategory);
+  }, [portfolio.persistedId, persistedCategory, fetchPersistedPortfolios]);
+
+  const { status: cloudStatus, reset: resetCloudStatus } = useBackendAutosave({
+    enabled: !!portfolio.persistedId && cloudDirty,
+    payload: cloudPayload,
+    onSave: handleCloudSave,
+    debounceMs: 500,
+  });
+
+  // Reset cloud status indicator on portfolio (de)selection.
+  useEffect(() => {
+    resetCloudStatus();
+  }, [portfolio.persistedId, resetCloudStatus]);
 
   // Pre-fill save input when a portfolio is loaded
   useEffect(() => {
@@ -237,6 +346,11 @@ function PortfolioPage() {
                 || portfolio.legs.length === 0
               }
             />
+            {/* Backend autosave status — only meaningful when editing a
+                backend-persisted portfolio. */}
+            {portfolio.persistedId && (
+              <SaveStatus status={cloudStatus} label="Cloud" />
+            )}
             {/* Clear — with confirmation */}
             <button
               className={styles.clearBtn}
@@ -274,6 +388,8 @@ function PortfolioPage() {
           saveDisabled={portfolio.legs.length === 0}
           onChangeItemCat={handleChangePortfolioCat}
           onArchive={handleArchivePortfolio}
+          selectedId={portfolio.persistedId}
+          onSelect={handleSelectPersisted}
         />
 
         {/* ── Holdings section ── */}
