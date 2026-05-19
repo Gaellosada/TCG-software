@@ -65,6 +65,33 @@ _ALL_GREEKS: tuple[GreekKind, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# IV inversion failure codes
+# ---------------------------------------------------------------------------
+# Public constants so tests and frontend tooltip mappers can import them
+# rather than string-matching. Each code identifies a distinct failure
+# regime; the frontend renders an appropriate tooltip per code.
+
+# Deep-ITM (|F-K|/F > 0.3) call/put where py_vollib's lower bound is
+# violated. The IV is mathematically degenerate at this regime.
+IV_ERROR_DEEP_ITM_DEGENERATE: str = "missing_iv_deep_itm_degenerate"
+
+# Mildly-ITM / ATM contract where mid sits below intrinsic value — almost
+# certainly a stale or bad bid/ask quote (data-quality issue), NOT a
+# regime where IV is undefined.
+IV_ERROR_BELOW_INTRINSIC_DATA_QUALITY: str = "missing_iv_below_intrinsic_data_quality"
+
+# Price above the no-arbitrage upper bound. Usually stale data or a
+# corrupt quote.
+IV_ERROR_ABOVE_MAXIMUM: str = "missing_iv_above_maximum"
+
+# Catch-all for any other py_vollib (or post-call sanity) failure.
+IV_ERROR_INVERT_FAILED: str = "missing_iv_invert_failed"
+
+# Moneyness threshold separating "deep ITM" from "shallow ITM": |F-K|/F.
+_DEEP_ITM_MONEYNESS_THRESHOLD: float = 0.3
+
+
 def _missing(
     error_code: str,
     missing_inputs: tuple[str, ...],
@@ -92,37 +119,87 @@ def _classify_iv_inversion_failure(
 ) -> ComputeResult:
     """Map a py_vollib inversion exception to the most informative error code.
 
-    The common case for VIX (and other low-time-value contracts) is
-    ``BelowIntrinsicException`` on a deep-ITM strike — the vendor's EOD
-    settle sits a few cents below the discounted no-arb floor on contracts
-    whose IV is degenerate anyway. We surface a friendlier code + message
-    so the tooltip explains the situation rather than dumping the raw
-    exception text.
+    Four regimes are distinguished:
 
-    Bounds checked:
-      - ITM put: K > F
-      - ITM call: K < F
-      - "Deep" is anything reaching the BelowIntrinsic boundary; we don't
-        require a moneyness threshold because the lower-bound violation is
-        itself the signal that the option is degenerate-by-data.
+      1. ``BelowIntrinsicException`` AND ITM AND moneyness > 0.3 →
+         ``missing_iv_deep_itm_degenerate``. Option is mathematically
+         degenerate (moves 1:1 with the underlying); IV is not a useful
+         number at this regime.
+      2. ``BelowIntrinsicException`` AND (ATM or shallow-ITM, moneyness
+         ≤ 0.3) → ``missing_iv_below_intrinsic_data_quality``. The mid
+         quote falls below intrinsic value — almost certainly a stale or
+         bad bid/ask, NOT a degenerate IV regime.
+      3. ``AboveMaximumException`` → ``missing_iv_above_maximum``. Mid
+         exceeds the no-arbitrage upper bound — typically a stale or
+         corrupt quote.
+      4. Any other exception (NaN inputs, numerical solver failure, etc.)
+         → ``missing_iv_invert_failed`` with raw exception name + msg in
+         ``error_detail``.
+
+    Moneyness convention: ``abs(F - K) / F``. F<=0 falls through to the
+    deep-ITM bucket (no meaningful moneyness can be computed; the contract
+    is degenerate by definition since the underlying is non-positive).
+
+    ITM tests:
+      - ITM put: ``K > F``
+      - ITM call: ``K < F``
+      - ATM (``F == K``) is NOT ITM → BelowIntrinsic on ATM is intrinsic
+        ≈ 0, so any negative deviation is bad data → data-quality bucket.
     """
     exc_name = type(exc).__name__
     is_below_intrinsic = exc_name == "BelowIntrinsicException"
+    is_above_maximum = exc_name == "AboveMaximumException"
     is_itm_put = flag == "p" and K > F
     is_itm_call = flag == "c" and K < F
+    is_itm = is_itm_put or is_itm_call
 
-    if is_below_intrinsic and (is_itm_put or is_itm_call):
-        # Two-sentence tooltip per UX request — explains why no IV exists
-        # AND tells the user what to use instead (analytic limits).
+    if is_above_maximum:
         detail = (
-            "Deep ITM: option moves 1:1 with the underlying so IV is "
-            "degenerate. Greek limits at this regime: |delta| approx 1, "
-            "gamma approx theta approx vega approx 0."
+            "Mid quote exceeds the no-arbitrage upper bound; the input "
+            "price is likely stale or corrupt and IV cannot be inverted."
         )
-        return _missing("missing_iv_deep_itm_degenerate", ("iv",), error_detail=detail)
+        return _missing(IV_ERROR_ABOVE_MAXIMUM, ("iv",), error_detail=detail)
+
+    if is_below_intrinsic and is_itm:
+        # Compute moneyness; guard F<=0 edge case (treat as deep-ITM since
+        # no meaningful ratio is defined and the contract is degenerate).
+        if F <= 0.0:
+            moneyness = float("inf")
+        else:
+            moneyness = abs(F - K) / F
+        if moneyness > _DEEP_ITM_MONEYNESS_THRESHOLD:
+            # Two-sentence tooltip per UX request — explains why no IV
+            # exists AND tells the user what to use instead.
+            detail = (
+                "Deep ITM: option moves 1:1 with the underlying so IV is "
+                "degenerate. Greek limits at this regime: |delta| approx "
+                "1, gamma approx theta approx vega approx 0."
+            )
+            return _missing(
+                IV_ERROR_DEEP_ITM_DEGENERATE, ("iv",), error_detail=detail
+            )
+        # Shallow-ITM BelowIntrinsic → data-quality bucket.
+        detail = (
+            "Option mid quote is below intrinsic value at this strike; "
+            "likely a stale or bad bid/ask, not a degenerate IV regime."
+        )
+        return _missing(
+            IV_ERROR_BELOW_INTRINSIC_DATA_QUALITY, ("iv",), error_detail=detail
+        )
+
+    if is_below_intrinsic:
+        # ATM or OTM BelowIntrinsic (intrinsic is 0; mid would need to be
+        # negative — bad data).
+        detail = (
+            "Option mid quote is below intrinsic value at this strike; "
+            "likely a stale or bad bid/ask, not a degenerate IV regime."
+        )
+        return _missing(
+            IV_ERROR_BELOW_INTRINSIC_DATA_QUALITY, ("iv",), error_detail=detail
+        )
 
     return _missing(
-        "missing_iv_invert_failed",
+        IV_ERROR_INVERT_FAILED,
         ("iv",),
         error_detail=f"{exc_name}: {exc}",
     )
