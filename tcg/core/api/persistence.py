@@ -37,6 +37,7 @@ callers may omit anything that isn't set yet.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
@@ -109,9 +110,12 @@ def _validate_payload(value: Any, field_name: str) -> Any:
     Used by Pydantic ``field_validator`` hooks on every opaque payload
     field (``rules`` / ``inputs`` / ``settings`` / ``definition`` /
     ``legs``). Depth is checked first since it's cheap; the serialized
-    size check uses ``repr()`` rather than ``json.dumps`` to avoid an
-    O(N) JSON pass on every request — the cap is intentionally loose
-    and catches the obvious abuse cases.
+    size check uses ``len(json.dumps(...).encode('utf-8'))`` so the
+    measurement is the actual wire-byte count (close to the BSON byte
+    count Mongo will see), not the Python repr length which over- or
+    under-counted depending on the codepoint range. ``default=str`` so
+    we never blow up on a non-JSON value the caller smuggled in — that
+    failure mode will surface as a Pydantic type error elsewhere.
     """
     depth = _max_depth(value)
     if depth > _MAX_PAYLOAD_DEPTH:
@@ -119,9 +123,16 @@ def _validate_payload(value: Any, field_name: str) -> Any:
             f"{field_name}: nesting depth {depth} exceeds limit "
             f"{_MAX_PAYLOAD_DEPTH}"
         )
-    # Approximate size guard. ``repr()`` overestimates JSON length but
-    # the cap is generous (1 MB per field).
-    size = len(repr(value))
+    # Closer-to-truth size guard than ``repr(value)``. ``ensure_ascii=
+    # False`` so multi-byte UTF-8 characters count as their actual
+    # serialized byte count, not the 6-byte ``\uXXXX`` escape.
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        # If we can't serialize for measurement we cannot enforce the
+        # size cap; fall back to ``repr()`` for an upper-bound estimate.
+        serialized = repr(value)
+    size = len(serialized.encode("utf-8"))
     if size > _MAX_PAYLOAD_SERIALIZED_BYTES:
         raise ValueError(
             f"{field_name}: serialized size {size} exceeds limit "
