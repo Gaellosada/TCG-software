@@ -76,6 +76,7 @@ class DocType(StrEnum):
     INDICATOR = "indicator"
     SIGNAL = "signal"
     PORTFOLIO = "portfolio"
+    BASKET = "basket"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,13 +137,40 @@ class PortfolioDoc:
     rebalance: str = "none"
 
 
-PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc
+@dataclass(frozen=True, slots=True)
+class BasketDoc:
+    """Persisted basket — a named, weighted, single-asset-class group of instruments.
+
+    ``legs`` is an opaque tuple of leg descriptors.  The persistence layer
+    does not interpret the inner shape — that belongs to the API layer which
+    validates asset-class homogeneity on write.
+
+    The leg shape stored inside the tuple is::
+
+        {"instrument_id": str, "collection": str, "weight": float}
+
+    where ``weight`` is a signed float fraction (negative = short) and
+    ``collection`` is the MongoDB collection that hosts the instrument
+    (used to derive asset class without a catalogue lookup).
+    """
+
+    id: str
+    type: Literal["basket"]
+    name: str
+    category: Category
+    created_at: datetime
+    updated_at: datetime
+    legs: tuple[dict, ...] = field(default_factory=tuple)
+
+
+PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc | BasketDoc
 
 # Internal map: discriminator string → dataclass. Used by ``from_mongo_dict``.
 _TYPE_TO_CLASS: dict[str, type] = {
     DocType.INDICATOR.value: IndicatorDoc,
     DocType.SIGNAL.value: SignalDoc,
     DocType.PORTFOLIO.value: PortfolioDoc,
+    DocType.BASKET.value: BasketDoc,
 }
 
 # Fields that store a sequence on the dataclass as a tuple but must be
@@ -152,6 +180,7 @@ _TUPLE_FIELDS_BY_TYPE: dict[str, frozenset[str]] = {
     DocType.INDICATOR.value: frozenset(),
     DocType.SIGNAL.value: frozenset({"inputs"}),
     DocType.PORTFOLIO.value: frozenset({"legs"}),
+    DocType.BASKET.value: frozenset({"legs"}),
 }
 
 
@@ -234,6 +263,7 @@ __all__ = [
     "IndicatorDoc",
     "SignalDoc",
     "PortfolioDoc",
+    "BasketDoc",
     "PersistenceDoc",
     "to_mongo_dict",
     "from_mongo_dict",
