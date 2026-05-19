@@ -53,6 +53,26 @@ async function _fetch(path, options = {}) {
   return _handleResponse(res);
 }
 
+/**
+ * Categorise an Error from a persistence call into a short user-facing
+ * label, distinguishing user-actionable (4xx) from server (5xx) errors.
+ * Returns the original message if the error has no ``.status`` (network
+ * error / AbortError / unknown).
+ */
+export function describePersistenceError(err) {
+  if (!err) return 'Unknown error';
+  if (err.name === 'AbortError') return 'Cancelled';
+  const status = err.status;
+  const msg = err.message || String(err);
+  if (typeof status !== 'number') return msg;
+  if (status === 409) return `Conflict (409): ${msg}`;
+  if (status === 413) return `Payload too large (413): ${msg}`;
+  if (status === 422) return `Validation error (422): ${msg}`;
+  if (status >= 400 && status < 500) return `Client error (${status}): ${msg}`;
+  if (status >= 500) return `Server error (${status}): ${msg}`;
+  return msg;
+}
+
 // ---------------------------------------------------------------------------
 // Signals
 // ---------------------------------------------------------------------------
@@ -103,8 +123,13 @@ export function getSignal(id) {
  *   description?: string }} payload
  * @returns {Promise<SignalOut>}
  */
-export function updateSignal(id, payload) {
-  return _fetch(`/signals/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+export function updateSignal(id, payload, options = {}) {
+  const { signal } = options;
+  return _fetch(`/signals/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: payload,
+    ...(signal ? { signal } : {}),
+  });
 }
 
 /**
@@ -176,8 +201,13 @@ export function getPortfolio(id) {
  *   legs?: Array<object>, rebalance?: string }} payload
  * @returns {Promise<PortfolioOut>}
  */
-export function updatePortfolio(id, payload) {
-  return _fetch(`/portfolios/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+export function updatePortfolio(id, payload, options = {}) {
+  const { signal } = options;
+  return _fetch(`/portfolios/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: payload,
+    ...(signal ? { signal } : {}),
+  });
 }
 
 /**
