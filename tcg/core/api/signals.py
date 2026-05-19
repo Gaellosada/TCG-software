@@ -287,20 +287,18 @@ _EQUITY_CANDIDATE_COLLECTIONS: tuple[str, ...] = ("ETF", "FUND", "FOREX")
 def _derive_inline_leg_collection_prefix(
     asset_class: str, instrument_id: str
 ) -> str | None:
-    """Derive the host collection for an inline-basket leg by prefix.
+    """Derive the host collection for an inline-basket leg by id prefix.
 
-    Returns the deterministic host collection for asset classes whose
-    instrument-id convention encodes the underlying:
+    Zero-DB lookup for the three asset classes whose ids encode the host:
 
     * ``index``  → ``"INDEX"`` (single canonical collection).
-    * ``future`` → ``"FUT_<UNDERLYING>"`` parsed from
-      ``FUT_<UNDERLYING>_<EXPIRY>``.
-    * ``option`` → ``"OPT_<UNDERLYING>"`` parsed from
-      ``OPT_<UNDERLYING>_<...>``.
+    * ``future`` → ``"FUT_<UNDERLYING>"`` from ``FUT_<UNDERLYING>_<EXPIRY>``
+      (underlying may contain underscores; drop the trailing segment).
+    * ``option`` → ``"OPT_<UNDERLYING>"`` from ``OPT_<UNDERLYING>_<...>``.
 
-    Returns ``None`` for asset classes (currently ``equity``) where the
-    host collection is not derivable from the id alone — the caller must
-    fall back to a DB probe.
+    Returns ``None`` for ``equity`` (no id-encoded collection — caller
+    falls back to :func:`_probe_equity_collection`) and for any leg whose
+    id doesn't match the declared class's prefix (caller raises mismatch).
     """
     if asset_class == "index":
         return "INDEX"
@@ -333,12 +331,13 @@ async def _probe_equity_collection(
 ) -> str | None:
     """Find which equity-bucket collection hosts ``instrument_id``.
 
-    Probes each candidate collection (ETF, FUND, FOREX) via
+    Bounded 3-candidate probe (ETF → FUND → FOREX, in that order) via
     :meth:`MarketDataService.get_prices` with no date window.  Returns
-    the first collection that yields a non-``None`` price series.
-    Returns ``None`` if the id is not found in any equity collection.
+    the first collection that yields a non-``None`` series.
 
-    One DB read per candidate per leg — bounded by 3 reads worst-case.
+    Worst-case cost is 3 DB reads per equity leg (first hit short-
+    circuits). Returns ``None`` when all three miss — callers turn this
+    into a ``SignalValidationError`` (asset-class / id mismatch).
     """
     for candidate in _EQUITY_CANDIDATE_COLLECTIONS:
         try:
@@ -359,16 +358,15 @@ async def _resolve_inline_leg_collections(
 ) -> tuple[dict, ...]:
     """Stamp each inline-basket leg with its host MongoDB collection.
 
-    Returns a tuple of leg dicts in the same shape downstream code
-    expects: ``{"instrument_id": str, "weight": float, "collection": str}``.
-
-    For ``future`` / ``option`` / ``index`` the collection is derived from
-    the leg's id prefix (zero DB reads).  For ``equity`` the resolver
-    probes ETF/FUND/FOREX in turn.
+    Implements the Wave-P Q1 decision: DB-free path for ``future`` /
+    ``option`` / ``index`` (id-prefix derivation) and a bounded
+    ETF/FUND/FOREX probe for ``equity``.  Returns a tuple of leg dicts
+    in the downstream-expected shape:
+    ``{"instrument_id": str, "weight": float, "collection": str}``.
 
     Raises :class:`SignalValidationError` when a leg's id cannot be
-    bucketed under the declared ``asset_class`` (asset-class / id
-    mismatch, per Q1 of the brief).
+    bucketed under the declared ``asset_class`` — that is the only
+    place the asset-class / id-prefix mismatch is rejected.
     """
     out: list[dict] = []
     for i, leg in enumerate(legs):
