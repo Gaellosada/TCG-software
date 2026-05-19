@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import styles from './Signals.module.css';
+import { CATEGORIES } from '../../api/persistence';
 
 /**
  * Left panel — searchable list of signals. Simpler than the Indicators
@@ -7,14 +8,18 @@ import styles from './Signals.module.css';
  * section (custom) with a ``+ New`` button in the header.
  *
  * Props match the Indicators list for consistency:
- *   signals          {Array}    [{id, name}, ...]
- *   selectedId       {string}
- *   onSelect         {Function} (id) => void
- *   onAdd            {Function} () => void
- *   onDelete         {Function} (id) => void (caller confirms)
- *   onRename         {Function} (id, newName) => void
- *   search           {string}
- *   onSearchChange   {Function} (q) => void
+ *   signals            {Array}    [{id, name, category?}, ...]
+ *   selectedId         {string}
+ *   onSelect           {Function} (id) => void
+ *   onAdd              {Function} () => void
+ *   onDelete           {Function} (id) => void (caller confirms)
+ *   onRename           {Function} (id, newName) => void
+ *   search             {string}
+ *   onSearchChange     {Function} (q) => void
+ *   category           {string}   currently selected category (one of CATEGORIES)
+ *   onCategoryChange   {Function} (cat) => void
+ *   onChangeItemCat    {Function} (id, newCat) => void — move item to a different category
+ *   loading            {boolean}  show a loading hint in the list
  */
 function SignalsList({
   signals,
@@ -25,6 +30,10 @@ function SignalsList({
   onRename,
   search,
   onSearchChange,
+  category,
+  onCategoryChange,
+  onChangeItemCat,
+  loading,
 }) {
   const [renamingId, setRenamingId] = useState(null);
   const [renameDraft, setRenameDraft] = useState('');
@@ -96,6 +105,24 @@ function SignalsList({
             ✎
           </button>
         )}
+        {!isRenaming && onChangeItemCat && (
+          <select
+            className={styles.categoryChipSelect}
+            value={sig.category || category || 'RESEARCH'}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => {
+              e.stopPropagation();
+              onChangeItemCat(sig.id, e.target.value);
+            }}
+            aria-label={`Category for ${sig.name}`}
+            data-testid={`signal-cat-select-${sig.id}`}
+            title="Move to category"
+          >
+            {CATEGORIES.map((cat) => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+        )}
         {!isRenaming && (
           <button
             type="button"
@@ -126,6 +153,25 @@ function SignalsList({
           + New
         </button>
       </div>
+      {onCategoryChange && (
+        <div className={styles.categoryRow}>
+          <label className={styles.categoryLabel} htmlFor="signals-category-select">
+            Category
+          </label>
+          <select
+            id="signals-category-select"
+            className={styles.categorySelect}
+            value={category || 'RESEARCH'}
+            onChange={(e) => onCategoryChange(e.target.value)}
+            aria-label="Filter signals by category"
+            data-testid="signals-category-filter"
+          >
+            {CATEGORIES.map((cat) => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className={styles.listSearchRow}>
         <input
           className={styles.search}
@@ -137,7 +183,9 @@ function SignalsList({
         />
       </div>
       <div className={styles.listBody}>
-        {signals.length === 0 ? (
+        {loading ? (
+          <div className={styles.listEmpty}>Loading...</div>
+        ) : signals.length === 0 ? (
           <div className={styles.listEmpty}>
             No signals yet — click + New to create one.
           </div>

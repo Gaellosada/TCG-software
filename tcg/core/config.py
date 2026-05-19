@@ -20,4 +20,6 @@ def load_config() -> MongoConfig:
     return MongoConfig(
         uri=os.getenv("MONGO_URI") or env.get("MONGO_URI", "mongodb://localhost:27017"),
         db_name=os.getenv("MONGO_DB_NAME") or env.get("MONGO_DB_NAME", "tcg-instrument"),
+        app_write_db_name=os.getenv("MONGO_APP_WRITE_DB_NAME") or env.get("MONGO_APP_WRITE_DB_NAME", "tcg-app-data"),
+        app_write_collection=os.getenv("MONGO_APP_WRITE_COLLECTION") or env.get("MONGO_APP_WRITE_COLLECTION", "2026-app-data"),
     )

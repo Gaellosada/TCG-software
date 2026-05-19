@@ -7,8 +7,8 @@ import styles from './Signals.module.css';
 afterEach(cleanup);
 
 const SAMPLE = [
-  { id: 's1', name: 'Signal Alpha' },
-  { id: 's2', name: 'Signal Beta' },
+  { id: 's1', name: 'Signal Alpha', category: 'RESEARCH' },
+  { id: 's2', name: 'Signal Beta', category: 'DEV' },
 ];
 
 function defaultProps(overrides = {}) {
@@ -21,6 +21,10 @@ function defaultProps(overrides = {}) {
     onRename: vi.fn(),
     search: '',
     onSearchChange: vi.fn(),
+    category: 'RESEARCH',
+    onCategoryChange: vi.fn(),
+    onChangeItemCat: vi.fn(),
+    loading: false,
     ...overrides,
   };
 }
@@ -94,5 +98,56 @@ describe('<SignalsList>', () => {
     expect(screen.getByRole('textbox', { name: /rename signal alpha/i })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /rename signal alpha/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /delete signal alpha/i })).toBeNull();
+  });
+
+  // --- Category selector (persistence layer) ---
+
+  it('renders the category filter dropdown with all four options', () => {
+    render(<SignalsList {...defaultProps()} />);
+    const select = screen.getByTestId('signals-category-filter');
+    const options = Array.from(select.querySelectorAll('option')).map((o) => o.value);
+    expect(options).toEqual(['RESEARCH', 'DEV', 'PROD', 'ARCHIVE']);
+  });
+
+  it('shows the current category as selected in the filter', () => {
+    render(<SignalsList {...defaultProps({ category: 'DEV' })} />);
+    expect(screen.getByTestId('signals-category-filter').value).toBe('DEV');
+  });
+
+  it('calls onCategoryChange when the category filter is changed', () => {
+    const props = defaultProps();
+    render(<SignalsList {...props} />);
+    fireEvent.change(screen.getByTestId('signals-category-filter'), { target: { value: 'PROD' } });
+    expect(props.onCategoryChange).toHaveBeenCalledWith('PROD');
+  });
+
+  it('does NOT render category filter when onCategoryChange is not provided', () => {
+    const props = defaultProps({ onCategoryChange: undefined });
+    render(<SignalsList {...props} />);
+    expect(screen.queryByTestId('signals-category-filter')).toBeNull();
+  });
+
+  it('renders per-row category chip select for each signal', () => {
+    render(<SignalsList {...defaultProps()} />);
+    expect(screen.getByTestId('signal-cat-select-s1')).toBeTruthy();
+    expect(screen.getByTestId('signal-cat-select-s2')).toBeTruthy();
+  });
+
+  it('per-row category select shows the signal category', () => {
+    render(<SignalsList {...defaultProps()} />);
+    expect(screen.getByTestId('signal-cat-select-s1').value).toBe('RESEARCH');
+    expect(screen.getByTestId('signal-cat-select-s2').value).toBe('DEV');
+  });
+
+  it('calls onChangeItemCat with correct id and value when chip changes', () => {
+    const props = defaultProps();
+    render(<SignalsList {...props} />);
+    fireEvent.change(screen.getByTestId('signal-cat-select-s1'), { target: { value: 'PROD' } });
+    expect(props.onChangeItemCat).toHaveBeenCalledWith('s1', 'PROD');
+  });
+
+  it('shows loading hint when loading=true', () => {
+    render(<SignalsList {...defaultProps({ loading: true, signals: [] })} />);
+    expect(screen.getByText('Loading...')).toBeTruthy();
   });
 });

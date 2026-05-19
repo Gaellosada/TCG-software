@@ -1,0 +1,181 @@
+/*
+ * PersistedPortfolioPanel styles.
+ *
+ * The outer container and header come from the shared <Card> component
+ * (same surface / border / border-radius as HoldingsList). Only the
+ * panel-specific inner layout is defined here.
+ */
+
+/* ── Header right-side controls ── */
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.categoryLabel {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.categorySelect {
+  padding: 3px 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.78rem;
+  outline: none;
+  cursor: pointer;
+}
+
+.categorySelect:focus {
+  border-color: var(--accent);
+}
+
+/* "+ Save current" button — matches the addBtn pattern from HoldingsList */
+
+.addBtn {
+  padding: 4px 10px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+
+.addBtn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.addBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── List body ── */
+
+.list {
+  padding: 4px 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.empty {
+  padding: 12px 16px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+/* ── Row layout — mirrors HoldingsList compact row ── */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 16px;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-secondary);
+  transition: background 0.12s;
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+.rowActive {
+  background: rgba(var(--accent-rgb, 37 99 235) / 0.06);
+}
+
+/* Portfolio name — clickable, fills available width */
+
+.rowName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.rowName:hover {
+  color: var(--accent);
+}
+
+/* Category chip select — hover-reveal, matches SignalsList pattern */
+
+.rowCatSelect {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.7rem;
+  padding: 1px 4px;
+  height: 20px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+  outline: none;
+}
+
+.row:hover .rowCatSelect,
+.row:focus-within .rowCatSelect {
+  opacity: 1;
+}
+
+/* Archive (delete) button — matches removeBtn from HoldingsList */
+
+.rowDeleteBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.row:hover .rowDeleteBtn,
+.row:focus-within .rowDeleteBtn {
+  opacity: 1;
+}
+
+.rowDeleteBtn:hover {
+  color: var(--error);
+  border-color: var(--error);
+  background: var(--error-bg);
+}

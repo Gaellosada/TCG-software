@@ -62,6 +62,15 @@ vi.mock('../../api/signals', () => ({
   collectIndicatorIds: () => new Set(),
 }));
 
+// Mock persistence API so tests don't attempt real HTTP calls.
+vi.mock('../../api/persistence', () => ({
+  listSignals: vi.fn(() => Promise.resolve([])),
+  createSignal: vi.fn(() => Promise.resolve({})),
+  updateSignal: vi.fn(() => Promise.resolve({})),
+  archiveSignal: vi.fn(() => Promise.resolve(null)),
+  describePersistenceError: (err) => (err && err.message) || String(err),
+}));
+
 // Allow the run gate to pass so M1 tests can populate lastResult.
 vi.mock('./runGate', () => ({
   computeRunGate: () => ({ runDisabledReason: null, missingIds: [] }),
