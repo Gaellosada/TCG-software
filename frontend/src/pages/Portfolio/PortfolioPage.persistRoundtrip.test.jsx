@@ -135,7 +135,7 @@ describe('<PortfolioPage> — backend hydrate + autosave', () => {
     });
   });
 
-  it('PUTs the edited legs to the backend within ~600ms', async () => {
+  it('PUTs the edited legs to the backend within ~3100ms', async () => {
     vi.useFakeTimers();
     try {
       await act(async () => {
@@ -165,7 +165,7 @@ describe('<PortfolioPage> — backend hydrate + autosave', () => {
 
       // Within the debounce window the PUT must fire.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(600);
+        await vi.advanceTimersByTimeAsync(3100);
       });
 
       expect(mockUpdatePortfolio).toHaveBeenCalled();

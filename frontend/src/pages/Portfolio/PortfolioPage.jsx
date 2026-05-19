@@ -53,7 +53,6 @@ function PortfolioPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [signalModalOpen, setSignalModalOpen] = useState(false);
   const [saveInput, setSaveInput] = useState('');
-  const [savedList, setSavedList] = useState(() => portfolio.getSavedPortfolios());
   // iter-4: replaced window.confirm with shared ConfirmDialog.
   // deleteTarget holds the portfolioName pending-delete (null = dialog closed).
   // clearConfirmOpen gates the clear-all dialog (no payload needed).
@@ -246,7 +245,6 @@ function PortfolioPage() {
     enabled: !!portfolio.persistedId && cloudDirty,
     payload: cloudPayload,
     onSave: handleCloudSave,
-    debounceMs: 500,
   });
 
   // Reset cloud status indicator on portfolio (de)selection.
@@ -264,33 +262,19 @@ function PortfolioPage() {
   const handleOpenModal = useCallback(() => setModalOpen(true), []);
   const handleCloseModal = useCallback(() => setModalOpen(false), []);
 
-  const refreshSavedList = useCallback(() => {
-    setSavedList(portfolio.getSavedPortfolios());
-  }, [portfolio.getSavedPortfolios]);
-
   const handleSave = useCallback(() => {
     // If editing a loaded portfolio and input is empty/unchanged, save with current name
     const name = saveInput.trim() || portfolio.portfolioName;
     if (!name) return;
     portfolio.savePortfolio(name);
-    refreshSavedList();
-  }, [saveInput, portfolio, refreshSavedList]);
-
-  const handleLoad = useCallback(
-    (name) => {
-      portfolio.loadPortfolio(name);
-      refreshSavedList();
-    },
-    [portfolio, refreshSavedList],
-  );
+  }, [saveInput, portfolio]);
 
   const handleDeleteSaved = useCallback(
     (name) => {
       portfolio.deleteSavedPortfolio(name);
       portfolio.clearAll();
-      refreshSavedList();
     },
-    [portfolio, refreshSavedList],
+    [portfolio],
   );
 
   return (
@@ -300,24 +284,6 @@ function PortfolioPage() {
         <div className={styles.header}>
           <div className={styles.headerLeft}>
             <h2 className={styles.pageTitle}>Portfolio</h2>
-            {/* Load dropdown — right next to title */}
-            {savedList.length > 0 && (
-              <select
-                className={styles.loadSelect}
-                value=""
-                onChange={(e) => {
-                  if (e.target.value) handleLoad(e.target.value);
-                }}
-                aria-label="Load saved portfolio"
-              >
-                <option value="" disabled>
-                  {portfolio.portfolioName || 'Load...'}
-                </option>
-                {savedList.map((name) => (
-                  <option key={name} value={name}>{name}</option>
-                ))}
-              </select>
-            )}
             {/* Delete current portfolio — only when one is loaded */}
             {portfolio.portfolioName && (
               <button
