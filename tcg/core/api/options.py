@@ -390,10 +390,13 @@ async def _batch_underlying_prices(
     fetched; for option-on-future roots the FUT_* document referenced
     by ``contract.underlying_ref`` is fetched.
     """
+    from tcg.engine.options.chain._forward import (
+        is_vix as _is_vix,
+        resolve_vix_futures_ref,
+    )
     from tcg.engine.options.chain._join import (
         _futures_collection_for,
         _is_btc,
-        _is_vix,
     )
 
     # BTC: underlying price lives on the row — no Mongo call.
@@ -422,13 +425,9 @@ async def _batch_underlying_prices(
         # future (~20+), causing the pricer to misclassify slightly-OTM
         # puts as ITM-below-intrinsic and surface
         # "deep_itm_degenerate" on rows that should compute cleanly.
-        # Look up the matching FUT_VIX contract by the option's expiration.
-        exp = contract.expiration
-        exp_int = exp.year * 10000 + exp.month * 100 + exp.day
-        try:
-            fut_id = await svc.find_futures_contract_by_expiration("FUT_VIX", exp_int)
-        except Exception:  # noqa: BLE001
-            return {}
+        # Shared helper ensures the API and chain join use the same
+        # FUT_VIX dispatch logic (see _forward.resolve_vix_futures_ref).
+        fut_id = await resolve_vix_futures_ref(contract, svc)
         if fut_id is None:
             # Weekly VIX option with no matching monthly future. The
             # engine gate surfaces ``missing_forward_vix_curve`` on every

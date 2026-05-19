@@ -44,25 +44,19 @@ from __future__ import annotations
 
 from datetime import date
 
+from tcg.engine.options.chain._forward import is_vix as _is_vix
+from tcg.engine.options.chain._forward import resolve_vix_forward
 from tcg.engine.options.chain._ports import FuturesDataPort, IndexDataPort
 from tcg.types.options import OptionContractDoc, OptionDailyRow
 
 
 _BTC_ROOTS: frozenset[str] = frozenset({"BTC", "OPT_BTC"})
-_VIX_ROOTS: frozenset[str] = frozenset({"IND_VIX", "OPT_VIX"})
 
 
 def _is_btc(contract: OptionContractDoc) -> bool:
     return (
         contract.collection == "OPT_BTC"
         or contract.root_underlying in _BTC_ROOTS
-    )
-
-
-def _is_vix(contract: OptionContractDoc) -> bool:
-    return (
-        contract.collection == "OPT_VIX"
-        or contract.root_underlying in _VIX_ROOTS
     )
 
 
@@ -100,18 +94,12 @@ async def resolve_underlying_price(
     if _is_btc(contract):
         return row.underlying_price_stored
 
-    # Branch 2: OPT_VIX — match by expiration against FUT_VIX.
-    # VIX options are AM-settled on the matching VIX future on
-    # expiration Wednesday; Black-76 takes that future's close as the
-    # forward. When no FUT_VIX exists for the option's expiration the
-    # option is a weekly (Phase 3) and we return None so the pricing
-    # gate surfaces ``missing_forward_vix_curve``.
+    # Branch 2: OPT_VIX — match by expiration against FUT_VIX. Delegates
+    # to the shared helper so the API bulk path
+    # (``_batch_underlying_prices``) uses the same dispatch logic
+    # (see ``tcg.engine.options.chain._forward.resolve_vix_forward``).
     if _is_vix(contract):
-        return await futures_port.get_futures_close_by_expiration(
-            "FUT_VIX",
-            contract.expiration,
-            target_date,
-        )
+        return await resolve_vix_forward(contract, futures_port, target_date)
 
     # Branch 3: option-on-future — FUT_* lookup.
     if contract.underlying_ref is None:

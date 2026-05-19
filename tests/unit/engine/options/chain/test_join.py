@@ -293,3 +293,103 @@ class TestOptETHBranch:
         )
 
         assert result is None
+
+
+class TestSharedVixForward:
+    """Both call sites (chain _join + API _batch_underlying_prices) must
+    use the same VIX forward dispatch (Wave 2 / triage #4). This test
+    pins that they delegate to the same shared helper so the contract-
+    detail endpoint and chain endpoint agree on the forward.
+    """
+
+    @pytest.mark.asyncio
+    async def test_chain_join_delegates_to_resolve_vix_forward(self) -> None:
+        from tcg.engine.options.chain._forward import resolve_vix_forward
+
+        contract = _make_contract(
+            collection="OPT_VIX",
+            root_underlying="IND_VIX",
+            underlying_ref=None,
+        )
+        row = _make_row(target_date=date(2024, 6, 21))
+        index_port = AsyncMock()
+        futures_port = AsyncMock()
+        futures_port.get_futures_close_by_expiration.return_value = 18.0
+
+        # Call _join.resolve_underlying_price and the shared helper with
+        # the same inputs; both must return the same forward.
+        join_result = await resolve_underlying_price(
+            contract=contract,
+            row=row,
+            target_date=date(2024, 6, 21),
+            index_port=index_port,
+            futures_port=futures_port,
+        )
+        helper_result = await resolve_vix_forward(
+            contract, futures_port, date(2024, 6, 21)
+        )
+
+        assert join_result == helper_result == 18.0
+
+    @pytest.mark.asyncio
+    async def test_resolve_vix_forward_short_circuits_non_vix(self) -> None:
+        """Non-VIX contract → None so the API/chain fall through to spot
+        or per-contract paths.
+        """
+        from tcg.engine.options.chain._forward import resolve_vix_forward
+
+        contract = _make_contract(
+            collection="OPT_SP_500",
+            root_underlying="IND_SP_500",
+            underlying_ref="FUT_SP_500_EMINI_20240621",
+        )
+        futures_port = AsyncMock()
+
+        result = await resolve_vix_forward(
+            contract, futures_port, date(2024, 6, 21)
+        )
+
+        assert result is None
+        futures_port.get_futures_close_by_expiration.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resolve_vix_futures_ref_returns_contract_id(self) -> None:
+        """The API bulk path uses :func:`resolve_vix_futures_ref` to get
+        the FUT_VIX contract id (then drives a date-range fetch).
+        """
+        from tcg.engine.options.chain._forward import resolve_vix_futures_ref
+
+        contract = _make_contract(
+            collection="OPT_VIX",
+            root_underlying="IND_VIX",
+            underlying_ref=None,
+        )
+        svc = AsyncMock()
+        svc.find_futures_contract_by_expiration.return_value = "FUT_VIX_20240621"
+
+        result = await resolve_vix_futures_ref(contract, svc)
+
+        assert result == "FUT_VIX_20240621"
+        svc.find_futures_contract_by_expiration.assert_awaited_once_with(
+            "FUT_VIX", 20240621
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolve_vix_futures_ref_swallows_data_error(self) -> None:
+        """Underlying data error → None (mirrors the API endpoint policy
+        of "do not 502 on a single missing underlying").
+        """
+        from tcg.engine.options.chain._forward import resolve_vix_futures_ref
+
+        contract = _make_contract(
+            collection="OPT_VIX",
+            root_underlying="IND_VIX",
+            underlying_ref=None,
+        )
+        svc = AsyncMock()
+        svc.find_futures_contract_by_expiration.side_effect = RuntimeError("mongo down")
+
+        result = await resolve_vix_futures_ref(contract, svc)
+
+        assert result is None
+
