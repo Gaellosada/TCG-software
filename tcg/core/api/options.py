@@ -64,13 +64,11 @@ from tcg.core.api.common import (
 from tcg.data._utils import int_to_date
 from tcg.data.protocols import MarketDataService
 from tcg.types.errors import (
-    OptionsContractNotFound,
     OptionsSelectionError,
     OptionsValidationError,
 )
 from tcg.types.options import (
     ChainSnapshot,
-    ComputeResult,
     OptionContractDoc,
     OptionContractSeries,
     OptionDailyRow,

@@ -9,7 +9,6 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-import numpy as np
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ASCENDING
 from pymongo.errors import PyMongoError
