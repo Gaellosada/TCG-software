@@ -85,6 +85,7 @@ from pydantic import BaseModel, Field
 from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
+    BasketRef,
     ContinuousInstrumentRef,
     OptionStreamRef,
     SpotInstrumentRef,
@@ -137,9 +138,12 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 class _InputIn(BaseModel):
     id: str
     # Pydantic v2 discriminated union on ``type``.
-    instrument: SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef = Field(
-        discriminator="type"
-    )
+    instrument: (
+        SpotInstrumentRef
+        | ContinuousInstrumentRef
+        | OptionStreamRef
+        | BasketRef
+    ) = Field(discriminator="type")
 
 
 class _OperandIn(BaseModel):

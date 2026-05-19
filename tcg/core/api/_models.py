@@ -91,7 +91,20 @@ class OptionStreamRef(BaseModel):
         return v
 
 
+class BasketRef(BaseModel):
+    """Reference to a persisted basket by id.
+
+    The API layer looks up the basket in MongoDB at signal-resolution
+    time, snapshots its legs, and constructs an :class:`InstrumentBasket`.
+    Only the ``basket_id`` is carried over the wire — legs are resolved
+    server-side so the frontend never has to mirror that state.
+    """
+
+    type: Literal["basket"]
+    basket_id: str = Field(..., min_length=1, max_length=128)
+
+
 SeriesRef = Annotated[
-    SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef,
+    SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef | BasketRef,
     Field(discriminator="type"),
 ]
