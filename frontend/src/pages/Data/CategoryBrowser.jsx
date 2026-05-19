@@ -35,6 +35,39 @@ const CATEGORY_CONFIG = [
   },
 ];
 
+/**
+ * Render the greeks-availability badge for an option root:
+ * - stored_greeks_ratio >= 0.9   → solid green "Greeks"
+ *                                  (vendor reliably ships them; e.g. OPT_SP_500)
+ * - 0.1 <= ratio < 0.9           → split green/gray "Greeks"
+ *                                  (vendor ships them for a fraction of docs;
+ *                                  e.g. OPT_BTC ~37%, OPT_JPYUSD ~30%)
+ * - ratio < 0.1 && has_computed_greeks → gray "Comp. Greeks"
+ *                                  (vendor stocks ~none but engine can compute;
+ *                                  e.g. OPT_VIX via Black-76 + FUT_VIX forward)
+ * - otherwise                    → no badge (e.g. OPT_ETH — no greeks anywhere)
+ *
+ * Falls back to the legacy ``has_greeks`` flag when the new fields are absent
+ * (older response shape or tests that don't populate them).
+ */
+function renderGreeksBadge(root) {
+  const ratio = typeof root.stored_greeks_ratio === 'number'
+    ? root.stored_greeks_ratio
+    : (root.has_greeks ? 1 : 0);
+  const canCompute = root.has_computed_greeks ?? false;
+
+  if (ratio >= 0.9) {
+    return <span className={styles.greeksBadge}>Greeks</span>;
+  }
+  if (ratio >= 0.1) {
+    return <span className={styles.greeksBadgePartial}>Greeks</span>;
+  }
+  if (canCompute) {
+    return <span className={styles.greeksBadgeComputed}>Comp. Greeks</span>;
+  }
+  return null;
+}
+
 function CategoryBrowser({ selected, onSelect }) {
   const [categories, setCategories] = useState([]);
   const [expanded, setExpanded] = useState({ indexes: false, assets: false, futures: false, options: false });
@@ -225,9 +258,7 @@ function CategoryBrowser({ selected, onSelect }) {
                     >
                       <span className={styles.instrumentSymbol}>{root.name}</span>
                       <span className={styles.badges}>
-                        {root.has_greeks && (
-                          <span className={styles.greeksBadge}>Greeks</span>
-                        )}
+                        {renderGreeksBadge(root)}
                       </span>
                     </button>
                   ))

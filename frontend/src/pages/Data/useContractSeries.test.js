@@ -32,7 +32,7 @@ describe('useContractSeries', () => {
 
     await waitFor(() => expect(result.current.data).toEqual(payload));
     expect(getOptionContract).toHaveBeenCalledWith('OPT_SP_500', 'X|M', {
-      computeMissing: false,
+      computeMissing: true,
       dateFrom: null,
       dateTo: null,
     });

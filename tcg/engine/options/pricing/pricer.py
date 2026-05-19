@@ -10,10 +10,15 @@ index. Module 6 (`tcg.engine.options.chain`) is responsible for the join.
 Invariants (per brief / guardrails):
 - ``r=0.0`` hardcoded, surfaced via ``inputs_used.r=0.0`` on every successful
   compute (guardrail #5).
-- OPT_VIX → ``error_code="missing_forward_vix_curve"`` for all 5 fields
-  (guardrail #6). No Black-76 fallback.
+- OPT_VIX → forward resolved from FUT_VIX (Phase 2): monthly options
+  compute normally under Black-76; weeklies (no matching FUT_VIX
+  expiration) reach the missing-underlying branch and surface
+  ``error_code="missing_forward_vix_curve"`` (more specific than the
+  generic ``missing_underlying_price``).
 - OPT_ETH → ``error_code="missing_deribit_feed"`` for all 5 fields.
-- ``underlying_price is None`` → ``error_code="missing_underlying_price"``.
+- ``underlying_price is None`` → ``error_code="missing_underlying_price"``
+  for most roots; ``missing_forward_vix_curve`` for OPT_VIX (per
+  ``_gating.missing_underlying_error``).
 - TTM ≤ 0 → ``error_code="expired_contract"``.
 - Root in the strike-factor-gated set with ``strike_factor_verified=False`` →
   ``error_code="strike_factor_unverified"``.
@@ -33,6 +38,7 @@ from typing import Sequence
 
 from tcg.engine.options.pricing._gating import (
     is_blocked_root,
+    missing_underlying_error,
     needs_strike_factor_verification,
     sign_for_type,
     time_to_expiry_years,
@@ -59,6 +65,33 @@ _ALL_GREEKS: tuple[GreekKind, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# IV inversion failure codes
+# ---------------------------------------------------------------------------
+# Public constants so tests and frontend tooltip mappers can import them
+# rather than string-matching. Each code identifies a distinct failure
+# regime; the frontend renders an appropriate tooltip per code.
+
+# Deep-ITM (|F-K|/F > 0.3) call/put where py_vollib's lower bound is
+# violated. The IV is mathematically degenerate at this regime.
+IV_ERROR_DEEP_ITM_DEGENERATE: str = "missing_iv_deep_itm_degenerate"
+
+# Mildly-ITM / ATM contract where mid sits below intrinsic value — almost
+# certainly a stale or bad bid/ask quote (data-quality issue), NOT a
+# regime where IV is undefined.
+IV_ERROR_BELOW_INTRINSIC_DATA_QUALITY: str = "missing_iv_below_intrinsic_data_quality"
+
+# Price above the no-arbitrage upper bound. Usually stale data or a
+# corrupt quote.
+IV_ERROR_ABOVE_MAXIMUM: str = "missing_iv_above_maximum"
+
+# Catch-all for any other py_vollib (or post-call sanity) failure.
+IV_ERROR_INVERT_FAILED: str = "missing_iv_invert_failed"
+
+# Moneyness threshold separating "deep ITM" from "shallow ITM": |F-K|/F.
+_DEEP_ITM_MONEYNESS_THRESHOLD: float = 0.3
+
+
 def _missing(
     error_code: str,
     missing_inputs: tuple[str, ...],
@@ -79,6 +112,97 @@ def _missing(
 def _not_requested() -> ComputeResult:
     """Sentinel for Greeks the caller did not ask for via ``which``."""
     return _missing("not_requested", ())
+
+
+def _classify_iv_inversion_failure(
+    exc: BaseException, *, flag: str, F: float, K: float
+) -> ComputeResult:
+    """Map a py_vollib inversion exception to the most informative error code.
+
+    Four regimes are distinguished:
+
+      1. ``BelowIntrinsicException`` AND ITM AND moneyness > 0.3 →
+         ``missing_iv_deep_itm_degenerate``. Option is mathematically
+         degenerate (moves 1:1 with the underlying); IV is not a useful
+         number at this regime.
+      2. ``BelowIntrinsicException`` AND (ATM or shallow-ITM, moneyness
+         ≤ 0.3) → ``missing_iv_below_intrinsic_data_quality``. The mid
+         quote falls below intrinsic value — almost certainly a stale or
+         bad bid/ask, NOT a degenerate IV regime.
+      3. ``AboveMaximumException`` → ``missing_iv_above_maximum``. Mid
+         exceeds the no-arbitrage upper bound — typically a stale or
+         corrupt quote.
+      4. Any other exception (NaN inputs, numerical solver failure, etc.)
+         → ``missing_iv_invert_failed`` with raw exception name + msg in
+         ``error_detail``.
+
+    Moneyness convention: ``abs(F - K) / F``. F<=0 falls through to the
+    deep-ITM bucket (no meaningful moneyness can be computed; the contract
+    is degenerate by definition since the underlying is non-positive).
+
+    ITM tests:
+      - ITM put: ``K > F``
+      - ITM call: ``K < F``
+      - ATM (``F == K``) is NOT ITM → BelowIntrinsic on ATM is intrinsic
+        ≈ 0, so any negative deviation is bad data → data-quality bucket.
+    """
+    exc_name = type(exc).__name__
+    is_below_intrinsic = exc_name == "BelowIntrinsicException"
+    is_above_maximum = exc_name == "AboveMaximumException"
+    is_itm_put = flag == "p" and K > F
+    is_itm_call = flag == "c" and K < F
+    is_itm = is_itm_put or is_itm_call
+
+    if is_above_maximum:
+        detail = (
+            "Mid quote exceeds the no-arbitrage upper bound; the input "
+            "price is likely stale or corrupt and IV cannot be inverted."
+        )
+        return _missing(IV_ERROR_ABOVE_MAXIMUM, ("iv",), error_detail=detail)
+
+    if is_below_intrinsic and is_itm:
+        # Compute moneyness; guard F<=0 edge case (treat as deep-ITM since
+        # no meaningful ratio is defined and the contract is degenerate).
+        if F <= 0.0:
+            moneyness = float("inf")
+        else:
+            moneyness = abs(F - K) / F
+        if moneyness > _DEEP_ITM_MONEYNESS_THRESHOLD:
+            # Two-sentence tooltip per UX request — explains why no IV
+            # exists AND tells the user what to use instead.
+            detail = (
+                "Deep ITM: option moves 1:1 with the underlying so IV is "
+                "degenerate. Greek limits at this regime: |delta| approx "
+                "1, gamma approx theta approx vega approx 0."
+            )
+            return _missing(
+                IV_ERROR_DEEP_ITM_DEGENERATE, ("iv",), error_detail=detail
+            )
+        # Shallow-ITM BelowIntrinsic → data-quality bucket.
+        detail = (
+            "Option mid quote is below intrinsic value at this strike; "
+            "likely a stale or bad bid/ask, not a degenerate IV regime."
+        )
+        return _missing(
+            IV_ERROR_BELOW_INTRINSIC_DATA_QUALITY, ("iv",), error_detail=detail
+        )
+
+    if is_below_intrinsic:
+        # ATM or OTM BelowIntrinsic (intrinsic is 0; mid would need to be
+        # negative — bad data).
+        detail = (
+            "Option mid quote is below intrinsic value at this strike; "
+            "likely a stale or bad bid/ask, not a degenerate IV regime."
+        )
+        return _missing(
+            IV_ERROR_BELOW_INTRINSIC_DATA_QUALITY, ("iv",), error_detail=detail
+        )
+
+    return _missing(
+        IV_ERROR_INVERT_FAILED,
+        ("iv",),
+        error_detail=f"{exc_name}: {exc}",
+    )
 
 
 def _all_missing(error_code: str, missing_inputs: tuple[str, ...]) -> ComputedGreeks:
@@ -122,7 +246,8 @@ class DefaultOptionsPricer(OptionsPricer):
 
         # 3) Underlying price.
         if underlying_price is None:
-            return _all_missing("missing_underlying_price", ("underlying_price",))
+            code, missing = missing_underlying_error(contract.collection)
+            return _all_missing(code, missing)
 
         # 4) Time-to-expiry.
         T = time_to_expiry_years(contract.expiration, row.date)
@@ -221,7 +346,8 @@ class DefaultOptionsPricer(OptionsPricer):
 
         # 3) Underlying price.
         if underlying_price is None:
-            return _missing("missing_underlying_price", ("underlying_price",))
+            code, missing = missing_underlying_error(contract.collection)
+            return _missing(code, missing)
 
         # 4) TTM.
         T = time_to_expiry_years(contract.expiration, row.date)
@@ -257,8 +383,7 @@ class DefaultOptionsPricer(OptionsPricer):
                 flag=flag,
             )
         except Exception as exc:  # noqa: BLE001 — py_vollib raises a hierarchy
-            detail = f"{type(exc).__name__}: {exc}"
-            return _missing("missing_iv_invert_failed", ("iv",), error_detail=detail)
+            return _classify_iv_inversion_failure(exc, flag=flag, F=F, K=K)
 
         # Some py_vollib paths return NaN or a sentinel non-finite value rather
         # than raising; treat as failure.

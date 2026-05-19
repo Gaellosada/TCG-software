@@ -9,7 +9,6 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-import numpy as np
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ASCENDING
 from pymongo.errors import PyMongoError
@@ -175,6 +174,34 @@ class MongoInstrumentReader:
             raise DataAccessError(
                 f"MongoDB error fetching futures contracts from '{collection}': {exc}"
             ) from exc
+
+    async def find_contract_by_expiration(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the ``_id`` (as a string) of the single contract in
+        *collection* whose ``expiration`` field equals *expiration_int*
+        (YYYYMMDD integer, legacy schema). Returns ``None`` when no
+        document matches.
+
+        Used by the OPT_VIX underlying-price resolver to map an option
+        expiration to the corresponding FUT_VIX contract without going
+        through the private ``_db`` attribute on the service.
+        """
+        try:
+            doc = await self._db[collection].find_one(
+                {"expiration": expiration_int}, {"_id": 1}
+            )
+        except PyMongoError as exc:
+            raise DataAccessError(
+                f"MongoDB error finding contract by expiration "
+                f"in '{collection}' (expiration={expiration_int}): {exc}"
+            ) from exc
+        if doc is None:
+            return None
+        raw_id = doc["_id"]
+        return raw_id if isinstance(raw_id, str) else str(raw_id)
 
     async def fetch_available_cycles(
         self,

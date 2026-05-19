@@ -331,6 +331,26 @@ class DefaultMarketDataService:
             root, option_type=option_type, cycle=cycle
         )
 
+    # --- Futures contract lookup by expiration ---
+
+    async def find_futures_contract_by_expiration(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the ``_id`` string of the futures contract in *collection*
+        whose ``expiration`` field equals *expiration_int* (YYYYMMDD int).
+
+        Returns ``None`` when no contract matches. Raises
+        ``DataNotFoundError`` if *collection* is not in the registry.
+        Used by the VIX greeks resolver (Phase 2) to map an OPT_VIX
+        expiration to the matching FUT_VIX contract without private-
+        attribute access.
+        """
+        if collection not in self._registry:
+            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
+        return await self._mongo.find_contract_by_expiration(collection, expiration_int)
+
     # --- Internal ---
 
     @staticmethod

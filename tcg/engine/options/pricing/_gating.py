@@ -11,11 +11,41 @@ from datetime import date
 from typing import Literal
 
 
-# Roots whose Greeks are structurally blocked in Phase 1 (guardrail #6).
+# Roots whose Greeks are structurally blocked.
+#
+# OPT_ETH stays blocked — no Deribit feed wired yet.
+# OPT_VIX was removed in Phase 2 of the VIX greeks rollout: monthly VIX
+# options now compute under Black-76 using the matching FUT_VIX close as
+# the forward; weeklies (no matching FUT_VIX expiry) still surface
+# ``missing_forward_vix_curve`` but the routing is conditional on the
+# resolver — see :func:`vix_forward_missing` below and the OPT_VIX
+# underlying-resolution branch in ``tcg.engine.options.chain._join``.
 _BLOCKED_ROOTS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "OPT_VIX": ("missing_forward_vix_curve", ("forward_vix_curve",)),
     "OPT_ETH": ("missing_deribit_feed", ("underlying_price",)),
 }
+
+
+# Per-root mapping for "underlying price unavailable" — most roots surface
+# the generic ``missing_underlying_price`` code, but OPT_VIX wants the more
+# specific ``missing_forward_vix_curve`` because the missing input is the
+# forward curve (weeklies), not the spot underlying.
+_MISSING_UNDERLYING_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "OPT_VIX": ("missing_forward_vix_curve", ("forward_vix_curve",)),
+}
+
+
+def missing_underlying_error(collection: str) -> tuple[str, tuple[str, ...]]:
+    """Return the (error_code, missing_inputs) tuple for a missing underlying
+    on the given root collection.
+
+    Default: ``("missing_underlying_price", ("underlying_price",))``.
+    OPT_VIX override: ``("missing_forward_vix_curve", ("forward_vix_curve",))``
+    — the missing input is the FUT_VIX forward (weekly options have no
+    matching FUT_VIX expiration).
+    """
+    return _MISSING_UNDERLYING_OVERRIDES.get(
+        collection, ("missing_underlying_price", ("underlying_price",))
+    )
 
 # Roots whose strike-factor must be verified before Black-76 may run.
 # Mirrors `tcg.data.options._strike_factor.STRIKE_FACTOR_VERIFIED` but lives
@@ -32,8 +62,10 @@ def is_blocked_root(collection: str) -> tuple[bool, str | None, tuple[str, ...]]
     """Return ``(blocked, error_code, missing_inputs)`` for the root collection.
 
     Examples:
+        >>> is_blocked_root("OPT_ETH")
+        (True, 'missing_deribit_feed', ('underlying_price',))
         >>> is_blocked_root("OPT_VIX")
-        (True, 'missing_forward_vix_curve', ('forward_vix_curve',))
+        (False, None, ())
         >>> is_blocked_root("OPT_SP_500")
         (False, None, ())
     """
@@ -41,6 +73,24 @@ def is_blocked_root(collection: str) -> tuple[bool, str | None, tuple[str, ...]]
         code, missing = _BLOCKED_ROOTS[collection]
         return True, code, missing
     return False, None, ()
+
+
+def blocked_roots() -> frozenset[str]:
+    """Return the set of OPT_* roots whose engine compute is blocked.
+
+    This is the **supported public boundary** for non-engine callers that
+    need to know whether the engine can compute greeks for a root —
+    notably the API layer, which injects ``has_computed_greeks`` onto
+    ``OptionRootInfo`` (the data layer cannot reach engine internals
+    per the ``engine-data-isolation`` import-linter contract).
+
+    Returns:
+        Immutable frozenset of root collection names (e.g. ``{"OPT_ETH"}``).
+        Membership in this set means: engine returns the per-root
+        ``error_code`` for every greek attempt and never invokes the
+        pricing kernel.
+    """
+    return frozenset(_BLOCKED_ROOTS.keys())
 
 
 def needs_strike_factor_verification(collection: str) -> bool:

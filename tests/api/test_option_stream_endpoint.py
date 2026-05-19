@@ -40,11 +40,13 @@ _ROOT_WITH_GREEKS = OptionRootInfo(
 )
 
 _ROOT_NO_GREEKS = OptionRootInfo(
-    collection="OPT_VIX",
-    name="VIX",
+    # OPT_ETH is the canonical no-greeks root at the data layer
+    # (OPT_VIX was unblocked in Phase 1 of the VIX greeks rollout).
+    collection="OPT_ETH",
+    name="ETH",
     has_greeks=False,
-    providers=("CBOE",),
-    expiration_first=date(2006, 1, 1),
+    providers=("DERIBIT",),
+    expiration_first=date(2020, 1, 1),
     expiration_last=date(2027, 12, 19),
     doc_count_estimated=500000,
     strike_factor_verified=True,
@@ -253,8 +255,8 @@ class TestValidationErrors:
 
     async def test_greeks_gated_on_no_greeks_root(self, client: AsyncClient):
         stream = _stream_entry(
-            label="gamma_vix",
-            collection="OPT_VIX",
+            label="gamma_eth",
+            collection="OPT_ETH",
             stream="gamma",
         )
         body = _request_body([stream])
@@ -262,12 +264,12 @@ class TestValidationErrors:
         assert resp.status_code == 422
         data = resp.json()
         assert data["error_code"] == "STREAM_UNAVAILABLE_FOR_ROOT"
-        assert data["root"] == "OPT_VIX"
+        assert data["root"] == "OPT_ETH"
 
     async def test_greeks_gated_theta_on_no_greeks_root(self, client: AsyncClient):
         stream = _stream_entry(
-            label="theta_vix",
-            collection="OPT_VIX",
+            label="theta_eth",
+            collection="OPT_ETH",
             stream="theta",
         )
         body = _request_body([stream])
@@ -280,8 +282,8 @@ class TestValidationErrors:
         """iv and delta are available on all roots — only gamma/vega/theta
         are gated."""
         stream = _stream_entry(
-            label="iv_vix",
-            collection="OPT_VIX",
+            label="iv_eth",
+            collection="OPT_ETH",
             stream="iv",
         )
         body = _request_body([stream])

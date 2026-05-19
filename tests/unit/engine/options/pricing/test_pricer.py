@@ -26,15 +26,41 @@ def _all_5(g: ComputedGreeks) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def test_opt_vix_blocked_all_five_missing(pricer: DefaultOptionsPricer) -> None:
+def test_opt_vix_no_forward_all_five_missing_forward_vix_curve(
+    pricer: DefaultOptionsPricer,
+) -> None:
+    """Phase 2: OPT_VIX with no forward (weekly — resolver returned None)
+    surfaces ``missing_forward_vix_curve`` for all 5 greeks via the
+    missing-underlying branch + OPT_VIX override in ``_gating``.
+    """
     contract = make_contract(collection="OPT_VIX", root_underlying="IND_VIX")
     row = make_row()
-    g = pricer.compute(contract, row, underlying_price=20.0)
+    g = pricer.compute(contract, row, underlying_price=None)
     for r in _all_5(g):
         assert r.value is None
         assert r.source == "missing"
         assert r.error_code == "missing_forward_vix_curve"
         assert r.missing_inputs == ("forward_vix_curve",)
+
+
+def test_opt_vix_with_forward_computes_greeks(
+    pricer: DefaultOptionsPricer,
+) -> None:
+    """Phase 2: OPT_VIX with a resolved FUT_VIX forward computes greeks
+    under Black-76 like any other root.
+    """
+    contract = make_contract(
+        collection="OPT_VIX",
+        root_underlying="IND_VIX",
+        strike=15.0,
+    )
+    row = make_row()
+    g = pricer.compute(contract, row, underlying_price=18.0)
+    # Don't pin numerical values (kernel-internal); just assert non-blocked.
+    for r in _all_5(g):
+        assert r.source == "computed", r
+        assert r.value is not None
+        assert r.error_code is None
 
 
 def test_opt_eth_blocked_all_five_missing(pricer: DefaultOptionsPricer) -> None:
@@ -59,10 +85,11 @@ def test_blocked_root_does_not_call_kernel() -> None:
         price_put = delta = gamma = theta = vega = implied_vol = price_call  # type: ignore[assignment]
 
     pricer = DefaultOptionsPricer(kernel=ExplodingKernel())  # type: ignore[arg-type]
-    contract = make_contract(collection="OPT_VIX")
+    # OPT_ETH is the only structurally-blocked root after Phase 2.
+    contract = make_contract(collection="OPT_ETH", root_underlying="ETHUSD")
     row = make_row()
-    g = pricer.compute(contract, row, underlying_price=20.0)
-    assert g.iv.error_code == "missing_forward_vix_curve"
+    g = pricer.compute(contract, row, underlying_price=2000.0)
+    assert g.iv.error_code == "missing_deribit_feed"
 
 
 # ---------------------------------------------------------------------------

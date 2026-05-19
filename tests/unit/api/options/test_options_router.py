@@ -67,6 +67,82 @@ async def test_roots_data_access_error_502(
     assert "Mongo timeout" in body["message"]
 
 
+async def test_roots_injects_has_computed_greeks_from_engine(
+    client: AsyncClient, options_reader: StubOptionsReader, monkeypatch
+):
+    """The API layer is the seam that adds ``has_computed_greeks`` per
+    ``blocked_roots()`` from the engine. The data layer cannot import the
+    engine — so the reader returns ``has_computed_greeks=False`` (default)
+    and the API widens it on the way out.
+
+    Also verifies that ``has_greeks`` is widened to ``stored>0 OR computed``.
+    """
+    import tcg.core.api.options as opt_api
+
+    monkeypatch.setattr(
+        opt_api, "blocked_roots", lambda: frozenset({"OPT_ETH"})
+    )
+
+    # SP500 has stored greeks AND is not blocked → has_computed_greeks=True,
+    # has_greeks=True.
+    sp500 = make_root_info("OPT_SP_500")
+    # ETH is blocked → has_computed_greeks=False, has_greeks=False.
+    eth = make_root_info("OPT_ETH")
+    eth_dict = {
+        "collection": "OPT_ETH",
+        "name": "ETH",
+        "has_greeks": False,  # data layer reports no stored greeks
+        "providers": ("COINAPI",),
+        "expiration_first": None,
+        "expiration_last": None,
+        "doc_count_estimated": 0,
+        "strike_factor_verified": False,
+        "stored_greeks_ratio": 0.0,
+        "has_computed_greeks": False,
+    }
+    from tcg.types.options import OptionRootInfo
+
+    eth = OptionRootInfo(**eth_dict)
+    # VIX has 0 stored greeks but engine can compute → has_computed_greeks=True,
+    # has_greeks=True (widened).
+    vix_dict = dict(eth_dict)
+    vix_dict["collection"] = "OPT_VIX"
+    vix_dict["name"] = "VIX"
+    vix_dict["providers"] = ("CBOE",)
+    vix = OptionRootInfo(**vix_dict)
+
+    # SP500 with stored_greeks_ratio > 0
+    sp500_dict = {
+        "collection": "OPT_SP_500",
+        "name": "SP 500",
+        "has_greeks": True,
+        "providers": ("IVOLATILITY",),
+        "expiration_first": date(2005, 12, 16),
+        "expiration_last": date(2030, 12, 20),
+        "doc_count_estimated": 417315,
+        "strike_factor_verified": True,
+        "stored_greeks_ratio": 0.997,
+        "has_computed_greeks": False,  # data-layer default; engine widens
+    }
+    sp500 = OptionRootInfo(**sp500_dict)
+
+    options_reader.list_roots_result = [sp500, vix, eth]
+    resp = await client.get("/api/options/roots")
+    assert resp.status_code == 200
+    roots = {r["collection"]: r for r in resp.json()["roots"]}
+
+    assert roots["OPT_SP_500"]["has_computed_greeks"] is True
+    assert roots["OPT_SP_500"]["has_greeks"] is True
+
+    assert roots["OPT_VIX"]["has_computed_greeks"] is True
+    # VIX has stored_ratio=0 but compute available → has_greeks widens to True.
+    assert roots["OPT_VIX"]["has_greeks"] is True
+
+    assert roots["OPT_ETH"]["has_computed_greeks"] is False
+    # ETH has neither stored nor compute → has_greeks stays False.
+    assert roots["OPT_ETH"]["has_greeks"] is False
+
+
 # ---------------------------------------------------------------------------
 # /expirations
 # ---------------------------------------------------------------------------

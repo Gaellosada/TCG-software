@@ -11,8 +11,15 @@ Three join strategies, dispatched on contract metadata:
 
 2. **OPT_VIX** (``root_underlying == "IND_VIX"``, or collection
    ``"OPT_VIX"``):
-   Look up the INDEX collection's ``IND_VIX`` document and find
-   the value matching ``target_date``.  Returns ``None`` on miss.
+   Look up the matching ``FUT_VIX`` contract whose ``expiration``
+   field equals the option's ``expiration``, and return its close
+   on ``target_date``.  This is the Black-76 forward for the option
+   (VIX options are European, AM-settled on the matching VIX future
+   on expiration Wednesday — the future is the canonical forward).
+   Returns ``None`` when no matching FUT_VIX contract exists (i.e.
+   the option is weekly — Phase 3 will add forward-curve
+   interpolation) or when the matching future has no bar for the
+   trade date.
 
 3. **All other roots** (option-on-future):
    Look up the FUT_* document referenced by
@@ -37,25 +44,19 @@ from __future__ import annotations
 
 from datetime import date
 
+from tcg.engine.options.chain._forward import is_vix as _is_vix
+from tcg.engine.options.chain._forward import resolve_vix_forward
 from tcg.engine.options.chain._ports import FuturesDataPort, IndexDataPort
 from tcg.types.options import OptionContractDoc, OptionDailyRow
 
 
 _BTC_ROOTS: frozenset[str] = frozenset({"BTC", "OPT_BTC"})
-_VIX_ROOTS: frozenset[str] = frozenset({"IND_VIX", "OPT_VIX"})
 
 
 def _is_btc(contract: OptionContractDoc) -> bool:
     return (
         contract.collection == "OPT_BTC"
         or contract.root_underlying in _BTC_ROOTS
-    )
-
-
-def _is_vix(contract: OptionContractDoc) -> bool:
-    return (
-        contract.collection == "OPT_VIX"
-        or contract.root_underlying in _VIX_ROOTS
     )
 
 
@@ -93,11 +94,12 @@ async def resolve_underlying_price(
     if _is_btc(contract):
         return row.underlying_price_stored
 
-    # Branch 2: OPT_VIX — INDEX lookup.
+    # Branch 2: OPT_VIX — match by expiration against FUT_VIX. Delegates
+    # to the shared helper so the API bulk path
+    # (``_batch_underlying_prices``) uses the same dispatch logic
+    # (see ``tcg.engine.options.chain._forward.resolve_vix_forward``).
     if _is_vix(contract):
-        # The legacy schema uses ``IND_VIX`` regardless of the option's
-        # root_underlying spelling (DB §3 / §4).
-        return await index_port.get_index_value_on_date("IND_VIX", target_date)
+        return await resolve_vix_forward(contract, futures_port, target_date)
 
     # Branch 3: option-on-future — FUT_* lookup.
     if contract.underlying_ref is None:

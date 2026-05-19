@@ -48,6 +48,35 @@ pytest -m "not integration"
 pytest
 ```
 
+## Mongo connection — replicaSet & auth required
+
+The production `tcg-instrument` Mongo runs as a single-node replica set
+with authentication enabled. A bare `mongodb://host:port` URI will
+**not** connect — Motor reports a server-selection timeout because the
+client cannot discover the replica set topology.
+
+Use the full form:
+
+```
+mongodb://<user>:<pass>@<host>:<port>/?directConnection=true&replicaSet=<rs_name>
+```
+
+For local dev, store the URI in `.env` (copy from `.env.example`) and
+export `MONGO_URI` + `MONGO_DB_NAME=tcg-instrument` when running
+scripts that talk to Mongo directly (the FastAPI app reads `.env` via
+the config loader; ad-hoc scripts do not).
+
+Symptom checklist when Mongo connections time out:
+
+- URI is missing the `replicaSet=<name>` query param → add it.
+- Authentication is failing silently (Motor's default behavior) →
+  confirm the URI carries the `<user>:<pass>@` prefix.
+- Wrong replica set name → `tcg-rs` in the current dev environment.
+- Network reachability — the dev Mongo lives behind a private network;
+  confirm the host is reachable before debugging the URI.
+
+Do not commit the credentialed URI to the repo.
+
 ## Dev Sharing
 
 See [`dev/README.md`](dev/README.md) for exposing the app via a Cloudflare Tunnel with password protection (client demos).

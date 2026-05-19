@@ -100,3 +100,28 @@ class FuturesDataPort(Protocol):
     ) -> float | None:
         """Return the futures close on *target_date* or ``None`` on miss."""
         ...
+
+    async def get_futures_close_by_expiration(
+        self,
+        collection: str,
+        expiration: date,
+        target_date: date,
+    ) -> float | None:
+        """Return the close on ``target_date`` of the FUT_* contract whose
+        ``expiration`` field matches the option's expiration date.
+
+        Used by the OPT_VIX branch of the underlying-price resolver to find
+        the matching monthly VIX future (the legacy Mongo schema stores
+        ``expiration`` as a YYYYMMDD int on each FUT_VIX document; the
+        adapter is responsible for translating ``expiration: date`` to the
+        right query). Returns ``None`` when:
+
+        - no FUT_* contract has a matching expiration (i.e. the option is
+          weekly — Phase 3 will introduce a forward-curve interpolator), or
+        - the matching contract has no row for ``target_date``.
+
+        The caller (``_join.resolve_underlying_price``) propagates the
+        ``None`` up to ``DefaultOptionsPricer.compute`` which surfaces
+        ``error_code="missing_forward_vix_curve"``.
+        """
+        ...

@@ -63,14 +63,13 @@ from tcg.core.api.common import (
 )
 from tcg.data._utils import int_to_date
 from tcg.data.protocols import MarketDataService
+from tcg.engine.options.pricing import blocked_roots
 from tcg.types.errors import (
-    OptionsContractNotFound,
     OptionsSelectionError,
     OptionsValidationError,
 )
 from tcg.types.options import (
     ChainSnapshot,
-    ComputeResult,
     OptionContractDoc,
     OptionContractSeries,
     OptionDailyRow,
@@ -217,14 +216,30 @@ async def list_roots(
 ) -> dict:
     """List every OPT_* collection with display metadata.
 
+    Injects engine-side metadata onto each ``OptionRootInfo`` before
+    serialization (the data layer can't reach the engine per the
+    ``engine-data-isolation`` import-linter contract):
+
+      * ``has_computed_greeks`` = ``root not in blocked_roots()``.
+      * ``has_greeks`` is widened: ``stored_greeks_ratio > 0 OR has_computed_greeks``.
+
     Errors:
         ``OptionsDataAccessError`` from the reader → 502 via the global
         TCG error handler.
     """
     roots = await svc.list_option_roots()
-    payload = ListRootsResponse.model_validate(
-        {"roots": [dataclasses.asdict(r) for r in roots]}
-    )
+    blocked = blocked_roots()
+    out: list[dict[str, Any]] = []
+    for r in roots:
+        d = dataclasses.asdict(r)
+        has_computed = r.collection not in blocked
+        d["has_computed_greeks"] = has_computed
+        # Widen has_greeks to "stored OR computed" — the semantic that
+        # downstream consumers (frontend badges, stream gating) rely on.
+        stored_positive = (r.stored_greeks_ratio or 0.0) > 0.0
+        d["has_greeks"] = stored_positive or has_computed
+        out.append(d)
+    payload = ListRootsResponse.model_validate({"roots": out})
     return payload.model_dump()
 
 
@@ -375,10 +390,13 @@ async def _batch_underlying_prices(
     fetched; for option-on-future roots the FUT_* document referenced
     by ``contract.underlying_ref`` is fetched.
     """
+    from tcg.engine.options.chain._forward import (
+        is_vix as _is_vix,
+        resolve_vix_futures_ref,
+    )
     from tcg.engine.options.chain._join import (
         _futures_collection_for,
         _is_btc,
-        _is_vix,
     )
 
     # BTC: underlying price lives on the row — no Mongo call.
@@ -400,7 +418,23 @@ async def _batch_underlying_prices(
 
     # Decide collection + instrument id for the single bulk fetch.
     if _is_vix(contract):
-        collection, instrument_id = "INDEX", "IND_VIX"
+        # Phase 2 made the chain endpoint resolve the VIX forward as the
+        # matching FUT_VIX close (not spot IND_VIX). The contract-detail
+        # endpoint must match — otherwise the time-series view uses spot
+        # (~14-15) as the forward while the chain uses the front-month
+        # future (~20+), causing the pricer to misclassify slightly-OTM
+        # puts as ITM-below-intrinsic and surface
+        # "deep_itm_degenerate" on rows that should compute cleanly.
+        # Shared helper ensures the API and chain join use the same
+        # FUT_VIX dispatch logic (see _forward.resolve_vix_futures_ref).
+        fut_id = await resolve_vix_futures_ref(contract, svc)
+        if fut_id is None:
+            # Weekly VIX option with no matching monthly future. The
+            # engine gate surfaces ``missing_forward_vix_curve`` on every
+            # row — leave the lookup empty so the pricer doesn't get a
+            # wrong forward.
+            return {}
+        collection, instrument_id = "FUT_VIX", fut_id
     elif contract.underlying_ref is not None:
         fut_collection = _futures_collection_for(contract.collection)
         if fut_collection is None:

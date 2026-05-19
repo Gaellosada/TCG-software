@@ -43,8 +43,13 @@ function buildDefaultFilters(initialRoot, overrides = {}) {
     expirationMax: overrides.expirationMax ?? addDays(anchor, 90),
     strikeMin: null,
     strikeMax: null,
-    // Decision C: computeMissing defaults to false; never persisted to localStorage.
-    computeMissing: false,
+    // Decision C: computeMissing is transient local state — never persisted to
+    // localStorage. Default flipped to true in Phase 2: now that OPT_VIX gets
+    // computed greeks via Black-76 (Phases 1+2) and CBOE stores zero greeks
+    // for VIX, default-true is required for VIX greeks to be visible without
+    // an extra click. Cost on OPT_SP_500 is negligible because stored greeks
+    // short-circuit the compute path per row.
+    computeMissing: true,
     // Default null → no cycle filter. Multi-cycle chains rely on the
     // cycle chip (commit 42b39da) to disambiguate visually; the dropdown
     // is opt-in. Contrast with the smile dropdown, which auto-picks the

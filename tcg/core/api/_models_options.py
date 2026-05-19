@@ -121,6 +121,12 @@ class OptionRootInfo(BaseModel):
     doc_count_estimated: int
     strike_factor_verified: bool
     last_trade_date: date | None = None
+    # Fraction of docs in the collection that carry ``eodGreeks``. 0.0 when
+    # no docs do (e.g. OPT_VIX), ~1.0 when the curated vendor ships them
+    # (e.g. OPT_SP_500). Drives the left-nav badge variant.
+    stored_greeks_ratio: float = 0.0
+    # True when the engine's Black-76 path is available for this root.
+    has_computed_greeks: bool = False
 
 
 # ---------------------------------------------------------------------------
