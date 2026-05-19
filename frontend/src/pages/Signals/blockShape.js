@@ -73,7 +73,17 @@ export function defaultBlock(section = 'entries') {
  *   - spot:          requires collection + instrument_id.
  *   - continuous:    requires collection + adjustment + cycle + rollOffset + strategy.
  *   - option_stream: requires collection + option_type + maturity + selection + stream.
+ *   - basket:        two shapes (locked descriptor; see InstrumentPickerModal):
+ *                    - {kind:'saved',   basket_id}                  → non-empty basket_id.
+ *                    - {kind:'inline',  asset_class, legs}          → non-empty legs array,
+ *                                                                     each leg has a non-empty
+ *                                                                     instrument_id and a finite
+ *                                                                     non-zero weight; asset_class
+ *                                                                     must be one of the locked
+ *                                                                     literals.
  */
+const _BASKET_ASSET_CLASSES = ['future', 'option', 'index', 'equity'];
+
 export function isInputConfigured(input) {
   if (!input || typeof input !== 'object') return false;
   if (!input.id || typeof input.id !== 'string') return false;
@@ -96,6 +106,22 @@ export function isInputConfigured(input) {
       && inst.maturity && typeof inst.maturity === 'object' && typeof inst.maturity.kind === 'string'
       && inst.selection && typeof inst.selection === 'object' && typeof inst.selection.kind === 'string'
       && typeof inst.stream === 'string' && inst.stream.length > 0);
+  }
+  if (inst.type === 'basket') {
+    if (inst.kind === 'saved') {
+      return typeof inst.basket_id === 'string' && inst.basket_id.length > 0;
+    }
+    if (inst.kind === 'inline') {
+      if (!_BASKET_ASSET_CLASSES.includes(inst.asset_class)) return false;
+      if (!Array.isArray(inst.legs) || inst.legs.length === 0) return false;
+      for (const leg of inst.legs) {
+        if (!leg || typeof leg !== 'object') return false;
+        if (typeof leg.instrument_id !== 'string' || leg.instrument_id.length === 0) return false;
+        if (!Number.isFinite(leg.weight) || leg.weight === 0) return false;
+      }
+      return true;
+    }
+    return false;
   }
   return false;
 }

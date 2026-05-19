@@ -240,6 +240,131 @@ describe('isInputConfigured', () => {
       },
     })).toBe(true);
   });
+
+  // Basket — two-shape discriminated union (saved | inline).
+  it('accepts a saved basket input with non-empty basket_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'saved', basket_id: 'BSK_ABC' },
+    })).toBe(true);
+  });
+
+  it('rejects a saved basket input with empty / missing basket_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'saved', basket_id: '' },
+    })).toBe(false);
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'saved' },
+    })).toBe(false);
+  });
+
+  it('accepts an inline basket input with asset_class and >=1 legs', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future',
+        legs: [
+          { instrument_id: 'ES_MAR26', weight: 1.0 },
+          { instrument_id: 'NQ_MAR26', weight: -0.5 },
+        ],
+      },
+    })).toBe(true);
+  });
+
+  it('accepts an inline basket with a single leg', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{ instrument_id: 'SPY', weight: 1.0 }],
+      },
+    })).toBe(true);
+  });
+
+  it('rejects an inline basket input with 0 legs', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future', legs: [],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket input with missing asset_class', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline',
+        legs: [{ instrument_id: 'SPY', weight: 1.0 }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket with unknown asset_class', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'commodity',
+        legs: [{ instrument_id: 'CL', weight: 1.0 }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket leg with empty instrument_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{ instrument_id: '', weight: 1.0 }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket leg with zero weight', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{ instrument_id: 'SPY', weight: 0 }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket leg with NaN weight', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{ instrument_id: 'SPY', weight: NaN }],
+      },
+    })).toBe(false);
+  });
+
+  it('accepts an inline basket with negative leg weight (short)', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future',
+        legs: [{ instrument_id: 'ES_MAR26', weight: -1.0 }],
+      },
+    })).toBe(true);
+  });
+
+  it('rejects a basket input with unknown kind', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'mystery', basket_id: 'X' },
+    })).toBe(false);
+  });
+
+  it('rejects a basket input with missing kind discriminator', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', basket_id: 'X' },
+    })).toBe(false);
+  });
 });
 
 describe('isOperandComplete (v5)', () => {
