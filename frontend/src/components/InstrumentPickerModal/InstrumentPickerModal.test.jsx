@@ -363,6 +363,42 @@ describe('<InstrumentPickerModal>', () => {
     expect(screen.getByTestId('basket-leg-0')).toBeTruthy();
   });
 
+  it('removing the last populated leg returns to one empty row + both CTAs disabled (no zero-leg DOM state)', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(listInstruments).mockResolvedValue({ items: [{ symbol: 'ES_MAR26' }] });
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    // Populate the one and only leg.
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    fireEvent.mouseDown(await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26'));
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '2' } });
+
+    // Both CTAs should be enabled now that the leg is fully configured.
+    await waitFor(() => expect(screen.getByTestId('basket-use-btn').disabled).toBe(false));
+    expect(screen.getByTestId('basket-save-btn').disabled).toBe(false);
+
+    // Remove the only leg.
+    fireEvent.click(screen.getByTestId('basket-leg-0-remove'));
+
+    // Exactly one empty leg row is present — composer never goes 0-leg.
+    expect(screen.getByTestId('basket-leg-0')).toBeTruthy();
+    expect(screen.queryByTestId('basket-leg-1')).toBeNull();
+
+    // And both CTAs are disabled again (no configured legs).
+    expect(screen.getByTestId('basket-use-btn').disabled).toBe(true);
+    expect(screen.getByTestId('basket-save-btn').disabled).toBe(true);
+
+    // The replacement row is genuinely empty (no instrument selected).
+    const newInput = screen.getByTestId('basket-leg-0-instrument-input');
+    expect(newInput.value).toBe('');
+  });
+
   it('Add leg appends an empty row', async () => {
     render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
     await flushAsync();
@@ -469,6 +505,53 @@ describe('<InstrumentPickerModal>', () => {
       kind: 'saved',
       basket_id: 'BSK_NEW_FROM_BE',
     });
+  });
+
+  it.each([
+    ['My Save'],
+    ['  spaces  galore  '],
+    ['weird/+=$#@!chars'],
+    ['日本語unicode-name'],
+    ['a'],
+    ['UPPERCASE'],
+    ['mix3d_NUMb3rs'],
+  ])('client-minted basket id conforms to BSK_<SLUG>_<timestamp> shape: %s', async (name) => {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(listInstruments).mockResolvedValue({ items: [{ symbol: 'ES_MAR26' }] });
+    // BE may echo a different id; we want to inspect what the FE sends.
+    vi.mocked(createBasket).mockResolvedValue({ id: 'BSK_ECHO', name });
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    // Configure one leg.
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    fireEvent.mouseDown(await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26'));
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '1' } });
+
+    fireEvent.click(screen.getByTestId('basket-save-btn'));
+    await waitFor(() => expect(screen.getByTestId('basket-save-input')).toBeTruthy());
+    fireEvent.change(screen.getByTestId('basket-save-name-input'), { target: { value: name } });
+    fireEvent.click(screen.getByTestId('basket-save-confirm'));
+
+    await waitFor(() => expect(createBasket).toHaveBeenCalled());
+    const payload = vi.mocked(createBasket).mock.calls[0][0];
+
+    // Backend _ID_PATTERN: /^[A-Za-z0-9_\-:.]+$/ — only these characters,
+    // total length 1..128. Also: prefix MUST be "BSK_" and there MUST be
+    // a trailing "_<digits>" timestamp segment (Date.now() ms epoch).
+    expect(typeof payload.id).toBe('string');
+    expect(payload.id.length).toBeGreaterThanOrEqual(1);
+    expect(payload.id.length).toBeLessThanOrEqual(128);
+    expect(payload.id).toMatch(/^[A-Za-z0-9_\-:.]+$/);
+    expect(payload.id).toMatch(/^BSK_/);
+    expect(payload.id).toMatch(/_\d+$/);
+    // The fully-anchored client-shape regex (single check, documents intent).
+    expect(payload.id).toMatch(/^BSK_[A-Z0-9_]+_\d+$/);
   });
 
   // ────────────────────────────────────────────────────────────────────────
