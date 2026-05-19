@@ -63,6 +63,21 @@ class Category(StrEnum):
     ARCHIVE = "ARCHIVE"
 
 
+class DocType(StrEnum):
+    """Discriminator string for persistence documents.
+
+    The three persistence document kinds share one MongoDB collection
+    and are distinguished by the ``type`` field. Using a ``StrEnum``
+    makes the discriminator a single source of truth — every runtime
+    comparison goes through this class and renaming a type is one
+    grep away rather than the previous 17-site sweep.
+    """
+
+    INDICATOR = "indicator"
+    SIGNAL = "signal"
+    PORTFOLIO = "portfolio"
+
+
 @dataclass(frozen=True, slots=True)
 class IndicatorDoc:
     """Persisted indicator definition.
@@ -125,18 +140,18 @@ PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc
 
 # Internal map: discriminator string → dataclass. Used by ``from_mongo_dict``.
 _TYPE_TO_CLASS: dict[str, type] = {
-    "indicator": IndicatorDoc,
-    "signal": SignalDoc,
-    "portfolio": PortfolioDoc,
+    DocType.INDICATOR.value: IndicatorDoc,
+    DocType.SIGNAL.value: SignalDoc,
+    DocType.PORTFOLIO.value: PortfolioDoc,
 }
 
 # Fields that store a sequence on the dataclass as a tuple but must be
 # emitted as a JSON list at the Mongo boundary. Keep this list explicit
 # so accidental tuple-typed fields don't get auto-converted.
 _TUPLE_FIELDS_BY_TYPE: dict[str, frozenset[str]] = {
-    "indicator": frozenset(),
-    "signal": frozenset({"inputs"}),
-    "portfolio": frozenset({"legs"}),
+    DocType.INDICATOR.value: frozenset(),
+    DocType.SIGNAL.value: frozenset({"inputs"}),
+    DocType.PORTFOLIO.value: frozenset({"legs"}),
 }
 
 
@@ -215,6 +230,7 @@ def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
 
 __all__ = [
     "Category",
+    "DocType",
     "IndicatorDoc",
     "SignalDoc",
     "PortfolioDoc",

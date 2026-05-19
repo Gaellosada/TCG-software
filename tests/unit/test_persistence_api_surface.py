@@ -127,3 +127,69 @@ def test_class_does_not_define_dunder_getattr() -> None:
         "WriteRepository defines __getattr__ — this would be an escape "
         "hatch back to the underlying Motor client. Remove it."
     )
+
+
+def test_coll_attribute_is_immutable_after_construction() -> None:
+    """``_coll`` must NOT be rebindable post-construction.
+
+    Regression for M5: a previous version allowed
+    ``repo._coll = attacker_handle`` which would route subsequent
+    writes to an attacker-controlled namespace. The class now uses
+    ``__slots__`` and a ``__setattr__`` guard to make any attempt
+    raise ``AttributeError``.
+    """
+    import pytest
+
+    class _FakeColl:
+        pass
+
+    class _FakeDB:
+        def __getitem__(self, name: str) -> object:
+            return _FakeColl()
+
+    class _FakeClient:
+        def __getitem__(self, name: str) -> object:
+            return _FakeDB()
+
+    repo = WriteRepository(
+        _FakeClient(),  # type: ignore[arg-type]
+        db_name="any",
+        collection_name="any",
+    )
+
+    # Existing _coll attribute cannot be rebound.
+    with pytest.raises(AttributeError):
+        repo._coll = _FakeColl()  # type: ignore[misc]
+
+    # Adding a fresh attribute is also rejected (slots + setattr guard).
+    with pytest.raises(AttributeError):
+        repo.alias = "x"  # type: ignore[attr-defined]
+
+
+def test_doctype_enum_values_match_discriminators() -> None:
+    """``DocType`` is the single source of truth for the type
+    discriminator strings. Regression for M6 — ensures any future
+    rename ripples through ``DocType`` rather than scattered string
+    literals."""
+    from tcg.types.persistence import DocType, SignalDoc
+
+    assert DocType.INDICATOR.value == "indicator"
+    assert DocType.SIGNAL.value == "signal"
+    assert DocType.PORTFOLIO.value == "portfolio"
+
+    # A constructed SignalDoc's type field compares equal to the
+    # corresponding enum member (StrEnum semantics).
+    from datetime import datetime, timezone
+
+    from tcg.types.persistence import Category
+
+    sig = SignalDoc(
+        id="x",
+        type="signal",
+        name="x",
+        category=Category.DEV,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    assert sig.type == DocType.SIGNAL
+    assert sig.type == DocType.SIGNAL.value

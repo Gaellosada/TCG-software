@@ -44,6 +44,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from tcg.types.persistence import (
     Category,
+    DocType,
     IndicatorDoc,
     PersistenceDoc,
     from_mongo_dict,
@@ -71,7 +72,17 @@ class WriteRepository:
     ``build_write_client()``, plus the resolved ``db_name`` and
     ``collection_name`` from env vars. The collection handle is bound
     on construction and never re-derived.
+
+    Immutability of ``_coll``
+    -------------------------
+    The instance uses ``__slots__`` to restrict attribute creation to
+    the documented private ``_coll`` slot, and overrides ``__setattr__``
+    to reject re-binding the attribute after ``__init__``. Together
+    these turn the "_coll is bound exactly once" claim into an enforced
+    invariant rather than a convention.
     """
+
+    __slots__ = ("_coll",)
 
     def __init__(
         self,
@@ -82,8 +93,23 @@ class WriteRepository:
     ) -> None:
         # Bind ONCE. We deliberately keep only ``self._coll`` so that
         # nothing in the rest of this class can navigate to another
-        # database or collection through ``self``.
-        self._coll = client[db_name][collection_name]
+        # database or collection through ``self``. ``object.__setattr__``
+        # is used to bypass our own ``__setattr__`` guard for the single
+        # legitimate write during construction.
+        object.__setattr__(self, "_coll", client[db_name][collection_name])
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Reject any post-construction attribute mutation.
+
+        Combined with ``__slots__``, this means ``repo._coll = other``
+        — or any other attribute assignment — raises rather than
+        silently re-binding the namespace handle. The repository is
+        intended to be effectively frozen after ``__init__`` returns.
+        """
+        raise AttributeError(
+            "WriteRepository is immutable after construction; "
+            f"cannot set attribute {name!r}"
+        )
 
     async def create(self, doc: PersistenceDoc) -> PersistenceDoc:
         """Insert ``doc`` and return the stored copy.
@@ -124,12 +150,14 @@ class WriteRepository:
         # The literal narrowing in the signature already restricts
         # callers, but assert at runtime to keep the soft-delete query
         # honest if the literal ever expands.
-        if doc_type != "indicator":
+        if doc_type != DocType.INDICATOR.value:
             raise ValueError(
                 f"list_by_type only supports 'indicator', got {doc_type!r}. "
                 "Use list_by_type_and_category for signals and portfolios."
             )
-        cursor = self._coll.find({"type": "indicator", "deleted": {"$ne": True}})
+        cursor = self._coll.find(
+            {"type": DocType.INDICATOR.value, "deleted": {"$ne": True}}
+        )
         rows = await cursor.to_list(length=None)
         return [from_mongo_dict(r) for r in rows]  # type: ignore[misc]
 
@@ -183,9 +211,9 @@ class WriteRepository:
         ``updated_at``.
         """
         now = _utcnow()
-        if doc_type == "indicator":
+        if doc_type == DocType.INDICATOR.value:
             update_payload = {"$set": {"deleted": True, "updated_at": now}}
-        elif doc_type in ("signal", "portfolio"):
+        elif doc_type in (DocType.SIGNAL.value, DocType.PORTFOLIO.value):
             update_payload = {
                 "$set": {
                     "category": Category.ARCHIVE.value,

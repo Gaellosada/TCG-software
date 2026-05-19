@@ -47,6 +47,7 @@ from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.persistence import WriteRepository
 from tcg.types.persistence import (
     Category,
+    DocType,
     IndicatorDoc,
     PersistenceDoc,
     PortfolioDoc,
@@ -239,7 +240,7 @@ async def create_indicator(body: IndicatorCreateIn, repo: RepoDep) -> IndicatorO
     now = _now()
     doc = IndicatorDoc(
         id=body.id,
-        type="indicator",
+        type=DocType.INDICATOR.value,
         name=body.name,
         definition=body.definition,
         created_at=now,
@@ -252,13 +253,17 @@ async def create_indicator(body: IndicatorCreateIn, repo: RepoDep) -> IndicatorO
 
 @router.get("/indicators", response_model=list[IndicatorOut])
 async def list_indicators(repo: RepoDep) -> list[IndicatorOut]:
-    docs = await repo.list_by_type("indicator")
+    docs = await repo.list_by_type(DocType.INDICATOR.value)
     return [_indicator_to_out(d) for d in docs]
 
 
 @router.get("/indicators/{doc_id}", response_model=IndicatorOut)
 async def get_indicator(doc_id: str, repo: RepoDep) -> IndicatorOut:
-    doc = _expect(await repo.get_by_id("indicator", doc_id), "indicator", doc_id)
+    doc = _expect(
+        await repo.get_by_id(DocType.INDICATOR.value, doc_id),
+        DocType.INDICATOR.value,
+        doc_id,
+    )
     assert isinstance(doc, IndicatorDoc)
     return _indicator_to_out(doc)
 
@@ -268,12 +273,14 @@ async def update_indicator(
     doc_id: str, body: IndicatorUpdateIn, repo: RepoDep
 ) -> IndicatorOut:
     existing = _expect(
-        await repo.get_by_id("indicator", doc_id), "indicator", doc_id
+        await repo.get_by_id(DocType.INDICATOR.value, doc_id),
+        DocType.INDICATOR.value,
+        doc_id,
     )
     assert isinstance(existing, IndicatorDoc)
     updated = IndicatorDoc(
         id=doc_id,
-        type="indicator",
+        type=DocType.INDICATOR.value,
         name=body.name,
         definition=body.definition,
         created_at=existing.created_at,
@@ -293,7 +300,7 @@ async def update_indicator(
 @router.delete("/indicators/{doc_id}", status_code=204)
 async def archive_indicator(doc_id: str, repo: RepoDep) -> None:
     try:
-        await repo.archive("indicator", doc_id)
+        await repo.archive(DocType.INDICATOR.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -308,7 +315,7 @@ async def create_signal(body: SignalCreateIn, repo: RepoDep) -> SignalOut:
     now = _now()
     doc = SignalDoc(
         id=body.id,
-        type="signal",
+        type=DocType.SIGNAL.value,
         name=body.name,
         category=body.category,
         created_at=now,
@@ -327,7 +334,7 @@ async def create_signal(body: SignalCreateIn, repo: RepoDep) -> SignalOut:
 async def list_signals(
     repo: RepoDep, category: Category = Query(...)
 ) -> list[SignalOut]:
-    docs = await repo.list_by_type_and_category("signal", category)
+    docs = await repo.list_by_type_and_category(DocType.SIGNAL.value, category)
     out: list[SignalOut] = []
     for d in docs:
         assert isinstance(d, SignalDoc)
@@ -337,7 +344,11 @@ async def list_signals(
 
 @router.get("/signals/{doc_id}", response_model=SignalOut)
 async def get_signal(doc_id: str, repo: RepoDep) -> SignalOut:
-    doc = _expect(await repo.get_by_id("signal", doc_id), "signal", doc_id)
+    doc = _expect(
+        await repo.get_by_id(DocType.SIGNAL.value, doc_id),
+        DocType.SIGNAL.value,
+        doc_id,
+    )
     assert isinstance(doc, SignalDoc)
     return _signal_to_out(doc)
 
@@ -346,11 +357,15 @@ async def get_signal(doc_id: str, repo: RepoDep) -> SignalOut:
 async def update_signal(
     doc_id: str, body: SignalUpdateIn, repo: RepoDep
 ) -> SignalOut:
-    existing = _expect(await repo.get_by_id("signal", doc_id), "signal", doc_id)
+    existing = _expect(
+        await repo.get_by_id(DocType.SIGNAL.value, doc_id),
+        DocType.SIGNAL.value,
+        doc_id,
+    )
     assert isinstance(existing, SignalDoc)
     updated = SignalDoc(
         id=doc_id,
-        type="signal",
+        type=DocType.SIGNAL.value,
         name=body.name,
         category=body.category,
         created_at=existing.created_at,
@@ -371,7 +386,7 @@ async def update_signal(
 @router.delete("/signals/{doc_id}", status_code=204)
 async def archive_signal(doc_id: str, repo: RepoDep) -> None:
     try:
-        await repo.archive("signal", doc_id)
+        await repo.archive(DocType.SIGNAL.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -386,7 +401,7 @@ async def create_portfolio(body: PortfolioCreateIn, repo: RepoDep) -> PortfolioO
     now = _now()
     doc = PortfolioDoc(
         id=body.id,
-        type="portfolio",
+        type=DocType.PORTFOLIO.value,
         name=body.name,
         category=body.category,
         created_at=now,
@@ -403,7 +418,7 @@ async def create_portfolio(body: PortfolioCreateIn, repo: RepoDep) -> PortfolioO
 async def list_portfolios(
     repo: RepoDep, category: Category = Query(...)
 ) -> list[PortfolioOut]:
-    docs = await repo.list_by_type_and_category("portfolio", category)
+    docs = await repo.list_by_type_and_category(DocType.PORTFOLIO.value, category)
     out: list[PortfolioOut] = []
     for d in docs:
         assert isinstance(d, PortfolioDoc)
@@ -414,7 +429,9 @@ async def list_portfolios(
 @router.get("/portfolios/{doc_id}", response_model=PortfolioOut)
 async def get_portfolio(doc_id: str, repo: RepoDep) -> PortfolioOut:
     doc = _expect(
-        await repo.get_by_id("portfolio", doc_id), "portfolio", doc_id
+        await repo.get_by_id(DocType.PORTFOLIO.value, doc_id),
+        DocType.PORTFOLIO.value,
+        doc_id,
     )
     assert isinstance(doc, PortfolioDoc)
     return _portfolio_to_out(doc)
@@ -425,12 +442,14 @@ async def update_portfolio(
     doc_id: str, body: PortfolioUpdateIn, repo: RepoDep
 ) -> PortfolioOut:
     existing = _expect(
-        await repo.get_by_id("portfolio", doc_id), "portfolio", doc_id
+        await repo.get_by_id(DocType.PORTFOLIO.value, doc_id),
+        DocType.PORTFOLIO.value,
+        doc_id,
     )
     assert isinstance(existing, PortfolioDoc)
     updated = PortfolioDoc(
         id=doc_id,
-        type="portfolio",
+        type=DocType.PORTFOLIO.value,
         name=body.name,
         category=body.category,
         created_at=existing.created_at,
@@ -449,6 +468,6 @@ async def update_portfolio(
 @router.delete("/portfolios/{doc_id}", status_code=204)
 async def archive_portfolio(doc_id: str, repo: RepoDep) -> None:
     try:
-        await repo.archive("portfolio", doc_id)
+        await repo.archive(DocType.PORTFOLIO.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
