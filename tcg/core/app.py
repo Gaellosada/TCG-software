@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
+import pymongo.errors
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -193,6 +194,37 @@ async def _send_too_large(send: Send, size: int) -> None:
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
+async def _pymongo_error_handler(
+    request: Request, exc: pymongo.errors.PyMongoError
+) -> JSONResponse:
+    """Catch-all for unhandled PyMongo errors → 503.
+
+    Routes that care about specific PyMongo failure modes (e.g.
+    ``DuplicateKeyError`` → 409 on create) catch them locally and
+    raise ``HTTPException`` BEFORE the exception reaches this handler.
+    What's left here are the unexpected ones — network blips, replica-
+    set elections, auth/role errors, server-selection timeouts. None
+    of those is the caller's fault, so we surface them as 503 Service
+    Unavailable with a sanitized envelope (we deliberately do NOT
+    include the PyMongo exception message in the response body — it
+    can leak topology / IPs / credential hints).
+    """
+    # Log the real error server-side for ops; keep the response body
+    # sterile. ``%r`` so the exception type is recoverable from logs.
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "persistence unavailable: %r (path=%s)", exc, request.url.path
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error_type": "persistence_unavailable",
+            "message": "persistence layer is temporarily unavailable",
+        },
+    )
+
+
 async def _request_validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
@@ -234,6 +266,13 @@ def create_app() -> FastAPI:
     )
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.add_exception_handler(RequestValidationError, _request_validation_error_handler)
+    # Catch-all for unhandled PyMongo errors — see ``_pymongo_error_handler``.
+    # Routes that need a specific status (409 on duplicate, 413 on too-
+    # large, 409 on CAS miss) catch the relevant subclass locally and
+    # raise HTTPException, so those paths bypass this handler.
+    app.add_exception_handler(
+        pymongo.errors.PyMongoError, _pymongo_error_handler
+    )
     app.include_router(data_router)
     app.include_router(portfolio_router)
     app.include_router(indicators_router)
