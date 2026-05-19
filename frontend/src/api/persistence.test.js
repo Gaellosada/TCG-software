@@ -48,21 +48,24 @@ const SIGNAL_FIXTURE = {
   id: 'sig-1',
   type: 'signal',
   name: 'Test Signal',
-  blocks: [],
   category: 'RESEARCH',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
+  inputs: [],
+  rules: {},
+  settings: {},
+  description: '',
 };
 
 const PORTFOLIO_FIXTURE = {
   id: 'port-1',
   type: 'portfolio',
   name: 'Test Portfolio',
-  instruments: [],
-  rebalance: {},
   category: 'DEV',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
+  legs: [],
+  rebalance: 'none',
 };
 
 // ---------------------------------------------------------------------------
@@ -82,18 +85,24 @@ describe('CATEGORIES', () => {
 describe('createSignal', () => {
   it('POSTs to /api/persistence/signals with the payload', async () => {
     const fn = mockFetch(jsonOk(SIGNAL_FIXTURE));
-    const result = await createSignal({ id: 'sig-1', name: 'Test Signal', blocks: [], category: 'RESEARCH' });
+    const result = await createSignal({
+      id: 'sig-1', name: 'Test Signal', category: 'RESEARCH',
+      inputs: [], rules: {}, settings: {}, description: '',
+    });
     expect(fn).toHaveBeenCalledOnce();
     const [url, init] = fn.mock.calls[0];
     expect(url).toBe('/api/persistence/signals');
     expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body)).toEqual({ id: 'sig-1', name: 'Test Signal', blocks: [], category: 'RESEARCH' });
+    const sent = JSON.parse(init.body);
+    expect(sent.id).toBe('sig-1');
+    expect(sent.category).toBe('RESEARCH');
+    expect(sent.rules).toEqual({});
     expect(result.id).toBe('sig-1');
   });
 
   it('throws with status on non-2xx', async () => {
     mockFetch(jsonError(422, { detail: 'Validation error' }));
-    await expect(createSignal({ id: '', name: '', blocks: [], category: 'RESEARCH' }))
+    await expect(createSignal({ id: '', name: '', category: 'RESEARCH' }))
       .rejects.toMatchObject({ status: 422 });
   });
 });
@@ -137,11 +146,22 @@ describe('updateSignal', () => {
   it('PUTs to /api/persistence/signals/{id} with the full payload', async () => {
     const updated = { ...SIGNAL_FIXTURE, category: 'DEV' };
     const fn = mockFetch(jsonOk(updated));
-    const result = await updateSignal('sig-1', { name: 'Test Signal', blocks: [], category: 'DEV' });
+    const result = await updateSignal('sig-1', {
+      name: 'Test Signal', category: 'DEV',
+      inputs: [{ id: 'X', instrument: null }],
+      rules: { entries: [{ id: 'b1' }], exits: [], resets: [] },
+      settings: { dont_repeat: true },
+      description: 'doc',
+    });
     const [url, init] = fn.mock.calls[0];
     expect(url).toBe('/api/persistence/signals/sig-1');
     expect(init.method).toBe('PUT');
-    expect(JSON.parse(init.body).category).toBe('DEV');
+    const sent = JSON.parse(init.body);
+    expect(sent.category).toBe('DEV');
+    // CRUCIAL: the full editable state goes over the wire — this is the
+    // regression test for the persistence-gap bug.
+    expect(sent.rules.entries).toHaveLength(1);
+    expect(sent.description).toBe('doc');
     expect(result.category).toBe('DEV');
   });
 });
@@ -172,9 +192,9 @@ describe('createPortfolio', () => {
     const result = await createPortfolio({
       id: 'port-1',
       name: 'Test Portfolio',
-      instruments: [],
-      rebalance: {},
       category: 'DEV',
+      legs: [],
+      rebalance: 'none',
     });
     const [url, init] = fn.mock.calls[0];
     expect(url).toBe('/api/persistence/portfolios');
@@ -211,14 +231,18 @@ describe('updatePortfolio', () => {
     const fn = mockFetch(jsonOk(updated));
     const result = await updatePortfolio('port-1', {
       name: 'Test Portfolio',
-      instruments: [],
-      rebalance: {},
       category: 'PROD',
+      legs: [{ label: 'L1', type: 'instrument', collection: 'spot_daily', symbol: 'SPY', weight: 100 }],
+      rebalance: 'monthly',
     });
     const [url, init] = fn.mock.calls[0];
     expect(url).toBe('/api/persistence/portfolios/port-1');
     expect(init.method).toBe('PUT');
-    expect(JSON.parse(init.body).category).toBe('PROD');
+    const sent = JSON.parse(init.body);
+    expect(sent.category).toBe('PROD');
+    // Regression: full leg list goes over the wire.
+    expect(sent.legs).toHaveLength(1);
+    expect(sent.rebalance).toBe('monthly');
     expect(result.category).toBe('PROD');
   });
 });

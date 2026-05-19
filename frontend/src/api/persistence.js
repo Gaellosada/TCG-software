@@ -60,7 +60,12 @@ async function _fetch(path, options = {}) {
 /**
  * Create a new persisted signal.
  *
- * @param {{ id: string, name: string, blocks: Array<object>, category: string }} payload
+ * Backend defaults inputs / rules / settings / description when omitted,
+ * so a minimal payload (id + name + category) creates a valid empty signal.
+ *
+ * @param {{ id: string, name: string, category: string,
+ *   inputs?: Array<object>, rules?: object, settings?: object,
+ *   description?: string }} payload
  * @returns {Promise<SignalOut>}
  */
 export function createSignal(payload) {
@@ -88,10 +93,14 @@ export function getSignal(id) {
 }
 
 /**
- * Full-replace update for a persisted signal.
+ * Full-replace update for a persisted signal. PUT semantics — the
+ * caller must supply every field; omitted optional fields default to
+ * empty list / dict / string on the backend.
  *
  * @param {string} id
- * @param {{ name: string, blocks: Array<object>, category: string }} payload
+ * @param {{ name: string, category: string,
+ *   inputs?: Array<object>, rules?: object, settings?: object,
+ *   description?: string }} payload
  * @returns {Promise<SignalOut>}
  */
 export function updateSignal(id, payload) {
@@ -129,7 +138,8 @@ export async function archiveSignal(id) {
 /**
  * Create a new persisted portfolio.
  *
- * @param {{ id: string, name: string, instruments: Array<object>, rebalance: object, category: string }} payload
+ * @param {{ id: string, name: string, category: string,
+ *   legs?: Array<object>, rebalance?: string }} payload
  * @returns {Promise<PortfolioOut>}
  */
 export function createPortfolio(payload) {
@@ -157,10 +167,13 @@ export function getPortfolio(id) {
 }
 
 /**
- * Full-replace update for a persisted portfolio.
+ * Full-replace update for a persisted portfolio. PUT semantics — the
+ * caller must supply every field; omitted optional fields default to
+ * empty list / "none" on the backend.
  *
  * @param {string} id
- * @param {{ name: string, instruments: Array<object>, rebalance: object, category: string }} payload
+ * @param {{ name: string, category: string,
+ *   legs?: Array<object>, rebalance?: string }} payload
  * @returns {Promise<PortfolioOut>}
  */
 export function updatePortfolio(id, payload) {

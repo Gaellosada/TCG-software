@@ -66,7 +66,10 @@ vi.mock('./storage', () => ({
 }));
 
 // The mock we care about: createSignal call count.
-const mockCreateSignal = vi.fn(() => Promise.resolve({ id: 'new-sig', name: 'Signal 1' }));
+const mockCreateSignal = vi.fn(() => Promise.resolve({
+  id: 'new-sig', name: 'Signal 1', category: 'RESEARCH',
+  inputs: [], rules: {}, settings: {}, description: '',
+}));
 const mockListSignals = vi.fn(() => Promise.resolve([]));
 
 vi.mock('../../api/persistence', () => ({

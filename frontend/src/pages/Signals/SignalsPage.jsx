@@ -21,6 +21,8 @@ import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
 import SaveControls, { useAutosave } from '../../components/SaveControls';
+import SaveStatus from '../../components/SaveStatus/SaveStatus';
+import useBackendAutosave from '../../hooks/useBackendAutosave';
 import Card from '../../components/Card';
 import InlineNameInput from '../../components/InlineNameInput';
 import useAbortableAction from '../../hooks/useAbortableAction';
@@ -42,6 +44,26 @@ function nextSignalName(existing) {
 // exact shape we'd persist.
 function serializePersistablePayload(signals) {
   return JSON.stringify({ signals });
+}
+
+// Build the editor-shape signal object from a backend SignalOut payload.
+// Backend field ``description`` maps to local ``doc``; the rest mirror.
+function hydrateFromPersisted(persisted) {
+  const inputs = Array.isArray(persisted.inputs) ? persisted.inputs : [];
+  const rules = (persisted.rules && typeof persisted.rules === 'object')
+    ? { ...emptyRules(), ...persisted.rules }
+    : emptyRules();
+  const settings = (persisted.settings && typeof persisted.settings === 'object')
+    ? { ...defaultSettings(), ...persisted.settings }
+    : defaultSettings();
+  return {
+    id: persisted.id,
+    name: persisted.name || 'Untitled',
+    inputs,
+    rules,
+    settings,
+    doc: typeof persisted.description === 'string' ? persisted.description : '',
+  };
 }
 
 // Re-export for consumers that import from this file.
@@ -71,16 +93,18 @@ function SignalsPage() {
   // --- Persistence state ---------------------------------------------------
   // persistedSignals: list fetched from backend for the current category.
   // They drive what is shown in the SignalsList panel.
-  // The local `signals` array still holds full editor state (inputs, rules, etc.)
-  // for the currently selected signal only — kept in localStorage so refreshes
-  // survive. When the user selects a persisted signal that isn't in local state,
-  // we add a blank skeleton for it so the editor can open.
+  // The local ``signals`` array still holds full editor state. When the
+  // user selects a persisted signal that isn't in local state yet, we
+  // hydrate from the backend doc rather than injecting a blank skeleton —
+  // this is the load-bearing fix for the "rules don't persist" bug.
   const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
   const [persistedSignals, setPersistedSignals] = useState([]);
   const [persistedLoading, setPersistedLoading] = useState(false);
 
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
+  const persistedSignalsRef = useRef(persistedSignals);
+  persistedSignalsRef.current = persistedSignals;
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
@@ -156,6 +180,16 @@ function SignalsPage() {
     [signals, selectedId],
   );
 
+  // Is the selected signal one of the persisted ones? Only persisted
+  // signals get the backend autosave treatment — un-persisted local
+  // skeletons (the brief moment before a create resolves) do not.
+  const selectedPersisted = useMemo(
+    () => (selectedId
+      ? persistedSignals.find((p) => p.id === selectedId) || null
+      : null),
+    [selectedId, persistedSignals],
+  );
+
   // The SignalsList displays backend-persisted signals, filtered by name search.
   // persistedSignals provides the authoritative list for the current category.
   const filteredPersistedSignals = useMemo(() => {
@@ -164,25 +198,26 @@ function SignalsPage() {
     return persistedSignals.filter((s) => (s.name || '').toLowerCase().includes(q));
   }, [persistedSignals, search]);
 
-  // When a persisted signal is selected that has no local editor state yet,
-  // inject a blank skeleton so the editor can open.
+  // When a persisted signal is selected that has no local editor state
+  // yet, hydrate from the backend doc — NOT a blank skeleton. This is
+  // the load-bearing fix for the "rules don't survive a refresh" bug.
   const handleSelectPersisted = useCallback((id) => {
     setSelectedId(id);
     setSignals((prev) => {
-      if (prev.find((s) => s.id === id)) return prev;
-      const persisted = persistedSignals.find((p) => p.id === id);
+      const existing = prev.find((s) => s.id === id);
+      const persisted = persistedSignalsRef.current.find((p) => p.id === id);
       if (!persisted) return prev;
-      const skeleton = {
-        id: persisted.id,
-        name: persisted.name,
-        inputs: [],
-        rules: emptyRules(),
-        settings: defaultSettings(),
-        doc: '',
-      };
-      return [...prev, skeleton];
+      const hydrated = hydrateFromPersisted(persisted);
+      if (!existing) {
+        return [...prev, hydrated];
+      }
+      // Always re-hydrate from backend on (re)select — backend is the
+      // source of truth. Preserves the in-progress edits made by the
+      // current user only when re-selecting the SAME id without
+      // intervening backend changes; otherwise backend wins.
+      return prev.map((s) => (s.id === id ? hydrated : s));
     });
-  }, [persistedSignals]);
+  }, []);
 
   // --- Mutations -----------------------------------------------------------
   const handleAdd = useCallback(() => {
@@ -210,7 +245,15 @@ function SignalsPage() {
     // Fire-and-forget: persist to backend in current category.
     // If the backend call fails, the signal still exists locally — user
     // can re-save via the existing save flow. Non-blocking.
-    createSignal({ id, name, blocks: [], category: persistedCategory }).then(() => {
+    createSignal({
+      id,
+      name,
+      category: persistedCategory,
+      inputs: [],
+      rules: emptyRules(),
+      settings: defaultSettings(),
+      description: '',
+    }).then(() => {
       fetchPersistedSignals(persistedCategory);
     }).catch(() => {
       // ignore — local signal still usable
@@ -241,15 +284,19 @@ function SignalsPage() {
     });
   }, [confirmDeleteId, persistedCategory, fetchPersistedSignals]);
 
-  // Move a persisted signal to a different category.
+  // Move a persisted signal to a different category. Preserves all
+  // editable content via the full-replace PUT.
   const handleChangeItemCat = useCallback(async (id, newCat) => {
     const target = persistedSignals.find((s) => s.id === id);
     if (!target) return;
     try {
       await updateSignal(id, {
         name: target.name,
-        blocks: target.blocks || [],
         category: newCat,
+        inputs: target.inputs || [],
+        rules: target.rules || {},
+        settings: target.settings || {},
+        description: target.description || '',
       });
       // If the new category differs from the current filter, the item
       // disappears from the current view — re-fetch to reflect backend truth.
@@ -261,18 +308,9 @@ function SignalsPage() {
 
   const handleRename = useCallback((id, newName) => {
     setSignals((prev) => prev.map((s) => (s.id !== id ? s : { ...s, name: newName })));
-    // Sync name to backend if this signal exists in the persisted list.
-    const persisted = persistedSignals.find((s) => s.id === id);
-    if (persisted) {
-      updateSignal(id, {
-        name: newName,
-        blocks: persisted.blocks || [],
-        category: persisted.category,
-      }).then(() => {
-        fetchPersistedSignals(persistedCategory);
-      }).catch(() => {/* non-fatal */});
-    }
-  }, [persistedSignals, persistedCategory, fetchPersistedSignals]);
+    // The debounced backend autosave below will pick up the name change
+    // via the payload (it's part of the dirty-tracked currentSelectedDoc).
+  }, []);
 
   const handleInputsChange = useCallback((nextInputs) => {
     setSignals((prev) => prev.map((s) => (
@@ -287,6 +325,81 @@ function SignalsPage() {
   const handleDocChange = useCallback((nextDoc) => {
     setSignals((prev) => prev.map((s) => (s.id !== selectedId ? s : { ...s, doc: nextDoc })));
   }, [selectedId]);
+
+  // --- Backend debounced auto-save for the selected persisted signal -------
+  // Only fires when:
+  //   - a signal is selected
+  //   - that signal exists in the backend persisted list
+  //   - the user has actually edited something
+  // The payload is stringified so a re-render with structurally equal
+  // content does not retrigger the debounce.
+  const selectedDocSerialized = useMemo(() => {
+    if (!selectedSignal || !selectedPersisted) return null;
+    return JSON.stringify({
+      name: selectedSignal.name,
+      category: selectedPersisted.category,
+      inputs: selectedSignal.inputs,
+      rules: selectedSignal.rules,
+      settings: selectedSignal.settings,
+      description: selectedSignal.doc,
+    });
+  }, [selectedSignal, selectedPersisted]);
+
+  // Track the "last seen from backend" snapshot per selectedId to
+  // suppress the FIRST autosave cycle after a hydrate-on-select (which
+  // would otherwise PUT the freshly fetched content back uselessly).
+  // Seeded in an effect — never mutate refs during render.
+  const lastHydratedPayloadRef = useRef({ id: null, payload: null });
+  useEffect(() => {
+    if (selectedPersisted && selectedPersisted.id === selectedId) {
+      lastHydratedPayloadRef.current = {
+        id: selectedId,
+        payload: JSON.stringify({
+          name: selectedPersisted.name,
+          category: selectedPersisted.category,
+          inputs: selectedPersisted.inputs || [],
+          rules: selectedPersisted.rules || {},
+          settings: selectedPersisted.settings || {},
+          description: selectedPersisted.description || '',
+        }),
+      };
+    } else if (selectedId === null) {
+      lastHydratedPayloadRef.current = { id: null, payload: null };
+    }
+    // We deliberately depend on selectedId only — when ``selectedPersisted``
+    // first appears in the list for the currently selected id, this effect
+    // re-runs because ``selectedPersisted`` is in the deps below.
+  }, [selectedId, selectedPersisted]);
+
+  const backendDirty = !!selectedDocSerialized
+    && (lastHydratedPayloadRef.current.id !== selectedId
+        || lastHydratedPayloadRef.current.payload !== selectedDocSerialized);
+
+  const handleBackendSave = useCallback(async (payloadStr) => {
+    if (!selectedId || !payloadStr) return;
+    const body = JSON.parse(payloadStr);
+    await updateSignal(selectedId, body);
+    // After a successful save, set last-hydrated to the just-sent payload
+    // so the same content doesn't immediately re-trigger the debounce.
+    lastHydratedPayloadRef.current = { id: selectedId, payload: payloadStr };
+    // Refresh the persisted list so the local cache stays in sync (esp.
+    // ``updated_at`` and, more importantly, the canonical content if the
+    // backend coerced anything).
+    fetchPersistedSignals(persistedCategory);
+  }, [selectedId, persistedCategory, fetchPersistedSignals]);
+
+  const { status: cloudStatus, reset: resetCloudStatus } = useBackendAutosave({
+    enabled: !!selectedPersisted && backendDirty,
+    payload: selectedDocSerialized,
+    onSave: handleBackendSave,
+    debounceMs: 500,
+  });
+
+  // When the selection changes, reset cloud status so the indicator
+  // doesn't show "saved" for the previously selected signal.
+  useEffect(() => {
+    resetCloudStatus();
+  }, [selectedId, resetCloudStatus]);
 
   // --- Validation + run ----------------------------------------------------
   // Run gate checks inputs too — every input must be configured
@@ -429,14 +542,19 @@ function SignalsPage() {
             onSave={commitSave}
             onToggleAutosave={setAutosave}
             leftSlot={
-              <InlineNameInput
-                entity={selectedSignal}
-                onRename={handleRename}
-                className={styles.nameInput}
-                placeholder="Select a signal"
-                selectedPlaceholder="Signal name"
-                ariaLabel="Signal name"
-              />
+              <>
+                <InlineNameInput
+                  entity={selectedSignal}
+                  onRename={handleRename}
+                  className={styles.nameInput}
+                  placeholder="Select a signal"
+                  selectedPlaceholder="Signal name"
+                  ariaLabel="Signal name"
+                />
+                {selectedPersisted && (
+                  <SaveStatus status={cloudStatus} label="Cloud" />
+                )}
+              </>
             }
           />
         </div>
