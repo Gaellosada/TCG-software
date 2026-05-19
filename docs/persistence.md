@@ -18,8 +18,7 @@ named `appDataWriter`. That role grants exactly:
 {
   privileges: [{
     resource:   { db: "tcg-instrument", collection: "2026-app-data" },
-    actions:    [find, insert, update, remove, createIndex,
-                 listIndexes, collStats]
+    actions:    [find, insert, update, remove, createIndex, listIndexes]
   }],
   inherited roles: []
 }
