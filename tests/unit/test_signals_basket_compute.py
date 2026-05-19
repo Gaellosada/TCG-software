@@ -164,6 +164,7 @@ def test_compute_with_basket_input_returns_200_with_basket_position(
                     "id": "B",
                     "instrument": {
                         "type": "basket",
+                        "kind": "saved",
                         "basket_id": "basket-e2e",
                     },
                 }
@@ -225,6 +226,7 @@ def test_compute_with_basket_input_returns_200_with_basket_position(
     assert pos["input_id"] == "B"
     inst = pos["instrument"]
     assert inst["type"] == "basket"
+    assert inst["kind"] == "saved"
     assert inst["basket_id"] == "basket-e2e"
     # Legs round-trip through the response (snapshot of what was fetched).
     assert isinstance(inst["legs"], list)
@@ -267,6 +269,7 @@ def test_compute_with_unknown_basket_id_returns_validation_error(
                     "id": "B",
                     "instrument": {
                         "type": "basket",
+                        "kind": "saved",
                         "basket_id": "does-not-exist",
                     },
                 }
@@ -284,3 +287,329 @@ def test_compute_with_unknown_basket_id_returns_validation_error(
     body_json = resp.json()
     assert body_json.get("error_type") == "validation"
     assert "does-not-exist" in body_json.get("message", "")
+
+
+# ===========================================================================
+# Inline-shape tests (Wave I-back iter1, EXTEND).
+#
+# Inline baskets bypass the DB pre-pass entirely: the resolver stamps each
+# leg with a host collection (derived from id prefix for future/option/
+# index; probed for equity), then `_parse_input` constructs an
+# `InstrumentBasket` straight from the wire payload.  These tests assert
+# the happy path, the no-DB-call invariant, identity-tuple stability, and
+# the various leg-level validation rules.
+# ===========================================================================
+
+
+def _inline_basket_spec(
+    *,
+    input_id: str = "B",
+    asset_class: str = "equity",
+    legs: list[dict] | None = None,
+    signal_id: str = "sig-inline",
+    entry_condition_input_id: str | None = None,
+) -> dict:
+    """Helper: build a minimal signal-compute body with one inline-basket
+    input and an AlwaysOn entry block (so the engine runs through and
+    produces a position whose weighted-sum was actually evaluated)."""
+    if legs is None:
+        legs = [
+            {"instrument_id": "SPY", "weight": 0.6},
+            {"instrument_id": "QQQ", "weight": 0.4},
+        ]
+    ec_id = entry_condition_input_id or input_id
+    return {
+        "spec": {
+            "id": signal_id,
+            "name": "Inline E2E",
+            "inputs": [
+                {
+                    "id": input_id,
+                    "instrument": {
+                        "type": "basket",
+                        "kind": "inline",
+                        "asset_class": asset_class,
+                        "legs": legs,
+                    },
+                }
+            ],
+            "rules": {
+                "entries": [
+                    {
+                        "id": "E1",
+                        "name": "AlwaysOn",
+                        "input_id": input_id,
+                        "weight": 100.0,
+                        "conditions": [
+                            {
+                                "op": "gt",
+                                "lhs": {
+                                    "kind": "instrument",
+                                    "input_id": ec_id,
+                                    "field": "close",
+                                },
+                                "rhs": {"kind": "constant", "value": 0.0},
+                            }
+                        ],
+                    }
+                ],
+                "exits": [],
+            },
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+
+
+def test_signals_inline_basket_compute_weighted_sum(
+    client: TestClient,
+    fake_market_data: MagicMock,
+    basket_repo: _BasketRepo,
+) -> None:
+    """Inline basket with two equity legs: weighted-sum runs, response
+    shape is the kind-discriminated inline payload, and no DB pre-pass
+    was triggered (repo.get_by_id is never called)."""
+    # Track repo.get_by_id calls (the resolver short-circuit must skip them).
+    seen_calls: list[tuple[str, str]] = []
+    orig_get = basket_repo.get_by_id
+
+    async def trace_get_by_id(doc_type: str, doc_id: str):  # noqa: ANN202
+        seen_calls.append((doc_type, doc_id))
+        return await orig_get(doc_type, doc_id)
+
+    basket_repo.get_by_id = trace_get_by_id  # type: ignore[method-assign]
+
+    body = _inline_basket_spec(asset_class="equity")
+    resp = client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # One position with the inline-shape payload.
+    assert len(data["positions"]) == 1
+    inst = data["positions"][0]["instrument"]
+    assert inst["type"] == "basket"
+    assert inst["kind"] == "inline"
+    assert inst["asset_class"] == "equity"
+    assert "basket_id" not in inst  # inline never carries an id
+    leg_ids = {leg["instrument_id"] for leg in inst["legs"]}
+    assert leg_ids == {"SPY", "QQQ"}
+
+    # Q6 short-circuit: inline-only request must not hit the repo.
+    assert seen_calls == [], (
+        f"resolver hit the repo for an inline-only request: {seen_calls}"
+    )
+
+    # Equity-probe path actually ran: get_prices was called for SPY/QQQ.
+    called_ids = {
+        call.args[1] for call in fake_market_data.get_prices.await_args_list
+    }
+    assert {"SPY", "QQQ"}.issubset(called_ids)
+
+
+def test_signals_inline_basket_zero_legs_returns_validation_error(
+    client: TestClient,
+) -> None:
+    """Inline with empty `legs` is rejected at Pydantic time (min_length=1)."""
+    body = _inline_basket_spec(legs=[])
+    resp = client.post("/api/signals/compute", json=body)
+    # Pydantic's request-body validation yields HTTP 422 with the
+    # project-standard envelope's `error_type="validation_error"`.
+    assert resp.status_code in (400, 422), resp.text
+
+
+def test_signals_inline_basket_single_leg_compute(
+    client: TestClient,
+) -> None:
+    """Inline with a single SPY leg, weight=1.0 — the weighted sum
+    equals the SPY close series, position runs to completion."""
+    body = _inline_basket_spec(
+        legs=[{"instrument_id": "SPY", "weight": 1.0}],
+    )
+    resp = client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert len(data["positions"]) == 1
+    assert data["positions"][0]["instrument"]["kind"] == "inline"
+    assert len(data["positions"][0]["values"]) == len(data["timestamps"])
+
+
+def test_signals_inline_basket_negative_weight_compute(
+    client: TestClient, fake_market_data: MagicMock
+) -> None:
+    """A single negative-weight leg flips the sign relative to the
+    baseline positive-weight equivalent.  We verify just that the
+    request succeeds and emits a position — the sign-flip semantic is
+    covered by the underlying engine tests."""
+    body = _inline_basket_spec(
+        legs=[{"instrument_id": "SPY", "weight": -1.0}],
+    )
+    resp = client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+
+
+def test_signals_saved_basket_kind_discriminator_required(
+    client: TestClient,
+) -> None:
+    """Saved-shape with `kind` missing is rejected at the wire layer —
+    proves the discriminator is actually wired."""
+    body = {
+        "spec": {
+            "id": "sig-x",
+            "name": "X",
+            "inputs": [
+                {
+                    "id": "B",
+                    "instrument": {
+                        "type": "basket",
+                        # NO `kind` field — must be rejected.
+                        "basket_id": "basket-e2e",
+                    },
+                }
+            ],
+            "rules": {"entries": [], "exits": []},
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+    resp = client.post("/api/signals/compute", json=body)
+    assert resp.status_code in (400, 422), resp.text
+
+
+def test_signals_inline_basket_intersects_dates_across_legs(
+    fake_market_data: MagicMock, basket_repo: _BasketRepo
+) -> None:
+    """Two legs with disjoint date ranges raise a SignalDataError
+    ("no overlapping dates between legs") via the standard envelope."""
+    # Tweak fake_market_data so SPY and QQQ have non-overlapping dates.
+    disjoint_qqq_dates = np.array(
+        [20240201, 20240202, 20240205, 20240206, 20240207, 20240208],
+        dtype=np.int64,
+    )
+    disjoint_qqq = PriceSeries(
+        dates=disjoint_qqq_dates,
+        open=_QQQ_CLOSES - 1.0,
+        high=_QQQ_CLOSES + 1.0,
+        low=_QQQ_CLOSES - 2.0,
+        close=_QQQ_CLOSES,
+        volume=np.full(6, 1000.0, dtype=np.float64),
+    )
+
+    async def disjoint_get_prices(
+        collection: str, instrument_id: str, *, start=None, end=None, provider=None
+    ):
+        if instrument_id == "SPY":
+            return _price_series(_SPY_CLOSES)
+        if instrument_id == "QQQ":
+            return disjoint_qqq
+        return None
+
+    fake_market_data.get_prices = AsyncMock(side_effect=disjoint_get_prices)
+
+    app = create_app()
+    app.state.market_data = fake_market_data
+    app.dependency_overrides[get_write_repository] = lambda: basket_repo
+    client_local = TestClient(app)
+
+    body = _inline_basket_spec(asset_class="equity")
+    resp = client_local.post("/api/signals/compute", json=body)
+    # SignalDataError is surfaced through error_response("data", ...).
+    # Whichever specific envelope key is used, the response is non-200.
+    assert resp.status_code != 200, resp.text
+    payload = resp.json()
+    msg = payload.get("message", "")
+    assert "overlap" in msg.lower() or "no business days" in msg.lower() or (
+        "basket" in msg.lower()
+    ), payload
+
+
+def test_signals_inline_basket_unknown_asset_class_rejected(
+    client: TestClient,
+) -> None:
+    """Pydantic Literal["future","option","index","equity"] rejects any
+    other asset class at request-validation time."""
+    body = _inline_basket_spec(asset_class="commodity")  # type: ignore[arg-type]
+    resp = client.post("/api/signals/compute", json=body)
+    assert resp.status_code in (400, 422), resp.text
+
+
+def test_signals_inline_basket_instrument_identity_stable() -> None:
+    """Two inline baskets with the same legs in different orders share
+    a structural identity tuple (so the engine dedupes their fetches).
+
+    Unit test on `_instrument_identity` directly — no HTTP layer needed."""
+    from tcg.engine.signal_exec import _instrument_identity
+    from tcg.types.signal import InstrumentBasket
+
+    b1 = InstrumentBasket(
+        legs=(
+            {"instrument_id": "SPY", "weight": 0.6, "collection": "ETF"},
+            {"instrument_id": "QQQ", "weight": 0.4, "collection": "ETF"},
+        ),
+        collection="ETF",
+        basket_id=None,
+        asset_class="equity",
+    )
+    b2 = InstrumentBasket(
+        legs=(
+            {"instrument_id": "QQQ", "weight": 0.4, "collection": "ETF"},
+            {"instrument_id": "SPY", "weight": 0.6, "collection": "ETF"},
+        ),
+        collection="ETF",
+        basket_id=None,
+        asset_class="equity",
+    )
+    assert _instrument_identity(b1) == _instrument_identity(b2)
+
+    # Different weights ⇒ different identity.
+    b3 = InstrumentBasket(
+        legs=(
+            {"instrument_id": "SPY", "weight": 0.5, "collection": "ETF"},
+            {"instrument_id": "QQQ", "weight": 0.5, "collection": "ETF"},
+        ),
+        collection="ETF",
+        basket_id=None,
+        asset_class="equity",
+    )
+    assert _instrument_identity(b1) != _instrument_identity(b3)
+
+    # Saved and inline with structurally-equal legs DON'T collide
+    # because the saved identity uses ("basket","saved",basket_id).
+    b_saved = InstrumentBasket(
+        legs=b1.legs,
+        collection="ETF",
+        basket_id="some-saved-id",
+        asset_class=None,
+    )
+    assert _instrument_identity(b1) != _instrument_identity(b_saved)
+
+    # And a user-chosen basket_id of "inline" cannot collide with a
+    # structural-identity inline basket (Q2 collision-avoidance).
+    b_named_inline = InstrumentBasket(
+        legs=b1.legs,
+        collection="ETF",
+        basket_id="inline",
+        asset_class=None,
+    )
+    assert _instrument_identity(b_named_inline) != _instrument_identity(b1)
+
+
+def test_signals_inline_basket_id_asset_class_mismatch_rejected(
+    fake_market_data: MagicMock, basket_repo: _BasketRepo
+) -> None:
+    """A leg whose instrument_id can't be bucketed into the declared
+    asset_class is rejected with a validation envelope."""
+    app = create_app()
+    app.state.market_data = fake_market_data
+    app.dependency_overrides[get_write_repository] = lambda: basket_repo
+    client_local = TestClient(app)
+
+    # asset_class="future" but instrument_id doesn't start with FUT_.
+    body = _inline_basket_spec(
+        asset_class="future",
+        legs=[{"instrument_id": "SPY", "weight": 1.0}],
+    )
+    resp = client_local.post("/api/signals/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    payload = resp.json()
+    assert payload.get("error_type") == "validation"
+    assert "asset_class" in payload.get("message", "")
