@@ -72,6 +72,7 @@ from tcg.types.signal import (
     InRangeCondition,
     Input,
     InputInstrument,
+    InstrumentBasket,
     InstrumentContinuous,
     InstrumentOperand,
     InstrumentOptionStream,
@@ -189,6 +190,23 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
             repr(inst.selection),
             inst.stream,
         )
+    if isinstance(inst, InstrumentBasket):
+        # Kind-prefixed identities so a user-chosen basket_id of "inline"
+        # cannot collide with a structural-identity inline basket (Q2 of
+        # Wave-P decisions).
+        if inst.basket_id is not None:
+            return ("basket", "saved", inst.basket_id)
+        # Inline basket: structural identity built from asset_class +
+        # canonically-sorted (instrument_id, weight) tuples.  Two inline
+        # baskets with the same legs in any order share an identity, so
+        # the fetcher dedupes them.
+        legs_key = tuple(
+            sorted(
+                (str(leg["instrument_id"]), float(leg["weight"]))
+                for leg in inst.legs
+            )
+        )
+        return ("basket", "inline", inst.asset_class, legs_key)
     raise SignalValidationError(f"unknown instrument kind: {inst!r}")
 
 
