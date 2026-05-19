@@ -72,6 +72,7 @@ from tcg.types.signal import (
     InRangeCondition,
     Input,
     InputInstrument,
+    InstrumentBasket,
     InstrumentContinuous,
     InstrumentOperand,
     InstrumentOptionStream,
@@ -189,6 +190,8 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
             repr(inst.selection),
             inst.stream,
         )
+    if isinstance(inst, InstrumentBasket):
+        return ("basket", inst.basket_id)
     raise SignalValidationError(f"unknown instrument kind: {inst!r}")
 
 
