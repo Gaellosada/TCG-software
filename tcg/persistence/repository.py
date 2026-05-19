@@ -44,8 +44,6 @@ from tcg.types.persistence import (
     Category,
     IndicatorDoc,
     PersistenceDoc,
-    SignalDoc,
-    PortfolioDoc,
     from_mongo_dict,
     to_mongo_dict,
 )
@@ -198,13 +196,6 @@ class WriteRepository:
             raise KeyError(
                 f"persistence: no {doc_type} with id={doc_id!r} to archive"
             )
-
-
-# Concrete subclasses so callers can spell the return types explicitly
-# at the API edge (handlers want ``IndicatorDoc``, not the broad union).
-# Not strictly necessary — the methods already preserve the dataclass
-# identity — but documented here so static analyzers see the link.
-_DOC_CLASSES: tuple[type, ...] = (IndicatorDoc, SignalDoc, PortfolioDoc)
 
 
 __all__ = ["WriteRepository"]

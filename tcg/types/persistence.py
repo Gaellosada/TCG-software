@@ -34,7 +34,7 @@ BSON encoding).
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields, replace
+from dataclasses import MISSING, dataclass, fields
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -175,24 +175,6 @@ def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
     return cls(**kwargs)  # type: ignore[no-any-return]
 
 
-def with_timestamps(
-    doc: PersistenceDoc,
-    *,
-    created_at: datetime | None = None,
-    updated_at: datetime,
-) -> PersistenceDoc:
-    """Return a copy of ``doc`` with timestamp fields overwritten.
-
-    Helper used by ``WriteRepository`` so callers don't have to import
-    ``dataclasses.replace`` everywhere. ``created_at=None`` leaves the
-    existing value untouched (used on update); pass an explicit value
-    on create.
-    """
-    if created_at is None:
-        return replace(doc, updated_at=updated_at)
-    return replace(doc, created_at=created_at, updated_at=updated_at)
-
-
 __all__ = [
     "Category",
     "IndicatorDoc",
@@ -201,5 +183,4 @@ __all__ = [
     "PersistenceDoc",
     "to_mongo_dict",
     "from_mongo_dict",
-    "with_timestamps",
 ]
