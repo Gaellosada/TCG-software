@@ -1,7 +1,7 @@
 """Frozen dataclasses for the persistence (write) layer.
 
 These three documents (``IndicatorDoc``, ``SignalDoc``, ``PortfolioDoc``)
-all live in the single MongoDB collection ``tcg-instrument.2026-app-data``
+all live in the single MongoDB collection ``tcg-app-data.2026-app-data``
 and are distinguished by a ``type`` discriminator string. The collection
 is treated as a flat, open-schema store: this module owns *structure*,
 not *interpretation* of the inner payloads.

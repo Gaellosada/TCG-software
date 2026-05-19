@@ -2,9 +2,11 @@
 
 This is the ONLY module that reads ``MONGO_APP_WRITE_URI``. The URI
 belongs to a Mongo user whose role is restricted, server-side, to
-``readWrite`` on the single collection ``tcg-instrument.2026-app-data``
-(see ``workspace/tasks/persistence-layer/output/scope-check-evidence.json``
-for the privilege check).
+``readWrite`` on the single collection ``tcg-app-data.2026-app-data``
+(see ``workspace/tasks/persistence-layer/output/migration-scope-check-evidence.json``
+for the privilege check — the write namespace was migrated out of the
+legacy ``tcg-instrument`` database into its own dedicated database so
+the scoped user has zero visibility into ``tcg-instrument``).
 
 The two-layer isolation model is:
 

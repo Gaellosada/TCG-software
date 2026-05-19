@@ -1,11 +1,11 @@
 """WriteRepository — the only object the application uses to mutate
-``tcg-instrument.2026-app-data``.
+``tcg-app-data.2026-app-data``.
 
 Safety design
 -------------
 The collection handle is bound exactly once in ``__init__``:
 
-    self._coll = client["tcg-instrument"]["2026-app-data"]
+    self._coll = client["tcg-app-data"]["2026-app-data"]
 
 No public method accepts a collection name. No public method calls
 ``client[...]`` or ``db[...]``. There is no ``__getattr__`` escape
@@ -49,7 +49,7 @@ from tcg.types.persistence import (
 )
 
 
-_DB_NAME = "tcg-instrument"
+_DB_NAME = "tcg-app-data"
 _COLLECTION_NAME = "2026-app-data"
 
 

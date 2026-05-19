@@ -7,17 +7,27 @@ remains unchanged and is documented in `data-model.md`.
 ## Two-layer isolation
 
 The write layer enforces "only ever touch
-`tcg-instrument.2026-app-data`" twice, independently:
+`tcg-app-data.2026-app-data`" twice, independently:
+
+> **Defense in depth — dedicated database.** The write namespace lives
+> in its OWN database (`tcg-app-data`), not in the legacy
+> `tcg-instrument` database that the read-only data layer uses. This
+> makes the scoped Mongo user invisible to `tcg-instrument` entirely:
+> `list_database_names()` on the scoped client returns only
+> `['tcg-app-data']`, and every operation against any collection in
+> `tcg-instrument` (including `listCollections`) is rejected with
+> `OperationFailure` code 13.
 
 ### Layer 1 — Mongo role (server-side)
 
-A dedicated database user `app-writer` holds a single custom role
-named `appDataWriter`. That role grants exactly:
+A dedicated database user `app-writer` (provisioned in `tcg-app-data`)
+holds a single custom role named `appDataWriter` (also defined in
+`tcg-app-data`). That role grants exactly:
 
 ```text
 {
   privileges: [{
-    resource:   { db: "tcg-instrument", collection: "2026-app-data" },
+    resource:   { db: "tcg-app-data", collection: "2026-app-data" },
     actions:    [find, insert, update, remove, createIndex, listIndexes]
   }],
   inherited roles: []
@@ -25,13 +35,14 @@ named `appDataWriter`. That role grants exactly:
 ```
 
 No `dbAdmin`, no `userAdmin`, no `readAnyDatabase`. Any operation
-outside this single namespace — including `listCollections` on the
-parent database — fails with `OperationFailure` code 13 / `Unauthorized`.
+outside this single namespace — including `listCollections` on either
+`tcg-app-data` or `tcg-instrument` — fails with `OperationFailure`
+code 13 / `Unauthorized`.
 
 Evidence of the live privilege check (run at provisioning time and
 re-runnable from `tests/integration/test_persistence_scope_rejection.py`)
 is captured in
-`workspace/tasks/persistence-layer/output/scope-check-evidence.json`.
+`workspace/tasks/persistence-layer/output/migration-scope-check-evidence.json`.
 
 ### Layer 2 — `WriteRepository` (application-side)
 
@@ -39,7 +50,7 @@ is captured in
 exactly once:
 
 ```python
-self._coll = client["tcg-instrument"]["2026-app-data"]
+self._coll = client["tcg-app-data"]["2026-app-data"]
 ```
 
 The class exposes **only** the following public methods:
@@ -73,7 +84,7 @@ before data can be written outside the authorised namespace.
 The scoped client is built from a single environment variable:
 
 ```
-MONGO_APP_WRITE_URI=mongodb://app-writer:<password>@<host>:27017/?...&authSource=tcg-instrument
+MONGO_APP_WRITE_URI=mongodb://app-writer:<password>@<host>:27017/?...&authSource=tcg-app-data
 ```
 
 This URI is the **only** secret needed by the write layer. The
