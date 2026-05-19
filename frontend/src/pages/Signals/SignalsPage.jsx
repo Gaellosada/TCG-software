@@ -11,7 +11,10 @@ import InputsPanel from './InputsPanel';
 import { loadState, saveState, emptyRules, defaultSettings } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
-import { listSignals, createSignal, updateSignal, archiveSignal } from '../../api/persistence';
+import {
+  listSignals, createSignal, updateSignal, archiveSignal,
+  describePersistenceError,
+} from '../../api/persistence';
 import { buildComputeRequestBody } from './requestBuilder';
 import { computeRunGate } from './runGate';
 import { countOwnPanelIndicators } from './resultsPlotTraces';
@@ -110,6 +113,12 @@ function SignalsPage() {
   // category-change). Kept separate from the debounced autosave status so
   // neither path's timing can overwrite the other.
   const [oneshotStatus, setOneshotStatus] = useState('idle');
+  // Detailed error message for one-shot persistence failures (M8).
+  // Shown as a tooltip / inline subtext on SaveStatus.
+  const [oneshotError, setOneshotError] = useState(null);
+  // Detailed error message for the most recent debounced cloud autosave
+  // failure (M8). Cleared when a save succeeds.
+  const [cloudError, setCloudError] = useState(null);
 
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
@@ -203,10 +212,26 @@ function SignalsPage() {
     return persistedSignals.filter((s) => (s.name || '').toLowerCase().includes(q));
   }, [persistedSignals, search]);
 
+  // Mirror of ``backendDirty`` accessible from event handlers that are
+  // declared before ``backendDirty`` itself is defined in the function
+  // body. Synced via effect (see below).
+  const backendDirtyRef = useRef(false);
+
   // When a persisted signal is selected that has no local editor state
   // yet, hydrate from the backend doc — NOT a blank skeleton. This is
   // the load-bearing fix for the "rules don't survive a refresh" bug.
+  //
+  // Guard against destroying in-progress edits: if the user clicks the
+  // SAME row that is currently selected AND has unsaved edits (the
+  // debounce hasn't fired yet), DO NOT overwrite local state with the
+  // stale backend snapshot. The autosave hook is responsible for
+  // pushing those edits to the backend; until then, the user's edits
+  // are authoritative for the active selection.
   const handleSelectPersisted = useCallback((id) => {
+    // Re-click of the same row mid-edit: preserve in-progress edits.
+    if (id === selectedId && backendDirtyRef.current) {
+      return;
+    }
     setSelectedId(id);
     setSignals((prev) => {
       const existing = prev.find((s) => s.id === id);
@@ -216,13 +241,12 @@ function SignalsPage() {
       if (!existing) {
         return [...prev, hydrated];
       }
-      // Always re-hydrate from backend on (re)select — backend is the
-      // source of truth. Preserves the in-progress edits made by the
-      // current user only when re-selecting the SAME id without
-      // intervening backend changes; otherwise backend wins.
+      // Selection switch to a different id (or first selection of this
+      // id after hydration cleared): re-hydrate from backend. Backend
+      // is the source of truth at selection boundary.
       return prev.map((s) => (s.id === id ? hydrated : s));
     });
-  }, []);
+  }, [selectedId]);
 
   // --- Mutations -----------------------------------------------------------
   const handleAdd = useCallback(() => {
@@ -259,10 +283,16 @@ function SignalsPage() {
       settings: defaultSettings(),
       description: '',
     }).then(() => {
+      setOneshotError(null);
       setOneshotStatus('saved');
       fetchPersistedSignals(persistedCategory);
-    }).catch(() => {
+    }).catch((err) => {
+      // M8: capture error details (status/message) so the user can see
+      // what went wrong — not just an opaque "save failed".
+      setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('createSignal failed:', err);
     });
   }, [persistedCategory, fetchPersistedSignals]);
 
@@ -285,10 +315,14 @@ function SignalsPage() {
     // Archive on backend (soft-delete → ARCHIVE category); surface result.
     setOneshotStatus('saving');
     archiveSignal(id).then(() => {
+      setOneshotError(null);
       setOneshotStatus('saved');
       fetchPersistedSignals(persistedCategory);
-    }).catch(() => {
+    }).catch((err) => {
+      setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('archiveSignal failed:', err);
     });
   }, [confirmDeleteId, persistedCategory, fetchPersistedSignals]);
 
@@ -307,12 +341,16 @@ function SignalsPage() {
         settings: target.settings || {},
         description: target.description || '',
       });
+      setOneshotError(null);
       setOneshotStatus('saved');
       // If the new category differs from the current filter, the item
       // disappears from the current view — re-fetch to reflect backend truth.
       fetchPersistedSignals(persistedCategory);
-    } catch {
+    } catch (err) {
+      setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('updateSignal (category change) failed:', err);
     }
   }, [persistedSignals, persistedCategory, fetchPersistedSignals]);
 
@@ -384,11 +422,32 @@ function SignalsPage() {
   const backendDirty = !!selectedDocSerialized
     && (lastHydratedPayloadRef.current.id !== selectedId
         || lastHydratedPayloadRef.current.payload !== selectedDocSerialized);
+  // Keep the ref in sync so ``handleSelectPersisted`` (declared earlier)
+  // can read the current dirty state without a closure dependency.
+  backendDirtyRef.current = backendDirty;
 
-  const handleBackendSave = useCallback(async (payloadStr) => {
+  const handleBackendSave = useCallback(async (payloadStr, { signal } = {}) => {
     if (!selectedId || !payloadStr) return;
     const body = JSON.parse(payloadStr);
-    await updateSignal(selectedId, body);
+    try {
+      await updateSignal(selectedId, body, { signal });
+    } catch (err) {
+      // Aborts are intentional cancellations — let the hook surface
+      // them as 'idle'. Other errors: capture details for the UI tooltip
+      // and re-throw so the hook moves to 'error'.
+      if (err && err.name === 'AbortError') {
+        throw err;
+      }
+      setCloudError(describePersistenceError(err));
+      // eslint-disable-next-line no-console
+      console.error('updateSignal (autosave) failed:', err);
+      throw err;
+    }
+    // If the save was aborted between dispatch and resolution, stop here
+    // — don't touch the hydrated ref or refetch.
+    if (signal && signal.aborted) return;
+    // Clear any prior error after a successful save.
+    setCloudError(null);
     // After a successful save, set last-hydrated to the just-sent payload
     // so the same content doesn't immediately re-trigger the debounce.
     lastHydratedPayloadRef.current = { id: selectedId, payload: payloadStr };
@@ -412,6 +471,29 @@ function SignalsPage() {
   useEffect(() => {
     resetCloudStatus();
   }, [selectedId, resetCloudStatus]);
+
+  // M7: derive what the SaveStatus indicator should actually show.
+  //
+  // Precedence rules:
+  //   1. If the debounced cloud autosave is actively 'saving', that
+  //      wins — a stale 'saved' from a prior one-shot must not mask
+  //      an in-flight save.
+  //   2. If the debounced autosave is 'error', that also wins — the
+  //      user needs to know an autosave failed even if a recent
+  //      one-shot succeeded.
+  //   3. Otherwise the more recent one-shot status takes precedence
+  //      (e.g. just-clicked "+ New" → show 'saving' or 'error').
+  //   4. Fallback to cloudStatus.
+  const displayedSaveStatus = (
+    cloudStatus === 'saving' || cloudStatus === 'error'
+      ? cloudStatus
+      : (oneshotStatus !== 'idle' ? oneshotStatus : cloudStatus)
+  );
+  const saveErrorMessage = (
+    displayedSaveStatus === 'error'
+      ? (cloudStatus === 'error' ? cloudError : oneshotError)
+      : null
+  );
 
   // --- Validation + run ----------------------------------------------------
   // Run gate checks inputs too — every input must be configured
@@ -565,8 +647,11 @@ function SignalsPage() {
                 />
                 {(oneshotStatus !== 'idle' || selectedPersisted) && (
                   <SaveStatus
-                    status={oneshotStatus !== 'idle' ? oneshotStatus : cloudStatus}
+                    status={displayedSaveStatus}
                     label="Cloud"
+                    errorMessage={
+                      displayedSaveStatus === 'error' ? saveErrorMessage : null
+                    }
                   />
                 )}
               </>

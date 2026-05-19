@@ -20,6 +20,7 @@ import {
   createPortfolio,
   updatePortfolio,
   archivePortfolio,
+  describePersistenceError,
 } from '../../api/persistence';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
@@ -68,6 +69,11 @@ function PortfolioPage() {
   // category-change). Kept separate from the debounced autosave status so
   // neither path's timing can overwrite the other.
   const [oneshotStatus, setOneshotStatus] = useState('idle');
+  // M8: detailed error message for one-shot persistence failures.
+  const [oneshotError, setOneshotError] = useState(null);
+  // M8: detailed error message for the most recent debounced cloud
+  // autosave failure. Cleared when a save succeeds.
+  const [cloudError, setCloudError] = useState(null);
 
   const fetchPersistedPortfolios = useCallback(async (cat) => {
     setPersistedLoading(true);
@@ -122,6 +128,7 @@ function PortfolioPage() {
         legs: legsToWire(portfolio.legs),
         rebalance: portfolio.rebalance || 'none',
       });
+      setOneshotError(null);
       setOneshotStatus('saved');
       portfolio.setPersistedId(id);
       // Make sure the portfolioName state reflects what we just saved
@@ -130,8 +137,11 @@ function PortfolioPage() {
         portfolio.setPortfolioName(name);
       }
       fetchPersistedPortfolios(persistedCategory);
-    } catch {
+    } catch (err) {
+      setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('createPortfolio failed:', err);
     }
   }, [saveInput, portfolio, persistedCategory, fetchPersistedPortfolios, legsToWire]);
 
@@ -148,10 +158,14 @@ function PortfolioPage() {
         legs: target.legs || [],
         rebalance: target.rebalance || 'none',
       });
+      setOneshotError(null);
       setOneshotStatus('saved');
       fetchPersistedPortfolios(persistedCategory);
-    } catch {
+    } catch (err) {
+      setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('updatePortfolio (category change) failed:', err);
     }
   }, [persistedPortfolios, persistedCategory, fetchPersistedPortfolios]);
 
@@ -160,6 +174,7 @@ function PortfolioPage() {
     setOneshotStatus('saving');
     try {
       await archivePortfolio(id);
+      setOneshotError(null);
       setOneshotStatus('saved');
       // If we were editing this exact portfolio, drop the persistedId
       // so further edits don't try to autosave to an archived row.
@@ -167,13 +182,29 @@ function PortfolioPage() {
         portfolio.setPersistedId(null);
       }
       fetchPersistedPortfolios(persistedCategory);
-    } catch {
+    } catch (err) {
+      setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('archivePortfolio failed:', err);
     }
   }, [persistedCategory, fetchPersistedPortfolios, portfolio]);
 
+  // Mirror of ``cloudDirty`` accessible from event handlers declared
+  // before ``cloudDirty`` itself is defined (synced via assignment below).
+  const cloudDirtyRef = useRef(false);
+
   // Load a backend-persisted portfolio into the editor.
+  //
+  // Guard against destroying in-progress edits: if the user clicks the
+  // SAME persisted row that is currently loaded AND has unsaved local
+  // edits (the debounce hasn't fired yet), DO NOT overwrite local
+  // state with the stale backend snapshot. The autosave hook is
+  // responsible for pushing those edits to the backend.
   const handleSelectPersisted = useCallback((id) => {
+    if (id === portfolio.persistedId && cloudDirtyRef.current) {
+      return;
+    }
     const doc = persistedPortfolios.find((p) => p.id === id);
     if (!doc) return;
     portfolio.loadFromPersisted(doc);
@@ -226,11 +257,26 @@ function PortfolioPage() {
   const cloudDirty = !!cloudPayload
     && (lastSeenPayloadRef.current.id !== portfolio.persistedId
         || lastSeenPayloadRef.current.payload !== cloudPayload);
+  // Keep the ref in sync so ``handleSelectPersisted`` (declared earlier)
+  // can read the current dirty state without a closure dependency.
+  cloudDirtyRef.current = cloudDirty;
 
-  const handleCloudSave = useCallback(async (payloadStr) => {
+  const handleCloudSave = useCallback(async (payloadStr, { signal } = {}) => {
     if (!portfolio.persistedId || !payloadStr) return;
     const body = JSON.parse(payloadStr);
-    await updatePortfolio(portfolio.persistedId, body);
+    try {
+      await updatePortfolio(portfolio.persistedId, body, { signal });
+    } catch (err) {
+      if (err && err.name === 'AbortError') throw err;
+      setCloudError(describePersistenceError(err));
+      // eslint-disable-next-line no-console
+      console.error('updatePortfolio (autosave) failed:', err);
+      throw err;
+    }
+    // If the save was aborted between dispatch and resolution, don't
+    // mutate the last-seen ref or refetch.
+    if (signal && signal.aborted) return;
+    setCloudError(null);
     lastSeenPayloadRef.current = {
       id: portfolio.persistedId,
       payload: payloadStr,
@@ -251,6 +297,19 @@ function PortfolioPage() {
   useEffect(() => {
     resetCloudStatus();
   }, [portfolio.persistedId, resetCloudStatus]);
+
+  // M7: precedence — debounced cloud autosave 'saving'/'error' wins over
+  // a stale one-shot 'saved'. Otherwise prefer the more recent one-shot.
+  const displayedSaveStatus = (
+    cloudStatus === 'saving' || cloudStatus === 'error'
+      ? cloudStatus
+      : (oneshotStatus !== 'idle' ? oneshotStatus : cloudStatus)
+  );
+  const saveErrorMessage = (
+    displayedSaveStatus === 'error'
+      ? (cloudStatus === 'error' ? cloudError : oneshotError)
+      : null
+  );
 
   // Pre-fill save input when a portfolio is loaded
   useEffect(() => {
@@ -331,8 +390,11 @@ function PortfolioPage() {
                 One-shot status takes priority; falls back to debounce status. */}
             {(oneshotStatus !== 'idle' || portfolio.persistedId) && (
               <SaveStatus
-                status={oneshotStatus !== 'idle' ? oneshotStatus : cloudStatus}
+                status={displayedSaveStatus}
                 label="Cloud"
+                errorMessage={
+                  displayedSaveStatus === 'error' ? saveErrorMessage : null
+                }
               />
             )}
             {/* Clear — with confirmation */}

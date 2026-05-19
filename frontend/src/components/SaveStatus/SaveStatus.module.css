@@ -21,3 +21,8 @@
   color: var(--color-danger, #c0392b);
   background: var(--color-danger-subtle, transparent);
 }
+
+.errorDetail {
+  font-weight: normal;
+  opacity: 0.85;
+}
