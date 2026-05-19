@@ -233,3 +233,82 @@ export async function archivePortfolio(id) {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Baskets
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a new persisted basket.
+ *
+ * @param {{ id: string, name: string, category: string,
+ *   legs?: Array<{instrument_id: string, collection: string, weight: number}> }} payload
+ * @returns {Promise<BasketOut>}
+ */
+export function createBasket(payload) {
+  return _fetch('/baskets', { method: 'POST', body: payload });
+}
+
+/**
+ * List baskets in a given category.
+ *
+ * @param {string} category  One of CATEGORIES.
+ * @returns {Promise<Array<BasketOut>>}
+ */
+export function listBaskets(category) {
+  return _fetch(`/baskets?category=${encodeURIComponent(category)}`);
+}
+
+/**
+ * Get a single persisted basket by id.
+ *
+ * @param {string} id
+ * @returns {Promise<BasketOut>}
+ */
+export function getBasket(id) {
+  return _fetch(`/baskets/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Full-replace update for a persisted basket. PUT semantics — caller
+ * must supply every field; the backend defaults ``legs`` to an empty
+ * list when omitted.
+ *
+ * @param {string} id
+ * @param {{ name: string, category: string,
+ *   legs?: Array<{instrument_id: string, collection: string, weight: number}> }} payload
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<BasketOut>}
+ */
+export function updateBasket(id, payload, options = {}) {
+  const { signal } = options;
+  return _fetch(`/baskets/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: payload,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/**
+ * Soft-archive a basket (moves it to ARCHIVE category on the server).
+ * Returns 204 No Content — the Promise resolves to null on success.
+ *
+ * @param {string} id
+ * @returns {Promise<null>}
+ */
+export async function archiveBasket(id) {
+  const res = await fetch(`${BASE}/baskets/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    let body = null;
+    try { body = await res.json(); } catch { /* ignore */ }
+    const msg = (body && (body.detail || body.message)) || res.statusText || 'Delete failed';
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return null;
+}
