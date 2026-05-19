@@ -186,33 +186,35 @@ function SignalsPage() {
 
   // --- Mutations -----------------------------------------------------------
   const handleAdd = useCallback(() => {
-    setSignals((prev) => {
-      const id = (globalThis.crypto && globalThis.crypto.randomUUID)
-        ? globalThis.crypto.randomUUID()
-        : `sig-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const name = nextSignalName(prev);
-      const newSig = {
-        id,
-        name,
-        inputs: [],
-        rules: emptyRules(),
-        // v4 bullet #7: new signals get dont_repeat=true by default.
-        settings: defaultSettings(),
-        doc: '',
-      };
-      setSelectedId(id);
-      // Fire-and-forget: persist to backend in current category.
-      // If the backend call fails, the signal still exists locally — user
-      // can re-save via the existing save flow. Non-blocking.
-      createSignal({ id, name, blocks: [], category: persistedCategory }).then(() => {
-        fetchPersistedSignals(persistedCategory);
-      }).catch(() => {
-        // ignore — local signal still usable
-      });
-      return [...prev, newSig];
-    });
+    // Generate id and name OUTSIDE the setSignals updater so side effects
+    // (the createSignal API call) are NOT triggered twice by React 18
+    // StrictMode, which intentionally invokes state updater functions twice
+    // in development to surface inadvertent side effects.
+    const id = (globalThis.crypto && globalThis.crypto.randomUUID)
+      ? globalThis.crypto.randomUUID()
+      : `sig-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const name = nextSignalName(signalsRef.current);
+    const newSig = {
+      id,
+      name,
+      inputs: [],
+      rules: emptyRules(),
+      // v4 bullet #7: new signals get dont_repeat=true by default.
+      settings: defaultSettings(),
+      doc: '',
+    };
+    setSignals((prev) => [...prev, newSig]);
+    setSelectedId(id);
     setError(null);
     setLastResult(null);
+    // Fire-and-forget: persist to backend in current category.
+    // If the backend call fails, the signal still exists locally — user
+    // can re-save via the existing save flow. Non-blocking.
+    createSignal({ id, name, blocks: [], category: persistedCategory }).then(() => {
+      fetchPersistedSignals(persistedCategory);
+    }).catch(() => {
+      // ignore — local signal still usable
+    });
   }, [persistedCategory, fetchPersistedSignals]);
 
   const handleDelete = useCallback((id) => {
