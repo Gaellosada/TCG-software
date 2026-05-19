@@ -49,13 +49,14 @@ describe('navConfig', () => {
     expect(app.anchor).toBe('bottom');
   });
 
-  it('Manual section preserves order Data, Indicators, Signals, Portfolio', () => {
+  it('Manual section preserves order Data, Indicators, Signals, Portfolio, Baskets', () => {
     const manual = NAV_SECTIONS.find((s) => s.id === 'manual');
     expect(manual.items.map((i) => i.path)).toEqual([
       '/data',
       '/indicators',
       '/signals',
       '/portfolio',
+      '/baskets',
     ]);
   });
 });

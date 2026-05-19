@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { listCollections, listInstruments, getAvailableCycles } from '../../api/data';
 import { getOptionRoots } from '../../api/options';
+import { listBaskets } from '../../api/persistence';
 import OptionStreamForm, { buildDefaultOptionStream, validateOptionStream } from '../OptionStreamForm';
 import styles from './InstrumentPickerModal.module.css';
 
@@ -8,12 +9,15 @@ import styles from './InstrumentPickerModal.module.css';
  * Category definitions.
  * Indexes and Assets show instruments directly (no drill-down).
  * Futures and Options keep collection-level navigation (many collections).
+ * Baskets shows the user's saved baskets (RESEARCH/DEV/PROD), fetched on
+ * open; selecting one emits a ``{type:'basket', basket_id}`` input.
  */
 const CATEGORY_CONFIG = [
   { key: 'indexes', label: 'Indexes', color: 'var(--cat-indexes)', collections: ['INDEX'] },
   { key: 'assets', label: 'Assets', color: 'var(--cat-assets)', collections: ['ETF', 'FOREX', 'FUND'] },
   { key: 'futures', label: 'Futures', color: 'var(--cat-futures)', dynamicFutures: true },
   { key: 'options', label: 'Options', color: 'var(--cat-options)', dynamicOptions: true },
+  { key: 'baskets', label: 'Baskets', color: 'var(--cat-baskets, #8b5cf6)', dynamicBaskets: true },
 ];
 
 /**
@@ -77,6 +81,17 @@ export default function InstrumentPickerModal({
     () => visibleCategories.some((c) => c.key === 'options'),
     [visibleCategories],
   );
+  const basketsVisible = useMemo(
+    () => visibleCategories.some((c) => c.key === 'baskets'),
+    [visibleCategories],
+  );
+
+  // Baskets category state — populated when the modal opens, if the
+  // baskets category is visible. Merges RESEARCH+DEV+PROD lists; archived
+  // baskets are deliberately excluded so users don't reference dead ones.
+  const [basketList, setBasketList] = useState([]);
+  const [basketsLoading, setBasketsLoading] = useState(false);
+  const [basketsError, setBasketsError] = useState(null);
 
   /* ── Load collections + instruments when modal opens ── */
   useEffect(() => {
@@ -145,6 +160,31 @@ export default function InstrumentPickerModal({
       });
     return () => { cancelled = true; };
   }, [isOpen, optionsVisible]);
+
+  /* ── Load baskets when modal opens (only when baskets visible) ── */
+  useEffect(() => {
+    if (!isOpen || !basketsVisible) return;
+    let cancelled = false;
+    setBasketsLoading(true);
+    setBasketsError(null);
+    Promise.all([listBaskets('RESEARCH'), listBaskets('DEV'), listBaskets('PROD')])
+      .then(([research, dev, prod]) => {
+        if (cancelled) return;
+        setBasketList([
+          ...(Array.isArray(research) ? research : []),
+          ...(Array.isArray(dev) ? dev : []),
+          ...(Array.isArray(prod) ? prod : []),
+        ]);
+        setBasketsLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBasketsError(err?.message || 'Failed to load baskets');
+        setBasketList([]);
+        setBasketsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, basketsVisible]);
 
   /* ── Load available cycles for futures drill-down ── */
   useEffect(() => {
@@ -228,6 +268,14 @@ export default function InstrumentPickerModal({
     setInOptionsDrillDown(false);
     setOptionStreamValue(null);
   }, []);
+
+  const handleSelectBasket = useCallback(
+    (basketId) => {
+      onSelect({ type: 'basket', basket_id: basketId });
+      onClose();
+    },
+    [onSelect, onClose],
+  );
 
   const handleConfirmOptionStream = useCallback(() => {
     if (!optionStreamValue) return;
@@ -376,7 +424,7 @@ export default function InstrumentPickerModal({
           ) : (
             /* ── Main view: toggleable categories ── */
             <>
-              {visibleCategories.filter((c) => !c.dynamicFutures && !c.dynamicOptions).map((cat) => {
+              {visibleCategories.filter((c) => !c.dynamicFutures && !c.dynamicOptions && !c.dynamicBaskets).map((cat) => {
                 const instruments = cat.collections.flatMap(
                   (coll) => (instrumentsByCollection[coll] || []).map((inst) => ({ ...inst, collection: coll })),
                 );
@@ -471,6 +519,59 @@ export default function InstrumentPickerModal({
                     </span>
                     <span className={styles.chevron}>&#8250;</span>
                   </button>
+                </div>
+              )}
+
+              {/* Baskets — saved BasketDocs emit ``{type:'basket', basket_id}`` */}
+              {basketsVisible && (
+                <div className={styles.group}>
+                  <button
+                    className={styles.groupToggle}
+                    type="button"
+                    onClick={() => toggleCategory('baskets')}
+                    data-testid="picker-baskets-toggle"
+                  >
+                    <span className={styles.groupDot} style={{ background: 'var(--cat-baskets, #8b5cf6)' }} />
+                    <span className={styles.groupLabel}>Baskets</span>
+                    <span className={styles.groupCount}>
+                      {basketsLoading ? '...' : basketList.length}
+                    </span>
+                    <span className={styles.chevron}>{expanded.baskets ? '▾' : '▸'}</span>
+                  </button>
+                  {expanded.baskets && (
+                    basketsLoading ? (
+                      <div className={styles.state}>Loading baskets...</div>
+                    ) : basketsError ? (
+                      <div className={styles.error} data-testid="picker-baskets-error">
+                        {basketsError}
+                      </div>
+                    ) : basketList.length === 0 ? (
+                      <div className={styles.state} data-testid="picker-baskets-empty">
+                        No baskets — create one on the Baskets page.
+                      </div>
+                    ) : (
+                      <ul className={styles.instrumentList}>
+                        {basketList.map((b) => (
+                          <li
+                            key={b.id}
+                            className={styles.instrumentItem}
+                            role="button"
+                            tabIndex={0}
+                            data-testid={`picker-basket-${b.id}`}
+                            onClick={() => handleSelectBasket(b.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleSelectBasket(b.id);
+                            }}
+                          >
+                            <span className={styles.instrumentSymbol}>{b.name}</span>
+                            <span style={{ marginLeft: 8, opacity: 0.6, fontSize: '0.8em' }}>
+                              ({b.id})
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  )}
                 </div>
               )}
             </>

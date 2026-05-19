@@ -73,6 +73,8 @@ export function defaultBlock(section = 'entries') {
  *   - spot:          requires collection + instrument_id.
  *   - continuous:    requires collection + adjustment + cycle + rollOffset + strategy.
  *   - option_stream: requires collection + option_type + maturity + selection + stream.
+ *   - basket:        requires a non-empty basket_id (the backend resolves the
+ *                    legs at request time — the FE only needs the reference).
  */
 export function isInputConfigured(input) {
   if (!input || typeof input !== 'object') return false;
@@ -96,6 +98,9 @@ export function isInputConfigured(input) {
       && inst.maturity && typeof inst.maturity === 'object' && typeof inst.maturity.kind === 'string'
       && inst.selection && typeof inst.selection === 'object' && typeof inst.selection.kind === 'string'
       && typeof inst.stream === 'string' && inst.stream.length > 0);
+  }
+  if (inst.type === 'basket') {
+    return typeof inst.basket_id === 'string' && inst.basket_id.length > 0;
   }
   return false;
 }

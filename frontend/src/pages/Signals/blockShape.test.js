@@ -240,6 +240,28 @@ describe('isInputConfigured', () => {
       },
     })).toBe(true);
   });
+
+  it('accepts a basket input with non-empty basket_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', basket_id: 'my-basket' },
+    })).toBe(true);
+  });
+
+  it('rejects a basket input with empty / missing basket_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', basket_id: '' },
+    })).toBe(false);
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket' },
+    })).toBe(false);
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', basket_id: 42 },
+    })).toBe(false);
+  });
 });
 
 describe('isOperandComplete (v5)', () => {

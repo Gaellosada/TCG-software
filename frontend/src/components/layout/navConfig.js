@@ -15,6 +15,7 @@ export const NAV_SECTIONS = [
       { path: '/indicators', label: 'Indicators', icon: 'indicators' },
       { path: '/signals',    label: 'Signals',    icon: 'signals' },
       { path: '/portfolio',  label: 'Portfolio',  icon: 'portfolio' },
+      { path: '/baskets',    label: 'Baskets',    icon: 'portfolio' },
     ],
   },
   {
