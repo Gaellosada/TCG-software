@@ -522,3 +522,258 @@ def test_generic_pymongo_error_on_update_returns_503(
     )
     assert r.status_code == 503, r.text
     assert r.json()["error_type"] == "persistence_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Basket CRUD tests
+# ---------------------------------------------------------------------------
+
+
+def test_create_basket_returns_201(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-1",
+            "name": "My Basket",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 0.6},
+                {"instrument_id": "QQQ", "collection": "ETF", "weight": 0.4},
+            ],
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["id"] == "basket-1"
+    assert body["type"] == "basket"
+    assert body["name"] == "My Basket"
+    assert body["category"] == "RESEARCH"
+    assert len(body["legs"]) == 2
+
+
+def test_create_basket_mixed_asset_class_returns_400(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-mixed",
+            "name": "Mixed",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 0.5},
+                {"instrument_id": "VX1", "collection": "FUT_VIX", "weight": 0.5},
+            ],
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "mixed" in r.json()["detail"].lower()
+
+
+def test_create_basket_options_collection_returns_400(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-opt",
+            "name": "Options not allowed",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "OPT_X", "collection": "OPT_VIX", "weight": 0.5},
+            ],
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "OPT_VIX" in r.json()["detail"]
+
+
+def test_create_basket_duplicate_leg_returns_400(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-dup",
+            "name": "Dup",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 0.5},
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 0.5},
+            ],
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "SPY" in r.json()["detail"]
+
+
+def test_create_basket_duplicate_id_returns_409(
+    client: TestClient, fake_repo: _FakeRepo
+) -> None:
+    fake_repo.raise_duplicate_on_create = True
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-x",
+            "name": "X",
+            "category": "RESEARCH",
+            "legs": [],
+        },
+    )
+    assert r.status_code == 409, r.text
+
+
+def test_list_baskets_requires_category(client: TestClient) -> None:
+    r = client.get("/api/persistence/baskets")
+    # FastAPI's default would be 422, but the app installs a custom
+    # validation-error handler that maps missing query params to 400.
+    assert r.status_code in (400, 422), r.text
+
+
+def test_list_baskets_by_category(client: TestClient) -> None:
+    r0 = client.post(
+        "/api/persistence/baskets",
+        json={"id": "b1", "name": "B1", "category": "RESEARCH", "legs": []},
+    )
+    assert r0.status_code == 201
+    r = client.get("/api/persistence/baskets?category=RESEARCH")
+    assert r.status_code == 200, r.text
+    assert any(b["id"] == "b1" for b in r.json())
+
+
+def test_get_basket_not_found_returns_404(client: TestClient) -> None:
+    r = client.get("/api/persistence/baskets/does-not-exist")
+    assert r.status_code == 404, r.text
+
+
+def test_get_basket_returns_basket(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-get",
+            "name": "G",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 1.0},
+            ],
+        },
+    )
+    r = client.get("/api/persistence/baskets/b-get")
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "b-get"
+    assert r.json()["legs"][0]["instrument_id"] == "SPY"
+
+
+def test_update_basket_returns_200(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={"id": "b-upd", "name": "Original", "category": "RESEARCH", "legs": []},
+    )
+    r = client.put(
+        "/api/persistence/baskets/b-upd",
+        json={"name": "Updated", "category": "DEV", "legs": []},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Updated"
+    assert r.json()["category"] == "DEV"
+
+
+def test_update_basket_mixed_asset_class_returns_400(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={"id": "b-mixed-upd", "name": "X", "category": "RESEARCH", "legs": []},
+    )
+    r = client.put(
+        "/api/persistence/baskets/b-mixed-upd",
+        json={
+            "name": "X",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 0.5},
+                {"instrument_id": "VX1", "collection": "FUT_VIX", "weight": 0.5},
+            ],
+        },
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_update_basket_not_found_returns_404(client: TestClient) -> None:
+    r = client.put(
+        "/api/persistence/baskets/never-existed",
+        json={"name": "x", "category": "RESEARCH", "legs": []},
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_archive_basket_returns_204(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={"id": "b-del", "name": "Del", "category": "RESEARCH", "legs": []},
+    )
+    r = client.delete("/api/persistence/baskets/b-del")
+    assert r.status_code == 204, r.text
+
+
+def test_archive_basket_not_found_returns_404(client: TestClient) -> None:
+    r = client.delete("/api/persistence/baskets/no-such-id")
+    assert r.status_code == 404, r.text
+
+
+def test_basket_extra_field_rejected(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-extra",
+            "name": "X",
+            "category": "RESEARCH",
+            "legs": [],
+            "unexpected_field": "boom",
+        },
+    )
+    _expect_validation(r)
+
+
+def test_basket_leg_zero_weight_rejected(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-zero",
+            "name": "Zero Weight",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 0.0}
+            ],
+        },
+    )
+    _expect_validation(r)
+
+
+def test_basket_leg_extra_field_rejected(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-leg-extra",
+            "name": "X",
+            "category": "RESEARCH",
+            "legs": [
+                {
+                    "instrument_id": "SPY",
+                    "collection": "ETF",
+                    "weight": 0.5,
+                    "junk": 1,
+                }
+            ],
+        },
+    )
+    _expect_validation(r)
+
+
+def test_basket_negative_weight_allowed(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-short",
+            "name": "Short Leg",
+            "category": "RESEARCH",
+            "legs": [
+                {"instrument_id": "SPY", "collection": "ETF", "weight": 1.0},
+                {"instrument_id": "QQQ", "collection": "ETF", "weight": -0.5},
+            ],
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["legs"][1]["weight"] == -0.5

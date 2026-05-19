@@ -74,6 +74,7 @@ Error envelope unchanged: ``{error_type, message, traceback?}``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Literal
 
@@ -85,12 +86,18 @@ from pydantic import BaseModel, Field
 from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
+    BasketLegInLite,
+    BasketRefInline,
+    BasketRefSaved,
     ContinuousInstrumentRef,
     OptionStreamRef,
+    SeriesRef,
     SpotInstrumentRef,
 )
+from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import error_response, get_market_data
+from tcg.persistence import WriteRepository
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import (
@@ -101,6 +108,7 @@ from tcg.engine.signal_exec import (
     evaluate_signal,
 )
 from tcg.types.errors import DataNotFoundError
+from tcg.types.persistence import BasketDoc, DocType
 from tcg.types.signal import (
     Block,
     CompareCondition,
@@ -111,6 +119,7 @@ from tcg.types.signal import (
     InRangeCondition,
     Input,
     InputInstrument,
+    InstrumentBasket,
     InstrumentContinuous,
     InstrumentOperand,
     InstrumentOptionStream,
@@ -136,10 +145,11 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 
 class _InputIn(BaseModel):
     id: str
-    # Pydantic v2 discriminated union on ``type``.
-    instrument: SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef = Field(
-        discriminator="type"
-    )
+    # Discriminated union shared with the indicators router, routed by
+    # the callable discriminator in ``_models.py``.  Tags collapse the
+    # outer ``type`` and inner ``kind`` (basket-branch only) into a
+    # single flat tag space, which keeps OpenAPI 3.0 emission valid.
+    instrument: SeriesRef
 
 
 class _OperandIn(BaseModel):
@@ -241,10 +251,239 @@ _CROSS_OPS = {"cross_above", "cross_below"}
 _ROLLING_OPS = {"rolling_gt", "rolling_lt"}
 
 
-def _parse_input(inp_in: _InputIn) -> Input:
+@dataclass
+class _ResolvedBasketInput:
+    """Internal carrier for a basket input that has been pre-resolved.
+
+    Replaces a :class:`_InputIn` whose ``instrument`` is a :class:`BasketRef`
+    once it has been turned into a leg-snapshot.  For *saved* baskets the
+    legs come from a ``BasketDoc`` fetched via the repo; for *inline*
+    baskets they come straight from the wire payload (with per-leg
+    ``collection`` resolved by :func:`_resolve_inline_leg_collections`).
+
+    Both shapes converge here so the synchronous :func:`_parse_input` can
+    build an :class:`InstrumentBasket` without any I/O.
+
+    Exactly one of ``basket_id`` / ``asset_class`` is set:
+
+    * ``basket_id is not None and asset_class is None`` — saved basket.
+    * ``basket_id is None and asset_class is not None`` — inline basket.
+    """
+
+    id: str
+    legs: tuple[dict, ...]
+    collection: str
+    basket_id: str | None = None
+    asset_class: str | None = None
+
+
+# Equity-class candidate collections.  Mirrors the registry rules in
+# ``tcg/data/_mongo/registry.py`` (ETF / FUND / FOREX → EQUITY).  Listed
+# here rather than imported so this resolver does not depend on
+# ``tcg/data/*`` (Sign 1 guardrail).
+_EQUITY_CANDIDATE_COLLECTIONS: tuple[str, ...] = ("ETF", "FUND", "FOREX")
+
+
+def _derive_inline_leg_collection_prefix(
+    asset_class: str, instrument_id: str
+) -> str | None:
+    """Derive the host collection for an inline-basket leg by prefix.
+
+    Returns the deterministic host collection for asset classes whose
+    instrument-id convention encodes the underlying:
+
+    * ``index``  → ``"INDEX"`` (single canonical collection).
+    * ``future`` → ``"FUT_<UNDERLYING>"`` parsed from
+      ``FUT_<UNDERLYING>_<EXPIRY>``.
+    * ``option`` → ``"OPT_<UNDERLYING>"`` parsed from
+      ``OPT_<UNDERLYING>_<...>``.
+
+    Returns ``None`` for asset classes (currently ``equity``) where the
+    host collection is not derivable from the id alone — the caller must
+    fall back to a DB probe.
+    """
+    if asset_class == "index":
+        return "INDEX"
+    if asset_class == "future":
+        if not instrument_id.startswith("FUT_"):
+            return None
+        # FUT_<UNDERLYING>_<EXPIRY> — the underlying may contain
+        # underscores (e.g. FUT_SP_500_2026H), so collection = id minus
+        # the trailing ``_<EXPIRY>`` segment.
+        parts = instrument_id.split("_")
+        if len(parts) < 3:
+            return None
+        return "_".join(parts[:-1])
+    if asset_class == "option":
+        if not instrument_id.startswith("OPT_"):
+            return None
+        # OPT_<UNDERLYING>_<...> — same logic as futures: drop the last
+        # underscore-delimited segment.  Most option ids carry more
+        # structure (strike, expiry, type) but the collection is just
+        # OPT_<ROOT>.
+        parts = instrument_id.split("_")
+        if len(parts) < 3:
+            return None
+        return "_".join(parts[:-1])
+    return None  # equity → probe-based
+
+
+async def _probe_equity_collection(
+    instrument_id: str, svc: MarketDataService
+) -> str | None:
+    """Find which equity-bucket collection hosts ``instrument_id``.
+
+    Probes each candidate collection (ETF, FUND, FOREX) via
+    :meth:`MarketDataService.get_prices` with no date window.  Returns
+    the first collection that yields a non-``None`` price series.
+    Returns ``None`` if the id is not found in any equity collection.
+
+    One DB read per candidate per leg — bounded by 3 reads worst-case.
+    """
+    for candidate in _EQUITY_CANDIDATE_COLLECTIONS:
+        try:
+            series = await svc.get_prices(candidate, instrument_id)
+        except DataNotFoundError:
+            continue
+        if series is not None:
+            return candidate
+    return None
+
+
+async def _resolve_inline_leg_collections(
+    asset_class: str,
+    legs: list[BasketLegInLite],
+    svc: MarketDataService,
+    *,
+    input_id: str,
+) -> tuple[dict, ...]:
+    """Stamp each inline-basket leg with its host MongoDB collection.
+
+    Returns a tuple of leg dicts in the same shape downstream code
+    expects: ``{"instrument_id": str, "weight": float, "collection": str}``.
+
+    For ``future`` / ``option`` / ``index`` the collection is derived from
+    the leg's id prefix (zero DB reads).  For ``equity`` the resolver
+    probes ETF/FUND/FOREX in turn.
+
+    Raises :class:`SignalValidationError` when a leg's id cannot be
+    bucketed under the declared ``asset_class`` (asset-class / id
+    mismatch, per Q1 of the brief).
+    """
+    out: list[dict] = []
+    for i, leg in enumerate(legs):
+        derived = _derive_inline_leg_collection_prefix(
+            asset_class, leg.instrument_id
+        )
+        if derived is None and asset_class == "equity":
+            derived = await _probe_equity_collection(leg.instrument_id, svc)
+        if derived is None:
+            raise SignalValidationError(
+                f"input {input_id!r}: basket leg {i} "
+                f"({leg.instrument_id!r}) does not match declared "
+                f"asset_class={asset_class!r}"
+            )
+        out.append(
+            {
+                "instrument_id": leg.instrument_id,
+                "weight": float(leg.weight),
+                "collection": derived,
+            }
+        )
+    return tuple(out)
+
+
+async def _resolve_basket_inputs(
+    raw_inputs: list[_InputIn],
+    repo: WriteRepository,
+    svc: MarketDataService,
+) -> list[_InputIn | _ResolvedBasketInput]:
+    """Pre-resolve every basket ref into a leg snapshot.
+
+    * Saved basket → fetch ``BasketDoc`` via ``repo``, copy ``doc.legs``.
+    * Inline basket → derive each leg's ``collection`` via
+      :func:`_resolve_inline_leg_collections` (no DB read for
+      future/option/index; probe-based for equity).
+    * Non-basket inputs pass through untouched.
+
+    Short-circuit (Q6): if no input has ``kind == "saved"``, the repo is
+    never consulted — inline-only compute requests work even when the
+    persistence layer is unreachable.
+
+    Raises :class:`SignalValidationError` when a saved basket id is
+    unknown, when a saved basket has no legs, when a saved basket's
+    first leg is missing ``collection``, or when an inline leg's id
+    does not match the declared asset class.
+    """
+    # Short-circuit: avoid repo reads when no input is a saved basket.
+    any_saved = any(
+        isinstance(inp.instrument, BasketRefSaved) for inp in raw_inputs
+    )
+    out: list[_InputIn | _ResolvedBasketInput] = []
+    for inp in raw_inputs:
+        if isinstance(inp.instrument, BasketRefSaved):
+            assert any_saved  # repo must be live for at least one read
+            basket_id = inp.instrument.basket_id
+            doc = await repo.get_by_id(DocType.BASKET.value, basket_id)
+            if doc is None or not isinstance(doc, BasketDoc):
+                raise SignalValidationError(
+                    f"input {inp.id!r}: basket {basket_id!r} not found"
+                )
+            if not doc.legs:
+                raise SignalValidationError(
+                    f"input {inp.id!r}: basket {basket_id!r} has no legs"
+                )
+            first_leg = doc.legs[0]
+            collection = first_leg.get("collection", "")
+            if not collection:
+                raise SignalValidationError(
+                    f"input {inp.id!r}: basket {basket_id!r} leg is missing "
+                    f"'collection' — re-save the basket to populate it"
+                )
+            out.append(
+                _ResolvedBasketInput(
+                    id=inp.id,
+                    basket_id=basket_id,
+                    legs=doc.legs,
+                    collection=collection,
+                )
+            )
+        elif isinstance(inp.instrument, BasketRefInline):
+            inline = inp.instrument
+            legs = await _resolve_inline_leg_collections(
+                inline.asset_class, inline.legs, svc, input_id=inp.id
+            )
+            # Representative collection — the fetcher and overlap loops
+            # always read ``leg.get("collection", inst.collection)`` so
+            # this is purely a defensive default; the per-leg
+            # ``collection`` we stamped above is authoritative.
+            shared = legs[0]["collection"] if legs else ""
+            out.append(
+                _ResolvedBasketInput(
+                    id=inp.id,
+                    legs=legs,
+                    collection=shared,
+                    asset_class=inline.asset_class,
+                )
+            )
+        else:
+            out.append(inp)
+    return out
+
+
+def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
     iid = inp_in.id
     if not iid:
         raise SignalValidationError("input id must be non-empty")
+    # Pre-resolved basket — no DB call needed (already fetched / inline).
+    if isinstance(inp_in, _ResolvedBasketInput):
+        instrument: InputInstrument = InstrumentBasket(
+            legs=inp_in.legs,
+            collection=inp_in.collection,
+            basket_id=inp_in.basket_id,
+            asset_class=inp_in.asset_class,
+        )
+        return Input(id=iid, instrument=instrument)
     inst_in = inp_in.instrument
     if isinstance(inst_in, SpotInstrumentRef):
         if not inst_in.collection or not inst_in.instrument_id:
@@ -546,8 +785,18 @@ def _parse_blocks(
     return tuple(out)
 
 
-def parse_signal(raw: SignalIn) -> Signal:
-    inputs = tuple(_parse_input(i) for i in raw.inputs)
+def parse_signal(
+    raw: SignalIn,
+    *,
+    resolved_inputs: list[_InputIn | _ResolvedBasketInput] | None = None,
+) -> Signal:
+    """Parse a wire-shape :class:`SignalIn` into the dataclass :class:`Signal`.
+
+    When ``resolved_inputs`` is given it replaces ``raw.inputs`` — used by
+    :func:`compute_signal` to inject pre-resolved basket inputs.
+    """
+    input_list = resolved_inputs if resolved_inputs is not None else raw.inputs
+    inputs = tuple(_parse_input(i) for i in input_list)
     # Parse resets FIRST so we can collect their ids for cross-validating
     # entries' and exits' requires_reset_block_id bindings.
     resets = _parse_blocks(
@@ -665,6 +914,42 @@ async def compute_input_overlap(
                     [date_to_int(d) for d in trade_dates], dtype=np.int64
                 )
                 date_arrays.append(dates_arr)
+            case "InstrumentBasket":
+                # Intersection of leg date arrays.  Asset-class
+                # homogeneity is enforced at write-time so all legs are
+                # in compatible collections.
+                basket_dates: npt.NDArray[np.int64] | None = None
+                for leg in inst.legs:  # type: ignore[union-attr]
+                    leg_col = leg.get(
+                        "collection", inst.collection  # type: ignore[union-attr]
+                    )
+                    leg_id = leg["instrument_id"]
+                    try:
+                        leg_series = await svc.get_prices(
+                            leg_col, leg_id, start=start, end=end
+                        )
+                    except DataNotFoundError as exc:
+                        raise SignalDataError(
+                            f"input {inp.id!r} basket leg {leg_id!r}: {exc}"
+                        ) from exc
+                    if leg_series is None:
+                        raise SignalDataError(
+                            f"input {inp.id!r}: basket leg {leg_id!r} not "
+                            f"found in {leg_col!r}"
+                        )
+                    if basket_dates is None:
+                        basket_dates = leg_series.dates
+                    else:
+                        basket_dates = np.intersect1d(
+                            basket_dates,
+                            leg_series.dates,
+                            assume_unique=False,
+                        )
+                if basket_dates is None or basket_dates.size == 0:
+                    raise SignalDataError(
+                        f"input {inp.id!r}: basket has no overlapping dates"
+                    )
+                date_arrays.append(basket_dates)
             case _:
                 raise SignalDataError(f"input {inp.id!r}: unsupported instrument type")
 
@@ -793,6 +1078,69 @@ def make_signal_fetcher(
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
             return dates_arr, values
 
+        if isinstance(instrument, InstrumentBasket):
+            # Weighted combination of leg price series.
+            # All legs share an asset class but each leg carries its own
+            # ``collection`` in case the basket was authored before the
+            # homogeneity check landed.
+            #
+            # ``basket_desc`` is what appears in error messages — saved
+            # baskets identify themselves by their persisted id; inline
+            # baskets have no id, so they self-identify by asset class.
+            basket_desc = (
+                repr(instrument.basket_id)
+                if instrument.basket_id is not None
+                else f"inline[{instrument.asset_class}]"
+            )
+            weighted_dates: npt.NDArray[np.int64] | None = None
+            weighted_values: npt.NDArray[np.float64] | None = None
+
+            for leg in instrument.legs:
+                leg_id = leg["instrument_id"]
+                leg_col = leg.get("collection", instrument.collection)
+                leg_weight = float(leg["weight"])
+                try:
+                    leg_series = await svc.get_prices(
+                        leg_col, leg_id, start=start, end=end
+                    )
+                except DataNotFoundError as exc:
+                    raise SignalDataError(
+                        f"basket {basket_desc} leg {leg_id!r}: {exc}"
+                    ) from exc
+                if leg_series is None:
+                    raise SignalDataError(
+                        f"basket {basket_desc}: leg instrument "
+                        f"{leg_id!r} not found in {leg_col!r}"
+                    )
+                leg_values = _pick_field(leg_series, field)
+
+                if weighted_dates is None:
+                    weighted_dates = leg_series.dates
+                    weighted_values = leg_weight * leg_values
+                else:
+                    common, idx_a, idx_b = np.intersect1d(
+                        weighted_dates,
+                        leg_series.dates,
+                        assume_unique=True,
+                        return_indices=True,
+                    )
+                    if common.size == 0:
+                        raise SignalDataError(
+                            f"basket {basket_desc}: no overlapping "
+                            f"dates between legs"
+                        )
+                    weighted_dates = common
+                    assert weighted_values is not None
+                    weighted_values = (
+                        weighted_values[idx_a] + leg_weight * leg_values[idx_b]
+                    )
+
+            if weighted_dates is None or weighted_values is None:
+                raise SignalDataError(
+                    f"basket {basket_desc} has no legs"
+                )
+            return weighted_dates, weighted_values
+
         # continuous
         try:
             roll_config = build_roll_config(
@@ -839,6 +1187,27 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             "collection": inst.collection,
             "instrument_id": inst.instrument_id,
         }
+    if isinstance(inst, InstrumentBasket):
+        # Kind-discriminated emission so the FE can re-render either
+        # shape from the response.  Saved baskets carry ``basket_id`` and
+        # the resolved legs snapshot; inline baskets carry ``asset_class``
+        # plus legs (so the wire round-trip is lossless).
+        if inst.basket_id is not None:
+            return {
+                "type": "basket",
+                "kind": "saved",
+                "basket_id": inst.basket_id,
+                "collection": inst.collection,
+                "legs": [dict(leg) for leg in inst.legs],
+            }
+        # inline: basket_id is None
+        return {
+            "type": "basket",
+            "kind": "inline",
+            "asset_class": inst.asset_class,
+            "collection": inst.collection,
+            "legs": [dict(leg) for leg in inst.legs],
+        }
     if isinstance(inst, InstrumentOptionStream):
         from dataclasses import asdict
 
@@ -865,6 +1234,7 @@ def _instrument_payload(inst: InputInstrument) -> dict:
 async def compute_signal(
     body: SignalComputeRequest,
     svc: MarketDataService = Depends(get_market_data),
+    repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
     """Evaluate a v4 Signal and return per-input positions + events."""
 
@@ -874,7 +1244,10 @@ async def compute_signal(
         return error_response("validation", str(exc))
 
     try:
-        signal = parse_signal(body.spec)
+        resolved_inputs = await _resolve_basket_inputs(
+            body.spec.inputs, repo, svc
+        )
+        signal = parse_signal(body.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
 
