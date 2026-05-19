@@ -30,10 +30,9 @@ from tcg.data.options._doc_to_dto import (
     index_greeks_by_date,
 )
 from tcg.data.options._provider import (
-    has_computed_greeks_for_root,
+    get_stored_greeks_ratios,
     has_greeks_for_root,
     select_provider,
-    stored_greeks_ratio_for_root,
 )
 from tcg.data.options._strike_factor import STRIKE_FACTOR_VERIFIED
 from tcg.types.errors import OptionsContractNotFound, OptionsDataAccessError
@@ -424,25 +423,29 @@ class MongoOptionsDataReader:
         providers = tuple(await _peek_providers(coll))
         last_trade_date = await _peek_last_trade_date(coll)
 
-        # Vendor-determined coverage ratio, served from a hardcoded registry
-        # rather than a live `count_documents`. The live query was unworkably
-        # slow on production-sized collections (~60s timeout on /api/options/roots).
-        # The registry was measured 2026-05-18 — update when vendor coverage shifts.
-        stored_greeks_ratio = stored_greeks_ratio_for_root(collection)
+        # Vendor-determined coverage ratio, served from a 24h-TTL in-memory
+        # cache that refreshes lazily via $sample(500) per root in parallel.
+        # See ``_provider.get_stored_greeks_ratios`` for the cache semantics.
+        ratios = await get_stored_greeks_ratios(self._db)
+        stored_greeks_ratio = ratios.get(collection, 0.0)
         # If the data layer blocks greeks for this root entirely (OPT_ETH), the
-        # registry value still applies — but make it impossible to surface a
-        # positive ratio for a blocked root by AND-ing with the data-layer gate.
+        # measured value should never surface as a positive ratio — AND with
+        # the data-layer gate.
         if not has_greeks_for_root(collection):
             stored_greeks_ratio = 0.0
-        has_computed = has_computed_greeks_for_root(collection)
 
+        # ``has_computed_greeks`` is intentionally NOT populated here. The
+        # data layer cannot import from ``tcg.engine`` (import-linter
+        # ``engine-data-isolation`` contract); the API layer injects this
+        # field by consulting ``tcg.engine.options.pricing.blocked_roots()``.
         return OptionRootInfo(
             collection=collection,
             name=_display_name(collection),
-            # `has_greeks` retains its historical meaning ("greeks may surface
-            # for this root at all") — true when the vendor stocks some OR the
-            # engine can compute. Used by callers that gate streams/UI logic.
-            has_greeks=stored_greeks_ratio > 0.0 or has_computed,
+            # ``has_greeks`` retains its historical meaning ("greeks may
+            # surface for this root at all"). The data layer can only report
+            # the stored side; the API layer widens this when computed
+            # greeks are available for the root.
+            has_greeks=stored_greeks_ratio > 0.0,
             providers=providers,
             expiration_first=expiration_first,
             expiration_last=expiration_last,
@@ -450,7 +453,7 @@ class MongoOptionsDataReader:
             strike_factor_verified=STRIKE_FACTOR_VERIFIED.get(collection, False),
             last_trade_date=last_trade_date,
             stored_greeks_ratio=stored_greeks_ratio,
-            has_computed_greeks=has_computed,
+            has_computed_greeks=False,  # placeholder; API layer overrides.
         )
 
     async def _find_document(
