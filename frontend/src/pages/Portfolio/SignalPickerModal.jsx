@@ -249,6 +249,7 @@ export default function SignalPickerModal({ isOpen, onClose, onSelect }) {
             ? `Pick instrument for input ${editedInputs[pickingInputIdx].id}`
             : 'Select Instrument'
         }
+        allowBaskets={true}
       />
     </>
   );

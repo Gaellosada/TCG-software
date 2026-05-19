@@ -15,8 +15,14 @@ vi.mock('../../api/options', () => ({
   getOptionRoots: vi.fn(),
 }));
 
+vi.mock('../../api/persistence', () => ({
+  createBasket: vi.fn(),
+  listBaskets: vi.fn(),
+}));
+
 import { listCollections, listInstruments, getAvailableCycles } from '../../api/data';
 import { getOptionRoots } from '../../api/options';
+import { createBasket, listBaskets } from '../../api/persistence';
 
 const MOCK_ROOTS = [
   { collection: 'OPT_SP_500', root_label: 'SP 500', name: 'SP 500', has_greeks: true },
@@ -29,6 +35,8 @@ beforeEach(() => {
   vi.mocked(listInstruments).mockResolvedValue({ items: [{ symbol: 'SPX' }] });
   vi.mocked(getAvailableCycles).mockResolvedValue(['M']);
   vi.mocked(getOptionRoots).mockResolvedValue({ roots: MOCK_ROOTS });
+  vi.mocked(listBaskets).mockResolvedValue([]);
+  vi.mocked(createBasket).mockResolvedValue({ id: 'BSK_NEW', name: 'Test' });
 });
 
 async function flushAsync() {
@@ -191,5 +199,423 @@ describe('<InstrumentPickerModal>', () => {
 
     const confirm = screen.getByTestId('option-stream-confirm');
     expect(confirm.disabled).toBe(true);
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Basket category visibility (Q5 — default-deny).
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('does NOT render the Baskets category by default (default-deny)', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />);
+    await flushAsync();
+    await waitFor(() => expect(screen.getByText('Futures')).toBeTruthy());
+    expect(screen.queryByText('Baskets')).toBeNull();
+    expect(screen.queryByTestId('picker-baskets-toggle')).toBeNull();
+  });
+
+  it('does NOT call listBaskets when allowBaskets is unset', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />);
+    await flushAsync();
+    await waitFor(() => expect(screen.getByText('Futures')).toBeTruthy());
+    expect(listBaskets).not.toHaveBeenCalled();
+  });
+
+  it('renders the Baskets category when allowBaskets={true}', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    await waitFor(() => expect(screen.getByText('Baskets')).toBeTruthy());
+    expect(screen.getByTestId('picker-baskets-toggle')).toBeTruthy();
+  });
+
+  it('calls listBaskets for RESEARCH+DEV+PROD when allowBaskets={true}', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    await waitFor(() => expect(listBaskets).toHaveBeenCalled());
+    const categories = vi.mocked(listBaskets).mock.calls.map((c) => c[0]).sort();
+    expect(categories).toEqual(['DEV', 'PROD', 'RESEARCH']);
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Composer entry + basic layout.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('opens the inline composer when the Baskets tile is clicked', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    await waitFor(() => expect(screen.getByTestId('picker-baskets-toggle')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    // Header switches; one empty leg is visible by default.
+    expect(screen.getByRole('heading', { name: 'Basket Composer' })).toBeTruthy();
+    expect(screen.getByTestId('basket-leg-0')).toBeTruthy();
+    expect(screen.getByTestId('basket-asset-class-select')).toBeTruthy();
+    expect(screen.getByTestId('basket-saved-select')).toBeTruthy();
+  });
+
+  it('both CTAs are disabled when no leg is fully populated (0-leg disable)', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    expect(screen.getByTestId('basket-use-btn').disabled).toBe(true);
+    expect(screen.getByTestId('basket-save-btn').disabled).toBe(true);
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Inline emit path (Use without saving).
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('emits an inline-shape descriptor when a leg is configured and "Use" is clicked', async () => {
+    // Mock futures collection so the future asset-class has candidates.
+    vi.mocked(listCollections).mockResolvedValue(['INDEX', 'ETF', 'FUT_ES']);
+    vi.mocked(listInstruments).mockImplementation(async (coll) => {
+      if (coll === 'FUT_ES') return { items: [{ symbol: 'ES_MAR26' }] };
+      return { items: [{ symbol: 'SPX' }] };
+    });
+    const onSelect = vi.fn();
+    const onClose = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={onClose} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    // Default asset class is 'future' — wait for futures instruments to load.
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    // Type into the leg-0 instrument input → pick from suggestions.
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    const suggestion = await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26');
+    fireEvent.mouseDown(suggestion);
+
+    // Set weight to +1
+    const weight = screen.getByTestId('basket-leg-0-weight-input');
+    fireEvent.change(weight, { target: { value: '1' } });
+
+    const useBtn = screen.getByTestId('basket-use-btn');
+    await waitFor(() => expect(useBtn.disabled).toBe(false));
+    fireEvent.click(useBtn);
+
+    expect(onSelect).toHaveBeenCalledOnce();
+    const emitted = onSelect.mock.calls[0][0];
+    expect(emitted).toEqual({
+      type: 'basket',
+      kind: 'inline',
+      asset_class: 'future',
+      legs: [{ instrument_id: 'ES_MAR26', weight: 1 }],
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a leg with weight=0 — CTAs stay disabled', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['INDEX', 'ETF', 'FUT_ES']);
+    vi.mocked(listInstruments).mockImplementation(async (coll) => {
+      if (coll === 'FUT_ES') return { items: [{ symbol: 'ES_MAR26' }] };
+      return { items: [{ symbol: 'SPX' }] };
+    });
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    fireEvent.mouseDown(await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26'));
+
+    const weight = screen.getByTestId('basket-leg-0-weight-input');
+    fireEvent.change(weight, { target: { value: '0' } });
+
+    expect(screen.getByTestId('basket-use-btn').disabled).toBe(true);
+    expect(screen.getByTestId('basket-save-btn').disabled).toBe(true);
+  });
+
+  it('accepts a negative leg weight (short) and emits it on use', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['INDEX', 'ETF', 'FUT_ES']);
+    vi.mocked(listInstruments).mockImplementation(async (coll) => {
+      if (coll === 'FUT_ES') return { items: [{ symbol: 'ES_MAR26' }] };
+      return { items: [{ symbol: 'SPX' }] };
+    });
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    fireEvent.mouseDown(await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26'));
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '-0.5' } });
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+    expect(onSelect.mock.calls[0][0].legs[0]).toEqual({ instrument_id: 'ES_MAR26', weight: -0.5 });
+  });
+
+  it('removing the last leg falls back to a single empty row', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('basket-leg-0-remove'));
+    expect(screen.getByTestId('basket-leg-0')).toBeTruthy();
+  });
+
+  it('Add leg appends an empty row', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('basket-add-leg'));
+    expect(screen.getByTestId('basket-leg-0')).toBeTruthy();
+    expect(screen.getByTestId('basket-leg-1')).toBeTruthy();
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Saved baskets dropdown → emit saved-ref.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('selecting a saved basket emits a saved-reference descriptor on Use', async () => {
+    vi.mocked(listBaskets).mockImplementation(async (cat) => {
+      if (cat === 'RESEARCH') return [
+        { id: 'BSK_ABC', name: 'My Basket', legs: [{ instrument_id: 'SPY', weight: 1.0, collection: 'ETF' }] },
+      ];
+      return [];
+    });
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    // Wait for the option to appear in the dropdown.
+    await waitFor(() => {
+      const select = screen.getByTestId('basket-saved-select');
+      expect(select.querySelector('option[value="BSK_ABC"]')).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId('basket-saved-select'), { target: { value: 'BSK_ABC' } });
+
+    // Banner confirms it's saved-clean.
+    await waitFor(() => expect(screen.getByTestId('basket-saved-banner')).toBeTruthy());
+    expect(screen.getByTestId('basket-saved-banner').textContent).toMatch(/Saved as/);
+
+    // Use button label morphs.
+    expect(screen.getByTestId('basket-use-btn').textContent).toMatch(/Use saved/);
+
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onSelect.mock.calls[0][0]).toEqual({
+      type: 'basket',
+      kind: 'saved',
+      basket_id: 'BSK_ABC',
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Save-as flow.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('Save-as flow: opens inline input → calls createBasket → banner + saved-ref emit', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['INDEX', 'ETF', 'FUT_ES']);
+    vi.mocked(listInstruments).mockImplementation(async (coll) => {
+      if (coll === 'FUT_ES') return { items: [{ symbol: 'ES_MAR26' }] };
+      return { items: [{ symbol: 'SPX' }] };
+    });
+    vi.mocked(createBasket).mockResolvedValue({ id: 'BSK_NEW_FROM_BE', name: 'My Save' });
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    // Configure one leg.
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    fireEvent.mouseDown(await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26'));
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '2' } });
+
+    // Open save input.
+    const saveBtn = screen.getByTestId('basket-save-btn');
+    await waitFor(() => expect(saveBtn.disabled).toBe(false));
+    fireEvent.click(saveBtn);
+    await waitFor(() => expect(screen.getByTestId('basket-save-input')).toBeTruthy());
+
+    // Type a name + confirm.
+    fireEvent.change(screen.getByTestId('basket-save-name-input'), { target: { value: 'My Save' } });
+    fireEvent.click(screen.getByTestId('basket-save-confirm'));
+
+    // createBasket was called with the right payload shape.
+    await waitFor(() => expect(createBasket).toHaveBeenCalled());
+    const payload = vi.mocked(createBasket).mock.calls[0][0];
+    expect(payload.name).toBe('My Save');
+    expect(payload.category).toBe('RESEARCH');
+    expect(payload.legs).toEqual([
+      { instrument_id: 'ES_MAR26', collection: 'FUT_ES', weight: 2 },
+    ]);
+
+    // Banner appears.
+    await waitFor(() => expect(screen.getByTestId('basket-saved-banner')).toBeTruthy());
+    expect(screen.getByTestId('basket-saved-banner').textContent).toMatch(/Saved as/);
+    expect(screen.getByTestId('basket-save-btn').textContent).toMatch(/Saved/);
+
+    // Now use → emits saved-ref.
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+    expect(onSelect.mock.calls[0][0]).toEqual({
+      type: 'basket',
+      kind: 'saved',
+      basket_id: 'BSK_NEW_FROM_BE',
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Save → mutate-after-save → re-save state machine.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('mutating a saved basket flips the banner to "Modified" and reverts emit shape to inline', async () => {
+    vi.mocked(listBaskets).mockImplementation(async (cat) => {
+      if (cat === 'RESEARCH') return [
+        {
+          id: 'BSK_ABC',
+          name: 'My Basket',
+          legs: [{ instrument_id: 'SPY', weight: 1.0, collection: 'ETF' }],
+        },
+      ];
+      return [];
+    });
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    await waitFor(() => {
+      const select = screen.getByTestId('basket-saved-select');
+      expect(select.querySelector('option[value="BSK_ABC"]')).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId('basket-saved-select'), { target: { value: 'BSK_ABC' } });
+
+    // Saved-clean state.
+    await waitFor(() => expect(screen.getByTestId('basket-saved-banner').textContent).toMatch(/Saved as/));
+    expect(screen.getByTestId('basket-use-btn').textContent).toMatch(/Use saved/);
+
+    // Mutate leg-0 weight → dirty.
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '3' } });
+    await waitFor(() => expect(screen.getByTestId('basket-saved-banner').textContent).toMatch(/Modified/));
+    expect(screen.getByTestId('basket-use-btn').textContent).toMatch(/Use without saving/);
+
+    // Use → emits inline.
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+    const emitted = onSelect.mock.calls[0][0];
+    expect(emitted.kind).toBe('inline');
+    expect(emitted.legs[0].weight).toBe(3);
+  });
+
+  it('Unsave drops the saved reference but keeps current legs', async () => {
+    vi.mocked(listBaskets).mockImplementation(async (cat) => {
+      if (cat === 'RESEARCH') return [
+        {
+          id: 'BSK_ABC',
+          name: 'My Basket',
+          legs: [{ instrument_id: 'SPY', weight: 1.0, collection: 'ETF' }],
+        },
+      ];
+      return [];
+    });
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    await waitFor(() => {
+      const select = screen.getByTestId('basket-saved-select');
+      expect(select.querySelector('option[value="BSK_ABC"]')).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId('basket-saved-select'), { target: { value: 'BSK_ABC' } });
+    await waitFor(() => expect(screen.getByTestId('basket-saved-banner')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('basket-unsave-btn'));
+    // Banner gone; legs preserved.
+    expect(screen.queryByTestId('basket-saved-banner')).toBeNull();
+    expect(screen.getByTestId('basket-leg-0-weight-input').value).toBe('1');
+
+    // Use → emits inline (no saved ref).
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+    const emitted = onSelect.mock.calls[0][0];
+    expect(emitted.kind).toBe('inline');
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Asset-class change with non-empty legs → confirm dialog clears legs.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('asset-class change with non-empty legs prompts confirm; confirm clears legs', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['INDEX', 'ETF', 'FUT_ES']);
+    vi.mocked(listInstruments).mockImplementation(async (coll) => {
+      if (coll === 'FUT_ES') return { items: [{ symbol: 'ES_MAR26' }] };
+      return { items: [{ symbol: 'SPX' }] };
+    });
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    fireEvent.mouseDown(await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26'));
+
+    // Switch asset class → confirm banner.
+    fireEvent.change(screen.getByTestId('basket-asset-class-select'), { target: { value: 'equity' } });
+    await waitFor(() => expect(screen.getByTestId('basket-asset-class-confirm')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('basket-asset-class-confirm-yes'));
+    // After confirm, legs cleared to a fresh empty row, asset class changed.
+    expect(screen.getByTestId('basket-asset-class-select').value).toBe('equity');
+    expect(screen.getByTestId('basket-leg-0-instrument-input').value).toBe('');
+  });
+
+  it('asset-class change confirmation can be cancelled — legs preserved', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['INDEX', 'ETF', 'FUT_ES']);
+    vi.mocked(listInstruments).mockImplementation(async (coll) => {
+      if (coll === 'FUT_ES') return { items: [{ symbol: 'ES_MAR26' }] };
+      return { items: [{ symbol: 'SPX' }] };
+    });
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    await waitFor(() => expect(listInstruments).toHaveBeenCalledWith('FUT_ES', expect.anything()));
+
+    const input = screen.getByTestId('basket-leg-0-instrument-input');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'ES' } });
+    fireEvent.mouseDown(await screen.findByTestId('basket-leg-0-suggestion-ES_MAR26'));
+
+    fireEvent.change(screen.getByTestId('basket-asset-class-select'), { target: { value: 'equity' } });
+    await waitFor(() => expect(screen.getByTestId('basket-asset-class-confirm')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('basket-asset-class-confirm-cancel'));
+    expect(screen.getByTestId('basket-asset-class-select').value).toBe('future');
+    expect(screen.getByTestId('basket-leg-0-instrument-input').value).toBe('ES_MAR26');
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Back button leaves the composer without emitting.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('back button leaves the composer and returns to the category list', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+    const backBtn = screen.getByText('←');
+    fireEvent.click(backBtn);
+    await waitFor(() => expect(screen.queryByTestId('basket-composer')).toBeNull());
   });
 });

@@ -211,6 +211,7 @@ function InputsPanel({ inputs, onChange }) {
         onClose={() => setPickerIdx(null)}
         onSelect={handlePickerSelect}
         title="Select Instrument"
+        allowBaskets={true}
       />
     </div>
   );
