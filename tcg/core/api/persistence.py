@@ -822,3 +822,116 @@ async def archive_portfolio(doc_id: str, repo: RepoDep) -> None:
         await repo.archive(DocType.PORTFOLIO.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Basket endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/baskets", response_model=BasketOut, status_code=201)
+async def create_basket(body: BasketIn, repo: RepoDep) -> BasketOut:
+    _check_basket_no_duplicates(body.legs)
+    _check_basket_homogeneity(body.legs)
+    now = _now()
+    raw_legs = tuple(
+        {
+            "instrument_id": leg.instrument_id,
+            "collection": leg.collection,
+            "weight": leg.weight,
+        }
+        for leg in body.legs
+    )
+    doc = BasketDoc(
+        id=body.id,
+        type=DocType.BASKET.value,
+        name=body.name,
+        category=body.category,
+        created_at=now,
+        updated_at=now,
+        legs=raw_legs,
+    )
+    try:
+        stored = await repo.create(doc)
+    except pymongo.errors.DuplicateKeyError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"basket with id={body.id!r} already exists"
+        ) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    assert isinstance(stored, BasketDoc)
+    return _basket_to_out(stored)
+
+
+@router.get("/baskets", response_model=list[BasketOut])
+async def list_baskets(
+    repo: RepoDep, category: Category = Query(...)
+) -> list[BasketOut]:
+    docs = await repo.list_by_type_and_category(DocType.BASKET.value, category)
+    out: list[BasketOut] = []
+    for d in docs:
+        assert isinstance(d, BasketDoc)
+        out.append(_basket_to_out(d))
+    return out
+
+
+@router.get("/baskets/{doc_id}", response_model=BasketOut)
+async def get_basket(doc_id: str, repo: RepoDep) -> BasketOut:
+    doc = _expect(
+        await repo.get_by_id(DocType.BASKET.value, doc_id),
+        DocType.BASKET.value,
+        doc_id,
+    )
+    assert isinstance(doc, BasketDoc)
+    return _basket_to_out(doc)
+
+
+@router.put("/baskets/{doc_id}", response_model=BasketOut)
+async def update_basket(
+    doc_id: str, body: BasketUpdateIn, repo: RepoDep
+) -> BasketOut:
+    _check_basket_no_duplicates(body.legs)
+    _check_basket_homogeneity(body.legs)
+    existing = _expect(
+        await repo.get_by_id(DocType.BASKET.value, doc_id),
+        DocType.BASKET.value,
+        doc_id,
+    )
+    assert isinstance(existing, BasketDoc)
+    raw_legs = tuple(
+        {
+            "instrument_id": leg.instrument_id,
+            "collection": leg.collection,
+            "weight": leg.weight,
+        }
+        for leg in body.legs
+    )
+    updated = BasketDoc(
+        id=doc_id,
+        type=DocType.BASKET.value,
+        name=body.name,
+        category=body.category,
+        created_at=existing.created_at,
+        updated_at=existing.updated_at,  # repo bumps it
+        legs=raw_legs,
+    )
+    try:
+        stored = await repo.update(
+            updated, expected_updated_at=existing.updated_at
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    assert isinstance(stored, BasketDoc)
+    return _basket_to_out(stored)
+
+
+@router.delete("/baskets/{doc_id}", status_code=204)
+async def archive_basket(doc_id: str, repo: RepoDep) -> None:
+    try:
+        await repo.archive(DocType.BASKET.value, doc_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
