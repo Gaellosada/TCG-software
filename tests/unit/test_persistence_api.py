@@ -762,6 +762,34 @@ def test_basket_leg_extra_field_rejected(client: TestClient) -> None:
     _expect_validation(r)
 
 
+def test_basket_out_extra_field_rejected() -> None:
+    """``BasketOut`` (response model) forbids extra fields.
+
+    Symmetric with the ``extra="forbid"`` regression on the write
+    models — guards against accidental schema drift if a future change
+    enriches the response shape without updating clients.
+    """
+    from pydantic import ValidationError
+
+    from tcg.core.api.persistence import BasketOut
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = {
+        "id": "b-out",
+        "type": "basket",
+        "name": "Out",
+        "category": "RESEARCH",
+        "created_at": now,
+        "updated_at": now,
+        "legs": [],
+    }
+    # Base shape parses.
+    BasketOut(**base)
+    # Extra field rejected.
+    with pytest.raises(ValidationError):
+        BasketOut(**base, surprise="boom")
+
+
 def test_basket_negative_weight_allowed(client: TestClient) -> None:
     r = client.post(
         "/api/persistence/baskets",

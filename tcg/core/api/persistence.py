@@ -417,6 +417,8 @@ class BasketUpdateIn(_BaseWriteModel):
 
 
 class BasketOut(BaseModel):
+    model_config = {"extra": "forbid"}
+
     id: str
     type: str
     name: str
