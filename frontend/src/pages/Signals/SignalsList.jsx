@@ -1,8 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import styles from './Signals.module.css';
-
-/** Category values matching the backend enum. */
-const CATEGORIES = ['RESEARCH', 'DEV', 'PROD', 'ARCHIVE'];
+import { CATEGORIES } from '../../api/persistence';
 
 /**
  * Left panel — searchable list of signals. Simpler than the Indicators

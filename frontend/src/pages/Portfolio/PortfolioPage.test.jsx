@@ -57,6 +57,7 @@ vi.mock('../../api/statistics', () => ({
 // Mock persistence API to prevent real HTTP calls.
 const mockListPortfolios = vi.fn(() => Promise.resolve([]));
 vi.mock('../../api/persistence', () => ({
+  CATEGORIES: ['RESEARCH', 'DEV', 'PROD', 'ARCHIVE'],
   listPortfolios: (...args) => mockListPortfolios(...args),
   createPortfolio: vi.fn(() => Promise.resolve({})),
   updatePortfolio: vi.fn(() => Promise.resolve({})),

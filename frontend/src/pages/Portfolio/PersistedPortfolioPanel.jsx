@@ -13,9 +13,7 @@
 //   onArchive             {Function} (id) => void
 
 import styles from './PortfolioPage.module.css';
-
-/** Category values matching the backend enum. */
-const CATEGORIES = ['RESEARCH', 'DEV', 'PROD', 'ARCHIVE'];
+import { CATEGORIES } from '../../api/persistence';
 
 function PersistedPortfolioPanel({
   category,
