@@ -160,7 +160,7 @@ describe('<SignalsPage> — backend hydrate + autosave', () => {
     });
   });
 
-  it('PUTs the edited rules to the backend within ~600ms', async () => {
+  it('PUTs the edited rules to the backend within ~3100ms', async () => {
     // Use fake timers for the debounce window — real timers would make
     // this test slow / flaky.
     vi.useFakeTimers();
@@ -196,7 +196,7 @@ describe('<SignalsPage> — backend hydrate + autosave', () => {
 
       // Within the debounce window the PUT must have fired.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(600);
+        await vi.advanceTimersByTimeAsync(3100);
       });
 
       expect(mockUpdateSignal).toHaveBeenCalled();

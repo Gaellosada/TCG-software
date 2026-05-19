@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 /**
+ * Default debounce duration for backend autosave (ms).
+ *
+ * Callers should omit ``debounceMs`` from ``useBackendAutosave`` rather than
+ * hardcoding a value, so any future tuning of this constant propagates
+ * automatically.
+ */
+export const DEFAULT_AUTOSAVE_DEBOUNCE_MS = 3000;
+
+/**
  * Debounced backend-autosave hook.
  *
  * Calls ``onSave(payload)`` after ``debounceMs`` of inactivity on
@@ -21,7 +30,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
  * @param {Function} opts.onSave  ``(payload) => Promise<*>``. Called with
  *   the latest payload after the debounce. Failure (rejected Promise)
  *   sets status to ``'error'``.
- * @param {number}  [opts.debounceMs=500]
+ * @param {number}  [opts.debounceMs=DEFAULT_AUTOSAVE_DEBOUNCE_MS]
  * @returns {{ status: 'idle'|'saving'|'saved'|'error',
  *             flush: () => void,
  *             reset: () => void,
@@ -38,7 +47,7 @@ export default function useBackendAutosave({
   enabled,
   payload,
   onSave,
-  debounceMs = 500,
+  debounceMs = DEFAULT_AUTOSAVE_DEBOUNCE_MS,
 }) {
   const [status, setStatus] = useState('idle');
   const timerRef = useRef(null);

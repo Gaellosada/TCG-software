@@ -405,7 +405,6 @@ function SignalsPage() {
     enabled: !!selectedPersisted && backendDirty,
     payload: selectedDocSerialized,
     onSave: handleBackendSave,
-    debounceMs: 500,
   });
 
   // When the selection changes, reset cloud status so the indicator
