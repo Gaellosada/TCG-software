@@ -119,6 +119,7 @@ vi.mock('../../api/persistence', () => ({
   listSignals: (...args) => mockListSignals(...args),
   updateSignal: (...args) => mockUpdateSignal(...args),
   archiveSignal: (...args) => mockArchiveSignal(...args),
+  describePersistenceError: (err) => (err && err.message) || String(err),
 }));
 
 import SignalsPage from './SignalsPage';

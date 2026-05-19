@@ -68,6 +68,7 @@ vi.mock('../../api/persistence', () => ({
   createSignal: vi.fn(() => Promise.resolve({})),
   updateSignal: vi.fn(() => Promise.resolve({})),
   archiveSignal: vi.fn(() => Promise.resolve(null)),
+  describePersistenceError: (err) => (err && err.message) || String(err),
 }));
 
 // Allow the run gate to pass so M1 tests can populate lastResult.

@@ -62,6 +62,7 @@ vi.mock('../../api/persistence', () => ({
   createPortfolio: vi.fn(() => Promise.resolve({})),
   updatePortfolio: vi.fn(() => Promise.resolve({})),
   archivePortfolio: vi.fn(() => Promise.resolve(null)),
+  describePersistenceError: (err) => (err && err.message) || String(err),
 }));
 
 import PortfolioPage from './PortfolioPage';

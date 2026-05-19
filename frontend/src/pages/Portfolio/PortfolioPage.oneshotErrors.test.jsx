@@ -118,6 +118,7 @@ vi.mock('../../api/persistence', () => ({
   createPortfolio: (...args) => mockCreatePortfolio(...args),
   updatePortfolio: (...args) => mockUpdatePortfolio(...args),
   archivePortfolio: (...args) => mockArchivePortfolio(...args),
+  describePersistenceError: (err) => (err && err.message) || String(err),
 }));
 
 const PERSISTED_DOC = {

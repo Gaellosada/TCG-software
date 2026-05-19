@@ -1,20 +1,18 @@
 // @vitest-environment jsdom
 //
-// Backend-persistence round-trip:
-//
-//   1. Mount SignalsPage with mock persistence API.
-//   2. Backend "list" returns one signal with NON-EMPTY rules.
-//   3. User selects that signal — assert the editor receives the
-//      hydrated rules (the load-bearing fix for the rules-don't-persist
-//      bug).
-//   4. User edits the rules — within ~600ms the page calls
-//      ``updateSignal`` with the new payload including the edited rules.
+// B2 regression: re-clicking the same already-selected persisted signal
+// must NOT overwrite in-progress edits with the stale backend snapshot.
+// (Before the fix, ``handleSelectPersisted`` unconditionally re-hydrated
+// from the backend doc — which silently discarded edits typed since the
+// last debounced save.)
 
 import React from 'react';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react';
+import {
+  render, screen, fireEvent, cleanup, act, waitFor,
+} from '@testing-library/react';
 
-// --- Mocks ---------------------------------------------------------------
+// --- Mocks --------------------------------------------------------------
 
 let capturedOnRulesChange = null;
 let lastRulesProp = null;
@@ -42,9 +40,6 @@ vi.mock('./BlockEditor', () => ({
     lastRulesProp = rules;
     return (
       <div data-testid="block-editor-stub">
-        <span data-testid="rules-entry-count">
-          {(rules?.entries || []).length}
-        </span>
         <span data-testid="rules-entry-name">
           {(rules?.entries || [])[0]?.name || ''}
         </span>
@@ -57,11 +52,7 @@ vi.mock('./ParamsPanel', () => ({
   default: () => <div data-testid="params-panel-stub" />,
 }));
 vi.mock('./InputsPanel', () => ({
-  default: ({ inputs }) => (
-    <div data-testid="inputs-panel-stub">
-      <span data-testid="inputs-count">{(inputs || []).length}</span>
-    </div>
-  ),
+  default: () => <div data-testid="inputs-panel-stub" />,
 }));
 vi.mock('./ResultsView', () => ({
   default: () => <div data-testid="results-view-stub" />,
@@ -93,25 +84,25 @@ vi.mock('./storage', () => ({
 }));
 
 const PERSISTED_DOC = {
-  id: 'sig-persisted-1',
+  id: 'sig-reselect-1',
   type: 'signal',
-  name: 'My Saved Signal',
+  name: 'Re-select Signal',
   category: 'RESEARCH',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
-  inputs: [{ id: 'X', instrument: { type: 'spot', collection: 'spot_daily', instrument_id: 'AAPL' } }],
+  inputs: [],
   rules: {
-    entries: [{ id: 'b1', name: 'My Entry Block', input_id: 'X', weight: 50, conditions: [] }],
+    entries: [{ id: 'b1', name: 'Original Block Name', input_id: 'X', weight: 50, conditions: [] }],
     exits: [],
     resets: [],
   },
   settings: { dont_repeat: true },
-  description: 'hello world',
+  description: '',
 };
 
 const mockUpdateSignal = vi.fn(() => Promise.resolve({ ...PERSISTED_DOC }));
 const mockListSignals = vi.fn(() => Promise.resolve([PERSISTED_DOC]));
-const mockCreateSignal = vi.fn(() => Promise.resolve({ ...PERSISTED_DOC, id: 'sig-new' }));
+const mockCreateSignal = vi.fn(() => Promise.resolve({ ...PERSISTED_DOC }));
 
 vi.mock('../../api/persistence', () => ({
   CATEGORIES: ['RESEARCH', 'DEV', 'PROD', 'ARCHIVE'],
@@ -130,84 +121,60 @@ beforeEach(() => {
   mockUpdateSignal.mockClear();
   mockListSignals.mockClear();
   mockCreateSignal.mockClear();
-  mockListSignals.mockResolvedValue([PERSISTED_DOC]);
 });
 
 afterEach(() => {
   cleanup();
 });
 
-describe('<SignalsPage> — backend hydrate + autosave', () => {
-  it('hydrates the editor from the backend doc when a persisted signal is selected', async () => {
-    await act(async () => {
-      render(<SignalsPage />);
-    });
-
-    // Wait for the persisted list to surface in the UI.
-    await waitFor(() => {
-      expect(screen.queryByTestId('select-sig-persisted-1')).not.toBeNull();
-    });
-
-    // Select the persisted signal.
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('select-sig-persisted-1'));
-    });
-
-    // The editor should now show the hydrated rules (1 entry) and inputs (1).
-    await waitFor(() => {
-      expect(screen.getByTestId('rules-entry-count').textContent).toBe('1');
-      expect(screen.getByTestId('rules-entry-name').textContent).toBe('My Entry Block');
-      expect(screen.getByTestId('inputs-count').textContent).toBe('1');
-    });
-  });
-
-  it('PUTs the edited rules to the backend within ~3100ms', async () => {
-    // Use fake timers for the debounce window — real timers would make
-    // this test slow / flaky.
+describe('<SignalsPage> — re-select guard (B2)', () => {
+  it('re-clicking the same already-selected row preserves in-progress edits before the debounced save fires', async () => {
     vi.useFakeTimers();
     try {
       await act(async () => {
         render(<SignalsPage />);
       });
-      // Let pending microtasks (list fetch) settle.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      // Let list fetch settle.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
       // Select the persisted signal.
       await act(async () => {
-        fireEvent.click(screen.getByTestId('select-sig-persisted-1'));
+        fireEvent.click(screen.getByTestId('select-sig-reselect-1'));
       });
-      // Allow seeding effect to run.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      mockUpdateSignal.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
-      // Edit the rules by invoking the captured onRulesChange handler.
+      // Verify hydrate happened.
+      expect(screen.getByTestId('rules-entry-name').textContent).toBe('Original Block Name');
       expect(capturedOnRulesChange).not.toBeNull();
+
+      // User types — edits the rules locally. The autosave debounce
+      // (3s) has NOT fired yet.
       const editedRules = {
         ...lastRulesProp,
         entries: [
-          { ...lastRulesProp.entries[0], name: 'Edited Entry Block' },
+          { ...lastRulesProp.entries[0], name: 'IN-PROGRESS EDIT' },
         ],
       };
       await act(async () => {
         capturedOnRulesChange(editedRules);
       });
 
-      // Within the debounce window the PUT must have fired.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3100);
-      });
+      // Confirm the edit is reflected in the editor stub.
+      expect(screen.getByTestId('rules-entry-name').textContent).toBe('IN-PROGRESS EDIT');
 
-      expect(mockUpdateSignal).toHaveBeenCalled();
-      // The PUT payload must carry the edited rules.
-      const [calledId, calledBody] = mockUpdateSignal.mock.calls[0];
-      expect(calledId).toBe('sig-persisted-1');
-      expect(calledBody.rules.entries[0].name).toBe('Edited Entry Block');
-      // It must also carry the other persisted fields.
-      expect(calledBody.description).toBe('hello world');
-      expect(calledBody.category).toBe('RESEARCH');
+      // User clicks the SAME row again BEFORE the debounce has elapsed.
+      // Without the guard, the old behaviour would overwrite the local
+      // edit with the stale backend snapshot.
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('select-sig-reselect-1'));
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      // The edit must still be present.
+      expect(screen.getByTestId('rules-entry-name').textContent).toBe('IN-PROGRESS EDIT');
+
+      // updateSignal must NOT have been called yet (debounce hasn't fired).
+      expect(mockUpdateSignal).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

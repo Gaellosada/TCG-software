@@ -78,6 +78,7 @@ vi.mock('../../api/persistence', () => ({
   listSignals: (...args) => mockListSignals(...args),
   updateSignal: vi.fn(() => Promise.resolve({})),
   archiveSignal: vi.fn(() => Promise.resolve(null)),
+  describePersistenceError: (err) => (err && err.message) || String(err),
 }));
 
 import SignalsPage from './SignalsPage';
