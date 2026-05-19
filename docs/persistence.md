@@ -79,6 +79,54 @@ collection. If layer 2 is regressed (someone adds an escape hatch),
 layer 1 still rejects the write at the server. Both layers must fail
 before data can be written outside the authorised namespace.
 
+Layer 2 is a defence-in-depth convention, not a Python-level
+invariant. `WriteRepository` uses `__slots__` + a `__setattr__`
+guard that blocks ordinary attribute rebinding after
+construction (e.g. `repo._coll = other` raises). `object.__setattr__`
+is still reachable from a determined caller — at that point only
+layer 1 stands, and an integration test
+(`test_object_setattr_bypass_rejected_by_mongo_role`) proves
+that bypass is still caught by the server with `OperationFailure`
+code 13.
+
+## Request lifecycle and error mapping
+
+The HTTP layer maps repository / Mongo / validation errors to clean
+status codes so internal exceptions never leak as 500s:
+
+| Condition | Status | Source |
+|---|---|---|
+| Validation error (`extra` field, `_id` pattern, oversize `description`, unknown `rebalance`, depth > 16, serialized payload > 1 MB) | 400 (via `RequestValidationError` handler) | Pydantic constraints in `tcg/core/api/persistence.py` |
+| Duplicate `_id` on create | 409 | `pymongo.errors.DuplicateKeyError` → `HTTPException(409)` |
+| Concurrent update (CAS miss on `updated_at`) | 409 | `ConcurrentUpdateError` → `HTTPException(409)` |
+| Request body > 4 MB (`Content-Length` or chunked) | 413 | `BodySizeLimitMiddleware` in `tcg/core/app.py` |
+| Document too large after encoding (rare; 16 MB BSON limit) | 413 | `pymongo.errors.DocumentTooLarge` → `DocumentTooLargeError` → `HTTPException(413)` |
+| Doc not found (`update` / `archive` on missing `_id`) | 404 | `KeyError` → `HTTPException(404)` |
+| Any other PyMongo error (`OperationFailure` non-duplicate, `ServerSelectionTimeoutError`, network etc.) | 503 | App-level `pymongo.errors.PyMongoError` handler — message sanitised, no server topology / credentials leaked |
+
+### Concurrency model
+
+`update` uses optimistic concurrency on `updated_at`:
+
+1. Route reads pre-image via `get_by_id`, capturing `existing.updated_at`.
+2. Route calls `repo.update(..., expected_updated_at=existing.updated_at)`.
+3. Repo filters `{_id, type, updated_at: expected_updated_at}` and
+   `replace_one`. On 0-matched, it probes existence: doc gone →
+   `KeyError` (404); doc present with different `updated_at` →
+   `ConcurrentUpdateError` (409).
+
+This means two readers racing to update the same doc cannot silently
+lose an update — the second writer hits 409 and can refetch + retry.
+
+### Body size cap
+
+`BodySizeLimitMiddleware` enforces a 4 MB cap (well below Mongo's
+16 MB BSON limit) on every request. It honours `Content-Length` for
+the fast path; for chunked / HTTP/2 transports without a declared
+length it counts bytes as they stream and short-circuits with 413
+once the threshold is exceeded. This bounds the memory cost of
+any single request to roughly `4 MB + one chunk`.
+
 ## Environment variable
 
 The scoped client is built from a single environment variable:
@@ -135,15 +183,28 @@ go through the same `create / get_by_id / update / archive` surface.
 ## Failure modes
 
 - **Missing env var.** `build_write_client` raises `ValueError`. The
-  FastAPI dependency surfaces this as a 500 to the caller.
-- **Auth failure mid-request.** Motor raises `OperationFailure`
-  (re-thrown as 500). The role is configured at provisioning time;
-  in-band auth failures indicate the server-side role was mutated.
+  FastAPI dependency surfaces this as a 500 to the caller (a startup
+  / config bug, not a runtime condition).
+- **Auth failure mid-request.** Motor raises `OperationFailure`, which
+  the app-level `PyMongoError` handler maps to **503** with a
+  sanitised message. In-band auth failures indicate the server-side
+  role was mutated and require operator attention.
 - **Update / archive on a missing doc.** `WriteRepository.update` /
-  `archive` raise `KeyError`. The HTTP handlers translate to 404.
+  `archive` raise `KeyError`. The HTTP handlers translate to **404**.
+- **Concurrent update conflict.** `update` raises
+  `ConcurrentUpdateError` when the on-disk `updated_at` no longer
+  matches the value read before the write. HTTP returns **409**;
+  the client should refetch and retry.
 - **Type/id collision.** `get_by_id(doc_type, doc_id)` filters by
   both keys, so an indicator and a signal sharing the same `_id`
   return only their respective doc.
+- **Oversize request body.** Requests > 4 MB are rejected with
+  **413** by the body-size middleware (both `Content-Length` and
+  chunked transports).
+- **Malformed input.** Pydantic rejects payloads that fail the
+  validation constraints (`_id` pattern, `description` length,
+  `rebalance` enum, nesting depth, extra fields) with **400** via
+  the project's `RequestValidationError` handler.
 
 ## Out of scope (for now)
 
