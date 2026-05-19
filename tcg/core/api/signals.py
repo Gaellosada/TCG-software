@@ -76,7 +76,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -87,11 +87,11 @@ from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
     BasketLegInLite,
-    BasketRef,
     BasketRefInline,
     BasketRefSaved,
     ContinuousInstrumentRef,
     OptionStreamRef,
+    SeriesRef,
     SpotInstrumentRef,
 )
 from tcg.core.api._persistence_wiring import get_write_repository
@@ -145,21 +145,11 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 
 class _InputIn(BaseModel):
     id: str
-    # Pydantic v2 discriminated union on ``type``.  The basket branch is
-    # itself a nested discriminated union (on ``kind``) — see
-    # ``tcg.core.api._models.BasketRef``.  Pydantic v2 supports a member
-    # of a discriminated union that is itself a discriminated union; the
-    # outer key (``type``) routes to the inner union, then the inner key
-    # (``kind``) routes within it.  Annotated form (rather than the bare
-    # ``SeriesRef`` alias from ``_models.py``) keeps the discriminator
-    # explicit at the field site.
-    instrument: Annotated[
-        SpotInstrumentRef
-        | ContinuousInstrumentRef
-        | OptionStreamRef
-        | BasketRef,
-        Field(discriminator="type"),
-    ]
+    # Discriminated union shared with the indicators router, routed by
+    # the callable discriminator in ``_models.py``.  Tags collapse the
+    # outer ``type`` and inner ``kind`` (basket-branch only) into a
+    # single flat tag space, which keeps OpenAPI 3.0 emission valid.
+    instrument: SeriesRef
 
 
 class _OperandIn(BaseModel):

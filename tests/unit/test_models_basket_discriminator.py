@@ -96,8 +96,14 @@ def test_missing_kind_on_basket_payload_is_rejected() -> None:
     payload = {"type": "basket", "basket_id": "B1"}
     with pytest.raises(ValidationError) as exc_info:
         _SeriesRefAdapter.validate_python(payload)
-    # The error message should mention the missing discriminator key.
-    assert "kind" in str(exc_info.value)
+    # The callable discriminator returns None when ``kind`` is absent,
+    # which Pydantic surfaces as ``union_tag_not_found``.  The error
+    # type code is the stable contract; the message text mentions the
+    # discriminator function name.
+    err = exc_info.value
+    assert err.error_count() == 1
+    error = err.errors()[0]
+    assert error["type"] == "union_tag_not_found"
 
 
 def test_unknown_kind_on_basket_payload_is_rejected() -> None:
