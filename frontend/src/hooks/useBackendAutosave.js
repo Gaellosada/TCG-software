@@ -24,11 +24,15 @@ import { useEffect, useRef, useState, useCallback } from 'react';
  * @param {number}  [opts.debounceMs=500]
  * @returns {{ status: 'idle'|'saving'|'saved'|'error',
  *             flush: () => void,
- *             reset: () => void }}
+ *             reset: () => void,
+ *             setStatus: (s: 'idle'|'saving'|'saved'|'error') => void }}
  *   ``flush`` synchronously fires any pending debounced save.
  *   ``reset`` clears the status back to ``idle`` and cancels any
  *   pending timer WITHOUT firing — use when switching selection so the
  *   indicator doesn't show "saved" for the wrong item.
+ *   ``setStatus`` allows one-shot mutation handlers (add / archive /
+ *   category-change) to reflect their own save state through the same
+ *   indicator without going through the debounce path.
  */
 export default function useBackendAutosave({
   enabled,
@@ -102,5 +106,5 @@ export default function useBackendAutosave({
   // Cleanup on unmount.
   useEffect(() => cancelTimer, [cancelTimer]);
 
-  return { status, flush, reset };
+  return { status, flush, reset, setStatus };
 }

@@ -106,6 +106,11 @@ function SignalsPage() {
   const persistedSignalsRef = useRef(persistedSignals);
   persistedSignalsRef.current = persistedSignals;
 
+  // Separate status state for one-shot operations (add / archive /
+  // category-change). Kept separate from the debounced autosave status so
+  // neither path's timing can overwrite the other.
+  const [oneshotStatus, setOneshotStatus] = useState('idle');
+
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
     try { localStorage.setItem(AUTOSAVE_KEY, String(on)); } catch { /* ignore */ }
@@ -242,9 +247,9 @@ function SignalsPage() {
     setSelectedId(id);
     setError(null);
     setLastResult(null);
-    // Fire-and-forget: persist to backend in current category.
-    // If the backend call fails, the signal still exists locally — user
-    // can re-save via the existing save flow. Non-blocking.
+    // Persist to backend in current category; surface success/failure via
+    // the one-shot status indicator. Local signal still usable on failure.
+    setOneshotStatus('saving');
     createSignal({
       id,
       name,
@@ -254,9 +259,10 @@ function SignalsPage() {
       settings: defaultSettings(),
       description: '',
     }).then(() => {
+      setOneshotStatus('saved');
       fetchPersistedSignals(persistedCategory);
     }).catch(() => {
-      // ignore — local signal still usable
+      setOneshotStatus('error');
     });
   }, [persistedCategory, fetchPersistedSignals]);
 
@@ -276,11 +282,13 @@ function SignalsPage() {
       });
       return next;
     });
-    // Archive on backend (soft-delete → ARCHIVE category).
+    // Archive on backend (soft-delete → ARCHIVE category); surface result.
+    setOneshotStatus('saving');
     archiveSignal(id).then(() => {
+      setOneshotStatus('saved');
       fetchPersistedSignals(persistedCategory);
     }).catch(() => {
-      // Local state already removed — backend archive failure is non-fatal.
+      setOneshotStatus('error');
     });
   }, [confirmDeleteId, persistedCategory, fetchPersistedSignals]);
 
@@ -289,6 +297,7 @@ function SignalsPage() {
   const handleChangeItemCat = useCallback(async (id, newCat) => {
     const target = persistedSignals.find((s) => s.id === id);
     if (!target) return;
+    setOneshotStatus('saving');
     try {
       await updateSignal(id, {
         name: target.name,
@@ -298,11 +307,12 @@ function SignalsPage() {
         settings: target.settings || {},
         description: target.description || '',
       });
+      setOneshotStatus('saved');
       // If the new category differs from the current filter, the item
       // disappears from the current view — re-fetch to reflect backend truth.
       fetchPersistedSignals(persistedCategory);
     } catch {
-      // Non-fatal — leave the list as-is.
+      setOneshotStatus('error');
     }
   }, [persistedSignals, persistedCategory, fetchPersistedSignals]);
 
@@ -388,7 +398,10 @@ function SignalsPage() {
     fetchPersistedSignals(persistedCategory);
   }, [selectedId, persistedCategory, fetchPersistedSignals]);
 
-  const { status: cloudStatus, reset: resetCloudStatus } = useBackendAutosave({
+  const {
+    status: cloudStatus,
+    reset: resetCloudStatus,
+  } = useBackendAutosave({
     enabled: !!selectedPersisted && backendDirty,
     payload: selectedDocSerialized,
     onSave: handleBackendSave,
@@ -551,8 +564,11 @@ function SignalsPage() {
                   selectedPlaceholder="Signal name"
                   ariaLabel="Signal name"
                 />
-                {selectedPersisted && (
-                  <SaveStatus status={cloudStatus} label="Cloud" />
+                {(oneshotStatus !== 'idle' || selectedPersisted) && (
+                  <SaveStatus
+                    status={oneshotStatus !== 'idle' ? oneshotStatus : cloudStatus}
+                    label="Cloud"
+                  />
                 )}
               </>
             }

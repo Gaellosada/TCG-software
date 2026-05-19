@@ -65,6 +65,11 @@ function PortfolioPage() {
   const [persistedPortfolios, setPersistedPortfolios] = useState([]);
   const [persistedLoading, setPersistedLoading] = useState(false);
 
+  // Separate status state for one-shot operations (save-current / archive /
+  // category-change). Kept separate from the debounced autosave status so
+  // neither path's timing can overwrite the other.
+  const [oneshotStatus, setOneshotStatus] = useState('idle');
+
   const fetchPersistedPortfolios = useCallback(async (cat) => {
     setPersistedLoading(true);
     try {
@@ -109,6 +114,7 @@ function PortfolioPage() {
   const handlePersistSave = useCallback(async () => {
     const name = saveInput.trim() || portfolio.portfolioName || 'Portfolio';
     const id = `portfolio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    setOneshotStatus('saving');
     try {
       await createPortfolio({
         id,
@@ -117,6 +123,7 @@ function PortfolioPage() {
         legs: legsToWire(portfolio.legs),
         rebalance: portfolio.rebalance || 'none',
       });
+      setOneshotStatus('saved');
       portfolio.setPersistedId(id);
       // Make sure the portfolioName state reflects what we just saved
       // so subsequent autosaves include it.
@@ -125,7 +132,7 @@ function PortfolioPage() {
       }
       fetchPersistedPortfolios(persistedCategory);
     } catch {
-      // Non-fatal — user can retry.
+      setOneshotStatus('error');
     }
   }, [saveInput, portfolio, persistedCategory, fetchPersistedPortfolios, legsToWire]);
 
@@ -134,6 +141,7 @@ function PortfolioPage() {
   const handleChangePortfolioCat = useCallback(async (id, newCat) => {
     const target = persistedPortfolios.find((p) => p.id === id);
     if (!target) return;
+    setOneshotStatus('saving');
     try {
       await updatePortfolio(id, {
         name: target.name,
@@ -141,16 +149,19 @@ function PortfolioPage() {
         legs: target.legs || [],
         rebalance: target.rebalance || 'none',
       });
+      setOneshotStatus('saved');
       fetchPersistedPortfolios(persistedCategory);
     } catch {
-      // Non-fatal.
+      setOneshotStatus('error');
     }
   }, [persistedPortfolios, persistedCategory, fetchPersistedPortfolios]);
 
   // Archive (soft-delete) a persisted portfolio.
   const handleArchivePortfolio = useCallback(async (id) => {
+    setOneshotStatus('saving');
     try {
       await archivePortfolio(id);
+      setOneshotStatus('saved');
       // If we were editing this exact portfolio, drop the persistedId
       // so further edits don't try to autosave to an archived row.
       if (portfolio.persistedId === id) {
@@ -158,7 +169,7 @@ function PortfolioPage() {
       }
       fetchPersistedPortfolios(persistedCategory);
     } catch {
-      // Non-fatal.
+      setOneshotStatus('error');
     }
   }, [persistedCategory, fetchPersistedPortfolios, portfolio]);
 
@@ -228,7 +239,10 @@ function PortfolioPage() {
     fetchPersistedPortfolios(persistedCategory);
   }, [portfolio.persistedId, persistedCategory, fetchPersistedPortfolios]);
 
-  const { status: cloudStatus, reset: resetCloudStatus } = useBackendAutosave({
+  const {
+    status: cloudStatus,
+    reset: resetCloudStatus,
+  } = useBackendAutosave({
     enabled: !!portfolio.persistedId && cloudDirty,
     payload: cloudPayload,
     onSave: handleCloudSave,
@@ -346,10 +360,14 @@ function PortfolioPage() {
                 || portfolio.legs.length === 0
               }
             />
-            {/* Backend autosave status — only meaningful when editing a
-                backend-persisted portfolio. */}
-            {portfolio.persistedId && (
-              <SaveStatus status={cloudStatus} label="Cloud" />
+            {/* Backend autosave status — shown when editing a persisted
+                portfolio OR when a one-shot operation has a pending result.
+                One-shot status takes priority; falls back to debounce status. */}
+            {(oneshotStatus !== 'idle' || portfolio.persistedId) && (
+              <SaveStatus
+                status={oneshotStatus !== 'idle' ? oneshotStatus : cloudStatus}
+                label="Cloud"
+              />
             )}
             {/* Clear — with confirmation */}
             <button
