@@ -1,12 +1,14 @@
 """WriteRepository — the only object the application uses to mutate
-``tcg-app-data.2026-app-data``.
+the application write collection (``tcg-app-data.2026-app-data`` by default).
 
 Safety design
 -------------
 The collection handle is bound exactly once in ``__init__``:
 
-    self._coll = client["tcg-app-data"]["2026-app-data"]
+    self._coll = client[db_name][collection_name]
 
+``db_name`` and ``collection_name`` are resolved from env vars by the
+factory in ``_persistence_wiring.py`` and injected at construction time.
 No public method accepts a collection name. No public method calls
 ``client[...]`` or ``db[...]``. There is no ``__getattr__`` escape
 hatch. This guarantees — at the Python class boundary — that every
@@ -49,10 +51,6 @@ from tcg.types.persistence import (
 )
 
 
-_DB_NAME = "tcg-app-data"
-_COLLECTION_NAME = "2026-app-data"
-
-
 def _utcnow() -> datetime:
     """Single source of truth for server-set timestamps.
 
@@ -70,15 +68,22 @@ class WriteRepository:
     """Application-side write surface for the persistence layer.
 
     Instantiated once per process with a ``client`` built from
-    ``build_write_client()``. The collection handle is bound on
-    construction and never re-derived.
+    ``build_write_client()``, plus the resolved ``db_name`` and
+    ``collection_name`` from env vars. The collection handle is bound
+    on construction and never re-derived.
     """
 
-    def __init__(self, client: AsyncIOMotorClient) -> None:
+    def __init__(
+        self,
+        client: AsyncIOMotorClient,
+        *,
+        db_name: str,
+        collection_name: str,
+    ) -> None:
         # Bind ONCE. We deliberately keep only ``self._coll`` so that
         # nothing in the rest of this class can navigate to another
         # database or collection through ``self``.
-        self._coll = client[_DB_NAME][_COLLECTION_NAME]
+        self._coll = client[db_name][collection_name]
 
     async def create(self, doc: PersistenceDoc) -> PersistenceDoc:
         """Insert ``doc`` and return the stored copy.

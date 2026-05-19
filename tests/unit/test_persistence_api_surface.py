@@ -78,15 +78,28 @@ def test_no_public_method_accepts_a_collection_name() -> None:
             )
 
 
-def test_init_signature_is_locked_to_client_only() -> None:
-    """``__init__`` must accept exactly ``(self, client)`` — no extras
-    that could route to a different collection or database."""
+def test_init_signature_is_locked_to_client_db_collection() -> None:
+    """``__init__`` must accept exactly ``(self, client, *, db_name, collection_name)``.
+
+    ``db_name`` and ``collection_name`` are keyword-only — they configure
+    the collection binding at construction time and are not reachable
+    through the public API surface (``__init__`` is exempt from the
+    "no collection name in public methods" rule; the constraint applies
+    to ``create / get_by_id / list_* / update / archive``).
+    """
     sig = inspect.signature(WriteRepository.__init__)
-    param_names = list(sig.parameters.keys())
-    assert param_names == ["self", "client"], (
+    params = sig.parameters
+    param_names = list(params.keys())
+    assert param_names == ["self", "client", "db_name", "collection_name"], (
         f"WriteRepository.__init__ signature drifted: "
-        f"expected ['self','client'], got {param_names}"
+        f"expected ['self', 'client', 'db_name', 'collection_name'], got {param_names}"
     )
+    # db_name and collection_name must be keyword-only
+    import inspect as _inspect
+    for kw in ("db_name", "collection_name"):
+        assert params[kw].kind == _inspect.Parameter.KEYWORD_ONLY, (
+            f"WriteRepository.__init__ parameter {kw!r} must be keyword-only"
+        )
 
 
 def test_no_public_attribute_exposes_a_collection_handle() -> None:

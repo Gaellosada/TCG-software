@@ -24,6 +24,7 @@ Two reasons:
 
 from __future__ import annotations
 
+from tcg.core.config import load_config
 from tcg.persistence import WriteRepository, build_write_client
 
 
@@ -36,10 +37,18 @@ def get_write_repository() -> WriteRepository:
     Builds the scoped Motor client on first call. Subsequent calls
     reuse the same instance. Raises ``ValueError`` (propagated as a
     500 by FastAPI) when ``MONGO_APP_WRITE_URI`` is not configured.
+    DB name and collection name are resolved from ``MongoConfig`` (env
+    vars ``MONGO_APP_WRITE_DB_NAME`` and ``MONGO_APP_WRITE_COLLECTION``),
+    with safe defaults ``tcg-app-data`` and ``2026-app-data``.
     """
     global _REPO_SINGLETON
     if _REPO_SINGLETON is None:
-        _REPO_SINGLETON = WriteRepository(build_write_client())
+        cfg = load_config()
+        _REPO_SINGLETON = WriteRepository(
+            build_write_client(),
+            db_name=cfg.app_write_db_name,
+            collection_name=cfg.app_write_collection,
+        )
     return _REPO_SINGLETON
 
 

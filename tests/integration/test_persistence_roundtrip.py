@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 
+from tcg.core.config import load_config
 from tcg.persistence import WriteRepository, build_write_client
 from tcg.types.persistence import (
     Category,
@@ -49,8 +50,13 @@ async def repo_with_cleanup():
     """
     # Use the production factory so we exercise the same tz_aware /
     # timeout settings as the live wiring.
+    cfg = load_config()
     client = build_write_client()
-    repo = WriteRepository(client)
+    repo = WriteRepository(
+        client,
+        db_name=cfg.app_write_db_name,
+        collection_name=cfg.app_write_collection,
+    )
     # Probe ID prefix — caller appends suffixes.
     prefix = f"_test-persistence-{uuid.uuid4().hex[:12]}"
     created_ids: list[str] = []
