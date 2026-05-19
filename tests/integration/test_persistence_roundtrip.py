@@ -18,8 +18,14 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 
+import pymongo.errors
+
 from tcg.core.config import load_config
-from tcg.persistence import WriteRepository, build_write_client
+from tcg.persistence import (
+    ConcurrentUpdateError,
+    WriteRepository,
+    build_write_client,
+)
 from tcg.types.persistence import (
     Category,
     IndicatorDoc,
@@ -347,6 +353,72 @@ async def test_get_by_id_returns_none_when_missing(repo_with_cleanup) -> None:
     doc_id = repo_with_cleanup.id("never")
     result = await repo.get_by_id("indicator", doc_id)
     assert result is None
+
+
+async def test_create_duplicate_id_raises_duplicate_key_error(
+    repo_with_cleanup,
+) -> None:
+    """B1 regression — inserting twice with the same ``_id`` must raise
+    ``pymongo.errors.DuplicateKeyError`` so the API layer can map it
+    to 409 rather than letting an unhandled 500 leak out."""
+    repo = repo_with_cleanup.inner
+    doc_id = repo_with_cleanup.id("dup")
+    now = _now()
+    doc = IndicatorDoc(
+        id=doc_id,
+        type="indicator",
+        name="orig",
+        definition={},
+        created_at=now,
+        updated_at=now,
+    )
+    await repo.create(doc)
+    # Second insert with same id MUST raise (not silently upsert / 500).
+    with pytest.raises(pymongo.errors.DuplicateKeyError):
+        await repo.create(doc)
+
+
+async def test_update_with_stale_expected_updated_at_raises_concurrent(
+    repo_with_cleanup,
+) -> None:
+    """M4 regression — when two writers read the same doc, the second
+    PUT (whose ``expected_updated_at`` no longer matches) must raise
+    :class:`ConcurrentUpdateError` rather than silently overwrite the
+    first writer's edits."""
+    from dataclasses import replace as _replace
+
+    repo = repo_with_cleanup.inner
+    doc_id = repo_with_cleanup.id("cas")
+    now = _now()
+    doc = IndicatorDoc(
+        id=doc_id,
+        type="indicator",
+        name="v0",
+        definition={},
+        created_at=now,
+        updated_at=now,
+    )
+    stored = await repo.create(doc)
+
+    # Writer A reads then writes — succeeds, ``updated_at`` advances.
+    after_a = await repo.update(
+        _replace(stored, name="v1-by-A"),
+        expected_updated_at=stored.updated_at,
+    )
+    assert after_a.name == "v1-by-A"
+
+    # Writer B has the stale ``stored.updated_at`` — its CAS must miss
+    # and raise.
+    with pytest.raises(ConcurrentUpdateError):
+        await repo.update(
+            _replace(stored, name="v1-by-B"),
+            expected_updated_at=stored.updated_at,
+        )
+
+    # And the doc must still reflect Writer A's value.
+    refetched = await repo.get_by_id("indicator", doc_id)
+    assert isinstance(refetched, IndicatorDoc)
+    assert refetched.name == "v1-by-A"
 
 
 async def test_get_by_id_does_not_cross_types(repo_with_cleanup) -> None:

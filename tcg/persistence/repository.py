@@ -40,6 +40,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Literal
 
+import pymongo.errors
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from tcg.types.persistence import (
@@ -50,6 +51,21 @@ from tcg.types.persistence import (
     from_mongo_dict,
     to_mongo_dict,
 )
+
+
+class DocumentTooLargeError(Exception):
+    """Raised when a persistence write hits MongoDB's 16 MB doc limit.
+
+    Wraps :class:`pymongo.errors.DocumentTooLarge` so the API layer can
+    map it to 413 without leaking PyMongo types across the boundary.
+    """
+
+
+class ConcurrentUpdateError(Exception):
+    """Raised by :meth:`WriteRepository.update` when the optimistic
+    check-and-set guard sees ``updated_at`` has moved since the
+    pre-image was read. The API layer maps this to 409.
+    """
 
 
 def _utcnow() -> datetime:
@@ -116,10 +132,18 @@ class WriteRepository:
 
         ``created_at`` and ``updated_at`` are overwritten server-side
         with the current UTC instant — callers cannot back-date docs.
+        Raises :class:`DocumentTooLargeError` when the resulting BSON
+        document would exceed MongoDB's 16 MB cap.
         """
         now = _utcnow()
         stamped = replace(doc, created_at=now, updated_at=now)
-        await self._coll.insert_one(to_mongo_dict(stamped))
+        try:
+            await self._coll.insert_one(to_mongo_dict(stamped))
+        except pymongo.errors.DocumentTooLarge as exc:
+            raise DocumentTooLargeError(
+                f"persistence: {doc.type} doc id={doc.id!r} exceeds "
+                f"MongoDB's 16 MB BSON document limit"
+            ) from exc
         return stamped
 
     async def get_by_id(
@@ -177,20 +201,58 @@ class WriteRepository:
         rows = await cursor.to_list(length=None)
         return [from_mongo_dict(r) for r in rows]
 
-    async def update(self, doc: PersistenceDoc) -> PersistenceDoc:
+    async def update(
+        self,
+        doc: PersistenceDoc,
+        *,
+        expected_updated_at: datetime | None = None,
+    ) -> PersistenceDoc:
         """Replace the doc identified by ``(_id, type)`` with ``doc``.
 
         ``updated_at`` is bumped to the current UTC instant.
-        ``created_at`` is preserved verbatim from ``doc``. Raises
-        ``KeyError`` if no document matched — callers must surface a
-        404 rather than silently upsert.
+        ``created_at`` is preserved verbatim from ``doc``.
+
+        Concurrency: when ``expected_updated_at`` is supplied the
+        filter is extended to ``{_id, type, updated_at: expected}`` —
+        a check-and-set. If no document matches, the method first
+        checks whether the doc exists at all:
+
+        - exists with a *different* ``updated_at`` → another writer
+          modified it since we read it → raise
+          :class:`ConcurrentUpdateError`.
+        - does not exist → raise ``KeyError`` (same as before).
+
+        Without ``expected_updated_at`` the previous semantics hold:
+        match by ``(_id, type)`` only, ``KeyError`` on miss. Callers
+        that don't supply the token accept last-writer-wins.
+
+        Also raises :class:`DocumentTooLargeError` when the replacement
+        BSON would exceed MongoDB's 16 MB cap.
         """
         bumped = replace(doc, updated_at=_utcnow())
         payload = to_mongo_dict(bumped)
-        result = await self._coll.replace_one(
-            {"_id": doc.id, "type": doc.type}, payload
-        )
+        filter_: dict = {"_id": doc.id, "type": doc.type}
+        if expected_updated_at is not None:
+            filter_["updated_at"] = expected_updated_at
+        try:
+            result = await self._coll.replace_one(filter_, payload)
+        except pymongo.errors.DocumentTooLarge as exc:
+            raise DocumentTooLargeError(
+                f"persistence: {doc.type} doc id={doc.id!r} exceeds "
+                f"MongoDB's 16 MB BSON document limit"
+            ) from exc
         if result.matched_count == 0:
+            # Disambiguate: was the doc gone (404) or did its
+            # ``updated_at`` move under us (409)?
+            if expected_updated_at is not None:
+                still_there = await self._coll.find_one(
+                    {"_id": doc.id, "type": doc.type}, projection={"_id": 1}
+                )
+                if still_there is not None:
+                    raise ConcurrentUpdateError(
+                        f"persistence: {doc.type} id={doc.id!r} was modified "
+                        f"concurrently — refusing to overwrite"
+                    )
             raise KeyError(
                 f"persistence: no {doc.type} with id={doc.id!r} to update"
             )
@@ -231,4 +293,8 @@ class WriteRepository:
             )
 
 
-__all__ = ["WriteRepository"]
+__all__ = [
+    "WriteRepository",
+    "ConcurrentUpdateError",
+    "DocumentTooLargeError",
+]

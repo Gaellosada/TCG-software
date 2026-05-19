@@ -6,6 +6,15 @@ Only this package may construct the Motor client bound to
 """
 
 from tcg.persistence._client import build_write_client
-from tcg.persistence.repository import WriteRepository
+from tcg.persistence.repository import (
+    ConcurrentUpdateError,
+    DocumentTooLargeError,
+    WriteRepository,
+)
 
-__all__ = ["WriteRepository", "build_write_client"]
+__all__ = [
+    "WriteRepository",
+    "build_write_client",
+    "ConcurrentUpdateError",
+    "DocumentTooLargeError",
+]

@@ -24,6 +24,15 @@ from tcg.data import create_services
 from tcg.types.errors import TCGError
 
 
+# Hard cap on inbound request body size. MongoDB rejects documents
+# larger than 16 MB with ``DocumentTooLarge``; we cut the request off
+# at 4 MB so a buggy or malicious client sees a clean 413 long before
+# the request reaches the persistence layer. The cap applies to the
+# whole application because the persistence router has no exclusive
+# host header — keeping it global is the safer default.
+_MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024  # 4 MB
+
+
 def _cors_origins() -> list[str]:
     """Resolve CORS origins from env. Default to the Vite dev server only.
 
@@ -54,6 +63,35 @@ async def lifespan(app: FastAPI):
     client.close()
 
 
+async def _body_size_limit_middleware(request: Request, call_next):
+    """Reject requests whose body exceeds ``_MAX_REQUEST_BODY_BYTES``.
+
+    Uses the ``Content-Length`` header when present (fast path — the
+    request body is never read). Without ``Content-Length`` we let the
+    request through; a body that turns out to be too large will be
+    caught downstream by the persistence layer's ``DocumentTooLarge``
+    handler.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            size = int(content_length)
+        except ValueError:
+            size = -1  # malformed header — let it fall through
+        if size > _MAX_REQUEST_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error_type": "request_too_large",
+                    "message": (
+                        f"request body size {size} exceeds limit "
+                        f"{_MAX_REQUEST_BODY_BYTES}"
+                    ),
+                },
+            )
+    return await call_next(request)
+
+
 async def _request_validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
@@ -80,6 +118,11 @@ async def _request_validation_error_handler(
 def create_app() -> FastAPI:
     """Build the FastAPI application with all routers and middleware."""
     app = FastAPI(title="TCG Platform", version="0.1.0", lifespan=lifespan)
+    # NOTE: middleware is applied in reverse registration order. We
+    # register the body-size guard FIRST so it runs LAST (i.e. it
+    # wraps CORS, not the other way around) — that ordering means
+    # the 413 still carries CORS headers.
+    app.middleware("http")(_body_size_limit_middleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),

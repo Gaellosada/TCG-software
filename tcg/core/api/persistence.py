@@ -38,13 +38,18 @@ callers may omit anything that isn't set yet.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
+import pymongo.errors
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from tcg.core.api._persistence_wiring import get_write_repository
-from tcg.persistence import WriteRepository
+from tcg.persistence import (
+    ConcurrentUpdateError,
+    DocumentTooLargeError,
+    WriteRepository,
+)
 from tcg.types.persistence import (
     Category,
     DocType,
@@ -56,6 +61,82 @@ from tcg.types.persistence import (
 
 
 router = APIRouter(prefix="/api/persistence", tags=["persistence"])
+
+
+# ---------------------------------------------------------------------------
+# Validation helpers (M2: input tightening — depth / shape / pattern guards)
+# ---------------------------------------------------------------------------
+
+
+# Identifier regex: alphanumerics plus a small punctuation set. Forbids
+# the Mongo operator prefix ``$``, leading ``.`` (used by Mongo path
+# operators), and any whitespace / control characters. Length-capped
+# separately by ``min_length=1, max_length=128``.
+_ID_PATTERN = r"^[A-Za-z0-9_\-:.]+$"
+
+# Depth and size caps. MongoDB BSON limits nesting at 100 levels and a
+# single doc at 16 MB; we set defensive ceilings well below both so a
+# malicious or buggy client surfaces a clean 422 long before Mongo's
+# server-side limits trip. Together with the body-size middleware
+# (B3) these turn pathological-payload scenarios into validation errors
+# rather than 500s.
+_MAX_PAYLOAD_DEPTH = 16
+_MAX_PAYLOAD_SERIALIZED_BYTES = 1_000_000  # 1 MB per opaque payload field
+
+
+def _max_depth(value: Any, _depth: int = 0) -> int:
+    """Return the maximum nesting depth of ``value``.
+
+    Walks dicts and lists/tuples recursively. Scalars count as depth
+    ``_depth``. The maximum value returned is bounded only by the
+    caller's recursion limit — callers MUST check it against
+    ``_MAX_PAYLOAD_DEPTH`` and reject before deep recursion bites.
+    """
+    if isinstance(value, dict):
+        if not value:
+            return _depth
+        return max(_max_depth(v, _depth + 1) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return _depth
+        return max(_max_depth(v, _depth + 1) for v in value)
+    return _depth
+
+
+def _validate_payload(value: Any, field_name: str) -> Any:
+    """Reject payloads that exceed the depth or serialized-size caps.
+
+    Used by Pydantic ``field_validator`` hooks on every opaque payload
+    field (``rules`` / ``inputs`` / ``settings`` / ``definition`` /
+    ``legs``). Depth is checked first since it's cheap; the serialized
+    size check uses ``repr()`` rather than ``json.dumps`` to avoid an
+    O(N) JSON pass on every request — the cap is intentionally loose
+    and catches the obvious abuse cases.
+    """
+    depth = _max_depth(value)
+    if depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(
+            f"{field_name}: nesting depth {depth} exceeds limit "
+            f"{_MAX_PAYLOAD_DEPTH}"
+        )
+    # Approximate size guard. ``repr()`` overestimates JSON length but
+    # the cap is generous (1 MB per field).
+    size = len(repr(value))
+    if size > _MAX_PAYLOAD_SERIALIZED_BYTES:
+        raise ValueError(
+            f"{field_name}: serialized size {size} exceeds limit "
+            f"{_MAX_PAYLOAD_SERIALIZED_BYTES}"
+        )
+    return value
+
+
+# Accepted ``rebalance`` values — mirrors ``tcg.types.portfolio.RebalanceFreq``
+# (and the frontend ``REBALANCE_OPTIONS``). Using ``Literal`` here lets
+# Pydantic emit a precise 422 with the allowed values rather than
+# accepting any free string.
+RebalanceLiteral = Literal[
+    "none", "daily", "weekly", "monthly", "quarterly", "annually"
+]
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +153,14 @@ class _BaseWriteModel(BaseModel):
 class IndicatorCreateIn(_BaseWriteModel):
     """Create-payload for an indicator. The server stamps timestamps."""
 
-    id: str = Field(..., min_length=1, max_length=256)
+    id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
     name: str = Field(..., min_length=1, max_length=512)
     definition: dict
+
+    @field_validator("definition")
+    @classmethod
+    def _check_definition(cls, v: dict) -> dict:
+        return _validate_payload(v, "definition")
 
 
 class IndicatorUpdateIn(_BaseWriteModel):
@@ -87,6 +173,11 @@ class IndicatorUpdateIn(_BaseWriteModel):
     definition: dict
     deleted: bool = False
 
+    @field_validator("definition")
+    @classmethod
+    def _check_definition(cls, v: dict) -> dict:
+        return _validate_payload(v, "definition")
+
 
 class SignalCreateIn(_BaseWriteModel):
     """Create-payload for a signal.
@@ -96,13 +187,28 @@ class SignalCreateIn(_BaseWriteModel):
     signal can be empty. Defaults are empty list / dict / string.
     """
 
-    id: str = Field(..., min_length=1, max_length=256)
+    id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
     name: str = Field(..., min_length=1, max_length=512)
     category: Category
     inputs: list[dict] = Field(default_factory=list)
     rules: dict = Field(default_factory=dict)
     settings: dict = Field(default_factory=dict)
-    description: str = ""
+    description: str = Field(default="", max_length=4096)
+
+    @field_validator("inputs")
+    @classmethod
+    def _check_inputs(cls, v: list[dict]) -> list[dict]:
+        return _validate_payload(v, "inputs")
+
+    @field_validator("rules")
+    @classmethod
+    def _check_rules(cls, v: dict) -> dict:
+        return _validate_payload(v, "rules")
+
+    @field_validator("settings")
+    @classmethod
+    def _check_settings(cls, v: dict) -> dict:
+        return _validate_payload(v, "settings")
 
 
 class SignalUpdateIn(_BaseWriteModel):
@@ -113,22 +219,47 @@ class SignalUpdateIn(_BaseWriteModel):
     inputs: list[dict] = Field(default_factory=list)
     rules: dict = Field(default_factory=dict)
     settings: dict = Field(default_factory=dict)
-    description: str = ""
+    description: str = Field(default="", max_length=4096)
+
+    @field_validator("inputs")
+    @classmethod
+    def _check_inputs(cls, v: list[dict]) -> list[dict]:
+        return _validate_payload(v, "inputs")
+
+    @field_validator("rules")
+    @classmethod
+    def _check_rules(cls, v: dict) -> dict:
+        return _validate_payload(v, "rules")
+
+    @field_validator("settings")
+    @classmethod
+    def _check_settings(cls, v: dict) -> dict:
+        return _validate_payload(v, "settings")
 
 
 class PortfolioCreateIn(_BaseWriteModel):
-    id: str = Field(..., min_length=1, max_length=256)
+    id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
     name: str = Field(..., min_length=1, max_length=512)
     category: Category
     legs: list[dict] = Field(default_factory=list)
-    rebalance: str = "none"
+    rebalance: RebalanceLiteral = "none"
+
+    @field_validator("legs")
+    @classmethod
+    def _check_legs(cls, v: list[dict]) -> list[dict]:
+        return _validate_payload(v, "legs")
 
 
 class PortfolioUpdateIn(_BaseWriteModel):
     name: str = Field(..., min_length=1, max_length=512)
     category: Category
     legs: list[dict] = Field(default_factory=list)
-    rebalance: str = "none"
+    rebalance: RebalanceLiteral = "none"
+
+    @field_validator("legs")
+    @classmethod
+    def _check_legs(cls, v: list[dict]) -> list[dict]:
+        return _validate_payload(v, "legs")
 
 
 class IndicatorOut(BaseModel):
@@ -246,7 +377,17 @@ async def create_indicator(body: IndicatorCreateIn, repo: RepoDep) -> IndicatorO
         created_at=now,
         updated_at=now,
     )
-    stored = await repo.create(doc)
+    try:
+        stored = await repo.create(doc)
+    except pymongo.errors.DuplicateKeyError as exc:
+        # Map the unique-index violation to 409 so retries / React 18
+        # StrictMode double-mounts / racing clients see a structured
+        # error rather than an unhandled 500.
+        raise HTTPException(
+            status_code=409, detail=f"indicator with id={body.id!r} already exists"
+        ) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     assert isinstance(stored, IndicatorDoc)
     return _indicator_to_out(stored)
 
@@ -288,11 +429,19 @@ async def update_indicator(
         deleted=body.deleted,
     )
     try:
-        stored = await repo.update(updated)
+        stored = await repo.update(
+            updated, expected_updated_at=existing.updated_at
+        )
     except KeyError as exc:
         # The earlier get_by_id succeeded but the doc was deleted in
         # the gap — surface a 404 rather than a 500.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        # Optimistic CAS: another writer touched the doc between our
+        # read and our replace — refuse to clobber.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     assert isinstance(stored, IndicatorDoc)
     return _indicator_to_out(stored)
 
@@ -325,7 +474,14 @@ async def create_signal(body: SignalCreateIn, repo: RepoDep) -> SignalOut:
         settings=body.settings,
         description=body.description,
     )
-    stored = await repo.create(doc)
+    try:
+        stored = await repo.create(doc)
+    except pymongo.errors.DuplicateKeyError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"signal with id={body.id!r} already exists"
+        ) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     assert isinstance(stored, SignalDoc)
     return _signal_to_out(stored)
 
@@ -376,9 +532,15 @@ async def update_signal(
         description=body.description,
     )
     try:
-        stored = await repo.update(updated)
+        stored = await repo.update(
+            updated, expected_updated_at=existing.updated_at
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     assert isinstance(stored, SignalDoc)
     return _signal_to_out(stored)
 
@@ -409,7 +571,14 @@ async def create_portfolio(body: PortfolioCreateIn, repo: RepoDep) -> PortfolioO
         legs=tuple(body.legs),
         rebalance=body.rebalance,
     )
-    stored = await repo.create(doc)
+    try:
+        stored = await repo.create(doc)
+    except pymongo.errors.DuplicateKeyError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"portfolio with id={body.id!r} already exists"
+        ) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     assert isinstance(stored, PortfolioDoc)
     return _portfolio_to_out(stored)
 
@@ -458,9 +627,15 @@ async def update_portfolio(
         rebalance=body.rebalance,
     )
     try:
-        stored = await repo.update(updated)
+        stored = await repo.update(
+            updated, expected_updated_at=existing.updated_at
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DocumentTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     assert isinstance(stored, PortfolioDoc)
     return _portfolio_to_out(stored)
 
