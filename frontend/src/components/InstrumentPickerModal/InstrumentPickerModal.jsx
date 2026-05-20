@@ -183,9 +183,15 @@ export default function InstrumentPickerModal({
     return () => { cancelled = true; };
   }, [isOpen]);
 
-  /* ── Load option roots when modal opens (only when options visible) ── */
+  /* ── Load option roots when modal opens ──
+   *
+   * Loaded whenever the Options tab is visible OR the Baskets tab is
+   * visible (the inline composer needs roots to render option-stream
+   * legs).  Skipped only when both are gated off.
+   */
   useEffect(() => {
-    if (!isOpen || !optionsVisible) return;
+    if (!isOpen) return;
+    if (!optionsVisible && !basketsVisible) return;
     let cancelled = false;
     setOptionRootsLoading(true);
     setOptionRootsError(null);
@@ -202,7 +208,7 @@ export default function InstrumentPickerModal({
         setOptionRootsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [isOpen, optionsVisible]);
+  }, [isOpen, optionsVisible, basketsVisible]);
 
   /* ── Load saved baskets when modal opens (only when baskets visible) ── */
   useEffect(() => {
@@ -475,6 +481,7 @@ export default function InstrumentPickerModal({
               basketList={basketList}
               basketsLoading={basketsLoading}
               basketsError={basketsError}
+              optionRoots={optionRoots}
               onEmit={handleEmitBasket}
             />
           ) : (
@@ -771,14 +778,91 @@ function OptionStreamPicker({ value, onChange, availableRoots, assetClass: _asse
 }
 
 /**
- * Make a fresh empty leg row.  Iter-1/2 single-contract shape — the
- * polymorphic-shape variant is introduced in the next commit (Wave
- * I-front-3 Phase C); this commit only extracts the picker sub-
- * components so the existing iter-1/2 vitests still pass (Sign 10
- * behaviour preservation for the extraction-only commit).
+ * Make a fresh empty leg row for the given basket asset class.
+ *
+ * Each leg = `{instrument: <Spot|Continuous|OptionStream>, weight}` —
+ * the polymorphic shape mirrored on the wire from `BasketLeg` in
+ * `tcg/core/api/_models.py`.  The composer never produces a strict-
+ * mismatched basket because the per-class branch hard-codes the
+ * `instrument.type` it emits (strict-mapping impossibility by
+ * construction; pinned by a sanity vitest).
  */
-function makeEmptyLeg() {
-  return { instrument_id: '', weight: 1, collection: '' };
+function makeEmptyLeg(assetClass) {
+  if (assetClass === 'future') {
+    return {
+      instrument: {
+        type: 'continuous',
+        collection: '',
+        adjustment: 'none',
+        cycle: null,
+        rollOffset: 0,
+        strategy: 'front_month',
+      },
+      weight: 1,
+    };
+  }
+  if (assetClass === 'option') {
+    return {
+      instrument: {
+        // Will be replaced by a full default by <OptionStreamPicker>
+        // once `availableRoots` resolves; leaving collection empty
+        // here keeps `isInstrumentRefConfigured` false until then.
+        type: 'option_stream',
+        collection: '',
+      },
+      weight: 1,
+    };
+  }
+  // equity / index — spot leg.
+  return {
+    instrument: {
+      type: 'spot',
+      collection: '',
+      instrument_id: '',
+    },
+    weight: 1,
+  };
+}
+
+/**
+ * True iff a leg's `instrument` sub-object is fully configured for its
+ * declared `type` — switched on the discriminator.  Mirrors the
+ * server-side per-class refs (`SpotInstrumentRef`,
+ * `ContinuousInstrumentRef`, `OptionStreamRef`).  Kept file-local
+ * (not imported from `blockShape.js`) so the composer's configuration
+ * check has no cross-page dependency; the inline-basket branch in
+ * `blockShape.js:isInputConfigured` carries the equivalent dispatch.
+ */
+function isInstrumentRefConfigured(inst) {
+  if (!inst || typeof inst !== 'object') return false;
+  if (inst.type === 'spot') {
+    return typeof inst.collection === 'string' && inst.collection.length > 0
+      && typeof inst.instrument_id === 'string' && inst.instrument_id.length > 0;
+  }
+  if (inst.type === 'continuous') {
+    return typeof inst.collection === 'string' && inst.collection.length > 0;
+  }
+  if (inst.type === 'option_stream') {
+    if (typeof inst.collection !== 'string' || inst.collection.length === 0) return false;
+    if (inst.option_type !== 'C' && inst.option_type !== 'P') return false;
+    if (!inst.maturity || typeof inst.maturity !== 'object') return false;
+    if (!inst.selection || typeof inst.selection !== 'object') return false;
+    if (typeof inst.stream !== 'string' || inst.stream.length === 0) return false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Map a basket asset_class to the leg's `instrument.type`.  The
+ * composer renderer enforces this mapping structurally (per-class
+ * branch hard-codes the emitted type), so a strict-mismatched basket
+ * is impossible to produce.
+ */
+function instrumentTypeForAssetClass(assetClass) {
+  if (assetClass === 'future') return 'continuous';
+  if (assetClass === 'option') return 'option_stream';
+  return 'spot'; // equity, index
 }
 
 /**
@@ -804,10 +888,14 @@ function BasketComposer({
   basketList,
   basketsLoading,
   basketsError,
+  optionRoots,
   onEmit,
 }) {
   const [assetClass, setAssetClass] = useState('future');
-  const [legs, setLegs] = useState(() => [makeEmptyLeg()]);
+  // Each leg is `{instrument: <discriminated>, weight}`.  See
+  // `makeEmptyLeg` for the per-class default shape.  This polymorphic
+  // shape mirrors `BasketLeg` on the BE wire.
+  const [legs, setLegs] = useState(() => [makeEmptyLeg('future')]);
   const [selectedSavedId, setSelectedSavedId] = useState('');
   // savedBasket: {id, name} | null. Non-null means current legs reflect a
   // saved basket (possibly with edits, see dirtySinceSave).
@@ -839,6 +927,8 @@ function BasketComposer({
   );
 
   // Load any missing instrument lists for the current asset class.
+  // (Only used by the spot typeahead — futures/options legs pick a
+  // collection rather than a per-contract symbol.)
   useEffect(() => {
     let cancelled = false;
     const missing = candidateCollections.filter(
@@ -862,9 +952,8 @@ function BasketComposer({
     return () => { cancelled = true; };
   }, [candidateCollections, instrumentsByCollection, extraInstrumentsByCollection]);
 
-  // Combined candidate-instrument list for the typeahead, scoped to the
-  // current asset class. Each entry carries `collection` so we can store
-  // it on the leg row (for display + reload, NOT emitted).
+  // Combined candidate-instrument list for the spot typeahead, scoped
+  // to the current asset class.  Each entry carries `collection`.
   const candidateInstruments = useMemo(() => {
     const out = [];
     for (const coll of candidateCollections) {
@@ -876,19 +965,27 @@ function BasketComposer({
     return out;
   }, [candidateCollections, allInstrumentsByCollection]);
 
-  // True when at least one leg has both a non-empty instrument_id AND a
-  // finite non-zero weight. CTAs stay disabled otherwise.
+  // True when at least one leg's instrument is fully configured AND
+  // weight is a finite non-zero number.  CTAs stay disabled otherwise.
   const hasConfiguredLeg = useMemo(
-    () => legs.some((l) => l.instrument_id && Number.isFinite(l.weight) && l.weight !== 0),
+    () => legs.some(
+      (l) => isInstrumentRefConfigured(l.instrument)
+        && Number.isFinite(l.weight) && l.weight !== 0,
+    ),
     [legs],
   );
 
-  // Subset of legs that are emit-ready (drop empty rows so a half-filled
-  // composer can still emit only the populated rows).
+  // Subset of legs that are emit-ready (drop empty rows so a half-
+  // filled composer can still emit only the populated rows).  The
+  // emitted leg shape matches the BE `BasketLeg` polymorphic wire
+  // contract: `{instrument: <sub-object>, weight}`.
   const emittableLegs = useMemo(
     () => legs
-      .filter((l) => l.instrument_id && Number.isFinite(l.weight) && l.weight !== 0)
-      .map((l) => ({ instrument_id: l.instrument_id, weight: l.weight })),
+      .filter(
+        (l) => isInstrumentRefConfigured(l.instrument)
+          && Number.isFinite(l.weight) && l.weight !== 0,
+      )
+      .map((l) => ({ instrument: l.instrument, weight: l.weight })),
     [legs],
   );
 
@@ -897,11 +994,11 @@ function BasketComposer({
     if (savedBasket) setDirtySinceSave(true);
   }, [savedBasket]);
 
-  /** Mutating handlers — each one marks the composer dirty when saved. */
-  const setLegInstrument = useCallback((idx, symbol, collection) => {
+  /** Replace a leg's `instrument` sub-object wholesale. */
+  const setLegInstrument = useCallback((idx, instrument) => {
     setLegs((prev) => {
       const next = prev.slice();
-      next[idx] = { ...next[idx], instrument_id: symbol, collection };
+      next[idx] = { ...next[idx], instrument };
       return next;
     });
     markDirtyIfSaved();
@@ -921,25 +1018,40 @@ function BasketComposer({
       const next = prev.slice();
       next.splice(idx, 1);
       // Never leave zero leg rows in the composer UI — fall back to a
-      // single empty row so the user always sees the editing affordance.
-      return next.length === 0 ? [makeEmptyLeg()] : next;
+      // single empty row of the current asset class so the user always
+      // sees the editing affordance.
+      return next.length === 0 ? [makeEmptyLeg(assetClass)] : next;
     });
     markDirtyIfSaved();
-  }, [markDirtyIfSaved]);
+  }, [markDirtyIfSaved, assetClass]);
 
   const addLeg = useCallback(() => {
-    setLegs((prev) => [...prev, makeEmptyLeg()]);
+    setLegs((prev) => [...prev, makeEmptyLeg(assetClass)]);
     markDirtyIfSaved();
-  }, [markDirtyIfSaved]);
+  }, [markDirtyIfSaved, assetClass]);
 
   /** Asset-class change: confirm if any leg is populated; clear legs. */
   const requestAssetClassChange = useCallback((next) => {
     if (next === assetClass) return;
-    const hasNonEmpty = legs.some((l) => l.instrument_id);
+    // A leg is "non-empty" if its instrument has at least the
+    // collection slot populated OR the spot instrument_id (the user
+    // started filling it in).  We treat the fresh-from-`makeEmptyLeg`
+    // shape as empty even though it has `type` set.
+    const hasNonEmpty = legs.some((l) => {
+      const inst = l.instrument || {};
+      if (inst.type === 'spot') return !!(inst.collection || inst.instrument_id);
+      if (inst.type === 'continuous') return !!inst.collection;
+      if (inst.type === 'option_stream') return !!inst.collection;
+      return false;
+    });
     if (hasNonEmpty) {
       setPendingAssetClass(next);
     } else {
       setAssetClass(next);
+      // Replace all empty legs with empty legs of the new asset class
+      // so the leg-state shape stays consistent with the renderer
+      // dispatch (strict-mapping impossibility by construction).
+      setLegs([makeEmptyLeg(next)]);
       markDirtyIfSaved();
     }
   }, [assetClass, legs, markDirtyIfSaved]);
@@ -947,7 +1059,7 @@ function BasketComposer({
   const confirmAssetClassChange = useCallback(() => {
     if (!pendingAssetClass) return;
     setAssetClass(pendingAssetClass);
-    setLegs([makeEmptyLeg()]);
+    setLegs([makeEmptyLeg(pendingAssetClass)]);
     setPendingAssetClass(null);
     markDirtyIfSaved();
   }, [pendingAssetClass, markDirtyIfSaved]);
@@ -967,23 +1079,31 @@ function BasketComposer({
     }
     const found = basketList.find((b) => b.id === basketId);
     if (!found) return;
-    // Best-effort asset_class detection from the first leg's collection.
-    let nextAssetClass = assetClass;
-    const firstLeg = (found.legs || [])[0];
-    if (firstLeg && typeof firstLeg.collection === 'string') {
-      const coll = firstLeg.collection;
-      if (coll.startsWith('FUT_')) nextAssetClass = 'future';
-      else if (coll.startsWith('OPT_')) nextAssetClass = 'option';
-      else if (coll === 'INDEX') nextAssetClass = 'index';
-      else if (coll === 'ETF') nextAssetClass = 'equity';
-    }
+    // BE persists `BasketDoc.asset_class` alongside the polymorphic
+    // legs — trust the envelope.  Fall back to the current selection
+    // if the envelope is missing (defensive; production rows always
+    // carry it).
+    const nextAssetClass = (
+      found.asset_class === 'future' || found.asset_class === 'option'
+        || found.asset_class === 'index' || found.asset_class === 'equity'
+    ) ? found.asset_class : assetClass;
     setAssetClass(nextAssetClass);
+    const expectedType = instrumentTypeForAssetClass(nextAssetClass);
     setLegs(
-      (found.legs || []).map((l) => ({
-        instrument_id: l.instrument_id || '',
-        weight: typeof l.weight === 'number' ? l.weight : 1,
-        collection: l.collection || '',
-      })),
+      (found.legs || []).map((l) => {
+        // `l.instrument` is opaque on the wire — adopt it verbatim
+        // when its type matches the envelope.  Strict-mismatched
+        // persisted legs would have been rejected by the BE CRUD
+        // validator on write; if one slips in we fall back to an
+        // empty leg of the right type.
+        const inst = (l && l.instrument && l.instrument.type === expectedType)
+          ? l.instrument
+          : makeEmptyLeg(nextAssetClass).instrument;
+        return {
+          instrument: inst,
+          weight: typeof l.weight === 'number' ? l.weight : 1,
+        };
+      }),
     );
     setSavedBasket({ id: found.id, name: found.name || found.id });
     setDirtySinceSave(false);
@@ -1030,9 +1150,8 @@ function BasketComposer({
       setSaveError('Name is required');
       return;
     }
-    // Generate a stable id from the name + timestamp; the BE may have
-    // its own id contract but createBasket(payload) takes the id we
-    // supply (matching the existing signal/portfolio CRUD shape).
+    // Generate a stable id from the name + timestamp; the BE may
+    // rewrite the id (we adopt whatever it confirms).
     const slug = trimmed
       .replace(/[^a-zA-Z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '')
@@ -1046,13 +1165,17 @@ function BasketComposer({
         id,
         name: trimmed,
         category: 'RESEARCH',
+        asset_class: assetClass,
+        // Polymorphic leg shape on the wire — `instrument` is the
+        // discriminated sub-object, `weight` is signed/non-zero.  The
+        // BE `BasketIn` Pydantic model validates the per-class strict
+        // mapping (asset_class → instrument.type).
         legs: legs
-          .filter((l) => l.instrument_id && Number.isFinite(l.weight) && l.weight !== 0)
-          .map((l) => ({
-            instrument_id: l.instrument_id,
-            collection: l.collection,
-            weight: l.weight,
-          })),
+          .filter(
+            (l) => isInstrumentRefConfigured(l.instrument)
+              && Number.isFinite(l.weight) && l.weight !== 0,
+          )
+          .map((l) => ({ instrument: l.instrument, weight: l.weight })),
       });
       // Use whatever id the BE confirms (it may rewrite ours).
       const finalId = (created && created.id) || id;
@@ -1066,7 +1189,7 @@ function BasketComposer({
     } finally {
       setSaving(false);
     }
-  }, [hasConfiguredLeg, saveName, legs]);
+  }, [hasConfiguredLeg, saveName, legs, assetClass]);
 
   const handleUnsave = useCallback(() => {
     setSavedBasket(null);
@@ -1202,8 +1325,11 @@ function BasketComposer({
           <BasketLegRow
             key={idx}
             leg={leg}
+            assetClass={assetClass}
             candidateInstruments={candidateInstruments}
-            onChangeInstrument={(symbol, collection) => setLegInstrument(idx, symbol, collection)}
+            candidateCollections={candidateCollections}
+            optionRoots={optionRoots}
+            onChangeInstrument={(instrument) => setLegInstrument(idx, instrument)}
             onChangeWeight={(w) => setLegWeight(idx, w)}
             onRemove={() => removeLeg(idx)}
             testId={`basket-leg-${idx}`}
@@ -1312,44 +1438,81 @@ function BasketComposer({
 }
 
 /**
- * Per-leg row: instrument typeahead + signed-weight input + remove button.
- * Pure UI — all mutation goes through callbacks. Sub-component of
- * BasketComposer (same file — Sign 6).
+ * Per-leg row — dispatches the per-instrument renderer by
+ * `assetClass`.  Sub-component of BasketComposer (Sign 6 — same file,
+ * no nested modal).
+ *
+ *   - equity / index → spot typeahead (iter-1/2 UX) → emits
+ *                      `{type:"spot", collection, instrument_id}`.
+ *   - future         → collection picker + <ContinuousSpecPicker> →
+ *                      emits `{type:"continuous", collection,
+ *                      adjustment, cycle, rollOffset,
+ *                      strategy:"front_month"}`.
+ *   - option         → <OptionStreamPicker> (wraps OptionStreamForm
+ *                      which has its own root selector) → emits the
+ *                      full `OptionStreamRef` shape.
+ *
+ * Weight + remove control are common to all three.
  */
 function BasketLegRow({
   leg,
+  assetClass,
   candidateInstruments,
+  candidateCollections,
+  optionRoots,
   onChangeInstrument,
   onChangeWeight,
   onRemove,
   testId,
 }) {
-  const [query, setQuery] = useState(leg.instrument_id);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-
-  // Keep typeahead text in sync when the leg's instrument changes via
-  // saved-basket load (external update).
-  useEffect(() => {
-    setQuery(leg.instrument_id);
-  }, [leg.instrument_id]);
-
-  const filtered = useMemo(() => {
-    const q = (query || '').trim().toUpperCase();
-    if (!q) return candidateInstruments.slice(0, 20);
-    return candidateInstruments
-      .filter((c) => c.symbol.toUpperCase().includes(q))
-      .slice(0, 20);
-  }, [query, candidateInstruments]);
-
-  // Validation: weight must be finite and non-zero.
   const weightValid = Number.isFinite(leg.weight) && leg.weight !== 0;
+  const inst = leg.instrument || {};
+
+  // Per-renderer body.  All three end with the weight + remove
+  // controls so the layout stays consistent across asset classes.
+  let body;
+  if (inst.type === 'spot') {
+    body = (
+      <SpotLegPicker
+        leg={leg}
+        candidateInstruments={candidateInstruments}
+        onChangeInstrument={onChangeInstrument}
+        testId={testId}
+      />
+    );
+  } else if (inst.type === 'continuous') {
+    body = (
+      <ContinuousLegPicker
+        leg={leg}
+        candidateCollections={candidateCollections}
+        onChangeInstrument={onChangeInstrument}
+        testId={testId}
+      />
+    );
+  } else if (inst.type === 'option_stream') {
+    body = (
+      <OptionLegPicker
+        leg={leg}
+        optionRoots={optionRoots}
+        onChangeInstrument={onChangeInstrument}
+        testId={testId}
+      />
+    );
+  } else {
+    // Fallback — should be unreachable because every makeEmptyLeg
+    // branch sets `instrument.type` and the renderer dispatch above
+    // covers all three discriminants.
+    body = <div data-testid={`${testId}-unknown-type`}>Unsupported asset class</div>;
+  }
 
   return (
     <div
       data-testid={testId}
+      data-asset-class={assetClass}
+      data-instrument-type={inst.type || ''}
       style={{
         display: 'flex',
-        alignItems: 'center',
+        alignItems: inst.type === 'option_stream' ? 'flex-start' : 'center',
         gap: 8,
         padding: '6px 8px',
         border: '1px solid var(--border-primary)',
@@ -1358,73 +1521,7 @@ function BasketLegRow({
         position: 'relative',
       }}
     >
-      <div style={{ flex: 1, position: 'relative' }}>
-        <input
-          type="text"
-          className={styles.optionSelect}
-          style={{ width: '100%' }}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setShowSuggestions(true);
-            // Reset committed instrument until the user picks one — avoids
-            // emitting a typed-but-unconfirmed string as instrument_id.
-            if (leg.instrument_id) onChangeInstrument('', '');
-          }}
-          onFocus={() => setShowSuggestions(true)}
-          onBlur={() => {
-            // Delay so onClick on a suggestion has time to fire.
-            setTimeout(() => setShowSuggestions(false), 120);
-          }}
-          placeholder="Search instrument..."
-          data-testid={`${testId}-instrument-input`}
-        />
-        {showSuggestions && filtered.length > 0 && (
-          <ul
-            data-testid={`${testId}-suggestions`}
-            style={{
-              listStyle: 'none',
-              margin: 0,
-              padding: 0,
-              position: 'absolute',
-              top: '100%',
-              left: 0,
-              right: 0,
-              maxHeight: 180,
-              overflowY: 'auto',
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border-primary)',
-              borderRadius: 'var(--radius-sm)',
-              zIndex: 1100,
-            }}
-          >
-            {filtered.map((c) => (
-              <li
-                key={`${c.collection}-${c.symbol}`}
-                style={{
-                  padding: '4px 8px',
-                  cursor: 'pointer',
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: '0.8rem',
-                }}
-                role="button"
-                tabIndex={0}
-                onMouseDown={(e) => {
-                  // Use mousedown so it fires before the input's onBlur.
-                  e.preventDefault();
-                  setQuery(c.symbol);
-                  setShowSuggestions(false);
-                  onChangeInstrument(c.symbol, c.collection);
-                }}
-                data-testid={`${testId}-suggestion-${c.symbol}`}
-              >
-                <span>{c.symbol}</span>
-                <span style={{ marginLeft: 8, opacity: 0.6 }}>({c.collection})</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {body}
       <input
         type="number"
         step="any"
@@ -1456,6 +1553,174 @@ function BasketLegRow({
       >
         &#215;
       </button>
+    </div>
+  );
+}
+
+/**
+ * Spot leg picker — instrument typeahead.  Used for equity / index.
+ * Sub-component of <BasketLegRow> (in-file; Sign 6).
+ */
+function SpotLegPicker({ leg, candidateInstruments, onChangeInstrument, testId }) {
+  const inst = leg.instrument || {};
+  const [query, setQuery] = useState(inst.instrument_id || '');
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  // Keep typeahead text in sync when the leg's instrument changes
+  // via saved-basket load (external update).
+  useEffect(() => {
+    setQuery(inst.instrument_id || '');
+  }, [inst.instrument_id]);
+
+  const filtered = useMemo(() => {
+    const q = (query || '').trim().toUpperCase();
+    if (!q) return candidateInstruments.slice(0, 20);
+    return candidateInstruments
+      .filter((c) => c.symbol.toUpperCase().includes(q))
+      .slice(0, 20);
+  }, [query, candidateInstruments]);
+
+  return (
+    <div style={{ flex: 1, position: 'relative' }}>
+      <input
+        type="text"
+        className={styles.optionSelect}
+        style={{ width: '100%' }}
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setShowSuggestions(true);
+          // Reset committed instrument until the user picks one — avoids
+          // emitting a typed-but-unconfirmed string as instrument_id.
+          if (inst.instrument_id) {
+            onChangeInstrument({ type: 'spot', collection: '', instrument_id: '' });
+          }
+        }}
+        onFocus={() => setShowSuggestions(true)}
+        onBlur={() => {
+          // Delay so onClick on a suggestion has time to fire.
+          setTimeout(() => setShowSuggestions(false), 120);
+        }}
+        placeholder="Search instrument..."
+        data-testid={`${testId}-instrument-input`}
+      />
+      {showSuggestions && filtered.length > 0 && (
+        <ul
+          data-testid={`${testId}-suggestions`}
+          style={{
+            listStyle: 'none',
+            margin: 0,
+            padding: 0,
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            right: 0,
+            maxHeight: 180,
+            overflowY: 'auto',
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border-primary)',
+            borderRadius: 'var(--radius-sm)',
+            zIndex: 1100,
+          }}
+        >
+          {filtered.map((c) => (
+            <li
+              key={`${c.collection}-${c.symbol}`}
+              style={{
+                padding: '4px 8px',
+                cursor: 'pointer',
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: '0.8rem',
+              }}
+              role="button"
+              tabIndex={0}
+              onMouseDown={(e) => {
+                // Use mousedown so it fires before the input's onBlur.
+                e.preventDefault();
+                setQuery(c.symbol);
+                setShowSuggestions(false);
+                onChangeInstrument({
+                  type: 'spot',
+                  collection: c.collection,
+                  instrument_id: c.symbol,
+                });
+              }}
+              data-testid={`${testId}-suggestion-${c.symbol}`}
+            >
+              <span>{c.symbol}</span>
+              <span style={{ marginLeft: 8, opacity: 0.6 }}>({c.collection})</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Continuous (future) leg picker — collection select +
+ * <ContinuousSpecPicker>.  Sub-component of <BasketLegRow>.
+ *
+ * The future-asset-class leg references a continuous-rolled series of
+ * a futures collection (e.g., FUT_ES), not a specific contract.  The
+ * collection dropdown is scoped to FUT_* collections; the
+ * <ContinuousSpecPicker> sub-component (single source of truth shared
+ * with the existing futures drill-down) handles adjustment / cycle /
+ * rollOffset.
+ */
+function ContinuousLegPicker({ leg, candidateCollections, onChangeInstrument, testId }) {
+  const inst = leg.instrument || {};
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <select
+        className={styles.optionSelect}
+        style={{ width: '100%' }}
+        value={inst.collection || ''}
+        onChange={(e) => onChangeInstrument({
+          ...inst,
+          type: 'continuous',
+          collection: e.target.value,
+          strategy: 'front_month',
+        })}
+        data-testid={`${testId}-collection-select`}
+      >
+        <option value="">— pick a collection —</option>
+        {candidateCollections.map((c) => (
+          <option key={c} value={c}>{c}</option>
+        ))}
+      </select>
+      <ContinuousSpecPicker
+        value={{
+          type: 'continuous',
+          collection: inst.collection || '',
+          adjustment: inst.adjustment || 'none',
+          cycle: inst.cycle == null ? null : inst.cycle,
+          rollOffset: Number.isFinite(inst.rollOffset) ? inst.rollOffset : 0,
+          strategy: 'front_month',
+        }}
+        onChange={(next) => onChangeInstrument(next)}
+        availableCycles={undefined /* sub-component loads its own keyed off value.collection */}
+        assetClass="future"
+      />
+    </div>
+  );
+}
+
+/**
+ * Option leg picker — wraps <OptionStreamPicker> which in turn
+ * wraps the existing <OptionStreamForm>.  Sub-component of
+ * <BasketLegRow>.
+ */
+function OptionLegPicker({ leg, optionRoots, onChangeInstrument, testId }) {
+  const inst = leg.instrument || {};
+  return (
+    <div style={{ flex: 1, display: 'flex' }} data-testid={`${testId}-option-leg`}>
+      <OptionStreamPicker
+        value={inst.type === 'option_stream' ? inst : null}
+        onChange={(next) => onChangeInstrument(next)}
+        availableRoots={optionRoots}
+        assetClass="option"
+      />
     </div>
   );
 }
