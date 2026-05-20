@@ -753,11 +753,21 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
  *                     dispatch parity with ContinuousSpecPicker.
  */
 function OptionStreamPicker({ value, onChange, availableRoots, assetClass: _assetClass = 'option' }) {
+  // A "complete" value is one with maturity + selection + stream filled
+  // in — anything less and we let <OptionStreamForm> render against
+  // its own internal default (passing `null` triggers that path inside
+  // the form's useMemo guard).  Once the parent adopts the default via
+  // the effect below, subsequent renders pass the real value through.
+  const valueForForm = (
+    value && value.type === 'option_stream'
+      && value.maturity && value.selection && value.stream
+  ) ? value : null;
+
   // Adopt a sensible default if the parent has not yet initialised the
   // leg's instrument shape.  We notify the parent so it picks up the
   // baseline immediately (no half-configured state hiding in the form).
   useEffect(() => {
-    if (value && value.type === 'option_stream' && value.collection) return;
+    if (valueForForm !== null) return;
     if (!availableRoots || availableRoots.length === 0) return;
     const next = buildDefaultOptionStream({ availableRoots });
     onChange(next);
@@ -769,7 +779,7 @@ function OptionStreamPicker({ value, onChange, availableRoots, assetClass: _asse
   return (
     <div data-testid="option-stream-picker" style={{ flex: 1, minWidth: 0 }}>
       <OptionStreamForm
-        value={value}
+        value={valueForForm}
         onChange={onChange}
         availableRoots={availableRoots || []}
       />
