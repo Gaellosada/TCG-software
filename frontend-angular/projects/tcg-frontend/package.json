@@ -1,0 +1,17 @@
+{
+  "name": "@tcg/frontend",
+  "version": "0.0.1",
+  "description": "TCG Angular feature library — consumed by host apps via git submodule/subtree (source feature module integration, NOT a published package).",
+  "private": true,
+  "peerDependencies": {
+    "@angular/common": "^17.0.0 || ^18.0.0 || ^19.0.0",
+    "@angular/core": "^17.0.0 || ^18.0.0 || ^19.0.0",
+    "@angular/forms": "^17.0.0 || ^18.0.0 || ^19.0.0",
+    "@angular/router": "^17.0.0 || ^18.0.0 || ^19.0.0",
+    "rxjs": "^7.5.0"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "sideEffects": false
+}
