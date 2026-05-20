@@ -5,6 +5,10 @@
  * Everything a host application can import from the library MUST be
  * re-exported here. Anything not listed below is considered internal
  * and may change without notice between waves.
+ *
+ * G4: every public symbol is prefixed `tcg-` / `Tcg` / `TCG_`. No
+ * back-compat exception — unprefixed aliases are not part of the
+ * public API.
  */
 
 // Core / wave 0 ---------------------------------------------------------
@@ -58,27 +62,17 @@ export type { TcgAutosaveRegistration } from './lib/services/tcg-autosave.servic
 export { TcgAbortableActionService } from './lib/services/tcg-abortable-action.service';
 
 // Chart subsystem ------------------------------------------------------
+// Chart implementation helpers (buildBaseLayout, getChartColors,
+// CHART_CONFIG, TRACE_COLORS, createVerticalLineTrace, hiddenOverlayAxis,
+// buildAllMarkerTraces, buildMarkerTrace, buildMarkerHovertemplate,
+// buildCsv, downloadCsv) are deliberately NOT re-exported. They are
+// library-internal — consumed by TcgChartComponent via relative imports.
 export { TcgChartComponent } from './lib/components/chart/tcg-chart.component';
 export { TcgPlotlyService } from './lib/components/chart/tcg-plotly.service';
-export type { TcgPlotlyModule, PlotlyModule } from './lib/components/chart/tcg-plotly.service';
-export {
-  buildBaseLayout,
-  getChartColors,
-  CHART_CONFIG,
-  TRACE_COLORS,
-  createVerticalLineTrace,
-  hiddenOverlayAxis,
-} from './lib/components/chart/chart-theme';
-export type { TcgChartPalette, ChartPalette } from './lib/components/chart/chart-theme';
-export { buildAllMarkerTraces, buildMarkerTrace, buildMarkerHovertemplate } from './lib/components/chart/chart-markers';
-export type {
-  TcgChartMarker,
-  TcgContractMeta,
-  ChartMarker,
-  ContractMeta,
-} from './lib/components/chart/chart-markers';
-export { buildCsv, downloadCsv } from './lib/components/chart/chart-csv';
-export type { TcgCsvTrace, CsvTrace } from './lib/components/chart/chart-csv';
+export type { TcgPlotlyModule } from './lib/components/chart/tcg-plotly.service';
+export type { TcgChartPalette } from './lib/components/chart/chart-theme';
+export type { TcgChartMarker, TcgContractMeta } from './lib/components/chart/chart-markers';
+export type { TcgCsvTrace } from './lib/components/chart/chart-csv';
 
 // Components -----------------------------------------------------------
 export { TcgIconComponent } from './lib/components/icon/tcg-icon.component';
