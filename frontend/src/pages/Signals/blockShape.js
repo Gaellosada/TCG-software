@@ -75,37 +75,84 @@ export function defaultBlock(section = 'entries') {
  *   - option_stream: requires collection + option_type + maturity + selection + stream.
  *   - basket:        two shapes (locked descriptor; see InstrumentPickerModal):
  *                    - {kind:'saved',   basket_id}                  → non-empty basket_id.
- *                    - {kind:'inline',  asset_class, legs}          → non-empty legs array,
- *                                                                     each leg has a non-empty
- *                                                                     instrument_id and a finite
- *                                                                     non-zero weight; asset_class
- *                                                                     must be one of the locked
+ *                    - {kind:'inline',  asset_class, legs}          → non-empty legs array;
+ *                                                                     each leg's `instrument`
+ *                                                                     sub-object is configured
+ *                                                                     per its `instrument.type`
+ *                                                                     (Spot / Continuous /
+ *                                                                     OptionStream — strict per-
+ *                                                                     class mapping with
+ *                                                                     asset_class enforced by
+ *                                                                     the BE).  Each leg also
+ *                                                                     needs a finite non-zero
+ *                                                                     weight.  asset_class must
+ *                                                                     be one of the locked
  *                                                                     literals.
  */
 const _BASKET_ASSET_CLASSES = ['future', 'option', 'index', 'equity'];
 
-export function isInputConfigured(input) {
-  if (!input || typeof input !== 'object') return false;
-  if (!input.id || typeof input.id !== 'string') return false;
-  const inst = input.instrument;
+// Per-asset-class strict mapping (mirrors `_ASSET_CLASS_TO_INSTRUMENT_TYPE`
+// in `tcg/core/api/_models.py` — the BE enforces the same map via
+// `BasketRefInline._check_strict_per_class_mapping`).
+const _BASKET_ASSET_CLASS_TO_INSTRUMENT_TYPE = {
+  equity: 'spot',
+  index: 'spot',
+  future: 'continuous',
+  option: 'option_stream',
+};
+
+/**
+ * True iff a leg's `instrument` sub-object is fully configured for its
+ * declared `type` (Spot / Continuous / OptionStream).  Switched on the
+ * discriminator so each branch verifies only the fields its server-
+ * side counterpart requires.
+ */
+function isInstrumentRefConfigured(inst) {
   if (!inst || typeof inst !== 'object') return false;
   if (inst.type === 'spot') {
     return typeof inst.collection === 'string' && inst.collection.length > 0
       && typeof inst.instrument_id === 'string' && inst.instrument_id.length > 0;
   }
   if (inst.type === 'continuous') {
-    return typeof inst.collection === 'string' && inst.collection.length > 0
-      && ['none', 'ratio', 'difference'].includes(inst.adjustment)
-      && (inst.cycle == null || typeof inst.cycle === 'string')
-      && Number.isFinite(inst.rollOffset)
-      && inst.strategy === 'front_month';
+    // Adjustment / cycle / rollOffset all have BE-side defaults; we
+    // only require `collection` here (matches the BE
+    // ContinuousInstrumentRef Pydantic — only `type` and `collection`
+    // are required).
+    return typeof inst.collection === 'string' && inst.collection.length > 0;
   }
   if (inst.type === 'option_stream') {
     return !!(typeof inst.collection === 'string' && inst.collection.length > 0
-      && ['C', 'P'].includes(inst.option_type)
+      && (inst.option_type === 'C' || inst.option_type === 'P')
       && inst.maturity && typeof inst.maturity === 'object' && typeof inst.maturity.kind === 'string'
       && inst.selection && typeof inst.selection === 'object' && typeof inst.selection.kind === 'string'
       && typeof inst.stream === 'string' && inst.stream.length > 0);
+  }
+  return false;
+}
+
+export function isInputConfigured(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (!input.id || typeof input.id !== 'string') return false;
+  const inst = input.instrument;
+  if (!inst || typeof inst !== 'object') return false;
+  if (inst.type === 'spot' || inst.type === 'continuous' || inst.type === 'option_stream') {
+    // Top-level instrument check — same dispatch as the basket-leg
+    // helper (DRY).  The continuous variant at the top level still
+    // requires the full adjustment/cycle/rollOffset/strategy spec
+    // because the picker emits those fields together.
+    if (inst.type === 'spot') {
+      return typeof inst.collection === 'string' && inst.collection.length > 0
+        && typeof inst.instrument_id === 'string' && inst.instrument_id.length > 0;
+    }
+    if (inst.type === 'continuous') {
+      return typeof inst.collection === 'string' && inst.collection.length > 0
+        && ['none', 'ratio', 'difference'].includes(inst.adjustment)
+        && (inst.cycle == null || typeof inst.cycle === 'string')
+        && Number.isFinite(inst.rollOffset)
+        && inst.strategy === 'front_month';
+    }
+    // option_stream:
+    return isInstrumentRefConfigured(inst);
   }
   if (inst.type === 'basket') {
     if (inst.kind === 'saved') {
@@ -114,9 +161,16 @@ export function isInputConfigured(input) {
     if (inst.kind === 'inline') {
       if (!_BASKET_ASSET_CLASSES.includes(inst.asset_class)) return false;
       if (!Array.isArray(inst.legs) || inst.legs.length === 0) return false;
+      const expectedType = _BASKET_ASSET_CLASS_TO_INSTRUMENT_TYPE[inst.asset_class];
       for (const leg of inst.legs) {
         if (!leg || typeof leg !== 'object') return false;
-        if (typeof leg.instrument_id !== 'string' || leg.instrument_id.length === 0) return false;
+        // Each leg = `{instrument: <discriminated>, weight}` (iter-3
+        // polymorphic shape — mirrors `BasketLeg` on the BE wire).
+        if (!isInstrumentRefConfigured(leg.instrument)) return false;
+        // Strict per-class mapping — the BE rejects mismatches with
+        // 422; the FE refuses to call the basket "configured" until
+        // the renderer has emitted the right `instrument.type`.
+        if (leg.instrument.type !== expectedType) return false;
         if (!Number.isFinite(leg.weight) || leg.weight === 0) return false;
       }
       return true;
