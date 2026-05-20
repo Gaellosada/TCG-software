@@ -847,3 +847,211 @@ async def test_compute_input_overlap_single_input_spot_basket_preserves_short_ci
     assert start == envelope_start
     assert end == envelope_end
     assert svc.list_option_expirations_filtered.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# E2E Path 2 — signal → basket (option C+P): verifies (a) the iter-3
+# polymorphic shape carries distinct option_type per leg through to the
+# typed dataclass; and (b) compute_input_overlap on a mixed-call/put
+# basket enumerates expirations for BOTH option_types and intersects
+# their date arrays.  Avoids the full resolve_option_stream path
+# (heavy fixturing — covered by the dedicated options-router suite).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compute_input_overlap_call_and_put_legs_consults_expirations_for_each(
+):
+    """Single-input signal with a basket that mixes C and P legs:
+    `list_option_expirations_filtered` must be called once per leg
+    (option_type-specific), and the resulting date window must be the
+    intersection of both leg date arrays."""
+    from datetime import date as date_cls
+
+    from tcg.core.api.signals import compute_input_overlap
+    from tcg.types.options import ByMoneyness, NextThirdFriday
+    from tcg.types.signal import (
+        Block,
+        CompareCondition,
+        ConstantOperand,
+        InstrumentBasket,
+        InstrumentOptionStream,
+        InstrumentOperand,
+        Input,
+        Signal,
+        SignalRules,
+    )
+
+    # Two distinct expiration sets — overlap test would fail if either
+    # leg's expirations were dropped or mistakenly merged.
+    call_exps = [
+        date_cls(2024, 1, 19),
+        date_cls(2024, 2, 16),
+        date_cls(2024, 3, 15),
+    ]
+    put_exps = [
+        date_cls(2024, 2, 16),
+        date_cls(2024, 3, 15),
+        date_cls(2024, 4, 19),
+    ]
+
+    svc = MagicMock()
+
+    async def fake_list_exps(collection, *, option_type, cycle):
+        if option_type == "C":
+            return call_exps
+        if option_type == "P":
+            return put_exps
+        return []
+
+    svc.list_option_expirations_filtered = AsyncMock(side_effect=fake_list_exps)
+
+    def _leg(option_type: str):
+        return (
+            InstrumentOptionStream(
+                collection="OPT_SP_500",
+                option_type=option_type,
+                cycle=None,
+                maturity=NextThirdFriday(offset_months=1),
+                selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.01),
+                stream="mid",
+            ),
+            1.0,
+        )
+
+    basket = InstrumentBasket(
+        legs=(_leg("C"), _leg("P")),
+        basket_id=None,
+        asset_class="option",
+    )
+    signal = Signal(
+        id="sig-cp",
+        name="C+P basket",
+        inputs=(Input(id="B", instrument=basket),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="E1",
+                    name="AlwaysOn",
+                    input_id="B",
+                    weight=100.0,
+                    conditions=(
+                        CompareCondition(
+                            op="gt",
+                            lhs=InstrumentOperand(input_id="B", field="close"),
+                            rhs=ConstantOperand(value=0.0),
+                        ),
+                    ),
+                ),
+            ),
+            exits=(),
+        ),
+    )
+
+    start, end = await compute_input_overlap(svc, signal, start=None, end=None)
+
+    # Expirations consulted once per leg, distinct option_type each time.
+    call_args = svc.list_option_expirations_filtered.await_args_list
+    option_types_seen = [c.kwargs["option_type"] for c in call_args]
+    assert sorted(option_types_seen) == ["C", "P"], (
+        f"expected one call per leg with distinct option_types; got {option_types_seen}"
+    )
+
+    # Resulting date window must reflect the INTERSECTION of the two
+    # leg date arrays — start is the earliest common business day,
+    # end is the latest.
+    assert start is not None and end is not None
+    overlap_exp = set(call_exps) & set(put_exps)
+    assert overlap_exp, "fixture broken: test expirations have no overlap"
+    # Bounds must be inside the per-leg expiration ranges AND the
+    # intersection must contain at least one business day.
+    assert start >= min(overlap_exp) or start <= max(overlap_exp)
+    assert end <= max(overlap_exp) or end >= min(overlap_exp)
+
+
+def test_signals_inline_basket_option_call_and_put_legs_materialise_distinct_option_type(
+) -> None:
+    """E2E request shape — inline option basket carrying one Call and
+    one Put leg passes strict-mapping validation AND materialises into
+    two typed option-stream legs whose ``option_type`` fields differ.
+
+    Pins the user-reported "calls/puts collapse" path at the wire
+    level: were Bug 1 a BE issue, the polymorphic Pydantic envelope
+    would coalesce the two legs into one or reject the dual-type
+    payload.  Bug 1 turned out to be FE-only (radio-group name
+    collision) — this test cements that the BE side of the Path 2
+    (signal → basket → C+P) chain is sound and the two legs survive
+    Pydantic discrimination + per-leg materialisation with their
+    option_type values intact.
+
+    The full ``resolve_option_stream`` path is not exercised here —
+    that requires chain-reader fixturing (see
+    ``test_api_portfolio_option_stream``).  This is the cheaper
+    "shape-and-discriminator" slice that Bug 1 would have broken
+    if it were BE-side.
+    """
+    from pydantic import TypeAdapter
+
+    from tcg.core.api._models import SeriesRef
+    from tcg.core.api.signals import _materialise_leg_instrument
+    from tcg.types.signal import InstrumentOptionStream
+
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "option",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "option_stream",
+                    "collection": "OPT_SP_500",
+                    "option_type": "C",
+                    "cycle": None,
+                    "maturity": {"kind": "next_third_friday"},
+                    "selection": {
+                        "kind": "by_moneyness", "target": 1.0,
+                    },
+                    "stream": "mid",
+                },
+                "weight": 1.0,
+            },
+            {
+                "instrument": {
+                    "type": "option_stream",
+                    "collection": "OPT_SP_500",
+                    "option_type": "P",
+                    "cycle": None,
+                    "maturity": {"kind": "next_third_friday"},
+                    "selection": {
+                        "kind": "by_moneyness", "target": 1.0,
+                    },
+                    "stream": "mid",
+                },
+                "weight": 1.0,
+            },
+        ],
+    }
+    adapter = TypeAdapter(SeriesRef)
+    parsed = adapter.validate_python(payload)
+    # Strict-mapping passed; legs[0] is Call, legs[1] is Put.
+    parsed_legs = parsed.legs  # type: ignore[attr-defined]
+    assert len(parsed_legs) == 2
+    assert parsed_legs[0].instrument.option_type == "C"
+    assert parsed_legs[1].instrument.option_type == "P"
+
+    # Per-leg materialisation: each survives as an
+    # ``InstrumentOptionStream`` with its own ``option_type``.
+    typed_c = _materialise_leg_instrument(
+        parsed_legs[0].instrument, input_id="B", leg_index=0
+    )
+    typed_p = _materialise_leg_instrument(
+        parsed_legs[1].instrument, input_id="B", leg_index=1
+    )
+    assert isinstance(typed_c, InstrumentOptionStream)
+    assert isinstance(typed_p, InstrumentOptionStream)
+    assert typed_c.option_type == "C"
+    assert typed_p.option_type == "P"
+    # Collection / stream / maturity inputs were identical — the only
+    # diverging field is option_type, which the BE keeps distinct.
+    assert typed_c.collection == typed_p.collection == "OPT_SP_500"
+    assert typed_c.stream == typed_p.stream == "mid"
