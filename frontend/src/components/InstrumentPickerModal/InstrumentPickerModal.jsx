@@ -797,9 +797,21 @@ function OptionStreamPicker({ value, onChange, availableRoots, assetClass: _asse
  * `instrument.type` it emits (strict-mapping impossibility by
  * construction; pinned by a sanity vitest).
  */
+// Monotonic counter for per-leg internal ids.  Used in `makeEmptyLeg`
+// so each leg carries a stable React key independent of its array
+// index — protects against the class of state-share bug Bug 1 exhibits
+// when middle legs are removed and subsequent legs shift index.
+// Internal-only: stripped on emit (see `emittableLegs`).
+let _legIdCounter = 0;
+function nextLegId() {
+  _legIdCounter += 1;
+  return `leg-${_legIdCounter}`;
+}
+
 function makeEmptyLeg(assetClass) {
   if (assetClass === 'future') {
     return {
+      __id: nextLegId(),
       instrument: {
         type: 'continuous',
         collection: '',
@@ -813,6 +825,7 @@ function makeEmptyLeg(assetClass) {
   }
   if (assetClass === 'option') {
     return {
+      __id: nextLegId(),
       instrument: {
         // Will be replaced by a full default by <OptionStreamPicker>
         // once `availableRoots` resolves; leaving collection empty
@@ -825,6 +838,7 @@ function makeEmptyLeg(assetClass) {
   }
   // equity / index — spot leg.
   return {
+    __id: nextLegId(),
     instrument: {
       type: 'spot',
       collection: '',
@@ -1110,6 +1124,7 @@ function BasketComposer({
           ? l.instrument
           : makeEmptyLeg(nextAssetClass).instrument;
         return {
+          __id: nextLegId(),
           instrument: inst,
           weight: typeof l.weight === 'number' ? l.weight : 1,
         };
@@ -1333,7 +1348,7 @@ function BasketComposer({
       <div data-testid="basket-legs" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {legs.map((leg, idx) => (
           <BasketLegRow
-            key={idx}
+            key={leg.__id || idx}
             leg={leg}
             assetClass={assetClass}
             candidateInstruments={candidateInstruments}
