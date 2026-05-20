@@ -72,6 +72,7 @@ from tcg.types.signal import (
     InRangeCondition,
     Input,
     InputInstrument,
+    InstrumentBasket,
     InstrumentContinuous,
     InstrumentOperand,
     InstrumentOptionStream,
@@ -189,6 +190,27 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
             repr(inst.selection),
             inst.stream,
         )
+    if isinstance(inst, InstrumentBasket):
+        # Kind-prefixed identities so a user-chosen basket_id of "inline"
+        # cannot collide with a structural-identity inline basket (Q2 of
+        # Wave-P decisions).
+        if inst.basket_id is not None:
+            return ("basket", "saved", inst.basket_id)
+        # Inline basket: structural identity built from asset_class +
+        # canonically-sorted per-leg (instrument-identity, weight) pairs.
+        # Recursing into ``_instrument_identity`` for each leg's
+        # instrument means two inline baskets with the same legs in any
+        # order share an identity, AND two baskets with the same legs
+        # but different adjustment / cycle / option-stream selection
+        # produce *different* identities (iter-3 requirement: full
+        # instrument spec hashed, not just instrument_id).
+        legs_key = tuple(
+            sorted(
+                (_instrument_identity(leg_inst), float(leg_weight))
+                for leg_inst, leg_weight in inst.legs
+            )
+        )
+        return ("basket", "inline", inst.asset_class, legs_key)
     raise SignalValidationError(f"unknown instrument kind: {inst!r}")
 
 
@@ -1024,6 +1046,16 @@ async def evaluate_signal(
                 price_label = f"{inp.instrument.instrument_id}.close"
             elif isinstance(inp.instrument, InstrumentOptionStream):
                 price_label = f"{inp.instrument.collection}.{inp.instrument.stream}"
+            elif isinstance(inp.instrument, InstrumentBasket):
+                # Baskets identify themselves by ``basket_id`` (saved) or
+                # by their declared ``asset_class`` (inline) so the price
+                # label remains stable across the polymorphic-leg shape.
+                if inp.instrument.basket_id is not None:
+                    price_label = f"basket:{inp.instrument.basket_id}.close"
+                else:
+                    price_label = (
+                        f"basket:inline[{inp.instrument.asset_class}].close"
+                    )
             else:
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]

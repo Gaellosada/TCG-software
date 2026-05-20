@@ -522,3 +522,451 @@ def test_generic_pymongo_error_on_update_returns_503(
     )
     assert r.status_code == 503, r.text
     assert r.json()["error_type"] == "persistence_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Basket CRUD tests — iter-3 polymorphic-leg shape.
+#
+# Each leg now carries an ``instrument`` sub-object discriminated on
+# ``instrument.type``.  The envelope declares ``asset_class``; the CRUD
+# validator enforces the strict per-class mapping.
+# ---------------------------------------------------------------------------
+
+
+def _spot_basket_leg(instrument_id: str, weight: float = 0.5) -> dict:
+    return {
+        "instrument": {
+            "type": "spot",
+            "collection": "ETF",
+            "instrument_id": instrument_id,
+        },
+        "weight": weight,
+    }
+
+
+def _continuous_basket_leg(
+    collection: str,
+    weight: float = 0.5,
+    *,
+    adjustment: str = "none",
+    cycle: str | None = None,
+) -> dict:
+    return {
+        "instrument": {
+            "type": "continuous",
+            "collection": collection,
+            "adjustment": adjustment,
+            "cycle": cycle,
+            "rollOffset": 0,
+            "strategy": "front_month",
+        },
+        "weight": weight,
+    }
+
+
+def _option_stream_basket_leg(weight: float = 1.0) -> dict:
+    return {
+        "instrument": {
+            "type": "option_stream",
+            "collection": "OPT_SP_500",
+            "option_type": "C",
+            "cycle": None,
+            "maturity": {"kind": "next_third_friday"},
+            "selection": {"kind": "by_moneyness", "target": 1.0},
+            "stream": "mid",
+        },
+        "weight": weight,
+    }
+
+
+def test_create_basket_equity_spot_legs_returns_201(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-1",
+            "name": "My Basket",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [
+                _spot_basket_leg("SPY", weight=0.6),
+                _spot_basket_leg("QQQ", weight=0.4),
+            ],
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["id"] == "basket-1"
+    assert body["asset_class"] == "equity"
+    assert len(body["legs"]) == 2
+    assert body["legs"][0]["instrument"]["type"] == "spot"
+    assert body["legs"][0]["instrument"]["instrument_id"] == "SPY"
+
+
+def test_create_basket_continuous_legs_returns_201(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-fut",
+            "name": "Futures",
+            "category": "RESEARCH",
+            "asset_class": "future",
+            "legs": [
+                _continuous_basket_leg(
+                    "FUT_VIX",
+                    weight=0.5,
+                    adjustment="ratio",
+                    cycle="HMUZ",
+                ),
+                _continuous_basket_leg(
+                    "FUT_ES", weight=0.5, adjustment="none", cycle="HMUZ"
+                ),
+            ],
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["asset_class"] == "future"
+    leg_types = [leg["instrument"]["type"] for leg in body["legs"]]
+    assert leg_types == ["continuous", "continuous"]
+
+
+def test_create_basket_option_stream_legs_returns_201(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-opt",
+            "name": "Options",
+            "category": "RESEARCH",
+            "asset_class": "option",
+            "legs": [_option_stream_basket_leg()],
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["asset_class"] == "option"
+    assert body["legs"][0]["instrument"]["type"] == "option_stream"
+
+
+def test_create_basket_strict_mismatch_future_with_spot_returns_400(
+    client: TestClient,
+) -> None:
+    """The CRUD validator rejects asset_class=future basket with a spot
+    leg — detail names the leg index and the expected type."""
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-mismatch",
+            "name": "Mismatch",
+            "category": "RESEARCH",
+            "asset_class": "future",
+            "legs": [_spot_basket_leg("SPY", weight=1.0)],
+        },
+    )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "leg 0" in detail
+    assert "continuous" in detail
+
+
+def test_create_basket_strict_mismatch_equity_with_continuous_returns_400(
+    client: TestClient,
+) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-mismatch-2",
+            "name": "Mismatch 2",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [_continuous_basket_leg("FUT_VIX", weight=1.0)],
+        },
+    )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "leg 0" in detail
+    assert "spot" in detail
+
+
+def test_create_basket_duplicate_same_instrument_and_weight_returns_400(
+    client: TestClient,
+) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-dup",
+            "name": "Dup",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [
+                _spot_basket_leg("SPY", weight=0.5),
+                _spot_basket_leg("SPY", weight=0.5),
+            ],
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "duplicate" in r.json()["detail"].lower()
+
+
+def test_create_basket_same_instrument_different_weights_succeeds(
+    client: TestClient,
+) -> None:
+    """Iter-3 dedup change: same instrument with DIFFERENT weights is
+    NOT a duplicate (used for layering)."""
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-layered",
+            "name": "Layered",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [
+                _spot_basket_leg("SPY", weight=0.3),
+                _spot_basket_leg("SPY", weight=0.5),
+            ],
+        },
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_create_basket_duplicate_id_returns_409(
+    client: TestClient, fake_repo: _FakeRepo
+) -> None:
+    fake_repo.raise_duplicate_on_create = True
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "basket-x",
+            "name": "X",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    assert r.status_code == 409, r.text
+
+
+def test_list_baskets_requires_category(client: TestClient) -> None:
+    r = client.get("/api/persistence/baskets")
+    assert r.status_code in (400, 422), r.text
+
+
+def test_list_baskets_by_category(client: TestClient) -> None:
+    r0 = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b1",
+            "name": "B1",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    assert r0.status_code == 201
+    r = client.get("/api/persistence/baskets?category=RESEARCH")
+    assert r.status_code == 200, r.text
+    assert any(b["id"] == "b1" for b in r.json())
+
+
+def test_get_basket_not_found_returns_404(client: TestClient) -> None:
+    r = client.get("/api/persistence/baskets/does-not-exist")
+    assert r.status_code == 404, r.text
+
+
+def test_get_basket_returns_basket(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-get",
+            "name": "G",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [_spot_basket_leg("SPY", weight=1.0)],
+        },
+    )
+    r = client.get("/api/persistence/baskets/b-get")
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "b-get"
+    assert r.json()["legs"][0]["instrument"]["instrument_id"] == "SPY"
+
+
+def test_update_basket_returns_200(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-upd",
+            "name": "Original",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    r = client.put(
+        "/api/persistence/baskets/b-upd",
+        json={
+            "name": "Updated",
+            "category": "DEV",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Updated"
+    assert r.json()["category"] == "DEV"
+
+
+def test_update_basket_strict_mismatch_returns_400(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-mixed-upd",
+            "name": "X",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    r = client.put(
+        "/api/persistence/baskets/b-mixed-upd",
+        json={
+            "name": "X",
+            "category": "RESEARCH",
+            "asset_class": "future",
+            "legs": [_spot_basket_leg("SPY", weight=1.0)],
+        },
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_update_basket_not_found_returns_404(client: TestClient) -> None:
+    r = client.put(
+        "/api/persistence/baskets/never-existed",
+        json={
+            "name": "x",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_archive_basket_returns_204(client: TestClient) -> None:
+    client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-del",
+            "name": "Del",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    r = client.delete("/api/persistence/baskets/b-del")
+    assert r.status_code == 204, r.text
+
+
+def test_archive_basket_not_found_returns_404(client: TestClient) -> None:
+    r = client.delete("/api/persistence/baskets/no-such-id")
+    assert r.status_code == 404, r.text
+
+
+def test_basket_extra_field_rejected(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-extra",
+            "name": "X",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+            "unexpected_field": "boom",
+        },
+    )
+    _expect_validation(r)
+
+
+def test_basket_leg_zero_weight_rejected(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-zero",
+            "name": "Zero Weight",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [
+                {
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "ETF",
+                        "instrument_id": "SPY",
+                    },
+                    "weight": 0.0,
+                }
+            ],
+        },
+    )
+    _expect_validation(r)
+
+
+def test_basket_leg_extra_field_at_leg_envelope_rejected(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-leg-extra",
+            "name": "X",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [
+                {
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "ETF",
+                        "instrument_id": "SPY",
+                    },
+                    "weight": 0.5,
+                    "junk": 1,  # extra at the leg envelope
+                }
+            ],
+        },
+    )
+    _expect_validation(r)
+
+
+def test_basket_out_extra_field_rejected() -> None:
+    """``BasketOut`` (response model) forbids extra fields."""
+    from pydantic import ValidationError
+
+    from tcg.core.api.persistence import BasketOut
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = {
+        "id": "b-out",
+        "type": "basket",
+        "name": "Out",
+        "category": "RESEARCH",
+        "asset_class": "equity",
+        "created_at": now,
+        "updated_at": now,
+        "legs": [],
+    }
+    BasketOut(**base)
+    with pytest.raises(ValidationError):
+        BasketOut(**base, surprise="boom")
+
+
+def test_basket_negative_weight_allowed(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "b-short",
+            "name": "Short Leg",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [
+                _spot_basket_leg("SPY", weight=1.0),
+                _spot_basket_leg("QQQ", weight=-0.5),
+            ],
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["legs"][1]["weight"] == -0.5

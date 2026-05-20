@@ -74,6 +74,7 @@ Error envelope unchanged: ``{error_type, message, traceback?}``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Literal
 
@@ -85,12 +86,18 @@ from pydantic import BaseModel, Field
 from tcg.core.api._adapters import build_roll_config
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
+    BasketLeg,
+    BasketRefInline,
+    BasketRefSaved,
     ContinuousInstrumentRef,
     OptionStreamRef,
+    SeriesRef,
     SpotInstrumentRef,
 )
+from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import error_response, get_market_data
+from tcg.persistence import WriteRepository
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import (
@@ -101,6 +108,7 @@ from tcg.engine.signal_exec import (
     evaluate_signal,
 )
 from tcg.types.errors import DataNotFoundError
+from tcg.types.persistence import BasketDoc, DocType
 from tcg.types.signal import (
     Block,
     CompareCondition,
@@ -111,6 +119,7 @@ from tcg.types.signal import (
     InRangeCondition,
     Input,
     InputInstrument,
+    InstrumentBasket,
     InstrumentContinuous,
     InstrumentOperand,
     InstrumentOptionStream,
@@ -136,10 +145,11 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 
 class _InputIn(BaseModel):
     id: str
-    # Pydantic v2 discriminated union on ``type``.
-    instrument: SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef = Field(
-        discriminator="type"
-    )
+    # Discriminated union shared with the indicators router, routed by
+    # the callable discriminator in ``_models.py``.  Tags collapse the
+    # outer ``type`` and inner ``kind`` (basket-branch only) into a
+    # single flat tag space, which keeps OpenAPI 3.0 emission valid.
+    instrument: SeriesRef
 
 
 class _OperandIn(BaseModel):
@@ -241,10 +251,292 @@ _CROSS_OPS = {"cross_above", "cross_below"}
 _ROLLING_OPS = {"rolling_gt", "rolling_lt"}
 
 
-def _parse_input(inp_in: _InputIn) -> Input:
+@dataclass
+class _ResolvedBasketInput:
+    """Internal carrier for a basket input that has been pre-resolved.
+
+    Replaces a :class:`_InputIn` whose ``instrument`` is a
+    :class:`BasketRef` once it has been turned into a typed
+    leaf-instrument leg list.  Each leg is an already-built
+    :class:`InstrumentSpot` / :class:`InstrumentContinuous` /
+    :class:`InstrumentOptionStream` paired with its signed weight.
+
+    For *saved* baskets the legs come from materialising the persisted
+    ``BasketDoc.legs`` polymorphic dicts; for *inline* baskets they
+    come from dispatching each :class:`BasketLeg` on the wire.  Both
+    shapes converge here so :func:`_parse_input` can build an
+    :class:`InstrumentBasket` without any I/O.
+
+    Exactly one of ``basket_id`` / ``asset_class`` is set:
+
+    * ``basket_id is not None and asset_class is None`` — saved basket.
+    * ``basket_id is None and asset_class is not None`` — inline basket.
+    """
+
+    id: str
+    legs: tuple[
+        tuple[
+            "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream",
+            float,
+        ],
+        ...,
+    ]
+    basket_id: str | None = None
+    asset_class: str | None = None
+
+
+def _materialise_leg_instrument(
+    instrument_ref: SpotInstrumentRef
+    | ContinuousInstrumentRef
+    | OptionStreamRef,
+    *,
+    input_id: str,
+    leg_index: int,
+) -> "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream":
+    """Build a typed leaf-instrument from a Pydantic instrument-ref.
+
+    Shared between inline-basket leg dispatch (wire-side
+    :class:`BasketLeg.instrument`) and saved-basket leg materialisation
+    (Mongo-side ``BasketDoc.legs[i]["instrument"]`` dicts re-validated
+    through the same Pydantic refs).  Mirrors the non-basket
+    :func:`_parse_input` branches.
+    """
+    if isinstance(instrument_ref, SpotInstrumentRef):
+        if not instrument_ref.collection or not instrument_ref.instrument_id:
+            raise SignalValidationError(
+                f"input {input_id!r}: basket leg {leg_index} spot "
+                f"instrument requires collection + instrument_id"
+            )
+        return InstrumentSpot(
+            collection=instrument_ref.collection,
+            instrument_id=instrument_ref.instrument_id,
+        )
+    if isinstance(instrument_ref, ContinuousInstrumentRef):
+        if not instrument_ref.collection:
+            raise SignalValidationError(
+                f"input {input_id!r}: basket leg {leg_index} continuous "
+                f"instrument requires collection"
+            )
+        return InstrumentContinuous(
+            collection=instrument_ref.collection,
+            adjustment=instrument_ref.adjustment,
+            cycle=instrument_ref.cycle,
+            roll_offset=int(instrument_ref.rollOffset),
+            strategy=instrument_ref.strategy,
+        )
+    if isinstance(instrument_ref, OptionStreamRef):
+        if not instrument_ref.collection:
+            raise SignalValidationError(
+                f"input {input_id!r}: basket leg {leg_index} option_stream "
+                f"instrument requires collection"
+            )
+        from tcg.core.api.options import (
+            _criterion_pydantic_to_dataclass,
+            _maturity_pydantic_to_dataclass,
+        )
+
+        maturity = _maturity_pydantic_to_dataclass(instrument_ref.maturity)
+        selection = _criterion_pydantic_to_dataclass(instrument_ref.selection)
+        return InstrumentOptionStream(
+            collection=instrument_ref.collection,
+            option_type=instrument_ref.option_type,
+            cycle=instrument_ref.cycle,
+            maturity=maturity,
+            selection=selection,
+            stream=instrument_ref.stream,
+        )
+    raise SignalValidationError(
+        f"input {input_id!r}: basket leg {leg_index} has unsupported "
+        f"instrument shape {type(instrument_ref).__name__!r}"
+    )
+
+
+def _validate_saved_basket_leg_against_asset_class(
+    *, asset_class: str, instrument_type: str, basket_id: str, leg_index: int
+) -> None:
+    """Mirror the strict per-class mapping on the saved-basket path.
+
+    Saved baskets are written via the CRUD route which already enforces
+    the mapping at write-time, but a basket created before the iter-3
+    schema would slip through; verifying again at resolve time keeps
+    the invariant locally checkable and surfaces re-save instructions
+    in the error envelope.
+    """
+    expected = {
+        "equity": "spot",
+        "index": "spot",
+        "future": "continuous",
+        "option": "option_stream",
+    }.get(asset_class)
+    if expected is None:
+        raise SignalValidationError(
+            f"basket {basket_id!r} leg {leg_index}: unsupported "
+            f"asset_class={asset_class!r}"
+        )
+    if instrument_type != expected:
+        raise SignalValidationError(
+            f"basket {basket_id!r} leg {leg_index}: asset_class="
+            f"{asset_class!r} requires instrument.type={expected!r}, "
+            f"got {instrument_type!r}"
+        )
+
+
+def _saved_basket_leg_to_typed(
+    leg_dict: dict,
+    *,
+    basket_id: str,
+    leg_index: int,
+    asset_class: str,
+) -> tuple[
+    "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream", float
+]:
+    """Materialise one persisted ``BasketDoc.legs[i]`` dict into a
+    ``(typed-instrument, weight)`` pair.
+
+    Re-validates the persisted ``instrument`` sub-dict through the
+    Pydantic instrument refs so we get the same field validation
+    saved-basket creates went through, then dispatches via
+    :func:`_materialise_leg_instrument`.
+    """
+    if not isinstance(leg_dict, dict):
+        raise SignalValidationError(
+            f"basket {basket_id!r} leg {leg_index}: persisted leg is "
+            f"not a dict ({type(leg_dict).__name__})"
+        )
+    instrument_payload = leg_dict.get("instrument")
+    weight = leg_dict.get("weight")
+    if instrument_payload is None or weight is None:
+        raise SignalValidationError(
+            f"basket {basket_id!r} leg {leg_index}: persisted leg is "
+            f"missing 'instrument' or 'weight' — re-save the basket"
+        )
+    inst_type = (
+        instrument_payload.get("type")
+        if isinstance(instrument_payload, dict)
+        else None
+    )
+    _validate_saved_basket_leg_against_asset_class(
+        asset_class=asset_class,
+        instrument_type=inst_type or "",
+        basket_id=basket_id,
+        leg_index=leg_index,
+    )
+    if inst_type == "spot":
+        instrument_ref = SpotInstrumentRef.model_validate(instrument_payload)
+    elif inst_type == "continuous":
+        instrument_ref = ContinuousInstrumentRef.model_validate(
+            instrument_payload
+        )
+    elif inst_type == "option_stream":
+        instrument_ref = OptionStreamRef.model_validate(instrument_payload)
+    else:
+        raise SignalValidationError(
+            f"basket {basket_id!r} leg {leg_index}: unsupported "
+            f"instrument.type={inst_type!r}"
+        )
+    typed_inst = _materialise_leg_instrument(
+        instrument_ref, input_id=f"saved:{basket_id}", leg_index=leg_index
+    )
+    return typed_inst, float(weight)
+
+
+async def _resolve_basket_inputs(
+    raw_inputs: list[_InputIn],
+    repo: WriteRepository,
+    svc: MarketDataService,
+) -> list[_InputIn | _ResolvedBasketInput]:
+    """Pre-resolve every basket ref into a typed-leg snapshot.
+
+    * Saved basket → fetch ``BasketDoc`` via ``repo``, dispatch each
+      persisted leg's ``instrument`` sub-dict through
+      :func:`_materialise_leg_instrument`.
+    * Inline basket → dispatch each :class:`BasketLeg` directly
+      through :func:`_materialise_leg_instrument` (no DB read).
+    * Non-basket inputs pass through untouched.
+
+    Short-circuit (Q6, preserved from iter 1): if no input has
+    ``kind == "saved"``, the repo is never consulted — inline-only
+    compute requests work even when the persistence layer is
+    unreachable.
+
+    Raises :class:`SignalValidationError` when a saved basket id is
+    unknown, when a saved basket has no legs, or when a leg's
+    persisted shape doesn't match the basket's declared
+    ``asset_class``.
+    """
+    # Short-circuit: avoid repo reads when no input is a saved basket.
+    any_saved = any(
+        isinstance(inp.instrument, BasketRefSaved) for inp in raw_inputs
+    )
+    _ = svc  # not consulted under the polymorphic-leg flow; kept on the
+    # signature so the saved-basket short-circuit invariant call site
+    # in tests doesn't shift.
+    out: list[_InputIn | _ResolvedBasketInput] = []
+    for inp in raw_inputs:
+        if isinstance(inp.instrument, BasketRefSaved):
+            assert any_saved  # repo must be live for at least one read
+            basket_id = inp.instrument.basket_id
+            doc = await repo.get_by_id(DocType.BASKET.value, basket_id)
+            if doc is None or not isinstance(doc, BasketDoc):
+                raise SignalValidationError(
+                    f"input {inp.id!r}: basket {basket_id!r} not found"
+                )
+            if not doc.legs:
+                raise SignalValidationError(
+                    f"input {inp.id!r}: basket {basket_id!r} has no legs"
+                )
+            typed_legs = tuple(
+                _saved_basket_leg_to_typed(
+                    leg,
+                    basket_id=basket_id,
+                    leg_index=i,
+                    asset_class=doc.asset_class,
+                )
+                for i, leg in enumerate(doc.legs)
+            )
+            out.append(
+                _ResolvedBasketInput(
+                    id=inp.id,
+                    basket_id=basket_id,
+                    legs=typed_legs,
+                )
+            )
+        elif isinstance(inp.instrument, BasketRefInline):
+            inline = inp.instrument
+            typed_legs = tuple(
+                (
+                    _materialise_leg_instrument(
+                        leg.instrument, input_id=inp.id, leg_index=i
+                    ),
+                    float(leg.weight),
+                )
+                for i, leg in enumerate(inline.legs)
+            )
+            out.append(
+                _ResolvedBasketInput(
+                    id=inp.id,
+                    legs=typed_legs,
+                    asset_class=inline.asset_class,
+                )
+            )
+        else:
+            out.append(inp)
+    return out
+
+
+def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
     iid = inp_in.id
     if not iid:
         raise SignalValidationError("input id must be non-empty")
+    # Pre-resolved basket — typed legs already materialised by
+    # ``_resolve_basket_inputs``.  No I/O performed here.
+    if isinstance(inp_in, _ResolvedBasketInput):
+        instrument: InputInstrument = InstrumentBasket(
+            legs=inp_in.legs,
+            basket_id=inp_in.basket_id,
+            asset_class=inp_in.asset_class,
+        )
+        return Input(id=iid, instrument=instrument)
     inst_in = inp_in.instrument
     if isinstance(inst_in, SpotInstrumentRef):
         if not inst_in.collection or not inst_in.instrument_id:
@@ -546,8 +838,18 @@ def _parse_blocks(
     return tuple(out)
 
 
-def parse_signal(raw: SignalIn) -> Signal:
-    inputs = tuple(_parse_input(i) for i in raw.inputs)
+def parse_signal(
+    raw: SignalIn,
+    *,
+    resolved_inputs: list[_InputIn | _ResolvedBasketInput] | None = None,
+) -> Signal:
+    """Parse a wire-shape :class:`SignalIn` into the dataclass :class:`Signal`.
+
+    When ``resolved_inputs`` is given it replaces ``raw.inputs`` — used by
+    :func:`compute_signal` to inject pre-resolved basket inputs.
+    """
+    input_list = resolved_inputs if resolved_inputs is not None else raw.inputs
+    inputs = tuple(_parse_input(i) for i in input_list)
     # Parse resets FIRST so we can collect their ids for cross-validating
     # entries' and exits' requires_reset_block_id bindings.
     resets = _parse_blocks(
@@ -580,6 +882,114 @@ def parse_signal(raw: SignalIn) -> Signal:
 # ---------------------------------------------------------------------------
 
 
+async def _date_array_for_leaf_instrument(
+    inst: "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream",
+    svc: MarketDataService,
+    *,
+    start: date | None,
+    end: date | None,
+    err_prefix: str,
+) -> npt.NDArray[np.int64]:
+    """Fetch the date array for a non-basket leaf instrument.
+
+    Shared between the top-level :func:`compute_input_overlap` loop and
+    its basket-leg recursion; mirrors exactly the per-type branches
+    that already lived inside the loop.
+    """
+    if isinstance(inst, InstrumentSpot):
+        try:
+            series = await svc.get_prices(
+                inst.collection,
+                inst.instrument_id,
+                start=start,
+                end=end,
+            )
+        except DataNotFoundError as exc:
+            raise SignalDataError(f"{err_prefix}: {exc}") from exc
+        if series is None:
+            raise SignalDataError(
+                f"{err_prefix}: instrument {inst.instrument_id!r} not "
+                f"found in {inst.collection!r}"
+            )
+        return series.dates
+    if isinstance(inst, InstrumentContinuous):
+        try:
+            roll_config = build_roll_config(
+                inst.adjustment, inst.cycle, inst.roll_offset
+            )
+        except ValueError as exc:
+            raise SignalDataError(f"{err_prefix}: {exc}") from exc
+        try:
+            cseries = await svc.get_continuous(
+                inst.collection, roll_config, start=start, end=end
+            )
+        except DataNotFoundError as exc:
+            raise SignalDataError(f"{err_prefix}: {exc}") from exc
+        if cseries is None:
+            raise SignalDataError(
+                f"{err_prefix}: continuous series unavailable for "
+                f"{inst.collection!r}"
+            )
+        return cseries.prices.dates
+    if isinstance(inst, InstrumentOptionStream):
+        from tcg.core.api._options_materialise import _business_dates_in_range
+        from tcg.data._utils import date_to_int
+
+        all_expirations = await svc.list_option_expirations_filtered(
+            inst.collection,
+            option_type=inst.option_type,
+            cycle=inst.cycle,
+        )
+        if not all_expirations:
+            raise SignalDataError(
+                f"{err_prefix}: no option expirations found for "
+                f"{inst.collection} {inst.option_type} cycle={inst.cycle}"
+            )
+        lo_date = min(all_expirations)
+        hi_date = max(all_expirations)
+        if start is not None:
+            lo_date = max(lo_date, start)
+        if end is not None:
+            hi_date = min(hi_date, end)
+        trade_dates = _business_dates_in_range(lo_date, hi_date)
+        if not trade_dates:
+            raise SignalDataError(
+                f"{err_prefix}: no business days in option date "
+                f"range [{lo_date}, {hi_date}]"
+            )
+        return np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
+    raise SignalDataError(
+        f"{err_prefix}: unsupported leaf instrument type "
+        f"{type(inst).__name__!r}"
+    )
+
+
+def _has_option_stream_dependency(
+    inst: "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream "
+          "| InstrumentBasket",
+) -> bool:
+    """True iff resolving this instrument requires an option-stream date
+    enumeration (which needs an explicit date window via
+    `_business_dates_in_range`).
+
+    The single-input short-circuit in ``compute_input_overlap`` MUST
+    fall through into the per-input loop for these — otherwise the
+    fetcher inherits ``start=end=None`` from the envelope and raises
+    "option_stream requires explicit start/end dates" at the leaf
+    resolver (`signals.py` option_stream branch).  Spot and continuous
+    legs do not need this because their date axis is borrowed from the
+    underlying price series.
+    """
+    if isinstance(inst, InstrumentOptionStream):
+        return True
+    if isinstance(inst, InstrumentBasket):
+        return any(
+            isinstance(leg_inst, InstrumentOptionStream)
+            for leg_inst, _w in inst.legs
+        )
+    return False
+
+
 async def compute_input_overlap(
     svc: MarketDataService,
     signal: Signal,
@@ -593,80 +1003,60 @@ async def compute_input_overlap(
     defined — analogous to the portfolio page's aligned-price logic.
     """
     if len(signal.inputs) <= 1:
-        return start, end
+        # Preserve the short-circuit for the spot/continuous case
+        # (they don't need pre-resolved dates — the leaf resolver
+        # borrows the date axis from the price series itself).  But
+        # fall through into the loop when the single input has an
+        # option-stream dependency, because the option_stream resolver
+        # needs an explicit (start, end) window derived from available
+        # expirations — and Bug 2 surfaces when the envelope dates are
+        # ``None`` (SignalsPage has no date-range UI today).
+        if not signal.inputs or not _has_option_stream_dependency(
+            signal.inputs[0].instrument
+        ):
+            return start, end
+        # else: fall through to the per-input loop, which clamps via
+        # `_date_array_for_leaf_instrument` (option_stream branch) /
+        # the basket recursion at lines below.
 
     date_arrays: list[npt.NDArray[np.int64]] = []
     for inp in signal.inputs:
         inst = inp.instrument
-        match type(inst).__name__:
-            case "InstrumentSpot":
-                try:
-                    series = await svc.get_prices(
-                        inst.collection,  # type: ignore[union-attr]
-                        inst.instrument_id,  # type: ignore[union-attr]
-                        start=start,
-                        end=end,
-                    )
-                except DataNotFoundError as exc:
-                    raise SignalDataError(f"input {inp.id!r}: {exc}") from exc
-                date_arrays.append(series.dates)
-            case "InstrumentContinuous":
-                try:
-                    roll_config = build_roll_config(
-                        inst.adjustment,  # type: ignore[union-attr]
-                        inst.cycle,  # type: ignore[union-attr]
-                        inst.roll_offset,  # type: ignore[union-attr]
-                    )
-                except ValueError as exc:
-                    raise SignalDataError(f"input {inp.id!r}: {exc}") from exc
-                try:
-                    cseries = await svc.get_continuous(
-                        inst.collection,  # type: ignore[union-attr]
-                        roll_config,
-                        start=start,
-                        end=end,
-                    )
-                except DataNotFoundError as exc:
-                    raise SignalDataError(f"input {inp.id!r}: {exc}") from exc
-                date_arrays.append(cseries.prices.dates)
-            case "InstrumentOptionStream":
-                # Cheap pre-flight: enumerate business days between
-                # the earliest and latest available expirations, clamped
-                # to the caller's [start, end] bounds.  No materialisation
-                # — the actual resolver runs later inside the fetcher.
-                from tcg.core.api._options_materialise import _business_dates_in_range
-                from tcg.data._utils import date_to_int
-
-                all_expirations = await svc.list_option_expirations_filtered(
-                    inst.collection,  # type: ignore[union-attr]
-                    option_type=inst.option_type,  # type: ignore[union-attr]
-                    cycle=inst.cycle,  # type: ignore[union-attr]
+        if isinstance(inst, InstrumentBasket):
+            # Intersection of leg date arrays.  Each leg's
+            # ``instrument`` is one of the three leaf types, so we can
+            # recurse into the same per-type date-array helper used
+            # by the top-level branches.
+            basket_dates: npt.NDArray[np.int64] | None = None
+            for leg_index, (leg_inst, _leg_weight) in enumerate(inst.legs):
+                leg_dates = await _date_array_for_leaf_instrument(
+                    leg_inst,
+                    svc,
+                    start=start,
+                    end=end,
+                    err_prefix=f"input {inp.id!r} basket leg {leg_index}",
                 )
-                if not all_expirations:
-                    raise SignalDataError(
-                        f"input {inp.id!r}: no option expirations found for "
-                        f"{inst.collection} {inst.option_type} "  # type: ignore[union-attr]
-                        f"cycle={inst.cycle}"  # type: ignore[union-attr]
+                if basket_dates is None:
+                    basket_dates = leg_dates
+                else:
+                    basket_dates = np.intersect1d(
+                        basket_dates, leg_dates, assume_unique=False
                     )
-                lo_date = min(all_expirations)
-                hi_date = max(all_expirations)
-                # Clamp to caller's date bounds if provided.
-                if start is not None:
-                    lo_date = max(lo_date, start)
-                if end is not None:
-                    hi_date = min(hi_date, end)
-                trade_dates = _business_dates_in_range(lo_date, hi_date)
-                if not trade_dates:
-                    raise SignalDataError(
-                        f"input {inp.id!r}: no business days in option "
-                        f"date range [{lo_date}, {hi_date}]"
-                    )
-                dates_arr = np.array(
-                    [date_to_int(d) for d in trade_dates], dtype=np.int64
+            if basket_dates is None or basket_dates.size == 0:
+                raise SignalDataError(
+                    f"input {inp.id!r}: basket has no overlapping dates"
                 )
-                date_arrays.append(dates_arr)
-            case _:
-                raise SignalDataError(f"input {inp.id!r}: unsupported instrument type")
+            date_arrays.append(basket_dates)
+        else:
+            date_arrays.append(
+                await _date_array_for_leaf_instrument(
+                    inst,
+                    svc,
+                    start=start,
+                    end=end,
+                    err_prefix=f"input {inp.id!r}",
+                )
+            )
 
     # Intersect all date arrays to find the common range.
     common = date_arrays[0]
@@ -793,6 +1183,64 @@ def make_signal_fetcher(
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
             return dates_arr, values
 
+        if isinstance(instrument, InstrumentBasket):
+            # Weighted combination of leg series.  Each leg is a typed
+            # leaf instrument paired with its weight; we recurse into
+            # ``fetch`` for the leg's instrument so spot / continuous /
+            # option_stream legs all reuse the existing per-type
+            # resolvers without any duplicated logic.
+            #
+            # ``basket_desc`` is what appears in error messages — saved
+            # baskets identify themselves by their persisted id; inline
+            # baskets have no id, so they self-identify by asset class.
+            basket_desc = (
+                repr(instrument.basket_id)
+                if instrument.basket_id is not None
+                else f"inline[{instrument.asset_class}]"
+            )
+            weighted_dates: npt.NDArray[np.int64] | None = None
+            weighted_values: npt.NDArray[np.float64] | None = None
+
+            for leg_index, (leg_inst, leg_weight_raw) in enumerate(
+                instrument.legs
+            ):
+                leg_weight = float(leg_weight_raw)
+                try:
+                    leg_dates, leg_values = await fetch(leg_inst, field)
+                except SignalDataError as exc:
+                    # Re-raise with a basket-leg-prefixed message so
+                    # downstream error envelopes carry leg context.
+                    raise SignalDataError(
+                        f"basket {basket_desc} leg {leg_index}: {exc}"
+                    ) from exc
+
+                if weighted_dates is None:
+                    weighted_dates = leg_dates
+                    weighted_values = leg_weight * leg_values
+                else:
+                    common, idx_a, idx_b = np.intersect1d(
+                        weighted_dates,
+                        leg_dates,
+                        assume_unique=True,
+                        return_indices=True,
+                    )
+                    if common.size == 0:
+                        raise SignalDataError(
+                            f"basket {basket_desc}: no overlapping "
+                            f"dates between legs"
+                        )
+                    weighted_dates = common
+                    assert weighted_values is not None
+                    weighted_values = (
+                        weighted_values[idx_a] + leg_weight * leg_values[idx_b]
+                    )
+
+            if weighted_dates is None or weighted_values is None:
+                raise SignalDataError(
+                    f"basket {basket_desc} has no legs"
+                )
+            return weighted_dates, weighted_values
+
         # continuous
         try:
             roll_config = build_roll_config(
@@ -839,6 +1287,30 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             "collection": inst.collection,
             "instrument_id": inst.instrument_id,
         }
+    if isinstance(inst, InstrumentBasket):
+        # Kind-discriminated emission so the FE can re-render either
+        # shape from the response.  Each leg's ``instrument`` is emitted
+        # via the same per-type payload-builder used by the top-level
+        # branches above — guarantees the wire round-trip matches the
+        # leg's input shape exactly.  Saved baskets carry ``basket_id``;
+        # inline baskets carry ``asset_class``.
+        legs_payload = [
+            {"instrument": _instrument_payload(leg_inst), "weight": float(w)}
+            for leg_inst, w in inst.legs
+        ]
+        if inst.basket_id is not None:
+            return {
+                "type": "basket",
+                "kind": "saved",
+                "basket_id": inst.basket_id,
+                "legs": legs_payload,
+            }
+        return {
+            "type": "basket",
+            "kind": "inline",
+            "asset_class": inst.asset_class,
+            "legs": legs_payload,
+        }
     if isinstance(inst, InstrumentOptionStream):
         from dataclasses import asdict
 
@@ -865,6 +1337,7 @@ def _instrument_payload(inst: InputInstrument) -> dict:
 async def compute_signal(
     body: SignalComputeRequest,
     svc: MarketDataService = Depends(get_market_data),
+    repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
     """Evaluate a v4 Signal and return per-input positions + events."""
 
@@ -874,7 +1347,10 @@ async def compute_signal(
         return error_response("validation", str(exc))
 
     try:
-        signal = parse_signal(body.spec)
+        resolved_inputs = await _resolve_basket_inputs(
+            body.spec.inputs, repo, svc
+        )
+        signal = parse_signal(body.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
 

@@ -6,6 +6,23 @@ import { isInputConfigured } from './blockShape';
 import styles from './InputsPanel.module.css';
 
 /**
+ * One-line summary of a single basket leg's inner instrument. Shared
+ * between the inline-basket label and any other site that wants a
+ * short per-leg tag.
+ */
+function basketLegLabel(leg) {
+  const inst = leg && leg.instrument;
+  if (!inst) return '?';
+  if (inst.type === 'spot') return inst.instrument_id || inst.collection || '?';
+  if (inst.type === 'continuous') return inst.collection || '?';
+  if (inst.type === 'option_stream') {
+    const parts = [inst.collection, inst.option_type].filter(Boolean);
+    return parts.length > 0 ? parts.join('·') : '?';
+  }
+  return '?';
+}
+
+/**
  * Format an instrument value as a human-readable label for the trigger button.
  */
 function instrumentLabel(instrument) {
@@ -15,6 +32,22 @@ function instrumentLabel(instrument) {
   }
   if (instrument.type === 'spot' && instrument.collection && instrument.instrument_id) {
     return `${instrument.collection} / ${instrument.instrument_id}`;
+  }
+  if (instrument.type === 'option_stream' && instrument.collection) {
+    const parts = [instrument.collection, instrument.option_type].filter(Boolean);
+    return parts.join(' · ');
+  }
+  if (instrument.type === 'basket') {
+    if (instrument.kind === 'saved' && instrument.basket_id) {
+      return `Basket: ${instrument.basket_id}`;
+    }
+    if (
+      instrument.kind === 'inline' &&
+      Array.isArray(instrument.legs) &&
+      instrument.legs.length > 0
+    ) {
+      return `Basket: ${instrument.legs.map(basketLegLabel).join(', ')}`;
+    }
   }
   return null;
 }
@@ -211,6 +244,7 @@ function InputsPanel({ inputs, onChange }) {
         onClose={() => setPickerIdx(null)}
         onSelect={handlePickerSelect}
         title="Select Instrument"
+        allowBaskets={true}
       />
     </div>
   );

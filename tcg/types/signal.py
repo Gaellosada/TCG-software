@@ -96,7 +96,60 @@ class InstrumentOptionStream:
     kind: Literal["option_stream"] = "option_stream"
 
 
-InputInstrument = InstrumentSpot | InstrumentContinuous | InstrumentOptionStream
+# A single leg of an :class:`InstrumentBasket`.  Each leg pairs one of
+# the three concrete leaf instrument types (``InstrumentSpot`` /
+# ``InstrumentContinuous`` / ``InstrumentOptionStream``) with a signed
+# ``float`` weight.  Tuple-of-tuples representation chosen over a
+# wrapper dataclass to minimise churn in the engine / fetcher / overlap
+# / identity paths — those code paths already pattern-match on the
+# leaf instrument types, so unpacking ``(instrument, weight)`` per leg
+# requires no new ``isinstance`` chains.
+
+
+@dataclass(frozen=True)
+class InstrumentBasket:
+    """Basket instrument — saved or inline.
+
+    Two shapes converge into this single dataclass after API-layer
+    resolution so downstream code (fetcher, overlap, identity, payload)
+    does not need to branch on origin:
+
+    * **Saved basket** (``basket_id is not None``): a reference to a
+      persisted ``BasketDoc``. The basket's legs are resolved from the
+      DB by ``_resolve_basket_inputs`` and materialised into the
+      polymorphic leg shape.
+    * **Inline basket** (``basket_id is None and asset_class is not None``):
+      legs come from the wire payload, each leg's ``instrument``
+      sub-object dispatched into the matching leaf type by
+      ``_parse_input``.
+
+    ``legs`` is a tuple of ``(instrument, weight)`` pairs where
+    ``instrument`` is one of :class:`InstrumentSpot`,
+    :class:`InstrumentContinuous`, or :class:`InstrumentOptionStream`.
+    The per-leg instrument carries its own ``collection`` (and
+    adjustment / cycle / etc. for the rolled / option-stream shapes),
+    so the basket-level ``collection`` field that earlier iterations
+    carried is no longer needed and has been dropped.
+
+    ``asset_class`` is non-``None`` for inline baskets and saved
+    baskets (carried on the envelope so the identity hash can
+    discriminate ``equity`` vs ``index`` baskets of the same spot
+    legs).  It is used by ``_instrument_identity`` to compute a
+    structural identity for inline baskets.
+    """
+
+    legs: tuple[
+        tuple["InstrumentSpot | InstrumentContinuous | InstrumentOptionStream", float],
+        ...,
+    ]
+    basket_id: str | None = None
+    asset_class: str | None = None
+    kind: Literal["basket"] = "basket"
+
+
+InputInstrument = (
+    InstrumentSpot | InstrumentContinuous | InstrumentOptionStream | InstrumentBasket
+)
 
 
 @dataclass(frozen=True)
@@ -341,6 +394,7 @@ __all__ = [
     "Input",
     "InputInstrument",
     "InRangeCondition",
+    "InstrumentBasket",
     "InstrumentContinuous",
     "InstrumentOperand",
     "InstrumentOptionStream",

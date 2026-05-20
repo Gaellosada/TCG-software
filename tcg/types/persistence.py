@@ -76,6 +76,7 @@ class DocType(StrEnum):
     INDICATOR = "indicator"
     SIGNAL = "signal"
     PORTFOLIO = "portfolio"
+    BASKET = "basket"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,13 +137,51 @@ class PortfolioDoc:
     rebalance: str = "none"
 
 
-PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc
+@dataclass(frozen=True, slots=True)
+class BasketDoc:
+    """Persisted basket — a named, weighted, single-asset-class group of instruments.
+
+    ``legs`` is an opaque tuple of leg descriptors.  The persistence layer
+    does not interpret the inner shape — that belongs to the API layer which
+    validates strict per-class mapping on write (each leg's
+    ``instrument.type`` must match the envelope-declared ``asset_class``).
+
+    The leg shape stored inside the tuple is the polymorphic form::
+
+        {"instrument": {"type": "<spot|continuous|option_stream>", ...},
+         "weight": float}
+
+    where ``weight`` is a signed float fraction (negative = short) and
+    the ``instrument`` sub-dict carries the full spec for the leg's
+    underlying series (collection, adjustment, cycle, etc., depending
+    on the discriminator).
+
+    ``asset_class`` is the envelope-level declaration that constrains
+    the per-leg ``instrument.type`` — ``"equity"``/``"index"`` →
+    ``"spot"``, ``"future"`` → ``"continuous"``, ``"option"`` →
+    ``"option_stream"``.  Defaulted to ``"equity"`` for backward
+    compatibility with the iter-1/2 saved-basket shape (no production
+    data — the basket collection is empty per ORDERS).
+    """
+
+    id: str
+    type: Literal["basket"]
+    name: str
+    category: Category
+    created_at: datetime
+    updated_at: datetime
+    legs: tuple[dict, ...] = field(default_factory=tuple)
+    asset_class: str = "equity"
+
+
+PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc | BasketDoc
 
 # Internal map: discriminator string → dataclass. Used by ``from_mongo_dict``.
 _TYPE_TO_CLASS: dict[str, type] = {
     DocType.INDICATOR.value: IndicatorDoc,
     DocType.SIGNAL.value: SignalDoc,
     DocType.PORTFOLIO.value: PortfolioDoc,
+    DocType.BASKET.value: BasketDoc,
 }
 
 # Fields that store a sequence on the dataclass as a tuple but must be
@@ -152,6 +191,7 @@ _TUPLE_FIELDS_BY_TYPE: dict[str, frozenset[str]] = {
     DocType.INDICATOR.value: frozenset(),
     DocType.SIGNAL.value: frozenset({"inputs"}),
     DocType.PORTFOLIO.value: frozenset({"legs"}),
+    DocType.BASKET.value: frozenset({"legs"}),
 }
 
 
@@ -234,6 +274,7 @@ __all__ = [
     "IndicatorDoc",
     "SignalDoc",
     "PortfolioDoc",
+    "BasketDoc",
     "PersistenceDoc",
     "to_mongo_dict",
     "from_mongo_dict",

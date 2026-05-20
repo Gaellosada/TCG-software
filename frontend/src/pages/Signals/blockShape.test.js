@@ -240,6 +240,253 @@ describe('isInputConfigured', () => {
       },
     })).toBe(true);
   });
+
+  // Basket — two-shape discriminated union (saved | inline).
+  it('accepts a saved basket input with non-empty basket_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'saved', basket_id: 'BSK_ABC' },
+    })).toBe(true);
+  });
+
+  it('rejects a saved basket input with empty / missing basket_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'saved', basket_id: '' },
+    })).toBe(false);
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'saved' },
+    })).toBe(false);
+  });
+
+  it('accepts an inline future basket with >=1 continuous legs', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future',
+        legs: [
+          {
+            instrument: {
+              type: 'continuous', collection: 'FUT_ES',
+              adjustment: 'none', cycle: null, rollOffset: 0,
+              strategy: 'front_month',
+            },
+            weight: 1.0,
+          },
+          {
+            instrument: {
+              type: 'continuous', collection: 'FUT_NQ',
+              adjustment: 'ratio', cycle: 'M', rollOffset: 3,
+              strategy: 'front_month',
+            },
+            weight: -0.5,
+          },
+        ],
+      },
+    })).toBe(true);
+  });
+
+  it('accepts an inline equity basket with a single spot leg', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{
+          instrument: { type: 'spot', collection: 'ETF', instrument_id: 'SPY' },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(true);
+  });
+
+  it('accepts an inline option basket with a single option_stream leg', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'option',
+        legs: [{
+          instrument: {
+            type: 'option_stream', collection: 'OPT_SP_500',
+            option_type: 'C', cycle: 'M',
+            maturity: { kind: 'next_third_friday', offset_months: 0 },
+            selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+            stream: 'mid',
+          },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(true);
+  });
+
+  it('rejects an inline basket input with 0 legs', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future', legs: [],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket input with missing asset_class', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline',
+        legs: [{
+          instrument: { type: 'spot', collection: 'ETF', instrument_id: 'SPY' },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket with unknown asset_class', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'commodity',
+        legs: [{
+          instrument: { type: 'spot', collection: 'ETF', instrument_id: 'CL' },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline equity basket whose leg has empty instrument_id', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{
+          instrument: { type: 'spot', collection: 'ETF', instrument_id: '' },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline future basket whose leg has empty collection', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future',
+        legs: [{
+          instrument: {
+            type: 'continuous', collection: '',
+            adjustment: 'none', cycle: null, rollOffset: 0,
+            strategy: 'front_month',
+          },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket leg with zero weight', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{
+          instrument: { type: 'spot', collection: 'ETF', instrument_id: 'SPY' },
+          weight: 0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an inline basket leg with NaN weight', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{
+          instrument: { type: 'spot', collection: 'ETF', instrument_id: 'SPY' },
+          weight: NaN,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('accepts an inline basket with negative leg weight (short)', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future',
+        legs: [{
+          instrument: {
+            type: 'continuous', collection: 'FUT_ES',
+            adjustment: 'none', cycle: null, rollOffset: 0,
+            strategy: 'front_month',
+          },
+          weight: -1.0,
+        }],
+      },
+    })).toBe(true);
+  });
+
+  // Strict per-class mapping — the FE refuses to call a basket
+  // configured when a leg's instrument.type doesn't match asset_class.
+  // The BE rejects with 422 in the same case (BasketRefInline
+  // _check_strict_per_class_mapping validator).
+  it('rejects strict-mismatch: future asset_class with a spot leg', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'future',
+        legs: [{
+          instrument: { type: 'spot', collection: 'FUT_ES', instrument_id: 'ES_MAR26' },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects strict-mismatch: equity asset_class with a continuous leg', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'equity',
+        legs: [{
+          instrument: {
+            type: 'continuous', collection: 'FUT_ES',
+            adjustment: 'none', cycle: null, rollOffset: 0,
+            strategy: 'front_month',
+          },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects strict-mismatch: option asset_class with a spot leg', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: {
+        type: 'basket', kind: 'inline', asset_class: 'option',
+        legs: [{
+          instrument: { type: 'spot', collection: 'OPT_SP_500', instrument_id: 'SPX' },
+          weight: 1.0,
+        }],
+      },
+    })).toBe(false);
+  });
+
+  it('rejects a basket input with unknown kind', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', kind: 'mystery', basket_id: 'X' },
+    })).toBe(false);
+  });
+
+  it('rejects a basket input with missing kind discriminator', () => {
+    expect(isInputConfigured({
+      id: 'B',
+      instrument: { type: 'basket', basket_id: 'X' },
+    })).toBe(false);
+  });
 });
 
 describe('isOperandComplete (v5)', () => {
