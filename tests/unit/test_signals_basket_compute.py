@@ -1055,3 +1055,104 @@ def test_signals_inline_basket_option_call_and_put_legs_materialise_distinct_opt
     # diverging field is option_type, which the BE keeps distinct.
     assert typed_c.collection == typed_p.collection == "OPT_SP_500"
     assert typed_c.stream == typed_p.stream == "mid"
+
+
+# ---------------------------------------------------------------------------
+# E2E Path 3 — Indicator alongside a basket input.
+#
+# Per the manifest's investigation, indicators do NOT accept basket
+# inputs structurally — the IndicatorComputeRequest takes a `seriesMap`
+# of spot refs.  What the user's "indicator path" actually refers to
+# is an indicator operand referenced inside a signal that ALSO carries
+# a basket input.  The indicator runs against its own `seriesMap`
+# (spot refs) — fully independent of the basket fetcher.
+#
+# This test pins the wire-shape independence: a signal payload with
+# BOTH an indicator block (its seriesMap is spot-only) AND a basket
+# input is valid at the Pydantic level — neither side corrupts the
+# other.  Full compute would require chain-reader fixturing (out of
+# scope).
+# ---------------------------------------------------------------------------
+
+
+def test_signal_with_indicator_alongside_basket_input_validates() -> None:
+    """Path 3: a signal can carry an indicator block AND a basket
+    input without the wire shape leaking state between the two.
+
+    Pydantic-level pin only — full compute fixturing requires
+    chain-reader stubs (out of iter-4 scope; covered by the dedicated
+    options-router and indicator suites).
+    """
+    from tcg.core.api.signals import SignalComputeRequest
+
+    body = {
+        "spec": {
+            "id": "sig-indi-basket",
+            "name": "Indicator alongside basket",
+            "inputs": [
+                {
+                    "id": "B",
+                    "instrument": {
+                        "type": "basket",
+                        "kind": "inline",
+                        "asset_class": "option",
+                        "legs": [
+                            {
+                                "instrument": {
+                                    "type": "option_stream",
+                                    "collection": "OPT_SP_500",
+                                    "option_type": "C",
+                                    "cycle": None,
+                                    "maturity": {"kind": "next_third_friday"},
+                                    "selection": {
+                                        "kind": "by_moneyness", "target": 1.0,
+                                    },
+                                    "stream": "mid",
+                                },
+                                "weight": 1.0,
+                            },
+                        ],
+                    },
+                },
+                {
+                    "id": "S",
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "ETF",
+                        "instrument_id": "SPY",
+                    },
+                },
+            ],
+            "rules": {"entries": [], "exits": []},
+        },
+        "indicators": [
+            {
+                "id": "ind1",
+                "code": "sma_close",  # any plausible code; validation may differ
+                "params": {"window": 5},
+                "seriesMap": {
+                    "x": {"collection": "ETF", "instrument_id": "SPY"},
+                },
+            }
+        ],
+        "instruments": {},
+    }
+    # Indicator spec is owned by a separate Pydantic model.  We
+    # validate the SignalComputeRequest envelope as a whole — if the
+    # presence of an indicator alongside a basket input were to cause
+    # discriminator collisions or extra-key rejections, this would
+    # surface here.
+    parsed = SignalComputeRequest.model_validate(body)
+
+    # Two inputs survive distinctly.
+    assert len(parsed.spec.inputs) == 2
+    ids = [inp.id for inp in parsed.spec.inputs]
+    assert sorted(ids) == ["B", "S"]
+    # One indicator survives.
+    assert len(parsed.indicators) == 1
+    ind = parsed.indicators[0]
+    assert ind.id == "ind1"
+    # The indicator's seriesMap references SPY — separate from the
+    # basket fetcher's option_stream resolver path.
+    assert "x" in ind.seriesMap
+    assert ind.seriesMap["x"].instrument_id == "SPY"
