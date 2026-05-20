@@ -964,6 +964,32 @@ async def _date_array_for_leaf_instrument(
     )
 
 
+def _has_option_stream_dependency(
+    inst: "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream "
+          "| InstrumentBasket",
+) -> bool:
+    """True iff resolving this instrument requires an option-stream date
+    enumeration (which needs an explicit date window via
+    `_business_dates_in_range`).
+
+    The single-input short-circuit in ``compute_input_overlap`` MUST
+    fall through into the per-input loop for these — otherwise the
+    fetcher inherits ``start=end=None`` from the envelope and raises
+    "option_stream requires explicit start/end dates" at the leaf
+    resolver (`signals.py` option_stream branch).  Spot and continuous
+    legs do not need this because their date axis is borrowed from the
+    underlying price series.
+    """
+    if isinstance(inst, InstrumentOptionStream):
+        return True
+    if isinstance(inst, InstrumentBasket):
+        return any(
+            isinstance(leg_inst, InstrumentOptionStream)
+            for leg_inst, _w in inst.legs
+        )
+    return False
+
+
 async def compute_input_overlap(
     svc: MarketDataService,
     signal: Signal,
@@ -977,7 +1003,21 @@ async def compute_input_overlap(
     defined — analogous to the portfolio page's aligned-price logic.
     """
     if len(signal.inputs) <= 1:
-        return start, end
+        # Preserve the short-circuit for the spot/continuous case
+        # (they don't need pre-resolved dates — the leaf resolver
+        # borrows the date axis from the price series itself).  But
+        # fall through into the loop when the single input has an
+        # option-stream dependency, because the option_stream resolver
+        # needs an explicit (start, end) window derived from available
+        # expirations — and Bug 2 surfaces when the envelope dates are
+        # ``None`` (SignalsPage has no date-range UI today).
+        if not signal.inputs or not _has_option_stream_dependency(
+            signal.inputs[0].instrument
+        ):
+            return start, end
+        # else: fall through to the per-input loop, which clamps via
+        # `_date_array_for_leaf_instrument` (option_stream branch) /
+        # the basket recursion at lines below.
 
     date_arrays: list[npt.NDArray[np.int64]] = []
     for inp in signal.inputs:
