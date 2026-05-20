@@ -137,4 +137,76 @@ describe('<InputsPanel>', () => {
     const toggle = screen.getByTestId('inputs-panel-toggle');
     expect(toggle.textContent).toMatch(/1\/2/);
   });
+
+  it('picker button labels a configured inline basket input as "Basket: leg1, leg2"', () => {
+    // Regression for the UX bug where a configured basket input still
+    // rendered "Select instrument" because instrumentLabel() returned
+    // null for type === "basket".
+    const inputs = [
+      {
+        id: 'X',
+        instrument: {
+          type: 'basket',
+          kind: 'inline',
+          asset_class: 'equity',
+          legs: [
+            { instrument: { type: 'spot', collection: 'ETF', instrument_id: 'SPY' }, weight: 0.6 },
+            { instrument: { type: 'spot', collection: 'ETF', instrument_id: 'QQQ' }, weight: 0.4 },
+          ],
+        },
+      },
+    ];
+    renderPanel(inputs);
+    fireEvent.click(screen.getByTestId('inputs-panel-toggle'));
+    const pickerBtn = screen.getByTestId('input-picker-0');
+    expect(pickerBtn.textContent).toBe('Basket: SPY, QQQ');
+    expect(pickerBtn.textContent).not.toMatch(/Select instrument/);
+  });
+
+  it('picker button labels a configured option-basket input with collection·option_type per leg', () => {
+    // Bug 1 (iter-4) was about per-leg radio independence on the
+    // composer; this pin ensures the InputsPanel label likewise shows
+    // the option_types so the user can verify the basket at a glance.
+    const inputs = [
+      {
+        id: 'X',
+        instrument: {
+          type: 'basket',
+          kind: 'inline',
+          asset_class: 'option',
+          legs: [
+            { instrument: { type: 'option_stream', collection: 'OPT_ES', option_type: 'C' }, weight: 1.0 },
+            { instrument: { type: 'option_stream', collection: 'OPT_ES', option_type: 'P' }, weight: 1.0 },
+          ],
+        },
+      },
+    ];
+    renderPanel(inputs);
+    fireEvent.click(screen.getByTestId('inputs-panel-toggle'));
+    expect(screen.getByTestId('input-picker-0').textContent).toBe('Basket: OPT_ES·C, OPT_ES·P');
+  });
+
+  it('picker button labels a saved-basket input as "Basket: <basket_id>"', () => {
+    const inputs = [
+      {
+        id: 'X',
+        instrument: { type: 'basket', kind: 'saved', basket_id: 'BSK_TECH_2026' },
+      },
+    ];
+    renderPanel(inputs);
+    fireEvent.click(screen.getByTestId('inputs-panel-toggle'));
+    expect(screen.getByTestId('input-picker-0').textContent).toBe('Basket: BSK_TECH_2026');
+  });
+
+  it('falls back to "Select instrument" for an unconfigured (0-leg) inline basket', () => {
+    const inputs = [
+      {
+        id: 'X',
+        instrument: { type: 'basket', kind: 'inline', asset_class: 'equity', legs: [] },
+      },
+    ];
+    renderPanel(inputs);
+    fireEvent.click(screen.getByTestId('inputs-panel-toggle'));
+    expect(screen.getByTestId('input-picker-0').textContent).toMatch(/Select instrument/);
+  });
 });
