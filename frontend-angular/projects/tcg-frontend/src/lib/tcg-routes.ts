@@ -1,6 +1,9 @@
 import { Routes } from '@angular/router';
 import { TcgPlaceholderRouteComponent } from './components/placeholder-page/tcg-placeholder-route.component';
 import { TcgUserSettingsService } from './services/tcg-user-settings.service';
+import { TcgDataPageComponent } from './pages/data/tcg-data-page.component';
+import { TcgOptionsApi } from './api/tcg-options-api.service';
+import { TcgSeriesSummaryApi } from './api/tcg-series-summary-api.service';
 
 /**
  * Library `Routes` array. Mirrors React's `<Routes>` in `App.jsx`.
@@ -26,8 +29,8 @@ export const tcgRoutes: Routes = [
       { path: '', pathMatch: 'full', redirectTo: 'data' },
       {
         path: 'data',
-        component: TcgPlaceholderRouteComponent,
-        data: { title: 'Data', description: 'Data page port lands in Wave I Phase B (Worker B).' },
+        component: TcgDataPageComponent,
+        providers: [TcgOptionsApi, TcgSeriesSummaryApi],
       },
       {
         path: 'settings',

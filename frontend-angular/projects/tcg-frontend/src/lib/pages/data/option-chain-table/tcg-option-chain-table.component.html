@@ -1,0 +1,240 @@
+<div class="container">
+  <div class="header">
+    <h2 class="title">{{ filters().root || 'Option Chain' }}</h2>
+    @if (chainMeta(); as m) {
+      <span class="meta">
+        {{ (m.count || 0).toLocaleString() }} contracts
+        @if (m.date) { · as of {{ m.date }} }
+        @if (m.underlying) { · Underlying price (S) on {{ m.date }}: {{ m.underlying }} }
+      </span>
+    }
+  </div>
+
+  <div class="filters">
+    <label class="filterLabel">
+      Date
+      <input
+        type="date"
+        class="filterInput"
+        [value]="filters().date || ''"
+        (input)="setDate($any($event.target).value)"
+      />
+    </label>
+    <label class="filterLabel">
+      Expiration min
+      <select
+        class="filterSelect"
+        [value]="filters().expirationMin && expirations().includes(filters().expirationMin || '') ? filters().expirationMin : ''"
+        (change)="setExpirationMin($any($event.target).value)"
+        [disabled]="expirationsLoading() || expirations().length === 0"
+      >
+        @if (expirationsLoading()) { <option value="">Loading…</option> }
+        @if (!expirationsLoading() && expirations().length === 0) {
+          <option value="">No expirations</option>
+        }
+        @for (exp of expirationOptions(); track exp) {
+          <option [value]="exp">{{ exp }}</option>
+        }
+      </select>
+    </label>
+    <label class="filterLabel">
+      Expiration max
+      <select
+        class="filterSelect"
+        [value]="filters().expirationMax && expirations().includes(filters().expirationMax || '') ? filters().expirationMax : ''"
+        (change)="setExpirationMax($any($event.target).value)"
+        [disabled]="expirationsLoading() || expirations().length === 0"
+      >
+        @if (expirationsLoading()) { <option value="">Loading…</option> }
+        @if (!expirationsLoading() && expirations().length === 0) {
+          <option value="">No expirations</option>
+        }
+        @for (exp of expirationOptions(); track exp) {
+          <option [value]="exp">{{ exp }}</option>
+        }
+      </select>
+    </label>
+    <label class="filterLabel">
+      Strike min
+      <input
+        type="number"
+        class="filterInput"
+        [value]="filters().strikeMin == null ? '' : filters().strikeMin"
+        (input)="setStrikeMin($any($event.target).value)"
+      />
+    </label>
+    <label class="filterLabel">
+      Strike max
+      <input
+        type="number"
+        class="filterInput"
+        [value]="filters().strikeMax == null ? '' : filters().strikeMax"
+        (input)="setStrikeMax($any($event.target).value)"
+      />
+    </label>
+    <label class="filterLabel">
+      Cycle
+      <select
+        class="filterSelect"
+        [value]="filters().expirationCycle ?? ''"
+        (change)="setExpirationCycle($any($event.target).value)"
+      >
+        <option value="">All cycles</option>
+        @for (cyc of cycleOptions(); track cyc) {
+          <option [value]="cyc">{{ cyc }}</option>
+        }
+      </select>
+    </label>
+    <label
+      class="toggle"
+      title="Compute missing Greeks via Black-76 (Decision C: transient)"
+    >
+      <input
+        type="checkbox"
+        [checked]="filters().computeMissing"
+        (change)="setComputeMissing($any($event.target).checked)"
+      />
+      Compute missing Greeks
+    </label>
+    <button
+      type="button"
+      class="fetchButton"
+      (click)="refresh()"
+      [disabled]="loading() || !filters().root || !filters().date"
+    >
+      {{ loading() ? 'Loading…' : 'Refresh' }}
+    </button>
+  </div>
+
+  @if (loading() && !rows()) {
+    <div class="loading">Loading chain…</div>
+  }
+  @if (chainError(); as err) {
+    <div class="error">Failed to load chain: {{ err.message || err }}</div>
+  }
+
+  @if (rows() && rows()!.length === 0 && !loading()) {
+    <div class="empty">No contracts match current filters.</div>
+  }
+
+  @if (rows() && rows()!.length > 0) {
+    <div class="tableWrapper">
+      <table class="table">
+        <thead>
+          <tr>
+            <th rowspan="2" class="colExp">Expiration</th>
+            <th colspan="10" class="groupCalls">Calls</th>
+            <th rowspan="2" class="colStrike">Strike</th>
+            <th colspan="10" class="groupPuts">Puts</th>
+          </tr>
+          <tr>
+            <th class="bidQuote">Bid</th>
+            <th>Mid</th>
+            <th class="askQuote">Ask</th>
+            <th>IV</th>
+            <th>Δ</th><th>Γ</th><th>Θ</th><th>ν</th><th>OI</th>
+            <th class="typeCol" aria-label="Call marker"></th>
+            <th class="typeCol" aria-label="Put marker"></th>
+            <th class="bidQuote">Bid</th>
+            <th>Mid</th>
+            <th class="askQuote">Ask</th>
+            <th>IV</th>
+            <th>Δ</th><th>Γ</th><th>Θ</th><th>ν</th><th>OI</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (entry of merged(); track trackRow($index, entry); let i = $index) {
+            @let selectedSide = selectedSideFor(entry);
+            <tr
+              class="row"
+              [class.expChange]="expChanged(i)"
+              [class.rowSelected]="!!selectedSide"
+              [attr.data-selected-side]="selectedSide || null"
+              [attr.aria-selected]="selectedSide ? 'true' : null"
+              (click)="handleRowClick(entry, $event)"
+            >
+              <td class="colExp">
+                {{ entry.expiration }}
+                @if (entry.expiration_cycle) {
+                  <span
+                    class="cycleChip"
+                    [title]="entry.expiration_cycle"
+                    [attr.aria-label]="entry.expiration_cycle"
+                    data-testid="cycle-chip"
+                  >{{ entry.expiration_cycle.trim()[0] }}</span>
+                }
+              </td>
+              @let c = entry.call;
+              <td data-side="call" class="bidQuote">{{ c ? fmt(c.bid, 2) : '' }}</td>
+              <td data-side="call">{{ c ? fmt(c.mid, 2) : '' }}</td>
+              <td data-side="call" class="askQuote thinSepRight">{{ c ? fmt(c.ask, 2) : '' }}</td>
+
+              @for (key of ['iv','delta','gamma','theta','vega']; track key) {
+                <td data-side="call">
+                  @if (c) {
+                    @let r = $any(c)[key];
+                    @switch (resultKind(r)) {
+                      @case ('missing') {
+                        <span class="missing" [title]="r ? missingTooltip(r) : 'Missing'">—</span>
+                      }
+                      @case ('computed') {
+                        <span class="computed" [title]="computedTooltip(r)">
+                          {{ fmt(r.value, 4) }}<span class="computedBadge" aria-label="computed">ⓒ</span>
+                        </span>
+                      }
+                      @default {
+                        <span>{{ fmt(r.value, 4) }}</span>
+                      }
+                    }
+                  }
+                </td>
+              }
+
+              <td data-side="call">{{ c ? fmtInt(c.open_interest) : '' }}</td>
+              <td
+                data-side="call"
+                class="typeCol thinSepLeft"
+                [class.typeCall]="!!c"
+              >{{ c ? 'C' : '' }}</td>
+
+              <td class="colStrike">{{ fmt(entry.strike, 2) }}</td>
+
+              @let p = entry.put;
+              <td
+                data-side="put"
+                class="typeCol thinSepRight"
+                [class.typePut]="!!p"
+              >{{ p ? 'P' : '' }}</td>
+              <td data-side="put" class="bidQuote">{{ p ? fmt(p.bid, 2) : '' }}</td>
+              <td data-side="put">{{ p ? fmt(p.mid, 2) : '' }}</td>
+              <td data-side="put" class="askQuote thinSepRight">{{ p ? fmt(p.ask, 2) : '' }}</td>
+
+              @for (key of ['iv','delta','gamma','theta','vega']; track key) {
+                <td data-side="put">
+                  @if (p) {
+                    @let r = $any(p)[key];
+                    @switch (resultKind(r)) {
+                      @case ('missing') {
+                        <span class="missing" [title]="r ? missingTooltip(r) : 'Missing'">—</span>
+                      }
+                      @case ('computed') {
+                        <span class="computed" [title]="computedTooltip(r)">
+                          {{ fmt(r.value, 4) }}<span class="computedBadge" aria-label="computed">ⓒ</span>
+                        </span>
+                      }
+                      @default {
+                        <span>{{ fmt(r.value, 4) }}</span>
+                      }
+                    }
+                  }
+                </td>
+              }
+
+              <td data-side="put">{{ p ? fmtInt(p.open_interest) : '' }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  }
+</div>

@@ -1,0 +1,114 @@
+<div class="container">
+  <div class="header">
+    <h2 class="title">{{ instrumentId }}</h2>
+    <button type="button" class="closeButton" (click)="emitClose()">Close</button>
+  </div>
+
+  <div class="controls">
+    <label class="toggle" title="Compute missing Greeks via Black-76 (Decision C: transient)">
+      <input
+        type="checkbox"
+        [checked]="computeMissing()"
+        (change)="toggleComputeMissing($any($event.target).checked)"
+      />
+      Compute missing
+    </label>
+    @for (g of greekDefs; track g.key) {
+      <label class="toggle">
+        <input
+          type="checkbox"
+          [checked]="overlayState()[g.key]"
+          (change)="toggleOverlay(g.key, $any($event.target).checked)"
+        />
+        {{ g.label }}
+      </label>
+    }
+    <label
+      class="toggle markerToggle"
+      title="Show life-cycle events: first trade, expiration, ATM cross, |Δ| thresholds"
+    >
+      <input
+        type="checkbox"
+        [checked]="showMarkers()"
+        (change)="toggleMarkers($any($event.target).checked)"
+      />
+      Life-cycle
+    </label>
+  </div>
+
+  @if (showLoading()) {
+    <div class="loading">Loading contract series…</div>
+  }
+  @if (error(); as err) {
+    <div class="error">Failed to load contract: {{ err.message || err }}</div>
+  }
+
+  @if (!showLoading() && !error() && data()) {
+    <div class="body">
+      <div class="chartCol">
+        <div class="chartCard">
+          @if (rows().length > 0) {
+            <tcg-chart
+              class="chartWrapper"
+              [traces]="traces()"
+              [layoutOverrides]="layoutOverrides()"
+              [downloadFilename]="downloadFilename"
+            />
+          } @else {
+            <div class="empty">No rows available.</div>
+          }
+        </div>
+      </div>
+
+      <aside class="sidebar">
+        <h3 class="sidebarTitle">Contract</h3>
+        <div class="metaRow">
+          <span class="metaKey">Strike</span>
+          <span class="metaValue">
+            {{ contract()?.strike != null ? fmt2(contract()?.strike) : '—' }}
+          </span>
+        </div>
+        <div class="metaRow">
+          <span class="metaKey">Type</span>
+          <span class="metaValue">
+            @switch (contract()?.type) {
+              @case ('C') { Call }
+              @case ('P') { Put }
+              @default { — }
+            }
+          </span>
+        </div>
+        <div class="metaRow">
+          <span class="metaKey">Expiration</span>
+          <span class="metaValue">{{ contract()?.expiration || '—' }}</span>
+        </div>
+        <div class="metaRow">
+          <span class="metaKey">DTE</span>
+          <span class="metaValue">{{ dte() == null ? '—' : dte() + ' d' }}</span>
+        </div>
+        <div class="metaRow">
+          <span class="metaKey">Root</span>
+          <span class="metaValue">{{ contract()?.root_underlying || '—' }}</span>
+        </div>
+        <div class="metaRow">
+          <span class="metaKey">Cycle</span>
+          <span class="metaValue">{{ contract()?.expiration_cycle || '—' }}</span>
+        </div>
+        <div class="metaRow">
+          <span class="metaKey">Provider</span>
+          <span class="metaValue">{{ contract()?.provider || '—' }}</span>
+        </div>
+        <div class="metaRow">
+          <span class="metaKey">Data range</span>
+          <span class="metaValue">{{ dataRange() }}</span>
+        </div>
+        @if (showAmericanNote()) {
+          <div class="metaRow">
+            <span class="metaKey">Exercise</span>
+            <span class="metaValue">American (note: pricing kernel is European)</span>
+          </div>
+        }
+      </aside>
+    </div>
+  }
+</div>

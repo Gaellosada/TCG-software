@@ -1,0 +1,98 @@
+@if (loading()) {
+  <div class="container">
+    <div class="status">Loading continuous series...</div>
+  </div>
+} @else if (error()) {
+  <div class="container">
+    <div class="error">Failed to load series: {{ error()?.message }}</div>
+  </div>
+} @else if (!data() || !data()!.dates || data()!.dates.length === 0) {
+  <div class="container">
+    <div class="status">No continuous series data available.</div>
+  </div>
+} @else {
+  <div class="container">
+    <div class="header">
+      <h2 class="title">{{ collection }} — Continuous</h2>
+      <span class="meta">
+        @if (displayMeta(); as m) {
+          {{ m.count.toLocaleString() }} bars &nbsp;·&nbsp;
+          {{ m.first }} to {{ m.last }}
+          @if (m.rolls > 0) {
+            &nbsp;·&nbsp; {{ m.rolls }} roll{{ m.rolls !== 1 ? 's' : '' }}
+          }
+          @if (m.contracts > 0) {
+            &nbsp;·&nbsp; {{ m.contracts }} contract{{ m.contracts !== 1 ? 's' : '' }}
+          }
+        }
+      </span>
+    </div>
+
+    <div class="controls">
+      @if (hasOHLC()) {
+        <label class="controlLabel">
+          Chart
+          <select
+            class="select"
+            [value]="chartType()"
+            (change)="setChartType($any($event.target).value)"
+          >
+            <option value="candlestick">Candlestick</option>
+            <option value="line">Line</option>
+          </select>
+        </label>
+      }
+
+      <label class="controlLabel">
+        Adjustment
+        <select
+          class="select"
+          [value]="adjustment()"
+          (change)="setAdjustment($any($event.target).value)"
+        >
+          @for (opt of adjustmentOptions; track opt.value) {
+            <option [value]="opt.value">{{ opt.label }}</option>
+          }
+        </select>
+      </label>
+
+      <label class="controlLabel">
+        Cycle
+        <select
+          class="select"
+          [value]="cycle()"
+          (change)="setCycle($any($event.target).value)"
+        >
+          <option value="">All</option>
+          @for (c of availableCycles(); track c) {
+            <option [value]="c">{{ c }}</option>
+          }
+        </select>
+      </label>
+
+      <label class="controlLabel">
+        Roll Offset (days)
+        <input
+          type="number"
+          class="select"
+          style="width: 56px"
+          [value]="rollOffset()"
+          min="0"
+          max="30"
+          (input)="setRollOffset($any($event.target).value)"
+        />
+      </label>
+    </div>
+
+    <div class="chartCard">
+      <tcg-chart
+        class="chartWrapper"
+        [traces]="traces()"
+        [markers]="markers()"
+        [markerHovertemplates]="markerHovertemplates"
+        [layoutOverrides]="layoutOverrides()"
+        [downloadFilename]="downloadFilename"
+      />
+    </div>
+  </div>
+}

@@ -1,0 +1,124 @@
+@if (loading()) {
+  <div class="loading">Loading instruments...</div>
+} @else if (error()) {
+  <div class="error">Failed to load: {{ error() }}</div>
+} @else {
+  <div class="browser">
+    @for (cat of categories(); track trackCategory($index, cat)) {
+      <div class="category">
+        <button class="categoryHeader" (click)="toggleCategory(cat.key)" type="button">
+          <span class="categoryBar" [style.background]="cat.color"></span>
+          <span class="categoryLabel">{{ cat.label }}</span>
+          <span class="chevron">{{ expanded()[cat.key] ? '▾' : '▸' }}</span>
+        </button>
+
+        @if (expanded()[cat.key]) {
+          <div class="categoryBody">
+            @if (cat.isOptions) {
+              @if (!cat.optionRoots || cat.optionRoots.length === 0) {
+                <div class="placeholder">No options roots available</div>
+              } @else {
+                @for (root of cat.optionRoots; track trackByRoot($index, root)) {
+                  <button
+                    type="button"
+                    class="instrument"
+                    [class.instrumentActive]="selected?.type === 'option' && selected?.collection === (root['collection'] || root.name)"
+                    (click)="selectOptionRoot(root)"
+                  >
+                    <span class="instrumentSymbol">{{ root.name }}</span>
+                    <span class="badges">
+                      @switch (greekBadgeKind(root)) {
+                        @case ('full') { <span class="greeksBadge">Greeks</span> }
+                        @case ('partial') { <span class="greeksBadgePartial">Greeks</span> }
+                        @case ('computed') { <span class="greeksBadgeComputed">Comp. Greeks</span> }
+                      }
+                    </span>
+                  </button>
+                }
+              }
+            } @else if (cat.isFutures) {
+              @if (!cat.futCollections || cat.futCollections.length === 0) {
+                <div class="placeholder">No futures collections available</div>
+              } @else {
+                @for (collName of cat.futCollections; track trackByCollection($index, collName)) {
+                  <div class="group">
+                    <button
+                      type="button"
+                      class="futGroupHeader"
+                      [class.futGroupActive]="isSelected(selected, 'continuous', null, collName)"
+                      (click)="handleFutGroupClick(collName)"
+                    >
+                      <span class="futGroupChevron">{{ expandedFutGroups()[collName] ? '▾' : '▸' }}</span>
+                      <span class="groupLabel" style="padding: 0">{{ collName }}</span>
+                    </button>
+
+                    @if (expandedFutGroups()[collName]) {
+                      <div>
+                        <button
+                          type="button"
+                          class="instrument continuousEntry"
+                          [class.instrumentActive]="isSelected(selected, 'continuous', null, collName)"
+                          (click)="selectContinuous(collName)"
+                        >
+                          <span class="instrumentSymbol">Continuous Series</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          class="contractsToggle"
+                          (click)="toggleContracts(collName)"
+                        >
+                          <span class="futGroupChevron">{{ contractsExpanded()[collName] ? '▾' : '▸' }}</span>
+                          <span class="contractsLabel">Individual Contracts</span>
+                        </button>
+
+                        @if (contractsExpanded()[collName]) {
+                          <div class="contractsList">
+                            @if (!contractsData()[collName]) {
+                              <div class="placeholder">Loading contracts...</div>
+                            } @else if (contractsData()[collName].length === 0) {
+                              <div class="placeholder">No contracts found</div>
+                            } @else {
+                              @for (inst of contractsData()[collName]; track trackItem($index, inst)) {
+                                <button
+                                  type="button"
+                                  class="instrument"
+                                  [class.instrumentActive]="isSelected(selected, 'instrument', $any(inst.symbol), collName)"
+                                  (click)="selectInstrument($any(inst.symbol), collName)"
+                                >
+                                  <span class="instrumentSymbol">{{ inst.symbol }}</span>
+                                </button>
+                              }
+                            }
+                          </div>
+                        }
+                      </div>
+                    }
+                  </div>
+                }
+              }
+            } @else {
+              @for (group of cat.groups; track trackByGroup($index, group)) {
+                <div class="group">
+                  @if (cat.groups && cat.groups.length > 1) {
+                    <div class="groupLabel">{{ group.collection }}</div>
+                  }
+                  @for (inst of group.instruments; track trackByInstrument($index, inst)) {
+                    <button
+                      type="button"
+                      class="instrument"
+                      [class.instrumentActive]="isSelected(selected, 'instrument', inst.symbol, group.collection)"
+                      (click)="selectInstrument(inst.symbol, group.collection)"
+                    >
+                      <span class="instrumentSymbol">{{ inst.symbol }}</span>
+                    </button>
+                  }
+                </div>
+              }
+            }
+          </div>
+        }
+      </div>
+    }
+  </div>
+}

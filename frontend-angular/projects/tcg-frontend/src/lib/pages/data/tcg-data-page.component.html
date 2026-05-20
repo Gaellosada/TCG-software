@@ -1,0 +1,158 @@
+<div class="page">
+  <div class="leftPanel">
+    <tcg-category-browser
+      [selected]="selected()"
+      (select)="onSelect($event)"
+    />
+  </div>
+  <div class="rightPanel">
+    @if (!selected()) {
+      <div class="welcome">
+        <div class="welcomeInner">
+          <h2>Select an instrument</h2>
+          <p>Pick an instrument from the categories on the left to view its price history.</p>
+        </div>
+      </div>
+    } @else if (asOption(selected())) {
+      @let opt = asOption(selected())!;
+      @if (!opt.last_trade_date) {
+        <div class="welcome">
+          <div class="welcomeInner">
+            <h2>{{ opt.collection }}: no data available</h2>
+            <p>
+              The backend reports no recent bars for this root. Check that the
+              ingestion pipeline is current; the API
+              <code> /api/options/roots </code>
+              response carries <code>last_trade_date: null</code> for this
+              collection.
+            </p>
+          </div>
+        </div>
+      } @else {
+        <div class="optionsWrapper">
+          <div class="optionsTabs" role="tablist">
+            @for (tab of OPTIONS_TABS; track tab.key) {
+              <button
+                type="button"
+                role="tab"
+                [attr.aria-selected]="optionsView() === tab.key"
+                class="optionsTab"
+                [class.optionsTabActive]="optionsView() === tab.key"
+                (click)="setOptionsView(tab.key)"
+              >{{ tab.label }}</button>
+            }
+          </div>
+
+          <div class="optionsTabBody">
+            @switch (optionsView()) {
+              @case ('chain') {
+                <div class="optionsContainer">
+                  <tcg-option-chain-table
+                    [root]="opt.collection"
+                    [selectedContract]="selectedContract()"
+                    [initialFilters]="{ date: opt.last_trade_date, expirationMin: opt.last_trade_date }"
+                    (rowClick)="onRowClick($event)"
+                  />
+                  @if (selectedContract(); as sc) {
+                    <div #detailPanelRef>
+                      <tcg-contract-detail-panel
+                        [collection]="sc.collection"
+                        [instrumentId]="sc.instrument_id"
+                        (closed)="closeDetail()"
+                      />
+                    </div>
+                  }
+                </div>
+              }
+              @case ('snapshot') {
+                <div class="snapshotView">
+                  <div class="snapshotFilters">
+                    <label class="filterLabel">
+                      Date
+                      <input
+                        type="date"
+                        class="filterInput"
+                        [value]="optionsDate()"
+                        (input)="setOptionsDate($any($event.target).value)"
+                      />
+                    </label>
+                    <label class="filterLabel">
+                      Type
+                      <select
+                        class="filterInput"
+                        [value]="optionsType()"
+                        (change)="setOptionsType($any($event.target).value)"
+                      >
+                        <option value="C">Calls</option>
+                        <option value="P">Puts</option>
+                      </select>
+                    </label>
+                    <label class="filterLabel">
+                      Cycle
+                      <select
+                        class="filterInput"
+                        [value]="optionsCycle() ?? ''"
+                        (change)="setOptionsCycle($any($event.target).value)"
+                      >
+                        <option value="">All cycles</option>
+                        @for (c of availableCycles(); track c) {
+                          <option [value]="c">{{ c }}</option>
+                        }
+                      </select>
+                    </label>
+                    <label class="filterLabel">
+                      Expiration
+                      <select
+                        class="filterInput"
+                        [value]="optionsExpiration() && rootExpirations().includes(optionsExpiration()) ? optionsExpiration() : ''"
+                        (change)="setOptionsExpiration($any($event.target).value)"
+                        [disabled]="rootExpirationsLoading() || rootExpirations().length === 0"
+                      >
+                        <option value="">
+                          {{ rootExpirationsLoading() ? 'Loading…' : 'Pick an expiration' }}
+                        </option>
+                        @for (exp of rootExpirationOptions(); track exp) {
+                          <option [value]="exp">{{ exp }}</option>
+                        }
+                      </select>
+                    </label>
+                  </div>
+                  @if (optionsExpiration().trim() && rootExpirations().includes(optionsExpiration().trim())) {
+                    <tcg-chain-snapshot-panel
+                      [root]="opt.collection"
+                      [date]="optionsDate()"
+                      [type]="optionsType()"
+                      [expiration]="optionsExpiration().trim()"
+                      [expirationCycle]="optionsCycle()"
+                      (snapshotData)="onSnapshotData($event)"
+                      (closed)="setOptionsView('chain')"
+                    />
+                  } @else {
+                    <div class="snapshotEmpty" data-testid="snapshot-empty">
+                      @if (rootExpirationsLoading()) {
+                        Loading available expirations…
+                      } @else if (rootExpirations().length === 0) {
+                        No expirations available for this root.
+                      } @else {
+                        Pick an expiration above to load the smile.
+                      }
+                    </div>
+                  }
+                </div>
+              }
+              @case ('continuous') {
+                <tcg-continuous-options-chart [collection]="opt.collection" />
+              }
+            }
+          </div>
+        </div>
+      }
+    } @else if (asContinuous(selected())) {
+      @let cont = asContinuous(selected())!;
+      <tcg-continuous-chart [collection]="cont.collection" />
+    } @else if (asInstrument(selected())) {
+      @let inst = asInstrument(selected())!;
+      <tcg-price-chart [collection]="inst.collection" [instrument]="inst.symbol" />
+    }
+  </div>
+</div>

@@ -1,0 +1,7 @@
+/* PriceChart styling is inherited from _chart-base.css via styleUrls. */
+:host {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}

@@ -1,0 +1,86 @@
+@if (rootsLoading()) {
+  <div class="container">
+    <div class="status">Loading option roots...</div>
+  </div>
+} @else if (rootsError()) {
+  <div class="container">
+    <div class="error">Failed to load option roots: {{ rootsError()?.message }}</div>
+  </div>
+} @else {
+  <div class="container" data-testid="continuous-options-chart">
+    <div class="header">
+      <h2 class="title">{{ collection }} — Continuous Options</h2>
+      <span class="meta">
+        @if (displayMeta(); as m) {
+          {{ m.count.toLocaleString() }} points &nbsp;·&nbsp; {{ m.first }} to {{ m.last }}
+        }
+      </span>
+    </div>
+
+    <div class="controls">
+      <label class="controlLabel">
+        Root
+        <select
+          class="select"
+          [value]="streamCollection()"
+          (change)="setStreamCollection($any($event.target).value)"
+        >
+          @for (r of availableRoots(); track rootValue(r)) {
+            <option [value]="rootValue(r)">{{ r.name }}</option>
+          }
+        </select>
+      </label>
+      <label class="controlLabel">
+        Start
+        <input
+          type="date"
+          class="select"
+          [value]="start()"
+          (input)="setStart($any($event.target).value)"
+        />
+      </label>
+      <label class="controlLabel">
+        End
+        <input
+          type="date"
+          class="select"
+          [value]="end()"
+          (input)="setEnd($any($event.target).value)"
+        />
+      </label>
+      <button
+        type="button"
+        class="select"
+        [disabled]="loading() || !streamCollection()"
+        (click)="resolve()"
+        data-testid="resolve-button"
+      >
+        {{ loading() ? 'Resolving…' : 'Resolve' }}
+      </button>
+    </div>
+
+    @if (error()) {
+      <div class="error" data-testid="resolve-error">
+        {{ error()?.message || 'An error occurred during resolution.' }}
+      </div>
+    }
+
+    @if (result() && traces().length > 0) {
+      <div class="chartCard">
+        <tcg-chart
+          class="chartWrapper"
+          [traces]="traces()"
+          [markers]="markers()"
+          [downloadFilename]="downloadFilename"
+        />
+      </div>
+    } @else if (result() && traces().length === 0) {
+      <div class="status">No data returned for this stream configuration.</div>
+    } @else if (!result() && !loading() && !error()) {
+      <div class="status">
+        Configure the stream above and click Resolve to materialise the time
+        series.
+      </div>
+    }
+  </div>
+}

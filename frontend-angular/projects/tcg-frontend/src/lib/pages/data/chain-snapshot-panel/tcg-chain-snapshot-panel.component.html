@@ -1,0 +1,61 @@
+<div class="container">
+  <div class="header">
+    <h2 class="title">Smile Snapshot</h2>
+  </div>
+
+  <div class="controls">
+    <span class="controlLabel">Field</span>
+    <div class="toggleGroup">
+      <button
+        type="button"
+        class="toggleButton"
+        [class.toggleButtonActive]="field() === 'iv'"
+        (click)="setField('iv')"
+      >IV</button>
+      <button
+        type="button"
+        class="toggleButton"
+        [class.toggleButtonActive]="field() === 'delta'"
+        (click)="setField('delta')"
+      >Delta</button>
+    </div>
+
+    <span class="controlLabel">X axis</span>
+    <div class="toggleGroup">
+      <button
+        type="button"
+        class="toggleButton"
+        [class.toggleButtonActive]="xAxis() === 'strike'"
+        (click)="setXAxis('strike')"
+      >Strike</button>
+      <button
+        type="button"
+        class="toggleButton"
+        [class.toggleButtonActive]="xAxis() === 'K_over_S'"
+        (click)="setXAxis('K_over_S')"
+      >K/S</button>
+    </div>
+  </div>
+
+  @if (loading()) {
+    <div class="loading">Loading snapshot…</div>
+  }
+  @if (error(); as err) {
+    <div class="error">Failed to load snapshot: {{ err.message || err }}</div>
+  }
+
+  @if (!loading() && !error()) {
+    <div class="chartCard">
+      @if (traces().length > 0) {
+        <tcg-chart
+          class="chartWrapper"
+          [traces]="traces()"
+          [layoutOverrides]="layoutOverrides()"
+          [downloadFilename]="downloadFilename"
+        />
+      } @else {
+        <div class="empty">{{ data() ? 'No data for this expiration.' : '' }}</div>
+      }
+    </div>
+  }
+</div>

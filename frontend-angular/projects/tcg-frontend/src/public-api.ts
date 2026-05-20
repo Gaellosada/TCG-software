@@ -131,3 +131,29 @@ export type { TcgNavItem, TcgNavSection } from './lib/layout/nav-config';
 
 // Routes ---------------------------------------------------------------
 export { tcgRoutes } from './lib/tcg-routes';
+
+// Data page -----------------------------------------------------------
+export { TcgDataPageComponent } from './lib/pages/data/tcg-data-page.component';
+export { TcgOptionsApi } from './lib/api/tcg-options-api.service';
+export type {
+  TcgOptionRootInfo,
+  TcgOptionRootsResponse,
+  TcgOptionExpirationsResponse,
+  TcgOptionChainParams,
+  TcgComputeResult,
+  TcgChainRow,
+  TcgChainResponse,
+  TcgContractRow,
+  TcgOptionContractMeta,
+  TcgContractSeries,
+  TcgContractOpts,
+  TcgChainSnapshotPoint,
+  TcgChainSnapshotSeries,
+  TcgChainSnapshotResponse,
+  TcgChainSnapshotOpts,
+} from './lib/api/tcg-options-api.service';
+export { TcgSeriesSummaryApi } from './lib/api/tcg-series-summary-api.service';
+export type {
+  TcgSeriesRef,
+  TcgSeriesSummary,
+} from './lib/api/tcg-series-summary-api.service';

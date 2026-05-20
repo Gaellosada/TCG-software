@@ -1,0 +1,106 @@
+/* Data page layout -------------------------------------------------------- */
+
+:host {
+  display: flex;
+  flex-direction: row;
+  height: 100%;
+  overflow: hidden;
+}
+
+.data-page {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  gap: 0;
+}
+
+/* Left rail — category browser */
+.data-page__left {
+  flex: 0 0 260px;
+  min-width: 200px;
+  max-width: 360px;
+  overflow-y: auto;
+  border-right: 1px solid var(--tcg-border, #e5e7eb);
+  background: var(--tcg-surface, #fff);
+}
+
+/* Right rail — chart / table area */
+.data-page__right {
+  flex: 1 1 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* Options tab bar */
+.data-page__tabs {
+  display: flex;
+  flex-direction: row;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--tcg-border, #e5e7eb);
+  padding-bottom: 0.5rem;
+  flex-shrink: 0;
+}
+
+.data-page__tab-btn {
+  padding: 0.375rem 0.875rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: var(--tcg-text-muted, #6b7280);
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.data-page__tab-btn:hover {
+  color: var(--tcg-text, #111827);
+}
+
+.data-page__tab-btn--active {
+  color: var(--tcg-primary, #2563eb);
+  border-bottom-color: var(--tcg-primary, #2563eb);
+  font-weight: 500;
+}
+
+/* Options date / type controls */
+.data-page__options-controls {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.data-page__options-controls label {
+  font-size: 0.8125rem;
+  color: var(--tcg-text-muted, #6b7280);
+}
+
+.data-page__options-controls select,
+.data-page__options-controls input[type="date"] {
+  font-size: 0.8125rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--tcg-border, #e5e7eb);
+  border-radius: 4px;
+  background: var(--tcg-surface, #fff);
+  color: var(--tcg-text, #111827);
+}
+
+/* Detail panel scroll anchor */
+.data-page__detail-anchor {
+  scroll-margin-top: 1rem;
+}
+
+/* Expiration loading hint */
+.data-page__expirations-loading {
+  font-size: 0.75rem;
+  color: var(--tcg-text-muted, #6b7280);
+  font-style: italic;
+}

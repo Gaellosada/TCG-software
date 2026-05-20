@@ -1,0 +1,50 @@
+@if (loading()) {
+  <div class="container">
+    <div class="status">Loading price data...</div>
+  </div>
+} @else if (error()) {
+  <div class="container">
+    <div class="error">Failed to load prices: {{ error()?.message }}</div>
+  </div>
+} @else if (!data() || !data()!.dates || data()!.dates.length === 0) {
+  <div class="container">
+    <div class="status">No price data available.</div>
+  </div>
+} @else {
+  <div class="container">
+    <div class="header">
+      <h2 class="title">{{ instrument }}</h2>
+      <span class="meta">
+        @if (displayMeta(); as m) {
+          {{ m.count.toLocaleString() }} bars &nbsp;·&nbsp;
+          {{ m.first }} to {{ m.last }}
+        }
+      </span>
+    </div>
+
+    @if (hasOHLC()) {
+      <div class="controls">
+        <label class="controlLabel">
+          Chart
+          <select
+            class="select"
+            [value]="chartType()"
+            (change)="setChartType($any($event.target).value)"
+          >
+            <option value="candlestick">Candlestick</option>
+            <option value="line">Line</option>
+          </select>
+        </label>
+      </div>
+    }
+
+    <div class="chartCard">
+      <tcg-chart
+        class="chartWrapper"
+        [traces]="traces()"
+        [layoutOverrides]="layoutOverrides()"
+        [downloadFilename]="downloadFilename"
+      />
+    </div>
+  </div>
+}
