@@ -3,5 +3,8 @@
   "dest": "../../dist/tcg-frontend",
   "lib": {
     "entryFile": "src/public-api.ts"
-  }
+  },
+  "allowedNonPeerDependencies": [
+    "plotly.js-dist-min"
+  ]
 }

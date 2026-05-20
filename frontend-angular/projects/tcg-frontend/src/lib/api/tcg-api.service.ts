@@ -19,11 +19,11 @@ export class TcgApiService {
   /**
    * Probe the backend to prove wiring works.
    *
-   * The TCG FastAPI does not currently expose `/api/health`; we use
-   * `/api/data/collections` (a cheap GET that returns a JSON array)
-   * because every backend deployment has at least one collection
-   * configured. The smoke component only cares that a JSON response
-   * comes back, not its shape — so we type the return as `unknown`.
+   * @deprecated Wave I introduces `TcgDataApi.listCollections()` which is
+   * the preferred way to fetch collections. `getHealth()` is retained for
+   * Wave 0's dev-harness smoke component (`TcgSmokeComponent`) and the
+   * new dev-stub backend exposes a dedicated `/api/health` endpoint that
+   * this method will switch to once the smoke component is rewired.
    */
   getHealth(): Observable<unknown> {
     return this.http.get<unknown>(`${this.baseUrl}/api/data/collections`);

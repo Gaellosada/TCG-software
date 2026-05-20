@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@angular-devkit/build-angular": "^19.2.26",
+    "@angular/cdk": "^19.2.19",
     "@angular/cli": "^19.2.26",
     "@angular/compiler-cli": "^19.2.0",
     "@types/jasmine": "~5.1.0",
@@ -33,6 +34,7 @@
     "karma-jasmine": "~5.1.0",
     "karma-jasmine-html-reporter": "~2.1.0",
     "ng-packagr": "^19.2.0",
+    "plotly.js-dist-min": "^3.5.1",
     "typescript": "~5.7.2"
   }
 }

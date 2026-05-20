@@ -8,10 +8,12 @@
     "@angular/core": "^17.0.0 || ^18.0.0 || ^19.0.0",
     "@angular/forms": "^17.0.0 || ^18.0.0 || ^19.0.0",
     "@angular/router": "^17.0.0 || ^18.0.0 || ^19.0.0",
+    "@angular/cdk": "^17.0.0 || ^18.0.0 || ^19.0.0",
     "rxjs": "^7.5.0"
   },
   "dependencies": {
-    "tslib": "^2.3.0"
+    "tslib": "^2.3.0",
+    "plotly.js-dist-min": "^2.27.0"
   },
   "sideEffects": false
 }

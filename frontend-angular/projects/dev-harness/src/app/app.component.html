@@ -1,1 +1,9 @@
-<router-outlet></router-outlet>
+<div class="app-shell">
+  <tcg-sidebar
+    [collapsed]="collapsed"
+    (toggled)="onSidebarToggled($event)"
+  ></tcg-sidebar>
+  <main class="app-shell__main">
+    <router-outlet></router-outlet>
+  </main>
+</div>
