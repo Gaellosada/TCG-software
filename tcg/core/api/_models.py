@@ -23,18 +23,37 @@ outer-discriminator tag, the union here is flattened and routed via a
 (b) emits an OpenAPI 3.x-compatible schema, which a nested
 ``Annotated[Union[...], Field(discriminator=...)]`` member does not.
 
-`BasketLegInLite` lives here (not in ``persistence.py``) because the
+Each inline-basket leg now carries a polymorphic ``instrument`` payload
+discriminated on ``instrument.type`` (``spot`` / ``continuous`` /
+``option_stream``) so a basket can mix asset-class-compatible spec
+shapes (e.g. continuous-rolled futures legs) instead of being limited
+to single-contract pointers.  The nested discriminator on
+``BasketLeg.instrument`` is a single level deep (no nested-nested form)
+which the standard ``Field(discriminator="type")`` machinery handles
+cleanly — only the *outer* SeriesRef union needed the iter-1 callable
+Discriminator refactor.
+
+`BasketLeg` lives here (not in ``persistence.py``) because the
 import-linter contract forbids ``_models.py`` from depending on
 ``persistence.py`` — they sit at the same layer but ``persistence.py``
 imports application-layer write-repo bits that ``_models.py`` must
-remain free of.
+remain free of.  ``persistence.py`` redefines the same shape file-local
+(iter-1/2 precedent).
 """
 
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 
 from tcg.core.api._models_options import MaturityRule, SelectionCriterion
 
@@ -107,24 +126,49 @@ class OptionStreamRef(BaseModel):
         return v
 
 
-class BasketLegInLite(BaseModel):
-    """A leg in an *inline* basket descriptor.
+# Per-asset-class strict mapping from the basket's declared ``asset_class``
+# to the leg's ``instrument.type``.  Equity and index baskets accept spot
+# legs only; futures must roll into a continuous spec; options must roll
+# into an option-stream spec.  The validator on ``BasketRefInline`` reads
+# this map to compute mismatch detail messages.
+_ASSET_CLASS_TO_INSTRUMENT_TYPE: dict[str, str] = {
+    "equity": "spot",
+    "index": "spot",
+    "future": "continuous",
+    "option": "option_stream",
+}
 
-    The wire shape for inline-basket legs intentionally omits
-    ``collection`` (the FE does not know per-leg collections — the BE
-    derives them at parse time from the declared ``asset_class``).
+
+class BasketLeg(BaseModel):
+    """A leg in an *inline* basket descriptor — polymorphic.
+
+    Each leg carries an ``instrument`` sub-object whose ``type``
+    discriminator selects one of:
+
+    * ``"spot"`` → :class:`SpotInstrumentRef` (equity / index legs)
+    * ``"continuous"`` → :class:`ContinuousInstrumentRef` (future legs;
+      rolled, possibly adjusted)
+    * ``"option_stream"`` → :class:`OptionStreamRef` (option legs)
+
     ``weight`` is a signed fraction (positive = long, negative = short)
-    and must be non-zero (mirrors the rule on the persisted
-    ``BasketLegIn`` model).
+    and must be non-zero.  Strict per-asset-class enforcement lives on
+    :class:`BasketRefInline` (model-level validator) — at the leg level
+    we accept any of the three shapes; the basket envelope rejects
+    mismatches.
 
-    This model is duplicated rather than imported from
+    This model is defined here rather than imported from
     ``tcg.core.api.persistence`` to satisfy the import-linter contract
-    that keeps ``_models.py`` free of write-layer dependencies.
+    that keeps ``_models.py`` free of write-layer dependencies (Sign 8
+    of the iter-3 guardrails).  ``persistence.py`` redefines the same
+    shape file-local; the two definitions track each other.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    instrument_id: str = Field(..., min_length=1, max_length=128)
+    instrument: Annotated[
+        Union[SpotInstrumentRef, ContinuousInstrumentRef, OptionStreamRef],
+        Field(discriminator="type"),
+    ]
     weight: float = Field(..., description="signed; must be non-zero")
 
     @field_validator("weight")
@@ -155,8 +199,13 @@ class BasketRefInline(BaseModel):
 
     Skips the DB pre-pass entirely: ``_parse_input`` builds the
     :class:`~tcg.types.signal.InstrumentBasket` directly from
-    ``asset_class`` + ``legs``, resolving each leg's host MongoDB
-    collection in-place.
+    ``asset_class`` + polymorphic ``legs``.
+
+    Strict per-class mapping: each leg's ``instrument.type`` must
+    match the declared ``asset_class`` per
+    ``_ASSET_CLASS_TO_INSTRUMENT_TYPE``.  Mismatches raise a 422 at
+    request-validation time with a detail naming the leg index and the
+    expected ``instrument.type``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -164,7 +213,19 @@ class BasketRefInline(BaseModel):
     type: Literal["basket"] = "basket"
     kind: Literal["inline"] = "inline"
     asset_class: Literal["future", "option", "index", "equity"]
-    legs: list[BasketLegInLite] = Field(..., min_length=1, max_length=64)
+    legs: list[BasketLeg] = Field(..., min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _check_strict_per_class_mapping(self) -> "BasketRefInline":
+        expected = _ASSET_CLASS_TO_INSTRUMENT_TYPE[self.asset_class]
+        for i, leg in enumerate(self.legs):
+            actual = leg.instrument.type
+            if actual != expected:
+                raise ValueError(
+                    f"basket leg {i}: asset_class={self.asset_class!r} "
+                    f"requires instrument.type={expected!r}, got {actual!r}"
+                )
+        return self
 
 
 def _series_ref_discriminator(v: Any) -> str | None:
