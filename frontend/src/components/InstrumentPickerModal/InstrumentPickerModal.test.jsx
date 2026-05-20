@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import InstrumentPickerModal from './InstrumentPickerModal';
 
 afterEach(cleanup);
@@ -927,5 +927,88 @@ describe('<InstrumentPickerModal>', () => {
     const backBtn = screen.getByText('←');
     fireEvent.click(backBtn);
     await waitFor(() => expect(screen.queryByTestId('basket-composer')).toBeNull());
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Bug 1 regression — two option legs hold independent option_type.
+  //
+  // Pre-fix the `<OptionStreamForm>` rendered all option-type radios with
+  // a hard-coded `name="option-type"`.  Two simultaneously-mounted forms
+  // (the basket composer with two option legs) joined a single browser
+  // radio group, so clicking "Put" on leg 1 visually deselected leg 0's
+  // "Call".  Fix: use `useId()` to scope the radio name per form
+  // instance — verified by both the DOM `.checked` state on the sibling
+  // leg AND the emitted wire payload carrying distinct `option_type`s.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('two option legs hold independent option_type (call+put) — Bug 1 regression', async () => {
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    // Switch to option asset class — first leg becomes an option_stream
+    // composer (its <OptionStreamForm> auto-adopts a default spec with
+    // option_type=C once the option roots resolve).
+    fireEvent.change(screen.getByTestId('basket-asset-class-select'), { target: { value: 'option' } });
+    await waitFor(() => expect(screen.getByTestId('option-stream-form')).toBeTruthy());
+
+    // Add a second option leg so two <OptionStreamForm> instances
+    // coexist — the precondition that surfaces Bug 1.
+    fireEvent.click(screen.getByTestId('basket-add-leg'));
+    await waitFor(() => expect(screen.getAllByTestId('option-stream-form').length).toBe(2));
+
+    // Both legs start with option_type=C (the form's default after
+    // root adoption).  Flip leg 1 to "Put".
+    const forms = screen.getAllByTestId('option-stream-form');
+    const leg0Form = forms[0];
+    const leg1Form = forms[1];
+    const leg1Put = within(leg1Form).getByLabelText('Put');
+    fireEvent.click(leg1Put);
+
+    // Sibling leg 0's "Call" radio must remain checked — this is the
+    // DOM-level proof that the radio-group share is broken.
+    const leg0Call = within(leg0Form).getByLabelText('Call');
+    const leg1PutAfter = within(leg1Form).getByLabelText('Put');
+    expect(leg0Call.checked).toBe(true);
+    expect(leg1PutAfter.checked).toBe(true);
+
+    // And the emitted wire payload carries the distinct option_types,
+    // proving the state isolation extends end-to-end (not just visually).
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '1' } });
+    fireEvent.change(screen.getByTestId('basket-leg-1-weight-input'), { target: { value: '1' } });
+    await waitFor(() => expect(screen.getByTestId('basket-use-btn').disabled).toBe(false));
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+
+    expect(onSelect).toHaveBeenCalledOnce();
+    const emitted = onSelect.mock.calls[0][0];
+    expect(emitted.legs).toHaveLength(2);
+    expect(emitted.legs[0].instrument.option_type).toBe('C');
+    expect(emitted.legs[1].instrument.option_type).toBe('P');
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Per-leg `__id` defensive — internal-only key MUST NOT leak into the
+  // emitted wire payload.  Pins the emit-side stripping contract.
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('emit payload does not carry the internal __id leg key', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    fireEvent.change(await screen.findByTestId('basket-leg-0-collection-select'), { target: { value: 'FUT_ES' } });
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '1' } });
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+
+    const emitted = onSelect.mock.calls[0][0];
+    for (const leg of emitted.legs) {
+      expect('__id' in leg).toBe(false);
+      expect(Object.keys(leg).sort()).toEqual(['instrument', 'weight']);
+    }
   });
 });
