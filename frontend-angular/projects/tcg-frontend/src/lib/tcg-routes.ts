@@ -1,5 +1,6 @@
 import { Routes } from '@angular/router';
 import { TcgPlaceholderRouteComponent } from './components/placeholder-page/tcg-placeholder-route.component';
+import { TcgSettingsPageComponent } from './pages/settings/tcg-settings-page.component';
 import { TcgUserSettingsService } from './services/tcg-user-settings.service';
 
 /**
@@ -29,14 +30,7 @@ export const tcgRoutes: Routes = [
         component: TcgPlaceholderRouteComponent,
         data: { title: 'Data', description: 'Data page port lands in Wave I Phase B (Worker B).' },
       },
-      {
-        path: 'settings',
-        component: TcgPlaceholderRouteComponent,
-        data: {
-          title: 'Settings',
-          description: 'Settings page port lands in Wave I Phase B (Worker C).',
-        },
-      },
+      { path: 'settings', component: TcgSettingsPageComponent },
       {
         path: 'indicators',
         component: TcgPlaceholderRouteComponent,

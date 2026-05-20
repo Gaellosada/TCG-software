@@ -131,3 +131,6 @@ export type { TcgNavItem, TcgNavSection } from './lib/layout/nav-config';
 
 // Routes ---------------------------------------------------------------
 export { tcgRoutes } from './lib/tcg-routes';
+
+// Settings page --------------------------------------------------------
+export { TcgSettingsPageComponent } from './lib/pages/settings/tcg-settings-page.component';
