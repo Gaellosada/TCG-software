@@ -426,54 +426,38 @@ export default function InstrumentPickerModal({
               )}
             </div>
           ) : inFutDrillDown ? (
-            /* ── Futures: configure continuous series ── */
+            /* ── Futures: configure continuous series ──
+             *
+             * Uses the in-file <ContinuousSpecPicker> sub-component — same
+             * single source of truth that <BasketLegRow> uses for future
+             * asset_class.  The parent owns adjustment/cycle/rollOffset
+             * state (so the iter-0 futures emit shape is unchanged) and
+             * passes it down via the picker's value/onChange interface.
+             */
             <div className={styles.continuousSection}>
               <p className={styles.continuousText}>
                 <strong>{selectedFutCollection}</strong> will be added as a
                 continuous rolled series (front month).
               </p>
 
-              <div className={styles.rollingOptions}>
-                <label className={styles.optionLabel}>
-                  Adjustment
-                  <select
-                    className={styles.optionSelect}
-                    value={adjustment}
-                    onChange={(e) => setAdjustment(e.target.value)}
-                  >
-                    <option value="none">None</option>
-                    <option value="ratio">Ratio</option>
-                    <option value="difference">Difference</option>
-                  </select>
-                </label>
-
-                <label className={styles.optionLabel}>
-                  Cycle
-                  <select
-                    className={styles.optionSelect}
-                    value={cycle}
-                    onChange={(e) => setCycle(e.target.value)}
-                  >
-                    <option value="">All</option>
-                    {availableCycles.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className={styles.optionLabel}>
-                  Roll Offset (days)
-                  <input
-                    type="number"
-                    className={styles.optionSelect}
-                    style={{ width: '56px' }}
-                    value={rollOffset}
-                    min={0}
-                    max={30}
-                    onChange={(e) => setRollOffset(Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0)))}
-                  />
-                </label>
-              </div>
+              <ContinuousSpecPicker
+                value={{
+                  type: 'continuous',
+                  collection: selectedFutCollection,
+                  adjustment,
+                  cycle: cycle || null,
+                  rollOffset,
+                  strategy: 'front_month',
+                }}
+                onChange={(next) => {
+                  if (typeof next.adjustment === 'string') setAdjustment(next.adjustment);
+                  // Sub-component emits null for "All", parent state is ''.
+                  setCycle(next.cycle == null ? '' : next.cycle);
+                  if (Number.isFinite(next.rollOffset)) setRollOffset(next.rollOffset);
+                }}
+                availableCycles={availableCycles}
+                assetClass="future"
+              />
 
               <button
                 className={styles.selectContinuousBtn}
@@ -621,10 +605,177 @@ export default function InstrumentPickerModal({
 }
 
 /**
- * Make a fresh empty leg row. Internal helper.
- * `collection` is retained in composer state so the per-leg typeahead can
- * disambiguate same-symbol instruments across collections; it is NOT
- * emitted on the wire (the BE derives collection at resolution time).
+ * Continuous-series spec picker — adjustment / cycle / rollOffset.
+ *
+ * In-file sub-component (Sign 6: no new file, no nested modal).  The
+ * **single source of truth** for the three continuous controls — used
+ * both inside the existing futures drill-down (parent owns the value
+ * state and passes `availableCycles` from its own loader) AND inside
+ * `<BasketLegRow>` per leg for future asset_class (the picker loads its
+ * own cycles when no `availableCycles` prop is supplied).
+ *
+ * Behaviour (Sign 10):
+ *   - Identical control labels, identical default values, identical
+ *     value shape (`{type:"continuous", collection, adjustment, cycle,
+ *     rollOffset, strategy:"front_month"}`) as the iter-0 futures
+ *     drill-down JSX.  The extraction is mechanical; the existing
+ *     vitests covering the futures flow MUST still pass.
+ *
+ * Props:
+ *   value           — current spec; `value.collection` drives the
+ *                     internal cycles loader when `availableCycles` is
+ *                     not supplied externally.
+ *   onChange        — receives the next full spec object.
+ *   availableCycles — when supplied (futures drill-down), the parent
+ *                     owns cycle-loading; the picker just renders the
+ *                     supplied list.  When undefined (basket leg), the
+ *                     picker loads cycles itself keyed off
+ *                     `value.collection`.
+ *   assetClass      — "future" | "option" — currently informational
+ *                     (allows future spec divergence by class).
+ */
+function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _assetClass = 'future' }) {
+  const [internalCycles, setInternalCycles] = useState([]);
+
+  // Load cycles when the parent does NOT supply them (basket-leg case).
+  // The existing futures drill-down passes its own `availableCycles`
+  // from a parent-scoped loader (Sign 10 — behaviour preserved); we
+  // skip the internal loader there to avoid duplicate network calls.
+  useEffect(() => {
+    if (availableCycles !== undefined) return undefined;
+    const coll = value && typeof value.collection === 'string' ? value.collection : '';
+    if (!coll) {
+      setInternalCycles([]);
+      return undefined;
+    }
+    let cancelled = false;
+    getAvailableCycles(coll)
+      .then((cycles) => { if (!cancelled) setInternalCycles(cycles || []); })
+      .catch(() => { if (!cancelled) setInternalCycles([]); });
+    return () => { cancelled = true; };
+  }, [availableCycles, value && value.collection]);
+
+  const cyclesList = availableCycles !== undefined ? availableCycles : internalCycles;
+  const adjustment = (value && value.adjustment) || 'none';
+  const cycleRaw = value && value.cycle;
+  // The <select> control uses '' to mean "All" (null on the wire).
+  const cycleSelect = cycleRaw == null ? '' : cycleRaw;
+  const rollOffset = value && Number.isFinite(value.rollOffset) ? value.rollOffset : 0;
+
+  const emit = useCallback((patch) => {
+    const next = {
+      type: 'continuous',
+      collection: (value && value.collection) || '',
+      adjustment,
+      cycle: cycleRaw == null ? null : cycleRaw,
+      rollOffset,
+      strategy: 'front_month',
+      ...patch,
+    };
+    onChange(next);
+  }, [value && value.collection, adjustment, cycleRaw, rollOffset, onChange]);
+
+  return (
+    <div className={styles.rollingOptions} data-testid="continuous-spec-picker">
+      <label className={styles.optionLabel}>
+        Adjustment
+        <select
+          className={styles.optionSelect}
+          value={adjustment}
+          onChange={(e) => emit({ adjustment: e.target.value })}
+          data-testid="continuous-spec-picker-adjustment"
+        >
+          <option value="none">None</option>
+          <option value="ratio">Ratio</option>
+          <option value="difference">Difference</option>
+        </select>
+      </label>
+
+      <label className={styles.optionLabel}>
+        Cycle
+        <select
+          className={styles.optionSelect}
+          value={cycleSelect}
+          onChange={(e) => emit({ cycle: e.target.value === '' ? null : e.target.value })}
+          data-testid="continuous-spec-picker-cycle"
+        >
+          <option value="">All</option>
+          {cyclesList.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+      </label>
+
+      <label className={styles.optionLabel}>
+        Roll Offset (days)
+        <input
+          type="number"
+          className={styles.optionSelect}
+          style={{ width: '56px' }}
+          value={rollOffset}
+          min={0}
+          max={30}
+          onChange={(e) => emit({
+            rollOffset: Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0)),
+          })}
+          data-testid="continuous-spec-picker-roll-offset"
+        />
+      </label>
+    </div>
+  );
+}
+
+/**
+ * Option-stream spec picker — thin wrapper over the existing
+ * <OptionStreamForm> standalone component.  Sub-component of
+ * <InstrumentPickerModal> (Sign 6: in-file).
+ *
+ * Used by <BasketLegRow> for `asset_class="option"`.  The form already
+ * builds a BE-compatible OptionStreamRef (`{type:"option_stream",
+ * collection, option_type, cycle, maturity, selection, stream}`) via
+ * `buildDefaultOptionStream`, so the wrapper just initialises the
+ * value from `availableRoots` when the leg is empty and forwards
+ * subsequent edits through `onChange`.  No new file, no nested modal.
+ *
+ * Props:
+ *   value           — current spec (or null/empty for fresh leg).
+ *   onChange        — receives the next spec.
+ *   availableRoots  — list of OPT_* roots from getOptionRoots() (loaded
+ *                     by the parent modal alongside the Options tab).
+ *   assetClass      — currently always "option"; reserved for future
+ *                     dispatch parity with ContinuousSpecPicker.
+ */
+function OptionStreamPicker({ value, onChange, availableRoots, assetClass: _assetClass = 'option' }) {
+  // Adopt a sensible default if the parent has not yet initialised the
+  // leg's instrument shape.  We notify the parent so it picks up the
+  // baseline immediately (no half-configured state hiding in the form).
+  useEffect(() => {
+    if (value && value.type === 'option_stream' && value.collection) return;
+    if (!availableRoots || availableRoots.length === 0) return;
+    const next = buildDefaultOptionStream({ availableRoots });
+    onChange(next);
+    // We intentionally depend only on the availability of roots — once
+    // the parent owns a real value we never overwrite it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableRoots && availableRoots.length]);
+
+  return (
+    <div data-testid="option-stream-picker" style={{ flex: 1, minWidth: 0 }}>
+      <OptionStreamForm
+        value={value}
+        onChange={onChange}
+        availableRoots={availableRoots || []}
+      />
+    </div>
+  );
+}
+
+/**
+ * Make a fresh empty leg row.  Iter-1/2 single-contract shape — the
+ * polymorphic-shape variant is introduced in the next commit (Wave
+ * I-front-3 Phase C); this commit only extracts the picker sub-
+ * components so the existing iter-1/2 vitests still pass (Sign 10
+ * behaviour preservation for the extraction-only commit).
  */
 function makeEmptyLeg() {
   return { instrument_id: '', weight: 1, collection: '' };
