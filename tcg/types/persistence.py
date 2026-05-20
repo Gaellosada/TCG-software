@@ -143,15 +143,25 @@ class BasketDoc:
 
     ``legs`` is an opaque tuple of leg descriptors.  The persistence layer
     does not interpret the inner shape — that belongs to the API layer which
-    validates asset-class homogeneity on write.
+    validates strict per-class mapping on write (each leg's
+    ``instrument.type`` must match the envelope-declared ``asset_class``).
 
-    The leg shape stored inside the tuple is::
+    The leg shape stored inside the tuple is the polymorphic form::
 
-        {"instrument_id": str, "collection": str, "weight": float}
+        {"instrument": {"type": "<spot|continuous|option_stream>", ...},
+         "weight": float}
 
     where ``weight`` is a signed float fraction (negative = short) and
-    ``collection`` is the MongoDB collection that hosts the instrument
-    (used to derive asset class without a catalogue lookup).
+    the ``instrument`` sub-dict carries the full spec for the leg's
+    underlying series (collection, adjustment, cycle, etc., depending
+    on the discriminator).
+
+    ``asset_class`` is the envelope-level declaration that constrains
+    the per-leg ``instrument.type`` — ``"equity"``/``"index"`` →
+    ``"spot"``, ``"future"`` → ``"continuous"``, ``"option"`` →
+    ``"option_stream"``.  Defaulted to ``"equity"`` for backward
+    compatibility with the iter-1/2 saved-basket shape (no production
+    data — the basket collection is empty per ORDERS).
     """
 
     id: str
@@ -161,6 +171,7 @@ class BasketDoc:
     created_at: datetime
     updated_at: datetime
     legs: tuple[dict, ...] = field(default_factory=tuple)
+    asset_class: str = "equity"
 
 
 PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc | BasketDoc

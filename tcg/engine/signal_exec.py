@@ -197,13 +197,17 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
         if inst.basket_id is not None:
             return ("basket", "saved", inst.basket_id)
         # Inline basket: structural identity built from asset_class +
-        # canonically-sorted (instrument_id, weight) tuples.  Two inline
-        # baskets with the same legs in any order share an identity, so
-        # the fetcher dedupes them.
+        # canonically-sorted per-leg (instrument-identity, weight) pairs.
+        # Recursing into ``_instrument_identity`` for each leg's
+        # instrument means two inline baskets with the same legs in any
+        # order share an identity, AND two baskets with the same legs
+        # but different adjustment / cycle / option-stream selection
+        # produce *different* identities (iter-3 requirement: full
+        # instrument spec hashed, not just instrument_id).
         legs_key = tuple(
             sorted(
-                (str(leg["instrument_id"]), float(leg["weight"]))
-                for leg in inst.legs
+                (_instrument_identity(leg_inst), float(leg_weight))
+                for leg_inst, leg_weight in inst.legs
             )
         )
         return ("basket", "inline", inst.asset_class, legs_key)
@@ -1042,6 +1046,16 @@ async def evaluate_signal(
                 price_label = f"{inp.instrument.instrument_id}.close"
             elif isinstance(inp.instrument, InstrumentOptionStream):
                 price_label = f"{inp.instrument.collection}.{inp.instrument.stream}"
+            elif isinstance(inp.instrument, InstrumentBasket):
+                # Baskets identify themselves by ``basket_id`` (saved) or
+                # by their declared ``asset_class`` (inline) so the price
+                # label remains stable across the polymorphic-leg shape.
+                if inp.instrument.basket_id is not None:
+                    price_label = f"basket:{inp.instrument.basket_id}.close"
+                else:
+                    price_label = (
+                        f"basket:inline[{inp.instrument.asset_class}].close"
+                    )
             else:
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]
