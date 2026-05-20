@@ -39,12 +39,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Union
 
 import pymongo.errors
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from tcg.core.api._models_options import MaturityRule, SelectionCriterion
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.persistence import (
     ConcurrentUpdateError,
@@ -143,85 +144,108 @@ def _validate_payload(value: Any, field_name: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Asset-class derivation for basket validation
+# Basket asset-class strict per-leg mapping
 # ---------------------------------------------------------------------------
 
 
-def _asset_class_from_collection(collection: str) -> str | None:
-    """Derive an asset-class bucket from a MongoDB collection name.
-
-    Returns one of ``'future'``, ``'index'``, ``'equity'``, or ``None``
-    when the collection is unknown or hosts options (options are not
-    yet supported in baskets — Phase 1 scope).
-
-    Mirrors the bucketing logic used elsewhere (``tcg.data._mongo``) but
-    re-implemented here to avoid importing from the read-only data layer
-    (Sign 2 guardrail).
-    """
-    if collection.startswith("FUT_"):
-        return "future"
-    if collection == "INDEX":
-        return "index"
-    if collection in ("ETF", "FUND", "FOREX"):
-        return "equity"
-    return None
+# Strict per-asset-class mapping from the basket envelope's declared
+# ``asset_class`` to the required leg ``instrument.type``.  Mirrored
+# in ``tcg.core.api._models._ASSET_CLASS_TO_INSTRUMENT_TYPE`` for the
+# inline-signal-input path; redefined file-local here to honour the
+# import-linter boundary (Sign 8 of the iter-3 guardrails forbids
+# ``persistence.py`` importing from ``_models.py``).
+_ASSET_CLASS_TO_INSTRUMENT_TYPE: dict[str, str] = {
+    "equity": "spot",
+    "index": "spot",
+    "future": "continuous",
+    "option": "option_stream",
+}
 
 
-def _check_basket_homogeneity(legs: list["BasketLegIn"]) -> None:
-    """Reject baskets whose legs straddle multiple asset classes.
+def _check_basket_homogeneity(
+    asset_class: str, legs: list["BasketLegIn"]
+) -> None:
+    """Reject baskets whose legs don't match the declared asset class.
 
-    Raises ``HTTPException(400)`` on:
+    Strict per-class mapping (iter-3):
 
-    * any leg whose ``collection`` resolves to an unknown / unsupported
-      asset class (including ``OPT_*`` option collections), or
-    * a mixture of asset classes across legs.
+    * ``asset_class="equity"`` or ``"index"`` → each leg's
+      ``instrument.type`` must be ``"spot"``.
+    * ``asset_class="future"`` → each leg's ``instrument.type`` must
+      be ``"continuous"``.
+    * ``asset_class="option"`` → each leg's ``instrument.type`` must
+      be ``"option_stream"``.
 
-    Empty baskets are permitted so that the frontend can save partial
-    work (the create dialog ships an empty basket on first save).
+    Raises ``HTTPException(400)`` with a detail naming the leg index
+    and the expected ``instrument.type`` on any mismatch.  Empty
+    baskets are permitted so the frontend can save partial work.
     """
     if not legs:
         return
-
-    buckets: dict[str, list[int]] = {}
-    for i, leg in enumerate(legs):
-        ac = _asset_class_from_collection(leg.collection)
-        if ac is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"basket leg {i}: collection {leg.collection!r} has no "
-                    f"supported asset class (unknown or options not yet "
-                    f"supported in baskets)"
-                ),
-            )
-        buckets.setdefault(ac, []).append(i)
-
-    if len(buckets) > 1:
-        parts = "; ".join(
-            f"{ac}=legs{idxs}" for ac, idxs in sorted(buckets.items())
-        )
+    expected = _ASSET_CLASS_TO_INSTRUMENT_TYPE.get(asset_class)
+    if expected is None:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"basket legs must share the same asset class — "
-                f"got mixed classes: {parts}"
+                f"basket asset_class {asset_class!r} is not supported "
+                f"(expected one of {sorted(_ASSET_CLASS_TO_INSTRUMENT_TYPE)!r})"
             ),
         )
-
-
-def _check_basket_no_duplicates(legs: list["BasketLegIn"]) -> None:
-    """Reject duplicate ``instrument_id`` within the same basket."""
-    seen: set[str] = set()
     for i, leg in enumerate(legs):
-        if leg.instrument_id in seen:
+        actual = leg.instrument.type
+        if actual != expected:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"basket leg {i}: duplicate instrument_id "
-                    f"{leg.instrument_id!r}"
+                    f"basket leg {i}: asset_class={asset_class!r} "
+                    f"requires instrument.type={expected!r}, got {actual!r}"
                 ),
             )
-        seen.add(leg.instrument_id)
+
+
+def _canonical_instrument_hash(instrument: Any) -> tuple:
+    """Return a stable, hashable canonical representation of a basket
+    leg's ``instrument`` sub-object.
+
+    Used by :func:`_check_basket_no_duplicates` and by the engine's
+    :func:`_instrument_identity` to discriminate legs that look the same
+    on instrument_id alone but differ on adjustment / cycle / rollOffset
+    / option-stream selection.  Two legs with structurally-identical
+    ``instrument`` payloads return equal hashes regardless of dict
+    insertion order.
+    """
+    payload = instrument.model_dump(mode="python")
+    return _freeze(payload)
+
+
+def _freeze(value: Any) -> Any:
+    """Recursively turn dicts/lists into sorted tuples for hashing."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+def _check_basket_no_duplicates(legs: list["BasketLegIn"]) -> None:
+    """Reject duplicate legs within the same basket.
+
+    A duplicate is two legs whose full ``instrument`` spec hashes
+    identically AND share the same ``weight``.  Two legs with the
+    same instrument but different weights are NOT duplicates (the
+    user may want to express a directional or sizing layering).
+    """
+    seen: set[tuple] = set()
+    for i, leg in enumerate(legs):
+        key = (_canonical_instrument_hash(leg.instrument), float(leg.weight))
+        if key in seen:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"basket leg {i}: duplicate (instrument, weight) pair"
+                ),
+            )
+        seen.add(key)
 
 
 # Accepted ``rebalance`` values — mirrors ``tcg.types.portfolio.RebalanceFreq``
@@ -360,21 +384,90 @@ class PortfolioUpdateIn(_BaseWriteModel):
 # Basket wire models
 # ---------------------------------------------------------------------------
 
+# File-local copies of the three instrument-ref shapes from
+# ``tcg.core.api._models``.  The import-linter contract (Sign 8 of the
+# iter-3 guardrails) forbids ``persistence.py`` importing names from
+# ``_models.py``; mirroring the iter-1/2 ``BasketLegInLite`` precedent,
+# we redefine the shapes here.  The two copies track each other —
+# any change to one MUST land here too.
+#
+# These are dict-literal ``model_config`` (not ``ConfigDict``) to match
+# the rest of the basket models in this file (iter-2 reviewer accepted
+# the dict-literal form as the file-local convention here).
+
+
+_OptionStreamLabel = Literal[
+    "mid", "iv", "delta", "gamma", "vega", "theta", "open_interest", "volume",
+]
+
+
+class _SpotInstrumentRefLocal(BaseModel):
+    """File-local mirror of ``_models.SpotInstrumentRef``."""
+
+    model_config = {"extra": "forbid"}
+
+    type: Literal["spot"]
+    collection: str = Field(..., min_length=1, max_length=128)
+    instrument_id: str = Field(..., min_length=1, max_length=256)
+
+
+class _ContinuousInstrumentRefLocal(BaseModel):
+    """File-local mirror of ``_models.ContinuousInstrumentRef``."""
+
+    model_config = {"extra": "forbid"}
+
+    type: Literal["continuous"]
+    collection: str = Field(..., min_length=1, max_length=128)
+    adjustment: Literal["none", "ratio", "difference"] = "none"
+    cycle: str | None = None
+    rollOffset: int = 0
+    strategy: Literal["front_month"] = "front_month"
+
+
+class _OptionStreamRefLocal(BaseModel):
+    """File-local mirror of ``_models.OptionStreamRef``."""
+
+    model_config = {"extra": "forbid"}
+
+    type: Literal["option_stream"]
+    collection: str = Field(..., min_length=1, max_length=128)
+    option_type: Literal["C", "P"]
+    cycle: str | None = None
+    maturity: MaturityRule
+    selection: SelectionCriterion
+    stream: _OptionStreamLabel
+
+    @field_validator("cycle", mode="before")
+    @classmethod
+    def _blank_cycle_to_none(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
 
 class BasketLegIn(BaseModel):
-    """A single leg in a basket create/update payload.
+    """A single leg in a basket create/update payload — polymorphic.
 
-    ``weight`` is a signed fraction: positive = long, negative = short.
-    The API does NOT validate that weights sum to 1.0 — callers may save
-    partial work. Zero weight is rejected (meaningless leg).
-    ``collection`` identifies the MongoDB collection that hosts the
-    instrument so asset class can be derived without a catalogue lookup.
+    Each leg carries a discriminated ``instrument`` sub-object
+    (``spot`` / ``continuous`` / ``option_stream``) plus a non-zero
+    signed ``weight``.  Asset-class homogeneity across the basket is
+    enforced separately by :func:`_check_basket_homogeneity`, which
+    reads the envelope-level ``asset_class`` and rejects any leg whose
+    ``instrument.type`` doesn't match the strict per-class mapping.
+
+    Mirrors the inline-input :class:`tcg.core.api._models.BasketLeg`.
     """
 
     model_config = {"extra": "forbid"}
 
-    instrument_id: str = Field(..., min_length=1, max_length=256)
-    collection: str = Field(..., min_length=1, max_length=128)
+    instrument: Annotated[
+        Union[
+            _SpotInstrumentRefLocal,
+            _ContinuousInstrumentRefLocal,
+            _OptionStreamRefLocal,
+        ],
+        Field(discriminator="type"),
+    ]
     weight: float = Field(...)
 
     @field_validator("weight")
@@ -385,12 +478,18 @@ class BasketLegIn(BaseModel):
         return v
 
 
+# Asset class declared on the basket envelope — drives the strict
+# per-class mapping enforced by ``_check_basket_homogeneity``.
+BasketAssetClassLiteral = Literal["future", "option", "index", "equity"]
+
+
 class BasketIn(_BaseWriteModel):
     """Create-payload for a basket."""
 
     id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
     name: str = Field(..., min_length=1, max_length=512)
     category: Category
+    asset_class: BasketAssetClassLiteral
     legs: list[BasketLegIn] = Field(default_factory=list)
 
     @field_validator("legs")
@@ -407,6 +506,7 @@ class BasketUpdateIn(_BaseWriteModel):
 
     name: str = Field(..., min_length=1, max_length=512)
     category: Category
+    asset_class: BasketAssetClassLiteral
     legs: list[BasketLegIn] = Field(default_factory=list)
 
     @field_validator("legs")
@@ -423,6 +523,7 @@ class BasketOut(BaseModel):
     type: str
     name: str
     category: Category
+    asset_class: str
     created_at: datetime
     updated_at: datetime
     legs: list[dict]
@@ -513,9 +614,28 @@ def _basket_to_out(doc: BasketDoc) -> BasketOut:
         type=doc.type,
         name=doc.name,
         category=doc.category,
+        asset_class=doc.asset_class,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         legs=list(doc.legs),
+    )
+
+
+def _legs_to_mongo(legs: list[BasketLegIn]) -> tuple[dict, ...]:
+    """Serialise wire-shape basket legs into the Mongo-bound dict form.
+
+    Each leg dict is ``{"instrument": <polymorphic-sub-dict>,
+    "weight": float}``.  ``model_dump(mode="json")`` collapses any
+    nested Pydantic models on ``instrument`` into plain JSON-compatible
+    dicts so the dataclass ``BasketDoc.legs`` (opaque tuples of dicts)
+    can round-trip through ``to_mongo_dict`` / ``from_mongo_dict``.
+    """
+    return tuple(
+        {
+            "instrument": leg.instrument.model_dump(mode="json"),
+            "weight": float(leg.weight),
+        }
+        for leg in legs
     )
 
 
@@ -833,22 +953,16 @@ async def archive_portfolio(doc_id: str, repo: RepoDep) -> None:
 
 @router.post("/baskets", response_model=BasketOut, status_code=201)
 async def create_basket(body: BasketIn, repo: RepoDep) -> BasketOut:
+    _check_basket_homogeneity(body.asset_class, body.legs)
     _check_basket_no_duplicates(body.legs)
-    _check_basket_homogeneity(body.legs)
     now = _now()
-    raw_legs = tuple(
-        {
-            "instrument_id": leg.instrument_id,
-            "collection": leg.collection,
-            "weight": leg.weight,
-        }
-        for leg in body.legs
-    )
+    raw_legs = _legs_to_mongo(body.legs)
     doc = BasketDoc(
         id=body.id,
         type=DocType.BASKET.value,
         name=body.name,
         category=body.category,
+        asset_class=body.asset_class,
         created_at=now,
         updated_at=now,
         legs=raw_legs,
@@ -892,27 +1006,21 @@ async def get_basket(doc_id: str, repo: RepoDep) -> BasketOut:
 async def update_basket(
     doc_id: str, body: BasketUpdateIn, repo: RepoDep
 ) -> BasketOut:
+    _check_basket_homogeneity(body.asset_class, body.legs)
     _check_basket_no_duplicates(body.legs)
-    _check_basket_homogeneity(body.legs)
     existing = _expect(
         await repo.get_by_id(DocType.BASKET.value, doc_id),
         DocType.BASKET.value,
         doc_id,
     )
     assert isinstance(existing, BasketDoc)
-    raw_legs = tuple(
-        {
-            "instrument_id": leg.instrument_id,
-            "collection": leg.collection,
-            "weight": leg.weight,
-        }
-        for leg in body.legs
-    )
+    raw_legs = _legs_to_mongo(body.legs)
     updated = BasketDoc(
         id=doc_id,
         type=DocType.BASKET.value,
         name=body.name,
         category=body.category,
+        asset_class=body.asset_class,
         created_at=existing.created_at,
         updated_at=existing.updated_at,  # repo bumps it
         legs=raw_legs,
