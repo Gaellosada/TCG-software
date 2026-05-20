@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useId } from 'react';
 import styles from './OptionStreamForm.module.css';
 
 /**
@@ -185,6 +185,14 @@ export default function OptionStreamForm({
   allowedCycles = ALL_CYCLES,
   disabled = false,
 }) {
+  // Per-instance stable id used to scope the option-type radio group's
+  // `name` attribute.  Without this, two simultaneously-mounted forms
+  // (e.g. an option basket composer with two option legs) would share a
+  // single browser-level radio group named "option-type", causing
+  // clicking "Put" on one form to visually deselect "Call" on the
+  // sibling — see Bug 1 regression in InstrumentPickerModal.test.jsx.
+  const formId = useId();
+
   // Resolve a usable value: if the parent supplies null we still render
   // safely against a sensible default. Exposing onChange below means the
   // parent will adopt the default on first interaction.
@@ -292,7 +300,7 @@ export default function OptionStreamForm({
             <label key={t} className={styles.radio}>
               <input
                 type="radio"
-                name="option-type"
+                name={`option-type-${formId}`}
                 value={t}
                 checked={v.option_type === t}
                 onChange={() => setOptionType(t)}
