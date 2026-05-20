@@ -169,6 +169,51 @@ describe('<InstrumentPickerModal>', () => {
     await waitFor(() => expect(screen.queryByTestId('option-stream-form')).toBeNull());
   });
 
+  it('existing futures drill-down emits continuous spec via shared <ContinuousSpecPicker> (Sign 10 regression)', async () => {
+    // Sign 10: the <ContinuousSpecPicker> extraction must preserve the
+    // existing futures drill-down's behaviour pixel-perfect — same
+    // controls, same defaults, same emit shape.  This regression test
+    // walks the futures drill-down path end-to-end.
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(getAvailableCycles).mockResolvedValue(['H', 'M']);
+    const onSelect = vi.fn();
+    const onClose = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={onClose} onSelect={onSelect} />);
+    await flushAsync();
+
+    // Expand Futures group → click FUT_ES → enter drill-down.
+    await waitFor(() => expect(screen.getByText('Futures')).toBeTruthy());
+    fireEvent.click(screen.getByText('Futures'));
+    await waitFor(() => expect(screen.getByText('FUT_ES')).toBeTruthy());
+    fireEvent.click(screen.getByText('FUT_ES'));
+
+    // The continuous-spec picker is rendered (single source of truth
+    // shared with the basket-composer future leg).
+    await waitFor(() => expect(screen.getByTestId('continuous-spec-picker')).toBeTruthy());
+
+    // Tune adjustment + cycle + rollOffset.
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-adjustment'), { target: { value: 'difference' } });
+    await waitFor(() => {
+      const sel = screen.getByTestId('continuous-spec-picker-cycle');
+      expect(sel.querySelector('option[value="H"]')).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-cycle'), { target: { value: 'H' } });
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-roll-offset'), { target: { value: '7' } });
+
+    // Click "Select Continuous Series" → emit shape is iter-0 stable.
+    fireEvent.click(screen.getByText('Select Continuous Series'));
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onSelect.mock.calls[0][0]).toEqual({
+      type: 'continuous',
+      collection: 'FUT_ES',
+      strategy: 'front_month',
+      adjustment: 'difference',
+      cycle: 'H',
+      rollOffset: 7,
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it('still emits a spot selection from the existing flow (regression)', async () => {
     const onSelect = vi.fn();
     const onClose = vi.fn();
