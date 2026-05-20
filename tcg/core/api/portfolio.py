@@ -21,9 +21,11 @@ from tcg.core.api._options_materialise import (
 )
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import get_market_data
+from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
     IndicatorSpecIn,
     SignalIn,
+    _resolve_basket_inputs,
     compute_input_overlap,
     make_signal_fetcher,
     parse_signal,
@@ -31,6 +33,7 @@ from tcg.core.api.signals import (
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data._utils import date_to_int, int_to_iso
 from tcg.data.protocols import MarketDataService
+from tcg.persistence import WriteRepository
 from tcg.engine import (
     aggregate_returns,
     compute_metrics,
@@ -289,6 +292,7 @@ async def _evaluate_signal_leg(
     svc: MarketDataService,
     start_date: date | None,
     end_date: date | None,
+    repo: WriteRepository,
 ) -> _SignalLegEvalResult:
     """Evaluate a signal leg and bubble up everything the portfolio path needs.
 
@@ -296,6 +300,12 @@ async def _evaluate_signal_leg(
     all per-input realized_pnl arrays from the signal evaluation:
 
         synthetic = 100.0 * (1.0 + aggregated_pnl)
+
+    Basket inputs (inline OR saved) on the signal's spec are pre-resolved
+    via :func:`_resolve_basket_inputs` and threaded into ``parse_signal``
+    as ``resolved_inputs=`` — mirrors :func:`compute_signal`'s pattern so
+    that a portfolio signal leg whose input is a basket doesn't crash
+    inside ``_parse_input`` on the continuous-branch fallback.
 
     Returns:
         ``_SignalLegEvalResult`` carrying the YYYYMMDD int date index, the
@@ -307,9 +317,17 @@ async def _evaluate_signal_leg(
     if leg.signal_spec is None:
         raise ValidationError(f"Leg '{label}': signal legs require 'signal_spec'")
 
-    # 1. Parse the signal spec into engine types
+    # 1. Pre-resolve basket refs (inline + saved) and parse the signal
+    #    spec into engine types. Mirrors ``compute_signal`` so that
+    #    BasketRefInline / BasketRefSaved inputs are materialised into
+    #    typed-leg snapshots before ``_parse_input`` runs.
     try:
-        signal = parse_signal(leg.signal_spec.spec)
+        resolved_inputs = await _resolve_basket_inputs(
+            leg.signal_spec.spec.inputs, repo, svc
+        )
+        signal = parse_signal(
+            leg.signal_spec.spec, resolved_inputs=resolved_inputs
+        )
     except SignalValidationError as exc:
         raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
 
@@ -518,6 +536,7 @@ async def compute_portfolio(
     body: PortfolioRequest,
     svc: MarketDataService = Depends(get_market_data),
     registry: CollectionRegistry = Depends(get_registry),
+    repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
     """Compute a weighted portfolio with rebalancing and return full analytics."""
 
@@ -631,6 +650,7 @@ async def compute_portfolio(
             svc,
             start_date,
             end_date,
+            repo,
         )
         signal_dates_map[label] = leg_result.index
         signal_closes[label] = leg_result.synthetic
