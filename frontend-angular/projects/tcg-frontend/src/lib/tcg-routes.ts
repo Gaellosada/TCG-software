@@ -3,6 +3,7 @@ import { TcgPlaceholderRouteComponent } from './components/placeholder-page/tcg-
 import { TcgSettingsPageComponent } from './pages/settings/tcg-settings-page.component';
 import { TcgUserSettingsService } from './services/tcg-user-settings.service';
 import { TcgDataPageComponent } from './pages/data/tcg-data-page.component';
+import { TcgDataApi } from './api/tcg-data-api.service';
 import { TcgOptionsApi } from './api/tcg-options-api.service';
 import { TcgSeriesSummaryApi } from './api/tcg-series-summary-api.service';
 
@@ -31,7 +32,7 @@ export const tcgRoutes: Routes = [
       {
         path: 'data',
         component: TcgDataPageComponent,
-        providers: [TcgOptionsApi, TcgSeriesSummaryApi],
+        providers: [TcgDataApi, TcgOptionsApi, TcgSeriesSummaryApi],
       },
       { path: 'settings', component: TcgSettingsPageComponent },
       {
