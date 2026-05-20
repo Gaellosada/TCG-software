@@ -26,7 +26,10 @@ export type {
   TcgInstrumentPricesOpts,
 } from './lib/api/tcg-data-api.service';
 
-export { TcgPersistenceApi, describePersistenceError, TCG_PERSISTENCE_CATEGORIES } from './lib/api/tcg-persistence-api.service';
+// `describePersistenceError` (unprefixed helper) is intentionally NOT
+// re-exported — library-internal, consumed by TcgPersistenceApi and its
+// spec via relative import.
+export { TcgPersistenceApi, TCG_PERSISTENCE_CATEGORIES } from './lib/api/tcg-persistence-api.service';
 export type {
   TcgPersistenceCategory,
   TcgSignalOut,
