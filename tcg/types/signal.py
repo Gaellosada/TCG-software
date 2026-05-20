@@ -104,9 +104,6 @@ class InstrumentOptionStream:
 # / identity paths — those code paths already pattern-match on the
 # leaf instrument types, so unpacking ``(instrument, weight)`` per leg
 # requires no new ``isinstance`` chains.
-BasketLegInstrument = (
-    "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream"
-)
 
 
 @dataclass(frozen=True)

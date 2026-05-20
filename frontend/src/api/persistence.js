@@ -241,8 +241,20 @@ export async function archivePortfolio(id) {
 /**
  * Create a new persisted basket.
  *
- * @param {{ id: string, name: string, category: string,
- *   legs?: Array<{instrument_id: string, collection: string, weight: number}> }} payload
+ * Leg shape is polymorphic per iter-3: each leg carries an `instrument`
+ * sub-object discriminated by `type` (`spot` | `continuous` |
+ * `option_stream`) plus a signed non-zero `weight`. The envelope
+ * `asset_class` determines which `instrument.type` is permitted
+ * (`equity`/`index` → spot; `future` → continuous; `option` →
+ * option_stream); the BE rejects mismatches with 400.
+ *
+ * @param {{
+ *   id: string,
+ *   name: string,
+ *   category: string,
+ *   asset_class: 'equity' | 'index' | 'future' | 'option',
+ *   legs?: Array<{instrument: object, weight: number}>
+ * }} payload
  * @returns {Promise<BasketOut>}
  */
 export function createBasket(payload) {
@@ -274,9 +286,18 @@ export function getBasket(id) {
  * must supply every field; the backend defaults ``legs`` to an empty
  * list when omitted.
  *
+ * Leg shape matches {@link createBasket}: each leg carries an
+ * `instrument` sub-object discriminated by `type` (`spot` | `continuous`
+ * | `option_stream`) plus a signed non-zero `weight`. Envelope
+ * `asset_class` gates which `instrument.type` is permitted per leg.
+ *
  * @param {string} id
- * @param {{ name: string, category: string,
- *   legs?: Array<{instrument_id: string, collection: string, weight: number}> }} payload
+ * @param {{
+ *   name: string,
+ *   category: string,
+ *   asset_class: 'equity' | 'index' | 'future' | 'option',
+ *   legs?: Array<{instrument: object, weight: number}>
+ * }} payload
  * @param {{ signal?: AbortSignal }} [options]
  * @returns {Promise<BasketOut>}
  */
