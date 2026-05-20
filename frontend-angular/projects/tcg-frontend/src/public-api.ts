@@ -157,3 +157,6 @@ export type {
   TcgSeriesRef,
   TcgSeriesSummary,
 } from './lib/api/tcg-series-summary-api.service';
+
+// Settings page --------------------------------------------------------
+export { TcgSettingsPageComponent } from './lib/pages/settings/tcg-settings-page.component';

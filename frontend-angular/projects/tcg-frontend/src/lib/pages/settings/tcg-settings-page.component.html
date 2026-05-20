@@ -1,0 +1,77 @@
+<tcg-page-container>
+  <div class="tcg-settings-page">
+    <h1 class="tcg-settings-page__title">Settings</h1>
+
+    <div class="tcg-settings-page__row">
+      <span class="tcg-settings-page__label">Theme</span>
+      <div class="tcg-settings-page__group" role="radiogroup" aria-label="Theme">
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="isDark()"
+          class="tcg-settings-page__option"
+          [class.tcg-settings-page__option--active]="isDark()"
+          (click)="setTheme('dark')"
+        >
+          <span class="tcg-settings-page__option-inner">
+            <tcg-icon name="moon" [size]="14"></tcg-icon>
+            Dark
+          </span>
+        </button>
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="isLight()"
+          class="tcg-settings-page__option"
+          [class.tcg-settings-page__option--active]="isLight()"
+          (click)="setTheme('light')"
+        >
+          <span class="tcg-settings-page__option-inner">
+            <tcg-icon name="sun" [size]="14"></tcg-icon>
+            Light
+          </span>
+        </button>
+      </div>
+    </div>
+
+    <div class="tcg-settings-page__row">
+      <span class="tcg-settings-page__label">Default chart</span>
+      <div class="tcg-settings-page__group" role="radiogroup" aria-label="Default chart type">
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="isCandlestick()"
+          class="tcg-settings-page__option"
+          [class.tcg-settings-page__option--active]="isCandlestick()"
+          (click)="setChartType('candlestick')"
+        >
+          Candlestick
+        </button>
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="isLine()"
+          class="tcg-settings-page__option"
+          [class.tcg-settings-page__option--active]="isLine()"
+          (click)="setChartType('line')"
+        >
+          Line
+        </button>
+      </div>
+    </div>
+
+    <div class="tcg-settings-page__row">
+      <span class="tcg-settings-page__label">Default risk-free rate</span>
+      <div>
+        <tcg-rfr-input
+          [valuePct]="rfPct()"
+          ariaLabel="Default risk-free rate (percent)"
+          (valuePctChange)="onRfChange($event)"
+        ></tcg-rfr-input>
+        <div class="tcg-settings-page__hint">
+          Used for Sharpe, Sortino, and Calmar ratios.
+        </div>
+      </div>
+    </div>
+  </div>
+</tcg-page-container>
