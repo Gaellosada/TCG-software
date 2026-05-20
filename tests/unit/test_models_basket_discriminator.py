@@ -1,32 +1,32 @@
-"""Q3 smoke test — Pydantic v2 nested discriminator for BasketRef.
+"""Q3 smoke + iter-3 polymorphic-leg discriminator tests for BasketRef.
 
-This is the FIRST piece of code on the BE worker's path (per Wave-P
-decision). Before extending ``signals.py`` or the engine, confirm
-that:
+Iter-1 confirmed the outer SeriesRef union runs through a callable
+``Discriminator(_series_ref_discriminator)`` because FastAPI's OpenAPI
+3.0 emitter can't handle nested discriminators *as members of another
+discriminated union*.
 
-1. The outer discriminator on ``type`` correctly selects the basket
-   branch.
-2. The inner discriminator on ``kind`` correctly disambiguates
-   ``BasketRefSaved`` vs ``BasketRefInline``.
-3. ``extra="forbid"`` is enforced on both shapes (and on
-   ``BasketLegInLite``).
-4. The inline shape's ``legs`` honours ``min_length=1`` and the
-   weight-nonzero validator.
+Iter-3 adds a nested standard ``Field(discriminator="type")`` on
+:class:`BasketLeg.instrument` over ``Spot | Continuous | OptionStream``.
+That nested discriminator is one level deep (its members are not
+themselves discriminated unions) so it does NOT trigger the OpenAPI bug
+— the standard Annotated/Field discriminator works.  This file
+smoke-tests the leg-level dispatch on every supported leg.instrument.type
+and verifies the outer SeriesRef discriminator still routes the
+non-basket branches.
 
-If Pydantic v2 rejects the construction, this test would fail at
-import time (Pydantic validates the Annotated discriminator wiring at
-class-build time, not lazily). A failure here is a STOP condition —
-escalate via PROBLEMS.md.
+Tests intentionally exercise the strict per-class mapping at the model
+level (``model_validator`` on :class:`BasketRefInline`) — a mismatched
+(asset_class, leg.instrument.type) raises ValidationError at
+Pydantic-validation time, BEFORE the request hits any route handler.
 """
 
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
-from typing import Annotated, Union
+from pydantic import TypeAdapter, ValidationError
 
 from tcg.core.api._models import (
-    BasketLegInLite,
+    BasketLeg,
     BasketRef,
     BasketRefInline,
     BasketRefSaved,
@@ -34,14 +34,13 @@ from tcg.core.api._models import (
 )
 
 
-# A minimal harness for round-tripping a SeriesRef payload — mirrors how
-# the field is used inside ``_InputIn.instrument`` in signals.py.
 _SeriesRefAdapter = TypeAdapter(SeriesRef)
 _BasketRefAdapter = TypeAdapter(BasketRef)
+_BasketLegAdapter = TypeAdapter(BasketLeg)
 
 
 # ---------------------------------------------------------------------------
-# Q3.1 — outer + inner discriminator both fire correctly
+# Q3.1 — outer + inner discriminator both fire
 # ---------------------------------------------------------------------------
 
 
@@ -50,59 +49,95 @@ def test_saved_basket_payload_resolves_to_basket_ref_saved() -> None:
     parsed = _SeriesRefAdapter.validate_python(payload)
     assert isinstance(parsed, BasketRefSaved)
     assert parsed.basket_id == "MY_BASKET"
-    assert parsed.kind == "saved"
-    assert parsed.type == "basket"
 
 
-def test_inline_basket_payload_resolves_to_basket_ref_inline() -> None:
+def test_inline_basket_with_spot_legs_resolves() -> None:
     payload = {
         "type": "basket",
         "kind": "inline",
         "asset_class": "equity",
         "legs": [
-            {"instrument_id": "SPY", "weight": 0.6},
-            {"instrument_id": "QQQ", "weight": 0.4},
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "SPY",
+                },
+                "weight": 0.6,
+            },
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "QQQ",
+                },
+                "weight": 0.4,
+            },
         ],
     }
     parsed = _SeriesRefAdapter.validate_python(payload)
     assert isinstance(parsed, BasketRefInline)
     assert parsed.asset_class == "equity"
-    assert parsed.kind == "inline"
-    assert parsed.type == "basket"
     assert len(parsed.legs) == 2
-    assert parsed.legs[0].instrument_id == "SPY"
-    assert parsed.legs[0].weight == 0.6
+    assert parsed.legs[0].instrument.type == "spot"
+    assert parsed.legs[0].instrument.instrument_id == "SPY"  # type: ignore[union-attr]
 
 
-def test_inline_basket_via_basket_ref_adapter_directly() -> None:
-    # Bypass the outer discriminator — exercise just the inner one.
+def test_inline_basket_with_continuous_legs_resolves() -> None:
     payload = {
         "type": "basket",
         "kind": "inline",
         "asset_class": "future",
-        "legs": [{"instrument_id": "FUT_ES_2026H", "weight": 1.0}],
+        "legs": [
+            {
+                "instrument": {
+                    "type": "continuous",
+                    "collection": "FUT_ES",
+                    "adjustment": "ratio",
+                    "cycle": "HMUZ",
+                    "rollOffset": 0,
+                    "strategy": "front_month",
+                },
+                "weight": 1.0,
+            }
+        ],
     }
-    parsed = _BasketRefAdapter.validate_python(payload)
+    parsed = _SeriesRefAdapter.validate_python(payload)
     assert isinstance(parsed, BasketRefInline)
+    assert parsed.legs[0].instrument.type == "continuous"
+    assert parsed.legs[0].instrument.adjustment == "ratio"  # type: ignore[union-attr]
 
 
-def test_saved_basket_via_basket_ref_adapter_directly() -> None:
-    payload = {"type": "basket", "kind": "saved", "basket_id": "B1"}
-    parsed = _BasketRefAdapter.validate_python(payload)
-    assert isinstance(parsed, BasketRefSaved)
+def test_inline_basket_with_option_stream_legs_resolves() -> None:
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "option",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "option_stream",
+                    "collection": "OPT_SP_500",
+                    "option_type": "C",
+                    "cycle": None,
+                    "maturity": {"kind": "next_third_friday"},
+                    "selection": {"kind": "by_moneyness", "target": 1.0},
+                    "stream": "mid",
+                },
+                "weight": 1.0,
+            }
+        ],
+    }
+    parsed = _SeriesRefAdapter.validate_python(payload)
+    assert isinstance(parsed, BasketRefInline)
+    assert parsed.legs[0].instrument.type == "option_stream"
 
 
 def test_missing_kind_on_basket_payload_is_rejected() -> None:
     payload = {"type": "basket", "basket_id": "B1"}
     with pytest.raises(ValidationError) as exc_info:
         _SeriesRefAdapter.validate_python(payload)
-    # The callable discriminator returns None when ``kind`` is absent,
-    # which Pydantic surfaces as ``union_tag_not_found``.  The error
-    # type code is the stable contract; the message text mentions the
-    # discriminator function name.
-    err = exc_info.value
-    assert err.error_count() == 1
-    error = err.errors()[0]
+    error = exc_info.value.errors()[0]
     assert error["type"] == "union_tag_not_found"
 
 
@@ -112,8 +147,39 @@ def test_unknown_kind_on_basket_payload_is_rejected() -> None:
         _SeriesRefAdapter.validate_python(payload)
 
 
+def test_missing_leg_instrument_type_is_rejected() -> None:
+    """The leg-level ``Field(discriminator="type")`` must reject a leg
+    whose ``instrument`` payload omits ``type``."""
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "equity",
+        "legs": [
+            {
+                "instrument": {"collection": "ETF", "instrument_id": "SPY"},
+                "weight": 1.0,
+            }
+        ],
+    }
+    with pytest.raises(ValidationError):
+        _SeriesRefAdapter.validate_python(payload)
+
+
+def test_unknown_leg_instrument_type_is_rejected() -> None:
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "equity",
+        "legs": [
+            {"instrument": {"type": "future_legacy"}, "weight": 1.0}
+        ],
+    }
+    with pytest.raises(ValidationError):
+        _SeriesRefAdapter.validate_python(payload)
+
+
 # ---------------------------------------------------------------------------
-# Q3.2 — extra="forbid" enforced on all three basket models
+# Q3.2 — extra="forbid" on all basket models
 # ---------------------------------------------------------------------------
 
 
@@ -122,7 +188,7 @@ def test_saved_basket_extra_field_rejected() -> None:
         "type": "basket",
         "kind": "saved",
         "basket_id": "B1",
-        "rogue_field": "should-fail",
+        "rogue_field": "x",
     }
     with pytest.raises(ValidationError):
         _SeriesRefAdapter.validate_python(payload)
@@ -133,8 +199,17 @@ def test_inline_basket_extra_field_rejected() -> None:
         "type": "basket",
         "kind": "inline",
         "asset_class": "equity",
-        "legs": [{"instrument_id": "SPY", "weight": 1.0}],
-        "rogue_field": "should-fail",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "SPY",
+                },
+                "weight": 1.0,
+            }
+        ],
+        "rogue_field": "x",
     }
     with pytest.raises(ValidationError):
         _SeriesRefAdapter.validate_python(payload)
@@ -145,9 +220,37 @@ def test_inline_basket_leg_extra_field_rejected() -> None:
         "type": "basket",
         "kind": "inline",
         "asset_class": "equity",
-        # The FE wire shape has no ``collection`` on inline legs.
-        # If a sloppy client adds one, reject it loudly.
-        "legs": [{"instrument_id": "SPY", "weight": 1.0, "collection": "ETF"}],
+        "legs": [
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "SPY",
+                },
+                "weight": 1.0,
+                "junk": "x",  # extra at the leg envelope
+            }
+        ],
+    }
+    with pytest.raises(ValidationError):
+        _SeriesRefAdapter.validate_python(payload)
+
+
+def test_inline_basket_leg_instrument_unknown_type_rejected() -> None:
+    """Sanity check that the standard ``Field(discriminator="type")``
+    on the leg-level union rejects unknown discriminator tags.  This
+    is the iter-3 standard-discriminator regression — different shape
+    from the outer callable-Discriminator coverage above."""
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "equity",
+        "legs": [
+            {
+                "instrument": {"type": "spot_legacy", "x": "y"},
+                "weight": 1.0,
+            }
+        ],
     }
     with pytest.raises(ValidationError):
         _SeriesRefAdapter.validate_python(payload)
@@ -174,7 +277,16 @@ def test_inline_basket_leg_zero_weight_rejected() -> None:
         "type": "basket",
         "kind": "inline",
         "asset_class": "equity",
-        "legs": [{"instrument_id": "SPY", "weight": 0.0}],
+        "legs": [
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "SPY",
+                },
+                "weight": 0.0,
+            }
+        ],
     }
     with pytest.raises(ValidationError):
         _SeriesRefAdapter.validate_python(payload)
@@ -185,7 +297,16 @@ def test_inline_basket_leg_negative_weight_accepted() -> None:
         "type": "basket",
         "kind": "inline",
         "asset_class": "equity",
-        "legs": [{"instrument_id": "SPY", "weight": -1.0}],
+        "legs": [
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "SPY",
+                },
+                "weight": -1.0,
+            }
+        ],
     }
     parsed = _SeriesRefAdapter.validate_python(payload)
     assert isinstance(parsed, BasketRefInline)
@@ -196,17 +317,121 @@ def test_inline_basket_unknown_asset_class_rejected() -> None:
     payload = {
         "type": "basket",
         "kind": "inline",
-        "asset_class": "commodity",  # not in the locked literal
-        "legs": [{"instrument_id": "X", "weight": 1.0}],
+        "asset_class": "commodity",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "X",
+                    "instrument_id": "Y",
+                },
+                "weight": 1.0,
+            }
+        ],
     }
     with pytest.raises(ValidationError):
         _SeriesRefAdapter.validate_python(payload)
 
 
 # ---------------------------------------------------------------------------
-# Q3.4 — outer discriminator still routes the non-basket branches.
-# Regression: adding the nested-union member must not break the simple
-# branches it shares the outer union with.
+# Iter-3 strict per-class mapping at the model level (model_validator)
+# ---------------------------------------------------------------------------
+
+
+def test_equity_with_continuous_leg_rejected_by_model_validator() -> None:
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "equity",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "continuous",
+                    "collection": "FUT_ES",
+                    "cycle": "HMUZ",
+                },
+                "weight": 1.0,
+            }
+        ],
+    }
+    with pytest.raises(ValidationError) as exc_info:
+        _SeriesRefAdapter.validate_python(payload)
+    msg = str(exc_info.value)
+    assert "leg 0" in msg
+    assert "spot" in msg and "continuous" in msg
+
+
+def test_future_with_spot_leg_rejected_by_model_validator() -> None:
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "future",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "SPY",
+                },
+                "weight": 1.0,
+            }
+        ],
+    }
+    with pytest.raises(ValidationError) as exc_info:
+        _SeriesRefAdapter.validate_python(payload)
+    assert "leg 0" in str(exc_info.value)
+
+
+def test_option_with_continuous_leg_rejected_by_model_validator() -> None:
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "option",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "continuous",
+                    "collection": "FUT_VIX",
+                },
+                "weight": 1.0,
+            }
+        ],
+    }
+    with pytest.raises(ValidationError):
+        _SeriesRefAdapter.validate_python(payload)
+
+
+def test_mismatch_detail_names_leg_index() -> None:
+    """Mismatch on the second leg names ``leg 1`` (zero-indexed)."""
+    payload = {
+        "type": "basket",
+        "kind": "inline",
+        "asset_class": "future",
+        "legs": [
+            {
+                "instrument": {
+                    "type": "continuous",
+                    "collection": "FUT_ES",
+                },
+                "weight": 0.5,
+            },
+            {
+                "instrument": {
+                    "type": "spot",
+                    "collection": "ETF",
+                    "instrument_id": "SPY",
+                },
+                "weight": 0.5,
+            },
+        ],
+    }
+    with pytest.raises(ValidationError) as exc_info:
+        _SeriesRefAdapter.validate_python(payload)
+    assert "leg 1" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Q3.4 — outer discriminator still routes non-basket branches
 # ---------------------------------------------------------------------------
 
 

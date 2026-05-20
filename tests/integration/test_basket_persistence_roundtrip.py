@@ -69,19 +69,38 @@ def _now() -> datetime:
 
 
 async def test_basket_roundtrip(repo_with_cleanup) -> None:
-    """Full create → get → list → update → archive cycle for BasketDoc."""
+    """Full create → get → list → update → archive cycle for BasketDoc.
+
+    Iter-3 polymorphic-leg shape: each leg carries an ``instrument``
+    sub-dict (spot / continuous / option_stream) and a flat ``weight``.
+    """
     repo = repo_with_cleanup.inner
     doc_id = repo_with_cleanup.id("basket")
     now = _now()
     legs = (
-        {"instrument_id": "SPY", "collection": "ETF", "weight": 0.6},
-        {"instrument_id": "QQQ", "collection": "ETF", "weight": 0.4},
+        {
+            "instrument": {
+                "type": "spot",
+                "collection": "ETF",
+                "instrument_id": "SPY",
+            },
+            "weight": 0.6,
+        },
+        {
+            "instrument": {
+                "type": "spot",
+                "collection": "ETF",
+                "instrument_id": "QQQ",
+            },
+            "weight": 0.4,
+        },
     )
     doc = BasketDoc(
         id=doc_id,
         type="basket",
         name="Integration Basket",
         category=Category.RESEARCH,
+        asset_class="equity",
         created_at=now,
         updated_at=now,
         legs=legs,
@@ -92,27 +111,39 @@ async def test_basket_roundtrip(repo_with_cleanup) -> None:
     assert isinstance(stored, BasketDoc)
     assert stored.id == doc_id
     assert stored.legs == legs
+    assert stored.asset_class == "equity"
 
     # 2. get_by_id
     fetched = await repo.get_by_id("basket", doc_id)
     assert isinstance(fetched, BasketDoc)
     assert fetched == stored
 
-    # 3. list_by_type_and_category — our doc must be present.
+    # 3. list_by_type_and_category
     all_research = await repo.list_by_type_and_category(
         "basket", Category.RESEARCH
     )
     assert any(d.id == doc_id for d in all_research)
 
-    # 4. update — change name + legs.
+    # 4. update — change name + legs to a continuous-future basket.
     new_legs = (
-        {"instrument_id": "SPY", "collection": "ETF", "weight": 1.0},
+        {
+            "instrument": {
+                "type": "continuous",
+                "collection": "FUT_VIX",
+                "adjustment": "ratio",
+                "cycle": "HMUZ",
+                "rollOffset": 0,
+                "strategy": "front_month",
+            },
+            "weight": 1.0,
+        },
     )
     updated_input = BasketDoc(
         id=doc_id,
         type="basket",
         name="Updated Basket",
         category=Category.DEV,
+        asset_class="future",
         created_at=stored.created_at,
         updated_at=stored.updated_at,
         legs=new_legs,
@@ -121,6 +152,7 @@ async def test_basket_roundtrip(repo_with_cleanup) -> None:
     assert isinstance(after, BasketDoc)
     assert after.name == "Updated Basket"
     assert after.category == Category.DEV
+    assert after.asset_class == "future"
     assert after.legs == new_legs
 
     # 5. archive — sets category=ARCHIVE.

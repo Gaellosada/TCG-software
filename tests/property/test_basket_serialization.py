@@ -1,4 +1,4 @@
-"""Hypothesis property tests: ``BasketDoc`` Mongo serde round-trips."""
+"""Hypothesis property tests: ``BasketDoc`` polymorphic-leg Mongo serde."""
 
 from __future__ import annotations
 
@@ -27,11 +27,33 @@ _SAFE_STR = st.text(
     max_size=64,
 )
 
-_LEG = st.fixed_dictionaries(
+
+_SPOT_LEG = st.fixed_dictionaries(
     {
-        "instrument_id": _SAFE_STR,
-        "collection": st.sampled_from(["ETF", "FUT_VIX", "INDEX", "FUND"]),
-        # Avoid weight=0.0 to mirror the wire-level validator.
+        "instrument": st.fixed_dictionaries(
+            {
+                "type": st.just("spot"),
+                "collection": st.sampled_from(["ETF", "FUND", "FOREX", "INDEX"]),
+                "instrument_id": _SAFE_STR,
+            }
+        ),
+        "weight": st.floats(min_value=0.01, max_value=1.0, allow_nan=False),
+    }
+)
+
+
+_CONTINUOUS_LEG = st.fixed_dictionaries(
+    {
+        "instrument": st.fixed_dictionaries(
+            {
+                "type": st.just("continuous"),
+                "collection": st.sampled_from(["FUT_VIX", "FUT_ES", "FUT_CL"]),
+                "adjustment": st.sampled_from(["none", "ratio", "difference"]),
+                "cycle": st.one_of(st.none(), st.sampled_from(["HMUZ", "M"])),
+                "rollOffset": st.integers(min_value=-5, max_value=5),
+                "strategy": st.just("front_month"),
+            }
+        ),
         "weight": st.floats(min_value=0.01, max_value=1.0, allow_nan=False),
     }
 )
@@ -41,16 +63,42 @@ _LEG = st.fixed_dictionaries(
     doc_id=_SAFE_STR,
     name=st.text(min_size=1, max_size=128),
     category=st.sampled_from(_CATEGORIES),
-    legs=st.lists(_LEG, max_size=20),
+    legs=st.lists(_SPOT_LEG, max_size=20),
 )
-@settings(max_examples=200, deadline=None)
-def test_basket_doc_mongo_round_trip(doc_id, name, category, legs) -> None:
+@settings(max_examples=150, deadline=None)
+def test_basket_doc_spot_legs_round_trip(doc_id, name, category, legs) -> None:
+    """Spot-leg baskets (equity / index) serde."""
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     doc = BasketDoc(
         id=doc_id,
         type=DocType.BASKET.value,
         name=name,
         category=category,
+        asset_class="equity",
+        created_at=now,
+        updated_at=now,
+        legs=tuple(legs),
+    )
+    d = to_mongo_dict(doc)
+    reconstructed = from_mongo_dict(d)
+    assert reconstructed == doc
+
+
+@given(
+    doc_id=_SAFE_STR,
+    legs=st.lists(_CONTINUOUS_LEG, max_size=10),
+)
+@settings(max_examples=100, deadline=None)
+def test_basket_doc_continuous_legs_round_trip(doc_id, legs) -> None:
+    """Continuous (rolled-future) legs serde — adjustment + cycle +
+    rollOffset all preserved."""
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    doc = BasketDoc(
+        id=doc_id,
+        type=DocType.BASKET.value,
+        name="prop-cont",
+        category=Category.RESEARCH,
+        asset_class="future",
         created_at=now,
         updated_at=now,
         legs=tuple(legs),
@@ -64,8 +112,13 @@ def test_basket_doc_mongo_round_trip(doc_id, name, category, legs) -> None:
     legs=st.lists(
         st.fixed_dictionaries(
             {
-                "instrument_id": _SAFE_STR,
-                "collection": st.sampled_from(["ETF", "FUT_VIX"]),
+                "instrument": st.fixed_dictionaries(
+                    {
+                        "type": st.just("spot"),
+                        "collection": st.sampled_from(["ETF", "FUT_VIX"]),
+                        "instrument_id": _SAFE_STR,
+                    }
+                ),
                 "weight": st.floats(
                     min_value=-1.0, max_value=1.0, allow_nan=False
                 ).filter(lambda w: abs(w) > 1e-9),
@@ -83,6 +136,7 @@ def test_basket_doc_signed_weights_round_trip(legs) -> None:
         type=DocType.BASKET.value,
         name="prop",
         category=Category.RESEARCH,
+        asset_class="equity",
         created_at=now,
         updated_at=now,
         legs=tuple(legs),

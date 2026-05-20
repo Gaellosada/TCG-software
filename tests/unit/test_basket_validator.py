@@ -1,4 +1,11 @@
-"""Unit tests for basket asset-class homogeneity validation helpers."""
+"""Unit tests for basket strict per-class mapping + duplicate-leg validators.
+
+Iter-3 rewrite: ``_asset_class_from_collection`` was removed (the basket
+envelope now declares ``asset_class`` directly); ``_check_basket_homogeneity``
+now enforces the strict per-asset-class → ``instrument.type`` mapping;
+``_check_basket_no_duplicates`` deduplicates on the canonical hash of the
+full leg ``instrument`` spec (not just ``instrument_id``).
+"""
 
 from __future__ import annotations
 
@@ -7,119 +14,195 @@ from fastapi import HTTPException
 
 from tcg.core.api.persistence import (
     BasketLegIn,
-    _asset_class_from_collection,
+    _ASSET_CLASS_TO_INSTRUMENT_TYPE,
     _check_basket_homogeneity,
     _check_basket_no_duplicates,
 )
 
 
-def _leg(instrument_id: str, collection: str, weight: float = 0.5) -> BasketLegIn:
+def _spot_leg(
+    instrument_id: str, collection: str = "ETF", weight: float = 0.5
+) -> BasketLegIn:
     return BasketLegIn(
-        instrument_id=instrument_id, collection=collection, weight=weight
+        instrument={
+            "type": "spot",
+            "collection": collection,
+            "instrument_id": instrument_id,
+        },
+        weight=weight,
+    )
+
+
+def _continuous_leg(
+    collection: str,
+    weight: float = 0.5,
+    *,
+    adjustment: str = "none",
+    cycle: str | None = None,
+    rollOffset: int = 0,
+) -> BasketLegIn:
+    return BasketLegIn(
+        instrument={
+            "type": "continuous",
+            "collection": collection,
+            "adjustment": adjustment,
+            "cycle": cycle,
+            "rollOffset": rollOffset,
+            "strategy": "front_month",
+        },
+        weight=weight,
+    )
+
+
+def _option_stream_leg(
+    collection: str = "OPT_VIX", weight: float = 0.5
+) -> BasketLegIn:
+    return BasketLegIn(
+        instrument={
+            "type": "option_stream",
+            "collection": collection,
+            "option_type": "C",
+            "cycle": None,
+            "maturity": {"kind": "next_third_friday"},
+            "selection": {"kind": "by_moneyness", "target": 1.0},
+            "stream": "mid",
+        },
+        weight=weight,
     )
 
 
 # ---------------------------------------------------------------------------
-# _asset_class_from_collection
+# _ASSET_CLASS_TO_INSTRUMENT_TYPE mapping is authoritative
 # ---------------------------------------------------------------------------
 
 
-def test_futures_collection() -> None:
-    assert _asset_class_from_collection("FUT_VIX") == "future"
-    assert _asset_class_from_collection("FUT_SP_500") == "future"
-
-
-def test_index_collection() -> None:
-    assert _asset_class_from_collection("INDEX") == "index"
-
-
-def test_equity_collections() -> None:
-    assert _asset_class_from_collection("ETF") == "equity"
-    assert _asset_class_from_collection("FUND") == "equity"
-    assert _asset_class_from_collection("FOREX") == "equity"
-
-
-def test_options_collection_returns_none() -> None:
-    assert _asset_class_from_collection("OPT_VIX") is None
-    assert _asset_class_from_collection("OPT_SP_500") is None
-
-
-def test_unknown_collection_returns_none() -> None:
-    assert _asset_class_from_collection("CRYPTO") is None
-    assert _asset_class_from_collection("") is None
+def test_asset_class_to_instrument_type_mapping() -> None:
+    """The four supported asset classes map to exactly one instrument
+    type each — the validator reads this map verbatim."""
+    assert _ASSET_CLASS_TO_INSTRUMENT_TYPE == {
+        "equity": "spot",
+        "index": "spot",
+        "future": "continuous",
+        "option": "option_stream",
+    }
 
 
 # ---------------------------------------------------------------------------
-# _check_basket_homogeneity
+# _check_basket_homogeneity — strict per-class mapping
 # ---------------------------------------------------------------------------
 
 
-def test_homogeneous_equity_legs_passes() -> None:
-    legs = [_leg("SPY", "ETF"), _leg("QQQ", "ETF")]
-    _check_basket_homogeneity(legs)  # should not raise
+def test_equity_with_spot_legs_passes() -> None:
+    legs = [_spot_leg("SPY"), _spot_leg("QQQ")]
+    _check_basket_homogeneity("equity", legs)  # should not raise
 
 
-def test_homogeneous_future_legs_passes() -> None:
-    legs = [_leg("VX1", "FUT_VIX"), _leg("VX2", "FUT_VIX")]
-    _check_basket_homogeneity(legs)
+def test_index_with_spot_legs_passes() -> None:
+    legs = [_spot_leg("SPX", collection="INDEX")]
+    _check_basket_homogeneity("index", legs)
 
 
-def test_mixed_equity_future_raises_400() -> None:
-    legs = [_leg("SPY", "ETF"), _leg("VX1", "FUT_VIX")]
+def test_future_with_continuous_legs_passes() -> None:
+    legs = [_continuous_leg("FUT_VIX"), _continuous_leg("FUT_ES")]
+    _check_basket_homogeneity("future", legs)
+
+
+def test_option_with_option_stream_legs_passes() -> None:
+    legs = [_option_stream_leg()]
+    _check_basket_homogeneity("option", legs)
+
+
+def test_equity_with_continuous_leg_raises_400_with_leg_index() -> None:
+    """Iter-3 strict mismatch: equity basket cannot carry a continuous leg."""
+    legs = [_spot_leg("SPY"), _continuous_leg("FUT_VIX")]
     with pytest.raises(HTTPException) as exc_info:
-        _check_basket_homogeneity(legs)
+        _check_basket_homogeneity("equity", legs)
     assert exc_info.value.status_code == 400
-    assert "mixed" in exc_info.value.detail.lower()
+    detail = exc_info.value.detail
+    assert "leg 1" in detail
+    assert "spot" in detail and "continuous" in detail
+    assert "equity" in detail
 
 
-def test_options_collection_raises_400() -> None:
-    legs = [_leg("VIX_C", "OPT_VIX")]
+def test_future_with_spot_leg_raises_400_with_leg_index() -> None:
+    legs = [_continuous_leg("FUT_VIX"), _spot_leg("SPY")]
     with pytest.raises(HTTPException) as exc_info:
-        _check_basket_homogeneity(legs)
+        _check_basket_homogeneity("future", legs)
     assert exc_info.value.status_code == 400
-    assert "OPT_VIX" in exc_info.value.detail
+    detail = exc_info.value.detail
+    assert "leg 1" in detail
+    assert "continuous" in detail
+    assert "future" in detail
 
 
-def test_unknown_collection_raises_400() -> None:
-    legs = [_leg("BTC", "CRYPTO")]
+def test_option_with_continuous_leg_raises_400_with_leg_index() -> None:
+    legs = [_option_stream_leg(), _continuous_leg("FUT_VIX")]
     with pytest.raises(HTTPException) as exc_info:
-        _check_basket_homogeneity(legs)
+        _check_basket_homogeneity("option", legs)
     assert exc_info.value.status_code == 400
+    detail = exc_info.value.detail
+    assert "leg 1" in detail
 
 
 def test_empty_legs_passes() -> None:
     """Empty basket is valid — supports saving partial work."""
-    _check_basket_homogeneity([])
+    _check_basket_homogeneity("equity", [])
 
 
 def test_single_leg_passes() -> None:
-    legs = [_leg("SPY", "ETF", weight=1.0)]
-    _check_basket_homogeneity(legs)
-
-
-def test_mixed_index_equity_raises_400() -> None:
-    legs = [_leg("SPX", "INDEX"), _leg("SPY", "ETF")]
-    with pytest.raises(HTTPException) as exc_info:
-        _check_basket_homogeneity(legs)
-    assert exc_info.value.status_code == 400
+    legs = [_spot_leg("SPY", weight=1.0)]
+    _check_basket_homogeneity("equity", legs)
 
 
 # ---------------------------------------------------------------------------
-# _check_basket_no_duplicates
+# _check_basket_no_duplicates — dedup by full instrument spec + weight
 # ---------------------------------------------------------------------------
 
 
 def test_no_duplicates_passes() -> None:
-    legs = [_leg("SPY", "ETF"), _leg("QQQ", "ETF")]
+    legs = [_spot_leg("SPY"), _spot_leg("QQQ")]
     _check_basket_no_duplicates(legs)
 
 
-def test_duplicate_instrument_id_raises_400() -> None:
-    legs = [_leg("SPY", "ETF"), _leg("SPY", "ETF", weight=0.3)]
+def test_duplicate_spot_legs_with_same_weight_rejected() -> None:
+    """Two structurally-identical spot legs with the same weight = duplicate."""
+    legs = [_spot_leg("SPY", weight=0.5), _spot_leg("SPY", weight=0.5)]
     with pytest.raises(HTTPException) as exc_info:
         _check_basket_no_duplicates(legs)
     assert exc_info.value.status_code == 400
-    assert "SPY" in exc_info.value.detail
+
+
+def test_same_instrument_different_weights_not_duplicate() -> None:
+    """Two legs with the same instrument but DIFFERENT weights are NOT
+    duplicates — the user may be expressing a directional layering."""
+    legs = [_spot_leg("SPY", weight=0.3), _spot_leg("SPY", weight=0.5)]
+    _check_basket_no_duplicates(legs)  # should not raise
+
+
+def test_continuous_legs_distinguished_by_adjustment() -> None:
+    """Two continuous legs on the same collection with different
+    adjustment must NOT be flagged as duplicates."""
+    legs = [
+        _continuous_leg("FUT_VIX", adjustment="none", weight=0.5),
+        _continuous_leg("FUT_VIX", adjustment="ratio", weight=0.5),
+    ]
+    _check_basket_no_duplicates(legs)
+
+
+def test_continuous_legs_same_full_spec_and_weight_rejected() -> None:
+    """Two continuous legs with identical adjustment/cycle/rollOffset
+    AND the same weight ARE duplicates."""
+    legs = [
+        _continuous_leg(
+            "FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5
+        ),
+        _continuous_leg(
+            "FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5
+        ),
+    ]
+    with pytest.raises(HTTPException) as exc_info:
+        _check_basket_no_duplicates(legs)
+    assert exc_info.value.status_code == 400
 
 
 def test_empty_no_duplicates_passes() -> None:
@@ -135,9 +218,40 @@ def test_basket_leg_zero_weight_rejected() -> None:
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
-        BasketLegIn(instrument_id="SPY", collection="ETF", weight=0.0)
+        BasketLegIn(
+            instrument={
+                "type": "spot",
+                "collection": "ETF",
+                "instrument_id": "SPY",
+            },
+            weight=0.0,
+        )
 
 
 def test_basket_leg_negative_weight_allowed() -> None:
-    leg = BasketLegIn(instrument_id="SPY", collection="ETF", weight=-0.5)
+    leg = BasketLegIn(
+        instrument={
+            "type": "spot",
+            "collection": "ETF",
+            "instrument_id": "SPY",
+        },
+        weight=-0.5,
+    )
     assert leg.weight == -0.5
+    assert leg.instrument.type == "spot"
+
+
+def test_basket_leg_extra_field_on_leg_rejected() -> None:
+    """``extra='forbid'`` on the leg envelope."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        BasketLegIn(
+            instrument={
+                "type": "spot",
+                "collection": "ETF",
+                "instrument_id": "SPY",
+            },
+            weight=1.0,
+            junk="x",
+        )
