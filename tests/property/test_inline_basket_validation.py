@@ -168,20 +168,27 @@ def test_inline_basket_strict_per_class_mapping_property(
 
     if instrument_type == expected:
         # Matching pair: the request *might* fail downstream with a
-        # data-not-found error (we stub get_prices to None) but it must
-        # NOT be rejected at request validation time on the strict
-        # mapping.  The validation envelope distinguishes by error_type.
+        # data-not-found error (we stub get_prices/list_option_expirations
+        # to None/[]) but it must NOT be rejected at request validation
+        # time on the strict mapping.  Look for the strict-mapping-
+        # specific marker phrase rather than just "leg 0" — the latter
+        # also appears in legitimate data-error messages (e.g. iter-4
+        # Bug 2 fix routes option_stream baskets through the BE date
+        # resolver, which raises "basket leg 0: no option expirations
+        # found" when the test stub returns []).  That's a downstream
+        # data error, not a strict-mapping rejection.
         if resp.status_code in (400, 422):
             payload = resp.json()
             msg = payload.get("message", "").lower()
-            assert "leg 0" not in msg, (
+            assert "requires instrument.type=" not in msg, (
                 f"matched pair ({asset_class!r}, {instrument_type!r}) "
-                f"rejected with leg-mismatch message: {payload}"
+                f"rejected with strict-mapping mismatch message: {payload}"
             )
         # Other status codes (e.g. 200, 500) are fine — the property
         # only cares about strict-mapping validation behaviour.
     else:
-        # Mismatched pair: must surface as validation rejection.
+        # Mismatched pair: must surface as validation rejection with the
+        # strict-mapping marker phrase.
         assert resp.status_code in (400, 422), (
             f"mismatched pair ({asset_class!r}, {instrument_type!r}) "
             f"NOT rejected at request validation; got "
@@ -189,6 +196,6 @@ def test_inline_basket_strict_per_class_mapping_property(
         )
         payload = resp.json()
         msg = payload.get("message", "").lower()
-        assert "leg 0" in msg, (
-            f"mismatch envelope missing 'leg 0': {payload}"
+        assert "requires instrument.type=" in msg, (
+            f"mismatch envelope missing strict-mapping marker: {payload}"
         )

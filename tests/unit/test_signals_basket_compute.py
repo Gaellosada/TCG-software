@@ -685,3 +685,165 @@ def test_signals_inline_basket_identity_saved_vs_inline_distinct() -> None:
         legs=legs, basket_id="inline", asset_class=None
     )
     assert _instrument_identity(b_named_inline) != _instrument_identity(b_inline)
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 regression — single-input signal whose only input is an inline option
+# basket must derive its date window from option expirations, not inherit
+# ``None``s from the compute envelope.  Previously ``compute_input_overlap``
+# short-circuited for ``len(inputs) <= 1`` and returned ``(None, None)`` so
+# the option_stream resolver downstream raised "option_stream requires
+# explicit start/end dates".  Fix: fall through into the per-input loop for
+# single inputs with option-stream dependencies (spot/continuous stay on
+# the short-circuit because they borrow their date axis from the
+# underlying price series).
+# ---------------------------------------------------------------------------
+
+
+def _build_option_stream_inst():
+    """Minimal ``InstrumentOptionStream`` for tests."""
+    from tcg.types.options import ByMoneyness, NextThirdFriday
+    from tcg.types.signal import InstrumentOptionStream
+
+    return InstrumentOptionStream(
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NextThirdFriday(offset_months=1),
+        selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.01),
+        stream="mid",
+    )
+
+
+def _build_single_basket_input_signal(*, option_stream: bool):
+    """One-input signal whose only input is an inline basket.
+
+    The basket carries either an option_stream leg (Bug 2 regression
+    surface) or a spot leg (control case — short-circuit must still
+    fire for spot-only baskets).
+    """
+    from tcg.types.signal import (
+        Block,
+        CompareCondition,
+        ConstantOperand,
+        InstrumentBasket,
+        InstrumentSpot,
+        Input,
+        InstrumentOperand,
+        Signal,
+        SignalRules,
+    )
+
+    if option_stream:
+        leg_inst = _build_option_stream_inst()
+    else:
+        leg_inst = InstrumentSpot(collection="ETF", instrument_id="SPY")
+
+    basket = InstrumentBasket(
+        legs=((leg_inst, 1.0),),
+        basket_id=None,
+        asset_class="option" if option_stream else "equity",
+    )
+    return Signal(
+        id="sig-b2",
+        name="B2",
+        inputs=(Input(id="B", instrument=basket),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="E1",
+                    name="AlwaysOn",
+                    input_id="B",
+                    weight=100.0,
+                    conditions=(
+                        CompareCondition(
+                            op="gt",
+                            lhs=InstrumentOperand(input_id="B", field="close"),
+                            rhs=ConstantOperand(value=0.0),
+                        ),
+                    ),
+                ),
+            ),
+            exits=(),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_compute_input_overlap_single_input_option_basket_resolves_dates_via_expirations(
+):
+    """Bug 2 regression: ``compute_input_overlap`` must derive a date
+    window from option expirations when the single input is an inline
+    option basket — even if the envelope's ``start``/``end`` are
+    ``None``.  Pre-fix this short-circuited and returned ``(None,
+    None)`` so the downstream fetcher raised "option_stream requires
+    explicit start/end dates"."""
+    from datetime import date as date_cls
+
+    from tcg.core.api.signals import compute_input_overlap
+
+    svc = MagicMock()
+    expirations = [
+        date_cls(2024, 1, 19),
+        date_cls(2024, 2, 16),
+        date_cls(2024, 3, 15),
+    ]
+    svc.list_option_expirations_filtered = AsyncMock(return_value=expirations)
+
+    signal = _build_single_basket_input_signal(option_stream=True)
+
+    # Envelope dates absent — simulates SignalsPage POST without a
+    # date-range UI (the canonical Bug 2 reproduction).
+    start, end = await compute_input_overlap(svc, signal, start=None, end=None)
+
+    # After fix: dates come from the option expirations, not None.
+    assert start is not None, "Bug 2: expected non-None start from expirations"
+    assert end is not None, "Bug 2: expected non-None end from expirations"
+    assert start <= end
+    # Bounds must lie inside the expiration range (the fetcher would
+    # otherwise raise "no business days in option date range").
+    assert start >= min(expirations)
+    assert end <= max(expirations)
+    # And the option-expirations resolver was actually consulted.
+    assert svc.list_option_expirations_filtered.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_compute_input_overlap_single_input_spot_basket_preserves_short_circuit(
+):
+    """Control case: the single-input short-circuit MUST still fire
+    for inputs without option-stream dependencies — otherwise we'd
+    force a redundant date pre-pass on spot/continuous-only baskets.
+
+    Asserts envelope dates pass through unchanged and the option
+    expirations resolver is NEVER consulted (proves we didn't
+    over-extend the fall-through)."""
+    from datetime import date as date_cls
+
+    from tcg.core.api.signals import compute_input_overlap
+
+    svc = MagicMock()
+    # If this is called we know the conservative short-circuit was
+    # incorrectly bypassed.
+    svc.list_option_expirations_filtered = AsyncMock(
+        side_effect=AssertionError(
+            "spot basket must NOT call the option expirations resolver"
+        )
+    )
+    # Spot path is never reached in the short-circuit branch.
+    svc.get_prices = AsyncMock(
+        side_effect=AssertionError(
+            "spot single-input short-circuit must not call get_prices"
+        )
+    )
+
+    signal = _build_single_basket_input_signal(option_stream=False)
+    envelope_start = date_cls(2024, 1, 1)
+    envelope_end = date_cls(2024, 12, 31)
+
+    start, end = await compute_input_overlap(
+        svc, signal, start=envelope_start, end=envelope_end
+    )
+    assert start == envelope_start
+    assert end == envelope_end
+    assert svc.list_option_expirations_filtered.await_count == 0
