@@ -53,7 +53,7 @@ vi.mock('../../api/statistics', () => ({
   fetchStatistics: vi.fn(),
 }));
 vi.mock('./hydrateIndicators', () => ({
-  hydrateAvailableIndicators: () => [],
+  hydrateAvailableIndicators: () => Promise.resolve([]),
 }));
 
 const mockComputeSignal = vi.fn();
@@ -63,8 +63,9 @@ vi.mock('../../api/signals', () => ({
 }));
 
 // Mock persistence API so tests don't attempt real HTTP calls.
+const mockListSignals = vi.fn(() => Promise.resolve([]));
 vi.mock('../../api/persistence', () => ({
-  listSignals: vi.fn(() => Promise.resolve([])),
+  listSignals: (...args) => mockListSignals(...args),
   createSignal: vi.fn(() => Promise.resolve({})),
   updateSignal: vi.fn(() => Promise.resolve({})),
   archiveSignal: vi.fn(() => Promise.resolve(null)),
@@ -88,20 +89,22 @@ vi.mock('./requestBuilder', async () => {
   };
 });
 
-// Two signals for the M1 switch test.
+// Two signals for the M1 switch test — backend shape (description, not doc).
 const SIG_A = {
   id: 'sig-a', name: 'Signal A',
+  category: 'RESEARCH',
   inputs: [],
   rules: { entries: [], exits: [] },
   settings: { dont_repeat: true },
-  doc: '',
+  description: '',
 };
 const SIG_B = {
   id: 'sig-b', name: 'Signal B',
+  category: 'RESEARCH',
   inputs: [],
   rules: { entries: [], exits: [] },
   settings: { dont_repeat: true },
-  doc: '',
+  description: '',
 };
 
 // Mutable storage factory so individual tests can control loadState return.
@@ -124,6 +127,8 @@ afterEach(() => {
   mockComputeSignal.mockReset();
   mockLoadState.mockReset();
   mockLoadState.mockReturnValue({ signals: [] });
+  mockListSignals.mockReset();
+  mockListSignals.mockResolvedValue([]);
 });
 
 describe('<SignalsPage> — Statistics wiring', () => {
@@ -150,6 +155,7 @@ describe('<SignalsPage> — M1 regression: lastResult cleared on signal switch',
   it('hides TradeLog after switching to a different signal following a completed run', async () => {
     // Load two signals so there is a second signal to switch to.
     mockLoadState.mockReturnValue({ signals: [SIG_A, SIG_B] });
+    mockListSignals.mockResolvedValue([SIG_A, SIG_B]);
 
     // computeSignal resolves with a minimal result containing trades.
     const fakeResult = {
@@ -208,6 +214,12 @@ describe('<SignalsPage> — entryDescriptions + exitDescriptions wiring', () => 
       doc: '',
     };
     mockLoadState.mockReturnValue({ signals: [SIG_WITH_BLOCKS] });
+    // Backend shape for SIG_WITH_BLOCKS
+    mockListSignals.mockResolvedValue([{
+      ...SIG_WITH_BLOCKS,
+      category: 'RESEARCH',
+      description: SIG_WITH_BLOCKS.doc || '',
+    }]);
 
     const fakeResult = {
       timestamps: [1000, 2000],
@@ -244,6 +256,11 @@ describe('<SignalsPage> — legacy v5 hydration (reset blocks)', () => {
       doc: '',
     };
     mockLoadState.mockReturnValue({ signals: [legacy] });
+    mockListSignals.mockResolvedValue([{
+      ...legacy,
+      category: 'RESEARCH',
+      description: '',
+    }]);
     await act(async () => { render(<SignalsPage />); });
     // ResultsView stub renders unconditionally — its presence proves the
     // page hydrated without throwing on the missing rules.resets field.

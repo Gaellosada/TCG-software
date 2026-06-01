@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tcg"
 version = "0.1.0"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.0",
     "motor>=3.0",

@@ -56,7 +56,7 @@ vi.mock('./InputsPanel', () => ({ default: () => <div data-testid="inputs-panel-
 vi.mock('./ResultsView', () => ({ default: () => <div data-testid="results-view-stub" /> }));
 vi.mock('../../components/Statistics', () => ({ default: () => <div data-testid="statistics-stub" /> }));
 vi.mock('../../components/TradeLog', () => ({ default: () => <div data-testid="trade-log-stub" /> }));
-vi.mock('./hydrateIndicators', () => ({ hydrateAvailableIndicators: () => [] }));
+vi.mock('./hydrateIndicators', () => ({ hydrateAvailableIndicators: () => Promise.resolve([]) }));
 vi.mock('../../api/signals', () => ({
   computeSignal: vi.fn(),
   collectIndicatorIds: () => new Set(),

@@ -31,7 +31,7 @@ vi.mock('../Signals/requestBuilder', () => ({
 }));
 
 vi.mock('../Signals/hydrateIndicators', () => ({
-  hydrateAvailableIndicators: vi.fn(() => []),
+  hydrateAvailableIndicators: vi.fn(() => Promise.resolve([])),
 }));
 
 // Mock useAutosave to a no-op so we don't trigger side effects.

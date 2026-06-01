@@ -103,6 +103,8 @@ function baseHook(overrides = {}) {
     persistedId: null,
     setPersistedId: vi.fn(),
     loadFromPersisted: vi.fn(),
+    persistedCategory: 'RESEARCH',
+    setPersistedCategory: vi.fn(),
     ...overrides,
   };
 }
@@ -446,11 +448,16 @@ describe('<PortfolioPage> — persisted portfolios panel', () => {
 
   it('re-fetches when category is changed', async () => {
     mockListPortfolios.mockResolvedValue([]);
+    // First render with RESEARCH.
     vi.mocked(usePortfolio).mockReturnValue(baseHook());
-    render(<PortfolioPage />);
-    const select = screen.getByTestId('portfolio-category-filter');
-    fireEvent.change(select, { target: { value: 'DEV' } });
-    // Should now have been called with DEV.
+    const { rerender } = render(<PortfolioPage />);
+    expect(mockListPortfolios).toHaveBeenCalledWith('RESEARCH');
+
+    // Simulate category change: the hook updates persistedCategory to DEV.
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({ persistedCategory: 'DEV' }),
+    );
+    rerender(<PortfolioPage />);
     expect(mockListPortfolios).toHaveBeenCalledWith('DEV');
   });
 });

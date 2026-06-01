@@ -38,8 +38,11 @@ callers may omit anything that isn't set yet.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal, Union
+
+_log = logging.getLogger(__name__)
 
 import pymongo.errors
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -122,8 +125,7 @@ def _validate_payload(value: Any, field_name: str) -> Any:
     depth = _max_depth(value)
     if depth > _MAX_PAYLOAD_DEPTH:
         raise ValueError(
-            f"{field_name}: nesting depth {depth} exceeds limit "
-            f"{_MAX_PAYLOAD_DEPTH}"
+            f"{field_name}: nesting depth {depth} exceeds limit {_MAX_PAYLOAD_DEPTH}"
         )
     # Closer-to-truth size guard than ``repr(value)``. ``ensure_ascii=
     # False`` so multi-byte UTF-8 characters count as their actual
@@ -162,9 +164,7 @@ _ASSET_CLASS_TO_INSTRUMENT_TYPE: dict[str, str] = {
 }
 
 
-def _check_basket_homogeneity(
-    asset_class: str, legs: list["BasketLegIn"]
-) -> None:
+def _check_basket_homogeneity(asset_class: str, legs: list["BasketLegIn"]) -> None:
     """Reject baskets whose legs don't match the declared asset class.
 
     Strict per-class mapping (iter-3):
@@ -241,9 +241,7 @@ def _check_basket_no_duplicates(legs: list["BasketLegIn"]) -> None:
         if key in seen:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"basket leg {i}: duplicate (instrument, weight) pair"
-                ),
+                detail=(f"basket leg {i}: duplicate (instrument, weight) pair"),
             )
         seen.add(key)
 
@@ -397,7 +395,14 @@ class PortfolioUpdateIn(_BaseWriteModel):
 
 
 _OptionStreamLabel = Literal[
-    "mid", "iv", "delta", "gamma", "vega", "theta", "open_interest", "volume",
+    "mid",
+    "iv",
+    "delta",
+    "gamma",
+    "vega",
+    "theta",
+    "open_interest",
+    "volume",
 ]
 
 
@@ -693,7 +698,17 @@ async def create_indicator(body: IndicatorCreateIn, repo: RepoDep) -> IndicatorO
 @router.get("/indicators", response_model=list[IndicatorOut])
 async def list_indicators(repo: RepoDep) -> list[IndicatorOut]:
     docs = await repo.list_by_type(DocType.INDICATOR.value)
-    return [_indicator_to_out(d) for d in docs]
+    out: list[IndicatorOut] = []
+    for d in docs:
+        try:
+            out.append(_indicator_to_out(d))
+        except Exception:
+            _log.warning(
+                "skipping malformed indicator doc id=%s",
+                getattr(d, "id", "?"),
+                exc_info=True,
+            )
+    return out
 
 
 @router.get("/indicators/{doc_id}", response_model=IndicatorOut)
@@ -727,9 +742,7 @@ async def update_indicator(
         deleted=body.deleted,
     )
     try:
-        stored = await repo.update(
-            updated, expected_updated_at=existing.updated_at
-        )
+        stored = await repo.update(updated, expected_updated_at=existing.updated_at)
     except KeyError as exc:
         # The earlier get_by_id succeeded but the doc was deleted in
         # the gap — surface a 404 rather than a 500.
@@ -791,8 +804,14 @@ async def list_signals(
     docs = await repo.list_by_type_and_category(DocType.SIGNAL.value, category)
     out: list[SignalOut] = []
     for d in docs:
-        assert isinstance(d, SignalDoc)
-        out.append(_signal_to_out(d))
+        try:
+            out.append(_signal_to_out(d))
+        except Exception:
+            _log.warning(
+                "skipping malformed signal doc id=%s",
+                getattr(d, "id", "?"),
+                exc_info=True,
+            )
     return out
 
 
@@ -808,9 +827,7 @@ async def get_signal(doc_id: str, repo: RepoDep) -> SignalOut:
 
 
 @router.put("/signals/{doc_id}", response_model=SignalOut)
-async def update_signal(
-    doc_id: str, body: SignalUpdateIn, repo: RepoDep
-) -> SignalOut:
+async def update_signal(doc_id: str, body: SignalUpdateIn, repo: RepoDep) -> SignalOut:
     existing = _expect(
         await repo.get_by_id(DocType.SIGNAL.value, doc_id),
         DocType.SIGNAL.value,
@@ -830,9 +847,7 @@ async def update_signal(
         description=body.description,
     )
     try:
-        stored = await repo.update(
-            updated, expected_updated_at=existing.updated_at
-        )
+        stored = await repo.update(updated, expected_updated_at=existing.updated_at)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -888,8 +903,14 @@ async def list_portfolios(
     docs = await repo.list_by_type_and_category(DocType.PORTFOLIO.value, category)
     out: list[PortfolioOut] = []
     for d in docs:
-        assert isinstance(d, PortfolioDoc)
-        out.append(_portfolio_to_out(d))
+        try:
+            out.append(_portfolio_to_out(d))
+        except Exception:
+            _log.warning(
+                "skipping malformed portfolio doc id=%s",
+                getattr(d, "id", "?"),
+                exc_info=True,
+            )
     return out
 
 
@@ -925,9 +946,7 @@ async def update_portfolio(
         rebalance=body.rebalance,
     )
     try:
-        stored = await repo.update(
-            updated, expected_updated_at=existing.updated_at
-        )
+        stored = await repo.update(updated, expected_updated_at=existing.updated_at)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -1003,9 +1022,7 @@ async def get_basket(doc_id: str, repo: RepoDep) -> BasketOut:
 
 
 @router.put("/baskets/{doc_id}", response_model=BasketOut)
-async def update_basket(
-    doc_id: str, body: BasketUpdateIn, repo: RepoDep
-) -> BasketOut:
+async def update_basket(doc_id: str, body: BasketUpdateIn, repo: RepoDep) -> BasketOut:
     _check_basket_homogeneity(body.asset_class, body.legs)
     _check_basket_no_duplicates(body.legs)
     existing = _expect(
@@ -1026,9 +1043,7 @@ async def update_basket(
         legs=raw_legs,
     )
     try:
-        stored = await repo.update(
-            updated, expected_updated_at=existing.updated_at
-        )
+        stored = await repo.update(updated, expected_updated_at=existing.updated_at)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:

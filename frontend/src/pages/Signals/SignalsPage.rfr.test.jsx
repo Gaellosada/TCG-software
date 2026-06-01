@@ -46,7 +46,7 @@ vi.mock('../../api/statistics', () => ({
   fetchStatistics: vi.fn(),
 }));
 vi.mock('./hydrateIndicators', () => ({
-  hydrateAvailableIndicators: () => [],
+  hydrateAvailableIndicators: () => Promise.resolve([]),
 }));
 
 const mockComputeSignal = vi.fn();
@@ -85,6 +85,22 @@ vi.mock('./storage', async () => {
     saveState: vi.fn(),
   };
 });
+
+// Backend shape of SIG_A for the persistence API mock.
+const SIG_A_BACKEND = {
+  ...SIG_A,
+  category: 'RESEARCH',
+  description: SIG_A.doc || '',
+};
+const mockListSignals = vi.fn(() => Promise.resolve([SIG_A_BACKEND]));
+vi.mock('../../api/persistence', () => ({
+  CATEGORIES: ['RESEARCH', 'DEV', 'PROD', 'ARCHIVE'],
+  listSignals: (...args) => mockListSignals(...args),
+  createSignal: vi.fn(() => Promise.resolve({})),
+  updateSignal: vi.fn(() => Promise.resolve({})),
+  archiveSignal: vi.fn(() => Promise.resolve(null)),
+  describePersistenceError: (err) => (err && err.message) || String(err),
+}));
 
 import SignalsPage from './SignalsPage';
 
