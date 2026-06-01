@@ -233,7 +233,8 @@ $nodeModules = Join-Path $frontendDir "node_modules"
 if (-not (Test-Path $nodeModules)) {
     Write-Info "Installing npm packages (first run)..."
     Push-Location $frontendDir
-    & npm install 2>&1 | ForEach-Object { Write-Info $_ }
+    # Use npm.cmd explicitly -- PowerShell's npm.ps1 shim can mangle arguments.
+    & cmd.exe /c "npm install" 2>&1 | ForEach-Object { Write-Info $_ }
     Pop-Location
 
     if ($LASTEXITCODE -ne 0) {
