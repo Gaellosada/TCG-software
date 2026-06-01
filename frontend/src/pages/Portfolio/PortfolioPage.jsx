@@ -75,13 +75,17 @@ function PortfolioPage() {
   // autosave failure. Cleared when a save succeeds.
   const [cloudError, setCloudError] = useState(null);
 
+  const [fetchError, setFetchError] = useState(null);
+
   const fetchPortfolios = useCallback(async (cat) => {
     setPortfoliosLoading(true);
+    setFetchError(null);
     try {
       const docs = await listPortfolios(cat);
       setPortfolios(docs);
-    } catch {
+    } catch (err) {
       setPortfolios([]);
+      setFetchError(`Failed to load portfolios: ${err.message || err}`);
     } finally {
       setPortfoliosLoading(false);
     }
@@ -439,6 +443,11 @@ function PortfolioPage() {
 
         {/* ── Saved portfolios panel ── */}
         <div className={styles.section}>
+          {fetchError && (
+            <div className={styles.error} data-testid="portfolio-fetch-error">
+              {fetchError}
+            </div>
+          )}
           <PersistedPortfolioPanel
             category={portfolio.persistedCategory}
             onCategoryChange={portfolio.setPersistedCategory}

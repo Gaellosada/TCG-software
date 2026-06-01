@@ -147,14 +147,14 @@ function SignalsPage() {
   // --- Hydrate on mount ----------------------------------------------------
   useEffect(() => {
     fetchSignals(persistedCategory);
-    setAvailableIndicators(hydrateAvailableIndicators());
+    hydrateAvailableIndicators().then(setAvailableIndicators);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-hydrate available indicators whenever the window regains focus —
+  // Re-hydrate available indicators whenever the window regains focus --
   // catches edits made on the Indicators page without a reload.
   useEffect(() => {
-    function refresh() { setAvailableIndicators(hydrateAvailableIndicators()); }
+    function refresh() { hydrateAvailableIndicators().then(setAvailableIndicators); }
     window.addEventListener('focus', refresh);
     return () => window.removeEventListener('focus', refresh);
   }, []);

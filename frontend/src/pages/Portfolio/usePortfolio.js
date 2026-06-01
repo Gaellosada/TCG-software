@@ -299,7 +299,7 @@ export default function usePortfolio() {
     }
 
     // Build legs dict for API
-    const availableIndicators = hydrateAvailableIndicators();
+    const availableIndicators = await hydrateAvailableIndicators();
     const apiLegs = {};
     for (const leg of legs) {
       if (leg.type === 'signal') {

@@ -64,7 +64,7 @@ vi.mock('../../components/TradeLog', () => ({
   default: () => <div data-testid="trade-log-stub" />,
 }));
 vi.mock('./hydrateIndicators', () => ({
-  hydrateAvailableIndicators: () => [],
+  hydrateAvailableIndicators: () => Promise.resolve([]),
 }));
 vi.mock('../../api/signals', () => ({
   computeSignal: vi.fn(),

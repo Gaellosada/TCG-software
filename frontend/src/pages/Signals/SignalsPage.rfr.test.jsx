@@ -46,7 +46,7 @@ vi.mock('../../api/statistics', () => ({
   fetchStatistics: vi.fn(),
 }));
 vi.mock('./hydrateIndicators', () => ({
-  hydrateAvailableIndicators: () => [],
+  hydrateAvailableIndicators: () => Promise.resolve([]),
 }));
 
 const mockComputeSignal = vi.fn();
