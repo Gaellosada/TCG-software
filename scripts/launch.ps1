@@ -252,6 +252,31 @@ if (-not (Test-Path $nodeModules)) {
 
 Write-Section "Starting application"
 
+# Check if ports are already in use (e.g. leftover from a previous run).
+$port8000 = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -First 1
+$port5173 = Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | Select-Object -First 1
+
+if ($port8000 -or $port5173) {
+    $occupied = @()
+    if ($port8000) { $occupied += "8000 (backend, PID $($port8000.OwningProcess))" }
+    if ($port5173) { $occupied += "5173 (frontend, PID $($port5173.OwningProcess))" }
+    Write-Warn "Port(s) already in use: $($occupied -join ', ')"
+    Write-Host ""
+    Write-Host "  This usually means a previous session was not shut down cleanly." -ForegroundColor Yellow
+    Write-Host "  The launcher will kill the old processes and continue." -ForegroundColor Yellow
+    Write-Host ""
+
+    if ($port8000) {
+        & taskkill /T /F /PID $port8000.OwningProcess 2>$null | Out-Null
+    }
+    if ($port5173) {
+        & taskkill /T /F /PID $port5173.OwningProcess 2>$null | Out-Null
+    }
+    # Brief pause for ports to release.
+    Start-Sleep -Seconds 2
+    Write-Ok "Old processes cleared"
+}
+
 # Track child processes for cleanup.
 $script:backendProcess = $null
 $script:frontendProcess = $null
