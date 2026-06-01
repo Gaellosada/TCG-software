@@ -54,16 +54,16 @@ function PortfolioPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [signalModalOpen, setSignalModalOpen] = useState(false);
   const [saveInput, setSaveInput] = useState('');
-  // iter-4: replaced window.confirm with shared ConfirmDialog.
-  // deleteTarget holds the portfolioName pending-delete (null = dialog closed).
-  // clearConfirmOpen gates the clear-all dialog (no payload needed).
-  const [deleteTarget, setDeleteTarget] = useState(null);
+  // archiveTarget holds the backend ID of the portfolio pending-archive
+  // (null = dialog closed). Replaces the old localStorage deleteTarget.
+  const [archiveTarget, setArchiveTarget] = useState(null);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
 
-  // --- Persisted portfolio panel -------------------------------------------
-  const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
-  const [persistedPortfolios, setPersistedPortfolios] = useState([]);
-  const [persistedLoading, setPersistedLoading] = useState(false);
+  // --- Portfolio list (backend is the sole source of truth) ----------------
+  // The category filter for the panel comes from the hook (shared with
+  // autosave payload). The list itself is fetched into local page state.
+  const [portfolios, setPortfolios] = useState([]);
+  const [portfoliosLoading, setPortfoliosLoading] = useState(false);
 
   // Separate status state for one-shot operations (save-current / archive /
   // category-change). Kept separate from the debounced autosave status so
@@ -75,21 +75,22 @@ function PortfolioPage() {
   // autosave failure. Cleared when a save succeeds.
   const [cloudError, setCloudError] = useState(null);
 
-  const fetchPersistedPortfolios = useCallback(async (cat) => {
-    setPersistedLoading(true);
+  const fetchPortfolios = useCallback(async (cat) => {
+    setPortfoliosLoading(true);
     try {
       const docs = await listPortfolios(cat);
-      setPersistedPortfolios(docs);
+      setPortfolios(docs);
     } catch {
-      setPersistedPortfolios([]);
+      setPortfolios([]);
     } finally {
-      setPersistedLoading(false);
+      setPortfoliosLoading(false);
     }
   }, []);
 
+  // Re-fetch whenever the panel category changes.
   useEffect(() => {
-    fetchPersistedPortfolios(persistedCategory);
-  }, [persistedCategory, fetchPersistedPortfolios]);
+    fetchPortfolios(portfolio.persistedCategory);
+  }, [portfolio.persistedCategory, fetchPortfolios]);
 
   // Serialize the portfolio leg list into the wire shape — strip the
   // local-only ``id`` (which we assign on load and never persist) and
@@ -116,39 +117,41 @@ function PortfolioPage() {
   // Save current portfolio state to backend in the selected category.
   // After a successful create, takes over autosave by setting
   // ``persistedId`` so ongoing edits get debounced PUTs.
-  const handlePersistSave = useCallback(async () => {
+  const handleCreatePortfolio = useCallback(async () => {
     const name = saveInput.trim() || portfolio.portfolioName || 'Portfolio';
     const id = `portfolio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const category = portfolio.persistedCategory;
     setOneshotStatus('saving');
     try {
       await createPortfolio({
         id,
         name,
-        category: persistedCategory,
+        category,
         legs: legsToWire(portfolio.legs),
         rebalance: portfolio.rebalance || 'none',
       });
       setOneshotError(null);
       setOneshotStatus('saved');
       portfolio.setPersistedId(id);
+      portfolio.setPersistedCategory(category);
       // Make sure the portfolioName state reflects what we just saved
       // so subsequent autosaves include it.
       if (name !== portfolio.portfolioName) {
         portfolio.setPortfolioName(name);
       }
-      fetchPersistedPortfolios(persistedCategory);
+      fetchPortfolios(category);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('createPortfolio failed:', err);
     }
-  }, [saveInput, portfolio, persistedCategory, fetchPersistedPortfolios, legsToWire]);
+  }, [saveInput, portfolio, fetchPortfolios, legsToWire]);
 
   // Move a persisted portfolio to a different category. Preserves all
   // editable content via the full-replace PUT.
   const handleChangePortfolioCat = useCallback(async (id, newCat) => {
-    const target = persistedPortfolios.find((p) => p.id === id);
+    const target = portfolios.find((p) => p.id === id);
     if (!target) return;
     setOneshotStatus('saving');
     try {
@@ -160,14 +163,19 @@ function PortfolioPage() {
       });
       setOneshotError(null);
       setOneshotStatus('saved');
-      fetchPersistedPortfolios(persistedCategory);
+      // If this is the currently loaded portfolio, update its category
+      // in the hook so the autosave payload stays correct.
+      if (portfolio.persistedId === id) {
+        portfolio.setPersistedCategory(newCat);
+      }
+      fetchPortfolios(portfolio.persistedCategory);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('updatePortfolio (category change) failed:', err);
     }
-  }, [persistedPortfolios, persistedCategory, fetchPersistedPortfolios]);
+  }, [portfolios, portfolio, fetchPortfolios]);
 
   // Archive (soft-delete) a persisted portfolio.
   const handleArchivePortfolio = useCallback(async (id) => {
@@ -176,19 +184,19 @@ function PortfolioPage() {
       await archivePortfolio(id);
       setOneshotError(null);
       setOneshotStatus('saved');
-      // If we were editing this exact portfolio, drop the persistedId
-      // so further edits don't try to autosave to an archived row.
+      // If we were editing this exact portfolio, clear the editor so
+      // further edits don't try to autosave to an archived row.
       if (portfolio.persistedId === id) {
-        portfolio.setPersistedId(null);
+        portfolio.clearAll();
       }
-      fetchPersistedPortfolios(persistedCategory);
+      fetchPortfolios(portfolio.persistedCategory);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('archivePortfolio failed:', err);
     }
-  }, [persistedCategory, fetchPersistedPortfolios, portfolio]);
+  }, [portfolio, fetchPortfolios]);
 
   // Mirror of ``cloudDirty`` accessible from event handlers declared
   // before ``cloudDirty`` itself is defined (synced via assignment below).
@@ -205,29 +213,29 @@ function PortfolioPage() {
     if (id === portfolio.persistedId && cloudDirtyRef.current) {
       return;
     }
-    const doc = persistedPortfolios.find((p) => p.id === id);
+    const doc = portfolios.find((p) => p.id === id);
     if (!doc) return;
     portfolio.loadFromPersisted(doc);
     setSaveInput(doc.name || '');
-  }, [persistedPortfolios, portfolio]);
+  }, [portfolios, portfolio]);
 
   // --- Backend debounced auto-save for the loaded persisted portfolio -----
+  // The category is now tracked inside the hook (portfolio.persistedCategory)
+  // so we no longer need to look it up from the portfolios list.
   const cloudPayload = useMemo(() => {
     if (!portfolio.persistedId) return null;
-    const persisted = persistedPortfolios.find((p) => p.id === portfolio.persistedId);
-    if (!persisted) return null; // safety — list not yet loaded
     return JSON.stringify({
-      name: portfolio.portfolioName || persisted.name || 'Portfolio',
-      category: persisted.category,
+      name: portfolio.portfolioName || 'Portfolio',
+      category: portfolio.persistedCategory,
       legs: legsToWire(portfolio.legs),
       rebalance: portfolio.rebalance || 'none',
     });
   }, [
     portfolio.persistedId,
     portfolio.portfolioName,
+    portfolio.persistedCategory,
     portfolio.legs,
     portfolio.rebalance,
-    persistedPortfolios,
     legsToWire,
   ]);
 
@@ -239,7 +247,9 @@ function PortfolioPage() {
       lastSeenPayloadRef.current = { id: null, payload: null };
       return;
     }
-    const persisted = persistedPortfolios.find((p) => p.id === portfolio.persistedId);
+    // Snapshot the initial state from the backend list so that a
+    // freshly-loaded portfolio doesn't immediately trigger a PUT.
+    const persisted = portfolios.find((p) => p.id === portfolio.persistedId);
     if (!persisted) return;
     if (lastSeenPayloadRef.current.id !== portfolio.persistedId) {
       lastSeenPayloadRef.current = {
@@ -252,7 +262,7 @@ function PortfolioPage() {
         }),
       };
     }
-  }, [portfolio.persistedId, persistedPortfolios]);
+  }, [portfolio.persistedId, portfolios]);
 
   const cloudDirty = !!cloudPayload
     && (lastSeenPayloadRef.current.id !== portfolio.persistedId
@@ -281,14 +291,14 @@ function PortfolioPage() {
       id: portfolio.persistedId,
       payload: payloadStr,
     };
-    fetchPersistedPortfolios(persistedCategory);
-  }, [portfolio.persistedId, persistedCategory, fetchPersistedPortfolios]);
+    fetchPortfolios(portfolio.persistedCategory);
+  }, [portfolio.persistedId, portfolio.persistedCategory, fetchPortfolios]);
 
   const {
     status: cloudStatus,
     reset: resetCloudStatus,
   } = useBackendAutosave({
-    enabled: !!portfolio.persistedId && cloudDirty,
+    enabled: !!portfolio.persistedId && cloudDirty && portfolio.autosave,
     payload: cloudPayload,
     onSave: handleCloudSave,
   });
@@ -321,20 +331,23 @@ function PortfolioPage() {
   const handleOpenModal = useCallback(() => setModalOpen(true), []);
   const handleCloseModal = useCallback(() => setModalOpen(false), []);
 
+  // "Save" button: if we already have a persistedId, this is a no-op
+  // (autosave handles it). If not, create a new portfolio in the backend.
   const handleSave = useCallback(() => {
-    // If editing a loaded portfolio and input is empty/unchanged, save with current name
-    const name = saveInput.trim() || portfolio.portfolioName;
-    if (!name) return;
-    portfolio.savePortfolio(name);
-  }, [saveInput, portfolio]);
-
-  const handleDeleteSaved = useCallback(
-    (name) => {
-      portfolio.deleteSavedPortfolio(name);
-      portfolio.clearAll();
-    },
-    [portfolio],
-  );
+    if (portfolio.persistedId) {
+      // Already persisted — the autosave will push changes. We could
+      // force a flush here, but a manual rename (changing saveInput)
+      // already triggers the cloudPayload change → autosave debounce.
+      // Update the name if the user typed a new one.
+      const name = saveInput.trim();
+      if (name && name !== portfolio.portfolioName) {
+        portfolio.setPortfolioName(name);
+      }
+      return;
+    }
+    // Not yet persisted — create in backend.
+    handleCreatePortfolio();
+  }, [saveInput, portfolio, handleCreatePortfolio]);
 
   return (
     <div className={styles.page}>
@@ -343,14 +356,14 @@ function PortfolioPage() {
         <div className={styles.header}>
           <div className={styles.headerLeft}>
             <h2 className={styles.pageTitle}>Portfolio</h2>
-            {/* Delete current portfolio — only when one is loaded */}
-            {portfolio.portfolioName && (
+            {/* Archive current portfolio — only when one is loaded from backend */}
+            {portfolio.persistedId && (
               <button
                 className={styles.deleteBtn}
                 type="button"
-                onClick={() => setDeleteTarget(portfolio.portfolioName)}
-                title="Delete saved portfolio"
-                aria-label="Delete saved portfolio"
+                onClick={() => setArchiveTarget(portfolio.persistedId)}
+                title="Archive portfolio"
+                aria-label="Archive portfolio"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14" aria-hidden="true">
                   <polyline points="3 6 5 6 21 6" />
@@ -424,14 +437,14 @@ function PortfolioPage() {
           </div>
         )}
 
-        {/* ── Persisted portfolios panel ── */}
+        {/* ── Saved portfolios panel ── */}
         <div className={styles.section}>
           <PersistedPortfolioPanel
-            category={persistedCategory}
-            onCategoryChange={setPersistedCategory}
-            portfolios={persistedPortfolios}
-            loading={persistedLoading}
-            onSaveCurrent={handlePersistSave}
+            category={portfolio.persistedCategory}
+            onCategoryChange={portfolio.setPersistedCategory}
+            portfolios={portfolios}
+            loading={portfoliosLoading}
+            onSaveCurrent={handleCreatePortfolio}
             saveDisabled={portfolio.legs.length === 0}
             onChangeItemCat={handleChangePortfolioCat}
             onArchive={handleArchivePortfolio}
@@ -660,24 +673,28 @@ function PortfolioPage() {
         }}
       />
 
-      {/* ── Delete saved portfolio confirmation ── */}
+      {/* ── Archive portfolio confirmation ── */}
       <ConfirmDialog
-        open={deleteTarget !== null}
-        title="Delete saved portfolio?"
+        open={archiveTarget !== null}
+        title="Archive portfolio?"
         message={
-          deleteTarget
-            ? `The saved portfolio "${deleteTarget}" will be permanently removed.`
+          archiveTarget
+            ? `The portfolio "${
+                portfolios.find((p) => p.id === archiveTarget)?.name
+                || portfolio.portfolioName
+                || archiveTarget
+              }" will be moved to the Archive category.`
             : ''
         }
-        confirmLabel="Delete"
+        confirmLabel="Archive"
         cancelLabel="Cancel"
         destructive
         onConfirm={() => {
-          const name = deleteTarget;
-          setDeleteTarget(null);
-          if (name) handleDeleteSaved(name);
+          const id = archiveTarget;
+          setArchiveTarget(null);
+          if (id) handleArchivePortfolio(id);
         }}
-        onCancel={() => setDeleteTarget(null)}
+        onCancel={() => setArchiveTarget(null)}
       />
 
       {/* ── Clear-all confirmation ── */}

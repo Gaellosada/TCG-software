@@ -1,6 +1,6 @@
 /**
- * Persistence API client — CRUD for signals and portfolios stored in MongoDB
- * via the backend persistence layer.
+ * Persistence API client — CRUD for signals, portfolios, and indicators
+ * stored in MongoDB via the backend persistence layer.
  *
  * Endpoint base: /api/persistence/
  *   POST   /signals                  create signal
@@ -14,6 +14,12 @@
  *   GET    /portfolios/{id}          get one portfolio
  *   PUT    /portfolios/{id}          update portfolio (full replace)
  *   DELETE /portfolios/{id}          archive portfolio
+ *
+ *   POST   /indicators               create indicator
+ *   GET    /indicators               list active indicators (no category)
+ *   GET    /indicators/{id}          get one indicator
+ *   PUT    /indicators/{id}          update indicator (full replace)
+ *   DELETE /indicators/{id}          archive indicator (sets deleted=true)
  *
  * Category values: "RESEARCH" | "DEV" | "PROD" | "ARCHIVE"
  *
@@ -219,6 +225,81 @@ export function updatePortfolio(id, payload, options = {}) {
  */
 export async function archivePortfolio(id) {
   const res = await fetch(`${BASE}/portfolios/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    let body = null;
+    try { body = await res.json(); } catch { /* ignore */ }
+    const msg = (body && (body.detail || body.message)) || res.statusText || 'Delete failed';
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Indicators
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a new persisted indicator.
+ *
+ * @param {{ id: string, name: string, definition: object }} payload
+ * @returns {Promise<IndicatorOut>}
+ */
+export function createIndicator(payload) {
+  return _fetch('/indicators', { method: 'POST', body: payload });
+}
+
+/**
+ * List all active (non-deleted) indicators.
+ * No category filter — indicators use a flat list.
+ *
+ * @returns {Promise<Array<IndicatorOut>>}
+ */
+export function listIndicators() {
+  return _fetch('/indicators');
+}
+
+/**
+ * Get a single persisted indicator by id.
+ *
+ * @param {string} id
+ * @returns {Promise<IndicatorOut>}
+ */
+export function getIndicator(id) {
+  return _fetch(`/indicators/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Full-replace update for a persisted indicator.
+ *
+ * @param {string} id
+ * @param {{ name: string, definition: object }} payload
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<IndicatorOut>}
+ */
+export function updateIndicator(id, payload, options = {}) {
+  const { signal } = options;
+  return _fetch(`/indicators/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: payload,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/**
+ * Soft-archive an indicator (sets deleted=true on the server).
+ * Returns 204 No Content — the Promise resolves to null on success.
+ *
+ * @param {string} id
+ * @returns {Promise<null>}
+ */
+export async function archiveIndicator(id) {
+  const res = await fetch(`${BASE}/indicators/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
   });

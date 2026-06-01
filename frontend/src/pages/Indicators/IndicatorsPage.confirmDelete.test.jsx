@@ -29,8 +29,19 @@ vi.mock('../../api/indicators', () => ({
   })),
 }));
 
+// Stub persistence API — the page now fetches custom indicators from
+// backend on mount and archives via DELETE on confirm-delete.
+vi.mock('../../api/persistence', () => ({
+  listIndicators: vi.fn(async () => []),
+  createIndicator: vi.fn(async (p) => ({ ...p, type: 'indicator', created_at: '', updated_at: '', deleted: false })),
+  updateIndicator: vi.fn(async (_id, p) => p),
+  archiveIndicator: vi.fn(async () => null),
+  describePersistenceError: vi.fn((err) => err?.message || 'Unknown error'),
+}));
+
 // Import AFTER the mocks so the page sees the stubs.
 import IndicatorsPage from './IndicatorsPage';
+import { listIndicators, archiveIndicator } from '../../api/persistence';
 import { AUTOSAVE_KEY } from './storageKeys';
 
 // Fixture: a user indicator with readonly:false — defaults are readonly
@@ -45,17 +56,26 @@ const USER_INDICATOR = {
   ownPanel: false,
 };
 
-const STORAGE_KEY = 'tcg.indicators.v1';
-
 beforeEach(() => {
   try { localStorage.clear(); } catch { /* ignore */ }
-  // Prime localStorage so the page hydrates with a deletable indicator.
-  // Matches the shape storage.loadState expects — indicators[] at the root.
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    version: 1, // storage.SCHEMA_VERSION — hydrate rejects mismatches
-    indicators: [USER_INDICATOR],
-    defaultState: {},
-  }));
+  // Prime the backend mock so the page hydrates with a deletable indicator.
+  // The page now fetches custom indicators from listIndicators() on mount.
+  listIndicators.mockResolvedValue([{
+    id: USER_INDICATOR.id,
+    type: 'indicator',
+    name: USER_INDICATOR.name,
+    definition: {
+      code: USER_INDICATOR.code,
+      doc: USER_INDICATOR.doc,
+      params: USER_INDICATOR.params,
+      seriesMap: USER_INDICATOR.seriesMap,
+      ownPanel: USER_INDICATOR.ownPanel,
+    },
+    created_at: '',
+    updated_at: '',
+    deleted: false,
+  }]);
+  archiveIndicator.mockResolvedValue(null);
   // Disable autosave so the test doesn't race with side-effects.
   localStorage.setItem(AUTOSAVE_KEY, 'false');
 });
