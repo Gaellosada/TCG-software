@@ -1,5 +1,5 @@
 # ============================================================================
-#  TCG Software — One-Click Launcher
+#  TCG Software -- One-Click Launcher
 #  Double-click start.bat to run this. Do not run directly.
 # ============================================================================
 
@@ -78,7 +78,7 @@ Write-Host "  Trading platform starting up..." -ForegroundColor DarkCyan
 Write-Host ""
 
 # ---------------------------------------------------------------------------
-# Step 1 — Check .env
+# Step 1 -- Check .env
 # ---------------------------------------------------------------------------
 
 Write-Section "Checking configuration"
@@ -107,7 +107,7 @@ if (-not (Test-Path $envFile)) {
 Write-Ok "Configuration file found"
 
 # ---------------------------------------------------------------------------
-# Step 2 — Python 3.12+
+# Step 2 -- Python 3.12+
 # ---------------------------------------------------------------------------
 
 Write-Section "Checking Python"
@@ -141,7 +141,7 @@ $pyVersion = & $pythonCmd --version 2>&1
 Write-Ok "$pyVersion"
 
 # ---------------------------------------------------------------------------
-# Step 3 — Node.js 18+
+# Step 3 -- Node.js 18+
 # ---------------------------------------------------------------------------
 
 Write-Section "Checking Node.js"
@@ -172,7 +172,7 @@ $nodeVersion = & node --version 2>&1
 Write-Ok "Node.js $nodeVersion"
 
 # ---------------------------------------------------------------------------
-# Step 4 — Python virtual environment
+# Step 4 -- Python virtual environment
 # ---------------------------------------------------------------------------
 
 Write-Section "Setting up Python environment"
@@ -196,7 +196,7 @@ if (-not (Test-Path $venvPython)) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 5 — Python dependencies
+# Step 5 -- Python dependencies
 # ---------------------------------------------------------------------------
 
 $depsMarker = Join-Path $venvDir ".deps-installed"
@@ -222,7 +222,7 @@ if ($freshVenv -or -not (Test-Path $depsMarker)) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6 — npm dependencies
+# Step 6 -- npm dependencies
 # ---------------------------------------------------------------------------
 
 Write-Section "Checking frontend dependencies"
@@ -246,7 +246,7 @@ if (-not (Test-Path $nodeModules)) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 7 & 8 — Start backend and frontend
+# Step 7 & 8 -- Start backend and frontend
 # ---------------------------------------------------------------------------
 
 Write-Section "Starting application"
@@ -277,7 +277,7 @@ function Stop-App {
     Write-Host ""
 }
 
-# Register Ctrl+C via CancelKeyPress — works reliably in cmd-launched PowerShell.
+# Register Ctrl+C via CancelKeyPress -- works reliably in cmd-launched PowerShell.
 $script:exitRequested = $false
 $null = [Console]::add_CancelKeyPress({
     param($sender, $e)
@@ -301,10 +301,10 @@ $script:backendProcess = Start-Process -FilePath $venvPython `
 # --- Frontend ---
 Write-Info "Starting frontend dev server (port 5173)..."
 
-# Run vite directly via its bin script — avoids PATH issues with npm+Start-Process.
+# Run vite directly via its bin script -- avoids PATH issues with npm+Start-Process.
 $viteCmd = Join-Path $frontendDir "node_modules\.bin\vite.cmd"
 if (-not (Test-Path $viteCmd)) {
-    Write-Fail "Vite not found at $viteCmd — try deleting frontend/node_modules and running again."
+    Write-Fail "Vite not found at $viteCmd -- try deleting frontend/node_modules and running again."
     & taskkill /T /F /PID $script:backendProcess.Id 2>$null | Out-Null
     exit 1
 }
@@ -316,14 +316,14 @@ $script:frontendProcess = Start-Process -FilePath $viteCmd `
     -PassThru
 
 # ---------------------------------------------------------------------------
-# Step 9 — Wait for backend with crash detection
+# Step 9 -- Wait for backend with crash detection
 # ---------------------------------------------------------------------------
 
 Write-Info "Waiting for backend to be ready..."
 
 $ready = $false
 for ($i = 0; $i -lt 50; $i++) {
-    # Detect early crash — backend exited before responding.
+    # Detect early crash -- backend exited before responding.
     if ($script:backendProcess.HasExited) {
         Write-Fail "Backend crashed before it could start."
         $errLog = Join-Path $script:logsDir "backend-error.log"
@@ -351,15 +351,17 @@ for ($i = 0; $i -lt 50; $i++) {
     }
 
     Start-Sleep -Milliseconds 200
+    $tcp = $null
     try {
-        # TCP check — works on all PowerShell versions (Invoke-WebRequest throws on 404 in PS 5.1).
+        # TCP check -- works on all PowerShell versions (Invoke-WebRequest throws on 404 in PS 5.1).
         $tcp = New-Object System.Net.Sockets.TcpClient
         $tcp.Connect("127.0.0.1", 8000)
-        $tcp.Close()
         $ready = $true
         break
     } catch {
-        # Connection refused — keep trying.
+        # Connection refused -- keep trying.
+    } finally {
+        if ($tcp) { $tcp.Dispose() }
     }
 }
 
@@ -371,7 +373,7 @@ if ($ready) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 10 — Open browser
+# Step 10 -- Open browser
 # ---------------------------------------------------------------------------
 
 Write-Section "Ready!"
@@ -380,7 +382,7 @@ Write-Host "  Opening http://localhost:5173 in your browser..." -ForegroundColor
 Start-Process "http://localhost:5173"
 
 # ---------------------------------------------------------------------------
-# Step 11 — Wait for exit
+# Step 11 -- Wait for exit
 # ---------------------------------------------------------------------------
 
 Write-Host ""
@@ -401,6 +403,13 @@ try {
         if ($script:backendProcess.HasExited -and -not $script:frontendProcess.HasExited) {
             Write-Warn "Backend stopped unexpectedly. The app may not work correctly."
             Write-Host "  Check backend-error.log at: $($script:logsDir)" -ForegroundColor Gray
+            break
+        }
+
+        # Detect frontend-only crash while running.
+        if ($script:frontendProcess.HasExited -and -not $script:backendProcess.HasExited) {
+            Write-Warn "Frontend stopped unexpectedly. Try refreshing your browser."
+            Write-Host "  Check frontend-error.log at: $($script:logsDir)" -ForegroundColor Gray
             break
         }
 
