@@ -301,8 +301,14 @@ $script:backendProcess = Start-Process -FilePath $venvPython `
 # --- Frontend ---
 Write-Info "Starting frontend dev server (port 5173)..."
 
-$script:frontendProcess = Start-Process -FilePath "cmd.exe" `
-    -ArgumentList "/c npm run dev" `
+# Run vite directly via its bin script — avoids PATH issues with npm+Start-Process.
+$viteCmd = Join-Path $frontendDir "node_modules\.bin\vite.cmd"
+if (-not (Test-Path $viteCmd)) {
+    Write-Fail "Vite not found at $viteCmd — try deleting frontend/node_modules and running again."
+    & taskkill /T /F /PID $script:backendProcess.Id 2>$null | Out-Null
+    exit 1
+}
+$script:frontendProcess = Start-Process -FilePath $viteCmd `
     -WorkingDirectory $frontendDir `
     -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $script:logsDir "frontend.log") `
@@ -346,11 +352,12 @@ for ($i = 0; $i -lt 50; $i++) {
 
     Start-Sleep -Milliseconds 200
     try {
-        $response = Invoke-WebRequest -Uri "http://localhost:8000" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
-        if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
-            $ready = $true
-            break
-        }
+        # TCP check — works on all PowerShell versions (Invoke-WebRequest throws on 404 in PS 5.1).
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect("127.0.0.1", 8000)
+        $tcp.Close()
+        $ready = $true
+        break
     } catch {
         # Connection refused — keep trying.
     }
