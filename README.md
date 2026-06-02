@@ -13,6 +13,27 @@ Financial simulation and exploration platform for volatility trading strategies,
 - Node 18+
 - MongoDB instance with legacy `tcg-instrument` database
 
+## SSM Tunnel (private MongoDB)
+
+If the MongoDB instance is in a private subnet behind an AWS bastion, the app can open an SSM port-forwarding tunnel automatically.
+
+### Additional prerequisites (tunnel mode only)
+
+- [AWS CLI v2](https://aws.amazon.com/cli/)
+- [AWS Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+- AWS credentials with `ssm:StartSession` permission on the bastion instance
+- Network egress to AWS endpoints (HTTPS 443)
+
+### Setup
+
+1. In `.env`, set `SSM_TUNNEL_ENABLED=true`
+2. Fill in `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
+3. Fill in `MONGO_USER`, `MONGO_PASSWORD`, and `MONGO_DB`
+4. (Optional) Fill in `MONGO_APP_WRITE_USER` and `MONGO_APP_WRITE_PASSWORD` for write access
+5. Start the app normally — the tunnel opens and closes automatically
+
+The tunnel connects `localhost:27017` → bastion → MongoDB private IP. If the tunnel drops, the backend restarts it automatically with exponential backoff.
+
 ## Quick Start
 
 ### Backend

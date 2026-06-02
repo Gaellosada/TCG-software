@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import pymongo.errors
 from fastapi import FastAPI, Request
@@ -21,7 +22,8 @@ from tcg.core.api.persistence import router as persistence_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
 from tcg.core.api.statistics import router as statistics_router
-from tcg.core.config import load_config
+from tcg.core.config import load_config, load_tunnel_config
+from tcg.core.tunnel import SSMTunnel
 from tcg.data import create_services
 from tcg.types.errors import TCGError
 
@@ -50,6 +52,16 @@ def _cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: connect to MongoDB, build services. Shutdown: close client."""
+    tunnel_config = load_tunnel_config()
+    tunnel: SSMTunnel | None = None
+    monitor_task: asyncio.Task[None] | None = None
+
+    if tunnel_config.enabled:
+        tunnel = SSMTunnel(tunnel_config)
+        await tunnel.start()
+        await tunnel.wait_until_ready()
+        monitor_task = asyncio.create_task(tunnel.monitor())
+
     config = load_config()
     client = AsyncIOMotorClient(
         config.uri,
@@ -63,6 +75,12 @@ async def lifespan(app: FastAPI):
     app.state.market_data = services["market_data"]
     yield
     client.close()
+    if monitor_task:
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
+    if tunnel:
+        await tunnel.stop()
 
 
 class BodySizeLimitMiddleware:
@@ -177,8 +195,10 @@ async def _send_too_large(send: Send, size: int) -> None:
     """Emit a 413 JSON response via the raw ASGI ``send`` callable."""
     body = (
         b'{"error_type":"request_too_large","message":'
-        b'"request body size ' + str(size).encode("ascii")
-        + b" exceeds limit " + str(_MAX_REQUEST_BODY_BYTES).encode("ascii")
+        b'"request body size '
+        + str(size).encode("ascii")
+        + b" exceeds limit "
+        + str(_MAX_REQUEST_BODY_BYTES).encode("ascii")
         + b'"}'
     )
     await send(
@@ -270,9 +290,7 @@ def create_app() -> FastAPI:
     # Routes that need a specific status (409 on duplicate, 413 on too-
     # large, 409 on CAS miss) catch the relevant subclass locally and
     # raise HTTPException, so those paths bypass this handler.
-    app.add_exception_handler(
-        pymongo.errors.PyMongoError, _pymongo_error_handler
-    )
+    app.add_exception_handler(pymongo.errors.PyMongoError, _pymongo_error_handler)
     app.include_router(data_router)
     app.include_router(portfolio_router)
     app.include_router(indicators_router)

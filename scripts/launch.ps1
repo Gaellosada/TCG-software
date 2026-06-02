@@ -112,14 +112,34 @@ if (-not (Test-Path $envFile)) {
 }
 
 $envContent = Get-Content $envFile -Raw
-if ($envContent -notmatch 'MONGO_URI\s*=\s*\S+') {
-    Write-Fail "Your .env file does not contain a MONGO_URI value."
-    Write-Host "  Edit '$envFile' and set MONGO_URI to your MongoDB connection string." -ForegroundColor Yellow
+
+# Check for valid configuration: either MONGO_URI or SSM tunnel enabled
+$hasMongo = $envContent -match 'MONGO_URI\s*=\s*\S+'
+$hasTunnel = $envContent -match 'SSM_TUNNEL_ENABLED\s*=\s*true'
+
+if (-not $hasMongo -and -not $hasTunnel) {
+    Write-Fail "Your .env file needs either MONGO_URI or SSM_TUNNEL_ENABLED=true."
+    Write-Host "  Edit '$envFile' and configure your MongoDB connection." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Option 1: Set MONGO_URI for direct connection" -ForegroundColor White
+    Write-Host "  Option 2: Set SSM_TUNNEL_ENABLED=true for bastion tunnel" -ForegroundColor White
     Write-Host ""
     exit 1
 }
 
-Write-Ok "Configuration file found"
+if ($hasTunnel) {
+    Write-Ok "Configuration file found (SSM tunnel mode)"
+    # Check for AWS CLI
+    $awsCmd = Get-Command aws -ErrorAction SilentlyContinue
+    if (-not $awsCmd) {
+        Write-Warn "AWS CLI not found in PATH. The SSM tunnel requires AWS CLI v2."
+        Write-Host "  Install from: https://aws.amazon.com/cli/" -ForegroundColor Yellow
+    } else {
+        Write-Ok "AWS CLI found"
+    }
+} else {
+    Write-Ok "Configuration file found"
+}
 
 # ---------------------------------------------------------------------------
 # Step 2 -- Python 3.12+
