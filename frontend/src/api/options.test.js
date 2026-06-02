@@ -60,7 +60,7 @@ describe('getOptionRoots', () => {
 
     expect(result).toEqual(ROOT_LIST);
     expect(fetchApi).toHaveBeenCalledOnce();
-    expect(fetchApi).toHaveBeenCalledWith('/options/roots');
+    expect(fetchApi).toHaveBeenCalledWith('/options/roots', {});
   });
 });
 

@@ -515,10 +515,46 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# Step 9 -- Wait for backend with crash detection
+# Step 9 -- Wait for frontend and open browser immediately
 # ---------------------------------------------------------------------------
 
-Write-Info "Waiting for backend to be ready..."
+Write-Info "Waiting for frontend to be ready..."
+$frontendReady = $false
+for ($i = 0; $i -lt 25; $i++) {
+    if ($script:exitRequested) { break }
+    $tcp = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect("127.0.0.1", $FrontendPort)
+        $frontendReady = $true
+        break
+    } catch { } finally {
+        if ($tcp) { $tcp.Dispose() }
+    }
+    Start-Sleep -Milliseconds 200
+}
+
+if ($frontendReady) {
+    Write-Ok "Frontend is ready"
+} else {
+    Write-Warn "Frontend did not respond within 5 seconds (it may still be starting)"
+}
+
+# Open the browser as soon as the frontend is reachable. The backend may
+# still be starting (SSM tunnel + MongoDB), but the UI handles that
+# gracefully — API calls show an error state until the backend is up.
+# Previously the launcher waited up to 30 s for the backend health check
+# before opening the browser, making every cold start feel slow.
+Write-Section "Ready!"
+Write-Host ""
+Write-Host "  Opening http://localhost:$FrontendPort in your browser..." -ForegroundColor White
+Start-Process "http://localhost:$FrontendPort"
+
+# ---------------------------------------------------------------------------
+# Step 10 -- Backend health check (non-blocking, just log the result)
+# ---------------------------------------------------------------------------
+
+Write-Info "Waiting for backend to be ready (this runs in the background)..."
 
 # Use the /health endpoint instead of a raw TCP check.  Uvicorn binds
 # the port BEFORE the lifespan runs (SSM tunnel + MongoDB connection),
@@ -576,36 +612,6 @@ if ($ready) {
     Write-Warn "Backend did not respond within 30 seconds (it may still be starting)"
     Write-Host "  Check logs at: $($script:logsDir)" -ForegroundColor Gray
 }
-
-# ---------------------------------------------------------------------------
-# Step 10 -- Wait for frontend, then open browser
-# ---------------------------------------------------------------------------
-
-Write-Info "Waiting for frontend to be ready..."
-$frontendReady = $false
-for ($i = 0; $i -lt 25; $i++) {
-    if ($script:exitRequested) { break }
-    $tcp = $null
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $tcp.Connect("127.0.0.1", $FrontendPort)
-        $frontendReady = $true
-        break
-    } catch { } finally {
-        if ($tcp) { $tcp.Dispose() }
-    }
-    Start-Sleep -Milliseconds 200
-}
-
-Write-Section "Ready!"
-Write-Host ""
-if ($frontendReady) {
-    Write-Host "  Opening http://localhost:$FrontendPort in your browser..." -ForegroundColor White
-} else {
-    Write-Warn "Frontend did not respond within 5 seconds (it may still be starting)"
-    Write-Host "  Opening browser anyway..." -ForegroundColor Gray
-}
-Start-Process "http://localhost:$FrontendPort"
 
 # ---------------------------------------------------------------------------
 # Step 11 -- Wait for exit

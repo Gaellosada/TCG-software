@@ -372,6 +372,16 @@ function PortfolioPage() {
         <div className={styles.header}>
           <div className={styles.headerLeft}>
             <h2 className={styles.pageTitle}>Portfolio</h2>
+            {/* New portfolio — detach from current and start fresh */}
+            <button
+              className={styles.newBtn}
+              type="button"
+              onClick={() => setClearConfirmOpen(true)}
+              disabled={portfolio.legs.length === 0 && !portfolio.persistedId}
+              title="New portfolio"
+            >
+              + New
+            </button>
             {/* Archive current portfolio — only when one is loaded from backend */}
             {portfolio.persistedId && (
               <button
@@ -426,15 +436,6 @@ function PortfolioPage() {
                 }
               />
             )}
-            {/* Clear — with confirmation */}
-            <button
-              className={styles.clearBtn}
-              type="button"
-              onClick={() => setClearConfirmOpen(true)}
-              disabled={portfolio.legs.length === 0 && !portfolio.results}
-            >
-              Clear
-            </button>
           </div>
         </div>
 
@@ -718,12 +719,12 @@ function PortfolioPage() {
         onCancel={() => setArchiveTarget(null)}
       />
 
-      {/* ── Clear-all confirmation ── */}
+      {/* ── New portfolio confirmation ── */}
       <ConfirmDialog
         open={clearConfirmOpen}
-        title="Clear all holdings and results?"
-        message="All holdings and computed results will be cleared. This cannot be undone."
-        confirmLabel="Clear"
+        title="Start a new portfolio?"
+        message="Current holdings and results will be cleared. Saved portfolios are not affected."
+        confirmLabel="New portfolio"
         cancelLabel="Cancel"
         destructive
         onConfirm={() => {

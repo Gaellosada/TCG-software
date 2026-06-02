@@ -6,9 +6,9 @@ import { classifyFetchError, FetchError } from '../utils/fetchError';
 // shape is preserved for every helper below, so callers that don't care
 // about the classification are unaffected. Callers that DO care can
 // ``catch (e) { if (e.kind === 'offline') ... }``.
-async function fetchClassified(path) {
+async function fetchClassified(path, options = {}) {
   try {
-    return await fetchApi(path);
+    return await fetchApi(path, options);
   } catch (err) {
     // ``fetchApi`` itself throws an ``ApiError`` we constructed in client.js
     // where ``errorType === 'network_error'`` for the fetch-threw case.
@@ -39,14 +39,14 @@ async function fetchClassified(path) {
   }
 }
 
-export async function listCollections(assetClass = null) {
+export async function listCollections(assetClass = null, { signal } = {}) {
   const params = assetClass ? `?asset_class=${assetClass}` : '';
-  const res = await fetchClassified(`/data/collections${params}`);
+  const res = await fetchClassified(`/data/collections${params}`, { signal });
   return res.collections || [];
 }
 
-export async function listInstruments(collection, { skip = 0, limit = 50 } = {}) {
-  const res = await fetchClassified(`/data/${collection}?skip=${skip}&limit=${limit}`);
+export async function listInstruments(collection, { skip = 0, limit = 50, signal } = {}) {
+  const res = await fetchClassified(`/data/${collection}?skip=${skip}&limit=${limit}`, { signal });
   return res; // { items, total, skip, limit }
 }
 

@@ -85,6 +85,30 @@
   opacity: 0.9;
 }
 
+.newBtn {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.newBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.newBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 .deleteBtn {
   display: flex;
   align-items: center;

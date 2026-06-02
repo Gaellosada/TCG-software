@@ -174,12 +174,23 @@ export function buildComputeRequestBody(signal, availableIndicators) {
       missing.push(id);
       continue;
     }
+    // Strip null/unfilled entries from seriesMap — the backend's
+    // _SeriesRefIn model only accepts {collection, instrument_id} dicts.
+    // Also strip the frontend-only ``type`` key so the payload matches
+    // the backend schema exactly.
+    const cleanMap = {};
+    for (const [label, ref] of Object.entries(ind.seriesMap || {})) {
+      if (ref && typeof ref === 'object' && ref.collection) {
+        const { type: _drop, ...rest } = ref;
+        cleanMap[label] = rest;
+      }
+    }
     indicatorList.push({
       id: ind.id,
       name: ind.name,
       code: ind.code,
       params: ind.params,
-      seriesMap: ind.seriesMap,
+      seriesMap: cleanMap,
       ownPanel: !!ind.ownPanel,
     });
   }

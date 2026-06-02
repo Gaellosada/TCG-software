@@ -68,12 +68,15 @@ async def lifespan(app: FastAPI):
 
     try:
         config = load_config()
+        # Pool sizes are modest — this is a single-user desktop app and all
+        # connections funnel through the same SSM tunnel (when enabled).
+        # Keeping the pool small avoids overwhelming the forwarded port.
         client = AsyncIOMotorClient(
             config.uri,
             serverSelectionTimeoutMS=30_000,
             connectTimeoutMS=60_000,
             socketTimeoutMS=300_000,
-            maxPoolSize=20,
+            maxPoolSize=5,
         )
         db = client[config.db_name]
         services = await create_services(db)

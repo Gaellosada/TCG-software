@@ -51,7 +51,7 @@ describe('<IndicatorsList>', () => {
     expect(screen.queryByRole('button', { name: /new indicator/i })).toBeNull();
   });
 
-  it('shows an empty-state hint under CUSTOM when no user indicators exist (after expanding)', () => {
+  it('shows an empty-state hint under CUSTOM when no user indicators exist', () => {
     render(
       <IndicatorsList
         {...defaultProps({
@@ -59,8 +59,7 @@ describe('<IndicatorsList>', () => {
         })}
       />,
     );
-    // CUSTOM starts collapsed; expand it to see the empty state hint.
-    fireEvent.click(screen.getByTestId('category-custom'));
+    // CUSTOM starts expanded — empty state hint is visible immediately.
     expect(screen.getByText(/no custom indicators yet/i)).toBeTruthy();
   });
 
@@ -79,8 +78,7 @@ describe('<IndicatorsList>', () => {
   it('invokes onSelect when a row is clicked', () => {
     const props = defaultProps();
     render(<IndicatorsList {...props} />);
-    // CUSTOM starts collapsed; expand it to see the custom rows.
-    fireEvent.click(screen.getByTestId('category-custom'));
+    // Both sections start expanded — rows are visible immediately.
     fireEvent.click(screen.getByText('My RSI'));
     expect(props.onSelect).toHaveBeenCalledWith('u1');
   });
@@ -101,63 +99,61 @@ describe('<IndicatorsList>', () => {
     expect(screen.getByText(/no matches/i)).toBeTruthy();
   });
 
-  // --- iter-8: collapsible sections ---------------------------------
+  // --- collapsible sections ---------------------------------
 
-  // iter-9: both DEFAULT and CUSTOM start collapsed on first load (no stored pref).
-  it('both DEFAULT and CUSTOM sections are collapsed on first load with no stored preference', () => {
-    // Ensure no preference in localStorage.
+  it('both DEFAULT and CUSTOM sections are expanded on first load with no stored preference', () => {
     expect(localStorage.getItem('tcg.indicators.listCollapsed')).toBeNull();
     render(<IndicatorsList {...defaultProps()} />);
     const defHeader = screen.getByTestId('category-default');
     const custHeader = screen.getByTestId('category-custom');
-    expect(defHeader.getAttribute('data-collapsed')).toBe('true');
-    expect(custHeader.getAttribute('data-collapsed')).toBe('true');
-    // Neither section's items are visible.
-    expect(screen.queryByText('SMA')).toBeNull();
-    expect(screen.queryByText('My RSI')).toBeNull();
+    expect(defHeader.getAttribute('data-collapsed')).toBe('false');
+    expect(custHeader.getAttribute('data-collapsed')).toBe('false');
+    // Both sections' items are visible.
+    expect(screen.getByText('SMA')).toBeTruthy();
+    expect(screen.getByText('My RSI')).toBeTruthy();
   });
 
-  it('renders DEFAULT section collapsed by default (no stored preference)', () => {
+  it('renders DEFAULT section expanded by default (no stored preference)', () => {
     render(<IndicatorsList {...defaultProps()} />);
-    // Items are hidden because DEFAULT starts collapsed.
-    expect(screen.queryByText('SMA')).toBeNull();
-    // Header is present with collapsed attribute.
+    // Items are visible because DEFAULT starts expanded.
+    expect(screen.getByText('SMA')).toBeTruthy();
+    // Header is present with expanded attribute.
     const header = screen.getByTestId('category-default');
-    expect(header.getAttribute('aria-expanded')).toBe('false');
+    expect(header.getAttribute('aria-expanded')).toBe('true');
+    expect(header.getAttribute('data-collapsed')).toBe('false');
+  });
+
+  it('clicking the DEFAULT header collapses its items', () => {
+    render(<IndicatorsList {...defaultProps()} />);
+    const header = screen.getByTestId('category-default');
+    fireEvent.click(header);
+    // Items now hidden.
+    expect(screen.queryByText('SMA')).toBeNull();
+    // Header reports collapsed.
     expect(header.getAttribute('data-collapsed')).toBe('true');
     // Count suffix visible when collapsed.
     expect(within(header).getByText(/\(1\)/)).toBeTruthy();
   });
 
-  it('clicking the DEFAULT header expands its items', () => {
+  it('clicking the collapsed DEFAULT header re-expands it', () => {
     render(<IndicatorsList {...defaultProps()} />);
     const header = screen.getByTestId('category-default');
-    fireEvent.click(header);
-    // Items now visible.
+    fireEvent.click(header); // collapse
+    fireEvent.click(header); // re-expand
     expect(screen.getByText('SMA')).toBeTruthy();
-    // Header reports expanded.
     expect(header.getAttribute('data-collapsed')).toBe('false');
-  });
-
-  it('clicking the expanded DEFAULT header re-collapses it', () => {
-    render(<IndicatorsList {...defaultProps()} />);
-    const header = screen.getByTestId('category-default');
-    fireEvent.click(header); // expand
-    fireEvent.click(header); // re-collapse
-    expect(screen.queryByText('SMA')).toBeNull();
-    expect(header.getAttribute('data-collapsed')).toBe('true');
   });
 
   it('persists collapsed state to localStorage under tcg.indicators.listCollapsed', () => {
     render(<IndicatorsList {...defaultProps()} />);
-    // Expand DEFAULT (it starts collapsed).
+    // Collapse DEFAULT (it starts expanded).
     fireEvent.click(screen.getByTestId('category-default'));
     const raw = localStorage.getItem('tcg.indicators.listCollapsed');
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw);
-    // After expanding DEFAULT, its value is false; CUSTOM stays true (collapsed).
-    expect(parsed.default).toBe(false);
-    expect(parsed.custom).toBe(true);
+    // After collapsing DEFAULT, its value is true; CUSTOM stays false (expanded).
+    expect(parsed.default).toBe(true);
+    expect(parsed.custom).toBe(false);
   });
 
   it('hydrates collapsed state from localStorage on mount', () => {
@@ -174,9 +170,11 @@ describe('<IndicatorsList>', () => {
     expect(screen.getByText('My RSI')).toBeTruthy();
   });
 
-  it('keeps + New visible when CUSTOM is collapsed (default state)', () => {
+  it('keeps + New visible when CUSTOM is collapsed', () => {
     render(<IndicatorsList {...defaultProps()} />);
-    // CUSTOM starts collapsed by default — items are not visible.
+    // Collapse CUSTOM.
+    fireEvent.click(screen.getByTestId('category-custom'));
+    // Items are hidden.
     expect(screen.queryByText('My RSI')).toBeNull();
     // + New still present inside the (still-rendered) header.
     expect(screen.getByRole('button', { name: /new indicator/i })).toBeTruthy();
@@ -185,12 +183,12 @@ describe('<IndicatorsList>', () => {
   it('Enter and Space on the header toggle the section', () => {
     render(<IndicatorsList {...defaultProps()} />);
     const header = screen.getByTestId('category-default');
-    // DEFAULT starts collapsed; Enter → expanded.
+    // DEFAULT starts expanded; Enter → collapsed.
     fireEvent.keyDown(header, { key: 'Enter' });
-    expect(header.getAttribute('data-collapsed')).toBe('false');
-    // Space → collapsed again.
-    fireEvent.keyDown(header, { key: ' ' });
     expect(header.getAttribute('data-collapsed')).toBe('true');
+    // Space → expanded again.
+    fireEvent.keyDown(header, { key: ' ' });
+    expect(header.getAttribute('data-collapsed')).toBe('false');
   });
 
   it('while search is active, collapsed state is ignored (flat list wins)', () => {
@@ -220,12 +218,12 @@ describe('<IndicatorsList>', () => {
     const props = defaultProps();
     render(<IndicatorsList {...props} />);
     const customHeader = screen.getByTestId('category-custom');
-    // CUSTOM starts collapsed by default.
-    expect(customHeader.getAttribute('data-collapsed')).toBe('true');
+    // CUSTOM starts expanded.
+    expect(customHeader.getAttribute('data-collapsed')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: /new indicator/i }));
     expect(props.onAdd).toHaveBeenCalledOnce();
-    // Still collapsed — + New click did not toggle the section.
-    expect(customHeader.getAttribute('data-collapsed')).toBe('true');
+    // Still expanded — + New click did not toggle the section.
+    expect(customHeader.getAttribute('data-collapsed')).toBe('false');
   });
 
   // --- Wave 3: asset-type compatibility grey-out + tooltip ---------
@@ -240,17 +238,11 @@ describe('<IndicatorsList>', () => {
       { id: 'u1', name: 'My-RSI', readonly: false },
     ];
 
-    function expandBoth() {
-      // Both sections start collapsed; expand to assert on rows.
-      fireEvent.click(screen.getByTestId('category-default'));
-      fireEvent.click(screen.getByTestId('category-custom'));
-    }
-
     it('greys out indicators incompatible with currentAssetType=option', () => {
       render(<IndicatorsList
         {...defaultProps({ indicators: COMPAT_INDS, currentAssetType: 'option' })}
       />);
-      expandBoth();
+      // Sections start expanded — rows visible immediately.
       const smaRow = screen.getByText('SMA').closest('[role="button"]');
       const atmRow = screen.getByText('ATM IV').closest('[role="button"]');
       expect(smaRow.getAttribute('data-incompat')).toBe('true');
@@ -261,7 +253,6 @@ describe('<IndicatorsList>', () => {
       render(<IndicatorsList
         {...defaultProps({ indicators: COMPAT_INDS, currentAssetType: 'option' })}
       />);
-      expandBoth();
       const smaRow = screen.getByText('SMA').closest('[role="button"]');
       const title = smaRow.getAttribute('title') || '';
       expect(title).toContain('option'); // current
@@ -273,7 +264,6 @@ describe('<IndicatorsList>', () => {
       render(<IndicatorsList
         {...defaultProps({ indicators: COMPAT_INDS, currentAssetType: null })}
       />);
-      expandBoth();
       const smaRow = screen.getByText('SMA').closest('[role="button"]');
       const atmRow = screen.getByText('ATM IV').closest('[role="button"]');
       expect(smaRow.getAttribute('data-incompat')).toBe('false');
@@ -288,7 +278,6 @@ describe('<IndicatorsList>', () => {
           selectedId: 'atm',
         })}
       />);
-      expandBoth();
       const userRow = screen.getByText('My-RSI').closest('[role="button"]');
       expect(userRow.getAttribute('data-incompat')).toBe('false');
       expect(userRow.getAttribute('title')).toBeNull();
@@ -303,7 +292,6 @@ describe('<IndicatorsList>', () => {
           onSelect,
         })}
       />);
-      expandBoth();
       fireEvent.click(screen.getByText('SMA'));
       expect(onSelect).toHaveBeenCalledWith('sma');
     });
@@ -324,7 +312,6 @@ describe('<IndicatorsList>', () => {
       render(<IndicatorsList
         {...defaultProps({ indicators: indsWithDefaults, currentAssetType: 'index' })}
       />);
-      expandBoth();
       const smaRow = screen.getByText('SMA').closest('[role="button"]');
       const atmRow = screen.getByText('ATM IV').closest('[role="button"]');
       // SMA is compatible with index → not greyed.

@@ -309,10 +309,16 @@ class SSMTunnel:
                 pass
 
     def _kill_process(self) -> None:
-        """Terminate the subprocess if it's still alive.
+        """Terminate the subprocess **and all its children**.
 
         Thread-safe: may be called concurrently from signal handlers,
         ``atexit``, and the ``stop()`` / ``monitor()`` methods.
+
+        ``proc.terminate()`` on Windows only kills the parent ``aws``
+        process — the ``session-manager-plugin.exe`` child is orphaned
+        and keeps the forwarded port open.  We use ``taskkill /T /F``
+        to kill the entire process tree, matching the launcher's cleanup
+        strategy.
         """
         with self._lock:
             proc = self._process
@@ -322,7 +328,16 @@ class SSMTunnel:
 
         # Outside the lock — terminate/wait can take time.
         if proc.poll() is None:
-            proc.terminate()
+            # Kill the entire process tree (aws + session-manager-plugin).
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except Exception:
+                # Fallback to basic kill if taskkill is unavailable.
+                proc.kill()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
