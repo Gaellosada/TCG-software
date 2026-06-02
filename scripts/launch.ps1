@@ -154,20 +154,38 @@ if ($hasTunnel) {
     # --- Session Manager plugin ---
     # The plugin is a separate binary invoked by the AWS CLI during SSM sessions.
     # It installs to a well-known path on Windows.
-    $ssmPlugin = Get-Command session-manager-plugin -ErrorAction SilentlyContinue
+    $ssmPluginPath = "C:\Program Files\Amazon\SessionManagerPlugin\bin\session-manager-plugin.exe"
+    $ssmPlugin = (Get-Command session-manager-plugin -ErrorAction SilentlyContinue) -or (Test-Path $ssmPluginPath)
+
     if (-not $ssmPlugin) {
-        $ssmPluginPath = "C:\Program Files\Amazon\SessionManagerPlugin\bin\session-manager-plugin.exe"
-        if (-not (Test-Path $ssmPluginPath)) {
-            Write-Warn "AWS Session Manager plugin not found."
-            Write-Host "  The SSM tunnel will not work without it. Install from:" -ForegroundColor Yellow
+        Write-Warn "Session Manager plugin not found. Installing..."
+        $installerUrl = "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe"
+        $installerPath = Join-Path $env:TEMP "SessionManagerPluginSetup.exe"
+        try {
+            Write-Info "Downloading Session Manager plugin installer..."
+            Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+            Write-Info "Running installer (you may see a UAC prompt)..."
+            $installProc = Start-Process -FilePath $installerPath -ArgumentList "/quiet" -Wait -PassThru
+            if ($installProc.ExitCode -eq 0) {
+                Refresh-Path
+                $ssmPlugin = (Get-Command session-manager-plugin -ErrorAction SilentlyContinue) -or (Test-Path $ssmPluginPath)
+            }
+        } catch {
+            Write-Warn "Auto-install failed: $_"
+        } finally {
+            if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+        }
+
+        if (-not $ssmPlugin) {
+            Write-Fail "Could not install Session Manager plugin automatically."
+            Write-Host ""
+            Write-Host "  The SSM tunnel will not work without it. Install manually:" -ForegroundColor Yellow
             Write-Host "    https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html" -ForegroundColor White
             Write-Host ""
-        } else {
-            Write-Ok "Session Manager plugin found"
+            exit 1
         }
-    } else {
-        Write-Ok "Session Manager plugin found"
     }
+    Write-Ok "Session Manager plugin found"
 } else {
     Write-Ok "Configuration file found"
 }
