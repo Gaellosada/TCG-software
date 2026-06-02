@@ -356,7 +356,14 @@ function Stop-PortProcess {
     param([object]$Conn, [int]$Port, [string[]]$Expected)
     $proc = Get-Process -Id $Conn.OwningProcess -ErrorAction SilentlyContinue
     if (-not $proc) { return }
-    if ($proc.Name -in $Expected) {
+    # Match process names flexibly: "python3.12" should match "python",
+    # "node" should match "node", etc.  Check if the process name starts
+    # with any of the expected prefixes.
+    $isTcg = $false
+    foreach ($name in $Expected) {
+        if ($proc.Name -like "$name*") { $isTcg = $true; break }
+    }
+    if ($isTcg) {
         Write-Info "Killing leftover $($proc.Name) (PID $($proc.Id)) on port $Port"
         & taskkill /T /F /PID $proc.Id 2>$null | Out-Null
     } else {
