@@ -345,8 +345,13 @@ if (-not (Test-Path $nodeModules)) {
 Write-Section "Starting application"
 
 # Check if ports are already in use (e.g. leftover from a previous run).
-$portBackend  = Get-NetTCPConnection -LocalPort $BackendPort -ErrorAction SilentlyContinue | Select-Object -First 1
-$portFrontend = Get-NetTCPConnection -LocalPort $FrontendPort -ErrorAction SilentlyContinue | Select-Object -First 1
+# Filter out PID 0 — those are lingering TIME_WAIT sockets from recently
+# closed connections (reported as the System Idle Process on Windows).
+# They release automatically and aren't real blockers.
+$portBackend  = Get-NetTCPConnection -LocalPort $BackendPort -ErrorAction SilentlyContinue |
+    Where-Object { $_.OwningProcess -ne 0 } | Select-Object -First 1
+$portFrontend = Get-NetTCPConnection -LocalPort $FrontendPort -ErrorAction SilentlyContinue |
+    Where-Object { $_.OwningProcess -ne 0 } | Select-Object -First 1
 
 # Expected process names for each port -- only auto-kill these, warn on anything else.
 $backendExpected  = @("python", "python3", "pythonw", "uvicorn")
