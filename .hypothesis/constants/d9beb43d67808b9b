@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/persistence/repository.py
-# hypothesis_version: 6.151.12
-
-[1000, '$ne', '$set', 'WriteRepository', '_coll', '_id', 'basket', 'category', 'deleted', 'indicator', 'portfolio', 'signal', 'type', 'updated_at']

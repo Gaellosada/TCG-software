@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/engine/options/series/stream_resolver.py
-# hypothesis_version: 6.151.12
-
-[0.01, 0.1, 0.15, 0.3, 365.0, 180, 'C', 'P', 'StreamLabel', 'both', 'data_access_error', 'delta', 'delta_stored', 'gamma', 'gamma_stored', 'iv', 'iv_stored', 'mid', 'no_chain_for_date', 'open_interest', 'past_last_trade_date', 'theta', 'theta_stored', 'vega', 'vega_stored', 'volume']

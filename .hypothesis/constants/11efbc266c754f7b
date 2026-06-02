@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/statistics.py
-# hypothesis_version: 6.151.12
-
-[0.04, '/api', '/statistics', 'avg_drawdown', 'best_day', 'best_month', 'cagr', 'calmar_ratio', 'current_drawdown', 'cvar_5', 'drawdown', 'excess_return', 'kurtosis', 'max_drawdown', 'num_observations', 'return', 'risk_adjusted', 'risk_free_rate_used', 'sharpe_ratio', 'skewness', 'sortino_ratio', 'statistics', 'tail', 'time_underwater_days', 'total_return', 'var_95', 'var_99', 'worst_day', 'worst_month']

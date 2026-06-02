@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/config.py
-# hypothesis_version: 6.151.12
-
-[65535, '.env', '2026-app-data', '27017', 'AWS_ACCESS_KEY_ID', 'AWS_REGION', 'DB_REMOTE_HOST', 'DB_REMOTE_PORT', 'LOCAL_PORT', 'MONGO_AUTH_SOURCE', 'MONGO_DB', 'MONGO_DB_NAME', 'MONGO_PASSWORD', 'MONGO_URI', 'MONGO_USER', 'SSM_BASTION_ID', 'SSM_TUNNEL_ENABLED', 'admin', 'aws_access_key_id', 'bastion_id', 'db_host', 'db_port', 'local_port', 'region', 'tcg-app-data', 'tcg-instrument', 'true']

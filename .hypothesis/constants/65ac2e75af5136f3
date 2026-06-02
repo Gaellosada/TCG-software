@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/_models.py
-# hypothesis_version: 6.151.12
-
-[0.0, 128, 'BasketRefInline', 'C', 'P', 'after', 'basket', 'basket_inline', 'basket_saved', 'before', 'continuous', 'cycle', 'delta', 'difference', 'equity', 'forbid', 'front_month', 'future', 'gamma', 'index', 'inline', 'iv', 'kind', 'mid', 'none', 'open_interest', 'option', 'option_stream', 'ratio', 'saved', 'spot', 'theta', 'type', 'vega', 'volume', 'weight']

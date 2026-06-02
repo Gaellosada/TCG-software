@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/app.py
-# hypothesis_version: 6.151.12
-
-[b' exceeds limit ', b'"}', b'application/json', b'content-length', b'content-type', 200, 400, 413, 503, 1024, 30000, 60000, 300000, '*', ',', '.', '/health', '0.1.0', '://***:***@', '://[^@]*@', 'GET', 'TCG Platform', 'TCG_CORS_ORIGINS', 'ascii', 'body', 'error_type', 'headers', 'http', 'http.disconnect', 'http.request', 'http.response.body', 'http.response.start', 'invalid request body', 'loc', 'market_data', 'message', 'more_body', 'msg', 'ok', 'starting', 'status', 'type', 'validation_error']

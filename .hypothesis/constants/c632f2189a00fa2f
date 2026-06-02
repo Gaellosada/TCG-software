@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/engine/signal_exec.py
-# hypothesis_version: 6.151.12
-
-[-1.0, 0.0, 1.0, 100.0, 'BlockEvent', 'IndicatorSpecInput', 'MISSING', 'PriceFetcher', 'SignalDataError', 'SignalEvalResult', 'SignalRuntimeError', 'T', 'basket', 'close', 'constant', 'continuous', 'cross_above', 'entry', 'eq', 'evaluate_signal', 'exit', 'ge', 'gt', 'ignore', 'indicator', 'inline', 'inputs', 'instrument', 'instrument operand', 'le', 'long', 'lt', 'option_stream', 'reset', 'rolling_gt', 'saved', 'short', 'spot']

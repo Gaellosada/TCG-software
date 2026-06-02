@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/__init__.py
-# hypothesis_version: 6.151.12
-
-['AdjustmentMethod', 'AssetClass', 'ContinuousLegSpec', 'ContinuousRollConfig', 'ContinuousSeries', 'ContractPriceData', 'ContractSpec', 'DataAccessError', 'DataNotFoundError', 'DataVersion', 'EngineType', 'EquityCurve', 'ErrorResponse', 'InstrumentId', 'MetricsSuite', 'MongoConfig', 'PaginatedResult', 'PortfolioResult', 'PortfolioSpec', 'PositionSizingConfig', 'PriceSeries', 'Provenance', 'RebalanceFreq', 'ResultSource', 'RollStrategy', 'SimConfig', 'SimResult', 'SimulationError', 'SimulationRequest', 'SizingMethod', 'StrategyDefinition', 'StrategyMeta', 'StrategyStage', 'TCGError', 'Trade', 'ValidationError']

@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/data/options/reader.py
-# hypothesis_version: 6.151.12
-
-[0.0, 100, 10000, 500000, 19000101, 21001231, '$exists', '$gte', '$lte', '$ne', 'BOTH', 'Bitcoin', 'C', 'CBOE', 'DERIBIT', 'EUR/USD', 'Ethereum', 'Gold', 'INTERNAL', 'IVOLATILITY', 'JPY/USD', 'NASDAQ 100', 'OPT_', 'OPT_BTC', 'OPT_ETH', 'OPT_EURUSD', 'OPT_GOLD', 'OPT_JPYUSD', 'OPT_NASDAQ_100', 'OPT_SP_500', 'OPT_T_BOND', 'OPT_T_NOTE_10_Y', 'OPT_VIX', 'P', 'SP 500', 'T-Bond', 'T-Note 10Y', 'VIX', '_', '_id', '_id.expirationCycle', 'both', 'contractSize', 'currency', 'date', 'eodDatas', 'eodGreeks', 'expiration', 'rootUnderlying', 'strike', 'type', 'underlying', 'underlyingSymbol']

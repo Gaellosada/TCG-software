@@ -1,4 +1,0 @@
-# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/persistence/_client.py
-# hypothesis_version: 6.151.12
-
-[30000, 60000, 300000, '.env', '27017', 'LOCAL_PORT', 'MONGO_APP_WRITE_URI', 'MONGO_APP_WRITE_USER', 'MONGO_AUTH_SOURCE', 'SSM_TUNNEL_ENABLED', 'admin', 'build_write_client', 'true']
