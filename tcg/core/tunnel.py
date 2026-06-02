@@ -13,11 +13,13 @@ daemon threads so the async caller never blocks.
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -121,6 +123,12 @@ class SSMTunnel:
         # messages when the process dies during startup.
         self._start_stderr_capture_thread(self._process.stderr)
 
+        # Safety net: kill the subprocess if Python exits without going
+        # through the lifespan shutdown (crash, Ctrl+C during startup,
+        # terminal closed, etc.).
+        atexit.register(self._kill_process)
+        self._install_signal_handlers()
+
     async def wait_until_ready(self, timeout: float = 30) -> None:
         """Block until the tunnel prints its ready marker or *timeout* elapses."""
         if self._process is None or self._process.stdout is None:
@@ -142,6 +150,7 @@ class SSMTunnel:
         """Terminate the tunnel subprocess."""
         self._stopped = True
         self._kill_process()
+        atexit.unregister(self._kill_process)
 
     async def monitor(self) -> None:
         """Long-lived task: restart the tunnel on unexpected exit with backoff."""
@@ -244,6 +253,32 @@ class SSMTunnel:
         t = threading.Thread(target=_drain, daemon=True)
         t.start()
         self._drain_threads.append(t)
+
+    def _install_signal_handlers(self) -> None:
+        """Chain signal handlers so the tunnel subprocess is killed on SIGINT/SIGTERM.
+
+        Preserves any existing handler (e.g. uvicorn's) and calls it after
+        cleanup so normal shutdown still proceeds.
+        """
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            prev = signal.getsignal(sig)
+
+            def _handler(signum: int, frame: object, _prev: object = prev) -> None:
+                self._kill_process()
+                # Re-invoke the previous handler so uvicorn (or Python's
+                # default KeyboardInterrupt) still fires normally.
+                if callable(_prev):
+                    _prev(signum, frame)
+                elif _prev == signal.SIG_DFL:
+                    signal.signal(signum, signal.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+
+            try:
+                signal.signal(sig, _handler)
+            except (OSError, ValueError):
+                # signal.signal() can only be called from the main thread.
+                # If we're not on the main thread, atexit is still in place.
+                pass
 
     def _kill_process(self) -> None:
         """Terminate the subprocess if it's still alive."""
