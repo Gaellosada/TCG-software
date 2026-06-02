@@ -85,21 +85,20 @@ class SSMTunnel:
         self._kill_process()
 
         # If the port is still occupied (e.g. orphaned session-manager-plugin
-        # from a previous run), wait briefly for it to be released rather
-        # than failing immediately.
+        # from a previous run that wasn't cleaned up), actively kill the
+        # process holding it. This is a single-user desktop app — anything
+        # on the tunnel port is from a previous run and safe to kill.
         if self._port_reachable(port):
-            logger.warning(
-                "SSM tunnel: port %d in use, waiting for it to be released...",
-                port,
-            )
-            for _ in range(10):  # 10 × 1s = 10s max wait
+            self._kill_port_holder(port)
+            # Give the OS a moment to release the socket.
+            for _ in range(5):
                 await asyncio.sleep(1)
                 if not self._port_reachable(port):
                     break
             else:
                 raise RuntimeError(
-                    f"SSM tunnel: port {port} is still in use after 10 seconds. "
-                    "Kill the process occupying it and retry."
+                    f"SSM tunnel: port {port} is still in use after killing "
+                    "the holder. Check Task Manager for orphaned processes."
                 )
         # Wait for old capture threads to finish (pipes close when process
         # dies) and clear the list so it doesn't grow across restarts.
@@ -266,6 +265,72 @@ class SSMTunnel:
                 return True
         except OSError:
             return False
+
+    @staticmethod
+    def _kill_port_holder(port: int) -> None:
+        """Find and kill the process listening on *port*.
+
+        Uses ``netstat -ano`` on Windows to discover the PID, then
+        ``taskkill /T /F`` to kill the entire process tree (the orphaned
+        ``session-manager-plugin.exe`` is typically a child of a dead
+        ``aws`` process, so tree-kill is essential).
+
+        On non-Windows platforms, falls back to ``lsof`` + ``kill``.
+        Errors are logged but never raised — the caller retries the port
+        check afterward and raises if it's still occupied.
+        """
+        try:
+            if sys.platform == "win32":
+                # netstat -ano outputs lines like:
+                #   TCP    127.0.0.1:27017    0.0.0.0:0    LISTENING    12345
+                result = subprocess.run(
+                    ["netstat", "-ano"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if (
+                        len(parts) >= 5
+                        and "LISTENING" in parts
+                        and f":{port}" in parts[1]
+                    ):
+                        pid = parts[-1]
+                        logger.warning(
+                            "SSM tunnel: killing PID %s holding port %d",
+                            pid,
+                            port,
+                        )
+                        subprocess.run(
+                            ["taskkill", "/T", "/F", "/PID", pid],
+                            capture_output=True,
+                            timeout=10,
+                        )
+                        return
+                logger.warning(
+                    "SSM tunnel: port %d in use but no LISTENING PID found",
+                    port,
+                )
+            else:
+                result = subprocess.run(
+                    ["lsof", "-ti", f":{port}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                for pid in result.stdout.strip().splitlines():
+                    pid = pid.strip()
+                    if pid.isdigit():
+                        logger.warning(
+                            "SSM tunnel: killing PID %s holding port %d",
+                            pid,
+                            port,
+                        )
+                        os.kill(int(pid), 9)  # SIGKILL
+                        return
+        except Exception as exc:
+            logger.warning("SSM tunnel: failed to kill port %d holder: %s", port, exc)
 
     def _poll_port(self, port: int) -> None:
         """Blocking TCP poll until ``localhost:port`` accepts a connection.
