@@ -75,30 +75,32 @@ class SSMTunnel:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Spawn the ``aws ssm start-session`` process.
-
-        When uvicorn ``--reload`` restarts the server, a tunnel from the
-        previous lifespan may still be alive (orphaned because the reloader
-        kills the child process before lifespan shutdown completes).  If the
-        forwarded port is already reachable, we skip spawning a new tunnel
-        and let ``wait_until_ready`` confirm connectivity.
-        """
+        """Spawn the ``aws ssm start-session`` process."""
         self._stopped = False
 
         cfg = self._config
         port = int(cfg.local_port)  # validated upstream, but ensure int
 
-        # If the port is already reachable (e.g. orphaned tunnel from a
-        # uvicorn --reload cycle), reuse it instead of failing.
-        if self._port_reachable(port):
-            logger.info(
-                "SSM tunnel: port %d already reachable — reusing existing tunnel",
-                port,
-            )
-            return
-
         # Kill any prior process before spawning a new one.
         self._kill_process()
+
+        # If the port is still occupied (e.g. orphaned session-manager-plugin
+        # from a previous run), wait briefly for it to be released rather
+        # than failing immediately.
+        if self._port_reachable(port):
+            logger.warning(
+                "SSM tunnel: port %d in use, waiting for it to be released...",
+                port,
+            )
+            for _ in range(10):  # 10 × 1s = 10s max wait
+                await asyncio.sleep(1)
+                if not self._port_reachable(port):
+                    break
+            else:
+                raise RuntimeError(
+                    f"SSM tunnel: port {port} is still in use after 10 seconds. "
+                    "Kill the process occupying it and retry."
+                )
         # Wait for old capture threads to finish (pipes close when process
         # dies) and clear the list so it doesn't grow across restarts.
         for t in self._drain_threads:
@@ -171,14 +173,8 @@ class SSMTunnel:
         This is more robust than parsing stdout/stderr for a ready marker
         because the Session Manager plugin's output format, buffering, and
         stream routing vary across versions and platforms.
-
-        When reusing an orphaned tunnel (``start`` returned early because
-        the port was already reachable), ``_process`` is None.  The port
-        check still succeeds immediately.
         """
-        if self._process is None and not self._port_reachable(
-            int(self._config.local_port)
-        ):
+        if self._process is None:
             raise RuntimeError("SSM tunnel: process not started")
 
         port = int(self._config.local_port)
@@ -215,18 +211,12 @@ class SSMTunnel:
         """Long-lived task: restart the tunnel on unexpected exit with backoff."""
         consecutive_failures = 0
         backoff = 1.0
-        port = int(self._config.local_port)
 
         while not self._stopped:
             await asyncio.sleep(1)
 
             if self._process is not None and self._process.poll() is None:
-                continue  # Still running — we own the process.
-
-            # Reuse path: we don't own a process but the port is still
-            # reachable (orphaned tunnel from a previous reload cycle).
-            if self._process is None and self._port_reachable(port):
-                continue
+                continue  # Still running
 
             # Process exited unexpectedly (or was never started after a
             # failed restart — _kill_process sets _process to None).

@@ -477,7 +477,7 @@ try {
 Write-Info "Starting backend server (port $BackendPort)..."
 
 $backendLog = Join-Path $script:logsDir "backend.log"
-$backendArgs = "-m uvicorn tcg.core.app:app --port $BackendPort --reload --reload-exclude .venv"
+$backendArgs = "-m uvicorn tcg.core.app:app --port $BackendPort"
 try {
     $script:backendProcess = Start-Process -FilePath $venvPython `
         -ArgumentList $backendArgs `
