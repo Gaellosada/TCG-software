@@ -4,6 +4,11 @@ Spawns an ``aws ssm start-session`` subprocess that forwards a local TCP
 port to a remote MongoDB host via an EC2 bastion.  The tunnel is started
 during FastAPI lifespan startup and stopped on shutdown.  A background
 ``monitor()`` task restarts the tunnel automatically on unexpected exit.
+
+Uses ``subprocess.Popen`` (not ``asyncio.create_subprocess_exec``) because
+Windows' asyncio ``ProactorEventLoop`` does not support subprocess pipes
+under uvicorn's reload-mode event loop.  Pipe reading is offloaded to
+daemon threads so the async caller never blocks.
 """
 
 from __future__ import annotations
@@ -13,6 +18,8 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import threading
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -48,9 +55,8 @@ class SSMTunnel:
 
     def __init__(self, config: TunnelConfig) -> None:
         self._config = config
-        self._process: asyncio.subprocess.Process | None = None
-        self._drain_stdout_task: asyncio.Task[None] | None = None
-        self._drain_stderr_task: asyncio.Task[None] | None = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._drain_threads: list[threading.Thread] = []
         self._stopped = False
 
     # ------------------------------------------------------------------
@@ -60,7 +66,6 @@ class SSMTunnel:
     async def start(self) -> None:
         """Spawn the ``aws ssm start-session`` process."""
         self._stopped = False
-        self._cancel_drain_tasks()
 
         aws_bin = shutil.which("aws")
         if aws_bin is None:
@@ -102,46 +107,29 @@ class SSMTunnel:
 
         logger.info("SSM tunnel: starting on localhost:%s", port)
 
-        self._process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
         )
 
-        # Drain stderr immediately to prevent pipe-buffer deadlocks.
-        # The SSM process may write auth errors or SDK debug messages to
-        # stderr before printing the ready marker on stdout.
-        self._drain_stderr_task = asyncio.create_task(
-            self._drain_pipe(self._process.stderr)
-        )
+        # Drain stderr immediately in a daemon thread to prevent pipe-
+        # buffer deadlocks.  The SSM process may write auth errors or
+        # SDK debug messages to stderr before printing the ready marker.
+        self._start_drain_thread(self._process.stderr)
 
     async def wait_until_ready(self, timeout: float = 30) -> None:
         """Block until the tunnel prints its ready marker or *timeout* elapses."""
         if self._process is None or self._process.stdout is None:
             raise RuntimeError("SSM tunnel: process not started")
 
-        async def _read_until_ready() -> None:
-            assert self._process is not None and self._process.stdout is not None
-            while True:
-                line = await self._process.stdout.readline()
-                if not line:
-                    # Process closed stdout without printing the ready marker.
-                    raise RuntimeError(
-                        "SSM tunnel: process exited before becoming ready. "
-                        "Check AWS credentials, bastion ID, and Session Manager plugin."
-                    )
-                text = line.decode(errors="replace").strip()
-                if "Waiting for connections" in text:
-                    logger.info("SSM tunnel: ready")
-                    # Drain remaining stdout in the background.
-                    self._drain_stdout_task = asyncio.create_task(
-                        self._drain_pipe(self._process.stdout)
-                    )
-                    return
-
+        loop = asyncio.get_running_loop()
         try:
-            await asyncio.wait_for(_read_until_ready(), timeout=timeout)
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._read_stdout_until_ready),
+                timeout=timeout,
+            )
         except asyncio.TimeoutError:
             raise RuntimeError(
                 f"SSM tunnel: did not become ready within {timeout}s. "
@@ -149,16 +137,9 @@ class SSMTunnel:
             ) from None
 
     async def stop(self) -> None:
-        """Terminate the tunnel subprocess and cancel drain tasks."""
+        """Terminate the tunnel subprocess."""
         self._stopped = True
-        self._cancel_drain_tasks()
-        if self._process is not None and self._process.returncode is None:
-            self._process.terminate()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self._process.kill()
-            self._process = None
+        self._kill_process()
 
     async def monitor(self) -> None:
         """Long-lived task: restart the tunnel on unexpected exit with backoff."""
@@ -168,7 +149,7 @@ class SSMTunnel:
         while not self._stopped:
             await asyncio.sleep(1)
 
-            if self._process is not None and self._process.returncode is None:
+            if self._process is not None and self._process.poll() is None:
                 continue  # Still running
 
             # Process exited unexpectedly
@@ -195,40 +176,58 @@ class SSMTunnel:
                 backoff = 1.0
             except Exception:
                 logger.exception("SSM tunnel: restart failed")
-                # Kill the process so the next iteration detects it as dead
-                # and retries, rather than seeing it as "running."
-                if self._process is not None and self._process.returncode is None:
-                    self._process.terminate()
-                    try:
-                        await asyncio.wait_for(self._process.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        self._process.kill()
+                self._kill_process()
 
     @property
     def is_alive(self) -> bool:
-        return self._process is not None and self._process.returncode is None
+        return self._process is not None and self._process.poll() is None
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _cancel_drain_tasks(self) -> None:
-        """Cancel and clear any active drain tasks."""
-        for task in (self._drain_stdout_task, self._drain_stderr_task):
-            if task is not None:
-                task.cancel()
-        self._drain_stdout_task = None
-        self._drain_stderr_task = None
+    def _read_stdout_until_ready(self) -> None:
+        """Blocking read of stdout until the ready marker appears.
 
-    @staticmethod
-    async def _drain_pipe(stream: asyncio.StreamReader | None) -> None:
-        """Read and discard a pipe so the OS buffer doesn't fill up."""
-        if stream is None:
-            return
-        try:
-            while True:
-                chunk = await stream.read(4096)
-                if not chunk:
-                    break
-        except asyncio.CancelledError:
-            return
+        Called via ``run_in_executor`` so the async caller doesn't block.
+        After detecting readiness, starts a drain thread for remaining
+        stdout output.
+        """
+        assert self._process is not None and self._process.stdout is not None
+        for raw_line in self._process.stdout:
+            text = raw_line.decode(errors="replace").strip()
+            if "Waiting for connections" in text:
+                logger.info("SSM tunnel: ready")
+                self._start_drain_thread(self._process.stdout)
+                return
+        # stdout closed without the ready marker — process exited.
+        raise RuntimeError(
+            "SSM tunnel: process exited before becoming ready. "
+            "Check AWS credentials, bastion ID, and Session Manager plugin."
+        )
+
+    def _start_drain_thread(self, pipe: object) -> None:
+        """Spawn a daemon thread that reads and discards a pipe."""
+
+        def _drain() -> None:
+            try:
+                while True:
+                    chunk = pipe.read(4096)  # type: ignore[union-attr]
+                    if not chunk:
+                        break
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_drain, daemon=True)
+        t.start()
+        self._drain_threads.append(t)
+
+    def _kill_process(self) -> None:
+        """Terminate the subprocess if it's still alive."""
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+        self._process = None
