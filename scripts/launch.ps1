@@ -129,13 +129,44 @@ if (-not $hasMongo -and -not $hasTunnel) {
 
 if ($hasTunnel) {
     Write-Ok "Configuration file found (SSM tunnel mode)"
-    # Check for AWS CLI
+
+    # --- AWS CLI ---
     $awsCmd = Get-Command aws -ErrorAction SilentlyContinue
     if (-not $awsCmd) {
-        Write-Warn "AWS CLI not found in PATH. The SSM tunnel requires AWS CLI v2."
-        Write-Host "  Install from: https://aws.amazon.com/cli/" -ForegroundColor Yellow
+        Write-Warn "AWS CLI not found. Installing via winget..."
+        try {
+            winget install --id Amazon.AWSCLI --exact --source winget --accept-package-agreements --accept-source-agreements
+            Refresh-Path
+            $awsCmd = Get-Command aws -ErrorAction SilentlyContinue
+        } catch { Write-Warn "Auto-install failed: $_" }
+
+        if (-not $awsCmd) {
+            Write-Fail "Could not install AWS CLI automatically."
+            Write-Host ""
+            Write-Host "  The SSM tunnel requires AWS CLI v2. Install manually:" -ForegroundColor Yellow
+            Write-Host "    https://aws.amazon.com/cli/" -ForegroundColor White
+            Write-Host ""
+            exit 1
+        }
+    }
+    Write-Ok "AWS CLI found"
+
+    # --- Session Manager plugin ---
+    # The plugin is a separate binary invoked by the AWS CLI during SSM sessions.
+    # It installs to a well-known path on Windows.
+    $ssmPlugin = Get-Command session-manager-plugin -ErrorAction SilentlyContinue
+    if (-not $ssmPlugin) {
+        $ssmPluginPath = "C:\Program Files\Amazon\SessionManagerPlugin\bin\session-manager-plugin.exe"
+        if (-not (Test-Path $ssmPluginPath)) {
+            Write-Warn "AWS Session Manager plugin not found."
+            Write-Host "  The SSM tunnel will not work without it. Install from:" -ForegroundColor Yellow
+            Write-Host "    https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html" -ForegroundColor White
+            Write-Host ""
+        } else {
+            Write-Ok "Session Manager plugin found"
+        }
     } else {
-        Write-Ok "AWS CLI found"
+        Write-Ok "Session Manager plugin found"
     }
 } else {
     Write-Ok "Configuration file found"
