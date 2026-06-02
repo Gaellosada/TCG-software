@@ -50,6 +50,10 @@ function Refresh-Path {
     $env:Path = $allPaths -join ";"
 }
 
+function Has-Winget {
+    return [bool](Get-Command winget -ErrorAction SilentlyContinue)
+}
+
 function Get-PythonCmd {
     # Returns the first working Python command (>= 3.12), or $null.
     foreach ($cmd in @("python", "python3", "py")) {
@@ -112,14 +116,87 @@ if (-not (Test-Path $envFile)) {
 }
 
 $envContent = Get-Content $envFile -Raw
-if ($envContent -notmatch 'MONGO_URI\s*=\s*\S+') {
-    Write-Fail "Your .env file does not contain a MONGO_URI value."
-    Write-Host "  Edit '$envFile' and set MONGO_URI to your MongoDB connection string." -ForegroundColor Yellow
+
+# Check for valid configuration: either MONGO_URI or SSM tunnel enabled
+$hasMongo = $envContent -match '(?m)^MONGO_URI\s*=\s*\S+'
+$hasTunnel = $envContent -match '(?m)^SSM_TUNNEL_ENABLED\s*=\s*true'
+
+if (-not $hasMongo -and -not $hasTunnel) {
+    Write-Fail "Your .env file needs either MONGO_URI or SSM_TUNNEL_ENABLED=true."
+    Write-Host "  Edit '$envFile' and configure your MongoDB connection." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Option 1: Set MONGO_URI for direct connection" -ForegroundColor White
+    Write-Host "  Option 2: Set SSM_TUNNEL_ENABLED=true for bastion tunnel" -ForegroundColor White
     Write-Host ""
     exit 1
 }
 
-Write-Ok "Configuration file found"
+if ($hasTunnel) {
+    Write-Ok "Configuration file found (SSM tunnel mode)"
+
+    # --- AWS CLI ---
+    $awsCmd = Get-Command aws -ErrorAction SilentlyContinue
+    if (-not $awsCmd) {
+        if (Has-Winget) {
+            Write-Warn "AWS CLI not found. Installing via winget..."
+            try {
+                winget install --id Amazon.AWSCLI --exact --source winget --accept-package-agreements --accept-source-agreements
+                Refresh-Path
+                $awsCmd = Get-Command aws -ErrorAction SilentlyContinue
+            } catch { Write-Warn "Auto-install failed: $_" }
+        } else {
+            Write-Warn "AWS CLI not found and winget is not available for auto-install."
+        }
+
+        if (-not $awsCmd) {
+            Write-Fail "Could not install AWS CLI automatically."
+            Write-Host ""
+            Write-Host "  The SSM tunnel requires AWS CLI v2. Install manually:" -ForegroundColor Yellow
+            Write-Host "    https://aws.amazon.com/cli/" -ForegroundColor White
+            Write-Host ""
+            exit 1
+        }
+    }
+    Write-Ok "AWS CLI found"
+
+    # --- Session Manager plugin ---
+    # The plugin is a separate binary invoked by the AWS CLI during SSM sessions.
+    # It installs to a well-known path on Windows.
+    $ssmPluginPath = "C:\Program Files\Amazon\SessionManagerPlugin\bin\session-manager-plugin.exe"
+    $ssmPlugin = (Get-Command session-manager-plugin -ErrorAction SilentlyContinue) -or (Test-Path $ssmPluginPath)
+
+    if (-not $ssmPlugin) {
+        Write-Warn "Session Manager plugin not found. Installing..."
+        $installerUrl = "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe"
+        $installerPath = Join-Path $env:TEMP "SessionManagerPluginSetup.exe"
+        try {
+            Write-Info "Downloading Session Manager plugin installer..."
+            Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+            Write-Info "Running installer (you may see a UAC prompt)..."
+            $installProc = Start-Process -FilePath $installerPath -ArgumentList "/quiet" -Wait -PassThru
+            if ($installProc.ExitCode -eq 0) {
+                Refresh-Path
+                $ssmPlugin = (Get-Command session-manager-plugin -ErrorAction SilentlyContinue) -or (Test-Path $ssmPluginPath)
+            }
+        } catch {
+            Write-Warn "Auto-install failed: $_"
+        } finally {
+            if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+        }
+
+        if (-not $ssmPlugin) {
+            Write-Fail "Could not install Session Manager plugin automatically."
+            Write-Host ""
+            Write-Host "  The SSM tunnel will not work without it. Install manually:" -ForegroundColor Yellow
+            Write-Host "    https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html" -ForegroundColor White
+            Write-Host ""
+            exit 1
+        }
+    }
+    Write-Ok "Session Manager plugin found"
+} else {
+    Write-Ok "Configuration file found"
+}
 
 # ---------------------------------------------------------------------------
 # Step 2 -- Python 3.12+
@@ -130,13 +207,17 @@ Write-Section "Checking Python"
 $pythonCmd = Get-PythonCmd
 
 if (-not $pythonCmd) {
-    Write-Warn "Python 3.12+ not found. Installing via winget..."
-    try {
-        winget install --id Python.Python.3.12 --exact --source winget --accept-package-agreements --accept-source-agreements
-        Refresh-Path
-        $pythonCmd = Get-PythonCmd
-    } catch {
-        Write-Warn "Auto-install failed: $_"
+    if (Has-Winget) {
+        Write-Warn "Python 3.12+ not found. Installing via winget..."
+        try {
+            winget install --id Python.Python.3.12 --exact --source winget --accept-package-agreements --accept-source-agreements
+            Refresh-Path
+            $pythonCmd = Get-PythonCmd
+        } catch {
+            Write-Warn "Auto-install failed: $_"
+        }
+    } else {
+        Write-Warn "Python 3.12+ not found and winget is not available for auto-install."
     }
 
     if (-not $pythonCmd) {
@@ -164,12 +245,16 @@ Write-Section "Checking Node.js"
 $nodeMajor = Get-NodeMajor
 
 if ($nodeMajor -lt 18) {
-    Write-Warn "Node.js 18+ not found. Installing via winget..."
-    try {
-        winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
-        Refresh-Path
-        $nodeMajor = Get-NodeMajor
-    } catch { Write-Warn "Auto-install failed: $_" }
+    if (Has-Winget) {
+        Write-Warn "Node.js 18+ not found. Installing via winget..."
+        try {
+            winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
+            Refresh-Path
+            $nodeMajor = Get-NodeMajor
+        } catch { Write-Warn "Auto-install failed: $_" }
+    } else {
+        Write-Warn "Node.js 18+ not found and winget is not available for auto-install."
+    }
 
     if ($nodeMajor -lt 18) {
         Write-Fail "Could not install Node.js automatically."
@@ -276,18 +361,27 @@ if (-not (Test-Path $nodeModules)) {
 Write-Section "Starting application"
 
 # Check if ports are already in use (e.g. leftover from a previous run).
-$portBackend  = Get-NetTCPConnection -LocalPort $BackendPort -ErrorAction SilentlyContinue | Select-Object -First 1
-$portFrontend = Get-NetTCPConnection -LocalPort $FrontendPort -ErrorAction SilentlyContinue | Select-Object -First 1
+# Filter: only LISTENING sockets with a real PID (not PID 0 / TIME_WAIT).
+$portBackend  = Get-NetTCPConnection -LocalPort $BackendPort -ErrorAction SilentlyContinue |
+    Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' } | Select-Object -First 1
+$portFrontend = Get-NetTCPConnection -LocalPort $FrontendPort -ErrorAction SilentlyContinue |
+    Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' } | Select-Object -First 1
 
 # Expected process names for each port -- only auto-kill these, warn on anything else.
-$backendExpected  = @("python", "python3", "pythonw", "uvicorn")
+# Regex matches: python, python3, python3.12, pythonw, node, vite (with optional version suffix).
+$backendExpected  = @("python", "pythonw", "uvicorn")
 $frontendExpected = @("node", "vite")
 
 function Stop-PortProcess {
     param([object]$Conn, [int]$Port, [string[]]$Expected)
     $proc = Get-Process -Id $Conn.OwningProcess -ErrorAction SilentlyContinue
     if (-not $proc) { return }
-    if ($proc.Name -in $Expected) {
+    # Match process names with optional version suffix (e.g. python3.12).
+    $isTcg = $false
+    foreach ($name in $Expected) {
+        if ($proc.Name -match "^${name}(\d[\d.]*)?$") { $isTcg = $true; break }
+    }
+    if ($isTcg) {
         Write-Info "Killing leftover $($proc.Name) (PID $($proc.Id)) on port $Port"
         & taskkill /T /F /PID $proc.Id 2>$null | Out-Null
     } else {
@@ -308,6 +402,21 @@ if ($portBackend -or $portFrontend) {
     if ($portFrontend) { Stop-PortProcess $portFrontend $FrontendPort $frontendExpected }
     # Brief pause for ports to release.
     Start-Sleep -Seconds 2
+
+    # Re-check that ports are actually free after cleanup.
+    $stillBusy = Get-NetTCPConnection -LocalPort $BackendPort -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' }
+    if ($stillBusy) {
+        Write-Fail "Port $BackendPort is still in use after cleanup. Wait a moment and try again."
+        exit 1
+    }
+    $stillBusy = Get-NetTCPConnection -LocalPort $FrontendPort -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' }
+    if ($stillBusy) {
+        Write-Fail "Port $FrontendPort is still in use after cleanup. Wait a moment and try again."
+        exit 1
+    }
+
     Write-Ok "Old processes cleared"
 }
 
@@ -316,7 +425,18 @@ $script:backendProcess = $null
 $script:frontendProcess = $null
 $script:logsDir = Join-Path $ProjectRoot "logs"
 if (-not (Test-Path $script:logsDir)) {
-    New-Item -Path $script:logsDir -ItemType Directory -Force | Out-Null
+    try {
+        New-Item -Path $script:logsDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Fail "Cannot create log directory: $($script:logsDir) -- $_"
+        exit 1
+    }
+}
+
+# Truncate log files from previous runs to prevent unbounded growth.
+foreach ($logName in @("backend.log", "backend-error.log", "frontend.log", "frontend-error.log")) {
+    $logPath = Join-Path $script:logsDir $logName
+    if (Test-Path $logPath) { Clear-Content $logPath -ErrorAction SilentlyContinue }
 }
 
 function Stop-App {
@@ -327,10 +447,16 @@ function Stop-App {
     if ($script:backendProcess -and -not $script:backendProcess.HasExited) {
         Write-Info "Stopping backend (PID $($script:backendProcess.Id))..."
         & taskkill /T /F /PID $script:backendProcess.Id 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Could not stop backend PID $($script:backendProcess.Id) -- it may have already exited."
+        }
     }
     if ($script:frontendProcess -and -not $script:frontendProcess.HasExited) {
         Write-Info "Stopping frontend (PID $($script:frontendProcess.Id))..."
         & taskkill /T /F /PID $script:frontendProcess.Id 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Could not stop frontend PID $($script:frontendProcess.Id) -- it may have already exited."
+        }
     }
 
     Write-Ok "All processes stopped. Goodbye!"
@@ -354,13 +480,18 @@ Write-Info "Starting backend server (port $BackendPort)..."
 
 $backendLog = Join-Path $script:logsDir "backend.log"
 $backendArgs = "-m uvicorn tcg.core.app:app --port $BackendPort --reload"
-$script:backendProcess = Start-Process -FilePath $venvPython `
-    -ArgumentList $backendArgs `
-    -WorkingDirectory $ProjectRoot `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput $backendLog `
-    -RedirectStandardError (Join-Path $script:logsDir "backend-error.log") `
-    -PassThru
+try {
+    $script:backendProcess = Start-Process -FilePath $venvPython `
+        -ArgumentList $backendArgs `
+        -WorkingDirectory $ProjectRoot `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $backendLog `
+        -RedirectStandardError (Join-Path $script:logsDir "backend-error.log") `
+        -PassThru
+} catch {
+    Write-Fail "Failed to start backend: $_"
+    exit 1
+}
 
 # --- Frontend ---
 Write-Info "Starting frontend dev server (port $FrontendPort)..."
@@ -372,12 +503,18 @@ if (-not (Test-Path $viteCmd)) {
     & taskkill /T /F /PID $script:backendProcess.Id 2>$null | Out-Null
     exit 1
 }
-$script:frontendProcess = Start-Process -FilePath $viteCmd `
-    -WorkingDirectory $frontendDir `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput (Join-Path $script:logsDir "frontend.log") `
-    -RedirectStandardError (Join-Path $script:logsDir "frontend-error.log") `
-    -PassThru
+try {
+    $script:frontendProcess = Start-Process -FilePath $viteCmd `
+        -WorkingDirectory $frontendDir `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $script:logsDir "frontend.log") `
+        -RedirectStandardError (Join-Path $script:logsDir "frontend-error.log") `
+        -PassThru
+} catch {
+    Write-Fail "Failed to start frontend: $_"
+    & taskkill /T /F /PID $script:backendProcess.Id 2>$null | Out-Null
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # Step 9 -- Wait for backend with crash detection
@@ -385,8 +522,14 @@ $script:frontendProcess = Start-Process -FilePath $viteCmd `
 
 Write-Info "Waiting for backend to be ready..."
 
+# Use the /health endpoint instead of a raw TCP check.  Uvicorn binds
+# the port BEFORE the lifespan runs (SSM tunnel + MongoDB connection),
+# so a raw TCP connect would return "ready" prematurely.  The /health
+# endpoint returns 200 only after the lifespan has completed.
 $ready = $false
-for ($i = 0; $i -lt 50; $i++) {
+for ($i = 0; $i -lt 150; $i++) {
+    if ($script:exitRequested) { break }
+
     # Detect early crash -- backend exited before responding.
     if ($script:backendProcess.HasExited) {
         Write-Fail "Backend crashed before it could start."
@@ -415,24 +558,24 @@ for ($i = 0; $i -lt 50; $i++) {
     }
 
     Start-Sleep -Milliseconds 200
-    $tcp = $null
     try {
-        # TCP check -- works on all PowerShell versions (Invoke-WebRequest throws on 404 in PS 5.1).
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $tcp.Connect("127.0.0.1", $BackendPort)
-        $ready = $true
-        break
+        $wc = New-Object System.Net.WebClient
+        $resp = $wc.DownloadString("http://127.0.0.1:$BackendPort/health")
+        if ($resp -match '"ok"') {
+            $ready = $true
+            break
+        }
     } catch {
-        # Connection refused -- keep trying.
+        # Not ready yet -- connection refused or 503.
     } finally {
-        if ($tcp) { $tcp.Dispose() }
+        if ($wc) { $wc.Dispose() }
     }
 }
 
 if ($ready) {
     Write-Ok "Backend is ready"
 } else {
-    Write-Warn "Backend did not respond within 10 seconds (it may still be starting)"
+    Write-Warn "Backend did not respond within 30 seconds (it may still be starting)"
     Write-Host "  Check logs at: $($script:logsDir)" -ForegroundColor Gray
 }
 
@@ -443,6 +586,7 @@ if ($ready) {
 Write-Info "Waiting for frontend to be ready..."
 $frontendReady = $false
 for ($i = 0; $i -lt 25; $i++) {
+    if ($script:exitRequested) { break }
     $tcp = $null
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient

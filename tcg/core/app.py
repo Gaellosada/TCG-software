@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import pymongo.errors
 from fastapi import FastAPI, Request
@@ -21,7 +22,8 @@ from tcg.core.api.persistence import router as persistence_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
 from tcg.core.api.statistics import router as statistics_router
-from tcg.core.config import load_config
+from tcg.core.config import load_config, load_tunnel_config
+from tcg.core.tunnel import SSMTunnel
 from tcg.data import create_services
 from tcg.types.errors import TCGError
 
@@ -50,19 +52,51 @@ def _cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: connect to MongoDB, build services. Shutdown: close client."""
-    config = load_config()
-    client = AsyncIOMotorClient(
-        config.uri,
-        serverSelectionTimeoutMS=30_000,
-        connectTimeoutMS=60_000,
-        socketTimeoutMS=300_000,
-        maxPoolSize=20,
-    )
-    db = client[config.db_name]
-    services = await create_services(db)
+    tunnel_config = load_tunnel_config()
+    tunnel: SSMTunnel | None = None
+    monitor_task: asyncio.Task[None] | None = None
+
+    if tunnel_config.enabled:
+        tunnel = SSMTunnel(tunnel_config)
+        try:
+            await tunnel.start()
+            await tunnel.wait_until_ready()
+        except Exception:
+            await tunnel.stop()
+            raise
+        monitor_task = asyncio.create_task(tunnel.monitor())
+
+    try:
+        config = load_config()
+        client = AsyncIOMotorClient(
+            config.uri,
+            serverSelectionTimeoutMS=30_000,
+            connectTimeoutMS=60_000,
+            socketTimeoutMS=300_000,
+            maxPoolSize=20,
+        )
+        db = client[config.db_name]
+        services = await create_services(db)
+    except Exception:
+        # Stop the tunnel if MongoDB setup fails — without this the SSM
+        # subprocess would be orphaned.
+        if monitor_task:
+            monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor_task
+        if tunnel:
+            await tunnel.stop()
+        raise
+
     app.state.market_data = services["market_data"]
     yield
     client.close()
+    if monitor_task:
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
+    if tunnel:
+        await tunnel.stop()
 
 
 class BodySizeLimitMiddleware:
@@ -177,8 +211,10 @@ async def _send_too_large(send: Send, size: int) -> None:
     """Emit a 413 JSON response via the raw ASGI ``send`` callable."""
     body = (
         b'{"error_type":"request_too_large","message":'
-        b'"request body size ' + str(size).encode("ascii")
-        + b" exceeds limit " + str(_MAX_REQUEST_BODY_BYTES).encode("ascii")
+        b'"request body size '
+        + str(size).encode("ascii")
+        + b" exceeds limit "
+        + str(_MAX_REQUEST_BODY_BYTES).encode("ascii")
         + b'"}'
     )
     await send(
@@ -209,12 +245,17 @@ async def _pymongo_error_handler(
     include the PyMongo exception message in the response body — it
     can leak topology / IPs / credential hints).
     """
-    # Log the real error server-side for ops; keep the response body
-    # sterile. ``%r`` so the exception type is recoverable from logs.
+    # Log the error type for ops — NOT the message, which can contain
+    # the Mongo URI (with embedded credentials) on connection failures.
     import logging
+    import re
 
+    sanitized = re.sub(r"://[^@]*@", "://***:***@", str(exc))
     logging.getLogger(__name__).warning(
-        "persistence unavailable: %r (path=%s)", exc, request.url.path
+        "persistence unavailable: %s: %s (path=%s)",
+        type(exc).__name__,
+        sanitized,
+        request.url.path,
     )
     return JSONResponse(
         status_code=503,
@@ -248,9 +289,21 @@ async def _request_validation_error_handler(
     )
 
 
+async def _health(request: Request) -> JSONResponse:
+    """Lightweight readiness probe — returns 200 only after the lifespan
+    has completed (services are wired up).  The launcher polls this
+    instead of a raw TCP check so it doesn't report "ready" before
+    MongoDB is actually connected.
+    """
+    if not hasattr(request.app.state, "market_data"):
+        return JSONResponse(status_code=503, content={"status": "starting"})
+    return JSONResponse(status_code=200, content={"status": "ok"})
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI application with all routers and middleware."""
     app = FastAPI(title="TCG Platform", version="0.1.0", lifespan=lifespan)
+    app.add_api_route("/health", _health, methods=["GET"])
     # NOTE: middleware is applied in reverse registration order. The
     # body-size guard is registered FIRST so it runs LAST in the
     # outbound chain (i.e. it sits CLOSEST to the routes, with CORS
@@ -270,9 +323,7 @@ def create_app() -> FastAPI:
     # Routes that need a specific status (409 on duplicate, 413 on too-
     # large, 409 on CAS miss) catch the relevant subclass locally and
     # raise HTTPException, so those paths bypass this handler.
-    app.add_exception_handler(
-        pymongo.errors.PyMongoError, _pymongo_error_handler
-    )
+    app.add_exception_handler(pymongo.errors.PyMongoError, _pymongo_error_handler)
     app.include_router(data_router)
     app.include_router(portfolio_router)
     app.include_router(indicators_router)

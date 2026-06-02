@@ -26,28 +26,50 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from dotenv import dotenv_values
 from motor.motor_asyncio import AsyncIOMotorClient
 
 
 _WRITE_URI_ENV = "MONGO_APP_WRITE_URI"
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 def _read_write_uri() -> str:
     """Return the scoped write URI from env or the project ``.env`` file.
 
+    When the SSM tunnel is enabled AND dedicated write credentials are
+    set (``MONGO_APP_WRITE_USER`` + ``MONGO_APP_WRITE_PASSWORD``), the
+    URI is assembled to route through localhost.  Otherwise falls through
+    to the existing ``MONGO_APP_WRITE_URI`` logic.
+
     Priority: real env > .env (mirrors ``tcg.core.config.load_config``).
-    Raises ``ValueError`` if the variable is missing — we do NOT fall
-    back to any unscoped URI.
+    Raises ``ValueError`` if no write URI can be resolved.
     """
+    env = dotenv_values(_ENV_PATH)
+
+    def _get(key: str, default: str = "") -> str:
+        return os.getenv(key) or env.get(key) or default
+
+    tunnel_enabled = _get("SSM_TUNNEL_ENABLED").lower() == "true"
+
+    if tunnel_enabled:
+        user = _get("MONGO_APP_WRITE_USER")
+        password = _get("MONGO_APP_WRITE_PASSWORD")
+        if user and password:
+            local_port = _get("LOCAL_PORT", "27017")
+            auth_source = _get("MONGO_AUTH_SOURCE", "admin")
+            return (
+                f"mongodb://{quote_plus(user)}:{quote_plus(password)}"
+                f"@localhost:{local_port}/"
+                f"?authSource={quote_plus(auth_source)}&directConnection=true"
+            )
+        # Write credentials not set — fall through to MONGO_APP_WRITE_URI
+
     real = os.environ.get(_WRITE_URI_ENV)
     if real:
         return real
-    # ``parents[2]`` resolves to the project root (``TCG-software/``)
-    # from ``tcg/persistence/_client.py``.
-    env_path = Path(__file__).resolve().parents[2] / ".env"
-    env = dotenv_values(env_path)
     fromfile = env.get(_WRITE_URI_ENV)
     if fromfile:
         return fromfile
