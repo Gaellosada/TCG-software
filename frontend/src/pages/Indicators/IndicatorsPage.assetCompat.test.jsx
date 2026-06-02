@@ -153,10 +153,8 @@ describe('runIndicator asset_type forwarding', () => {
 
     render(<IndicatorsPage />);
 
-    // Select 'Multi' — DEFAULT section starts collapsed.
-    const defaultHeader = await screen.findByTestId('category-default');
-    fireEvent.click(defaultHeader);
-    fireEvent.click(screen.getByText('Multi'));
+    // Select 'Multi' — DEFAULT section starts expanded.
+    fireEvent.click(await screen.findByText('Multi'));
 
     const runBtn = await screen.findByRole('button', { name: /run indicator/i });
     fireEvent.click(runBtn);

@@ -105,14 +105,15 @@ function CategoryBrowser({ selected, onSelect }) {
   }, [selected]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
 
     async function load() {
       try {
         setLoading(true);
         setError(null);
 
-        const collections = await listCollections();
+        const collections = await listCollections(null, { signal });
 
         const result = await Promise.all(
           CATEGORY_CONFIG.map(async (cat) => {
@@ -122,7 +123,7 @@ function CategoryBrowser({ selected, onSelect }) {
             }
 
             if (cat.dynamicOptions) {
-              const resp = await getOptionRoots();
+              const resp = await getOptionRoots({ signal });
               return { ...cat, optionRoots: resp.roots || [], isOptions: true };
             }
 
@@ -130,7 +131,7 @@ function CategoryBrowser({ selected, onSelect }) {
             const available = cat.collections.filter((c) => collections.includes(c));
             const groups = await Promise.all(
               available.map(async (collName) => {
-                const res = await listInstruments(collName);
+                const res = await listInstruments(collName, { signal });
                 return {
                   collection: collName,
                   instruments: (res.items || []).map((item) => ({
@@ -145,20 +146,19 @@ function CategoryBrowser({ selected, onSelect }) {
           })
         );
 
-        if (!cancelled) {
+        if (!signal.aborted) {
           setCategories(result);
           setLoading(false);
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err.message);
-          setLoading(false);
-        }
+        if (signal.aborted) return;
+        setError(err.message);
+        setLoading(false);
       }
     }
 
     load();
-    return () => { cancelled = true; };
+    return () => controller.abort();
   }, []);
 
   function toggleCategory(key) {

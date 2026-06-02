@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Wave 8 one-shot error surfacing for PortfolioPage:
-//   Verify that handlePersistSave (+ Save current), handleChangePortfolioCat,
+//   Verify that handlePersistSave (+ Save as new), handleChangePortfolioCat,
 //   and handleArchivePortfolio all flip the CloudStatus indicator to 'error'
 //   when the backend call rejects, and to 'saved' on success.
 
@@ -34,7 +34,7 @@ vi.mock('./PersistedPortfolioPanel', () => ({
           type="button"
           onClick={onSaveCurrent}
         >
-          + Save current
+          + Save as new
         </button>
         {portfolios.map((p) => (
           <div key={p.id}>
@@ -156,7 +156,7 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// handlePersistSave (+ Save current) — backend failure
+// handlePersistSave (+ Save as new) — backend failure
 // ---------------------------------------------------------------------------
 describe('<PortfolioPage> one-shot error surfacing — handlePersistSave', () => {
   it('shows SaveStatus=error when createPortfolio rejects', async () => {

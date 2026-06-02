@@ -36,7 +36,7 @@
   border-color: var(--accent);
 }
 
-/* "+ Save current" button — matches the addBtn pattern from HoldingsList */
+/* "+ Save as new" button — matches the addBtn pattern from HoldingsList */
 
 .addBtn {
   padding: 4px 10px;

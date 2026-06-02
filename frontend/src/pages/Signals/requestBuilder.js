@@ -174,12 +174,29 @@ export function buildComputeRequestBody(signal, availableIndicators) {
       missing.push(id);
       continue;
     }
+    // Clean seriesMap for the backend:
+    // - Strip the frontend-only ``type`` key from filled entries
+    // - For null/unfilled entries, send a placeholder ref — the backend
+    //   derives ``series_labels`` from the seriesMap *keys* and the
+    //   primary label (idx 0) is always bound via ``input_id``, so the
+    //   placeholder value is ignored.  Without the key, the backend
+    //   sees an empty ``series_labels`` and rejects the request.
+    const cleanMap = {};
+    for (const [label, ref] of Object.entries(ind.seriesMap || {})) {
+      if (ref && typeof ref === 'object' && ref.collection) {
+        const { type: _drop, ...rest } = ref;
+        cleanMap[label] = rest;
+      } else {
+        // Placeholder — backend ignores primary-label value.
+        cleanMap[label] = { collection: '_', instrument_id: '_' };
+      }
+    }
     indicatorList.push({
       id: ind.id,
       name: ind.name,
       code: ind.code,
       params: ind.params,
-      seriesMap: ind.seriesMap,
+      seriesMap: cleanMap,
       ownPanel: !!ind.ownPanel,
     });
   }

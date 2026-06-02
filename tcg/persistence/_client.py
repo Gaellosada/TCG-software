@@ -87,12 +87,14 @@ def build_write_client() -> AsyncIOMotorClient:
     cheap to keep alive — typically one instance per FastAPI app).
     """
     uri = _read_write_uri()
+    # Pool size kept small — single-user desktop app; when the SSM tunnel
+    # is active, every connection goes through one forwarded port.
     return AsyncIOMotorClient(
         uri,
         serverSelectionTimeoutMS=30_000,
         connectTimeoutMS=60_000,
         socketTimeoutMS=300_000,
-        maxPoolSize=10,
+        maxPoolSize=3,
         # BSON stores datetimes as naive UTC; without tz_aware=True the
         # decoder returns naive datetimes that fail to compare equal
         # against timezone-aware values produced by ``datetime.now(utc)``.

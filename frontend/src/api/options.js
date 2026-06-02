@@ -29,9 +29,9 @@ function rethrowClassified(err) {
 // as a ``FetchError`` with a classified ``kind``. Mirrors the same helper
 // defined in ``data.js`` — both files use an identical local copy so neither
 // depends on the other.
-async function fetchClassified(path) {
+async function fetchClassified(path, options = {}) {
   try {
-    return await fetchApi(path);
+    return await fetchApi(path, options);
   } catch (err) {
     rethrowClassified(err);
   }
@@ -43,8 +43,8 @@ async function fetchClassified(path) {
 //    Returns: { roots: OptionRootInfo[] }
 // ---------------------------------------------------------------------------
 
-export async function getOptionRoots() {
-  return fetchClassified('/options/roots');
+export async function getOptionRoots({ signal } = {}) {
+  return fetchClassified('/options/roots', signal ? { signal } : {});
 }
 
 // ---------------------------------------------------------------------------

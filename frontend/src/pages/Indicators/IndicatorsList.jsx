@@ -48,14 +48,14 @@ import { LIST_COLLAPSED_KEY } from './storageKeys';
 function loadCollapsed() {
   try {
     const raw = localStorage.getItem(LIST_COLLAPSED_KEY);
-    if (!raw) return { default: true, custom: true };
+    if (!raw) return { default: false, custom: false };
     const parsed = JSON.parse(raw);
     return {
       default: !!parsed.default,
       custom: !!parsed.custom,
     };
   } catch {
-    return { default: true, custom: true };
+    return { default: false, custom: false };
   }
 }
 

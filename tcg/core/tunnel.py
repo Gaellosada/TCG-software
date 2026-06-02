@@ -22,6 +22,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -77,8 +78,28 @@ class SSMTunnel:
         """Spawn the ``aws ssm start-session`` process."""
         self._stopped = False
 
+        cfg = self._config
+        port = int(cfg.local_port)  # validated upstream, but ensure int
+
         # Kill any prior process before spawning a new one.
         self._kill_process()
+
+        # If the port is still occupied (e.g. orphaned session-manager-plugin
+        # from a previous run that wasn't cleaned up), actively kill the
+        # process holding it. This is a single-user desktop app — anything
+        # on the tunnel port is from a previous run and safe to kill.
+        if self._port_reachable(port):
+            self._kill_port_holder(port)
+            # Give the OS a moment to release the socket.
+            for _ in range(5):
+                await asyncio.sleep(1)
+                if not self._port_reachable(port):
+                    break
+            else:
+                raise RuntimeError(
+                    f"SSM tunnel: port {port} is still in use after killing "
+                    "the holder. Check Task Manager for orphaned processes."
+                )
         # Wait for old capture threads to finish (pipes close when process
         # dies) and clear the list so it doesn't grow across restarts.
         for t in self._drain_threads:
@@ -91,9 +112,6 @@ class SSMTunnel:
                 "SSM tunnel: 'aws' CLI not found in PATH. "
                 "Install AWS CLI v2: https://aws.amazon.com/cli/"
             )
-
-        cfg = self._config
-        port = int(cfg.local_port)  # validated upstream, but ensure int
 
         parameters = json.dumps(
             {
@@ -239,6 +257,81 @@ class SSMTunnel:
     # Internal
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _port_reachable(port: int) -> bool:
+        """Quick one-shot TCP check — True if *something* is listening."""
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _kill_port_holder(port: int) -> None:
+        """Find and kill the process listening on *port*.
+
+        Uses ``netstat -ano`` on Windows to discover the PID, then
+        ``taskkill /T /F`` to kill the entire process tree (the orphaned
+        ``session-manager-plugin.exe`` is typically a child of a dead
+        ``aws`` process, so tree-kill is essential).
+
+        On non-Windows platforms, falls back to ``lsof`` + ``kill``.
+        Errors are logged but never raised — the caller retries the port
+        check afterward and raises if it's still occupied.
+        """
+        try:
+            if sys.platform == "win32":
+                # netstat -ano outputs lines like:
+                #   TCP    127.0.0.1:27017    0.0.0.0:0    LISTENING    12345
+                result = subprocess.run(
+                    ["netstat", "-ano"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if (
+                        len(parts) >= 5
+                        and "LISTENING" in parts
+                        and parts[1].rsplit(":", 1)[-1] == str(port)
+                    ):
+                        pid = parts[-1]
+                        logger.warning(
+                            "SSM tunnel: killing PID %s holding port %d",
+                            pid,
+                            port,
+                        )
+                        subprocess.run(
+                            ["taskkill", "/T", "/F", "/PID", pid],
+                            capture_output=True,
+                            timeout=10,
+                        )
+                        return
+                logger.warning(
+                    "SSM tunnel: port %d in use but no LISTENING PID found",
+                    port,
+                )
+            else:
+                result = subprocess.run(
+                    ["lsof", "-ti", f":{port}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                for pid in result.stdout.strip().splitlines():
+                    pid = pid.strip()
+                    if pid.isdigit():
+                        logger.warning(
+                            "SSM tunnel: killing PID %s holding port %d",
+                            pid,
+                            port,
+                        )
+                        os.kill(int(pid), 9)  # SIGKILL
+                        return
+        except Exception as exc:
+            logger.warning("SSM tunnel: failed to kill port %d holder: %s", port, exc)
+
     def _poll_port(self, port: int) -> None:
         """Blocking TCP poll until ``localhost:port`` accepts a connection.
 
@@ -309,10 +402,16 @@ class SSMTunnel:
                 pass
 
     def _kill_process(self) -> None:
-        """Terminate the subprocess if it's still alive.
+        """Terminate the subprocess **and all its children**.
 
         Thread-safe: may be called concurrently from signal handlers,
         ``atexit``, and the ``stop()`` / ``monitor()`` methods.
+
+        ``proc.terminate()`` on Windows only kills the parent ``aws``
+        process — the ``session-manager-plugin.exe`` child is orphaned
+        and keeps the forwarded port open.  We use ``taskkill /T /F``
+        to kill the entire process tree, matching the launcher's cleanup
+        strategy.
         """
         with self._lock:
             proc = self._process
@@ -322,7 +421,20 @@ class SSMTunnel:
 
         # Outside the lock — terminate/wait can take time.
         if proc.poll() is None:
-            proc.terminate()
+            if sys.platform == "win32":
+                # Kill the entire process tree (aws + session-manager-plugin).
+                # proc.terminate() on Windows only kills the parent, orphaning
+                # the Session Manager plugin child.
+                try:
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                        capture_output=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    proc.kill()
+            else:
+                proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
