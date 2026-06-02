@@ -170,7 +170,7 @@ class WriteRepository:
 
     async def get_by_id(
         self,
-        doc_type: Literal["indicator", "signal", "portfolio"],
+        doc_type: Literal["indicator", "signal", "portfolio", "basket"],
         doc_id: str,
     ) -> PersistenceDoc | None:
         """Return the doc with id ``doc_id`` and type ``doc_type``.
@@ -209,7 +209,7 @@ class WriteRepository:
 
     async def list_by_type_and_category(
         self,
-        doc_type: Literal["signal", "portfolio"],
+        doc_type: Literal["signal", "portfolio", "basket"],
         category: Category,
     ) -> list[PersistenceDoc]:
         """Return all docs of the given type filtered by category.
@@ -217,9 +217,7 @@ class WriteRepository:
         ``ARCHIVE`` is a legal category to query — that's how the UI
         surfaces archived items.
         """
-        cursor = self._coll.find(
-            {"type": doc_type, "category": category.value}
-        )
+        cursor = self._coll.find({"type": doc_type, "category": category.value})
         rows = await cursor.to_list(length=None)
         return [from_mongo_dict(r) for r in rows]
 
@@ -275,19 +273,17 @@ class WriteRepository:
                         f"persistence: {doc.type} id={doc.id!r} was modified "
                         f"concurrently — refusing to overwrite"
                     )
-            raise KeyError(
-                f"persistence: no {doc.type} with id={doc.id!r} to update"
-            )
+            raise KeyError(f"persistence: no {doc.type} with id={doc.id!r} to update")
         return bumped
 
     async def archive(
         self,
-        doc_type: Literal["indicator", "signal", "portfolio"],
+        doc_type: Literal["indicator", "signal", "portfolio", "basket"],
         doc_id: str,
     ) -> None:
         """Soft-delete the doc.
 
-        - ``signal`` / ``portfolio``: set ``category = ARCHIVE``.
+        - ``signal`` / ``portfolio`` / ``basket``: set ``category = ARCHIVE``.
         - ``indicator``: set ``deleted = True``.
 
         Raises ``KeyError`` if the doc does not exist. Idempotent
@@ -297,7 +293,11 @@ class WriteRepository:
         now = _utcnow()
         if doc_type == DocType.INDICATOR.value:
             update_payload = {"$set": {"deleted": True, "updated_at": now}}
-        elif doc_type in (DocType.SIGNAL.value, DocType.PORTFOLIO.value):
+        elif doc_type in (
+            DocType.SIGNAL.value,
+            DocType.PORTFOLIO.value,
+            DocType.BASKET.value,
+        ):
             update_payload = {
                 "$set": {
                     "category": Category.ARCHIVE.value,
@@ -310,9 +310,7 @@ class WriteRepository:
             {"_id": doc_id, "type": doc_type}, update_payload
         )
         if result.matched_count == 0:
-            raise KeyError(
-                f"persistence: no {doc_type} with id={doc_id!r} to archive"
-            )
+            raise KeyError(f"persistence: no {doc_type} with id={doc_id!r} to archive")
 
 
 __all__ = [

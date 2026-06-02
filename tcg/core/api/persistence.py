@@ -39,13 +39,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeVar, Union
 
 _log = logging.getLogger(__name__)
 
 import pymongo.errors
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tcg.core.api._models_options import MaturityRule, SelectionCriterion
@@ -89,15 +90,26 @@ _ID_PATTERN = r"^[A-Za-z0-9_\-:.]+$"
 _MAX_PAYLOAD_DEPTH = 16
 _MAX_PAYLOAD_SERIALIZED_BYTES = 1_000_000  # 1 MB per opaque payload field
 
+# Path-parameter validation for ``doc_id`` on GET/PUT/DELETE endpoints.
+# Matches the same pattern and length constraints applied to ``id`` on
+# create, closing the defense-in-depth gap (B3).
+DocId = Annotated[str, Path(min_length=1, max_length=128, pattern=_ID_PATTERN)]
+
+# TypeVar for the _checked helper below.
+_T = TypeVar("_T", IndicatorDoc, SignalDoc, PortfolioDoc, BasketDoc)
+
 
 def _max_depth(value: Any, _depth: int = 0) -> int:
     """Return the maximum nesting depth of ``value``.
 
     Walks dicts and lists/tuples recursively. Scalars count as depth
-    ``_depth``. The maximum value returned is bounded only by the
-    caller's recursion limit — callers MUST check it against
-    ``_MAX_PAYLOAD_DEPTH`` and reject before deep recursion bites.
+    ``_depth``. Bails out early when ``_depth`` exceeds
+    ``_MAX_PAYLOAD_DEPTH`` to prevent stack overflow from maliciously
+    crafted deep payloads — recursion is capped at
+    ``_MAX_PAYLOAD_DEPTH + 1`` levels regardless of input shape.
     """
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        return _depth  # already over the limit — no need to recurse further
     if isinstance(value, dict):
         if not value:
             return _depth
@@ -266,10 +278,9 @@ class _BaseWriteModel(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-class IndicatorCreateIn(_BaseWriteModel):
-    """Create-payload for an indicator. The server stamps timestamps."""
+class _IndicatorFields(_BaseWriteModel):
+    """Shared fields and validators for indicator create/update payloads (B7)."""
 
-    id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
     name: str = Field(..., min_length=1, max_length=512)
     definition: dict
 
@@ -279,23 +290,48 @@ class IndicatorCreateIn(_BaseWriteModel):
         return _validate_payload(v, "definition")
 
 
-class IndicatorUpdateIn(_BaseWriteModel):
+class IndicatorCreateIn(_IndicatorFields):
+    """Create-payload for an indicator. The server stamps timestamps."""
+
+    id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
+
+
+class IndicatorUpdateIn(_IndicatorFields):
     """Update-payload. ``id`` comes from the URL path; we re-supply the
     full document body (full-replace semantics — the repository does a
     ``replace_one``).
     """
 
-    name: str = Field(..., min_length=1, max_length=512)
-    definition: dict
     deleted: bool = False
 
-    @field_validator("definition")
+
+class _SignalFields(_BaseWriteModel):
+    """Shared fields and validators for signal create/update payloads (B7)."""
+
+    name: str = Field(..., min_length=1, max_length=512)
+    category: Category
+    inputs: list[dict] = Field(default_factory=list)
+    rules: dict = Field(default_factory=dict)
+    settings: dict = Field(default_factory=dict)
+    description: str = Field(default="", max_length=4096)
+
+    @field_validator("inputs")
     @classmethod
-    def _check_definition(cls, v: dict) -> dict:
-        return _validate_payload(v, "definition")
+    def _check_inputs(cls, v: list[dict]) -> list[dict]:
+        return _validate_payload(v, "inputs")
+
+    @field_validator("rules")
+    @classmethod
+    def _check_rules(cls, v: dict) -> dict:
+        return _validate_payload(v, "rules")
+
+    @field_validator("settings")
+    @classmethod
+    def _check_settings(cls, v: dict) -> dict:
+        return _validate_payload(v, "settings")
 
 
-class SignalCreateIn(_BaseWriteModel):
+class SignalCreateIn(_SignalFields):
     """Create-payload for a signal.
 
     The interesting editable content (``inputs`` / ``rules`` /
@@ -304,78 +340,32 @@ class SignalCreateIn(_BaseWriteModel):
     """
 
     id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
-    name: str = Field(..., min_length=1, max_length=512)
-    category: Category
-    inputs: list[dict] = Field(default_factory=list)
-    rules: dict = Field(default_factory=dict)
-    settings: dict = Field(default_factory=dict)
-    description: str = Field(default="", max_length=4096)
-
-    @field_validator("inputs")
-    @classmethod
-    def _check_inputs(cls, v: list[dict]) -> list[dict]:
-        return _validate_payload(v, "inputs")
-
-    @field_validator("rules")
-    @classmethod
-    def _check_rules(cls, v: dict) -> dict:
-        return _validate_payload(v, "rules")
-
-    @field_validator("settings")
-    @classmethod
-    def _check_settings(cls, v: dict) -> dict:
-        return _validate_payload(v, "settings")
 
 
-class SignalUpdateIn(_BaseWriteModel):
+class SignalUpdateIn(_SignalFields):
     """Update-payload — full replace. Same shape as create minus ``id``."""
 
+
+class _PortfolioFields(_BaseWriteModel):
+    """Shared fields and validators for portfolio create/update payloads (B7)."""
+
     name: str = Field(..., min_length=1, max_length=512)
     category: Category
-    inputs: list[dict] = Field(default_factory=list)
-    rules: dict = Field(default_factory=dict)
-    settings: dict = Field(default_factory=dict)
-    description: str = Field(default="", max_length=4096)
+    legs: list[dict] = Field(default_factory=list)
+    rebalance: RebalanceLiteral = "none"
 
-    @field_validator("inputs")
+    @field_validator("legs")
     @classmethod
-    def _check_inputs(cls, v: list[dict]) -> list[dict]:
-        return _validate_payload(v, "inputs")
-
-    @field_validator("rules")
-    @classmethod
-    def _check_rules(cls, v: dict) -> dict:
-        return _validate_payload(v, "rules")
-
-    @field_validator("settings")
-    @classmethod
-    def _check_settings(cls, v: dict) -> dict:
-        return _validate_payload(v, "settings")
+    def _check_legs(cls, v: list[dict]) -> list[dict]:
+        return _validate_payload(v, "legs")
 
 
-class PortfolioCreateIn(_BaseWriteModel):
+class PortfolioCreateIn(_PortfolioFields):
     id: str = Field(..., min_length=1, max_length=128, pattern=_ID_PATTERN)
-    name: str = Field(..., min_length=1, max_length=512)
-    category: Category
-    legs: list[dict] = Field(default_factory=list)
-    rebalance: RebalanceLiteral = "none"
-
-    @field_validator("legs")
-    @classmethod
-    def _check_legs(cls, v: list[dict]) -> list[dict]:
-        return _validate_payload(v, "legs")
 
 
-class PortfolioUpdateIn(_BaseWriteModel):
-    name: str = Field(..., min_length=1, max_length=512)
-    category: Category
-    legs: list[dict] = Field(default_factory=list)
-    rebalance: RebalanceLiteral = "none"
-
-    @field_validator("legs")
-    @classmethod
-    def _check_legs(cls, v: list[dict]) -> list[dict]:
-        return _validate_payload(v, "legs")
+class PortfolioUpdateIn(_PortfolioFields):
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +414,7 @@ class _ContinuousInstrumentRefLocal(BaseModel):
     type: Literal["continuous"]
     collection: str = Field(..., min_length=1, max_length=128)
     adjustment: Literal["none", "ratio", "difference"] = "none"
-    cycle: str | None = None
+    cycle: str | None = Field(default=None, max_length=16)
     rollOffset: int = 0
     strategy: Literal["front_month"] = "front_month"
 
@@ -437,7 +427,7 @@ class _OptionStreamRefLocal(BaseModel):
     type: Literal["option_stream"]
     collection: str = Field(..., min_length=1, max_length=128)
     option_type: Literal["C", "P"]
-    cycle: str | None = None
+    cycle: str | None = Field(default=None, max_length=16)
     maturity: MaturityRule
     selection: SelectionCriterion
     stream: _OptionStreamLabel
@@ -478,8 +468,8 @@ class BasketLegIn(BaseModel):
     @field_validator("weight")
     @classmethod
     def _check_weight_nonzero(cls, v: float) -> float:
-        if v == 0.0:
-            raise ValueError("weight must be non-zero")
+        if v == 0.0 or not math.isfinite(v):
+            raise ValueError("weight must be a finite non-zero number")
         return v
 
 
@@ -644,6 +634,22 @@ def _legs_to_mongo(legs: list[BasketLegIn]) -> tuple[dict, ...]:
     )
 
 
+def _checked(doc: PersistenceDoc, expected: type[_T]) -> _T:
+    """Verify that ``doc`` is an instance of ``expected`` and return it.
+
+    Replaces bare ``assert isinstance(...)`` calls throughout the
+    endpoints (B5). Unlike ``assert``, this check cannot be stripped
+    by ``python -O`` and produces a clean 500 with a diagnostic
+    message rather than a confusing ``AttributeError``.
+    """
+    if not isinstance(doc, expected):
+        raise HTTPException(
+            status_code=500,
+            detail=f"unexpected doc type: {type(doc).__name__}",
+        )
+    return doc  # type: ignore[return-value]
+
+
 def _expect(doc: PersistenceDoc | None, kind: str, doc_id: str) -> PersistenceDoc:
     """Raise a 404 when the repository returns None on a get_by_id."""
     if doc is None:
@@ -691,7 +697,7 @@ async def create_indicator(body: IndicatorCreateIn, repo: RepoDep) -> IndicatorO
         ) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, IndicatorDoc)
+    stored = _checked(stored, IndicatorDoc)
     return _indicator_to_out(stored)
 
 
@@ -701,37 +707,39 @@ async def list_indicators(repo: RepoDep) -> list[IndicatorOut]:
     out: list[IndicatorOut] = []
     for d in docs:
         try:
+            d = _checked(d, IndicatorDoc)
             out.append(_indicator_to_out(d))
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError, HTTPException) as exc:
             _log.warning(
-                "skipping malformed indicator doc id=%s",
+                "skipping malformed indicator doc _id=%s: %s",
                 getattr(d, "id", "?"),
+                exc,
                 exc_info=True,
             )
     return out
 
 
 @router.get("/indicators/{doc_id}", response_model=IndicatorOut)
-async def get_indicator(doc_id: str, repo: RepoDep) -> IndicatorOut:
+async def get_indicator(doc_id: DocId, repo: RepoDep) -> IndicatorOut:
     doc = _expect(
         await repo.get_by_id(DocType.INDICATOR.value, doc_id),
         DocType.INDICATOR.value,
         doc_id,
     )
-    assert isinstance(doc, IndicatorDoc)
+    doc = _checked(doc, IndicatorDoc)
     return _indicator_to_out(doc)
 
 
 @router.put("/indicators/{doc_id}", response_model=IndicatorOut)
 async def update_indicator(
-    doc_id: str, body: IndicatorUpdateIn, repo: RepoDep
+    doc_id: DocId, body: IndicatorUpdateIn, repo: RepoDep
 ) -> IndicatorOut:
     existing = _expect(
         await repo.get_by_id(DocType.INDICATOR.value, doc_id),
         DocType.INDICATOR.value,
         doc_id,
     )
-    assert isinstance(existing, IndicatorDoc)
+    existing = _checked(existing, IndicatorDoc)
     updated = IndicatorDoc(
         id=doc_id,
         type=DocType.INDICATOR.value,
@@ -753,12 +761,12 @@ async def update_indicator(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, IndicatorDoc)
+    stored = _checked(stored, IndicatorDoc)
     return _indicator_to_out(stored)
 
 
 @router.delete("/indicators/{doc_id}", status_code=204)
-async def archive_indicator(doc_id: str, repo: RepoDep) -> None:
+async def archive_indicator(doc_id: DocId, repo: RepoDep) -> None:
     try:
         await repo.archive(DocType.INDICATOR.value, doc_id)
     except KeyError as exc:
@@ -793,7 +801,7 @@ async def create_signal(body: SignalCreateIn, repo: RepoDep) -> SignalOut:
         ) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, SignalDoc)
+    stored = _checked(stored, SignalDoc)
     return _signal_to_out(stored)
 
 
@@ -805,35 +813,39 @@ async def list_signals(
     out: list[SignalOut] = []
     for d in docs:
         try:
+            d = _checked(d, SignalDoc)
             out.append(_signal_to_out(d))
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError, HTTPException) as exc:
             _log.warning(
-                "skipping malformed signal doc id=%s",
+                "skipping malformed signal doc _id=%s: %s",
                 getattr(d, "id", "?"),
+                exc,
                 exc_info=True,
             )
     return out
 
 
 @router.get("/signals/{doc_id}", response_model=SignalOut)
-async def get_signal(doc_id: str, repo: RepoDep) -> SignalOut:
+async def get_signal(doc_id: DocId, repo: RepoDep) -> SignalOut:
     doc = _expect(
         await repo.get_by_id(DocType.SIGNAL.value, doc_id),
         DocType.SIGNAL.value,
         doc_id,
     )
-    assert isinstance(doc, SignalDoc)
+    doc = _checked(doc, SignalDoc)
     return _signal_to_out(doc)
 
 
 @router.put("/signals/{doc_id}", response_model=SignalOut)
-async def update_signal(doc_id: str, body: SignalUpdateIn, repo: RepoDep) -> SignalOut:
+async def update_signal(
+    doc_id: DocId, body: SignalUpdateIn, repo: RepoDep
+) -> SignalOut:
     existing = _expect(
         await repo.get_by_id(DocType.SIGNAL.value, doc_id),
         DocType.SIGNAL.value,
         doc_id,
     )
-    assert isinstance(existing, SignalDoc)
+    existing = _checked(existing, SignalDoc)
     updated = SignalDoc(
         id=doc_id,
         type=DocType.SIGNAL.value,
@@ -854,12 +866,12 @@ async def update_signal(doc_id: str, body: SignalUpdateIn, repo: RepoDep) -> Sig
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, SignalDoc)
+    stored = _checked(stored, SignalDoc)
     return _signal_to_out(stored)
 
 
 @router.delete("/signals/{doc_id}", status_code=204)
-async def archive_signal(doc_id: str, repo: RepoDep) -> None:
+async def archive_signal(doc_id: DocId, repo: RepoDep) -> None:
     try:
         await repo.archive(DocType.SIGNAL.value, doc_id)
     except KeyError as exc:
@@ -892,7 +904,7 @@ async def create_portfolio(body: PortfolioCreateIn, repo: RepoDep) -> PortfolioO
         ) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, PortfolioDoc)
+    stored = _checked(stored, PortfolioDoc)
     return _portfolio_to_out(stored)
 
 
@@ -904,37 +916,39 @@ async def list_portfolios(
     out: list[PortfolioOut] = []
     for d in docs:
         try:
+            d = _checked(d, PortfolioDoc)
             out.append(_portfolio_to_out(d))
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError, HTTPException) as exc:
             _log.warning(
-                "skipping malformed portfolio doc id=%s",
+                "skipping malformed portfolio doc _id=%s: %s",
                 getattr(d, "id", "?"),
+                exc,
                 exc_info=True,
             )
     return out
 
 
 @router.get("/portfolios/{doc_id}", response_model=PortfolioOut)
-async def get_portfolio(doc_id: str, repo: RepoDep) -> PortfolioOut:
+async def get_portfolio(doc_id: DocId, repo: RepoDep) -> PortfolioOut:
     doc = _expect(
         await repo.get_by_id(DocType.PORTFOLIO.value, doc_id),
         DocType.PORTFOLIO.value,
         doc_id,
     )
-    assert isinstance(doc, PortfolioDoc)
+    doc = _checked(doc, PortfolioDoc)
     return _portfolio_to_out(doc)
 
 
 @router.put("/portfolios/{doc_id}", response_model=PortfolioOut)
 async def update_portfolio(
-    doc_id: str, body: PortfolioUpdateIn, repo: RepoDep
+    doc_id: DocId, body: PortfolioUpdateIn, repo: RepoDep
 ) -> PortfolioOut:
     existing = _expect(
         await repo.get_by_id(DocType.PORTFOLIO.value, doc_id),
         DocType.PORTFOLIO.value,
         doc_id,
     )
-    assert isinstance(existing, PortfolioDoc)
+    existing = _checked(existing, PortfolioDoc)
     updated = PortfolioDoc(
         id=doc_id,
         type=DocType.PORTFOLIO.value,
@@ -953,12 +967,12 @@ async def update_portfolio(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, PortfolioDoc)
+    stored = _checked(stored, PortfolioDoc)
     return _portfolio_to_out(stored)
 
 
 @router.delete("/portfolios/{doc_id}", status_code=204)
-async def archive_portfolio(doc_id: str, repo: RepoDep) -> None:
+async def archive_portfolio(doc_id: DocId, repo: RepoDep) -> None:
     try:
         await repo.archive(DocType.PORTFOLIO.value, doc_id)
     except KeyError as exc:
@@ -994,7 +1008,7 @@ async def create_basket(body: BasketIn, repo: RepoDep) -> BasketOut:
         ) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, BasketDoc)
+    stored = _checked(stored, BasketDoc)
     return _basket_to_out(stored)
 
 
@@ -1005,24 +1019,34 @@ async def list_baskets(
     docs = await repo.list_by_type_and_category(DocType.BASKET.value, category)
     out: list[BasketOut] = []
     for d in docs:
-        assert isinstance(d, BasketDoc)
-        out.append(_basket_to_out(d))
+        try:
+            d = _checked(d, BasketDoc)
+            out.append(_basket_to_out(d))
+        except (ValueError, KeyError, TypeError, AttributeError, HTTPException) as exc:
+            _log.warning(
+                "skipping malformed basket doc _id=%s: %s",
+                getattr(d, "id", "?"),
+                exc,
+                exc_info=True,
+            )
     return out
 
 
 @router.get("/baskets/{doc_id}", response_model=BasketOut)
-async def get_basket(doc_id: str, repo: RepoDep) -> BasketOut:
+async def get_basket(doc_id: DocId, repo: RepoDep) -> BasketOut:
     doc = _expect(
         await repo.get_by_id(DocType.BASKET.value, doc_id),
         DocType.BASKET.value,
         doc_id,
     )
-    assert isinstance(doc, BasketDoc)
+    doc = _checked(doc, BasketDoc)
     return _basket_to_out(doc)
 
 
 @router.put("/baskets/{doc_id}", response_model=BasketOut)
-async def update_basket(doc_id: str, body: BasketUpdateIn, repo: RepoDep) -> BasketOut:
+async def update_basket(
+    doc_id: DocId, body: BasketUpdateIn, repo: RepoDep
+) -> BasketOut:
     _check_basket_homogeneity(body.asset_class, body.legs)
     _check_basket_no_duplicates(body.legs)
     existing = _expect(
@@ -1030,7 +1054,7 @@ async def update_basket(doc_id: str, body: BasketUpdateIn, repo: RepoDep) -> Bas
         DocType.BASKET.value,
         doc_id,
     )
-    assert isinstance(existing, BasketDoc)
+    existing = _checked(existing, BasketDoc)
     raw_legs = _legs_to_mongo(body.legs)
     updated = BasketDoc(
         id=doc_id,
@@ -1050,12 +1074,12 @@ async def update_basket(doc_id: str, body: BasketUpdateIn, repo: RepoDep) -> Bas
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
-    assert isinstance(stored, BasketDoc)
+    stored = _checked(stored, BasketDoc)
     return _basket_to_out(stored)
 
 
 @router.delete("/baskets/{doc_id}", status_code=204)
-async def archive_basket(doc_id: str, repo: RepoDep) -> None:
+async def archive_basket(doc_id: DocId, repo: RepoDep) -> None:
     try:
         await repo.archive(DocType.BASKET.value, doc_id)
     except KeyError as exc:

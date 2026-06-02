@@ -31,6 +31,7 @@ from tcg.persistence.repository import (
     DocumentTooLargeError,
 )
 from tcg.types.persistence import (
+    BasketDoc,
     Category,
     IndicatorDoc,
     PortfolioDoc,
@@ -970,3 +971,203 @@ def test_basket_negative_weight_allowed(client: TestClient) -> None:
     )
     assert r.status_code == 201, r.text
     assert r.json()["legs"][1]["weight"] == -0.5
+
+
+# ---------------------------------------------------------------------------
+# T4 — malformed-document skip logic in list endpoints
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def test_list_indicators_skips_malformed_doc(
+    client: TestClient, fake_repo: _FakeRepo
+) -> None:
+    """A valid indicator is returned; a wrong-type doc injected into the
+    store is silently skipped rather than crashing the entire list."""
+    valid = IndicatorDoc(
+        id="good-ind",
+        type="indicator",
+        name="Good",
+        definition={"period": 14},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    # Inject a signal doc under the indicator type key — simulates a
+    # malformed/mistyped document in the collection.
+    malformed = SignalDoc(
+        id="bad-ind",
+        type="signal",
+        name="Wrong Type",
+        category=Category.DEV,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    fake_repo._store[("indicator", "good-ind")] = valid
+    fake_repo._store[("indicator", "bad-ind")] = malformed
+
+    r = client.get("/api/persistence/indicators")
+    assert r.status_code == 200, r.text
+    ids = [doc["id"] for doc in r.json()]
+    assert "good-ind" in ids
+    assert "bad-ind" not in ids
+
+
+def test_list_signals_skips_malformed_doc(
+    client: TestClient, fake_repo: _FakeRepo
+) -> None:
+    """A valid signal is returned; a wrong-type doc is skipped."""
+    valid = SignalDoc(
+        id="good-sig",
+        type="signal",
+        name="Good",
+        category=Category.DEV,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    malformed = IndicatorDoc(
+        id="bad-sig",
+        type="indicator",
+        name="Wrong Type",
+        definition={},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    fake_repo._store[("signal", "good-sig")] = valid
+    fake_repo._store[("signal", "bad-sig")] = malformed
+
+    r = client.get("/api/persistence/signals?category=DEV")
+    assert r.status_code == 200, r.text
+    ids = [doc["id"] for doc in r.json()]
+    assert "good-sig" in ids
+    assert "bad-sig" not in ids
+
+
+def test_list_portfolios_skips_malformed_doc(
+    client: TestClient, fake_repo: _FakeRepo
+) -> None:
+    """A valid portfolio is returned; a wrong-type doc is skipped."""
+    valid = PortfolioDoc(
+        id="good-ptf",
+        type="portfolio",
+        name="Good",
+        category=Category.RESEARCH,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    malformed = SignalDoc(
+        id="bad-ptf",
+        type="signal",
+        name="Wrong Type",
+        category=Category.RESEARCH,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    fake_repo._store[("portfolio", "good-ptf")] = valid
+    fake_repo._store[("portfolio", "bad-ptf")] = malformed
+
+    r = client.get("/api/persistence/portfolios?category=RESEARCH")
+    assert r.status_code == 200, r.text
+    ids = [doc["id"] for doc in r.json()]
+    assert "good-ptf" in ids
+    assert "bad-ptf" not in ids
+
+
+def test_list_baskets_skips_malformed_doc(
+    client: TestClient, fake_repo: _FakeRepo
+) -> None:
+    """A valid basket is returned; a wrong-type doc is skipped."""
+    valid = BasketDoc(
+        id="good-bkt",
+        type="basket",
+        name="Good",
+        category=Category.RESEARCH,
+        asset_class="equity",
+        created_at=_NOW,
+        updated_at=_NOW,
+        legs=(),
+    )
+    malformed = IndicatorDoc(
+        id="bad-bkt",
+        type="indicator",
+        name="Wrong Type",
+        definition={},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    fake_repo._store[("basket", "good-bkt")] = valid
+    fake_repo._store[("basket", "bad-bkt")] = malformed
+
+    r = client.get("/api/persistence/baskets?category=RESEARCH")
+    assert r.status_code == 200, r.text
+    ids = [doc["id"] for doc in r.json()]
+    assert "good-bkt" in ids
+    assert "bad-bkt" not in ids
+
+
+# ---------------------------------------------------------------------------
+# B3 — doc_id path parameter validation
+# ---------------------------------------------------------------------------
+
+
+def test_get_indicator_with_bad_doc_id_rejected(client: TestClient) -> None:
+    """Path parameter ``doc_id`` with disallowed characters is rejected."""
+    r = client.get("/api/persistence/indicators/$evil")
+    _expect_validation(r)
+
+
+def test_delete_signal_with_bad_doc_id_rejected(client: TestClient) -> None:
+    r = client.delete("/api/persistence/signals/$ne")
+    _expect_validation(r)
+
+
+def test_put_portfolio_with_overlong_doc_id_rejected(client: TestClient) -> None:
+    r = client.put(
+        f"/api/persistence/portfolios/{'a' * 129}",
+        json={"name": "n", "category": "RESEARCH"},
+    )
+    _expect_validation(r)
+
+
+# ---------------------------------------------------------------------------
+# B17 — basket leg weight rejects inf / nan (Pydantic model-level test)
+#
+# JSON itself does not allow NaN / Infinity literals, so this cannot be
+# tested through the HTTP client. Instead we validate at the Pydantic
+# model level to ensure the ``isfinite`` guard fires if a non-standard
+# JSON parser delivers these values.
+# ---------------------------------------------------------------------------
+
+
+def test_basket_leg_inf_weight_rejected_at_model_level() -> None:
+    """``float('inf')`` weight must be rejected by the Pydantic validator."""
+    from pydantic import ValidationError
+
+    from tcg.core.api.persistence import BasketLegIn
+
+    with pytest.raises(ValidationError, match="finite"):
+        BasketLegIn(
+            instrument={
+                "type": "spot",
+                "collection": "ETF",
+                "instrument_id": "SPY",
+            },
+            weight=float("inf"),
+        )
+
+
+def test_basket_leg_nan_weight_rejected_at_model_level() -> None:
+    """``float('nan')`` weight must be rejected by the Pydantic validator."""
+    from pydantic import ValidationError
+
+    from tcg.core.api.persistence import BasketLegIn
+
+    with pytest.raises(ValidationError, match="finite"):
+        BasketLegIn(
+            instrument={
+                "type": "spot",
+                "collection": "ETF",
+                "instrument_id": "SPY",
+            },
+            weight=float("nan"),
+        )
