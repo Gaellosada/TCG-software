@@ -1,6 +1,6 @@
 /**
- * Persistence API client — CRUD for signals and portfolios stored in MongoDB
- * via the backend persistence layer.
+ * Persistence API client — CRUD for signals, portfolios, and indicators
+ * stored in MongoDB via the backend persistence layer.
  *
  * Endpoint base: /api/persistence/
  *   POST   /signals                  create signal
@@ -14,6 +14,12 @@
  *   GET    /portfolios/{id}          get one portfolio
  *   PUT    /portfolios/{id}          update portfolio (full replace)
  *   DELETE /portfolios/{id}          archive portfolio
+ *
+ *   POST   /indicators               create indicator
+ *   GET    /indicators               list active indicators (no category)
+ *   GET    /indicators/{id}          get one indicator
+ *   PUT    /indicators/{id}          update indicator (full replace)
+ *   DELETE /indicators/{id}          archive indicator (sets deleted=true)
  *
  * Category values: "RESEARCH" | "DEV" | "PROD" | "ARCHIVE"
  *
@@ -32,7 +38,11 @@ export const CATEGORIES = /** @type {const} */ (['RESEARCH', 'DEV', 'PROD', 'ARC
  * Attaches `.status` and `.body` so callers can distinguish 404 from 422.
  */
 async function _handleResponse(res) {
-  if (res.ok) return res.json();
+  if (res.ok) {
+    // 204 No Content has no body — guard against res.json() throwing.
+    if (res.status === 204) return null;
+    return res.json();
+  }
   let body = null;
   try { body = await res.json(); } catch { /* ignore */ }
   const msg = (body && (body.detail || body.message)) || res.statusText || 'Request failed';
@@ -139,8 +149,13 @@ export function updateSignal(id, payload, options = {}) {
  * @param {string} id
  * @returns {Promise<null>}
  */
-export async function archiveSignal(id) {
-  const res = await fetch(`${BASE}/signals/${encodeURIComponent(id)}`, {
+/**
+ * Shared archive helper — all archive endpoints follow the same pattern:
+ * DELETE to the given path, expect 204 on success. Does NOT use ``_fetch``
+ * because the response body is intentionally empty on success.
+ */
+async function _archive(path) {
+  const res = await fetch(`${BASE}${path}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
   });
@@ -154,6 +169,10 @@ export async function archiveSignal(id) {
     throw err;
   }
   return null;
+}
+
+export function archiveSignal(id) {
+  return _archive(`/signals/${encodeURIComponent(id)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -217,21 +236,70 @@ export function updatePortfolio(id, payload, options = {}) {
  * @param {string} id
  * @returns {Promise<null>}
  */
-export async function archivePortfolio(id) {
-  const res = await fetch(`${BASE}/portfolios/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
+export function archivePortfolio(id) {
+  return _archive(`/portfolios/${encodeURIComponent(id)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Indicators
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a new persisted indicator.
+ *
+ * @param {{ id: string, name: string, definition: object }} payload
+ * @returns {Promise<IndicatorOut>}
+ */
+export function createIndicator(payload) {
+  return _fetch('/indicators', { method: 'POST', body: payload });
+}
+
+/**
+ * List all active (non-deleted) indicators.
+ * No category filter — indicators use a flat list.
+ *
+ * @returns {Promise<Array<IndicatorOut>>}
+ */
+export function listIndicators() {
+  return _fetch('/indicators');
+}
+
+/**
+ * Get a single persisted indicator by id.
+ *
+ * @param {string} id
+ * @returns {Promise<IndicatorOut>}
+ */
+export function getIndicator(id) {
+  return _fetch(`/indicators/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Full-replace update for a persisted indicator.
+ *
+ * @param {string} id
+ * @param {{ name: string, definition: object }} payload
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<IndicatorOut>}
+ */
+export function updateIndicator(id, payload, options = {}) {
+  const { signal } = options;
+  return _fetch(`/indicators/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: payload,
+    ...(signal ? { signal } : {}),
   });
-  if (!res.ok) {
-    let body = null;
-    try { body = await res.json(); } catch { /* ignore */ }
-    const msg = (body && (body.detail || body.message)) || res.statusText || 'Delete failed';
-    const err = new Error(msg);
-    err.status = res.status;
-    err.body = body;
-    throw err;
-  }
-  return null;
+}
+
+/**
+ * Soft-archive an indicator (sets deleted=true on the server).
+ * Returns 204 No Content — the Promise resolves to null on success.
+ *
+ * @param {string} id
+ * @returns {Promise<null>}
+ */
+export function archiveIndicator(id) {
+  return _archive(`/indicators/${encodeURIComponent(id)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -317,19 +385,6 @@ export function updateBasket(id, payload, options = {}) {
  * @param {string} id
  * @returns {Promise<null>}
  */
-export async function archiveBasket(id) {
-  const res = await fetch(`${BASE}/baskets/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    let body = null;
-    try { body = await res.json(); } catch { /* ignore */ }
-    const msg = (body && (body.detail || body.message)) || res.statusText || 'Delete failed';
-    const err = new Error(msg);
-    err.status = res.status;
-    err.body = body;
-    throw err;
-  }
-  return null;
+export function archiveBasket(id) {
+  return _archive(`/baskets/${encodeURIComponent(id)}`);
 }

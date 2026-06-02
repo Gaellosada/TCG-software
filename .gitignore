@@ -35,6 +35,9 @@ frontend/e2e/ux-refinements.spec.js
 frontend/e2e/vix-audit.spec.js
 frontend/e2e/vix-zoom.spec.js
 
+# Launcher logs
+logs/
+
 # Claude Code
 CLAUDE.md
 .claude/

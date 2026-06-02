@@ -7,10 +7,14 @@ import { resolveDefaultIndexInstrument, computeIndicator } from '../../api/indic
 import { getOptionRoots } from '../../api/options';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
+// saveState no longer called — backend is primary store for custom indicators.
+// loadState still used for default-indicator per-session overlays.
+// eslint-disable-next-line no-unused-vars
 import { loadState, saveState } from './storage';
 import { AUTOSAVE_KEY, OPTION_DATE_RANGE_KEY } from './storageKeys';
 import { computePresetRange, DEFAULT_PRESET } from '../../components/OptionDateRangeControl';
 import { hydrateDefault, applyDefaultSeries } from './hydrateDefault';
+// eslint-disable-next-line no-unused-vars
 import { buildPersistablePayload, serializePersistablePayload } from './persistablePayload';
 import { computeDefaultSeriesBannerText } from './defaultSeriesBanner';
 import {
@@ -20,11 +24,19 @@ import {
   computeOptionStreamSanity,
   deriveAssetTypeFromSeriesMap,
 } from './runGate';
+// useAutosave no longer called — backend autosave via useBackendAutosave.
+// eslint-disable-next-line no-unused-vars
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InlineNameInput from '../../components/InlineNameInput';
 import useAbortableAction from '../../hooks/useAbortableAction';
+import useBackendAutosave from '../../hooks/useBackendAutosave';
+import {
+  createIndicator, listIndicators, updateIndicator, archiveIndicator,
+  describePersistenceError,
+} from '../../api/persistence';
+import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import { classifyFetchError } from '../../utils/fetchError';
 import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
@@ -146,6 +158,51 @@ function nextIndicatorName(existing) {
   return `Indicator ${maxN + 1}`;
 }
 
+/**
+ * Pack a custom indicator's mutable fields into the opaque ``definition``
+ * dict the backend stores. The backend treats ``definition`` as an
+ * arbitrary JSON object — the shape is our convention only.
+ */
+function packDefinition(ind) {
+  return {
+    code: ind.code ?? '',
+    params: ind.params ?? {},
+    seriesMap: ind.seriesMap ?? {},
+    doc: typeof ind.doc === 'string' ? ind.doc : '',
+    ownPanel: !!ind.ownPanel,
+  };
+}
+
+/**
+ * Unpack a backend indicator document into the shape the page works with.
+ * Mirrors the loadState → userIndicators mapping, but sources from the
+ * backend ``{ id, name, definition }`` envelope instead of localStorage.
+ */
+function unpackBackendIndicator(doc) {
+  const def = doc.definition || {};
+  const code = typeof def.code === 'string' ? def.code : '';
+  const spec = parseIndicatorSpec(code);
+  return {
+    id: doc.id,
+    name: doc.name || 'Untitled',
+    code,
+    doc: typeof def.doc === 'string' ? def.doc : '',
+    params: reconcileParams(def.params || {}, spec.params),
+    seriesMap: reconcileSeriesMap(def.seriesMap || {}, spec.seriesLabels),
+    ownPanel: typeof def.ownPanel === 'boolean' ? def.ownPanel : false,
+  };
+}
+
+/**
+ * Serialise the selected custom indicator's saveable fields into a stable
+ * JSON string for dirty-tracking with ``useBackendAutosave``. Returns
+ * ``null`` when nothing should be saved (no selection or default selected).
+ */
+function serializeForBackend(ind) {
+  if (!ind || ind.readonly) return null;
+  return JSON.stringify({ name: ind.name, definition: packDefinition(ind) });
+}
+
 // Re-export hydrateDefault for tests that import from this module.
 export { hydrateDefault };
 
@@ -197,13 +254,13 @@ function IndicatorsPage() {
       return true;
     }
   });
-  // Last payload that hit localStorage — used to derive ``dirty``.
-  const [lastSavedPayload, setLastSavedPayload] = useState(null);
   // Code/Documentation tab state for the middle panel. Page-level only —
   // NOT persisted (always resets to 'code' on reload).
   const [viewMode, setViewMode] = useState('code');
   // null = confirm dialog closed; otherwise the id awaiting confirmation.
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  // Backend save error message — shown in SaveStatus tooltip.
+  const [cloudError, setCloudError] = useState(null);
 
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
@@ -213,31 +270,52 @@ function IndicatorsPage() {
     try { localStorage.setItem(AUTOSAVE_KEY, String(on)); } catch { /* quota — ignore */ }
   }, []);
 
+  // Track the "last seen from backend" snapshot per selectedId to
+  // suppress the FIRST autosave cycle after hydrate-on-mount/select.
+  const lastHydratedPayloadRef = useRef({ id: null, payload: null });
+
   // --- Hydrate on mount ------------------------------------------------
+  // Fetch user-created indicators from backend, merge with hardcoded
+  // defaults. Default-indicator per-session overrides (params/seriesMap
+  // tweaks) still load from localStorage — they're minor UI preferences.
   useEffect(() => {
-    const saved = loadState();
-    const defaults = DEFAULT_INDICATORS.map((def) =>
-      hydrateDefault(def, saved.defaultState?.[def.id]),
-    );
-    const userIndicators = (saved.indicators || []).map((ind) => {
-      const spec = parseIndicatorSpec(ind.code || '');
-      return {
-        id: ind.id,
-        name: ind.name,
-        code: ind.code || '',
-        doc: typeof ind.doc === 'string' ? ind.doc : '',
-        params: reconcileParams(ind.params || {}, spec.params),
-        seriesMap: reconcileSeriesMap(ind.seriesMap || {}, spec.seriesLabels),
-        // Legacy payloads lacking the flag default to overlay mode.
-        ownPanel: typeof ind.ownPanel === 'boolean' ? ind.ownPanel : false,
-      };
-    });
-    const merged = [...defaults, ...userIndicators];
-    setIndicators(merged);
-    if (merged.length > 0) setSelectedId((curr) => curr || merged[0].id);
-    // Seed lastSavedPayload with the hydrated snapshot so ``dirty``
-    // stays false until the user actually mutates state.
-    setLastSavedPayload(serializePersistablePayload(merged));
+    let cancelled = false;
+    async function hydrate() {
+      // Defaults: always from hardcoded registry. Per-session overlays
+      // from localStorage remain functional for default indicators only.
+      const saved = loadState(); // only used for saved.defaultState
+      const defaults = DEFAULT_INDICATORS.map((def) =>
+        hydrateDefault(def, saved.defaultState?.[def.id]),
+      );
+
+      // Custom indicators: fetch from backend.
+      let backendDocs = [];
+      try {
+        backendDocs = await listIndicators();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to load indicators from backend:', err);
+        // Graceful degradation: page shows defaults only.
+      }
+      if (cancelled) return;
+
+      const userIndicators = (Array.isArray(backendDocs) ? backendDocs : [])
+        .map(unpackBackendIndicator);
+      const merged = [...defaults, ...userIndicators];
+      setIndicators(merged);
+      if (merged.length > 0) setSelectedId((curr) => curr || merged[0].id);
+      // Seed the last-hydrated ref so the autosave doesn't immediately
+      // PUT the freshly fetched content back.
+      const first = userIndicators.length > 0 ? userIndicators[0] : null;
+      if (first) {
+        lastHydratedPayloadRef.current = {
+          id: first.id,
+          payload: serializeForBackend(first),
+        };
+      }
+    }
+    hydrate();
+    return () => { cancelled = true; };
   }, []);
 
   // --- Resolve default SPX-ish instrument once -------------------------
@@ -279,36 +357,97 @@ function IndicatorsPage() {
     ));
   }, [defaultSeriesLoaded, defaultSeries, defaultAutoFilled]);
 
-  // --- Autosave wiring ------------------------------------------------
-  // ``currentPayload`` = the exact serialized snapshot that would be
-  // persisted. ``dirty`` = this differs from what's actually on disk.
-  const currentPayload = useMemo(
-    () => serializePersistablePayload(indicators),
-    [indicators],
-  );
-  const dirty = lastSavedPayload !== null && currentPayload !== lastSavedPayload;
-
-  const commitSave = useCallback(() => {
-    // Caller: autosave hook OR manual Save button.
-    const payload = buildPersistablePayload(indicatorsRef.current);
-    saveState(payload);
-    setLastSavedPayload(serializePersistablePayload(indicatorsRef.current));
-  }, []);
-
-  useAutosave({
-    enabled: autosave,
-    dirty,
-    value: currentPayload,
-    onSave: commitSave,
-    debounceMs: 500,
-  });
-
-  // --- Derived helpers -------------------------------------------------
+  // --- Derived helpers (needed before autosave wiring) -----------------
   const selectedIndicator = useMemo(
     () => indicators.find((ind) => ind.id === selectedId) || null,
     [indicators, selectedId],
   );
 
+  // --- Backend autosave wiring -----------------------------------------
+  // Only custom (non-readonly) indicators go through the backend.
+  // Default-indicator per-session overrides stay in localStorage (minor
+  // UI preferences — params/seriesMap picks that don't warrant a round-trip).
+
+  // Stable serialized payload for the SELECTED custom indicator — used
+  // as the ``payload`` for ``useBackendAutosave`` so reference-identity
+  // changes don't re-trigger the debounce.
+  const selectedPayloadSerialized = useMemo(
+    () => serializeForBackend(selectedIndicator),
+    [selectedIndicator],
+  );
+
+  // backendDirty: the selected custom indicator has been edited since
+  // the last hydrated snapshot. Only true for custom indicators.
+  const backendDirty = !!selectedPayloadSerialized
+    && (lastHydratedPayloadRef.current.id !== selectedId
+        || lastHydratedPayloadRef.current.payload !== selectedPayloadSerialized);
+
+  const handleBackendSave = useCallback(async (payloadStr, { signal } = {}) => {
+    if (!selectedId || !payloadStr) return;
+    const body = JSON.parse(payloadStr);
+    try {
+      await updateIndicator(selectedId, body, { signal });
+    } catch (err) {
+      if (err && err.name === 'AbortError') throw err;
+      setCloudError(describePersistenceError(err));
+      // eslint-disable-next-line no-console
+      console.error('updateIndicator (autosave) failed:', err);
+      throw err;
+    }
+    if (signal && signal.aborted) return;
+    setCloudError(null);
+    lastHydratedPayloadRef.current = { id: selectedId, payload: payloadStr };
+  }, [selectedId]);
+
+  const {
+    status: cloudStatus,
+    flush: flushCloudSave,
+    reset: resetCloudStatus,
+  } = useBackendAutosave({
+    enabled: autosave && backendDirty,
+    payload: selectedPayloadSerialized,
+    onSave: handleBackendSave,
+  });
+
+  // When the selection changes, reset cloud status and seed the
+  // hydrated ref so the new selection doesn't trigger a spurious save.
+  useEffect(() => {
+    resetCloudStatus();
+    if (selectedIndicator && !selectedIndicator.readonly) {
+      lastHydratedPayloadRef.current = {
+        id: selectedIndicator.id,
+        payload: serializeForBackend(selectedIndicator),
+      };
+    }
+    // Intentionally only depends on selectedId — we want this to fire
+    // on selection change, not on every indicator mutation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, resetCloudStatus]);
+
+  // Derive a user-facing dirty flag. For custom indicators, dirty means
+  // the serialized payload differs from the last hydrated snapshot. For
+  // defaults, always false (their per-session overrides are negligible).
+  const dirty = backendDirty;
+
+  // Manual Save button: flush the pending backend autosave immediately.
+  // When autosave is off and the user clicks Save, we trigger a one-shot
+  // save via handleBackendSave directly with the current payload.
+  const commitSave = useCallback(() => {
+    if (autosave) {
+      // Autosave is on — flush the pending debounced save.
+      flushCloudSave();
+    } else {
+      // Autosave is off — fire a one-shot save.
+      const payload = selectedPayloadSerialized;
+      if (payload && selectedId) {
+        handleBackendSave(payload, {}).catch(() => {
+          // Error already set by handleBackendSave.
+        });
+      }
+    }
+  }, [autosave, flushCloudSave, selectedPayloadSerialized, selectedId, handleBackendSave]);
+
+  // --- Derived helpers -------------------------------------------------
   const parsedSpec = useMemo(
     () => parseIndicatorSpec(selectedIndicator?.code || ''),
     [selectedIndicator?.code],
@@ -321,39 +460,61 @@ function IndicatorsPage() {
   }, [indicators, search]);
 
   // --- Mutations -------------------------------------------------------
-  const handleAdd = useCallback(() => {
-    setIndicators((prev) => {
-      const id = (globalThis.crypto && globalThis.crypto.randomUUID)
-        ? globalThis.crypto.randomUUID()
-        : `ind-${Date.now()}-${Math.random()}`;
-      const spec = parseIndicatorSpec(NEW_CODE_TEMPLATE);
-      const seriesMap = reconcileSeriesMap({}, spec.seriesLabels);
-      // If we know the SPX default, pre-populate the 'price' slot.
-      if (defaultSeries) {
-        for (const label of Object.keys(seriesMap)) {
-          if (seriesMap[label] === null) {
-            seriesMap[label] = {
-              type: 'spot',
-              collection: defaultSeries.collection,
-              instrument_id: defaultSeries.instrument_id,
-            };
-          }
+  const handleAdd = useCallback(async () => {
+    const id = (globalThis.crypto && globalThis.crypto.randomUUID)
+      ? globalThis.crypto.randomUUID()
+      : `ind-${Date.now()}-${Math.random()}`;
+    const spec = parseIndicatorSpec(NEW_CODE_TEMPLATE);
+    const seriesMap = reconcileSeriesMap({}, spec.seriesLabels);
+    // If we know the SPX default, pre-populate the 'price' slot.
+    if (defaultSeries) {
+      for (const label of Object.keys(seriesMap)) {
+        if (seriesMap[label] === null) {
+          seriesMap[label] = {
+            type: 'spot',
+            collection: defaultSeries.collection,
+            instrument_id: defaultSeries.instrument_id,
+          };
         }
       }
-      const newInd = {
-        id,
-        name: nextIndicatorName(prev),
-        code: NEW_CODE_TEMPLATE,
-        doc: '',
-        params: reconcileParams({}, spec.params),
-        seriesMap,
-        ownPanel: false,
-      };
-      setSelectedId(id);
-      return [...prev, newInd];
-    });
+    }
+    const name = nextIndicatorName(indicatorsRef.current);
+    const newInd = {
+      id,
+      name,
+      code: NEW_CODE_TEMPLATE,
+      doc: '',
+      params: reconcileParams({}, spec.params),
+      seriesMap,
+      ownPanel: false,
+    };
+
+    // Optimistically add to local state, then persist to backend.
+    setIndicators((prev) => [...prev, newInd]);
+    setSelectedId(id);
     setError(null);
     setLastResult(null);
+
+    // Seed hydrated ref so autosave doesn't immediately re-save.
+    lastHydratedPayloadRef.current = {
+      id,
+      payload: serializeForBackend(newInd),
+    };
+
+    try {
+      await createIndicator({
+        id,
+        name,
+        definition: packDefinition(newInd),
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('createIndicator failed:', err);
+      // Roll back — remove the optimistically added indicator.
+      setIndicators((prev) => prev.filter((ind) => ind.id !== id));
+      setSelectedId((sel) => sel === id ? null : sel);
+      setCloudError(describePersistenceError(err));
+    }
   }, [defaultSeries]);
 
   const handleDelete = useCallback((id) => {
@@ -362,23 +523,32 @@ function IndicatorsPage() {
     setPendingDeleteId(id);
   }, []);
 
-  const handleConfirmDelete = useCallback(() => {
+  const handleConfirmDelete = useCallback(async () => {
     const id = pendingDeleteId;
     setPendingDeleteId(null);
     if (!id) return;
     const target = indicatorsRef.current.find((i) => i.id === id);
     if (!target || target.readonly) return;
+
+    // Optimistically remove from local state.
     setIndicators((prev) => {
       const next = prev.filter((ind) => ind.id !== id);
-      // If the deleted entry was selected, fall back to the first
-      // remaining indicator (defaults come first in the list) so the
-      // user never sees a blank middle pane when defaults are available.
       setSelectedId((sel) => {
         if (sel !== id) return sel;
         return next.length > 0 ? next[0].id : null;
       });
       return next;
     });
+
+    try {
+      await archiveIndicator(id);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('archiveIndicator failed:', err);
+      // Roll back — re-add the indicator.
+      setIndicators((prev) => [...prev, target]);
+      setCloudError(describePersistenceError(err));
+    }
   }, [pendingDeleteId]);
 
   const handleRename = useCallback((id, newName) => {
@@ -758,6 +928,10 @@ function IndicatorsPage() {
                 )}
               />
             }
+          />
+          <SaveStatus
+            status={cloudStatus}
+            errorMessage={cloudError}
           />
         </div>
         <ParamsPanel

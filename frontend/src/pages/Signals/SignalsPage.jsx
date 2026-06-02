@@ -8,7 +8,7 @@ import TradeLog from '../../components/TradeLog';
 import { buildSignalStatsInputs } from './signalStatsInputs';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
-import { loadState, saveState, emptyRules, defaultSettings } from './storage';
+import { emptyRules, defaultSettings } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import {
@@ -23,7 +23,7 @@ import { fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
-import SaveControls, { useAutosave } from '../../components/SaveControls';
+import SaveControls from '../../components/SaveControls';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import useBackendAutosave from '../../hooks/useBackendAutosave';
 import Card from '../../components/Card';
@@ -41,12 +41,6 @@ function nextSignalName(existing) {
     }
   }
   return `Signal ${maxN + 1}`;
-}
-
-// Stable serialisation for dirty comparison — JSON.stringify over the
-// exact shape we'd persist.
-function serializePersistablePayload(signals) {
-  return JSON.stringify({ signals });
 }
 
 // Build the editor-shape signal object from a backend SignalOut payload.
@@ -90,24 +84,18 @@ function SignalsPage() {
       return true;
     }
   });
-  const [lastSavedPayload, setLastSavedPayload] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   // --- Persistence state ---------------------------------------------------
-  // persistedSignals: list fetched from backend for the current category.
-  // They drive what is shown in the SignalsList panel.
-  // The local ``signals`` array still holds full editor state. When the
-  // user selects a persisted signal that isn't in local state yet, we
-  // hydrate from the backend doc rather than injecting a blank skeleton —
-  // this is the load-bearing fix for the "rules don't persist" bug.
+  // signals is now the single source of truth, loaded from the backend.
+  // persistedSignals has been removed — signals IS the persisted list.
   const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
-  const [persistedSignals, setPersistedSignals] = useState([]);
   const [persistedLoading, setPersistedLoading] = useState(false);
+  // Error state for the initial backend fetch — shown when the backend is unreachable.
+  const [fetchError, setFetchError] = useState(null);
 
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
-  const persistedSignalsRef = useRef(persistedSignals);
-  persistedSignalsRef.current = persistedSignals;
 
   // Separate status state for one-shot operations (add / archive /
   // category-change). Kept separate from the debounced autosave status so
@@ -125,127 +113,73 @@ function SignalsPage() {
     try { localStorage.setItem(AUTOSAVE_KEY, String(on)); } catch { /* ignore */ }
   }, []);
 
-  // --- Hydrate on mount ----------------------------------------------------
-  useEffect(() => {
-    const saved = loadState();
-    const initial = (saved.signals || []).map((s) => ({
-      id: s.id,
-      name: s.name || 'Untitled',
-      inputs: Array.isArray(s.inputs) ? s.inputs : [],
-      rules: { ...emptyRules(), ...(s.rules || {}) },
-      // v4 bullet #7: preserve stored dont_repeat verbatim. Sanitiser
-      // already defaulted missing settings to {dont_repeat:true} at load
-      // time. We do NOT override the stored value on hydrate.
-      settings: (s.settings && typeof s.settings === 'object')
-        ? { ...defaultSettings(), ...s.settings }
-        : defaultSettings(),
-      doc: typeof s.doc === 'string' ? s.doc : '',
-    }));
-    setSignals(initial);
-    if (initial.length > 0) setSelectedId((curr) => curr || initial[0].id);
-    setLastSavedPayload(serializePersistablePayload(initial));
-    setAvailableIndicators(hydrateAvailableIndicators());
-  }, []);
-
-  // Re-hydrate available indicators whenever the window regains focus —
-  // catches edits made on the Indicators page without a reload.
-  useEffect(() => {
-    function refresh() { setAvailableIndicators(hydrateAvailableIndicators()); }
-    window.addEventListener('focus', refresh);
-    return () => window.removeEventListener('focus', refresh);
-  }, []);
-
-  // --- Fetch persisted signals when category changes -----------------------
-  const fetchPersistedSignals = useCallback(async (cat) => {
+  // --- Fetch signals from backend ------------------------------------------
+  const fetchSignals = useCallback(async (cat) => {
     setPersistedLoading(true);
+    setFetchError(null);
     try {
       const docs = await listSignals(cat);
-      setPersistedSignals(docs);
-    } catch {
-      // Non-fatal — show empty list. Backend may be starting up.
-      setPersistedSignals([]);
+      const hydrated = docs.map(hydrateFromPersisted);
+      setSignals(hydrated);
+      // Select the first signal if nothing is selected, or keep current
+      // selection if the signal still exists in the new list.
+      setSelectedId((prev) => {
+        if (prev && hydrated.find((s) => s.id === prev)) return prev;
+        return hydrated.length > 0 ? hydrated[0].id : null;
+      });
+    } catch (err) {
+      setFetchError(describePersistenceError(err));
+      setSignals([]);
+      setSelectedId(null);
     } finally {
       setPersistedLoading(false);
     }
   }, []);
 
+  // --- Hydrate on mount ----------------------------------------------------
   useEffect(() => {
-    fetchPersistedSignals(persistedCategory);
-  }, [persistedCategory, fetchPersistedSignals]);
-
-  const currentPayload = useMemo(() => serializePersistablePayload(signals), [signals]);
-  const dirty = lastSavedPayload !== null && currentPayload !== lastSavedPayload;
-
-  const commitSave = useCallback(() => {
-    saveState({ signals: signalsRef.current });
-    setLastSavedPayload(serializePersistablePayload(signalsRef.current));
+    fetchSignals(persistedCategory);
+    hydrateAvailableIndicators().then(setAvailableIndicators);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useAutosave({
-    enabled: autosave,
-    dirty,
-    value: currentPayload,
-    onSave: commitSave,
-    debounceMs: 500,
-  });
+  // Re-hydrate available indicators whenever the window regains focus --
+  // catches edits made on the Indicators page without a reload.
+  useEffect(() => {
+    function refresh() { hydrateAvailableIndicators().then(setAvailableIndicators); }
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, []);
+
+  // --- Re-fetch signals when category changes ------------------------------
+  useEffect(() => {
+    fetchSignals(persistedCategory);
+  }, [persistedCategory, fetchSignals]);
 
   const selectedSignal = useMemo(
     () => signals.find((s) => s.id === selectedId) || null,
     [signals, selectedId],
   );
 
-  // Is the selected signal one of the persisted ones? Only persisted
-  // signals get the backend autosave treatment — un-persisted local
-  // skeletons (the brief moment before a create resolves) do not.
-  const selectedPersisted = useMemo(
-    () => (selectedId
-      ? persistedSignals.find((p) => p.id === selectedId) || null
-      : null),
-    [selectedId, persistedSignals],
-  );
-
-  // The SignalsList displays backend-persisted signals, filtered by name search.
-  // persistedSignals provides the authoritative list for the current category.
-  const filteredPersistedSignals = useMemo(() => {
+  // All signals are now loaded from the backend — filter the unified list for display.
+  const filteredSignals = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return persistedSignals;
-    return persistedSignals.filter((s) => (s.name || '').toLowerCase().includes(q));
-  }, [persistedSignals, search]);
+    if (!q) return signals;
+    return signals.filter((s) => (s.name || '').toLowerCase().includes(q));
+  }, [signals, search]);
 
   // Mirror of ``backendDirty`` accessible from event handlers that are
   // declared before ``backendDirty`` itself is defined in the function
   // body. Synced via effect (see below).
   const backendDirtyRef = useRef(false);
 
-  // When a persisted signal is selected that has no local editor state
-  // yet, hydrate from the backend doc — NOT a blank skeleton. This is
-  // the load-bearing fix for the "rules don't survive a refresh" bug.
-  //
-  // Guard against destroying in-progress edits: if the user clicks the
-  // SAME row that is currently selected AND has unsaved edits (the
-  // debounce hasn't fired yet), DO NOT overwrite local state with the
-  // stale backend snapshot. The autosave hook is responsible for
-  // pushing those edits to the backend; until then, the user's edits
-  // are authoritative for the active selection.
-  const handleSelectPersisted = useCallback((id) => {
-    // Re-click of the same row mid-edit: preserve in-progress edits.
+  // Simple selection handler — all signals live in the unified `signals` state.
+  // Guard against overwriting in-progress edits on re-click of the same row.
+  const handleSelect = useCallback((id) => {
     if (id === selectedId && backendDirtyRef.current) {
       return;
     }
     setSelectedId(id);
-    setSignals((prev) => {
-      const existing = prev.find((s) => s.id === id);
-      const persisted = persistedSignalsRef.current.find((p) => p.id === id);
-      if (!persisted) return prev;
-      const hydrated = hydrateFromPersisted(persisted);
-      if (!existing) {
-        return [...prev, hydrated];
-      }
-      // Selection switch to a different id (or first selection of this
-      // id after hydration cleared): re-hydrate from backend. Backend
-      // is the source of truth at selection boundary.
-      return prev.map((s) => (s.id === id ? hydrated : s));
-    });
   }, [selectedId]);
 
   // --- Mutations -----------------------------------------------------------
@@ -267,12 +201,13 @@ function SignalsPage() {
       settings: defaultSettings(),
       doc: '',
     };
+    // Optimistically add to local state so the UI feels instant.
     setSignals((prev) => [...prev, newSig]);
     setSelectedId(id);
     setError(null);
     setLastResult(null);
-    // Persist to backend in current category; surface success/failure via
-    // the one-shot status indicator. Local signal still usable on failure.
+    // Persist to backend in current category; refresh from backend on success
+    // to stay in sync (picks up created_at, updated_at, etc.).
     setOneshotStatus('saving');
     createSignal({
       id,
@@ -285,16 +220,19 @@ function SignalsPage() {
     }).then(() => {
       setOneshotError(null);
       setOneshotStatus('saved');
-      fetchPersistedSignals(persistedCategory);
+      fetchSignals(persistedCategory);
     }).catch((err) => {
       // M8: capture error details (status/message) so the user can see
       // what went wrong — not just an opaque "save failed".
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // Roll back — remove the optimistically added signal.
+      setSignals((prev) => prev.filter((s) => s.id !== id));
+      setSelectedId((sel) => sel === id ? null : sel);
       // eslint-disable-next-line no-console
       console.error('createSignal failed:', err);
     });
-  }, [persistedCategory, fetchPersistedSignals]);
+  }, [persistedCategory, fetchSignals]);
 
   const handleDelete = useCallback((id) => {
     setConfirmDeleteId(id);
@@ -312,24 +250,30 @@ function SignalsPage() {
       });
       return next;
     });
-    // Archive on backend (soft-delete → ARCHIVE category); surface result.
+    // Archive on backend (soft-delete → ARCHIVE category); refresh from backend.
     setOneshotStatus('saving');
+    // Capture the signal before removal so we can roll back on failure.
+    const target = signalsRef.current.find((s) => s.id === id);
     archiveSignal(id).then(() => {
       setOneshotError(null);
       setOneshotStatus('saved');
-      fetchPersistedSignals(persistedCategory);
+      fetchSignals(persistedCategory);
     }).catch((err) => {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // Roll back — re-add the optimistically removed signal.
+      if (target) {
+        setSignals((prev) => [...prev, target]);
+      }
       // eslint-disable-next-line no-console
       console.error('archiveSignal failed:', err);
     });
-  }, [confirmDeleteId, persistedCategory, fetchPersistedSignals]);
+  }, [confirmDeleteId, persistedCategory, fetchSignals]);
 
-  // Move a persisted signal to a different category. Preserves all
-  // editable content via the full-replace PUT.
+  // Move a signal to a different category. Preserves all editable
+  // content via the full-replace PUT.
   const handleChangeItemCat = useCallback(async (id, newCat) => {
-    const target = persistedSignals.find((s) => s.id === id);
+    const target = signalsRef.current.find((s) => s.id === id);
     if (!target) return;
     setOneshotStatus('saving');
     try {
@@ -339,20 +283,20 @@ function SignalsPage() {
         inputs: target.inputs || [],
         rules: target.rules || {},
         settings: target.settings || {},
-        description: target.description || '',
+        description: target.doc || '',
       });
       setOneshotError(null);
       setOneshotStatus('saved');
       // If the new category differs from the current filter, the item
       // disappears from the current view — re-fetch to reflect backend truth.
-      fetchPersistedSignals(persistedCategory);
+      fetchSignals(persistedCategory);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('updateSignal (category change) failed:', err);
     }
-  }, [persistedSignals, persistedCategory, fetchPersistedSignals]);
+  }, [persistedCategory, fetchSignals]);
 
   const handleRename = useCallback((id, newName) => {
     setSignals((prev) => prev.map((s) => (s.id !== id ? s : { ...s, name: newName })));
@@ -374,56 +318,56 @@ function SignalsPage() {
     setSignals((prev) => prev.map((s) => (s.id !== selectedId ? s : { ...s, doc: nextDoc })));
   }, [selectedId]);
 
-  // --- Backend debounced auto-save for the selected persisted signal -------
-  // Only fires when:
-  //   - a signal is selected
-  //   - that signal exists in the backend persisted list
-  //   - the user has actually edited something
-  // The payload is stringified so a re-render with structurally equal
-  // content does not retrigger the debounce.
+  // --- Backend debounced auto-save for the selected signal -----------------
+  // Fires when a signal is selected and the user has actually edited
+  // something since the last save/fetch. The payload is stringified so a
+  // re-render with structurally equal content does not retrigger the debounce.
   const selectedDocSerialized = useMemo(() => {
-    if (!selectedSignal || !selectedPersisted) return null;
+    if (!selectedSignal) return null;
     return JSON.stringify({
       name: selectedSignal.name,
-      category: selectedPersisted.category,
+      category: persistedCategory,
       inputs: selectedSignal.inputs,
       rules: selectedSignal.rules,
       settings: selectedSignal.settings,
       description: selectedSignal.doc,
     });
-  }, [selectedSignal, selectedPersisted]);
+  }, [selectedSignal, persistedCategory]);
 
   // Track the "last seen from backend" snapshot per selectedId to
-  // suppress the FIRST autosave cycle after a hydrate-on-select (which
+  // suppress the FIRST autosave cycle after a fetch/select (which
   // would otherwise PUT the freshly fetched content back uselessly).
   // Seeded in an effect — never mutate refs during render.
+  //
+  // Depends on ``selectedId`` so it fires on selection change. The
+  // ``signals`` reference is NOT in the dependency list to avoid
+  // re-seeding on every local edit. The handleBackendSave callback
+  // updates the ref directly after a successful save.
   const lastHydratedPayloadRef = useRef({ id: null, payload: null });
   useEffect(() => {
-    if (selectedPersisted && selectedPersisted.id === selectedId) {
+    if (selectedSignal && selectedSignal.id === selectedId) {
       lastHydratedPayloadRef.current = {
         id: selectedId,
         payload: JSON.stringify({
-          name: selectedPersisted.name,
-          category: selectedPersisted.category,
-          inputs: selectedPersisted.inputs || [],
-          rules: selectedPersisted.rules || {},
-          settings: selectedPersisted.settings || {},
-          description: selectedPersisted.description || '',
+          name: selectedSignal.name,
+          category: persistedCategory,
+          inputs: selectedSignal.inputs || [],
+          rules: selectedSignal.rules || {},
+          settings: selectedSignal.settings || {},
+          description: selectedSignal.doc || '',
         }),
       };
     } else if (selectedId === null) {
       lastHydratedPayloadRef.current = { id: null, payload: null };
     }
-    // We deliberately depend on selectedId only — when ``selectedPersisted``
-    // first appears in the list for the currently selected id, this effect
-    // re-runs because ``selectedPersisted`` is in the deps below.
-  }, [selectedId, selectedPersisted]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   const backendDirty = !!selectedDocSerialized
     && (lastHydratedPayloadRef.current.id !== selectedId
         || lastHydratedPayloadRef.current.payload !== selectedDocSerialized);
-  // Keep the ref in sync so ``handleSelectPersisted`` (declared earlier)
-  // can read the current dirty state without a closure dependency.
+  // Keep the ref in sync so ``handleSelect`` (declared earlier) can read
+  // the current dirty state without a closure dependency.
   backendDirtyRef.current = backendDirty;
 
   const handleBackendSave = useCallback(async (payloadStr, { signal } = {}) => {
@@ -451,20 +395,35 @@ function SignalsPage() {
     // After a successful save, set last-hydrated to the just-sent payload
     // so the same content doesn't immediately re-trigger the debounce.
     lastHydratedPayloadRef.current = { id: selectedId, payload: payloadStr };
-    // Refresh the persisted list so the local cache stays in sync (esp.
-    // ``updated_at`` and, more importantly, the canonical content if the
-    // backend coerced anything).
-    fetchPersistedSignals(persistedCategory);
-  }, [selectedId, persistedCategory, fetchPersistedSignals]);
+    // Note: we intentionally do NOT re-fetch the full signal list after
+    // every autosave — it would cause selection flicker and reset scroll.
+    // The local state is authoritative until a category change or add/delete.
+  }, [selectedId]);
 
   const {
     status: cloudStatus,
+    flush: flushCloudSave,
     reset: resetCloudStatus,
   } = useBackendAutosave({
-    enabled: !!selectedPersisted && backendDirty,
+    enabled: autosave && !!selectedSignal && backendDirty,
     payload: selectedDocSerialized,
     onSave: handleBackendSave,
   });
+
+  // Manual Save button: flush the pending backend autosave, or fire a
+  // one-shot save when autosave is off.
+  const commitSave = useCallback(() => {
+    if (autosave) {
+      flushCloudSave();
+    } else {
+      const payload = selectedDocSerialized;
+      if (payload && selectedId) {
+        handleBackendSave(payload, {}).catch(() => {
+          // Error already set by handleBackendSave.
+        });
+      }
+    }
+  }, [autosave, flushCloudSave, selectedDocSerialized, selectedId, handleBackendSave]);
 
   // When the selection changes, reset cloud status so the indicator
   // doesn't show "saved" for the previously selected signal.
@@ -592,9 +551,9 @@ function SignalsPage() {
     <div className={styles.page} style={{ '--results-row-min': `${resultsRowMin}px` }}>
       <div className={styles.listPanel}>
         <SignalsList
-          signals={filteredPersistedSignals}
+          signals={filteredSignals}
           selectedId={selectedId}
-          onSelect={handleSelectPersisted}
+          onSelect={handleSelect}
           onAdd={handleAdd}
           onDelete={handleDelete}
           onRename={handleRename}
@@ -607,7 +566,11 @@ function SignalsPage() {
         />
       </div>
       <div className={styles.editorPanel}>
-        {selectedSignal ? (
+        {fetchError ? (
+          <div className={styles.editorEmpty}>
+            <strong>Failed to load signals:</strong> {fetchError}
+          </div>
+        ) : selectedSignal ? (
           <>
             <InputsPanel
               inputs={selectedSignal.inputs || []}
@@ -631,7 +594,7 @@ function SignalsPage() {
       <div className={styles.paramsPanel}>
         <div className={styles.paramsTopBar}>
           <SaveControls
-            dirty={dirty}
+            dirty={backendDirty}
             autosave={autosave}
             onSave={commitSave}
             onToggleAutosave={setAutosave}
@@ -645,7 +608,7 @@ function SignalsPage() {
                   selectedPlaceholder="Signal name"
                   ariaLabel="Signal name"
                 />
-                {(oneshotStatus !== 'idle' || selectedPersisted) && (
+                {(oneshotStatus !== 'idle' || selectedSignal) && (
                   <SaveStatus
                     status={displayedSaveStatus}
                     label="Cloud"

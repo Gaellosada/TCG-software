@@ -2,20 +2,11 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { formatDateInt } from '../../utils/format';
-import { useAutosave } from '../../components/SaveControls';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { fetchSignalLegRange } from './signalLegRange';
 import { legsToRangesKey } from './legKey';
-import {
-  savePortfolio as persistPortfolio,
-  loadPortfolio as loadPortfolioEntry,
-  deleteSavedPortfolio as removeSavedPortfolio,
-  getSavedPortfolios as listSavedPortfolios,
-} from './storage';
 import useAbortableAction from '../../hooks/useAbortableAction';
-
-const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
 
 let nextId = 1;
 
@@ -47,14 +38,20 @@ export default function usePortfolio() {
   const [rangesLoading, setRangesLoading] = useState(false);
   const [portfolioName, setPortfolioName] = useState('');
   const [dirty, setDirty] = useState(false);
-  const [autosave, setAutosaveState] = useState(
-    () => localStorage.getItem(AUTOSAVE_KEY) === 'true',
-  );
+  // Autosave toggle — now controls backend autosave (3s debounce via
+  // useBackendAutosave at the page level). The old localStorage-based
+  // initialisation is kept commented for reference.
+  // Old: () => localStorage.getItem(AUTOSAVE_KEY) === 'true'
+  const [autosave, setAutosaveState] = useState(true);
   // ID of the backend-persisted portfolio doc currently loaded into the
   // editor. When non-null, every editable change is debounce-PUT to
-  // /api/persistence/portfolios/{persistedId}. Null when working on an
-  // unpersisted/local-only portfolio.
+  // /api/persistence/portfolios/{persistedId}. Every portfolio now has a
+  // persistedId from the moment it is created (always in backend).
   const [persistedId, setPersistedId] = useState(null);
+  // The category of the currently loaded portfolio. Tracked here so the
+  // backend autosave payload can include it without depending on the
+  // page-level persistedPortfolios list.
+  const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -232,6 +229,7 @@ export default function usePortfolio() {
     setPortfolioName('');
     setDirty(false);
     setPersistedId(null);
+    setPersistedCategory('RESEARCH');
   }, [abortCalculate]);
 
   /**
@@ -251,6 +249,7 @@ export default function usePortfolio() {
     setRebalance(typeof doc.rebalance === 'string' ? doc.rebalance : 'none');
     setPortfolioName(doc.name || '');
     setPersistedId(doc.id);
+    setPersistedCategory(doc.category || 'RESEARCH');
     setResults(null);
     setError(null);
     setLegDateRanges({});
@@ -285,7 +284,7 @@ export default function usePortfolio() {
     }
 
     // Build legs dict for API
-    const availableIndicators = hydrateAvailableIndicators();
+    const availableIndicators = await hydrateAvailableIndicators();
     const apiLegs = {};
     for (const leg of legs) {
       if (leg.type === 'signal') {
@@ -359,67 +358,12 @@ export default function usePortfolio() {
 
   const clearError = useCallback(() => setError(null), []);
 
-  /* ── Save/Load (localStorage) ── */
-
-  const savePortfolio = useCallback(
-    (name) => {
-      persistPortfolio(name, { legs, rebalance });
-      setPortfolioName(name);
-      setDirty(false);
-    },
-    [legs, rebalance],
-  );
-
-  const loadPortfolio = useCallback((name) => {
-    const entry = loadPortfolioEntry(name);
-    if (!entry) return false;
-
-    const restoredLegs = (entry.legs || []).map((l) => ({
-      ...l,
-      id: nextId++,
-    }));
-
-    setLegs(restoredLegs);
-    if (entry.rebalance) setRebalance(entry.rebalance);
-    setStartDate('');
-    setEndDate('');
-    setResults(null);
-    setError(null);
-    setPortfolioName(name);
-    setDirty(false);
-    return true;
-  }, []);
-
-  const deleteSavedPortfolio = useCallback((name) => {
-    removeSavedPortfolio(name);
-  }, []);
-
-  const getSavedPortfolios = useCallback(() => listSavedPortfolios(), []);
-
+  // Toggle autosave — no longer persisted to localStorage; the toggle
+  // now controls the backend debounced autosave at the page level.
+  // Old: localStorage.setItem(AUTOSAVE_KEY, String(on));
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
-    localStorage.setItem(AUTOSAVE_KEY, String(on));
   }, []);
-
-  /* ── Autosave: shared useAutosave hook ── */
-  // Payload identity changes when any persisted field does; the hook
-  // debounces writes + flushes on beforeunload/pagehide.
-  const autosavePayload = useMemo(
-    () => ({ legs, rebalance, name: portfolioName }),
-    [legs, rebalance, portfolioName],
-  );
-  const autosaveEnabled = !!autosave && !!portfolioName && legs.length > 0;
-  const handleAutosave = useCallback(
-    () => { if (portfolioName) savePortfolio(portfolioName); },
-    [portfolioName, savePortfolio],
-  );
-  useAutosave({
-    enabled: autosaveEnabled,
-    dirty,
-    value: autosavePayload,
-    onSave: handleAutosave,
-    debounceMs: 500,
-  });
 
   return {
     legs,
@@ -443,10 +387,12 @@ export default function usePortfolio() {
     error,
     clearError,
     handleCalculate,
-    savePortfolio,
-    loadPortfolio,
-    deleteSavedPortfolio,
-    getSavedPortfolios,
+    // localStorage save/load functions — kept in the hook but no longer
+    // exposed. All persistence goes through the backend now.
+    // savePortfolio,
+    // loadPortfolio,
+    // deleteSavedPortfolio,
+    // getSavedPortfolios,
     portfolioName,
     setPortfolioName,
     autosave,
@@ -454,6 +400,8 @@ export default function usePortfolio() {
     // Backend persistence wiring.
     persistedId,
     setPersistedId: setPersistedIdExternal,
+    persistedCategory,
+    setPersistedCategory,
     loadFromPersisted,
   };
 }
