@@ -217,8 +217,14 @@ describe('<SignalsPage> one-shot error surfacing — handleConfirmDelete (archiv
     });
     // Wait for the persisted list to render.
     await waitFor(() => {
-      expect(screen.queryByTestId('delete-sig-1')).not.toBeNull();
+      expect(screen.queryByTestId('select-sig-1')).not.toBeNull();
     });
+
+    // Select the signal first so SaveStatus is guaranteed to be rendered.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('select-sig-1'));
+    });
+    await act(async () => {});
 
     // Click delete on the signal — opens confirmation dialog.
     await act(async () => {
@@ -230,16 +236,11 @@ describe('<SignalsPage> one-shot error surfacing — handleConfirmDelete (archiv
       fireEvent.click(screen.getByTestId('confirm-btn'));
     });
 
-    // Expect error status.
+    // Expect error status — signal was selected so SaveStatus is present.
     await waitFor(() => {
       const el = screen.queryByTestId('save-status');
-      // The signal is deselected after delete, so SaveStatus may be
-      // unmounted (only shown when selectedPersisted is set). We check
-      // that either the status is 'error' OR the element is absent
-      // (which happens if the signal being deleted was not selected).
-      if (el) {
-        expect(el.dataset.status).toBe('error');
-      }
+      expect(el).not.toBeNull();
+      expect(el.dataset.status).toBe('error');
     });
   });
 });

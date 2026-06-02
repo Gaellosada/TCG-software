@@ -2,26 +2,11 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { formatDateInt } from '../../utils/format';
-// NOTE: useAutosave import kept for reference — localStorage autosave is
-// disabled; backend autosave (useBackendAutosave) is wired at the page level.
-// eslint-disable-next-line no-unused-vars
-import { useAutosave } from '../../components/SaveControls';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { fetchSignalLegRange } from './signalLegRange';
 import { legsToRangesKey } from './legKey';
-// NOTE: localStorage storage functions kept for reference — no longer called.
-// eslint-disable-next-line no-unused-vars
-import {
-  savePortfolio as persistPortfolio,
-  loadPortfolio as loadPortfolioEntry,
-  deleteSavedPortfolio as removeSavedPortfolio,
-  getSavedPortfolios as listSavedPortfolios,
-} from './storage';
 import useAbortableAction from '../../hooks/useAbortableAction';
-
-// eslint-disable-next-line no-unused-vars
-const AUTOSAVE_KEY = 'tcg-portfolio-autosave';
 
 let nextId = 1;
 
@@ -373,72 +358,12 @@ export default function usePortfolio() {
 
   const clearError = useCallback(() => setError(null), []);
 
-  /* ── Save/Load (localStorage) ── */
-
-  const savePortfolio = useCallback(
-    (name) => {
-      persistPortfolio(name, { legs, rebalance });
-      setPortfolioName(name);
-      setDirty(false);
-    },
-    [legs, rebalance],
-  );
-
-  const loadPortfolio = useCallback((name) => {
-    const entry = loadPortfolioEntry(name);
-    if (!entry) return false;
-
-    const restoredLegs = (entry.legs || []).map((l) => ({
-      ...l,
-      id: nextId++,
-    }));
-
-    setLegs(restoredLegs);
-    if (entry.rebalance) setRebalance(entry.rebalance);
-    setStartDate('');
-    setEndDate('');
-    setResults(null);
-    setError(null);
-    setPortfolioName(name);
-    setDirty(false);
-    return true;
-  }, []);
-
-  const deleteSavedPortfolio = useCallback((name) => {
-    removeSavedPortfolio(name);
-  }, []);
-
-  const getSavedPortfolios = useCallback(() => listSavedPortfolios(), []);
-
   // Toggle autosave — no longer persisted to localStorage; the toggle
   // now controls the backend debounced autosave at the page level.
   // Old: localStorage.setItem(AUTOSAVE_KEY, String(on));
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
   }, []);
-
-  /* ── Autosave (localStorage) — DISABLED ── */
-  // The localStorage autosave via useAutosave is no longer active.
-  // Backend autosave (useBackendAutosave, 3s debounce) is wired at the
-  // page level and is the sole autosave mechanism. The code below is
-  // kept for reference but not called.
-  //
-  // const autosavePayload = useMemo(
-  //   () => ({ legs, rebalance, name: portfolioName }),
-  //   [legs, rebalance, portfolioName],
-  // );
-  // const autosaveEnabled = !!autosave && !!portfolioName && legs.length > 0;
-  // const handleAutosave = useCallback(
-  //   () => { if (portfolioName) savePortfolio(portfolioName); },
-  //   [portfolioName, savePortfolio],
-  // );
-  // useAutosave({
-  //   enabled: autosaveEnabled,
-  //   dirty,
-  //   value: autosavePayload,
-  //   onSave: handleAutosave,
-  //   debounceMs: 500,
-  // });
 
   return {
     legs,

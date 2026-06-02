@@ -150,7 +150,12 @@ function PortfolioPage() {
       // eslint-disable-next-line no-console
       console.error('createPortfolio failed:', err);
     }
-  }, [saveInput, portfolio, fetchPortfolios, legsToWire]);
+  }, [
+    saveInput,
+    portfolio.portfolioName, portfolio.persistedCategory, portfolio.legs, portfolio.rebalance,
+    portfolio.setPersistedId, portfolio.setPersistedCategory, portfolio.setPortfolioName,
+    fetchPortfolios, legsToWire,
+  ]);
 
   // Move a persisted portfolio to a different category. Preserves all
   // editable content via the full-replace PUT.
@@ -172,14 +177,18 @@ function PortfolioPage() {
       if (portfolio.persistedId === id) {
         portfolio.setPersistedCategory(newCat);
       }
-      fetchPortfolios(portfolio.persistedCategory);
+      // If the item moved is the currently loaded portfolio AND the new
+      // category differs from the panel filter, re-fetch with the new
+      // category so the list stays accurate. Otherwise re-fetch with
+      // the current panel filter.
+      fetchPortfolios(portfolio.persistedId === id ? newCat : portfolio.persistedCategory);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('updatePortfolio (category change) failed:', err);
     }
-  }, [portfolios, portfolio, fetchPortfolios]);
+  }, [portfolios, portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedCategory, fetchPortfolios]);
 
   // Archive (soft-delete) a persisted portfolio.
   const handleArchivePortfolio = useCallback(async (id) => {
@@ -200,7 +209,7 @@ function PortfolioPage() {
       // eslint-disable-next-line no-console
       console.error('archivePortfolio failed:', err);
     }
-  }, [portfolio, fetchPortfolios]);
+  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.clearAll, fetchPortfolios]);
 
   // Mirror of ``cloudDirty`` accessible from event handlers declared
   // before ``cloudDirty`` itself is defined (synced via assignment below).
@@ -221,7 +230,7 @@ function PortfolioPage() {
     if (!doc) return;
     portfolio.loadFromPersisted(doc);
     setSaveInput(doc.name || '');
-  }, [portfolios, portfolio]);
+  }, [portfolios, portfolio.persistedId, portfolio.loadFromPersisted]);
 
   // --- Backend debounced auto-save for the loaded persisted portfolio -----
   // The category is now tracked inside the hook (portfolio.persistedCategory)
@@ -295,8 +304,11 @@ function PortfolioPage() {
       id: portfolio.persistedId,
       payload: payloadStr,
     };
-    fetchPortfolios(portfolio.persistedCategory);
-  }, [portfolio.persistedId, portfolio.persistedCategory, fetchPortfolios]);
+    // Note: we intentionally do NOT re-fetch the full portfolio list after
+    // every autosave — it would cause flicker and reset scroll position
+    // during rapid editing. The local state is authoritative until a
+    // category change, add, or archive operation.
+  }, [portfolio.persistedId, portfolio.persistedCategory]);
 
   const {
     status: cloudStatus,
@@ -351,7 +363,7 @@ function PortfolioPage() {
     }
     // Not yet persisted — create in backend.
     handleCreatePortfolio();
-  }, [saveInput, portfolio, handleCreatePortfolio]);
+  }, [saveInput, portfolio.persistedId, portfolio.portfolioName, portfolio.setPortfolioName, handleCreatePortfolio]);
 
   return (
     <div className={styles.page}>

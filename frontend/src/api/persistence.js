@@ -38,7 +38,11 @@ export const CATEGORIES = /** @type {const} */ (['RESEARCH', 'DEV', 'PROD', 'ARC
  * Attaches `.status` and `.body` so callers can distinguish 404 from 422.
  */
 async function _handleResponse(res) {
-  if (res.ok) return res.json();
+  if (res.ok) {
+    // 204 No Content has no body — guard against res.json() throwing.
+    if (res.status === 204) return null;
+    return res.json();
+  }
   let body = null;
   try { body = await res.json(); } catch { /* ignore */ }
   const msg = (body && (body.detail || body.message)) || res.statusText || 'Request failed';
@@ -145,8 +149,13 @@ export function updateSignal(id, payload, options = {}) {
  * @param {string} id
  * @returns {Promise<null>}
  */
-export async function archiveSignal(id) {
-  const res = await fetch(`${BASE}/signals/${encodeURIComponent(id)}`, {
+/**
+ * Shared archive helper — all archive endpoints follow the same pattern:
+ * DELETE to the given path, expect 204 on success. Does NOT use ``_fetch``
+ * because the response body is intentionally empty on success.
+ */
+async function _archive(path) {
+  const res = await fetch(`${BASE}${path}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
   });
@@ -160,6 +169,10 @@ export async function archiveSignal(id) {
     throw err;
   }
   return null;
+}
+
+export function archiveSignal(id) {
+  return _archive(`/signals/${encodeURIComponent(id)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,21 +236,8 @@ export function updatePortfolio(id, payload, options = {}) {
  * @param {string} id
  * @returns {Promise<null>}
  */
-export async function archivePortfolio(id) {
-  const res = await fetch(`${BASE}/portfolios/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    let body = null;
-    try { body = await res.json(); } catch { /* ignore */ }
-    const msg = (body && (body.detail || body.message)) || res.statusText || 'Delete failed';
-    const err = new Error(msg);
-    err.status = res.status;
-    err.body = body;
-    throw err;
-  }
-  return null;
+export function archivePortfolio(id) {
+  return _archive(`/portfolios/${encodeURIComponent(id)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,21 +298,8 @@ export function updateIndicator(id, payload, options = {}) {
  * @param {string} id
  * @returns {Promise<null>}
  */
-export async function archiveIndicator(id) {
-  const res = await fetch(`${BASE}/indicators/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    let body = null;
-    try { body = await res.json(); } catch { /* ignore */ }
-    const msg = (body && (body.detail || body.message)) || res.statusText || 'Delete failed';
-    const err = new Error(msg);
-    err.status = res.status;
-    err.body = body;
-    throw err;
-  }
-  return null;
+export function archiveIndicator(id) {
+  return _archive(`/indicators/${encodeURIComponent(id)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -398,19 +385,6 @@ export function updateBasket(id, payload, options = {}) {
  * @param {string} id
  * @returns {Promise<null>}
  */
-export async function archiveBasket(id) {
-  const res = await fetch(`${BASE}/baskets/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    let body = null;
-    try { body = await res.json(); } catch { /* ignore */ }
-    const msg = (body && (body.detail || body.message)) || res.statusText || 'Delete failed';
-    const err = new Error(msg);
-    err.status = res.status;
-    err.body = body;
-    throw err;
-  }
-  return null;
+export function archiveBasket(id) {
+  return _archive(`/baskets/${encodeURIComponent(id)}`);
 }

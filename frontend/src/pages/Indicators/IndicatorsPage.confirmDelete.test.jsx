@@ -138,5 +138,50 @@ describe('<IndicatorsPage> delete confirmation flow', () => {
     expect(screen.queryByTestId('confirm-dialog')).toBeNull();
     // The delete-button for the user indicator should no longer exist.
     expect(screen.queryByLabelText('Delete My Test Indicator')).toBeNull();
+    // T1: verify the backend archive call was actually made.
+    expect(archiveIndicator).toHaveBeenCalledWith('user-ind-1');
+  });
+
+  // T2: When archiveIndicator rejects, the indicator should be rolled back
+  // into the list and the error surfaced.
+  it('rolls back the indicator when archiveIndicator rejects', async () => {
+    archiveIndicator.mockRejectedValueOnce(new Error('network error'));
+    await act(async () => {
+      render(<IndicatorsPage />);
+    });
+    expandCustomSection();
+    fireEvent.click(screen.getByLabelText('Delete My Test Indicator'));
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Enter' });
+    });
+    // Wait for the rejection to settle.
+    await act(async () => {});
+    expandCustomSection();
+    // Indicator should be restored in the DOM.
+    expect(screen.getByLabelText('Delete My Test Indicator')).toBeDefined();
+  });
+
+  // T3: When createIndicator rejects, the optimistically added indicator
+  // should be removed from the list.
+  it('rolls back the indicator when createIndicator rejects', async () => {
+    const { createIndicator } = await import('../../api/persistence');
+    createIndicator.mockRejectedValueOnce(new Error('server error'));
+    await act(async () => {
+      render(<IndicatorsPage />);
+    });
+    // Count indicators before add.
+    expandCustomSection();
+    const beforeCount = screen.queryAllByLabelText(/^Delete /).length;
+    // Click the "+" button to add a new indicator.
+    const addBtn = screen.getByLabelText('New indicator');
+    await act(async () => {
+      fireEvent.click(addBtn);
+    });
+    // Wait for the rejection to settle.
+    await act(async () => {});
+    expandCustomSection();
+    // The optimistically added indicator should have been removed.
+    const afterCount = screen.queryAllByLabelText(/^Delete /).length;
+    expect(afterCount).toBe(beforeCount);
   });
 });

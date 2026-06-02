@@ -446,6 +446,15 @@ describe('<PortfolioPage> — persisted portfolios panel', () => {
     expect(mockListPortfolios).toHaveBeenCalledWith('RESEARCH');
   });
 
+  it('shows error when fetchPortfolios fails (backend unreachable)', async () => {
+    mockListPortfolios.mockRejectedValue(new Error('connection refused'));
+    vi.mocked(usePortfolio).mockReturnValue(baseHook());
+    const { findByTestId } = render(<PortfolioPage />);
+    // The page should display the fetch error div.
+    const errorEl = await findByTestId('portfolio-fetch-error');
+    expect(errorEl.textContent).toContain('Failed to load portfolios');
+  });
+
   it('re-fetches when category is changed', async () => {
     mockListPortfolios.mockResolvedValue([]);
     // First render with RESEARCH.

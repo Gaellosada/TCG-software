@@ -8,7 +8,7 @@ import TradeLog from '../../components/TradeLog';
 import { buildSignalStatsInputs } from './signalStatsInputs';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
-import { loadState, saveState, emptyRules, defaultSettings } from './storage';
+import { emptyRules, defaultSettings } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import {
@@ -23,7 +23,7 @@ import { fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
-import SaveControls, { useAutosave } from '../../components/SaveControls';
+import SaveControls from '../../components/SaveControls';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import useBackendAutosave from '../../hooks/useBackendAutosave';
 import Card from '../../components/Card';
@@ -41,12 +41,6 @@ function nextSignalName(existing) {
     }
   }
   return `Signal ${maxN + 1}`;
-}
-
-// Stable serialisation for dirty comparison — JSON.stringify over the
-// exact shape we'd persist.
-function serializePersistablePayload(signals) {
-  return JSON.stringify({ signals });
 }
 
 // Build the editor-shape signal object from a backend SignalOut payload.
@@ -90,7 +84,6 @@ function SignalsPage() {
       return true;
     }
   });
-  const [lastSavedPayload, setLastSavedPayload] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   // --- Persistence state ---------------------------------------------------
@@ -128,7 +121,6 @@ function SignalsPage() {
       const docs = await listSignals(cat);
       const hydrated = docs.map(hydrateFromPersisted);
       setSignals(hydrated);
-      setLastSavedPayload(serializePersistablePayload(hydrated));
       // Select the first signal if nothing is selected, or keep current
       // selection if the signal still exists in the new list.
       setSelectedId((prev) => {
@@ -163,27 +155,6 @@ function SignalsPage() {
   useEffect(() => {
     fetchSignals(persistedCategory);
   }, [persistedCategory, fetchSignals]);
-
-  const currentPayload = useMemo(() => serializePersistablePayload(signals), [signals]);
-  const dirty = lastSavedPayload !== null && currentPayload !== lastSavedPayload;
-
-  // localStorage commitSave kept for the SaveControls manual "Save" button
-  // but now acts as a no-op bookmark — the real persistence is backend.
-  const commitSave = useCallback(() => {
-    // localStorage save intentionally disabled — backend is the source of truth.
-    // saveState({ signals: signalsRef.current });
-    setLastSavedPayload(serializePersistablePayload(signalsRef.current));
-  }, []);
-
-  // localStorage autosave hook — kept in codebase but permanently disabled.
-  // The backend useBackendAutosave hook below is the sole autosave mechanism.
-  useAutosave({
-    enabled: false,
-    dirty,
-    value: currentPayload,
-    onSave: commitSave,
-    debounceMs: 500,
-  });
 
   const selectedSignal = useMemo(
     () => signals.find((s) => s.id === selectedId) || null,
@@ -255,6 +226,9 @@ function SignalsPage() {
       // what went wrong — not just an opaque "save failed".
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // Roll back — remove the optimistically added signal.
+      setSignals((prev) => prev.filter((s) => s.id !== id));
+      setSelectedId((sel) => sel === id ? null : sel);
       // eslint-disable-next-line no-console
       console.error('createSignal failed:', err);
     });
@@ -278,6 +252,8 @@ function SignalsPage() {
     });
     // Archive on backend (soft-delete → ARCHIVE category); refresh from backend.
     setOneshotStatus('saving');
+    // Capture the signal before removal so we can roll back on failure.
+    const target = signalsRef.current.find((s) => s.id === id);
     archiveSignal(id).then(() => {
       setOneshotError(null);
       setOneshotStatus('saved');
@@ -285,6 +261,10 @@ function SignalsPage() {
     }).catch((err) => {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
+      // Roll back — re-add the optimistically removed signal.
+      if (target) {
+        setSignals((prev) => [...prev, target]);
+      }
       // eslint-disable-next-line no-console
       console.error('archiveSignal failed:', err);
     });
@@ -359,9 +339,10 @@ function SignalsPage() {
   // would otherwise PUT the freshly fetched content back uselessly).
   // Seeded in an effect — never mutate refs during render.
   //
-  // We use ``lastSavedPayload`` as a dependency proxy: it's updated in
-  // ``fetchSignals`` after backend data arrives, so the effect re-runs
-  // when the signals list is refreshed (even if selectedId didn't change).
+  // Depends on ``selectedId`` so it fires on selection change. The
+  // ``signals`` reference is NOT in the dependency list to avoid
+  // re-seeding on every local edit. The handleBackendSave callback
+  // updates the ref directly after a successful save.
   const lastHydratedPayloadRef = useRef({ id: null, payload: null });
   useEffect(() => {
     if (selectedSignal && selectedSignal.id === selectedId) {
@@ -380,7 +361,7 @@ function SignalsPage() {
       lastHydratedPayloadRef.current = { id: null, payload: null };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, lastSavedPayload]);
+  }, [selectedId]);
 
   const backendDirty = !!selectedDocSerialized
     && (lastHydratedPayloadRef.current.id !== selectedId
@@ -421,12 +402,28 @@ function SignalsPage() {
 
   const {
     status: cloudStatus,
+    flush: flushCloudSave,
     reset: resetCloudStatus,
   } = useBackendAutosave({
     enabled: autosave && !!selectedSignal && backendDirty,
     payload: selectedDocSerialized,
     onSave: handleBackendSave,
   });
+
+  // Manual Save button: flush the pending backend autosave, or fire a
+  // one-shot save when autosave is off.
+  const commitSave = useCallback(() => {
+    if (autosave) {
+      flushCloudSave();
+    } else {
+      const payload = selectedDocSerialized;
+      if (payload && selectedId) {
+        handleBackendSave(payload, {}).catch(() => {
+          // Error already set by handleBackendSave.
+        });
+      }
+    }
+  }, [autosave, flushCloudSave, selectedDocSerialized, selectedId, handleBackendSave]);
 
   // When the selection changes, reset cloud status so the indicator
   // doesn't show "saved" for the previously selected signal.
@@ -597,7 +594,7 @@ function SignalsPage() {
       <div className={styles.paramsPanel}>
         <div className={styles.paramsTopBar}>
           <SaveControls
-            dirty={dirty}
+            dirty={backendDirty}
             autosave={autosave}
             onSave={commitSave}
             onToggleAutosave={setAutosave}

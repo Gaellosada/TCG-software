@@ -8,9 +8,6 @@
  * referenced indicator (we ship these wholesale). ``readonly`` flag is
  * preserved so the OperandPicker dropdown can show all of them.
  */
-// NOTE: localStorage import preserved but unused (migration kept code intact).
-// eslint-disable-next-line no-unused-vars
-import { loadState as loadIndicatorState } from '../Indicators/storage';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from '../Indicators/paramParser';
 import { DEFAULT_INDICATORS } from '../Indicators/defaultIndicators';
 import { listIndicators } from '../../api/persistence';
