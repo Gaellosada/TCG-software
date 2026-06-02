@@ -57,6 +57,7 @@ class SSMTunnel:
         self._config = config
         self._process: subprocess.Popen[bytes] | None = None
         self._drain_threads: list[threading.Thread] = []
+        self._stderr_lines: list[str] = []
         self._stopped = False
 
     # ------------------------------------------------------------------
@@ -107,6 +108,7 @@ class SSMTunnel:
 
         logger.info("SSM tunnel: starting on localhost:%s", port)
 
+        self._stderr_lines = []
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -114,10 +116,10 @@ class SSMTunnel:
             env=env,
         )
 
-        # Drain stderr immediately in a daemon thread to prevent pipe-
-        # buffer deadlocks.  The SSM process may write auth errors or
-        # SDK debug messages to stderr before printing the ready marker.
-        self._start_drain_thread(self._process.stderr)
+        # Capture stderr in a daemon thread to prevent pipe-buffer
+        # deadlocks.  Lines are kept so we can surface them in error
+        # messages when the process dies during startup.
+        self._start_stderr_capture_thread(self._process.stderr)
 
     async def wait_until_ready(self, timeout: float = 30) -> None:
         """Block until the tunnel prints its ready marker or *timeout* elapses."""
@@ -201,10 +203,31 @@ class SSMTunnel:
                 self._start_drain_thread(self._process.stdout)
                 return
         # stdout closed without the ready marker — process exited.
-        raise RuntimeError(
-            "SSM tunnel: process exited before becoming ready. "
-            "Check AWS credentials, bastion ID, and Session Manager plugin."
+        stderr_tail = (
+            "\n".join(self._stderr_lines[-20:])
+            if self._stderr_lines
+            else "(no stderr output)"
         )
+        raise RuntimeError(
+            f"SSM tunnel: process exited before becoming ready.\nstderr:\n{stderr_tail}"
+        )
+
+    def _start_stderr_capture_thread(self, pipe: object) -> None:
+        """Spawn a daemon thread that captures stderr lines for diagnostics."""
+
+        def _capture() -> None:
+            try:
+                for raw_line in pipe:  # type: ignore[union-attr]
+                    text = raw_line.decode(errors="replace").strip()  # type: ignore[union-attr]
+                    if text:
+                        self._stderr_lines.append(text)
+                        logger.debug("SSM tunnel stderr: %s", text)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_capture, daemon=True)
+        t.start()
+        self._drain_threads.append(t)
 
     def _start_drain_thread(self, pipe: object) -> None:
         """Spawn a daemon thread that reads and discards a pipe."""
