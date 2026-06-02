@@ -60,6 +60,7 @@ class SSMTunnel:
         self._process: subprocess.Popen[bytes] | None = None
         self._drain_threads: list[threading.Thread] = []
         self._stderr_lines: list[str] = []
+        self._stdout_lines: list[str] = []
         self._stopped = False
 
     # ------------------------------------------------------------------
@@ -111,6 +112,7 @@ class SSMTunnel:
         logger.info("SSM tunnel: starting on localhost:%s", port)
 
         self._stderr_lines = []
+        self._stdout_lines = []
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -141,9 +143,20 @@ class SSMTunnel:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
+            stdout_tail = (
+                "\n".join(self._stdout_lines[-20:])
+                if self._stdout_lines
+                else "(no stdout output)"
+            )
+            stderr_tail = (
+                "\n".join(self._stderr_lines[-20:])
+                if self._stderr_lines
+                else "(no stderr output)"
+            )
             raise RuntimeError(
-                f"SSM tunnel: did not become ready within {timeout}s. "
-                "Check AWS credentials, bastion ID, and network connectivity."
+                f"SSM tunnel: did not become ready within {timeout}s.\n"
+                f"stdout:\n{stdout_tail}\n"
+                f"stderr:\n{stderr_tail}"
             ) from None
 
     async def stop(self) -> None:
@@ -207,6 +220,9 @@ class SSMTunnel:
         assert self._process is not None and self._process.stdout is not None
         for raw_line in self._process.stdout:
             text = raw_line.decode(errors="replace").strip()
+            if text:
+                self._stdout_lines.append(text)
+                logger.debug("SSM tunnel stdout: %s", text)
             if "Waiting for connections" in text:
                 logger.info("SSM tunnel: ready")
                 self._start_drain_thread(self._process.stdout)
