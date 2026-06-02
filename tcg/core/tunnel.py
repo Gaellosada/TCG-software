@@ -24,6 +24,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class TunnelConfig:
 
 _MAX_CONSECUTIVE_FAILURES = 5
 _BACKOFF_CAP_SECONDS = 30.0
+_CAPTURED_LINES_MAX = 100
 
 
 class SSMTunnel:
@@ -60,9 +62,11 @@ class SSMTunnel:
     def __init__(self, config: TunnelConfig) -> None:
         self._config = config
         self._process: subprocess.Popen[bytes] | None = None
+        self._lock = threading.Lock()
         self._drain_threads: list[threading.Thread] = []
-        self._stderr_lines: list[str] = []
-        self._stdout_lines: list[str] = []
+        self._stderr_lines: deque[str] = deque(maxlen=_CAPTURED_LINES_MAX)
+        self._stdout_lines: deque[str] = deque(maxlen=_CAPTURED_LINES_MAX)
+        self._handlers_installed = False
         self._stopped = False
 
     # ------------------------------------------------------------------
@@ -73,6 +77,14 @@ class SSMTunnel:
         """Spawn the ``aws ssm start-session`` process."""
         self._stopped = False
 
+        # Kill any prior process before spawning a new one.
+        self._kill_process()
+        # Wait for old capture threads to finish (pipes close when process
+        # dies) and clear the list so it doesn't grow across restarts.
+        for t in self._drain_threads:
+            t.join(timeout=2)
+        self._drain_threads.clear()
+
         aws_bin = shutil.which("aws")
         if aws_bin is None:
             raise RuntimeError(
@@ -82,6 +94,10 @@ class SSMTunnel:
 
         cfg = self._config
         port = int(cfg.local_port)  # validated upstream, but ensure int
+
+        # Fail fast if another process already holds the port.
+        self._assert_port_free(port)
+
         parameters = json.dumps(
             {
                 "host": [cfg.db_host],
@@ -113,8 +129,8 @@ class SSMTunnel:
 
         logger.info("SSM tunnel: starting on localhost:%s", port)
 
-        self._stderr_lines = []
-        self._stdout_lines = []
+        self._stderr_lines.clear()
+        self._stdout_lines.clear()
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -128,10 +144,12 @@ class SSMTunnel:
         self._start_capture_thread(self._process.stderr, self._stderr_lines, "stderr")
 
         # Safety net: kill the subprocess if Python exits without going
-        # through the lifespan shutdown (crash, Ctrl+C during startup,
-        # terminal closed, etc.).
-        atexit.register(self._kill_process)
-        self._install_signal_handlers()
+        # through the lifespan shutdown.  Register only once to avoid
+        # accumulating duplicate handlers across restarts.
+        if not self._handlers_installed:
+            atexit.register(self._kill_process)
+            self._install_signal_handlers()
+            self._handlers_installed = True
 
     async def wait_until_ready(self, timeout: float = 30) -> None:
         """Poll the local forwarded port until a TCP connection succeeds.
@@ -152,12 +170,12 @@ class SSMTunnel:
             )
         except asyncio.TimeoutError:
             stdout_tail = (
-                "\n".join(self._stdout_lines[-20:])
+                "\n".join(self._stdout_lines)
                 if self._stdout_lines
                 else "(no stdout output)"
             )
             stderr_tail = (
-                "\n".join(self._stderr_lines[-20:])
+                "\n".join(self._stderr_lines)
                 if self._stderr_lines
                 else "(no stderr output)"
             )
@@ -184,7 +202,8 @@ class SSMTunnel:
             if self._process is not None and self._process.poll() is None:
                 continue  # Still running
 
-            # Process exited unexpectedly
+            # Process exited unexpectedly (or was never started after a
+            # failed restart — _kill_process sets _process to None).
             consecutive_failures += 1
             if consecutive_failures > _MAX_CONSECUTIVE_FAILURES:
                 logger.error(
@@ -194,8 +213,9 @@ class SSMTunnel:
                 return
 
             logger.warning(
-                "SSM tunnel: process exited, restarting (attempt %d)",
+                "SSM tunnel: restarting (attempt %d/%d)",
                 consecutive_failures,
+                _MAX_CONSECUTIVE_FAILURES,
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, _BACKOFF_CAP_SECONDS)
@@ -207,7 +227,11 @@ class SSMTunnel:
                 consecutive_failures = 0
                 backoff = 1.0
             except Exception:
-                logger.exception("SSM tunnel: restart failed")
+                logger.warning(
+                    "SSM tunnel: restart attempt %d failed: %s",
+                    consecutive_failures,
+                    type(Exception).__name__,
+                )
                 self._kill_process()
 
     @property
@@ -217,6 +241,16 @@ class SSMTunnel:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assert_port_free(port: int) -> None:
+        """Raise if another process is already listening on *port*."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                raise RuntimeError(
+                    f"SSM tunnel: port {port} is already in use. "
+                    "Another process may be bound to it."
+                )
 
     def _poll_port(self, port: int) -> None:
         """Blocking TCP poll until ``localhost:port`` accepts a connection.
@@ -228,7 +262,7 @@ class SSMTunnel:
             # If the process died, raise immediately with diagnostics.
             if self._process is not None and self._process.poll() is not None:
                 stderr_tail = (
-                    "\n".join(self._stderr_lines[-20:])
+                    "\n".join(self._stderr_lines)
                     if self._stderr_lines
                     else "(no stderr output)"
                 )
@@ -243,7 +277,7 @@ class SSMTunnel:
             except OSError:
                 time.sleep(0.5)
 
-    def _start_capture_thread(self, pipe: object, dest: list[str], label: str) -> None:
+    def _start_capture_thread(self, pipe: object, dest: deque[str], label: str) -> None:
         """Spawn a daemon thread that captures pipe lines into *dest*."""
 
         def _capture() -> None:
@@ -254,7 +288,7 @@ class SSMTunnel:
                         dest.append(text)
                         logger.debug("SSM tunnel %s: %s", label, text)
             except Exception:
-                pass
+                logger.debug("SSM tunnel %s capture ended", label)
 
         t = threading.Thread(target=_capture, daemon=True)
         t.start()
@@ -264,7 +298,8 @@ class SSMTunnel:
         """Chain signal handlers so the tunnel subprocess is killed on SIGINT/SIGTERM.
 
         Preserves any existing handler (e.g. uvicorn's) and calls it after
-        cleanup so normal shutdown still proceeds.
+        cleanup so normal shutdown still proceeds.  Called only once — the
+        ``_handlers_installed`` guard in ``start()`` prevents stacking.
         """
         for sig in (signal.SIGINT, signal.SIGTERM):
             prev = signal.getsignal(sig)
@@ -287,11 +322,21 @@ class SSMTunnel:
                 pass
 
     def _kill_process(self) -> None:
-        """Terminate the subprocess if it's still alive."""
-        if self._process is not None and self._process.poll() is None:
-            self._process.terminate()
+        """Terminate the subprocess if it's still alive.
+
+        Thread-safe: may be called concurrently from signal handlers,
+        ``atexit``, and the ``stop()`` / ``monitor()`` methods.
+        """
+        with self._lock:
+            proc = self._process
+            if proc is None:
+                return
+            self._process = None
+
+        # Outside the lock — terminate/wait can take time.
+        if proc.poll() is None:
+            proc.terminate()
             try:
-                self._process.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._process.kill()
-        self._process = None
+                proc.kill()

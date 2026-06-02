@@ -103,10 +103,15 @@ def load_config() -> MongoConfig:
                 "are not set. These are required to assemble the connection URI."
             )
 
+        # Validate local_port is numeric (load_tunnel_config validates the
+        # full range; here we just prevent a malformed URI).
+        if not local_port.isdigit():
+            raise ValueError(f"LOCAL_PORT must be numeric, got {local_port!r}")
+
         uri = (
             f"mongodb://{quote_plus(user)}:{quote_plus(password)}"
-            f"@localhost:{local_port}/{db_name}"
-            f"?authSource={auth_source}&directConnection=true"
+            f"@localhost:{local_port}/{quote_plus(db_name)}"
+            f"?authSource={quote_plus(auth_source)}&directConnection=true"
         )
     else:
         uri = _get("MONGO_URI", env, "mongodb://localhost:27017")

@@ -66,16 +66,28 @@ async def lifespan(app: FastAPI):
             raise
         monitor_task = asyncio.create_task(tunnel.monitor())
 
-    config = load_config()
-    client = AsyncIOMotorClient(
-        config.uri,
-        serverSelectionTimeoutMS=30_000,
-        connectTimeoutMS=60_000,
-        socketTimeoutMS=300_000,
-        maxPoolSize=20,
-    )
-    db = client[config.db_name]
-    services = await create_services(db)
+    try:
+        config = load_config()
+        client = AsyncIOMotorClient(
+            config.uri,
+            serverSelectionTimeoutMS=30_000,
+            connectTimeoutMS=60_000,
+            socketTimeoutMS=300_000,
+            maxPoolSize=20,
+        )
+        db = client[config.db_name]
+        services = await create_services(db)
+    except Exception:
+        # Stop the tunnel if MongoDB setup fails — without this the SSM
+        # subprocess would be orphaned.
+        if monitor_task:
+            monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor_task
+        if tunnel:
+            await tunnel.stop()
+        raise
+
     app.state.market_data = services["market_data"]
     yield
     client.close()
@@ -277,9 +289,21 @@ async def _request_validation_error_handler(
     )
 
 
+async def _health(request: Request) -> JSONResponse:
+    """Lightweight readiness probe — returns 200 only after the lifespan
+    has completed (services are wired up).  The launcher polls this
+    instead of a raw TCP check so it doesn't report "ready" before
+    MongoDB is actually connected.
+    """
+    if not hasattr(request.app.state, "market_data"):
+        return JSONResponse(status_code=503, content={"status": "starting"})
+    return JSONResponse(status_code=200, content={"status": "ok"})
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI application with all routers and middleware."""
     app = FastAPI(title="TCG Platform", version="0.1.0", lifespan=lifespan)
+    app.add_api_route("/health", _health, methods=["GET"])
     # NOTE: middleware is applied in reverse registration order. The
     # body-size guard is registered FIRST so it runs LAST in the
     # outbound chain (i.e. it sits CLOSEST to the routes, with CORS

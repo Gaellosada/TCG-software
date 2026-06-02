@@ -63,7 +63,7 @@ def _read_write_uri() -> str:
             return (
                 f"mongodb://{quote_plus(user)}:{quote_plus(password)}"
                 f"@localhost:{local_port}/"
-                f"?authSource={auth_source}&directConnection=true"
+                f"?authSource={quote_plus(auth_source)}&directConnection=true"
             )
         # Write credentials not set — fall through to MONGO_APP_WRITE_URI
 
