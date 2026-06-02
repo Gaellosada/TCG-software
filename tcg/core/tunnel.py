@@ -20,8 +20,10 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -120,10 +122,10 @@ class SSMTunnel:
             env=env,
         )
 
-        # Capture stderr in a daemon thread to prevent pipe-buffer
-        # deadlocks.  Lines are kept so we can surface them in error
-        # messages when the process dies during startup.
-        self._start_stderr_capture_thread(self._process.stderr)
+        # Capture both streams in daemon threads to prevent pipe-buffer
+        # deadlocks.  Lines are kept for diagnostic error messages.
+        self._start_capture_thread(self._process.stdout, self._stdout_lines, "stdout")
+        self._start_capture_thread(self._process.stderr, self._stderr_lines, "stderr")
 
         # Safety net: kill the subprocess if Python exits without going
         # through the lifespan shutdown (crash, Ctrl+C during startup,
@@ -132,14 +134,20 @@ class SSMTunnel:
         self._install_signal_handlers()
 
     async def wait_until_ready(self, timeout: float = 30) -> None:
-        """Block until the tunnel prints its ready marker or *timeout* elapses."""
-        if self._process is None or self._process.stdout is None:
+        """Poll the local forwarded port until a TCP connection succeeds.
+
+        This is more robust than parsing stdout/stderr for a ready marker
+        because the Session Manager plugin's output format, buffering, and
+        stream routing vary across versions and platforms.
+        """
+        if self._process is None:
             raise RuntimeError("SSM tunnel: process not started")
 
+        port = int(self._config.local_port)
         loop = asyncio.get_running_loop()
         try:
             await asyncio.wait_for(
-                loop.run_in_executor(None, self._read_stdout_until_ready),
+                loop.run_in_executor(None, self._poll_port, port),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -154,7 +162,7 @@ class SSMTunnel:
                 else "(no stderr output)"
             )
             raise RuntimeError(
-                f"SSM tunnel: did not become ready within {timeout}s.\n"
+                f"SSM tunnel: port {port} not reachable within {timeout}s.\n"
                 f"stdout:\n{stdout_tail}\n"
                 f"stderr:\n{stderr_tail}"
             ) from None
@@ -210,63 +218,45 @@ class SSMTunnel:
     # Internal
     # ------------------------------------------------------------------
 
-    def _read_stdout_until_ready(self) -> None:
-        """Blocking read of stdout until the ready marker appears.
+    def _poll_port(self, port: int) -> None:
+        """Blocking TCP poll until ``localhost:port`` accepts a connection.
 
-        Called via ``run_in_executor`` so the async caller doesn't block.
-        After detecting readiness, starts a drain thread for remaining
-        stdout output.
+        Called via ``run_in_executor``.  Also watches for early process
+        death so we don't wait the full timeout if the tunnel crashes.
         """
-        assert self._process is not None and self._process.stdout is not None
-        for raw_line in self._process.stdout:
-            text = raw_line.decode(errors="replace").strip()
-            if text:
-                self._stdout_lines.append(text)
-                logger.debug("SSM tunnel stdout: %s", text)
-            if "Waiting for connections" in text:
-                logger.info("SSM tunnel: ready")
-                self._start_drain_thread(self._process.stdout)
-                return
-        # stdout closed without the ready marker — process exited.
-        stderr_tail = (
-            "\n".join(self._stderr_lines[-20:])
-            if self._stderr_lines
-            else "(no stderr output)"
-        )
-        raise RuntimeError(
-            f"SSM tunnel: process exited before becoming ready.\nstderr:\n{stderr_tail}"
-        )
+        while True:
+            # If the process died, raise immediately with diagnostics.
+            if self._process is not None and self._process.poll() is not None:
+                stderr_tail = (
+                    "\n".join(self._stderr_lines[-20:])
+                    if self._stderr_lines
+                    else "(no stderr output)"
+                )
+                raise RuntimeError(
+                    "SSM tunnel: process exited before the port became reachable.\n"
+                    f"stderr:\n{stderr_tail}"
+                )
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    logger.info("SSM tunnel: ready (port %d reachable)", port)
+                    return
+            except OSError:
+                time.sleep(0.5)
 
-    def _start_stderr_capture_thread(self, pipe: object) -> None:
-        """Spawn a daemon thread that captures stderr lines for diagnostics."""
+    def _start_capture_thread(self, pipe: object, dest: list[str], label: str) -> None:
+        """Spawn a daemon thread that captures pipe lines into *dest*."""
 
         def _capture() -> None:
             try:
                 for raw_line in pipe:  # type: ignore[union-attr]
                     text = raw_line.decode(errors="replace").strip()  # type: ignore[union-attr]
                     if text:
-                        self._stderr_lines.append(text)
-                        logger.debug("SSM tunnel stderr: %s", text)
+                        dest.append(text)
+                        logger.debug("SSM tunnel %s: %s", label, text)
             except Exception:
                 pass
 
         t = threading.Thread(target=_capture, daemon=True)
-        t.start()
-        self._drain_threads.append(t)
-
-    def _start_drain_thread(self, pipe: object) -> None:
-        """Spawn a daemon thread that reads and discards a pipe."""
-
-        def _drain() -> None:
-            try:
-                while True:
-                    chunk = pipe.read(4096)  # type: ignore[union-attr]
-                    if not chunk:
-                        break
-            except Exception:
-                pass
-
-        t = threading.Thread(target=_drain, daemon=True)
         t.start()
         self._drain_threads.append(t)
 
