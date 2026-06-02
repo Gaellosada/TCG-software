@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/portfolio.py
+# hypothesis_version: 6.151.12
+
+[1.0, 100.0, 99999999, '/api/portfolio', '/compute', 'C', 'Holding', 'P', '_leg', 'after', 'change', 'close_bar', 'collection', 'continuous', 'date_range', 'dates', 'direction', 'end', 'entry_block_id', 'entry_block_name', 'exit_block_id', 'exit_block_name', 'first', 'full_date_range', 'holding', 'holding_id', 'holding_name', 'input_id', 'instrument', 'label', 'last', 'leg_equities', 'leg_metrics', 'level', 'log', 'long', 'maturity', 'max', 'mean', 'metrics', 'min', 'monthly', 'monthly_returns', 'none', 'normal', 'open_bar', 'option_stream', 'option_type', 'portfolio', 'portfolio_equity', 'positions', 'price', 'raw_leg_equities', 'rebalance', 'rebalance_dates', 'return_type', 'selection', 'short', 'signal', 'signed_weight', 'start', 'std', 'stream', 'stream_mode', 'tracking_series', 'trades', 'type', 'values', 'yearly', 'yearly_returns']

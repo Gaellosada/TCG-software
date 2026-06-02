@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/engine/options/pricing/kernel.py
+# hypothesis_version: 6.151.12
+
+[-0.5, 0.5, 1.0, 2.0, 100.0, 365.0, 'BS76Kernel', 'c', 'p']

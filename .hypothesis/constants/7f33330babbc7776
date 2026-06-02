@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/_models_options.py
+# hypothesis_version: 6.151.12
+
+[0.0, 0.01, 0.05, 'C', 'P', 'at_expiry', 'before', 'both', 'by_delta', 'by_moneyness', 'by_strike', 'computed', 'contract_data_ended', 'delta', 'delta_cross', 'end_of_month', 'exit_date', 'expiration_cycle', 'expirations', 'fixed', 'gamma', 'held_to_expiry', 'iv', 'kind', 'missing', 'n_days_before_expiry', 'nearest_to_target', 'next_third_friday', 'plus_n_days', 'stored', 'target', 'target_days', 'theta', 'vega']

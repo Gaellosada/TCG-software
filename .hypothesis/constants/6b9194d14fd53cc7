@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/data/options/_doc_to_dto.py
+# hypothesis_version: 6.151.12
+
+[0.0, 2.0, 100, 10000, 19000101, 21001231, '+00:00', 'C', 'P', 'Z', '_id', 'ask', 'askSize', 'bid', 'bidSize', 'close', 'contractSize', 'currency', 'date', 'delta', 'expiration', 'expirationCycle', 'gamma', 'high', 'impliedVolatility', 'low', 'open', 'openInterest', 'rootUnderlying', 'strike', 'theta', 'type', 'underlying', 'underlyingPrice', 'underlyingSymbol', 'unknown', 'vega', 'volume']

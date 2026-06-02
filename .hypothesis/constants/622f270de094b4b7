@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/engine/options/pricing/_gating.py
+# hypothesis_version: 6.151.12
+
+[365.0, 'C', 'OPT_ETH', 'OPT_EURUSD', 'OPT_JPYUSD', 'OPT_T_BOND', 'OPT_T_NOTE_10_Y', 'OPT_VIX', 'P', 'c', 'forward_vix_curve', 'missing_deribit_feed', 'p', 'underlying_price']

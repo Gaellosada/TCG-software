@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/_options_wiring.py
+# hypothesis_version: 6.151.12
+
+['C', 'CachedChainReader', 'INDEX', 'P', 'both', 'build_options_chain', 'build_options_pricer', 'get_options_reader']

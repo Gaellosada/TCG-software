@@ -1,5 +1,5 @@
 // PersistedPortfolioPanel — panel that shows backend-persisted portfolios
-// filtered by category, with category selector, + Save current, per-row
+// filtered by category, with category selector, + Save as new, per-row
 // category chip, row-level select, and row-level archive.
 //
 // Styled to match the shared Card component (same container, header title,
@@ -57,11 +57,11 @@ function PersistedPortfolioPanel({
         className={styles.addBtn}
         onClick={onSaveCurrent}
         disabled={!!saveDisabled}
-        title="Save current portfolio to this category"
-        aria-label="Save current portfolio"
+        title="Save as a new portfolio in this category"
+        aria-label="Save as new portfolio"
         data-testid="persist-portfolio-btn"
       >
-        + Save current
+        + Save as new
       </button>
     </div>
   );
@@ -77,7 +77,7 @@ function PersistedPortfolioPanel({
           <div className={styles.empty}>Loading...</div>
         ) : portfolios.length === 0 ? (
           <div className={styles.empty} data-testid="persisted-portfolio-empty">
-            No saved portfolios in {category} — click &quot;+ Save current&quot; to add one.
+            No saved portfolios in {category} — click &quot;+ Save as new&quot; to add one.
           </div>
         ) : (
           portfolios.map((p) => {

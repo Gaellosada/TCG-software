@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/data/_mongo/instruments.py
+# hypothesis_version: 6.151.12
+
+[19000101, 21001231, '$ne', '+00:00', 'Z', '_id', 'eodDatas', 'eodGreeks', 'expiration', 'expirationCycle', 'intradayDatas']

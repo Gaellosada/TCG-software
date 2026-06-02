@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/persistence.py
+# hypothesis_version: 6.151.12
+
+['ARCHIVE', 'BasketDoc', 'Category', 'DEV', 'DocType', 'IndicatorDoc', 'PROD', 'PersistenceDoc', 'PortfolioDoc', 'RESEARCH', 'SignalDoc', '_id', 'basket', 'category', 'equity', 'from_mongo_dict', 'id', 'indicator', 'inputs', 'legs', 'none', 'portfolio', 'signal', 'to_mongo_dict', 'type']

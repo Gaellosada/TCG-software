@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/common.py
+# hypothesis_version: 6.151.12
+
+[0.0, 1.0, 400, 'difference', 'done', 'error_type', 'fraction', 'message', 'none', 'ratio', 'total', 'traceback']

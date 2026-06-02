@@ -3,7 +3,7 @@
 // Tests for PersistedPortfolioPanel:
 //   - renders category selector with all four options
 //   - category change fires onCategoryChange
-//   - "+ Save current" fires onSaveCurrent; disabled when saveDisabled
+//   - "+ Save as new" fires onSaveCurrent; disabled when saveDisabled
 //   - empty state shown when portfolios list is empty
 //   - rows rendered with name and per-row category select
 //   - per-row category change fires onChangeItemCat
@@ -56,19 +56,19 @@ describe('<PersistedPortfolioPanel>', () => {
     expect(props.onCategoryChange).toHaveBeenCalledWith('PROD');
   });
 
-  it('calls onSaveCurrent when "+ Save current" is clicked', () => {
+  it('calls onSaveCurrent when "+ Save as new" is clicked', () => {
     const props = defaultProps();
     render(<PersistedPortfolioPanel {...props} />);
     fireEvent.click(screen.getByTestId('persist-portfolio-btn'));
     expect(props.onSaveCurrent).toHaveBeenCalledOnce();
   });
 
-  it('disables "+ Save current" when saveDisabled is true', () => {
+  it('disables "+ Save as new" when saveDisabled is true', () => {
     render(<PersistedPortfolioPanel {...defaultProps({ saveDisabled: true })} />);
     expect(screen.getByTestId('persist-portfolio-btn').disabled).toBe(true);
   });
 
-  it('enables "+ Save current" when saveDisabled is false', () => {
+  it('enables "+ Save as new" when saveDisabled is false', () => {
     render(<PersistedPortfolioPanel {...defaultProps({ saveDisabled: false })} />);
     expect(screen.getByTestId('persist-portfolio-btn').disabled).toBe(false);
   });

@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/tunnel.py
+# hypothesis_version: 6.151.12
+
+[1.0, 30.0, '--document-name', '--parameters', '--region', '--target', 'AWS_ACCESS_KEY_ID', 'AWS_REGION', 'SSM tunnel: ready', 'aws', 'host', 'localPortNumber', 'portNumber', 'replace', 'ssm', 'start-session']

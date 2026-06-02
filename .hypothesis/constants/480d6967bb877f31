@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/data/options/_strike_factor.py
+# hypothesis_version: 6.151.12
+
+['OPT_BTC', 'OPT_ETH', 'OPT_EURUSD', 'OPT_GOLD', 'OPT_JPYUSD', 'OPT_NASDAQ_100', 'OPT_SP_500', 'OPT_T_BOND', 'OPT_T_NOTE_10_Y', 'OPT_VIX']

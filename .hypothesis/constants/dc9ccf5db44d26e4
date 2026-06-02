@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/data.py
+# hypothesis_version: 6.151.12
+
+[500, '/api/data', '/collections', '/{collection}', 'Data provider filter', 'End date YYYY-MM-DD', 'Roll strategy', 'adjustment', 'asset_class', 'close', 'collection', 'collections', 'contracts', 'cycle', 'cycles', 'data', 'dates', 'exchange', 'front_month', 'high', 'items', 'limit', 'low', 'none', 'open', 'roll_dates', 'skip', 'strategy', 'symbol', 'total', 'volume']

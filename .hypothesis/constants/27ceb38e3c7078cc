@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/_options_materialise.py
+# hypothesis_version: 6.151.12
+
+['CME_TradeDate', '_single', 'bought', 'contract_id', 'date', 'delta', 'expiration', 'gamma', 'iv', 'mid', 'open_interest', 'root', 'sold', 'strike', 'theta', 'type', 'value', 'vega', 'volume']

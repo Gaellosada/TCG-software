@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/options.py
+# hypothesis_version: 6.151.12
+
+[0.0, 0.01, 0.05, 'C', 'P', 'computed', 'contract_data_ended', 'delta', 'exit_date', 'gamma', 'held_to_expiry', 'iv', 'missing', 'stored', 'theta', 'vega']

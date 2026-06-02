@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/engine/options/chain/_join.py
+# hypothesis_version: 6.151.12
+
+['BTC', 'FUT_', 'OPT_', 'OPT_BTC']

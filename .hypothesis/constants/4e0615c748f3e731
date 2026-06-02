@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/engine/options/selection/_match.py
+# hypothesis_version: 6.151.12
+
+[1e-09, 'no_chain_for_date', 'strike_not_in_chain']

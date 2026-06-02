@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/market.py
+# hypothesis_version: 6.151.12
+
+[1.0, 'difference', 'equity', 'front_month', 'future', 'index', 'none', 'ratio']

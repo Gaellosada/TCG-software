@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/simulation.py
+# hypothesis_version: 6.151.12
+
+[0.0005, 0.001, 100000.0, 'BUY', 'SELL', 'event_driven', 'fixed_fractional', 'vectorized', 'vol_target']

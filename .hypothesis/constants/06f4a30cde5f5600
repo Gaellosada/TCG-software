@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/persistence.py
+# hypothesis_version: 6.151.12
+
+[0.0, 128, 201, 204, 256, 400, 404, 409, 413, 500, 512, 4096, 1000000, '/api/persistence', '/baskets', '/baskets/{doc_id}', '/indicators', '/indicators/{doc_id}', '/portfolios', '/portfolios/{doc_id}', '/signals', '/signals/{doc_id}', '?', 'BasketLegIn', 'C', 'P', '^[A-Za-z0-9_\\-:.]+$', '_T', 'annually', 'before', 'continuous', 'cycle', 'daily', 'definition', 'delta', 'difference', 'equity', 'extra', 'forbid', 'front_month', 'future', 'gamma', 'id', 'index', 'inputs', 'instrument', 'iv', 'json', 'legs', 'mid', 'monthly', 'none', 'open_interest', 'option', 'option_stream', 'persistence', 'python', 'quarterly', 'ratio', 'rules', 'settings', 'spot', 'theta', 'type', 'utf-8', 'vega', 'volume', 'weekly', 'weight']

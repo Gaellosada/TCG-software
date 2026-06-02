@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/core/api/indicators.py
+# hypothesis_version: 6.151.12
+
+[422, 500, '/api/indicators', '/compute', '/progress/{task_id}', 'accepted_asset_types', 'adjustment', 'asset_type', 'by_delta', 'close', 'collection', 'continuous', 'cycle', 'data', 'dates', 'delta', 'detail', 'diagnostics', 'error_code', 'has_greeks', 'indicator', 'indicator_id', 'indicators', 'instrument_id', 'kind', 'label', 'option', 'option_stream', 'option_type', 'rollOffset', 'root', 'runtime', 'series', 'spot', 'strategy', 'stream', 'type', 'unavailable_streams', 'validation']

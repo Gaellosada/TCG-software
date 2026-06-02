@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/engine/options/roll/roller.py
+# hypothesis_version: 6.151.12
+
+['not_yet_due', 'phase_2_only', 'rolled_at_expiry']

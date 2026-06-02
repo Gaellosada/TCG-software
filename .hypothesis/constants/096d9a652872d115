@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/signal.py
+# hypothesis_version: 6.151.12
+
+[0.0, 'Block', 'C', 'CompareCondition', 'Condition', 'ConstantOperand', 'CrossCondition', 'InRangeCondition', 'IndicatorOperand', 'Input', 'InputInstrument', 'InstrumentBasket', 'InstrumentContinuous', 'InstrumentOperand', 'InstrumentSpot', 'Operand', 'OptionStreamLabel', 'P', 'RollingCondition', 'Signal', 'SignalRules', 'Trade', 'basket', 'close', 'constant', 'continuous', 'cross_above', 'cross_below', 'default', 'delta', 'difference', 'eq', 'front_month', 'gamma', 'ge', 'gt', 'in_range', 'indicator', 'instrument', 'iv', 'le', 'lt', 'mid', 'none', 'open_interest', 'option_stream', 'ratio', 'rolling_gt', 'rolling_lt', 'spot', 'theta', 'vega', 'volume']

@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/errors.py
+# hypothesis_version: 6.151.12
+
+['data_access_error', 'data_not_found', 'simulation_error', 'validation_error']

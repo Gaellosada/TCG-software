@@ -44,7 +44,7 @@ vi.mock('./PersistedPortfolioPanel', () => ({
           type="button"
           onClick={onSaveCurrent}
         >
-          + Save current
+          + Save as new
         </button>
         {portfolios.map((p) => (
           <div key={p.id}>
@@ -257,7 +257,7 @@ describe('<PortfolioPage> M8 — error message surfacing on SaveStatus', () => {
       await act(async () => { render(<PortfolioPage />); });
       await act(async () => {});
 
-      // Invoke the captured "+ Save current" callback directly. The
+      // Invoke the captured "+ Save as new" callback directly. The
       // ``handlePersistSave`` path is the simplest entry point that
       // triggers a one-shot error without needing a loaded portfolio.
       expect(capturedOnSaveCurrent).not.toBeNull();

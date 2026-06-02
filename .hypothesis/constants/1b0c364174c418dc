@@ -1,0 +1,4 @@
+# file: /home/gael/claude_workspace/trajectoire_cap/TCG-software/tcg/types/strategy.py
+# hypothesis_version: 6.151.12
+
+['archive', 'prod', 'trial', 'validation']
