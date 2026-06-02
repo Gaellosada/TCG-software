@@ -15,6 +15,7 @@ import pytest
 
 from tcg.core.config import load_config, load_tunnel_config
 from tcg.core.tunnel import TunnelConfig
+from tcg.types.config import MongoConfig
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,16 @@ class TestLoadTunnelConfig:
                 load_tunnel_config()
             assert "AWS_ACCESS_KEY_ID" in str(exc_info.value)
 
+    def test_invalid_port_raises(self):
+        with _patch_env({"LOCAL_PORT": "not-a-number"}):
+            with pytest.raises(ValueError, match="LOCAL_PORT"):
+                load_tunnel_config()
+
+    def test_port_out_of_range_raises(self):
+        with _patch_env({"LOCAL_PORT": "99999"}):
+            with pytest.raises(ValueError, match="LOCAL_PORT"):
+                load_tunnel_config()
+
 
 # ---------------------------------------------------------------------------
 # load_config — URI assembly
@@ -187,3 +198,30 @@ class TestWriteUriTunnelMode:
 
             with pytest.raises(ValueError, match="MONGO_APP_WRITE_URI"):
                 _read_write_uri()
+
+
+# ---------------------------------------------------------------------------
+# Repr redaction (security)
+# ---------------------------------------------------------------------------
+
+
+class TestReprRedaction:
+    def test_tunnel_config_hides_secrets(self):
+        with _patch_env():
+            cfg = load_tunnel_config()
+            r = repr(cfg)
+            assert "AKIAIOSFODNN7EXAMPLE" not in r
+            assert "wJalrXUtnFEMI" not in r
+            assert "***" in r
+            assert "eu-west-1" in r  # non-secret fields visible
+
+    def test_mongo_config_hides_password(self):
+        cfg = MongoConfig(uri="mongodb://user:secret@localhost:27017/db")
+        r = repr(cfg)
+        assert "secret" not in r
+        assert "***" in r
+
+    def test_mongo_config_no_password_safe(self):
+        cfg = MongoConfig(uri="mongodb://localhost:27017/db")
+        r = repr(cfg)
+        assert "localhost:27017" in r

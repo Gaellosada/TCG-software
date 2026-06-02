@@ -114,8 +114,8 @@ if (-not (Test-Path $envFile)) {
 $envContent = Get-Content $envFile -Raw
 
 # Check for valid configuration: either MONGO_URI or SSM tunnel enabled
-$hasMongo = $envContent -match 'MONGO_URI\s*=\s*\S+'
-$hasTunnel = $envContent -match 'SSM_TUNNEL_ENABLED\s*=\s*true'
+$hasMongo = $envContent -match '(?m)^MONGO_URI\s*=\s*\S+'
+$hasTunnel = $envContent -match '(?m)^SSM_TUNNEL_ENABLED\s*=\s*true'
 
 if (-not $hasMongo -and -not $hasTunnel) {
     Write-Fail "Your .env file needs either MONGO_URI or SSM_TUNNEL_ENABLED=true."

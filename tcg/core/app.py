@@ -58,8 +58,12 @@ async def lifespan(app: FastAPI):
 
     if tunnel_config.enabled:
         tunnel = SSMTunnel(tunnel_config)
-        await tunnel.start()
-        await tunnel.wait_until_ready()
+        try:
+            await tunnel.start()
+            await tunnel.wait_until_ready()
+        except Exception:
+            await tunnel.stop()
+            raise
         monitor_task = asyncio.create_task(tunnel.monitor())
 
     config = load_config()
@@ -229,12 +233,17 @@ async def _pymongo_error_handler(
     include the PyMongo exception message in the response body — it
     can leak topology / IPs / credential hints).
     """
-    # Log the real error server-side for ops; keep the response body
-    # sterile. ``%r`` so the exception type is recoverable from logs.
+    # Log the error type for ops — NOT the message, which can contain
+    # the Mongo URI (with embedded credentials) on connection failures.
     import logging
+    import re
 
+    sanitized = re.sub(r"://[^@]*@", "://***:***@", str(exc))
     logging.getLogger(__name__).warning(
-        "persistence unavailable: %r (path=%s)", exc, request.url.path
+        "persistence unavailable: %s: %s (path=%s)",
+        type(exc).__name__,
+        sanitized,
+        request.url.path,
     )
     return JSONResponse(
         status_code=503,

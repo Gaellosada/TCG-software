@@ -64,6 +64,17 @@ def load_tunnel_config() -> TunnelConfig:
             f"are not set: {', '.join(missing)}"
         )
 
+    # Validate local_port is a valid port number.
+    try:
+        port = int(values["local_port"])
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except (ValueError, KeyError):
+        raise ValueError(
+            f"LOCAL_PORT must be a number between 1 and 65535, "
+            f"got {values.get('local_port', '')!r}"
+        ) from None
+
     return TunnelConfig(enabled=True, **values)
 
 
