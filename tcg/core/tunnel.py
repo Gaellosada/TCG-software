@@ -22,6 +22,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -170,8 +171,14 @@ class SSMTunnel:
         This is more robust than parsing stdout/stderr for a ready marker
         because the Session Manager plugin's output format, buffering, and
         stream routing vary across versions and platforms.
+
+        When reusing an orphaned tunnel (``start`` returned early because
+        the port was already reachable), ``_process`` is None.  The port
+        check still succeeds immediately.
         """
-        if self._process is None:
+        if self._process is None and not self._port_reachable(
+            int(self._config.local_port)
+        ):
             raise RuntimeError("SSM tunnel: process not started")
 
         port = int(self._config.local_port)
@@ -208,12 +215,18 @@ class SSMTunnel:
         """Long-lived task: restart the tunnel on unexpected exit with backoff."""
         consecutive_failures = 0
         backoff = 1.0
+        port = int(self._config.local_port)
 
         while not self._stopped:
             await asyncio.sleep(1)
 
             if self._process is not None and self._process.poll() is None:
-                continue  # Still running
+                continue  # Still running — we own the process.
+
+            # Reuse path: we don't own a process but the port is still
+            # reachable (orphaned tunnel from a previous reload cycle).
+            if self._process is None and self._port_reachable(port):
+                continue
 
             # Process exited unexpectedly (or was never started after a
             # failed restart — _kill_process sets _process to None).
@@ -353,16 +366,20 @@ class SSMTunnel:
 
         # Outside the lock — terminate/wait can take time.
         if proc.poll() is None:
-            # Kill the entire process tree (aws + session-manager-plugin).
-            try:
-                subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    timeout=10,
-                )
-            except Exception:
-                # Fallback to basic kill if taskkill is unavailable.
-                proc.kill()
+            if sys.platform == "win32":
+                # Kill the entire process tree (aws + session-manager-plugin).
+                # proc.terminate() on Windows only kills the parent, orphaning
+                # the Session Manager plugin child.
+                try:
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                        capture_output=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    proc.kill()
+            else:
+                proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
