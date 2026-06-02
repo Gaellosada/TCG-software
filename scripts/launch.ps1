@@ -418,6 +418,44 @@ if ($portBackend -or $portFrontend) {
     Write-Ok "Old processes cleared"
 }
 
+# --- Tunnel port check (SSM mode only) ---
+# An orphaned session-manager-plugin.exe from a previous run can hold
+# the forwarded port indefinitely. Prompt the user before killing it.
+if ($hasTunnel) {
+    # Read LOCAL_PORT from .env; default 27017.
+    $tunnelPort = 27017
+    if ($envContent -match '(?m)^LOCAL_PORT\s*=\s*(\d+)') {
+        $tunnelPort = [int]$Matches[1]
+    }
+    $portTunnel = Get-NetTCPConnection -LocalPort $tunnelPort -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' } | Select-Object -First 1
+    if ($portTunnel) {
+        $tunnelProc = Get-Process -Id $portTunnel.OwningProcess -ErrorAction SilentlyContinue
+        $tunnelProcName = if ($tunnelProc) { $tunnelProc.Name } else { "unknown" }
+        Write-Warn "SSM tunnel port $tunnelPort is already in use by '$tunnelProcName' (PID $($portTunnel.OwningProcess))"
+        Write-Host ""
+        Write-Host "  This is likely an orphaned session-manager-plugin from a previous run." -ForegroundColor Yellow
+        Write-Host ""
+        $answer = Read-Host "  Kill it? (y/n)"
+        if ($answer -match '^[Yy]') {
+            Write-Info "Killing PID $($portTunnel.OwningProcess)..."
+            & taskkill /T /F /PID $portTunnel.OwningProcess 2>$null | Out-Null
+            Start-Sleep -Seconds 2
+            # Verify it's gone.
+            $recheck = Get-NetTCPConnection -LocalPort $tunnelPort -ErrorAction SilentlyContinue |
+                Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' }
+            if ($recheck) {
+                Write-Fail "Port $tunnelPort is still in use. Please kill the process manually and retry."
+                exit 1
+            }
+            Write-Ok "Tunnel port $tunnelPort freed"
+        } else {
+            Write-Fail "Cannot start SSM tunnel while port $tunnelPort is occupied. Aborting."
+            exit 1
+        }
+    }
+}
+
 # Track child processes for cleanup.
 $script:backendProcess = $null
 $script:frontendProcess = $null
