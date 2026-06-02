@@ -5,6 +5,8 @@
 
 $ErrorActionPreference = "Continue"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$BackendPort  = 8000
+$FrontendPort = 5173
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,10 +39,15 @@ function Write-Warn {
 }
 
 function Refresh-Path {
-    # Reload PATH from the registry so newly-installed tools are visible.
+    # Reload PATH from the registry so newly-installed tools are visible,
+    # while preserving any process-level PATH entries (conda, venvs, etc.).
+    $currentProcess = $env:Path
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = "$machinePath;$userPath"
+    # Merge and deduplicate: registry paths first, then existing process paths.
+    $allPaths = ("$machinePath;$userPath;$currentProcess") -split ";" |
+        Where-Object { $_ -ne "" } | Select-Object -Unique
+    $env:Path = $allPaths -join ";"
 }
 
 function Get-PythonCmd {
@@ -55,7 +62,7 @@ function Get-PythonCmd {
                     return $cmd
                 }
             }
-        } catch { }
+        } catch { Write-Verbose "Python candidate '$cmd' failed: $_" }
     }
     return $null
 }
@@ -64,7 +71,7 @@ function Get-NodeMajor {
     try {
         $ver = & node --version 2>&1
         if ($ver -match "v(\d+)") { return [int]$Matches[1] }
-    } catch { }
+    } catch { Write-Verbose "Node.js check failed: $_" }
     return 0
 }
 
@@ -104,6 +111,14 @@ if (-not (Test-Path $envFile)) {
     exit 1
 }
 
+$envContent = Get-Content $envFile -Raw
+if ($envContent -notmatch 'MONGO_URI\s*=\s*\S+') {
+    Write-Fail "Your .env file does not contain a MONGO_URI value."
+    Write-Host "  Edit '$envFile' and set MONGO_URI to your MongoDB connection string." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+
 Write-Ok "Configuration file found"
 
 # ---------------------------------------------------------------------------
@@ -117,11 +132,11 @@ $pythonCmd = Get-PythonCmd
 if (-not $pythonCmd) {
     Write-Warn "Python 3.12+ not found. Installing via winget..."
     try {
-        winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements
+        winget install --id Python.Python.3.12 --exact --source winget --accept-package-agreements --accept-source-agreements
         Refresh-Path
         $pythonCmd = Get-PythonCmd
     } catch {
-        # winget itself may not be available
+        Write-Warn "Auto-install failed: $_"
     }
 
     if (-not $pythonCmd) {
@@ -151,10 +166,10 @@ $nodeMajor = Get-NodeMajor
 if ($nodeMajor -lt 18) {
     Write-Warn "Node.js 18+ not found. Installing via winget..."
     try {
-        winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
+        winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
         Refresh-Path
         $nodeMajor = Get-NodeMajor
-    } catch { }
+    } catch { Write-Warn "Auto-install failed: $_" }
 
     if ($nodeMajor -lt 18) {
         Write-Fail "Could not install Node.js automatically."
@@ -206,9 +221,12 @@ if ($freshVenv -or -not (Test-Path $depsMarker)) {
     Write-Info "This may take a minute on first run..."
 
     Push-Location $ProjectRoot
-    & $venvPip install -e . 2>&1 | ForEach-Object { Write-Info "$_" }
-    $pipExit = $LASTEXITCODE
-    Pop-Location
+    try {
+        & $venvPip install -e . 2>&1 | ForEach-Object { Write-Info "$_" }
+        $pipExit = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
 
     if ($pipExit -ne 0) {
         Write-Fail "Failed to install Python dependencies. See the output above for details."
@@ -233,11 +251,16 @@ $nodeModules = Join-Path $frontendDir "node_modules"
 if (-not (Test-Path $nodeModules)) {
     Write-Info "Installing npm packages (first run)..."
     Push-Location $frontendDir
-    # Use npm.cmd explicitly -- PowerShell's npm.ps1 shim can mangle arguments.
-    & cmd.exe /c "npm install" 2>&1 | ForEach-Object { Write-Info $_ }
-    Pop-Location
+    try {
+        # Use cmd.exe /c -- PowerShell's npm.ps1 shim can mangle arguments.
+        # Pipe stderr into stdout inside cmd to preserve $LASTEXITCODE across the pipeline.
+        & cmd.exe /c "npm install 2>&1"
+        $npmExit = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($npmExit -ne 0) {
         Write-Fail "npm install failed. Check the output above."
         exit 1
     }
@@ -253,25 +276,36 @@ if (-not (Test-Path $nodeModules)) {
 Write-Section "Starting application"
 
 # Check if ports are already in use (e.g. leftover from a previous run).
-$port8000 = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -First 1
-$port5173 = Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | Select-Object -First 1
+$portBackend  = Get-NetTCPConnection -LocalPort $BackendPort -ErrorAction SilentlyContinue | Select-Object -First 1
+$portFrontend = Get-NetTCPConnection -LocalPort $FrontendPort -ErrorAction SilentlyContinue | Select-Object -First 1
 
-if ($port8000 -or $port5173) {
+# Expected process names for each port -- only auto-kill these, warn on anything else.
+$backendExpected  = @("python", "python3", "pythonw", "uvicorn")
+$frontendExpected = @("node", "vite")
+
+function Stop-PortProcess {
+    param([object]$Conn, [int]$Port, [string[]]$Expected)
+    $proc = Get-Process -Id $Conn.OwningProcess -ErrorAction SilentlyContinue
+    if (-not $proc) { return }
+    if ($proc.Name -in $Expected) {
+        Write-Info "Killing leftover $($proc.Name) (PID $($proc.Id)) on port $Port"
+        & taskkill /T /F /PID $proc.Id 2>$null | Out-Null
+    } else {
+        Write-Warn "Port $Port is used by '$($proc.Name)' (PID $($proc.Id)) -- not a TCG process. Skipping."
+    }
+}
+
+if ($portBackend -or $portFrontend) {
     $occupied = @()
-    if ($port8000) { $occupied += "8000 (backend, PID $($port8000.OwningProcess))" }
-    if ($port5173) { $occupied += "5173 (frontend, PID $($port5173.OwningProcess))" }
+    if ($portBackend)  { $occupied += "$BackendPort (backend, PID $($portBackend.OwningProcess))" }
+    if ($portFrontend) { $occupied += "$FrontendPort (frontend, PID $($portFrontend.OwningProcess))" }
     Write-Warn "Port(s) already in use: $($occupied -join ', ')"
     Write-Host ""
     Write-Host "  This usually means a previous session was not shut down cleanly." -ForegroundColor Yellow
-    Write-Host "  The launcher will kill the old processes and continue." -ForegroundColor Yellow
     Write-Host ""
 
-    if ($port8000) {
-        & taskkill /T /F /PID $port8000.OwningProcess 2>$null | Out-Null
-    }
-    if ($port5173) {
-        & taskkill /T /F /PID $port5173.OwningProcess 2>$null | Out-Null
-    }
+    if ($portBackend)  { Stop-PortProcess $portBackend  $BackendPort  $backendExpected }
+    if ($portFrontend) { Stop-PortProcess $portFrontend $FrontendPort $frontendExpected }
     # Brief pause for ports to release.
     Start-Sleep -Seconds 2
     Write-Ok "Old processes cleared"
@@ -311,11 +345,15 @@ $null = [Console]::add_CancelKeyPress({
     $script:exitRequested = $true
 })
 
+# Wrap the entire startup + run phase in try/finally so Ctrl+C during startup
+# still triggers Stop-App cleanup (fixes race where handler fires before main loop).
+try {
+
 # --- Backend ---
-Write-Info "Starting backend server (port 8000)..."
+Write-Info "Starting backend server (port $BackendPort)..."
 
 $backendLog = Join-Path $script:logsDir "backend.log"
-$backendArgs = "-m uvicorn tcg.core.app:app --port 8000"
+$backendArgs = "-m uvicorn tcg.core.app:app --port $BackendPort --reload"
 $script:backendProcess = Start-Process -FilePath $venvPython `
     -ArgumentList $backendArgs `
     -WorkingDirectory $ProjectRoot `
@@ -325,7 +363,7 @@ $script:backendProcess = Start-Process -FilePath $venvPython `
     -PassThru
 
 # --- Frontend ---
-Write-Info "Starting frontend dev server (port 5173)..."
+Write-Info "Starting frontend dev server (port $FrontendPort)..."
 
 # Run vite directly via its bin script -- avoids PATH issues with npm+Start-Process.
 $viteCmd = Join-Path $frontendDir "node_modules\.bin\vite.cmd"
@@ -365,7 +403,7 @@ for ($i = 0; $i -lt 50; $i++) {
         Write-Host "  Common causes:" -ForegroundColor Yellow
         Write-Host "    - Wrong MONGO_URI in .env (check your connection string)" -ForegroundColor White
         Write-Host "    - MongoDB server is not running or unreachable" -ForegroundColor White
-        Write-Host "    - Port 8000 is already in use by another program" -ForegroundColor White
+        Write-Host "    - Port $BackendPort is already in use by another program" -ForegroundColor White
         Write-Host ""
         Write-Host "  Full logs at: $($script:logsDir)" -ForegroundColor Gray
         Write-Host ""
@@ -381,7 +419,7 @@ for ($i = 0; $i -lt 50; $i++) {
     try {
         # TCP check -- works on all PowerShell versions (Invoke-WebRequest throws on 404 in PS 5.1).
         $tcp = New-Object System.Net.Sockets.TcpClient
-        $tcp.Connect("127.0.0.1", 8000)
+        $tcp.Connect("127.0.0.1", $BackendPort)
         $ready = $true
         break
     } catch {
@@ -399,13 +437,33 @@ if ($ready) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 10 -- Open browser
+# Step 10 -- Wait for frontend, then open browser
 # ---------------------------------------------------------------------------
+
+Write-Info "Waiting for frontend to be ready..."
+$frontendReady = $false
+for ($i = 0; $i -lt 25; $i++) {
+    $tcp = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect("127.0.0.1", $FrontendPort)
+        $frontendReady = $true
+        break
+    } catch { } finally {
+        if ($tcp) { $tcp.Dispose() }
+    }
+    Start-Sleep -Milliseconds 200
+}
 
 Write-Section "Ready!"
 Write-Host ""
-Write-Host "  Opening http://localhost:5173 in your browser..." -ForegroundColor White
-Start-Process "http://localhost:5173"
+if ($frontendReady) {
+    Write-Host "  Opening http://localhost:$FrontendPort in your browser..." -ForegroundColor White
+} else {
+    Write-Warn "Frontend did not respond within 5 seconds (it may still be starting)"
+    Write-Host "  Opening browser anyway..." -ForegroundColor Gray
+}
+Start-Process "http://localhost:$FrontendPort"
 
 # ---------------------------------------------------------------------------
 # Step 11 -- Wait for exit
@@ -416,7 +474,6 @@ Write-Host "  The app is running. Press Ctrl+C to stop." -ForegroundColor Yellow
 Write-Host "  Logs are in: $($script:logsDir)" -ForegroundColor Gray
 Write-Host ""
 
-try {
     while (-not $script:exitRequested) {
         # Detect if both processes died unexpectedly.
         if ($script:backendProcess.HasExited -and $script:frontendProcess.HasExited) {
@@ -441,6 +498,7 @@ try {
 
         Start-Sleep -Milliseconds 500
     }
+
 } finally {
     Stop-App
     exit 0
