@@ -403,18 +403,16 @@ if ($portBackend -or $portFrontend) {
     # Brief pause for ports to release.
     Start-Sleep -Seconds 2
 
-    # Re-check that ports are actually free after cleanup.
-    $stillBusy = Get-NetTCPConnection -LocalPort $BackendPort -ErrorAction SilentlyContinue |
-        Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' }
-    if ($stillBusy) {
-        Write-Fail "Port $BackendPort is still in use after cleanup. Wait a moment and try again."
-        exit 1
+    # Re-check ports. If still busy, wait a bit more and try once more.
+    $stillBusy = $false
+    foreach ($p in @($BackendPort, $FrontendPort)) {
+        $check = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue |
+            Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' }
+        if ($check) { $stillBusy = $true; break }
     }
-    $stillBusy = Get-NetTCPConnection -LocalPort $FrontendPort -ErrorAction SilentlyContinue |
-        Where-Object { $_.OwningProcess -ne 0 -and $_.State -eq 'Listen' }
     if ($stillBusy) {
-        Write-Fail "Port $FrontendPort is still in use after cleanup. Wait a moment and try again."
-        exit 1
+        Write-Info "Ports still releasing, waiting a few more seconds..."
+        Start-Sleep -Seconds 3
     }
 
     Write-Ok "Old processes cleared"

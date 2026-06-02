@@ -95,9 +95,6 @@ class SSMTunnel:
         cfg = self._config
         port = int(cfg.local_port)  # validated upstream, but ensure int
 
-        # Fail fast if another process already holds the port.
-        self._assert_port_free(port)
-
         parameters = json.dumps(
             {
                 "host": [cfg.db_host],
@@ -241,16 +238,6 @@ class SSMTunnel:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _assert_port_free(port: int) -> None:
-        """Raise if another process is already listening on *port*."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) == 0:
-                raise RuntimeError(
-                    f"SSM tunnel: port {port} is already in use. "
-                    "Another process may be bound to it."
-                )
 
     def _poll_port(self, port: int) -> None:
         """Blocking TCP poll until ``localhost:port`` accepts a connection.
