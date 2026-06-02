@@ -74,8 +74,27 @@ class SSMTunnel:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Spawn the ``aws ssm start-session`` process."""
+        """Spawn the ``aws ssm start-session`` process.
+
+        When uvicorn ``--reload`` restarts the server, a tunnel from the
+        previous lifespan may still be alive (orphaned because the reloader
+        kills the child process before lifespan shutdown completes).  If the
+        forwarded port is already reachable, we skip spawning a new tunnel
+        and let ``wait_until_ready`` confirm connectivity.
+        """
         self._stopped = False
+
+        cfg = self._config
+        port = int(cfg.local_port)  # validated upstream, but ensure int
+
+        # If the port is already reachable (e.g. orphaned tunnel from a
+        # uvicorn --reload cycle), reuse it instead of failing.
+        if self._port_reachable(port):
+            logger.info(
+                "SSM tunnel: port %d already reachable — reusing existing tunnel",
+                port,
+            )
+            return
 
         # Kill any prior process before spawning a new one.
         self._kill_process()
@@ -91,9 +110,6 @@ class SSMTunnel:
                 "SSM tunnel: 'aws' CLI not found in PATH. "
                 "Install AWS CLI v2: https://aws.amazon.com/cli/"
             )
-
-        cfg = self._config
-        port = int(cfg.local_port)  # validated upstream, but ensure int
 
         parameters = json.dumps(
             {
@@ -238,6 +254,15 @@ class SSMTunnel:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _port_reachable(port: int) -> bool:
+        """Quick one-shot TCP check — True if *something* is listening."""
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return True
+        except OSError:
+            return False
 
     def _poll_port(self, port: int) -> None:
         """Blocking TCP poll until ``localhost:port`` accepts a connection.
