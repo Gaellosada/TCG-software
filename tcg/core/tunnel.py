@@ -294,7 +294,7 @@ class SSMTunnel:
                     if (
                         len(parts) >= 5
                         and "LISTENING" in parts
-                        and f":{port}" in parts[1]
+                        and parts[1].rsplit(":", 1)[-1] == str(port)
                     ):
                         pid = parts[-1]
                         logger.warning(

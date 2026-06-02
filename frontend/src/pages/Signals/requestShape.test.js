@@ -121,6 +121,39 @@ describe('computeSignal request body shape (v4)', () => {
     expect(weights).toEqual([100, -100]);
   });
 
+  it('cleans seriesMap: null entries become placeholders, filled entries lose `type`', () => {
+    const signal = {
+      id: 's1', name: 'S1', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 10,
+          conditions: [
+            { op: 'gt',
+              lhs: { kind: 'indicator', indicator_id: 'ind-1', input_id: 'X', output: 'default' },
+              rhs: { kind: 'constant', value: 0 } },
+          ],
+        }],
+        exits: [],
+      },
+    };
+    const indicators = [
+      {
+        id: 'ind-1', name: 'Ind', code: 'CODE', params: {},
+        seriesMap: {
+          price: null,
+          close: { collection: 'INDEX', instrument_id: 'SPX', type: 'spot' },
+        },
+      },
+    ];
+    const { body } = buildComputeRequestBody(signal, indicators);
+    const ind = body.indicators.find((i) => i.id === 'ind-1');
+    // Null entry gets placeholder so backend sees the key in series_labels.
+    expect(ind.seriesMap.price).toEqual({ collection: '_', instrument_id: '_' });
+    // Filled entry keeps collection + instrument_id but `type` is stripped.
+    expect(ind.seriesMap.close).toEqual({ collection: 'INDEX', instrument_id: 'SPX' });
+    expect(ind.seriesMap.close.type).toBeUndefined();
+  });
+
   it('ships indicator specs as an array with {id,name,code,params,seriesMap}', () => {
     const signal = {
       id: 's1', name: 'S1', inputs: V4_INPUTS,

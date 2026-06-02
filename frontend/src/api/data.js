@@ -10,6 +10,8 @@ async function fetchClassified(path, options = {}) {
   try {
     return await fetchApi(path, options);
   } catch (err) {
+    // Let AbortError propagate unwrapped — callers check signal.aborted.
+    if (err && err.name === 'AbortError') throw err;
     // ``fetchApi`` itself throws an ``ApiError`` we constructed in client.js
     // where ``errorType === 'network_error'`` for the fetch-threw case.
     // For HTTP failures we don't have the raw Response anymore — synthesize
