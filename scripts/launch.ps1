@@ -96,10 +96,13 @@ Write-Host ""
 $BackendPort  = Get-FreePort
 $FrontendPort = Get-FreePort
 
-Write-Host ""
-Write-Host "  Ports allocated:" -ForegroundColor Gray
-Write-Host "    Backend  -> http://localhost:$BackendPort" -ForegroundColor Green
-Write-Host "    Frontend -> http://localhost:$FrontendPort" -ForegroundColor Green
+if (-not $BackendPort -or -not $FrontendPort) {
+    Write-Fail "Could not allocate free ports. Check firewall or network settings."
+    exit 1
+}
+
+Write-Ok "Backend  -> http://localhost:$BackendPort"
+Write-Ok "Frontend -> http://localhost:$FrontendPort"
 
 # ---------------------------------------------------------------------------
 # Step 1 -- Check .env
@@ -553,8 +556,8 @@ if (-not (Test-Path $viteCmd)) {
     & taskkill /T /F /PID $script:backendProcess.Id 2>$null | Out-Null
     exit 1
 }
-$env:VITE_BACKEND_PORT = $BackendPort
-$env:VITE_FRONTEND_PORT = $FrontendPort
+$env:TCG_BACKEND_PORT = $BackendPort
+$env:TCG_FRONTEND_PORT = $FrontendPort
 try {
     $script:frontendProcess = Start-Process -FilePath $viteCmd `
         -WorkingDirectory $frontendDir `
