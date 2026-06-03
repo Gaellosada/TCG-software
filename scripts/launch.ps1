@@ -5,9 +5,6 @@
 
 $ErrorActionPreference = "Continue"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$BackendPort  = 8000
-$FrontendPort = 5173
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -54,6 +51,14 @@ function Has-Winget {
     return [bool](Get-Command winget -ErrorAction SilentlyContinue)
 }
 
+function Get-FreePort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $port = $listener.LocalEndpoint.Port
+    $listener.Stop()
+    return $port
+}
+
 function Get-PythonCmd {
     # Returns the first working Python command (>= 3.12), or $null.
     foreach ($cmd in @("python", "python3", "py")) {
@@ -87,6 +92,14 @@ Write-Host ""
 Write-Host "  TCG Software Launcher" -ForegroundColor White -BackgroundColor DarkBlue
 Write-Host "  Trading platform starting up..." -ForegroundColor DarkCyan
 Write-Host ""
+
+$BackendPort  = Get-FreePort
+$FrontendPort = Get-FreePort
+
+Write-Host ""
+Write-Host "  Ports allocated:" -ForegroundColor Gray
+Write-Host "    Backend  -> http://localhost:$BackendPort" -ForegroundColor Green
+Write-Host "    Frontend -> http://localhost:$FrontendPort" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # Step 1 -- Check .env
@@ -516,6 +529,7 @@ Write-Info "Starting backend server (port $BackendPort)..."
 
 $backendLog = Join-Path $script:logsDir "backend.log"
 $backendArgs = "-m uvicorn tcg.core.app:app --port $BackendPort"
+$env:TCG_CORS_ORIGINS = "http://localhost:$FrontendPort"
 try {
     $script:backendProcess = Start-Process -FilePath $venvPython `
         -ArgumentList $backendArgs `
@@ -539,6 +553,8 @@ if (-not (Test-Path $viteCmd)) {
     & taskkill /T /F /PID $script:backendProcess.Id 2>$null | Out-Null
     exit 1
 }
+$env:VITE_BACKEND_PORT = $BackendPort
+$env:VITE_FRONTEND_PORT = $FrontendPort
 try {
     $script:frontendProcess = Start-Process -FilePath $viteCmd `
         -WorkingDirectory $frontendDir `
