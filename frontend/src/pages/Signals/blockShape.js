@@ -33,7 +33,14 @@
 // ``target_entry_block_name`` to resolve against the signal's entry blocks.
 
 import { operandSlots } from './conditionOps';
-import { newBlockId, MAX_ABS_WEIGHT } from './storage';
+import { newBlockId, MAX_ABS_WEIGHT, coerceResetCount } from './storage';
+
+// Re-export the canonical reset-count coercion so UI/validation callers can
+// import it from blockShape (the validation hub) without reaching into
+// storage directly. Single source of truth lives in storage.js — keeping it
+// there avoids a storage⇄blockShape import cycle (blockShape already depends
+// on storage; the reverse edge would be circular).
+export { coerceResetCount };
 
 /**
  * Build a brand-new empty block.

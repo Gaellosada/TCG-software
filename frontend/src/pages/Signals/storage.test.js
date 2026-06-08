@@ -10,8 +10,11 @@ import {
   nextInputId,
   newBlockId,
   cascadeDeleteEntry,
+  coerceResetCount,
   __resetIncompatibleVersionWarnedForTests,
 } from './storage';
+import { coerceResetCount as coerceFromBlockShape } from './blockShape';
+import { __coerceResetCountForTests as coerceFromRequest } from './requestBuilder';
 import { SIGNALS_STORAGE_KEY } from './storageKeys';
 
 function createStorageStub() {
@@ -985,6 +988,108 @@ describe('Signals storage — per-block requires_reset_block_id (v5)', () => {
   });
 });
 
+// coerceResetCount — the ONE shared int≥1 coercion used by storage,
+// requestBuilder, and BlockHeader. Pinned here (its home module) plus a
+// cross-module identity check so the three call sites can never drift the
+// way they did before (Number(x) vs parseFloat(x) diverging on "3px"/"" ).
+describe('coerceResetCount — shared reset-count coercion (int ≥ 1, default 1)', () => {
+  // raw input -> expected. invalid / non-finite / < 1 -> 1; valid -> floor.
+  const CASES = [
+    ['3px', 1], // Number('3px') === NaN -> 1 (parseFloat would have said 3 — the OLD divergence)
+    ['', 1], // Number('') === 0 -> <1 -> 1 (parseFloat would have said NaN -> also 1, but via a different path)
+    [2.9, 2], // floor
+    [0, 1], // <1
+    [-1, 1], // <1
+    [Number.NaN, 1], // non-finite
+    [3, 3], // valid integer
+    ['2', 2], // numeric string
+  ];
+
+  it.each(CASES)('coerces %o -> %i', (raw, expected) => {
+    expect(coerceResetCount(raw)).toBe(expected);
+  });
+
+  it.each(CASES)('storage / requestBuilder / blockShape agree on %o', (raw) => {
+    const fromStorage = coerceResetCount(raw);
+    expect(coerceFromBlockShape(raw)).toBe(fromStorage);
+    expect(coerceFromRequest(raw)).toBe(fromStorage);
+  });
+
+  it('all three references point at the SAME function object', () => {
+    // Strongest possible guarantee they cannot diverge: identity, not just
+    // value-equality. One helper, imported everywhere.
+    expect(coerceFromBlockShape).toBe(coerceResetCount);
+    expect(coerceFromRequest).toBe(coerceResetCount);
+  });
+});
+
+// Orphan-count-on-store: a block with NO reset bound must never carry a
+// stored count other than 1. sanitiseBlock forces it so a stale count
+// (e.g. left over after the user cleared the binding) can't ride in storage.
+describe('Signals storage — orphan requires_reset_count is forced to 1', () => {
+  it('kills an orphan count on an entry block (no requires_reset_block_id)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [{
+            id: 'e1', input_id: 'X', weight: 10, name: '', conditions: [],
+            enabled: true, description: '',
+            requires_reset_block_id: null, // no binding…
+            requires_reset_count: 5, // …but a stored count -> orphan
+          }],
+          exits: [],
+          resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    expect(loadState().signals[0].rules.entries[0].requires_reset_count).toBe(1);
+  });
+
+  it('kills an orphan count on an exit block (no requires_reset_block_id)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [],
+          exits: [{
+            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            conditions: [], enabled: true, description: '',
+            requires_reset_block_id: null, // no binding…
+            requires_reset_count: 5, // …but a stored count -> orphan
+          }],
+          resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    expect(loadState().signals[0].rules.exits[0].requires_reset_count).toBe(1);
+  });
+
+  it('keeps the count when a reset IS bound (not an orphan)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [{
+            id: 'e1', input_id: 'X', weight: 10, name: '', conditions: [],
+            enabled: true, description: '',
+            requires_reset_block_id: 'r1', requires_reset_count: 5,
+          }],
+          exits: [],
+          resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    expect(loadState().signals[0].rules.entries[0].requires_reset_count).toBe(5);
+  });
+});
+
 // requires_reset_count — sanitiser coerces to an integer ≥ 1 (default 1
 // when absent/invalid) on entries+exits, round-trips a valid count, and
 // strips the field from reset blocks. Crucially: WITHOUT a sanitiser
@@ -1066,12 +1171,15 @@ describe('Signals storage — per-block requires_reset_count (v5)', () => {
       signals: [{
         id: 's1', name: 'S1', inputs: [],
         rules: {
+          // Each carries a reset binding so the COERCION path is exercised
+          // (an unbound block would be forced to 1 by the orphan-kill rule,
+          // masking the floor/clamp behavior under test).
           entries: [
-            { id: 'a', input_id: '', weight: 0, conditions: [], requires_reset_count: 0 },
-            { id: 'b', input_id: '', weight: 0, conditions: [], requires_reset_count: -3 },
-            { id: 'c', input_id: '', weight: 0, conditions: [], requires_reset_count: 2.7 },
-            { id: 'd', input_id: '', weight: 0, conditions: [], requires_reset_count: 'nope' },
-            { id: 'e', input_id: '', weight: 0, conditions: [], requires_reset_count: Number.NaN },
+            { id: 'a', input_id: '', weight: 0, conditions: [], requires_reset_block_id: 'r1', requires_reset_count: 0 },
+            { id: 'b', input_id: '', weight: 0, conditions: [], requires_reset_block_id: 'r1', requires_reset_count: -3 },
+            { id: 'c', input_id: '', weight: 0, conditions: [], requires_reset_block_id: 'r1', requires_reset_count: 2.7 },
+            { id: 'd', input_id: '', weight: 0, conditions: [], requires_reset_block_id: 'r1', requires_reset_count: 'nope' },
+            { id: 'e', input_id: '', weight: 0, conditions: [], requires_reset_block_id: 'r1', requires_reset_count: Number.NaN },
           ],
           exits: [],
           resets: [],

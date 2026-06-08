@@ -200,21 +200,38 @@ function sanitiseRequiresResetBlockId(raw) {
 }
 
 /**
- * Sanitise a per-block reset-count value.
- *   - Coerce to a number, floor to an integer.
+ * Coerce a raw per-block reset-count to a canonical integer ≥ 1.
+ *   - Coerce to a number (numbers pass through; everything else via Number).
+ *   - If the result is finite and ≥ 1, floor it; otherwise → 1.
  *   - Anything non-finite or < 1 → 1 (the single-fire default == current
  *     re-arm behavior).
+ *
+ * THE single source of truth for reset-count coercion. ``requestBuilder.js``
+ * (wire) and ``BlockHeader.jsx`` (UI commit/display) import this exact
+ * function so all three call sites are byte-identical — guarding against the
+ * old ``Number(x)`` vs ``parseFloat(x)`` divergence (e.g. "3px": Number→NaN→1
+ * vs parseFloat→3; "": Number→0→1 vs parseFloat→NaN→1).
+ *
+ * Lives here (not in blockShape.js) to avoid a circular import:
+ * ``blockShape.js`` already imports from ``storage.js`` and would form a
+ * cycle if storage imported back from it. ``blockShape.js`` and
+ * ``requestBuilder.js`` already depend on ``storage.js``, so this adds no new
+ * edge. It also sits beside its sibling ``sanitiseWeight`` (same domain).
+ *
  * Field-local only; the count is meaningful solely when
- * requires_reset_block_id is set (the UI hides it otherwise) but we always
- * store a valid integer so the wire payload and the engine see a clean ≥ 1.
- * No SCHEMA_VERSION bump: defaulting missing values to 1 gives forward-
- * compat for existing v5 signals that predate the field.
+ * requires_reset_block_id is set. The sanitiser/normaliser force it to 1 when
+ * no reset is bound (see sanitiseBlock / normaliseBlock) so an orphan count
+ * can never ride in storage or on the wire. No SCHEMA_VERSION bump:
+ * defaulting missing values to 1 gives forward-compat for existing v5
+ * signals that predate the field.
+ *
+ * @param {*} raw
+ * @returns {number} integer ≥ 1
  */
-function sanitiseResetCount(raw) {
+export function coerceResetCount(raw) {
   const n = typeof raw === 'number' ? raw : Number(raw);
-  if (!Number.isFinite(n)) return 1;
-  const i = Math.floor(n);
-  return i < 1 ? 1 : i;
+  if (Number.isFinite(n) && n >= 1) return Math.floor(n);
+  return 1;
 }
 
 function sanitiseBlock(raw, section) {
@@ -238,6 +255,7 @@ function sanitiseBlock(raw, section) {
     // payloads may include these fields; strip them.
     // Legacy target_entry_block_id is also stripped — exits now
     // reference entries by their editable name string.
+    const exitReset = sanitiseRequiresResetBlockId(raw.requires_reset_block_id);
     return {
       id,
       name,
@@ -247,12 +265,16 @@ function sanitiseBlock(raw, section) {
       target_entry_block_name: typeof raw.target_entry_block_name === 'string'
         ? raw.target_entry_block_name
         : '',
-      requires_reset_block_id: sanitiseRequiresResetBlockId(raw.requires_reset_block_id),
-      requires_reset_count: sanitiseResetCount(raw.requires_reset_count),
+      requires_reset_block_id: exitReset,
+      // Orphan-kill: a count only means something when a reset is bound.
+      // No binding → force the single-fire default so a stale count can't
+      // ride in storage.
+      requires_reset_count: exitReset ? coerceResetCount(raw.requires_reset_count) : 1,
     };
   }
   const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
   const weight = sanitiseWeight(raw.weight);
+  const entryReset = sanitiseRequiresResetBlockId(raw.requires_reset_block_id);
   return {
     id,
     input_id,
@@ -261,8 +283,9 @@ function sanitiseBlock(raw, section) {
     conditions,
     enabled,
     description,
-    requires_reset_block_id: sanitiseRequiresResetBlockId(raw.requires_reset_block_id),
-    requires_reset_count: sanitiseResetCount(raw.requires_reset_count),
+    requires_reset_block_id: entryReset,
+    // Orphan-kill (see exits above).
+    requires_reset_count: entryReset ? coerceResetCount(raw.requires_reset_count) : 1,
   };
 }
 

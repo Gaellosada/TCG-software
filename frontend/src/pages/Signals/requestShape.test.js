@@ -585,6 +585,9 @@ describe('normaliseBlock — requires_reset_count whitelist', () => {
       rules: {
         entries: [{
           id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [],
+          // Bind a reset so the COERCION (floor) path is exercised — an
+          // unbound block would be forced to 1 by the orphan-kill rule.
+          requires_reset_block_id: 'reset-uuid-42',
           requires_reset_count: 2.9,
         }],
         exits: [],
@@ -612,5 +615,47 @@ describe('normaliseBlock — requires_reset_count whitelist', () => {
     };
     const { body } = buildComputeRequestBody(signal, []);
     expect('requires_reset_count' in body.spec.rules.resets[0]).toBe(false);
+  });
+});
+
+// Orphan-count-on-wire: a block with NO reset bound must emit
+// requires_reset_count = 1, regardless of any stale stored count. The wire
+// binding (requires_reset_block_id) and the wire count must agree — a count
+// only has meaning when a reset is bound.
+describe('normaliseBlock — orphan requires_reset_count is forced to 1 on the wire', () => {
+  it('forces the count to 1 on an unbound entry block (stored count 5)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [],
+          requires_reset_block_id: null, // no binding
+          requires_reset_count: 5, // orphan — must not ride the wire
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].requires_reset_block_id).toBe(null);
+    expect(body.spec.rules.entries[0].requires_reset_count).toBe(1);
+  });
+
+  it('forces the count to 1 on an unbound exit block (stored count 5)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [{
+          id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [],
+          requires_reset_block_id: null, // no binding
+          requires_reset_count: 5, // orphan — must not ride the wire
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.exits[0].requires_reset_block_id).toBe(null);
+    expect(body.spec.rules.exits[0].requires_reset_count).toBe(1);
   });
 });

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import ConfirmDialog from '../../components/ConfirmDialog';
-import { isInputConfigured } from './blockShape';
+import { isInputConfigured, coerceResetCount } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
@@ -47,10 +47,8 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
 
   // Committed reset count — integer ≥ 1; default 1 when absent/invalid so
   // a freshly-bound block (no stored count yet) shows the single-fire value.
-  const committedCount = Number.isInteger(block.requires_reset_count)
-    && block.requires_reset_count >= 1
-    ? block.requires_reset_count
-    : 1;
+  // Uses the ONE shared coercion (storage/wire/UI byte-identical).
+  const committedCount = coerceResetCount(block.requires_reset_count);
 
   useEffect(() => {
     if (editing && nameRef.current) {
@@ -100,18 +98,15 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   }
 
   /**
-   * Commit the reset-count on blur / Enter. Coerce to an integer ≥ 1;
-   * empty / non-numeric / sub-1 falls back to 1 (single-fire default).
+   * Commit the reset-count on blur / Enter. Delegates to the ONE shared
+   * coercion so the committed value is byte-identical to what storage and
+   * the wire produce: integer ≥ 1; empty / non-numeric / sub-1 → 1
+   * (single-fire default). ``Number('')`` is 0 → <1 → 1, so the empty case
+   * needs no special handling here.
    */
   function commitCount(raw) {
     setCountDraft(null);
-    const n = raw === '' ? NaN : parseFloat(raw);
-    if (!Number.isFinite(n)) {
-      onChange({ ...block, requires_reset_count: 1 });
-      return;
-    }
-    const i = Math.floor(n);
-    onChange({ ...block, requires_reset_count: i < 1 ? 1 : i });
+    onChange({ ...block, requires_reset_count: coerceResetCount(raw) });
   }
 
   const showUnconfiguredWarning = resolved && !resolvedConfigured;
