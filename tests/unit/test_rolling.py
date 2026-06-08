@@ -18,6 +18,7 @@ from tcg.data._rolling.adjustment import (
     adjust_difference,
     _find_closest_date_idx,
     _get_close_at_roll,
+    _shared_close_at_roll,
 )
 from tcg.data._rolling.stitcher import ContinuousSeriesBuilder
 
@@ -52,7 +53,9 @@ def _make_contract(
             high=np.array(highs, dtype=np.float64) if highs else c * 1.01,
             low=np.array(lows, dtype=np.float64) if lows else c * 0.99,
             close=c,
-            volume=np.array(volumes, dtype=np.float64) if volumes else np.full(n, 1000.0),
+            volume=np.array(volumes, dtype=np.float64)
+            if volumes
+            else np.full(n, 1000.0),
         ),
     )
 
@@ -116,12 +119,14 @@ class TestTrimOverlaps:
         """When contracts have overlapping date ranges, trim at roll boundary."""
         # c1 has data through 20240120 but should be trimmed at expiration 20240115
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240115, 20240117, 20240120],
             [20.0, 20.5, 21.0, 21.5, 22.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240113, 20240115, 20240117, 20240120],
             [22.0, 22.5, 23.0, 23.5],
         )
@@ -140,12 +145,14 @@ class TestTrimOverlaps:
     def test_zero_close_stripped(self):
         """Rows with close == 0 are stripped from contracts."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240111, 20240112],
             [20.0, 0.0, 21.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240116, 20240117],
             [22.0, 23.0],
         )
@@ -187,25 +194,34 @@ class TestAdjustRatio:
         np.testing.assert_array_equal(result.close, ps.close)
 
     def test_single_roll_ratio(self):
-        """Two contracts: verify ratio applied to pre-roll prices."""
-        # Roll date = 20240117 (first date of new contract segment in concat)
-        # _get_close_at_roll(c1, 20240117) → closest date 20240115 → close=100
-        # _get_close_at_roll(c2, 20240117) → exact match → close=107
-        # Ratio = 107/100 = 1.07
+        """Two contracts: verify ratio applied to pre-roll prices.
+
+        DATE-MISMATCH FIX: the gap must come from a single SHARED trading day,
+        not from the new contract at the roll date vs the old contract at a
+        different (nearest/trimmed) date. Here both contracts quote on the
+        shared day 20240115 (old=100, new=105), even though the roll date passed
+        by the stitcher is 20240117 (a new-only forward date). Correct ratio is
+        therefore 105/100 = 1.05, NOT the old cross-date 107/100 = 1.07.
+        """
+        # Shared day 20240115: c1 close=100, c2 close=105 → ratio = 1.05.
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240115],
             [95.0, 98.0, 100.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240115, 20240117, 20240120],
             [105.0, 107.0, 110.0],
         )
 
         # Raw concatenated series (after trim: c1 up to 20240115, c2 from 20240117)
         raw_ps = PriceSeries(
-            dates=np.array([20240110, 20240112, 20240115, 20240117, 20240120], dtype=np.int64),
+            dates=np.array(
+                [20240110, 20240112, 20240115, 20240117, 20240120], dtype=np.int64
+            ),
             open=np.array([95.0, 98.0, 100.0, 107.0, 110.0]),
             high=np.array([96.0, 99.0, 101.0, 108.0, 111.0]),
             low=np.array([94.0, 97.0, 99.0, 106.0, 109.0]),
@@ -218,9 +234,11 @@ class TestAdjustRatio:
 
         result = adjust_ratio(raw_ps, roll_dates, [c1, c2])
 
-        ratio = 107.0 / 100.0  # = 1.07
+        ratio = 105.0 / 100.0  # = 1.05 (shared-day 20240115 gap, NOT 107/100)
         # Dates before 20240117 should be multiplied by ratio
-        np.testing.assert_allclose(result.close[:3], [95.0 * ratio, 98.0 * ratio, 100.0 * ratio])
+        np.testing.assert_allclose(
+            result.close[:3], [95.0 * ratio, 98.0 * ratio, 100.0 * ratio]
+        )
         # Dates from 20240117 onward: unchanged
         np.testing.assert_allclose(result.close[3:], [107.0, 110.0])
         # Volume unchanged
@@ -244,24 +262,29 @@ class TestAdjustRatio:
 
 class TestAdjustDifference:
     def test_single_roll_difference(self):
-        """Two contracts: verify additive adjustment applied to pre-roll prices."""
-        # Roll date = 20240117 (first date of new segment)
-        # _get_close_at_roll(c1, 20240117) → closest date 20240115 → close=100
-        # _get_close_at_roll(c2, 20240117) → exact match → close=107
-        # Diff = 107 - 100 = +7
+        """Two contracts: verify additive adjustment applied to pre-roll prices.
+
+        DATE-MISMATCH FIX: gap from the shared day 20240115 (old=100, new=105),
+        so diff = 105 - 100 = +5, NOT the old cross-date 107 - 100 = +7.
+        """
+        # Shared day 20240115: c1 close=100, c2 close=105 → diff = +5.
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240115],
             [95.0, 98.0, 100.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240115, 20240117, 20240120],
             [105.0, 107.0, 110.0],
         )
 
         raw_ps = PriceSeries(
-            dates=np.array([20240110, 20240112, 20240115, 20240117, 20240120], dtype=np.int64),
+            dates=np.array(
+                [20240110, 20240112, 20240115, 20240117, 20240120], dtype=np.int64
+            ),
             open=np.array([95.0, 98.0, 100.0, 107.0, 110.0]),
             high=np.array([96.0, 99.0, 101.0, 108.0, 111.0]),
             low=np.array([94.0, 97.0, 99.0, 106.0, 109.0]),
@@ -272,8 +295,10 @@ class TestAdjustDifference:
         roll_dates = [20240117]
         result = adjust_difference(raw_ps, roll_dates, [c1, c2])
 
-        diff = 107.0 - 100.0  # = 7.0
-        np.testing.assert_allclose(result.close[:3], [95.0 + diff, 98.0 + diff, 100.0 + diff])
+        diff = 105.0 - 100.0  # = 5.0 (shared-day 20240115 gap, NOT 107-100)
+        np.testing.assert_allclose(
+            result.close[:3], [95.0 + diff, 98.0 + diff, 100.0 + diff]
+        )
         np.testing.assert_allclose(result.close[3:], [107.0, 110.0])
         np.testing.assert_array_equal(result.volume, raw_ps.volume)
 
@@ -288,7 +313,8 @@ class TestContinuousSeriesBuilder:
     def test_single_contract(self):
         """Single contract returns unchanged, no roll dates."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240101, 20240102, 20240103],
             [20.0, 21.0, 22.0],
         )
@@ -302,7 +328,8 @@ class TestContinuousSeriesBuilder:
     def test_single_contract_zero_close_stripped(self):
         """Single-contract path strips zero-close rows like multi-contract path."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240101, 20240102, 20240103, 20240104],
             [20.0, 0.0, 21.0, 22.0],
         )
@@ -319,7 +346,8 @@ class TestContinuousSeriesBuilder:
     def test_single_contract_all_zero_close_returns_empty(self):
         """Single contract with only zero-close rows yields empty series."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240101, 20240102],
             [0.0, 0.0],
         )
@@ -333,12 +361,14 @@ class TestContinuousSeriesBuilder:
     def test_two_contracts_no_adjustment(self):
         """Raw concatenation with no adjustment, verify roll date."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240115],
             [20.0, 20.5, 21.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240116, 20240117, 20240120],
             [22.0, 22.5, 23.0],
         )
@@ -373,17 +403,20 @@ class TestContinuousSeriesBuilder:
         # Pre-roll-1 gets multiplied by 12/11 * 1.1 = 1.2
 
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240115],
             [90.0, 95.0, 100.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240115, 20240117, 20240212, 20240215],
             [110.0, 112.0, 108.0, 110.0],
         )
         c3 = _make_contract(
-            "VXH24", 20240315,
+            "VXH24",
+            20240315,
             [20240215, 20240218, 20240220],
             [120.0, 122.0, 125.0],
         )
@@ -401,36 +434,49 @@ class TestContinuousSeriesBuilder:
         closes = result.prices.close
         returns = np.diff(closes) / closes[:-1]
 
-        # Also compute the "expected" returns from raw contract data within
-        # each segment (no adjustment needed within a segment).
-        # The key check: returns at roll boundaries should NOT be spikes.
-        # Specifically, the return across the roll boundary should reflect
-        # the actual price movement of the NEW contract, not the gap.
-
-        # Find roll boundary indices in the result
-        roll_date_set = set(result.roll_dates)
-        dates = result.prices.dates
-
         # Returns should be finite and not contain NaN
         assert np.all(np.isfinite(returns))
 
-        # Verify no return exceeds a reasonable threshold (raw gap would be ~10%)
-        # With proper adjustment, the max return should be much smaller
-        # The largest raw within-contract daily move is about 5/95 ~ 5.3%
-        # Without adjustment, the roll gap would cause a 10%+ return
-        assert np.all(np.abs(returns) < 0.10), (
-            f"Return spike detected at roll boundary: {returns}"
+        # TIGHTENED from a loose `abs(returns) < 0.10` band into an EXACT
+        # continuity assertion (date-mismatch fix). The shared-day factors are
+        # known exactly: roll 1 at 20240115 = 110/100 = 1.1 (both contracts
+        # quote 20240115); roll 2 at 20240215 = 120/110 = 12/11. The c1 segment
+        # (dates < 20240115) carries 1.1 * 12/11 = 1.2; the c2 segment
+        # (20240115 <= d < 20240215) carries 12/11; the c3 segment is raw.
+        # Any cross-date gap would shift these exact values.
+        f2 = 12.0 / 11.0
+        expected = np.array(
+            [
+                90.0 * 1.2,  # 20240110  (c1)
+                95.0 * 1.2,  # 20240112  (c1)
+                110.0 * f2,  # 20240115  (c2 wins dedup) -> 120.0
+                112.0 * f2,  # 20240117  (c2)
+                108.0 * f2,  # 20240212  (c2)
+                120.0,  # 20240215  (c3 wins dedup over c2's 110, unadjusted)
+                122.0,  # 20240218  (c3)
+                125.0,  # 20240220  (c3)
+            ]
+        )
+        np.testing.assert_allclose(closes, expected, atol=1e-9)
+        # Cross-seam returns equal the NEW contract's own move on the shared day
+        # (no artificial jump): at the 20240115 seam the adjusted return is
+        # exactly (110*f2)/(95*1.2) - 1, and at 20240215 it is 110/(108*f2) - 1.
+        # Spot-check the seam return is bounded by the within-contract band.
+        assert np.max(np.abs(returns)) < 0.06, (
+            f"Return spike at roll boundary: {returns}"
         )
 
     def test_two_contracts_difference(self):
         """Two contracts with difference adjustment: dollar diffs preserved."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240115],
             [95.0, 98.0, 100.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240115, 20240117, 20240120],
             [105.0, 107.0, 110.0],
         )
@@ -463,12 +509,14 @@ class TestContinuousSeriesBuilder:
     def test_zero_close_stripped(self):
         """Contracts with close=0 rows are cleaned before stitching."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240111, 20240112, 20240115],
             [20.0, 0.0, 0.0, 21.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240116, 20240117],
             [22.0, 23.0],
         )
@@ -484,7 +532,8 @@ class TestContinuousSeriesBuilder:
         """Empty/no-data contracts are skipped."""
         c_empty = _make_empty_contract("VXF24", 20240115)
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240116, 20240117],
             [22.0, 23.0],
         )
@@ -510,12 +559,14 @@ class TestContinuousSeriesBuilder:
         """Overlapping date ranges handled: earlier contract trimmed at roll."""
         # Both contracts have data on 20240113-20240115
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240113, 20240114, 20240115, 20240116, 20240117],
             [18.0, 19.0, 19.5, 20.0, 20.5, 21.0, 21.5],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240113, 20240114, 20240115, 20240116, 20240117, 20240120],
             [22.0, 22.5, 23.0, 23.5, 24.0, 25.0],
         )
@@ -545,9 +596,15 @@ class TestContinuousSeriesBuilder:
         # Roll 1: ratio_1 = c2_close / c1_close at c1 expiration
         # Pre-roll-1 prices get multiplied by ratio_1 * ratio_2 (backward cascade)
 
-        c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 50.0])
-        c2 = _make_contract("B", 20240120, [20240110, 20240115, 20240120], [60.0, 62.0, 60.0])
-        c3 = _make_contract("C", 20240130, [20240120, 20240125, 20240130], [72.0, 75.0, 78.0])
+        c1 = _make_contract(
+            "A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 50.0]
+        )
+        c2 = _make_contract(
+            "B", 20240120, [20240110, 20240115, 20240120], [60.0, 62.0, 60.0]
+        )
+        c3 = _make_contract(
+            "C", 20240130, [20240120, 20240125, 20240130], [72.0, 75.0, 78.0]
+        )
 
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
@@ -615,18 +672,21 @@ class TestContinuousSeriesBuilder:
         not the original list.
         """
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240105, 20240108, 20240110],
             [50.0, 52.0, 50.0],
         )
         # c2 has ONLY zero-close rows within its trim window (dates <= 20240215)
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240116, 20240120, 20240210],
             [0.0, 0.0, 0.0],
         )
         c3 = _make_contract(
-            "VXH24", 20240315,
+            "VXH24",
+            20240315,
             [20240216, 20240220, 20240301],
             [72.0, 75.0, 78.0],
         )
@@ -675,7 +735,9 @@ class TestContinuousSeriesBuilder:
         Contract A is fully subsumed — 0 roll transitions for that boundary.
         """
         c1 = _make_contract("VXF24", 20240115, [20240110, 20240115], [20.0, 21.0])
-        c2 = _make_contract("VXG24", 20240120, [20240110, 20240115, 20240120], [22.0, 23.0, 24.0])
+        c2 = _make_contract(
+            "VXG24", 20240120, [20240110, 20240115, 20240120], [22.0, 23.0, 24.0]
+        )
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
             adjustment=AdjustmentMethod.RATIO,
@@ -694,7 +756,9 @@ class TestContinuousSeriesBuilder:
         c1 = _make_contract("VXF24", 20240110, [20240101, 20240105], [10.0, 11.0])
         # c2's dates are all within c3's range, and c3 is later → c2 subsumed
         c2 = _make_contract("VXG24", 20240115, [20240110, 20240115], [20.0, 21.0])
-        c3 = _make_contract("VXH24", 20240120, [20240110, 20240115, 20240120], [30.0, 31.0, 32.0])
+        c3 = _make_contract(
+            "VXH24", 20240120, [20240110, 20240115, 20240120], [30.0, 31.0, 32.0]
+        )
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
             adjustment=AdjustmentMethod.RATIO,
@@ -781,8 +845,17 @@ class TestNewCloseZero:
         # Roll should be skipped (new_close=0), so prices unchanged
         np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])
 
-    def test_difference_new_close_zero_still_adjusts(self):
-        """Difference adjustment works with new_close == 0 (diff is just -old_close)."""
+    def test_difference_new_close_zero_skips_roll(self):
+        """Difference adjustment now SKIPS a roll when a reference close is 0.
+
+        ZERO-GUARD FIX (symmetry with ratio): previously difference had NO zero
+        guard, so a degenerate new_close==0 produced diff = 0 - old_close =
+        -old_close and shifted ALL prior history down by a full contract price
+        (the old assertion expected close[0] == 100 - 110 = -10). A zero close
+        is data that should have been stripped, not a real $0 quote; treating it
+        as a real gap corrupts the series. The guard now skips the roll and
+        leaves the prior history unchanged.
+        """
         c1 = _make_contract("A", 20240110, [20240101, 20240110], [100.0, 110.0])
         c2 = _make_contract("B", 20240120, [20240110, 20240120], [0.0, 50.0])
 
@@ -794,9 +867,9 @@ class TestNewCloseZero:
             close=np.array([100.0, 110.0, 50.0], dtype=np.float64),
             volume=np.array([1000.0, 1000.0, 1000.0], dtype=np.float64),
         )
-        # Difference: diff = 0 - 110 = -110, applied to dates < 20240110
+        # Shared day 20240110: old=110, new=0 → guard trips → roll skipped.
         result = adjust_difference(prices, [20240110], [c1, c2])
-        np.testing.assert_allclose(result.close[0], 100.0 - 110.0)  # -10.0
+        np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])
 
 
 # ── Additional coverage tests ─────────────────────────────────────
@@ -827,9 +900,15 @@ class TestDifferenceCascadingThreeRolls:
     """Mirror of test_ratio_cascading_three_rolls for difference adjustment."""
 
     def test_cascading_three_rolls(self):
-        c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 50.0])
-        c2 = _make_contract("B", 20240120, [20240110, 20240115, 20240120], [60.0, 62.0, 60.0])
-        c3 = _make_contract("C", 20240130, [20240120, 20240125, 20240130], [72.0, 75.0, 78.0])
+        c1 = _make_contract(
+            "A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 50.0]
+        )
+        c2 = _make_contract(
+            "B", 20240120, [20240110, 20240115, 20240120], [60.0, 62.0, 60.0]
+        )
+        c3 = _make_contract(
+            "C", 20240130, [20240120, 20240125, 20240130], [72.0, 75.0, 78.0]
+        )
 
         config = ContinuousRollConfig(
             strategy=RollStrategy.FRONT_MONTH,
@@ -869,8 +948,12 @@ class TestDateGapBetweenContracts:
 
     def test_gap_between_contracts(self):
         # c1 ends 20240110, c2 starts 20240120 — 10-day gap
-        c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0])
-        c2 = _make_contract("B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0])
+        c1 = _make_contract(
+            "A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0]
+        )
+        c2 = _make_contract(
+            "B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0]
+        )
 
         builder = ContinuousSeriesBuilder()
         config = ContinuousRollConfig(
@@ -888,8 +971,12 @@ class TestDateGapBetweenContracts:
 
     def test_gap_ratio_adjustment(self):
         """Ratio adjustment across a date gap uses closest-date matching."""
-        c1 = _make_contract("A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0])
-        c2 = _make_contract("B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0])
+        c1 = _make_contract(
+            "A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0]
+        )
+        c2 = _make_contract(
+            "B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0]
+        )
 
         builder = ContinuousSeriesBuilder()
         config = ContinuousRollConfig(
@@ -903,7 +990,9 @@ class TestDateGapBetweenContracts:
         # _get_close_at_roll(c2, 20240120) → exact match → close=60
         # Ratio = 60/55 = 12/11
         ratio = 60.0 / 55.0
-        np.testing.assert_allclose(result.prices.close[:3], [50.0 * ratio, 52.0 * ratio, 55.0 * ratio])
+        np.testing.assert_allclose(
+            result.prices.close[:3], [50.0 * ratio, 52.0 * ratio, 55.0 * ratio]
+        )
         np.testing.assert_allclose(result.prices.close[3:], [60.0, 62.0, 65.0])
 
 
@@ -967,7 +1056,9 @@ class TestComputeRollDatesWithOffset:
         c3 = _make_contract("VXH24", 20240315, [20240216, 20240217], [24.0, 25.0])
 
         default_result = compute_roll_dates([c1, c2, c3], RollStrategy.FRONT_MONTH)
-        offset_0_result = compute_roll_dates([c1, c2, c3], RollStrategy.FRONT_MONTH, roll_offset_days=0)
+        offset_0_result = compute_roll_dates(
+            [c1, c2, c3], RollStrategy.FRONT_MONTH, roll_offset_days=0
+        )
 
         assert default_result == offset_0_result
         assert offset_0_result == [20240115, 20240215]
@@ -977,7 +1068,9 @@ class TestComputeRollDatesWithOffset:
         c1 = _make_contract("VXF24", 20240115, [20240101, 20240102], [20.0, 21.0])
         c2 = _make_contract("VXG24", 20240215, [20240116, 20240117], [22.0, 23.0])
 
-        result = compute_roll_dates([c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2)
+        result = compute_roll_dates(
+            [c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2
+        )
         # 20240115 - 2 days = 20240113
         assert result == [20240113]
 
@@ -986,7 +1079,9 @@ class TestComputeRollDatesWithOffset:
         c1 = _make_contract("VXH24", 20240301, [20240220, 20240225], [30.0, 31.0])
         c2 = _make_contract("VXJ24", 20240401, [20240302, 20240305], [32.0, 33.0])
 
-        result = compute_roll_dates([c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2)
+        result = compute_roll_dates(
+            [c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2
+        )
         # 2024 is a leap year, so 20240301 - 2 = 20240228
         assert result == [20240228]
 
@@ -995,7 +1090,9 @@ class TestComputeRollDatesWithOffset:
         c1 = _make_contract("VXH23", 20230301, [20230220, 20230225], [30.0, 31.0])
         c2 = _make_contract("VXJ23", 20230401, [20230302, 20230305], [32.0, 33.0])
 
-        result = compute_roll_dates([c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2)
+        result = compute_roll_dates(
+            [c1, c2], RollStrategy.FRONT_MONTH, roll_offset_days=2
+        )
         # 2023 is NOT a leap year: 20230301 - 2 = 20230227
         assert result == [20230227]
 
@@ -1011,19 +1108,23 @@ class TestComputeRollDatesWithOffset:
         c2 = _make_contract("B", 20240215, [20240116], [60.0])
         c3 = _make_contract("C", 20240315, [20240216], [70.0])
 
-        result = compute_roll_dates([c1, c2, c3], RollStrategy.FRONT_MONTH, roll_offset_days=3)
+        result = compute_roll_dates(
+            [c1, c2, c3], RollStrategy.FRONT_MONTH, roll_offset_days=3
+        )
         # 20240115 - 3 = 20240112, 20240215 - 3 = 20240212
         assert result == [20240112, 20240212]
 
     def test_offset_through_builder(self):
         """End-to-end: offset flows through ContinuousSeriesBuilder correctly."""
         c1 = _make_contract(
-            "VXF24", 20240115,
+            "VXF24",
+            20240115,
             [20240110, 20240112, 20240113, 20240114, 20240115],
             [20.0, 20.5, 21.0, 21.5, 22.0],
         )
         c2 = _make_contract(
-            "VXG24", 20240215,
+            "VXG24",
+            20240215,
             [20240114, 20240115, 20240116, 20240117],
             [23.0, 23.5, 24.0, 24.5],
         )
@@ -1059,3 +1160,305 @@ class TestComputeRollDatesWithOffset:
         assert 20240115 in dates_0
         # offset=2: c1 trimmed at 20240113, so 20240114 and 20240115 come from c2 only
         assert 20240113 in dates_2
+
+
+# ── Shared-date gap (date-mismatch bugfix) ─────────────────────────────
+
+
+class TestSharedCloseAtRoll:
+    """Unit tests for _shared_close_at_roll — the contemporaneous gap helper."""
+
+    def test_roll_date_is_shared(self):
+        """When the roll date itself is in both contracts, use it directly."""
+        old = _make_contract(
+            "A", 20240115, [20240110, 20240113, 20240115], [90.0, 95.0, 100.0]
+        )
+        new = _make_contract("B", 20240215, [20240115, 20240117], [105.0, 107.0])
+        result = _shared_close_at_roll(old, new, 20240115)
+        assert result == (100.0, 105.0)
+
+    def test_picks_latest_shared_before_roll(self):
+        """rd not shared, but an earlier shared day exists → use the LATEST such day."""
+        # Both quote on 20240113 and 20240115; rd=20240117 (a new-only forward date).
+        old = _make_contract(
+            "A", 20240115, [20240110, 20240113, 20240115], [90.0, 95.0, 100.0]
+        )
+        new = _make_contract(
+            "B", 20240215, [20240113, 20240115, 20240117], [103.0, 105.0, 107.0]
+        )
+        result = _shared_close_at_roll(old, new, 20240117)
+        # Latest shared day <= 20240117 is 20240115 → (old=100, new=105), NOT (95,103) or cross-date.
+        assert result == (100.0, 105.0)
+
+    def test_no_shared_date_returns_none(self):
+        """Pure abutment / disjoint dates → None (caller falls back + warns)."""
+        old = _make_contract(
+            "A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0]
+        )
+        new = _make_contract(
+            "B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0]
+        )
+        assert _shared_close_at_roll(old, new, 20240120) is None
+
+    def test_shared_only_after_roll_returns_none(self):
+        """Shared dates exist but all are strictly AFTER the roll date → None."""
+        old = _make_contract("A", 20240115, [20240110, 20240120], [90.0, 95.0])
+        new = _make_contract("B", 20240215, [20240120, 20240125], [105.0, 107.0])
+        # The only shared day (20240120) is > rd=20240117, so no eligible day at/before roll.
+        assert _shared_close_at_roll(old, new, 20240117) is None
+
+    def test_empty_contract_returns_none(self):
+        old = ContractPriceData("A", 20240115, PriceSeries.empty())
+        new = _make_contract("B", 20240215, [20240115], [105.0])
+        assert _shared_close_at_roll(old, new, 20240115) is None
+
+
+class TestNoJumpAtSeam:
+    """THE property that catches the date-mismatch bug.
+
+    The roll gap must be computed from BOTH contracts' closes on a single
+    SHARED trading day. With the old (buggy) code the gap mixed the new
+    contract's close at the roll date with the old contract's close at a
+    DIFFERENT (trimmed-expiration / nearest) date, leaving a residual
+    artificial jump at the seam. After adjustment the cumulative factor on the
+    old segment must EXACTLY equal the true contemporaneous gap on the shared
+    day, i.e. adjusted_old(shared_day) == new_close(shared_day).
+    """
+
+    # Canonical single-roll fixture. Old and new both quote on the shared day
+    # 20240115 (old=100, new=105). The roll date passed by the stitcher is a
+    # NEW-only forward date (20240117), reproducing the trimmed-expiration
+    # mismatch that the builder's dedup also produces with sparse/abutting data.
+    @staticmethod
+    def _fixture():
+        old = _make_contract(
+            "VXF24", 20240115, [20240110, 20240112, 20240115], [95.0, 98.0, 100.0]
+        )
+        new = _make_contract(
+            "VXG24", 20240215, [20240115, 20240117, 20240120], [105.0, 107.0, 110.0]
+        )
+        # Raw series as the stitcher concatenates it: old segment owns dates up
+        # to (and including) the shared day 20240115; new segment from 20240117.
+        raw = PriceSeries(
+            dates=np.array(
+                [20240110, 20240112, 20240115, 20240117, 20240120], dtype=np.int64
+            ),
+            open=np.array([95.0, 98.0, 100.0, 107.0, 110.0]),
+            high=np.array([95.0, 98.0, 100.0, 107.0, 110.0]),
+            low=np.array([95.0, 98.0, 100.0, 107.0, 110.0]),
+            close=np.array([95.0, 98.0, 100.0, 107.0, 110.0]),
+            volume=np.full(5, 1000.0),
+        )
+        return old, new, raw
+
+    def test_ratio_no_jump_at_shared_day(self):
+        old, new, raw = self._fixture()
+        # rd = 20240117 (new-only forward date) — the mismatch trigger.
+        result = adjust_ratio(raw, [20240117], [old, new])
+        # Shared-day continuity: adjusted old close on 20240115 must equal the
+        # new contract's close on 20240115 (105). Factor = 105/100 = 1.05.
+        idx_shared = 2  # 20240115
+        assert result.close[idx_shared] == pytest.approx(105.0, abs=1e-9)
+        # And it must NOT be the buggy 107 (107/100 cross-date factor).
+        assert abs(result.close[idx_shared] - 107.0) > 1.0
+        # Whole old segment scaled by the contemporaneous ratio 1.05.
+        np.testing.assert_allclose(
+            result.close[:3], [95.0 * 1.05, 98.0 * 1.05, 100.0 * 1.05], atol=1e-9
+        )
+
+    def test_difference_no_jump_at_shared_day(self):
+        old, new, raw = self._fixture()
+        result = adjust_difference(raw, [20240117], [old, new])
+        # Shared-day continuity: 100 + (105-100) = 105. Buggy diff would be +7.
+        idx_shared = 2
+        assert result.close[idx_shared] == pytest.approx(105.0, abs=1e-9)
+        assert abs(result.close[idx_shared] - 107.0) > 1.0
+        np.testing.assert_allclose(
+            result.close[:3], [95.0 + 5.0, 98.0 + 5.0, 100.0 + 5.0], atol=1e-9
+        )
+
+
+class TestSeamContinuityEndToEnd:
+    """End-to-end (ContinuousSeriesBuilder.build) continuity at every seam.
+
+    For a back-adjusted series, the cumulative factor applied to each old
+    segment must equal the product/sum of the CONTEMPORANEOUS (shared-day) gaps
+    at the rolls after it — no cross-date artifact. We verify this by comparing
+    the full builder output against an independent reference that recomputes the
+    gap explicitly from a shared trading day at each roll, AND by checking that
+    the adjusted return across each real roll seam equals the new contract's own
+    move on that shared day (tol 1e-9).
+    """
+
+    def setup_method(self):
+        self.builder = ContinuousSeriesBuilder()
+
+    def _overlapping_three(self):
+        # Modest within-contract moves so any cross-date artifact is unmistakable.
+        # Each successive contract OVERLAPS the prior on two trading days, so a
+        # shared boundary day always exists (the no-fallback path).
+        c1 = _make_contract(
+            "A", 20240115, [20240110, 20240113, 20240115], [98.0, 99.0, 100.0]
+        )
+        c2 = _make_contract(
+            "B",
+            20240215,
+            [20240113, 20240115, 20240213, 20240215],
+            [104.0, 105.0, 109.0, 110.0],
+        )
+        c3 = _make_contract(
+            "C", 20240315, [20240213, 20240215, 20240218], [114.0, 115.0, 116.0]
+        )
+        return c1, c2, c3
+
+    def _reference_factor(self, old_c, new_c, rd, *, ratio: bool):
+        """Independent contemporaneous-gap factor on the latest shared day <= rd."""
+        shared = np.intersect1d(old_c.prices.dates, new_c.prices.dates)
+        shared = shared[shared <= rd]
+        ref = int(shared[-1])
+        oc = float(old_c.prices.close[np.searchsorted(old_c.prices.dates, ref)])
+        nc = float(new_c.prices.close[np.searchsorted(new_c.prices.dates, ref)])
+        return (nc / oc) if ratio else (nc - oc)
+
+    def test_ratio_multi_roll_matches_reference(self):
+        c1, c2, c3 = self._overlapping_three()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.RATIO
+        )
+        result = self.builder.build([c1, c2, c3], config)
+        assert result.contracts == ("A", "B", "C")
+        rd1, rd2 = result.roll_dates
+        f1 = self._reference_factor(c1, c2, rd1, ratio=True)
+        f2 = self._reference_factor(c2, c3, rd2, ratio=True)
+
+        dates = result.prices.dates
+        closes = result.prices.close
+        # Segment c1 (dates < rd1) carries f1*f2; segment c2 (rd1<=d<rd2) carries
+        # f2; segment c3 (d>=rd2) carries 1.0. Compare each adjusted close to the
+        # raw contract close times its expected cumulative factor.
+        raw_by_date = {}
+        for c in (c1, c2, c3):
+            for d, cl in zip(c.prices.dates.tolist(), c.prices.close.tolist()):
+                raw_by_date[d] = cl  # later contract overwrites on shared days
+        for d, adj in zip(dates.tolist(), closes.tolist()):
+            if d < rd1:
+                factor = f1 * f2
+            elif d < rd2:
+                factor = f2
+            else:
+                factor = 1.0
+            assert adj == pytest.approx(raw_by_date[d] * factor, abs=1e-9), (
+                f"date {d}: adjusted {adj} != raw {raw_by_date[d]} * {factor}"
+            )
+
+    def test_difference_multi_roll_matches_reference(self):
+        c1, c2, c3 = self._overlapping_three()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.DIFFERENCE
+        )
+        result = self.builder.build([c1, c2, c3], config)
+        assert result.contracts == ("A", "B", "C")
+        rd1, rd2 = result.roll_dates
+        d1 = self._reference_factor(c1, c2, rd1, ratio=False)
+        d2 = self._reference_factor(c2, c3, rd2, ratio=False)
+
+        dates = result.prices.dates
+        closes = result.prices.close
+        raw_by_date = {}
+        for c in (c1, c2, c3):
+            for d, cl in zip(c.prices.dates.tolist(), c.prices.close.tolist()):
+                raw_by_date[d] = cl
+        for d, adj in zip(dates.tolist(), closes.tolist()):
+            if d < rd1:
+                shift = d1 + d2
+            elif d < rd2:
+                shift = d2
+            else:
+                shift = 0.0
+            assert adj == pytest.approx(raw_by_date[d] + shift, abs=1e-9), (
+                f"date {d}: adjusted {adj} != raw {raw_by_date[d]} + {shift}"
+            )
+
+
+class TestAbutmentFallbackWarns:
+    """No shared trading day → approximate fallback + a clear warning."""
+
+    def test_gap_logs_approximate_warning(self, caplog):
+        import logging
+
+        old = _make_contract(
+            "A", 20240110, [20240105, 20240108, 20240110], [50.0, 52.0, 55.0]
+        )
+        new = _make_contract(
+            "B", 20240130, [20240120, 20240125, 20240130], [60.0, 62.0, 65.0]
+        )
+        raw = PriceSeries(
+            dates=np.array(
+                [20240105, 20240108, 20240110, 20240120, 20240125, 20240130],
+                dtype=np.int64,
+            ),
+            open=np.array([50.0, 52.0, 55.0, 60.0, 62.0, 65.0]),
+            high=np.array([50.0, 52.0, 55.0, 60.0, 62.0, 65.0]),
+            low=np.array([50.0, 52.0, 55.0, 60.0, 62.0, 65.0]),
+            close=np.array([50.0, 52.0, 55.0, 60.0, 62.0, 65.0]),
+            volume=np.full(6, 1000.0),
+        )
+        with caplog.at_level(logging.WARNING):
+            result = adjust_ratio(raw, [20240120], [old, new])
+        # Fallback factor = new(20240120)/old(nearest=20240110) = 60/55 (approx).
+        np.testing.assert_allclose(
+            result.close[:3],
+            [50.0 * 60.0 / 55.0, 52.0 * 60.0 / 55.0, 55.0 * 60.0 / 55.0],
+        )
+        assert any("APPROXIMATE" in rec.message for rec in caplog.records), (
+            "Expected an APPROXIMATE-gap warning when no shared day exists"
+        )
+
+
+class TestZeroNaNGuardSymmetry:
+    """Both ratio and difference must skip-with-warning on a 0 or NaN ref close."""
+
+    def _series(self, closes):
+        c = np.array(closes, dtype=np.float64)
+        return PriceSeries(
+            dates=np.array([20240101, 20240110, 20240120], dtype=np.int64),
+            open=c.copy(),
+            high=c.copy(),
+            low=c.copy(),
+            close=c.copy(),
+            volume=np.full(3, 1000.0),
+        )
+
+    def test_difference_zero_new_close_is_skipped(self, caplog):
+        """A 0 new-close at the roll must NOT shift all history by -old_close.
+
+        (Previously adjust_difference had no zero guard, so new_close==0 gave
+        diff=-old_close and corrupted the whole series. Now it skips + warns.)
+        """
+        import logging
+
+        old = _make_contract("A", 20240110, [20240101, 20240110], [100.0, 110.0])
+        # New contract's shared-day close is 0 (degenerate). It is the only day
+        # shared with `old`, so the gap helper returns (110, 0).
+        new = _make_contract("B", 20240120, [20240110, 20240120], [0.0, 50.0])
+        prices = self._series([100.0, 110.0, 50.0])
+        with caplog.at_level(logging.WARNING):
+            result = adjust_difference(prices, [20240110], [old, new])
+        # Skipped → pre-roll history unchanged (NOT shifted by -110).
+        np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])
+        assert any("skipped" in rec.message for rec in caplog.records)
+
+    def test_difference_nan_close_is_skipped(self):
+        old = _make_contract("A", 20240110, [20240101, 20240110], [100.0, 110.0])
+        new = _make_contract("B", 20240120, [20240110, 20240120], [np.nan, 50.0])
+        prices = self._series([100.0, 110.0, 50.0])
+        result = adjust_difference(prices, [20240110], [old, new])
+        # NaN must not poison the series.
+        np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])
+
+    def test_ratio_nan_close_is_skipped(self):
+        old = _make_contract("A", 20240110, [20240101, 20240110], [100.0, 110.0])
+        new = _make_contract("B", 20240120, [20240110, 20240120], [np.nan, 50.0])
+        prices = self._series([100.0, 110.0, 50.0])
+        result = adjust_ratio(prices, [20240110], [old, new])
+        np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])

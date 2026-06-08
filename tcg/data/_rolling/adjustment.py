@@ -39,11 +39,88 @@ def _get_close_at_roll(
     contract: ContractPriceData,
     roll_date: int,
 ) -> float:
-    """Get the close price of a contract on or nearest to the roll date."""
+    """Get the close price of a contract on or nearest to the roll date.
+
+    NOTE: this is the *approximate* (nearest-date) lookup. It is only used as
+    a last-resort fallback when the two contracts share no common trading day
+    at/before the roll (pure abutment / sparse data). For the normal case use
+    ``_shared_close_at_roll``, which guarantees both closes are quoted on the
+    SAME calendar date — see the docstring there for the correctness rationale.
+    """
     if len(contract.prices) == 0:
         return 0.0
     idx = _find_closest_date_idx(contract.prices.dates, roll_date)
     return float(contract.prices.close[idx])
+
+
+def _shared_close_at_roll(
+    old_contract: ContractPriceData,
+    new_contract: ContractPriceData,
+    roll_date: int,
+) -> tuple[float, float] | None:
+    """Return (old_close, new_close) quoted on a single SHARED trading day.
+
+    The roll gap must be computed from both contracts' closes on the *same*
+    calendar date, otherwise the back-adjustment leaves a residual artificial
+    jump at the seam (the factor would mix prices from different days). This
+    mirrors the legacy Java oracle ``DayStructure.backAdjustFromDayStructures*``
+    (simulator), where ``previousDayStructure`` (old contract) and
+    ``currentDayStructure`` (new contract) are both re-derived from the SAME
+    generic roll date — the gap is ``currentClose / previousClose`` (geometric)
+    or ``currentClose - previousClose`` (arithmetic) on one contemporaneous day.
+
+    We pick the LATEST date present in BOTH contracts' date arrays with
+    ``date <= roll_date`` — i.e. the last overlapping trading day at/before the
+    roll. If ``roll_date`` itself is shared, that date is used.
+
+    Returns ``None`` when the contracts have no common trading day at/before the
+    roll (pure abutment or sparse/disjoint data); callers fall back to the
+    approximate nearest-date gap and warn.
+    """
+    old_dates = old_contract.prices.dates
+    new_dates = new_contract.prices.dates
+    if len(old_dates) == 0 or len(new_dates) == 0:
+        return None
+
+    # Candidate shared dates are the intersection of both date arrays, restricted
+    # to dates at/before the roll boundary. np.intersect1d returns a sorted array.
+    shared = np.intersect1d(old_dates, new_dates)
+    if shared.size == 0:
+        return None
+    eligible = shared[shared <= roll_date]
+    if eligible.size == 0:
+        return None
+
+    ref_date = int(eligible[-1])  # latest shared day at/before the roll
+    old_idx = int(np.searchsorted(old_dates, ref_date))
+    new_idx = int(np.searchsorted(new_dates, ref_date))
+    return float(old_contract.prices.close[old_idx]), float(
+        new_contract.prices.close[new_idx]
+    )
+
+
+def _gap_closes_at_roll(
+    old_contract: ContractPriceData,
+    new_contract: ContractPriceData,
+    roll_date: int,
+) -> tuple[float, float, bool]:
+    """Resolve the (old_close, new_close) pair used for one roll gap.
+
+    Returns ``(old_close, new_close, approximate)``. ``approximate`` is True
+    when no shared trading day exists and the nearest-date fallback was used
+    (the gap mixes prices from different dates and is therefore inexact).
+    """
+    shared = _shared_close_at_roll(old_contract, new_contract, roll_date)
+    if shared is not None:
+        old_close, new_close = shared
+        return old_close, new_close, False
+
+    # Fallback: no common trading day at/before the roll (pure abutment / sparse
+    # data). Use the nearest-date lookup for each contract independently. This
+    # leaves the gap approximate because the two closes are on different days.
+    old_close = _get_close_at_roll(old_contract, roll_date)
+    new_close = _get_close_at_roll(new_contract, roll_date)
+    return old_close, new_close, True
 
 
 def adjust_ratio(
@@ -54,9 +131,11 @@ def adjust_ratio(
     """Multiply all prior prices by (new_close / old_close) at each roll boundary.
 
     Ratio adjustment (formerly called "proportional"). Process backwards
-    from the last roll to the first. At each roll date, find the close
-    prices of both contracts on that date, compute the ratio, and
-    multiply all OHLC prices before that date. Volume is left unchanged.
+    from the last roll to the first. At each roll boundary the gap is computed
+    from both contracts' closes on a single SHARED trading day at/before the
+    roll date (``_shared_close_at_roll``) so that no residual artificial jump
+    remains at the seam; the resulting ratio multiplies all OHLC prices before
+    the roll date. Volume is left unchanged.
 
     Parameters
     ----------
@@ -87,15 +166,41 @@ def adjust_ratio(
         old_contract = contracts[i]
         new_contract = contracts[i + 1]
 
-        old_close = _get_close_at_roll(old_contract, rd)
-        new_close = _get_close_at_roll(new_contract, rd)
+        # Gap from a single shared trading day (legacy-Java parity). Falls back
+        # to the approximate nearest-date gap only when the contracts share no
+        # common day at/before the roll.
+        old_close, new_close, approximate = _gap_closes_at_roll(
+            old_contract, new_contract, rd
+        )
+        if approximate:
+            logger.warning(
+                "Ratio roll at %d: no shared trading day between %s and %s; "
+                "gap is APPROXIMATE (old_close=%.4f, new_close=%.4f on "
+                "different dates).",
+                rd,
+                old_contract.contract_id,
+                new_contract.contract_id,
+                old_close,
+                new_close,
+            )
 
-        if old_close == 0.0 or new_close == 0.0:
+        # Zero/NaN guard (symmetric with adjust_difference): a 0 or NaN
+        # reference close cannot produce a meaningful gap — skip the roll
+        # rather than zeroing-out or NaN-poisoning all prior history.
+        if (
+            old_close == 0.0
+            or new_close == 0.0
+            or not np.isfinite(old_close)
+            or not np.isfinite(new_close)
+        ):
             logger.warning(
                 "Ratio roll skipped at %d: old_close=%.4f, new_close=%.4f "
                 "(contracts %s → %s). Unadjusted gap remains.",
-                rd, old_close, new_close,
-                old_contract.contract_id, new_contract.contract_id,
+                rd,
+                old_close,
+                new_close,
+                old_contract.contract_id,
+                new_contract.contract_id,
             )
             continue
 
@@ -126,7 +231,9 @@ def adjust_difference(
     """Add (new_close - old_close) to all prior prices at each roll boundary.
 
     Same backward processing as ratio adjustment, but additive instead of
-    multiplicative. Volume is left unchanged.
+    multiplicative. The gap is computed from a single SHARED trading day at/
+    before the roll date (``_shared_close_at_roll``), matching the legacy Java
+    arithmetic oracle. Volume is left unchanged.
 
     Parameters
     ----------
@@ -155,8 +262,44 @@ def adjust_difference(
         old_contract = contracts[i]
         new_contract = contracts[i + 1]
 
-        old_close = _get_close_at_roll(old_contract, rd)
-        new_close = _get_close_at_roll(new_contract, rd)
+        # Gap from a single shared trading day (legacy-Java parity), with the
+        # same nearest-date fallback as ratio when no shared day exists.
+        old_close, new_close, approximate = _gap_closes_at_roll(
+            old_contract, new_contract, rd
+        )
+        if approximate:
+            logger.warning(
+                "Difference roll at %d: no shared trading day between %s and %s; "
+                "gap is APPROXIMATE (old_close=%.4f, new_close=%.4f on "
+                "different dates).",
+                rd,
+                old_contract.contract_id,
+                new_contract.contract_id,
+                old_close,
+                new_close,
+            )
+
+        # Zero/NaN guard — SYMMETRIC with adjust_ratio (fixes the prior
+        # asymmetry where difference had no guard). A 0 reference close means a
+        # row that should have been stripped; treating diff = -old_close there
+        # would shift all history by a full contract price. A NaN would poison
+        # the entire series. Skip such rolls rather than corrupt the output.
+        if (
+            old_close == 0.0
+            or new_close == 0.0
+            or not np.isfinite(old_close)
+            or not np.isfinite(new_close)
+        ):
+            logger.warning(
+                "Difference roll skipped at %d: old_close=%.4f, new_close=%.4f "
+                "(contracts %s → %s). Unadjusted gap remains.",
+                rd,
+                old_close,
+                new_close,
+                old_contract.contract_id,
+                new_contract.contract_id,
+            )
+            continue
 
         diff = new_close - old_close
 
