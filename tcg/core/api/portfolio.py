@@ -19,7 +19,7 @@ from tcg.core.api._options_materialise import (
     PRICE_LIKE_STREAMS,
     materialise_option_streams,
 )
-from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.api.common import get_market_data
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
@@ -325,9 +325,7 @@ async def _evaluate_signal_leg(
         resolved_inputs = await _resolve_basket_inputs(
             leg.signal_spec.spec.inputs, repo, svc
         )
-        signal = parse_signal(
-            leg.signal_spec.spec, resolved_inputs=resolved_inputs
-        )
+        signal = parse_signal(leg.signal_spec.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
 
@@ -774,9 +772,13 @@ async def compute_portfolio(
 
     # ── 8. Compute metrics ──
 
-    metrics = compute_metrics(result.portfolio_equity)
+    # Risk stats must use the same return basis the equity curve was built
+    # with (HIGH#3): a log-built curve's vol/Sharpe/Sortino are otherwise
+    # computed on the wrong (simple-return) basis.
+    metrics = compute_metrics(result.portfolio_equity, return_type=body.return_type)
     leg_metrics = {
-        label: compute_metrics(eq) for label, eq in result.per_leg_equities.items()
+        label: compute_metrics(eq, return_type=body.return_type)
+        for label, eq in result.per_leg_equities.items()
     }
 
     # ── 9. Aggregate returns ──
@@ -885,9 +887,7 @@ async def compute_portfolio(
             }
         )
 
-    aggregated_trades.sort(
-        key=lambda t: (t["open_bar"], t["entry_block_id"])
-    )
+    aggregated_trades.sort(key=lambda t: (t["open_bar"], t["entry_block_id"]))
 
     # Build top-level positions payload (matches signals response shape).
     # First leg that references a given input_id wins; downstream conflicts
@@ -899,9 +899,7 @@ async def compute_portfolio(
         sig_idx = signal_dates_map[label]
         # Projection from common_dates onto signal-bar indices: -1 marks
         # portfolio bars where the signal has no data (rendered as null).
-        sig_index_of_date: dict[int, int] = {
-            int(d): j for j, d in enumerate(sig_idx)
-        }
+        sig_index_of_date: dict[int, int] = {int(d): j for j, d in enumerate(sig_idx)}
         proj = [sig_index_of_date.get(int(d), -1) for d in common_dates]
         for pos in pos_list:
             iid = pos["input_id"]
@@ -935,7 +933,9 @@ async def compute_portfolio(
             price_label = f"{leg.symbol}.close" if leg.symbol else f"{label}.close"
         elif leg.type == "continuous":
             direct_input_id = leg.collection or label
-            price_label = f"{leg.collection}.close" if leg.collection else f"{label}.close"
+            price_label = (
+                f"{leg.collection}.close" if leg.collection else f"{label}.close"
+            )
         else:
             direct_input_id = label
             price_label = f"{label}.close"
@@ -956,7 +956,7 @@ async def compute_portfolio(
 
     dates_iso = [int_to_iso(int(d)) for d in common_dates]
 
-    return {
+    response = {
         "dates": dates_iso,
         "portfolio_equity": result.portfolio_equity.tolist(),
         "leg_equities": {
@@ -978,3 +978,16 @@ async def compute_portfolio(
         "trades": aggregated_trades,
         "positions": aggregated_positions,
     }
+
+    # RFC-8259 finite-JSON invariant: NaN / +inf / -inf are NOT valid JSON, so
+    # the WHOLE payload is passed through ``sanitize_json_floats`` (every
+    # non-finite float -> null) in one recursive pass. Degenerate inputs can
+    # poison many blocks at once — an all-NaN leg or a zero-price bar reaches
+    # ``portfolio_equity`` / ``leg_equities`` / ``raw_leg_equities``, and the
+    # ``nan_safe_floats`` price/tracking blocks let ``inf`` through by design —
+    # so sanitizing block-by-block is leak-prone. A single terminal pass is the
+    # backstop regardless of how each block was built or what the response
+    # renderer's NaN policy is. The engine ALSO holds non-finite bars flat at
+    # the source (so curves are correct, not merely nulled), but this is the
+    # last line that makes the invariant total. (#6)
+    return sanitize_json_floats(response)

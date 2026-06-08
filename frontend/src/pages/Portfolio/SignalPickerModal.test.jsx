@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 //
-// Tests for SignalPickerModal — two-step modal: pick signal, configure inputs.
+// Tests for SignalPickerModal — two-step modal: pick signal (sourced from the
+// BACKEND via listSignals), then configure inputs.
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import SignalPickerModal from './SignalPickerModal';
 
-// Mock the Signals storage module so we control what signals are "saved".
-vi.mock('../Signals/storage', () => ({
-  loadState: vi.fn(() => ({ signals: [] })),
+// Mock the persistence API so we control what the backend "returns".
+vi.mock('../../api/persistence', () => ({
+  listSignals: vi.fn(),
+  describePersistenceError: vi.fn((err) => (err && err.message) || 'Unknown error'),
 }));
 
 // Mock InstrumentPickerModal to a simple stub — we test interaction, not its internals.
@@ -30,16 +32,20 @@ vi.mock('../../components/InstrumentPickerModal/InstrumentPickerModal', () => ({
   },
 }));
 
-import { loadState } from '../Signals/storage';
+import { listSignals } from '../../api/persistence';
 
-afterEach(() => { cleanup(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 const noop = () => {};
 
-function makeFakeSignal(overrides = {}) {
+// Build a backend SignalOut-shape payload. The backend uses ``description``
+// (not ``doc``); the modal must hydrate it the same way SignalsPage does.
+function makePersistedSignal(overrides = {}) {
   return {
     id: 's1',
     name: 'Test Signal',
+    category: 'RESEARCH',
+    description: 'a note',
     inputs: [
       { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
     ],
@@ -54,13 +60,22 @@ function makeFakeSignal(overrides = {}) {
       ],
       exits: [],
     },
+    settings: { dont_repeat: true },
     ...overrides,
   };
 }
 
+// A deferred promise helper so we can assert the in-flight loading state.
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 describe('<SignalPickerModal>', () => {
   beforeEach(() => {
-    loadState.mockReturnValue({ signals: [] });
+    listSignals.mockResolvedValue([]);
   });
 
   it('renders nothing when closed', () => {
@@ -70,16 +85,25 @@ describe('<SignalPickerModal>', () => {
     expect(screen.queryByTestId('signal-picker')).toBeNull();
   });
 
-  it('renders empty state when no signals saved', () => {
+  // ── RED test: signals come from the backend, not localStorage ──
+  it('fetches saved signals from the backend and renders them', async () => {
+    const sig1 = makePersistedSignal({ id: 's1', name: 'Alpha Signal' });
+    const sig2 = makePersistedSignal({ id: 's2', name: 'Beta Signal' });
+    listSignals.mockResolvedValue([sig1, sig2]);
+
     render(
       <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
     );
-    expect(screen.getByText(/No saved signals/)).toBeDefined();
+
+    expect(await screen.findByText('Alpha Signal')).toBeDefined();
+    expect(screen.getByText('Beta Signal')).toBeDefined();
+    // Default category fetch is RESEARCH (matches SignalsPage default).
+    expect(listSignals).toHaveBeenCalledWith('RESEARCH');
   });
 
-  it('renders saved signals with input and block counts', () => {
-    const sig1 = makeFakeSignal({ id: 's1', name: 'Alpha Signal' });
-    const sig2 = makeFakeSignal({
+  it('renders saved signals with input and block counts', async () => {
+    const sig1 = makePersistedSignal({ id: 's1', name: 'Alpha Signal' });
+    const sig2 = makePersistedSignal({
       id: 's2',
       name: 'Beta Signal',
       inputs: [
@@ -93,31 +117,121 @@ describe('<SignalPickerModal>', () => {
           { id: 'e2', input_id: 'X', weight: -25, conditions: [] },
         ],
         exits: [
-          { id: 'x1', input_id: 'Y', weight: 0, target_entry_block_name: 'e1', conditions: [] },
+          { id: 'x1', target_entry_block_name: 'e1', conditions: [] },
         ],
       },
     });
-    loadState.mockReturnValue({ signals: [sig1, sig2] });
+    listSignals.mockResolvedValue([sig1, sig2]);
 
     render(
       <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
     );
 
-    expect(screen.getByText('Alpha Signal')).toBeDefined();
+    expect(await screen.findByText('Alpha Signal')).toBeDefined();
     expect(screen.getByText('Beta Signal')).toBeDefined();
-    expect(screen.getByText('1 input \u00B7 1 block')).toBeDefined();
-    expect(screen.getByText('2 inputs \u00B7 3 blocks')).toBeDefined();
+    expect(screen.getByText('1 input · 1 block')).toBeDefined();
+    expect(screen.getByText('2 inputs · 3 blocks')).toBeDefined();
   });
 
-  it('clicking Select transitions to step 2 (configure inputs)', () => {
-    const signal = makeFakeSignal({ id: 's1', name: 'My Signal' });
-    loadState.mockReturnValue({ signals: [signal] });
+  // ── Loading state ──
+  it('shows a loading state while the fetch is in flight', async () => {
+    const d = deferred();
+    listSignals.mockReturnValue(d.promise);
 
     render(
       <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal My Signal/ }));
+    // Loading affordance present, and NOT the empty / error message.
+    expect(screen.getByTestId('signal-picker-loading')).toBeDefined();
+    expect(screen.queryByText(/No saved signals/)).toBeNull();
+    expect(screen.queryByText(/Failed to load/)).toBeNull();
+
+    // Resolve and confirm loading clears.
+    d.resolve([makePersistedSignal({ id: 's1', name: 'Resolved Signal' })]);
+    expect(await screen.findByText('Resolved Signal')).toBeDefined();
+    expect(screen.queryByTestId('signal-picker-loading')).toBeNull();
+  });
+
+  // ── Error state (must NOT be the empty / "no signals" message) ──
+  it('shows an error state with retry on fetch failure (NOT the empty message)', async () => {
+    listSignals.mockRejectedValue(new Error('boom'));
+
+    render(
+      <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
+    );
+
+    const errBox = await screen.findByTestId('signal-picker-error');
+    expect(errBox).toBeDefined();
+    // Crucially: a failed fetch is NOT rendered as "no signals".
+    expect(screen.queryByText(/No saved signals/)).toBeNull();
+    // A retry affordance exists.
+    expect(screen.getByRole('button', { name: /retry/i })).toBeDefined();
+  });
+
+  it('retry refetches after an error', async () => {
+    listSignals.mockRejectedValueOnce(new Error('boom'));
+    listSignals.mockResolvedValueOnce([makePersistedSignal({ id: 's1', name: 'Recovered' })]);
+
+    render(
+      <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
+    );
+
+    await screen.findByTestId('signal-picker-error');
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+    expect(await screen.findByText('Recovered')).toBeDefined();
+    expect(listSignals).toHaveBeenCalledTimes(2);
+  });
+
+  // ── Empty state per category ──
+  it('shows the empty state when the backend returns zero signals', async () => {
+    listSignals.mockResolvedValue([]);
+
+    render(
+      <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
+    );
+
+    expect(await screen.findByText(/No saved signals/)).toBeDefined();
+  });
+
+  // ── Category switch refetches ──
+  it('switching category refetches signals for the new category', async () => {
+    listSignals.mockResolvedValue([makePersistedSignal({ id: 's1', name: 'Research One' })]);
+
+    render(
+      <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
+    );
+
+    expect(await screen.findByText('Research One')).toBeDefined();
+    expect(listSignals).toHaveBeenLastCalledWith('RESEARCH');
+
+    // Switch to PROD.
+    listSignals.mockResolvedValue([makePersistedSignal({ id: 's2', name: 'Prod One' })]);
+    fireEvent.change(screen.getByTestId('signal-picker-category'), { target: { value: 'PROD' } });
+
+    expect(await screen.findByText('Prod One')).toBeDefined();
+    expect(listSignals).toHaveBeenLastCalledWith('PROD');
+  });
+
+  it('category selector excludes ARCHIVE', async () => {
+    render(
+      <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
+    );
+    await screen.findByText(/No saved signals/);
+    const select = screen.getByTestId('signal-picker-category');
+    const values = Array.from(select.querySelectorAll('option')).map((o) => o.value);
+    expect(values).toEqual(['RESEARCH', 'DEV', 'PROD']);
+  });
+
+  it('clicking Select transitions to step 2 (configure inputs)', async () => {
+    listSignals.mockResolvedValue([makePersistedSignal({ id: 's1', name: 'My Signal' })]);
+
+    render(
+      <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal My Signal/ }));
 
     // Step 2 shows the signal name in header and input configuration
     expect(screen.getByText(/Configure: My Signal/)).toBeDefined();
@@ -127,20 +241,20 @@ describe('<SignalPickerModal>', () => {
     expect(screen.getByText('Add to Portfolio')).toBeDefined();
   });
 
-  it('step 2 shows unconfigured inputs and disables Add button', () => {
-    const signal = makeFakeSignal({
+  it('step 2 shows unconfigured inputs and disables Add button', async () => {
+    const signal = makePersistedSignal({
       inputs: [
         { id: 'X', instrument: null },
         { id: 'Y', instrument: { type: 'spot', collection: 'EQ', instrument_id: 'AAPL' } },
       ],
     });
-    loadState.mockReturnValue({ signals: [signal] });
+    listSignals.mockResolvedValue([signal]);
 
     render(
       <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal/ }));
 
     expect(screen.getByText('Not configured')).toBeDefined();
     expect(screen.getByText('Pick')).toBeDefined(); // "Pick" for unconfigured
@@ -151,24 +265,24 @@ describe('<SignalPickerModal>', () => {
     expect(addBtn.disabled).toBe(true);
   });
 
-  it('step 2 disables Add button when signal has zero inputs', () => {
-    const signal = makeFakeSignal({ inputs: [] });
-    loadState.mockReturnValue({ signals: [signal] });
+  it('step 2 disables Add button when signal has zero inputs', async () => {
+    const signal = makePersistedSignal({ inputs: [] });
+    listSignals.mockResolvedValue([signal]);
 
     render(
       <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal/ }));
 
     expect(screen.getByText(/no inputs/i)).toBeDefined();
     const addBtn = screen.getByText('Add to Portfolio');
     expect(addBtn.disabled).toBe(true);
   });
 
-  it('clicking Change opens InstrumentPickerModal and updates the input', () => {
-    const signal = makeFakeSignal();
-    loadState.mockReturnValue({ signals: [signal] });
+  it('clicking Change opens InstrumentPickerModal and updates the input', async () => {
+    const signal = makePersistedSignal();
+    listSignals.mockResolvedValue([signal]);
     const onSelect = vi.fn();
 
     render(
@@ -176,7 +290,7 @@ describe('<SignalPickerModal>', () => {
     );
 
     // Go to step 2
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal/ }));
 
     // Click Change on input X
     fireEvent.click(screen.getByText('Change'));
@@ -192,9 +306,9 @@ describe('<SignalPickerModal>', () => {
     expect(screen.getByText(/AAPL/)).toBeDefined();
   });
 
-  it('Add to Portfolio calls onSelect with updated inputs', () => {
-    const signal = makeFakeSignal();
-    loadState.mockReturnValue({ signals: [signal] });
+  it('Add to Portfolio calls onSelect with hydrated signal and updated inputs', async () => {
+    const signal = makePersistedSignal();
+    listSignals.mockResolvedValue([signal]);
     const onSelect = vi.fn();
 
     render(
@@ -202,7 +316,7 @@ describe('<SignalPickerModal>', () => {
     );
 
     // Go to step 2
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal/ }));
 
     // Click Add to Portfolio (inputs are pre-filled so it's enabled)
     fireEvent.click(screen.getByText('Add to Portfolio'));
@@ -210,19 +324,22 @@ describe('<SignalPickerModal>', () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
     const received = onSelect.mock.calls[0][0];
     expect(received.id).toBe('s1');
+    expect(received.name).toBe('Test Signal');
     expect(received.inputs[0].instrument.instrument_id).toBe('SPX');
+    // Hydration: backend ``description`` becomes editor-shape ``doc``.
+    expect(received.doc).toBe('a note');
   });
 
-  it('back button returns to signal list', () => {
-    const signal = makeFakeSignal({ name: 'Go Back Test' });
-    loadState.mockReturnValue({ signals: [signal] });
+  it('back button returns to signal list', async () => {
+    const signal = makePersistedSignal({ name: 'Go Back Test' });
+    listSignals.mockResolvedValue([signal]);
 
     render(
       <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
     );
 
     // Go to step 2
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal/ }));
     expect(screen.getByText(/Configure: Go Back Test/)).toBeDefined();
 
     // Click back
@@ -233,21 +350,22 @@ describe('<SignalPickerModal>', () => {
     expect(screen.queryByText(/Configure:/)).toBeNull();
   });
 
-  it('calls onClose on Escape from step 1', () => {
-    loadState.mockReturnValue({ signals: [] });
+  it('calls onClose on Escape from step 1', async () => {
+    listSignals.mockResolvedValue([]);
     const onClose = vi.fn();
 
     render(
       <SignalPickerModal isOpen={true} onClose={onClose} onSelect={noop} />,
     );
 
+    await screen.findByText(/No saved signals/);
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('Escape from step 2 goes back to step 1 (not close)', () => {
-    const signal = makeFakeSignal();
-    loadState.mockReturnValue({ signals: [signal] });
+  it('Escape from step 2 goes back to step 1 (not close)', async () => {
+    const signal = makePersistedSignal();
+    listSignals.mockResolvedValue([signal]);
     const onClose = vi.fn();
 
     render(
@@ -255,7 +373,7 @@ describe('<SignalPickerModal>', () => {
     );
 
     // Go to step 2
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal/ }));
     expect(screen.getByText(/Configure:/)).toBeDefined();
 
     // Escape should go back, not close
@@ -265,21 +383,21 @@ describe('<SignalPickerModal>', () => {
     expect(screen.getByText('Test Signal')).toBeDefined(); // back on step 1
   });
 
-  it('handles multiple inputs correctly', () => {
-    const signal = makeFakeSignal({
+  it('handles multiple inputs correctly', async () => {
+    const signal = makePersistedSignal({
       inputs: [
         { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
         { id: 'Y', instrument: { type: 'continuous', collection: 'CME', adjustment: 'none', cycle: null, rollOffset: 0, strategy: 'front_month' } },
       ],
     });
-    loadState.mockReturnValue({ signals: [signal] });
+    listSignals.mockResolvedValue([signal]);
 
     render(
       <SignalPickerModal isOpen={true} onClose={noop} onSelect={noop} />,
     );
 
     // Go to step 2
-    fireEvent.click(screen.getByRole('button', { name: /Configure signal/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Configure signal/ }));
 
     // Both inputs should be visible
     expect(screen.getByText('X')).toBeDefined();

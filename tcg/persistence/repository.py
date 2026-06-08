@@ -36,9 +36,10 @@ Method contract
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import pymongo.errors
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -51,6 +52,40 @@ from tcg.types.persistence import (
     from_mongo_dict,
     to_mongo_dict,
 )
+
+_log = logging.getLogger(__name__)
+
+
+def _deserialize_skipping_malformed(rows: list[dict[str, Any]]) -> list[PersistenceDoc]:
+    """Deserialize raw Mongo docs, skipping + logging any malformed one.
+
+    ``from_mongo_dict`` raises ``ValueError`` / ``KeyError`` on a stored
+    document with a missing/unknown ``type``, a missing required field
+    (e.g. ``category``), or an unparseable ``category`` value. A single
+    such legacy / partial-write doc must NOT take down the entire list
+    endpoint — without this guard the list-comprehension propagated the
+    error as an unhandled 500 and the user saw zero signals / portfolios /
+    baskets for the whole category instead of "the good ones minus one".
+
+    The API layer's own skip-loop only wraps ``_checked`` / ``_to_out``
+    and never reaches a deserialization failure (the repo returned before
+    the API saw the docs), so the guard MUST live here. We skip the bad
+    doc, log it (with its ``_id`` when present) at WARNING with a
+    traceback, and return the docs that deserialized cleanly.
+    """
+    out: list[PersistenceDoc] = []
+    for r in rows:
+        try:
+            out.append(from_mongo_dict(r))
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            _log.warning(
+                "persistence: skipping malformed stored doc _id=%r type=%r: %s",
+                r.get("_id", "?") if isinstance(r, dict) else "?",
+                r.get("type", "?") if isinstance(r, dict) else "?",
+                exc,
+                exc_info=True,
+            )
+    return out
 
 
 class DocumentTooLargeError(Exception):
@@ -205,7 +240,9 @@ class WriteRepository:
             {"type": DocType.INDICATOR.value, "deleted": {"$ne": True}}
         )
         rows = await cursor.to_list(length=None)
-        return [from_mongo_dict(r) for r in rows]  # type: ignore[misc]
+        # Per-doc guard: a single malformed stored doc must not 500 the
+        # whole list (see _deserialize_skipping_malformed).
+        return _deserialize_skipping_malformed(rows)  # type: ignore[return-value]
 
     async def list_by_type_and_category(
         self,
@@ -219,7 +256,9 @@ class WriteRepository:
         """
         cursor = self._coll.find({"type": doc_type, "category": category.value})
         rows = await cursor.to_list(length=None)
-        return [from_mongo_dict(r) for r in rows]
+        # Per-doc guard: a single malformed stored doc must not 500 the
+        # whole list (see _deserialize_skipping_malformed).
+        return _deserialize_skipping_malformed(rows)
 
     async def update(
         self,

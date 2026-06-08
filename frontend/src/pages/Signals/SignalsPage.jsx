@@ -22,6 +22,7 @@ import { classifyFetchError } from '../../utils/fetchError';
 import { fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
+import { hydrateFromPersisted } from './hydrateSignal';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
 import SaveControls from '../../components/SaveControls';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
@@ -41,26 +42,6 @@ function nextSignalName(existing) {
     }
   }
   return `Signal ${maxN + 1}`;
-}
-
-// Build the editor-shape signal object from a backend SignalOut payload.
-// Backend field ``description`` maps to local ``doc``; the rest mirror.
-function hydrateFromPersisted(persisted) {
-  const inputs = Array.isArray(persisted.inputs) ? persisted.inputs : [];
-  const rules = (persisted.rules && typeof persisted.rules === 'object')
-    ? { ...emptyRules(), ...persisted.rules }
-    : emptyRules();
-  const settings = (persisted.settings && typeof persisted.settings === 'object')
-    ? { ...defaultSettings(), ...persisted.settings }
-    : defaultSettings();
-  return {
-    id: persisted.id,
-    name: persisted.name || 'Untitled',
-    inputs,
-    rules,
-    settings,
-    doc: typeof persisted.description === 'string' ? persisted.description : '',
-  };
 }
 
 // Re-export for consumers that import from this file.
