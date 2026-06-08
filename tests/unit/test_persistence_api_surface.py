@@ -96,6 +96,7 @@ def test_init_signature_is_locked_to_client_db_collection() -> None:
     )
     # db_name and collection_name must be keyword-only
     import inspect as _inspect
+
     for kw in ("db_name", "collection_name"):
         assert params[kw].kind == _inspect.Parameter.KEYWORD_ONLY, (
             f"WriteRepository.__init__ parameter {kw!r} must be keyword-only"
@@ -164,6 +165,169 @@ def test_coll_attribute_is_immutable_after_construction() -> None:
     # Adding a fresh attribute is also rejected (slots + setattr guard).
     with pytest.raises(AttributeError):
         repo.alias = "x"  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# CRIT#1 — per-document deserialization in the repository list methods must
+# NOT let ONE malformed stored doc 500 the entire list. The repo must skip +
+# log the bad doc and return the good ones.
+#
+# These tests drive the real ``WriteRepository.list_by_type`` /
+# ``list_by_type_and_category`` against a fake Motor collection whose
+# ``find(...).to_list(...)`` yields a mix of valid and malformed RAW mongo
+# dicts. They run pure-Python (no Mongo, no real event loop beyond asyncio.run).
+# ---------------------------------------------------------------------------
+
+
+class _FakeCursor:
+    """Stand-in for the Motor cursor returned by ``collection.find(...)``."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    async def to_list(self, length=None) -> list[dict]:  # noqa: ANN001
+        return list(self._rows)
+
+
+class _FakeFindColl:
+    """Fake collection exposing only the ``find`` used by the list methods."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self.last_filter: dict | None = None
+
+    def find(self, filter_: dict) -> _FakeCursor:
+        self.last_filter = filter_
+        return _FakeCursor(self._rows)
+
+
+def _repo_with_rows(rows: list[dict]) -> WriteRepository:
+    """Build a real ``WriteRepository`` whose ``_coll`` is a fake collection.
+
+    ``_coll`` is slot-locked, so we bind it through ``object.__setattr__``
+    exactly the way ``__init__`` does — the public surface is untouched.
+    """
+    repo = WriteRepository.__new__(WriteRepository)
+    object.__setattr__(repo, "_coll", _FakeFindColl(rows))
+    return repo
+
+
+def test_list_by_type_and_category_skips_malformed_doc() -> None:
+    """One stored signal doc missing ``category`` must NOT crash the list —
+    the valid doc is returned, the malformed one skipped (regression for the
+    CRITICAL: ``from_mongo_dict`` in the repo list-comp had no try/except)."""
+    import asyncio
+
+    from datetime import datetime, timezone
+
+    from tcg.types.persistence import Category, SignalDoc
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    good_raw = {
+        "_id": "good-sig",
+        "type": "signal",
+        "name": "Good",
+        "category": "DEV",
+        "created_at": now,
+        "updated_at": now,
+        "inputs": [],
+        "rules": {},
+        "settings": {},
+        "description": "",
+    }
+    # Malformed: missing ``category`` → from_mongo_dict raises KeyError.
+    bad_raw = {
+        "_id": "bad-sig",
+        "type": "signal",
+        "name": "Missing Category",
+        "created_at": now,
+        "updated_at": now,
+    }
+    repo = _repo_with_rows([good_raw, bad_raw])
+
+    result = asyncio.run(repo.list_by_type_and_category("signal", Category.DEV))
+
+    ids = [d.id for d in result]
+    assert ids == ["good-sig"], f"expected only the valid doc, got {ids}"
+    assert isinstance(result[0], SignalDoc)
+
+
+def test_list_by_type_and_category_skips_unknown_type_and_bad_category() -> None:
+    """Two distinct malformed shapes (unknown ``type`` → ValueError, bad
+    ``category`` value → ValueError) are both skipped while the good doc
+    survives."""
+    import asyncio
+
+    from datetime import datetime, timezone
+
+    from tcg.types.persistence import Category
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    good_raw = {
+        "_id": "good-ptf",
+        "type": "portfolio",
+        "name": "Good",
+        "category": "RESEARCH",
+        "created_at": now,
+        "updated_at": now,
+        "legs": [],
+        "rebalance": "none",
+    }
+    bad_type = {
+        "_id": "bad-type",
+        "type": "not-a-real-type",
+        "name": "Bad Type",
+        "category": "RESEARCH",
+        "created_at": now,
+        "updated_at": now,
+    }
+    bad_category = {
+        "_id": "bad-cat",
+        "type": "portfolio",
+        "name": "Bad Category",
+        "category": "BOGUS",
+        "created_at": now,
+        "updated_at": now,
+    }
+    repo = _repo_with_rows([good_raw, bad_type, bad_category])
+
+    result = asyncio.run(repo.list_by_type_and_category("portfolio", Category.RESEARCH))
+
+    assert [d.id for d in result] == ["good-ptf"]
+
+
+def test_list_by_type_skips_malformed_indicator_doc() -> None:
+    """The indicator list path (``list_by_type``) has the same per-doc
+    guard: a malformed indicator (missing required ``definition``) is
+    skipped, valid ones returned."""
+    import asyncio
+
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    good_raw = {
+        "_id": "good-ind",
+        "type": "indicator",
+        "name": "Good",
+        "definition": {"period": 14},
+        "created_at": now,
+        "updated_at": now,
+        "deleted": False,
+    }
+    # Missing required ``definition`` (no default) → ValueError in from_mongo_dict.
+    bad_raw = {
+        "_id": "bad-ind",
+        "type": "indicator",
+        "name": "Missing Definition",
+        "created_at": now,
+        "updated_at": now,
+        "deleted": False,
+    }
+    repo = _repo_with_rows([good_raw, bad_raw])
+
+    result = asyncio.run(repo.list_by_type("indicator"))
+
+    assert [d.id for d in result] == ["good-ind"]
 
 
 def test_doctype_enum_values_match_discriminators() -> None:
