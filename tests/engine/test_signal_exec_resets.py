@@ -1637,6 +1637,13 @@ def test_b15_placeholder_block_with_binding_accepted():
 #        the countdown is re-seeded so a subsequent re-arm again needs N.
 #   C7   one reset fire decrements ALL its disarmed bound blocks by 1 (shared
 #        reset, two entries, count=2) → both re-arm together after 2 fires.
+#   C8   two blocks bound to the SAME reset with DIFFERENT counts → each has
+#        an INDEPENDENT countdown; the smaller-count block re-arms (and
+#        re-fires) strictly earlier than the larger-count one.
+#   C9   reset operand NaN at a fire bar under count>1 does NOT decrement the
+#        countdown (and does not re-arm): the NaN bar is absent from fired/
+#        latched and the block stays disarmed exactly as if that bar were a
+#        non-firing gap.
 # ---------------------------------------------------------------------------
 
 
@@ -1923,3 +1930,116 @@ async def test_c7_one_fire_decrements_all_disarmed_bound_blocks():
     # Re-arm reached at the 2nd fire (t3) for both → ONE marker at t3.
     events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
     assert events_by[("R1", "reset")].latched_indices == (3,)
+
+
+@pytest.mark.asyncio
+async def test_c8_same_reset_different_counts_independent_countdowns():
+    # Two entries (EX, EY) bound to the SAME reset R1 but with DIFFERENT
+    # counts: EX count=2, EY count=3. Both open t0 (13) and close t1 (11).
+    # R1 (X==5) fires on NON-consecutive bars t2, t4, t6 — leaving eligible
+    # reopen bars (X=Y=13) at t3, t5, t7.
+    #   EX (count=2) re-arms at its 2nd fire (t4) → reopens at the next
+    #     eligible bar t5.
+    #   EY (count=3) re-arms only at its 3rd fire (t6) → reopens at t7, NOT
+    #     at t5 (its countdown is still 1 there).
+    # The strictly-later EY reopen proves the countdowns are PER-BLOCK and
+    # do not share the tally; R1 also records TWO distinct effective-re-arm
+    # markers (one per bound block), at t4 (EX) and t6 (EY).
+    INPUT_Y = Input(
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+    )
+    spx = np.array([13.0, 11.0, 5.0, 13.0, 5.0, 13.0, 5.0, 13.0])
+    ndx = np.array([13.0, 11.0, 5.0, 13.0, 5.0, 13.0, 5.0, 13.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
+    )
+    eX = Block(
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=2,
+    )
+    eY = Block(
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=100.0,
+        conditions=(_gt("Y", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=3,
+    )
+    xX = Block(id="XX", conditions=(_lt("X", 11.5),), target_entry_block_name="EX")
+    xY = Block(id="XY", conditions=(_lt("Y", 11.5),), target_entry_block_name="EY")
+    reset = _reset_at5()  # fires at t2, t4, t6 (X==5)
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(entries=(eX, eY), exits=(xX, xY), resets=(reset,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    by_entry: dict[str, list] = {"EX": [], "EY": []}
+    for tr in result.trades:
+        by_entry[tr.entry_block_id].append(tr)
+    # EX (count=2) re-arms at t4 → reopens at t5.
+    assert len(by_entry["EX"]) == 2, by_entry["EX"]
+    assert by_entry["EX"][1].open_bar == 5
+    # EY (count=3) re-arms at t6 → reopens at t7 (strictly later than EX),
+    # NOT at t5: independent, longer countdown.
+    assert len(by_entry["EY"]) == 2, by_entry["EY"]
+    assert by_entry["EY"][1].open_bar == 7
+    # Two distinct effective re-arms: EX at t4, EY at t6.
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    assert events_by[("R1", "reset")].latched_indices == (4, 6)
+
+
+@pytest.mark.asyncio
+async def test_c9_reset_nan_bar_does_not_decrement_countdown():
+    # count=2. Entry opens t0 (13), closes t1 (11). The bound reset R1
+    # (X==5) would fire at t2 AND t3, which under count=2 would re-arm the
+    # block. But t3 is NaN → its reset truth is masked, so ONLY t2 counts:
+    # the countdown stalls at 1 and never reaches 0. Result: NO re-arm, so
+    # the entry never reopens despite eligible bars at t4..t7 → ONE trade.
+    # The NaN bar t3 must be absent from BOTH fired_indices and
+    # latched_indices (a NaN reset bar behaves like a non-firing gap, not a
+    # decrement).
+    closes = np.array([13.0, 11.0, 5.0, np.nan, 13.0, 13.0, 13.0, 13.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=2,
+    )
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(_reset_at5(),)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # NaN at t3 did not count toward the countdown (only t2 fired) → the
+    # block never re-arms → exactly ONE trade.
+    assert len(result.trades) == 1, result.trades
+    assert (result.trades[0].open_bar, result.trades[0].close_bar) == (0, 1)
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    r = events_by[("R1", "reset")]
+    # Only the real fire (t2) is recorded; the NaN bar is neither fired nor
+    # an (ineffective) re-arm.
+    assert 2 in r.fired_indices
+    assert 3 not in r.fired_indices
+    assert 3 not in r.latched_indices
+    # No effective re-arm occurred at all (countdown stalled at 1).
+    assert r.latched_indices == ()

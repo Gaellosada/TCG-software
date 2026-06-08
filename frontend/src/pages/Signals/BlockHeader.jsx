@@ -291,12 +291,8 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
           </div>
           {block.requires_reset_block_id && (
             <div className={styles.blockWeightCell}>
-              <label
-                className={styles.conditionInlineLabel}
-                htmlFor={`reset-count-${blockIndex}`}
-              >
-                ×
-              </label>
+              {/* Single trailing "×" suffix (reads like "3×"), mirroring the
+                  weight input's single "%" suffix — no separate "×" label. */}
               <div className={styles.weightInputWrap}>
                 <input
                   id={`reset-count-${blockIndex}`}
