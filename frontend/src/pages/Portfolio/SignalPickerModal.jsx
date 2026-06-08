@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { loadState } from '../Signals/storage';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
+import { listSignals, describePersistenceError } from '../../api/persistence';
+import { hydrateFromPersisted } from '../Signals/hydrateSignal';
 import { formatInstrument } from './formatInstrument';
 import styles from './SignalPickerModal.module.css';
+
+// Categories selectable in this picker. Mirrors the Signals page selector
+// but excludes ARCHIVE — you don't add archived (soft-deleted) signals to a
+// portfolio. Default matches SignalsPage: RESEARCH.
+const PICKER_CATEGORIES = /** @type {const} */ (['RESEARCH', 'DEV', 'PROD']);
+const DEFAULT_CATEGORY = 'RESEARCH';
 
 /**
  * Two-step modal for adding a signal as a portfolio holding.
  *
- * Step 1: Pick a signal from the saved signals list.
+ * Step 1: Pick a signal from the backend-persisted signals list. A category
+ *         selector (RESEARCH / DEV / PROD) filters which signals are shown;
+ *         switching it refetches. Four distinct states are rendered:
+ *         loading, error (with retry), empty, and the signal list.
  * Step 2: Configure inputs — pre-filled from the saved signal, editable via
  *         InstrumentPickerModal. User can change any input's instrument before
  *         adding to the portfolio.
@@ -15,25 +25,62 @@ import styles from './SignalPickerModal.module.css';
  * Props:
  *   isOpen    {boolean}
  *   onClose   {Function}  () => void
- *   onSelect  {Function}  (signal) => void — receives the signal with updated inputs
+ *   onSelect  {Function}  (signal) => void — receives the (hydrated) signal
+ *                         with updated inputs
  */
 export default function SignalPickerModal({ isOpen, onClose, onSelect }) {
   const closeRef = useRef(null);
 
-  // Step 1 state
-  const signals = useMemo(() => {
-    if (!isOpen) return [];
-    return loadState().signals;
-  }, [isOpen]);
+  // Step 1 state — backend-sourced signal list.
+  const [category, setCategory] = useState(DEFAULT_CATEGORY);
+  const [signals, setSignals] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   // Step 2 state
   const [selectedSignal, setSelectedSignal] = useState(null);
   const [editedInputs, setEditedInputs] = useState([]);
   const [pickingInputIdx, setPickingInputIdx] = useState(null);
 
-  // Reset on close/open
+  // Monotonic request token — ignore resolutions from a superseded fetch
+  // (rapid category switch, or modal closed mid-flight) so a stale response
+  // can't clobber fresher state.
+  const reqTokenRef = useRef(0);
+
+  const fetchSignals = useCallback(async (cat) => {
+    const token = ++reqTokenRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const docs = await listSignals(cat);
+      if (token !== reqTokenRef.current) return;
+      setSignals(Array.isArray(docs) ? docs.map(hydrateFromPersisted) : []);
+    } catch (err) {
+      if (token !== reqTokenRef.current) return;
+      // A failed fetch must NOT collapse into the empty state — surface the
+      // error explicitly so the user can retry.
+      setError(describePersistenceError(err));
+      setSignals([]);
+    } finally {
+      if (token === reqTokenRef.current) setLoading(false);
+    }
+  }, []);
+
+  // Fetch on open and whenever the category changes while open.
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchSignals(category);
+  }, [isOpen, category, fetchSignals]);
+
+  // Reset all state on close so reopening starts clean (category → default,
+  // step 1, no stale list/error). Invalidate any in-flight request.
   useEffect(() => {
     if (!isOpen) {
+      reqTokenRef.current += 1;
+      setCategory(DEFAULT_CATEGORY);
+      setSignals([]);
+      setLoading(false);
+      setError(null);
       setSelectedSignal(null);
       setEditedInputs([]);
       setPickingInputIdx(null);
@@ -72,7 +119,7 @@ export default function SignalPickerModal({ isOpen, onClose, onSelect }) {
   // Step 1 → Step 2 transition
   const handlePickSignal = useCallback((signal) => {
     setSelectedSignal(signal);
-    // Deep-copy inputs so edits don't mutate localStorage state
+    // Deep-copy inputs so edits don't mutate the fetched/hydrated state.
     setEditedInputs(
       (signal.inputs || []).map((inp) => ({
         id: inp.id,
@@ -154,9 +201,45 @@ export default function SignalPickerModal({ isOpen, onClose, onSelect }) {
           {/* ── Step 1: Signal list ── */}
           {!selectedSignal && (
             <>
-              {signals.length === 0 ? (
+              {/* Category selector — mirrors the Signals page pattern. */}
+              <div className={styles.categoryRow}>
+                <label className={styles.categoryLabel} htmlFor="signal-picker-category-select">
+                  Category
+                </label>
+                <select
+                  id="signal-picker-category-select"
+                  className={styles.categorySelect}
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  aria-label="Filter signals by category"
+                  data-testid="signal-picker-category"
+                >
+                  {PICKER_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              </div>
+
+              {loading ? (
+                <div className={styles.empty} data-testid="signal-picker-loading">
+                  Loading signals&#8230;
+                </div>
+              ) : error ? (
+                <div className={styles.error} data-testid="signal-picker-error">
+                  <div className={styles.errorMsg}>
+                    <strong>Failed to load signals:</strong> {error}
+                  </div>
+                  <button
+                    className={styles.retryBtn}
+                    type="button"
+                    onClick={() => fetchSignals(category)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : signals.length === 0 ? (
                 <div className={styles.empty}>
-                  No saved signals. Go to the Signals page to create one.
+                  No saved signals in this category. Go to the Signals page to create one.
                 </div>
               ) : (
                 <div className={styles.list}>
@@ -171,7 +254,7 @@ export default function SignalPickerModal({ isOpen, onClose, onSelect }) {
                           <div className={styles.signalName}>{signal.name}</div>
                           <div className={styles.signalMeta}>
                             {inputCount} input{inputCount !== 1 ? 's' : ''}
-                            {' \u00B7 '}
+                            {' · '}
                             {blockCount} block{blockCount !== 1 ? 's' : ''}
                           </div>
                         </div>
