@@ -1415,6 +1415,173 @@ class TestAbutmentFallbackWarns:
         )
 
 
+class TestMonotonicOwnership:
+    """Dedup must produce MONOTONIC contract ownership (no interleaving artifact).
+
+    BUG (logged in PROBLEMS.md as "Dedup INTERLEAVING artifact"):
+    ``trim_overlaps`` cuts the old contract at ``dates <= expiration``. When the
+    old contract's expiration falls AFTER the new contract's first overlapping
+    trading day (the real VIX case: front and next month trade simultaneously
+    near expiry), the old contract RETAINS trading days after the new contract
+    has already started. ``_concatenate`` then deduped strictly day-by-day
+    ("later contract wins on a shared day"), but on a date the new contract did
+    NOT quote, the OLD contract's stale row survived — re-appearing AFTER the
+    new contract took over. That produced NON-MONOTONIC ownership
+    (e.g. ``[A,A,B,B,A,B]``), a ``surviving`` tuple that flip-flops
+    (``('A','B','A','B')``), PHANTOM extra roll dates, and corrupted prices
+    (the old contract's price re-inserted between the new contract's days).
+
+    CORRECT behavior (monotone high-water ownership): once the new contract
+    takes over at the transition (roll) day, the old contract owns no later
+    date. Each date belongs to exactly one contract; ownership switches forward
+    only; exactly one roll per real boundary; ``surviving`` never repeats a
+    contract; no stale old-contract price between new-contract days.
+    """
+
+    def setup_method(self):
+        self.builder = ContinuousSeriesBuilder()
+
+    @staticmethod
+    def _assert_monotonic(builder, contracts) -> None:
+        """Assert the trimmed → concatenated ownership is strictly monotone."""
+        roll_schedule = compute_roll_dates(contracts, RollStrategy.FRONT_MONTH)
+        trimmed = trim_overlaps(contracts, roll_schedule)
+        series, roll_dates, surviving = builder._concatenate(trimmed)
+
+        # 1. surviving indices are strictly increasing (no back-and-forth).
+        assert surviving == sorted(set(surviving)), (
+            f"surviving ownership not strictly monotone: {surviving}"
+        )
+        assert len(surviving) == len(set(surviving)), (
+            f"surviving repeats a contract: {surviving}"
+        )
+        # 2. Exactly one roll date per ownership transition.
+        assert len(roll_dates) == len(surviving) - 1, (
+            f"roll_dates ({len(roll_dates)}) != transitions "
+            f"({len(surviving) - 1}); phantom rolls present"
+        )
+        # 3. Roll dates strictly increasing (each boundary distinct & ordered).
+        assert roll_dates == sorted(roll_dates), (
+            f"roll dates not increasing: {roll_dates}"
+        )
+        assert len(roll_dates) == len(set(roll_dates)), (
+            f"duplicate roll dates: {roll_dates}"
+        )
+        # 4. Output dates strictly increasing & unique (each date owned once).
+        d = series.dates.tolist()
+        assert d == sorted(d), f"dates not sorted: {d}"
+        assert len(d) == len(set(d)), f"duplicate dates in output: {d}"
+
+    def test_repro_interleaving_is_monotonic(self):
+        """The brief's repro: old contract retains a post-roll overlapping day.
+
+        c1 expires 20240118 with dates [110,112,115,118]; c2 starts on the
+        shared day 20240115 (front/next trade together). Before the fix this
+        produced surviving=('A','B','A','B') with 3 roll dates and c1's price
+        re-appearing at 20240118 between c2's days. After the fix: c1 owns dates
+        before the transition (110,112), c2 owns from 20240115 onward, ONE roll.
+        """
+        c1 = _make_contract(
+            "A",
+            20240118,
+            [20240110, 20240112, 20240115, 20240118],
+            [10.0, 11.0, 12.0, 13.0],
+        )
+        c2 = _make_contract(
+            "B", 20240215, [20240115, 20240117, 20240120], [20.0, 21.0, 22.0]
+        )
+
+        self._assert_monotonic(self.builder, [c1, c2])
+
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.NONE
+        )
+        result = self.builder.build([c1, c2], config)
+
+        # Exactly ONE roll, no repeated contract.
+        assert result.contracts == ("A", "B")
+        assert len(result.roll_dates) == 1
+        # The phantom 20240118 (c1 re-appearing after c2 took over) is gone.
+        dates = result.prices.dates.tolist()
+        assert dates == [20240110, 20240112, 20240115, 20240117, 20240120]
+        # c1 owns its pre-transition days (raw 10, 11); c2 owns from 20240115
+        # (raw 20, 21, 22). No stale c1 price (13.0) anywhere in the output.
+        np.testing.assert_array_equal(
+            result.prices.close, [10.0, 11.0, 20.0, 21.0, 22.0]
+        )
+        assert 13.0 not in result.prices.close.tolist()
+
+    def test_repro_concatenate_directly(self):
+        """Brief-literal framing fed straight to ``_concatenate``.
+
+        Two already-trimmed contracts where the old one retains a later
+        overlapping day; ``_concatenate`` alone must not interleave.
+        """
+        c1 = _make_contract(
+            "A",
+            20240115,
+            [20240110, 20240112, 20240115, 20240118],
+            [10.0, 11.0, 12.0, 13.0],
+        )
+        c2 = _make_contract(
+            "B", 20240215, [20240115, 20240117, 20240120], [20.0, 21.0, 22.0]
+        )
+        series, roll_dates, surviving = self.builder._concatenate([c1, c2])
+
+        assert surviving == [0, 1], f"expected [0,1], got {surviving}"
+        assert len(roll_dates) == 1, f"expected 1 roll, got {roll_dates}"
+        assert roll_dates == [20240115]
+        assert series.dates.tolist() == [
+            20240110,
+            20240112,
+            20240115,
+            20240117,
+            20240120,
+        ]
+        # No stale old-contract row (13.0) between the new contract's days.
+        assert series.close.tolist() == [10.0, 11.0, 20.0, 21.0, 22.0]
+
+    def test_multi_roll_overlapping_is_monotonic(self):
+        """Realistic 3-contract case, each pair overlapping AND the old contract
+        carrying days beyond the next contract's start at every boundary."""
+        # c1 exp 20240118: keeps a post-115 day (118) that overlaps c2's window.
+        c1 = _make_contract(
+            "A",
+            20240118,
+            [20240110, 20240113, 20240115, 20240118],
+            [98.0, 99.0, 100.0, 101.0],
+        )
+        # c2 exp 20240218: starts 115 (shared with c1) AND keeps a post-215 day.
+        c2 = _make_contract(
+            "B",
+            20240218,
+            [20240115, 20240117, 20240213, 20240215, 20240218],
+            [104.0, 105.0, 109.0, 110.0, 111.0],
+        )
+        c3 = _make_contract(
+            "C",
+            20240315,
+            [20240213, 20240215, 20240218, 20240220],
+            [114.0, 115.0, 116.0, 117.0],
+        )
+
+        self._assert_monotonic(self.builder, [c1, c2, c3])
+
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.RATIO
+        )
+        result = self.builder.build([c1, c2, c3], config)
+        # Three contracts, each appears once, exactly two rolls.
+        assert result.contracts == ("A", "B", "C")
+        assert len(result.roll_dates) == 2
+        # Numerical monotonic-ownership check on the final metadata.
+        assert list(result.roll_dates) == sorted(set(result.roll_dates))
+        # Adjusted closes finite & positive (no NaN poisoning, no negative from
+        # a back-and-forth gap).
+        assert np.all(np.isfinite(result.prices.close))
+        assert np.all(result.prices.close > 0)
+
+
 class TestZeroNaNGuardSymmetry:
     """Both ratio and difference must skip-with-warning on a 0 or NaN ref close."""
 

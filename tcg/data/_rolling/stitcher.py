@@ -105,13 +105,9 @@ class ContinuousSeriesBuilder:
         # 4. Apply adjustment (surviving contracts aligned with actual_roll_dates)
         match config.adjustment:
             case AdjustmentMethod.RATIO:
-                adjusted = adjust_ratio(
-                    raw_series, actual_roll_dates, surviving
-                )
+                adjusted = adjust_ratio(raw_series, actual_roll_dates, surviving)
             case AdjustmentMethod.DIFFERENCE:
-                adjusted = adjust_difference(
-                    raw_series, actual_roll_dates, surviving
-                )
+                adjusted = adjust_difference(raw_series, actual_roll_dates, surviving)
             case _:
                 adjusted = raw_series
 
@@ -130,16 +126,35 @@ class ContinuousSeriesBuilder:
     ) -> tuple[PriceSeries, list[int], list[int]]:
         """Concatenate trimmed contracts into a single PriceSeries.
 
-        Deduplicates dates: if two contracts have data on the same date,
-        the later contract's data is kept. This means some contracts may be
-        entirely subsumed by a later contract and contribute no rows.
+        Deduplicates dates with **monotone (high-water) contract ownership** so
+        the stitched series advances through contracts in one direction only:
+
+        - On a date quoted by several contracts, the later contract (higher
+          index — contracts are sorted ascending by expiration) wins.
+        - Once a contract takes over, no EARLIER contract may own a later date.
+          ``trim_overlaps`` cuts each contract at ``dates <= expiration``; when a
+          contract's expiration falls after the next contract's first overlapping
+          trading day (the real VIX case: front and next month trade together
+          near expiry), the old contract retains days the new one has already
+          superseded. A naive day-by-day "later wins" dedup would keep such a
+          stale old-contract row on a date the new contract did not quote,
+          re-inserting the old contract AFTER the roll. That yields non-monotone
+          ownership (e.g. ``[A,A,B,B,A,B]``), a ``surviving`` tuple that
+          flip-flops, phantom extra roll dates and corrupted prices. We therefore
+          DROP any date whose winning contract index is below the running maximum
+          contract index already seen — a stale old-contract day after the roll.
+
+        Some contracts may be entirely subsumed by a later contract (it quotes
+        all their dates and starts at/before them) and contribute no rows.
 
         Returns
         -------
         (concatenated_series, roll_dates, surviving_indices) where:
         - roll_dates are the first date of each new contract segment
         - surviving_indices are the original indices into `trimmed` of
-          contracts that actually contribute data (len(roll_dates) == len(surviving) - 1)
+          contracts that actually contribute data. They are STRICTLY INCREASING
+          (no contract appears twice) and ``len(roll_dates) == len(surviving) - 1``
+          (exactly one roll per ownership transition).
         """
         if len(trimmed) == 1:
             return trimmed[0].prices, [], [0]
@@ -183,13 +198,25 @@ class ContinuousSeriesBuilder:
         cat_volume = cat_volume[sort_order]
         cat_idx = cat_idx[sort_order]
 
-        # For duplicate dates, keep the LAST occurrence (later contract)
+        # For duplicate dates, keep the LAST occurrence (later contract).
         # np.unique with return_index gives first occurrence; we want last.
         # Reverse, unique, reverse back.
         _, unique_idx = np.unique(cat_dates[::-1], return_index=True)
         # Convert reversed indices back to forward indices
-        keep = len(cat_dates) - 1 - unique_idx
-        keep = np.sort(keep)
+        candidate = len(cat_dates) - 1 - unique_idx
+        candidate = np.sort(candidate)
+
+        # Enforce monotone (high-water) ownership: walking dates in ascending
+        # order, the owning contract index must never decrease. Drop any date
+        # whose winning contract is below the running maximum — that is a stale
+        # old-contract day quoted after a later contract has already taken over
+        # (the post-roll overlap that ``trim_overlaps`` could not remove on its
+        # own). ``cat_idx[candidate]`` is the per-date winner (highest index on
+        # that date); keeping only rows equal to its cumulative max removes the
+        # interleaving artifact while preserving "later contract wins".
+        candidate_owner = cat_idx[candidate]
+        running_max_owner = np.maximum.accumulate(candidate_owner)
+        keep = candidate[candidate_owner >= running_max_owner]
 
         final_dates = cat_dates[keep]
         final_open = cat_open[keep]
