@@ -219,6 +219,110 @@ class TestPortfolioCompute:
         assert body["metrics"]["sharpe_ratio"] is None
 
 
+# ── Non-finite equity blocks must serialize as null (RFC-8259) ───────────
+
+
+# Reuse VALID_BODY's two legs (SPX + "VIX Futures") so leg labels line up
+# with whatever aligned series we inject. We override get_aligned_prices to
+# return pathological closes that NaN/inf-poison the equity curves, then
+# assert the RAW response text carries no bare non-finite JSON token. These
+# drive the ACTUAL compute + serialization path (mirroring the #6 raw-text
+# test) — a leg with a run of NaN closes (an all-NaN leg) and a leg with a
+# zero-price bar. We use rebalance="daily" so both the daily portfolio_equity
+# /leg_equities AND the buy-and-hold raw_leg_equities blocks are exercised.
+class TestNonFiniteEquityBlocksSanitized:
+    """BLOCKING regression: ``portfolio_equity`` / ``leg_equities`` /
+    ``raw_leg_equities`` were serialized via ``.tolist()`` WITHOUT
+    ``sanitize_json_floats``, and ``raw_leg_equities`` (always buy-and-hold)
+    NaN/inf-poisons. Starlette's ``JSONResponse`` renders with
+    ``json.dumps(allow_nan=False)`` → a bare NaN/inf raises and the endpoint
+    500s. No serialized float block may emit NaN/Infinity, anywhere.
+    """
+
+    def _inject(self, mock_app, dates: list[int], spx, vix) -> None:
+        svc = mock_app.state.market_data
+        common = np.array(dates, dtype=np.int64)
+        aligned = {
+            "SPX": _price_series(dates, spx),
+            "VIX Futures": _price_series(dates, vix),
+        }
+        svc.get_aligned_prices = AsyncMock(return_value=(common, aligned))
+
+    @staticmethod
+    def _assert_no_bare_nonfinite(resp) -> None:
+        # If a non-finite float reached the JSON renderer the endpoint would
+        # 500; assert success first so the reason is unambiguous.
+        assert resp.status_code == 200, resp.text
+        raw = resp.text
+        assert "NaN" not in raw, f"bare NaN leaked into JSON: {raw[:400]}"
+        assert "Infinity" not in raw, f"bare Infinity leaked into JSON: {raw[:400]}"
+        # "-Infinity" is a substring of "Infinity"; assert explicitly anyway.
+        assert "-Infinity" not in raw, f"bare -Infinity leaked: {raw[:400]}"
+
+    async def test_case_a_all_nan_leg(self, mock_app, client: AsyncClient):
+        """Case A: one leg is all-NaN after its first bar. Buy-and-hold
+        (``raw_leg_equities``) cumprods NaN to the end of the curve."""
+        dates = DATES
+        spx = [100.0 + i for i in range(len(dates))]
+        # "VIX Futures" leg: first bar then all-NaN → every return is NaN.
+        vix = [100.0] + [float("nan")] * (len(dates) - 1)
+        self._inject(mock_app, dates, spx, vix)
+
+        body = {
+            **VALID_BODY,
+            "rebalance": "daily",
+            "weights": {"SPX": 50, "VIX Futures": 50},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        self._assert_no_bare_nonfinite(resp)
+
+        parsed = resp.json()
+        # raw_leg_equities is ALWAYS buy-and-hold; the source fix holds the
+        # all-NaN leg flat at its initial allocation, so the curve is finite
+        # (no nulls) AND constant — not a row poisoned to null. The sanitizer
+        # is the backstop, but with the source fix there is nothing to null.
+        raw_vix = parsed["raw_leg_equities"]["VIX Futures"]
+        assert None not in raw_vix, raw_vix
+        assert raw_vix[0] is not None
+        assert all(v == raw_vix[0] for v in raw_vix), f"not held flat: {raw_vix}"
+
+    async def test_case_b_zero_price_bar(self, mock_app, client: AsyncClient):
+        """Case B: a leg has a zero-price bar → normal return is a divide-by
+        -zero (inf), and the next return divides by zero again. Both the
+        daily equity (inf) and buy-and-hold (NaN) blocks must not leak."""
+        dates = DATES
+        spx = [100.0 + i for i in range(len(dates))]
+        # Zero close at index 1, recovers after — exercises inf and the
+        # following division-by-zero.
+        vix = [100.0, 0.0] + [50.0 + i for i in range(len(dates) - 2)]
+        self._inject(mock_app, dates, spx, vix)
+
+        body = {
+            **VALID_BODY,
+            "rebalance": "daily",
+            "weights": {"SPX": 50, "VIX Futures": 50},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        self._assert_no_bare_nonfinite(resp)
+
+    async def test_case_b_zero_price_buy_and_hold(self, mock_app, client: AsyncClient):
+        """Case B under buy-and-hold (rebalance='none'): the zero-price bar
+        flows straight into the per-leg equity curve. Source fix must hold it
+        flat (no inf); sanitizer is the backstop."""
+        dates = DATES
+        spx = [100.0 + i for i in range(len(dates))]
+        vix = [100.0, 0.0] + [50.0 + i for i in range(len(dates) - 2)]
+        self._inject(mock_app, dates, spx, vix)
+
+        body = {
+            **VALID_BODY,
+            "rebalance": "none",
+            "weights": {"SPX": 50, "VIX Futures": 50},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        self._assert_no_bare_nonfinite(resp)
+
+
 # ── Validation errors ──────────────────────────────────────────────────
 
 

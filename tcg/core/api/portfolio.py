@@ -956,7 +956,7 @@ async def compute_portfolio(
 
     dates_iso = [int_to_iso(int(d)) for d in common_dates]
 
-    return {
+    response = {
         "dates": dates_iso,
         "portfolio_equity": result.portfolio_equity.tolist(),
         "leg_equities": {
@@ -966,14 +966,10 @@ async def compute_portfolio(
             label: eq.tolist() for label, eq in result.raw_leg_equities.items()
         },
         "rebalance_dates": [int_to_iso(int(d)) for d in result.rebalance_dates],
-        # NaN/inf in these aggregate blocks must serialize as JSON null
-        # (RFC-8259) so the browser's strict res.json() doesn't choke (#6).
-        "metrics": sanitize_json_floats(asdict(metrics)),
-        "leg_metrics": {
-            label: sanitize_json_floats(asdict(m)) for label, m in leg_metrics.items()
-        },
-        "monthly_returns": sanitize_json_floats(monthly),
-        "yearly_returns": sanitize_json_floats(yearly),
+        "metrics": asdict(metrics),
+        "leg_metrics": {label: asdict(m) for label, m in leg_metrics.items()},
+        "monthly_returns": monthly,
+        "yearly_returns": yearly,
         "date_range": {"start": dates_iso[0], "end": dates_iso[-1]},
         "full_date_range": {"start": full_start_iso, "end": full_end_iso},
         "rebalance": rebalance_freq.value,
@@ -982,3 +978,16 @@ async def compute_portfolio(
         "trades": aggregated_trades,
         "positions": aggregated_positions,
     }
+
+    # RFC-8259 finite-JSON invariant: NaN / +inf / -inf are NOT valid JSON, so
+    # the WHOLE payload is passed through ``sanitize_json_floats`` (every
+    # non-finite float -> null) in one recursive pass. Degenerate inputs can
+    # poison many blocks at once — an all-NaN leg or a zero-price bar reaches
+    # ``portfolio_equity`` / ``leg_equities`` / ``raw_leg_equities``, and the
+    # ``nan_safe_floats`` price/tracking blocks let ``inf`` through by design —
+    # so sanitizing block-by-block is leak-prone. A single terminal pass is the
+    # backstop regardless of how each block was built or what the response
+    # renderer's NaN policy is. The engine ALSO holds non-finite bars flat at
+    # the source (so curves are correct, not merely nulled), but this is the
+    # last line that makes the invariant total. (#6)
+    return sanitize_json_floats(response)

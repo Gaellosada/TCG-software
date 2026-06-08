@@ -166,3 +166,45 @@ class TestSanitizeJsonFloatsNested:
         src = {"a": float("nan")}
         sanitize_json_floats(src)
         assert math.isnan(src["a"])  # original untouched
+
+    def test_full_portfolio_response_shape_is_finite_or_null(self):
+        """Contract guard for the portfolio compute response: the WHOLE
+        payload is wrapped in ``sanitize_json_floats`` (RFC-8259 invariant),
+        so every float block — equity curves, per-leg equities, raw (buy-and
+        -hold) leg equities, tracking-series values, trade weights — must end
+        up finite or ``null``. A representative response with NaN/inf in each
+        of those blocks must contain no remaining non-finite float.
+        """
+        response = {
+            "dates": ["2024-01-02", "2024-01-03"],
+            "portfolio_equity": [100.0, float("inf")],
+            "leg_equities": {"A": [50.0, float("nan")]},
+            "raw_leg_equities": {"A": [50.0, float("nan")], "B": [float("-inf"), 1.0]},
+            "tracking_series": {"IV": {"label": "IV", "values": [float("inf"), 0.2]}},
+            "trades": [{"holding_id": "A", "signed_weight": float("nan")}],
+            "metrics": {"sharpe_ratio": float("inf"), "num_trades": 3},
+            "return_type": "normal",
+        }
+        out = sanitize_json_floats(response)
+
+        def _no_nonfinite(v: object) -> bool:
+            if isinstance(v, bool):
+                return True
+            if isinstance(v, float):
+                return math.isfinite(v)
+            if isinstance(v, dict):
+                return all(_no_nonfinite(x) for x in v.values())
+            if isinstance(v, (list, tuple)):
+                return all(_no_nonfinite(x) for x in v)
+            return True
+
+        assert _no_nonfinite(out), out
+        # Spot-check the previously-unsanitized blocks specifically.
+        assert out["portfolio_equity"] == [100.0, None]
+        assert out["leg_equities"]["A"] == [50.0, None]
+        assert out["raw_leg_equities"]["B"] == [None, 1.0]
+        assert out["tracking_series"]["IV"]["values"] == [None, 0.2]
+        assert out["trades"][0]["signed_weight"] is None
+        # Non-float scalars survive.
+        assert out["metrics"]["num_trades"] == 3
+        assert out["return_type"] == "normal"

@@ -541,6 +541,81 @@ class TestComputeWeightedPortfolio:
         np.testing.assert_allclose(result.portfolio_returns[1], 0.0, atol=1e-12)
         np.testing.assert_allclose(result.portfolio_equity[1], 100.0, atol=1e-10)
 
+    def test_buy_and_hold_nan_leg_does_not_poison_raw_equities(self):
+        """BLOCKING regression: ``raw_leg_equities`` is ALWAYS built via
+        buy-and-hold. A leg with a NaN run (a leg with a different listing
+        history / an internal gap) used to cumprod NaN to the end of that
+        leg's curve, so ``raw_leg_equities[leg]`` became ``[v, nan, nan,
+        nan]`` and the response could not serialize as finite JSON. The
+        buy-and-hold path must hold a NaN bar flat (0 return) like the daily
+        and periodic paths, so the SAME inputs don't diverge by frequency.
+        """
+        prices_a = np.array([100.0, 101.0, 102.0, 103.0])
+        prices_b = np.array([100.0, np.nan, np.nan, 110.0])
+        dates = np.array([20240101, 20240102, 20240103, 20240104], dtype=np.int64)
+
+        for freq in ("none", "daily", "monthly"):
+            result = compute_weighted_portfolio(
+                aligned_closes={"A": prices_a, "B": prices_b},
+                weights={"A": 0.5, "B": 0.5},
+                rebalance_freq=freq,
+                return_type="normal",
+                dates=dates,
+            )
+            # raw_leg_equities is buy-and-hold for EVERY frequency.
+            assert np.all(np.isfinite(result.raw_leg_equities["B"])), (
+                f"raw_leg_equities NaN-poisoned ({freq=}): "
+                f"{result.raw_leg_equities['B']}"
+            )
+            # B held flat -> stays at its initial allocation (50.0).
+            np.testing.assert_allclose(result.raw_leg_equities["B"], 50.0, atol=1e-10)
+
+    def test_buy_and_hold_all_nan_leg_holds_flat(self):
+        """A single all-NaN leg under buy-and-hold must produce a finite,
+        flat equity curve (held at its initial value) — not all-NaN."""
+        prices = np.array([100.0, np.nan, np.nan, np.nan])
+        dates = np.array([20240101, 20240102, 20240103, 20240104], dtype=np.int64)
+        result = compute_weighted_portfolio(
+            aligned_closes={"B": prices},
+            weights={"B": 1.0},
+            rebalance_freq="none",
+            return_type="normal",
+            dates=dates,
+        )
+        assert np.all(np.isfinite(result.portfolio_equity))
+        assert np.all(np.isfinite(result.raw_leg_equities["B"]))
+        np.testing.assert_allclose(result.portfolio_equity, 100.0, atol=1e-10)
+
+    def test_zero_price_bar_does_not_emit_inf(self):
+        """BLOCKING regression: a zero-price bar makes the normal return
+        ``(p[t]-0)/0 = inf`` and the next bar divide-by-zero. cumprod then
+        overflowed to inf (``leg_equities``/``portfolio_equity``) and 0*inf
+        produced NaN. The engine must hold the non-finite bar flat (no
+        return) so NO equity block carries inf/NaN, under every frequency
+        and both return bases.
+        """
+        prices_a = np.array([100.0, 101.0, 102.0])
+        prices_b = np.array([100.0, 0.0, 50.0])
+        dates = np.array([20240101, 20240102, 20240103], dtype=np.int64)
+
+        for freq in ("none", "daily", "monthly"):
+            for rt in ("normal", "log"):
+                result = compute_weighted_portfolio(
+                    aligned_closes={"A": prices_a, "B": prices_b},
+                    weights={"A": 0.5, "B": 0.5},
+                    rebalance_freq=freq,
+                    return_type=rt,
+                    dates=dates,
+                )
+                for name, arr in (
+                    ("portfolio_equity", result.portfolio_equity),
+                    ("leg_equities[B]", result.per_leg_equities["B"]),
+                    ("raw_leg_equities[B]", result.raw_leg_equities["B"]),
+                ):
+                    assert np.all(np.isfinite(arr)), (
+                        f"{name} carries non-finite value ({freq=}, {rt=}): {arr}"
+                    )
+
     def test_rebalance_preserves_total_value(self):
         """Rebalancing should not change total portfolio value."""
         dates = np.array([20240102, 20240103, 20240201, 20240202], dtype=np.int64)

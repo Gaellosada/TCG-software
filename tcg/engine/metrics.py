@@ -58,10 +58,16 @@ def compute_daily_returns(
     if n < 2:
         return result
 
-    if return_type == "normal":
-        result[1:] = (prices[1:] - prices[:-1]) / prices[:-1]
-    else:  # log
-        result[1:] = np.log(prices[1:] / prices[:-1])
+    # A zero or non-finite price makes a single return non-finite (inf/NaN).
+    # That is tolerated here and held flat downstream (see the rebalance
+    # paths), so silence the expected divide/invalid warnings rather than let
+    # degenerate data spam the logs — matching the engine's convention
+    # (see tcg/engine/signal_exec.py).
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if return_type == "normal":
+            result[1:] = (prices[1:] - prices[:-1]) / prices[:-1]
+        else:  # log
+            result[1:] = np.log(prices[1:] / prices[:-1])
 
     return result
 
@@ -111,10 +117,14 @@ def compute_equity_curve(
     if n == 1:
         return curve
 
-    if return_type == "normal":
-        curve[1:] = initial_value * np.cumprod(1.0 + returns[1:])
-    else:  # log
-        curve[1:] = initial_value * np.exp(np.cumsum(returns[1:]))
+    # Callers hold non-finite per-bar returns flat before building the curve,
+    # but defensively silence overflow/invalid here too (a degenerate return
+    # that slips through cumprod/exp is the caller's to sanitize/hold flat).
+    with np.errstate(over="ignore", invalid="ignore"):
+        if return_type == "normal":
+            curve[1:] = initial_value * np.cumprod(1.0 + returns[1:])
+        else:  # log
+            curve[1:] = initial_value * np.exp(np.cumsum(returns[1:]))
 
     return curve
 
@@ -386,8 +396,15 @@ def _compute_daily_rebalance(
     for lbl in labels:
         w = norm_weights[lbl]
         leg_ret = per_leg_returns[lbl]
-        # Treat a missing (NaN) leg return as a 0 contribution for that bar.
-        acc += w * np.nan_to_num(leg_ret[1:], nan=0.0)
+        # Treat any non-finite leg return as a 0 contribution for that bar
+        # (hold flat). NaN covers a leg with a different listing history or an
+        # internal gap; inf/-inf covers a zero-price bar, whose normal return
+        # ``(p[t]-0)/0`` is +/-inf and whose log return ``ln(p/0)`` is -inf.
+        # ``np.nan_to_num`` only handles NaN here — its inf -> dtype-max
+        # substitution would overflow the downstream cumprod to inf — so use
+        # an explicit finite mask, matching the buy-and-hold hold-flat fix.
+        tail = leg_ret[1:]
+        acc += w * np.where(np.isfinite(tail), tail, 0.0)
     portfolio_returns[1:] = acc
 
     portfolio_equity = compute_equity_curve(
@@ -427,6 +444,26 @@ def _compute_buy_and_hold(
         w = norm_weights[lbl]
         leg_initial = abs(w) * initial_total
         leg_ret = per_leg_returns[lbl]
+        # Hold a leg flat across any non-finite per-bar return before building
+        # the equity curve. ``compute_equity_curve`` is a cumprod/exp-cumsum,
+        # so a single NaN (a leg with a different listing history or an
+        # internal gap) or a non-finite value (a zero-price bar makes the
+        # normal return ``(p[t]-0)/0 = inf`` and the log return ``ln(p/0) =
+        # -inf``) would otherwise propagate to the END of the curve and emit
+        # NaN/inf — which the strict finite-JSON response invariant (RFC-8259)
+        # forbids, and which would make ``raw_leg_equities`` (always built
+        # here) a row of nulls. Index 0 is the seed and is ignored by
+        # ``compute_equity_curve``, so leave it untouched; map every
+        # non-finite return at index >= 1 to 0.0 (no return for that bar). This
+        # mirrors the daily-rebalance path, which holds a NaN leg-bar flat, so
+        # the SAME inputs don't diverge by rebalance frequency. A zero-price
+        # bar still books its -100% normal return into the prior bar, then the
+        # curve holds flat (a position worth 0 stays 0 rather than springing
+        # to inf).
+        if leg_ret.shape[0] > 1:
+            tail = leg_ret[1:]
+            leg_ret = leg_ret.copy()
+            leg_ret[1:] = np.where(np.isfinite(tail), tail, 0.0)
         leg_equity = compute_equity_curve(
             leg_ret, return_type, initial_value=leg_initial
         )
@@ -503,8 +540,12 @@ def _compute_periodic_rebalance(
         # Each leg grows by its own return for this day
         for lbl in labels:
             r = per_leg_returns[lbl][i]
-            if np.isnan(r):
-                # No return data -- hold value flat
+            if not np.isfinite(r):
+                # No usable return -- hold value flat. NaN is a gap / different
+                # listing history; inf/-inf comes from a zero-price bar (normal
+                # return ``(p-0)/0`` or log ``ln(p/0)``). Holding flat keeps the
+                # curve finite, matching the daily and buy-and-hold paths so the
+                # SAME inputs don't diverge by rebalance frequency.
                 pass
             else:
                 w = norm_weights[lbl]
@@ -573,10 +614,14 @@ def compute_metrics(
         return _empty_metrics()
 
     # ── Daily returns (consistent with the curve's return basis) ──
-    if return_type == "normal":
-        daily_returns = np.diff(equity) / equity[:-1]
-    else:  # log
-        daily_returns = np.log(equity[1:] / equity[:-1])
+    # An equity that touches 0 (e.g. a wiped-out leg) makes a single return
+    # non-finite; it is immediately neutralized by nan_to_num below, so the
+    # divide/invalid warning is expected and silenced (engine convention).
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if return_type == "normal":
+            daily_returns = np.diff(equity) / equity[:-1]
+        else:  # log
+            daily_returns = np.log(equity[1:] / equity[:-1])
     daily_returns = np.nan_to_num(daily_returns, nan=0.0, posinf=0.0, neginf=0.0)
 
     # ── Total return ──
@@ -761,11 +806,17 @@ def _period_key(date_int: int, granularity: str) -> str:
 
 
 def _compound(values: npt.NDArray[np.float64]) -> float:
-    """Compound a series of returns: (1+r1)*(1+r2)*...-1, skipping NaN."""
+    """Compound a series of returns: (1+r1)*(1+r2)*...-1, skipping NaN.
+
+    A non-finite return that survives the NaN filter (e.g. an inf per-leg
+    return from a zero-price bar) keeps the product non-finite; the value is
+    sanitized at the response boundary, so silence the expected warning here.
+    """
     v = values[~np.isnan(values)]
     if len(v) == 0:
         return float("nan")
-    return float(np.prod(1.0 + v) - 1.0)
+    with np.errstate(over="ignore", invalid="ignore"):
+        return float(np.prod(1.0 + v) - 1.0)
 
 
 def _sum_returns(values: npt.NDArray[np.float64]) -> float:
