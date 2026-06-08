@@ -31,6 +31,7 @@ def compute_statistics(
     dates: npt.NDArray[np.int64],
     equity: npt.NDArray[np.float64],
     risk_free_rate: float = 0.04,
+    return_type: str = "normal",
 ) -> StatisticsSuite:
     """Compute the full StatisticsSuite from an equity curve.
 
@@ -43,20 +44,28 @@ def compute_statistics(
         Equity values, length N. Must have N >= 2 and all values > 0.
     risk_free_rate:
         Annualized risk-free rate as a decimal (0.04 = 4%).
+    return_type:
+        Return basis the equity curve was BUILT with — ``"normal"``
+        (simple returns, the default) or ``"log"``. The per-bar returns
+        feeding volatility / Sharpe / Sortino / tail stats are derived
+        consistently with this basis. Level quantities (total return,
+        CAGR, drawdowns, best/worst month) are basis-independent.
 
     Raises
     ------
     ValueError
-        If lengths mismatch, N < 2, or any equity value is non-positive.
+        If lengths mismatch, N < 2, any equity value is non-positive,
+        or *return_type* is not ``"normal"`` / ``"log"``.
     """
+    if return_type not in ("normal", "log"):
+        raise ValueError(f"return_type must be 'normal' or 'log', got {return_type!r}")
+
     equity = np.asarray(equity, dtype=np.float64)
     dates = np.asarray(dates, dtype=np.int64)
 
     n = len(equity)
     if len(dates) != n:
-        raise ValueError(
-            f"dates length {len(dates)} != equity length {n}"
-        )
+        raise ValueError(f"dates length {len(dates)} != equity length {n}")
     if n < 2:
         raise ValueError("equity must have at least 2 observations")
     # ``np.all(equity > 0)`` is True for +Infinity and propagates NaN
@@ -66,7 +75,12 @@ def compute_statistics(
     if not np.all(equity > 0):
         raise ValueError("equity values must all be strictly positive")
 
-    daily_returns = np.diff(equity) / equity[:-1]
+    # Per-bar returns consistent with the curve's return basis. ``equity``
+    # is guaranteed strictly positive above, so the log is always defined.
+    if return_type == "normal":
+        daily_returns = np.diff(equity) / equity[:-1]
+    else:  # log
+        daily_returns = np.log(equity[1:] / equity[:-1])
     n_returns = len(daily_returns)
 
     return_stats = _compute_return_stats(dates, equity, daily_returns, risk_free_rate)
@@ -99,9 +113,7 @@ def _compute_return_stats(
     total_return = float(equity[-1] / equity[0] - 1.0)
 
     n_days = n - 1
-    cagr = float(
-        (equity[-1] / equity[0]) ** (_TRADING_DAYS_PER_YEAR / n_days) - 1.0
-    )
+    cagr = float((equity[-1] / equity[0]) ** (_TRADING_DAYS_PER_YEAR / n_days) - 1.0)
 
     excess_return = cagr - float(risk_free_rate)
 
@@ -238,7 +250,7 @@ def _compute_risk_adjusted_stats(
     # & Price 1994) — same convention as compute_metrics.
     downside = excess[excess < 0]
     if len(excess) > 0 and len(downside) > 0:
-        downside_std = float(np.sqrt(np.sum(downside ** 2) / len(excess)))
+        downside_std = float(np.sqrt(np.sum(downside**2) / len(excess)))
         annualized_downside = downside_std * np.sqrt(_TRADING_DAYS_PER_YEAR)
         if annualized_downside > 0:
             sortino_ratio = float(
@@ -299,11 +311,11 @@ def _sample_skewness(x: npt.NDArray[np.float64]) -> float | None:
     n = len(x)
     mean = float(np.mean(x))
     centered = x - mean
-    m2 = float(np.mean(centered ** 2))
+    m2 = float(np.mean(centered**2))
     if m2 == 0.0:
         return None
-    m3 = float(np.mean(centered ** 3))
-    g1 = m3 / (m2 ** 1.5)
+    m3 = float(np.mean(centered**3))
+    g1 = m3 / (m2**1.5)
     # Adjusted (bias-corrected) skewness — same form scipy.stats.skew uses
     # with bias=False.
     adj = np.sqrt(n * (n - 1)) / (n - 2) if n > 2 else 1.0
@@ -319,11 +331,11 @@ def _sample_excess_kurtosis(x: npt.NDArray[np.float64]) -> float | None:
     n = len(x)
     mean = float(np.mean(x))
     centered = x - mean
-    m2 = float(np.mean(centered ** 2))
+    m2 = float(np.mean(centered**2))
     if m2 == 0.0:
         return None
-    m4 = float(np.mean(centered ** 4))
-    g2 = m4 / (m2 ** 2) - 3.0
+    m4 = float(np.mean(centered**4))
+    g2 = m4 / (m2**2) - 3.0
     if n > 3:
         adj = ((n - 1) / ((n - 2) * (n - 3))) * ((n + 1) * g2 + 6)
         return float(adj)

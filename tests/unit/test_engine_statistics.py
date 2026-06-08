@@ -169,6 +169,58 @@ class TestRiskAdjusted:
         )
         assert math.isclose(suite.risk_adjusted.sharpe_ratio, expected, rel_tol=1e-9)
 
+    def test_log_return_type_uses_log_return_basis(self):
+        """HIGH#3 regression: a log-built equity curve must have its
+        risk-adjusted stats (Sharpe / vol) computed on the LOG return
+        basis, not the simple-return formula."""
+        rng = np.random.default_rng(13)
+        n = 500
+        dates = _yyyymmdd_range(2020, 1, n)
+        log_rets = rng.normal(0.0008, 0.012, size=n - 1)
+        equity = 100.0 * np.exp(np.cumsum(np.concatenate([[0.0], log_rets])))
+
+        suite = compute_statistics(dates, equity, risk_free_rate=0.0, return_type="log")
+
+        true_log = np.log(equity[1:] / equity[:-1])
+        expected_sharpe = float(
+            np.mean(true_log) / np.std(true_log, ddof=1) * np.sqrt(252.0)
+        )
+        assert math.isclose(
+            suite.risk_adjusted.sharpe_ratio, expected_sharpe, rel_tol=1e-9
+        )
+
+        expected_vol = float(np.std(true_log, ddof=1) * np.sqrt(252.0))
+        assert math.isclose(
+            suite.return_.annualized_volatility, expected_vol, rel_tol=1e-9
+        )
+
+        # Differs from the simple-return basis.
+        simple = np.diff(equity) / equity[:-1]
+        wrong_sharpe = float(np.mean(simple) / np.std(simple, ddof=1) * np.sqrt(252.0))
+        assert not math.isclose(
+            suite.risk_adjusted.sharpe_ratio, wrong_sharpe, rel_tol=1e-9
+        )
+
+    def test_default_return_type_is_normal(self):
+        """Omitting ``return_type`` preserves the prior simple-return
+        behaviour exactly."""
+        rng = np.random.default_rng(99)
+        n = 300
+        dates = _yyyymmdd_range(2020, 1, n)
+        rets = rng.normal(0.0005, 0.01, size=n - 1)
+        equity = np.concatenate(([100.0], 100.0 * np.cumprod(1.0 + rets)))
+        s_default = compute_statistics(dates, equity, risk_free_rate=0.0)
+        s_normal = compute_statistics(
+            dates, equity, risk_free_rate=0.0, return_type="normal"
+        )
+        assert (
+            s_default.risk_adjusted.sharpe_ratio == s_normal.risk_adjusted.sharpe_ratio
+        )
+        assert (
+            s_default.return_.annualized_volatility
+            == s_normal.return_.annualized_volatility
+        )
+
     def test_sharpe_rf_nonzero(self):
         rng = np.random.default_rng(11)
         n = 800
@@ -182,9 +234,7 @@ class TestRiskAdjusted:
         manual_daily = np.diff(equity) / equity[:-1]
         daily_rf = (1 + rf) ** (1 / 252) - 1
         excess = manual_daily - daily_rf
-        expected = float(
-            np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(252.0)
-        )
+        expected = float(np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(252.0))
         assert math.isclose(suite.risk_adjusted.sharpe_ratio, expected, rel_tol=1e-9)
 
     def test_sortino_positive_when_more_upside(self):

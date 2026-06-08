@@ -299,20 +299,34 @@ def compute_weighted_portfolio(
     if rebalance_freq == "daily":
         portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
             _compute_daily_rebalance(
-                per_leg_returns, norm_weights, return_type, n, labels,
+                per_leg_returns,
+                norm_weights,
+                return_type,
+                n,
+                labels,
             )
         )
     elif rebalance_freq == "none":
         portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
             _compute_buy_and_hold(
-                per_leg_returns, norm_weights, return_type, n, labels,
+                per_leg_returns,
+                norm_weights,
+                return_type,
+                n,
+                labels,
             )
         )
     else:
         # Periodic rebalancing: weekly, monthly, quarterly, annually
         portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
             _compute_periodic_rebalance(
-                per_leg_returns, norm_weights, return_type, n, labels, dates, rebalance_freq,
+                per_leg_returns,
+                norm_weights,
+                return_type,
+                n,
+                labels,
+                dates,
+                rebalance_freq,
             )
         )
 
@@ -321,7 +335,11 @@ def compute_weighted_portfolio(
         raw_leg_equities = per_leg_equities
     else:
         _, _, raw_leg_equities, _ = _compute_buy_and_hold(
-            per_leg_returns, norm_weights, return_type, n, labels,
+            per_leg_returns,
+            norm_weights,
+            return_type,
+            n,
+            labels,
         )
 
     return PortfolioComputeResult(
@@ -340,7 +358,12 @@ def _compute_daily_rebalance(
     return_type: str,
     n: int,
     labels: list[str],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]], list[int]]:
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    dict[str, npt.NDArray[np.float64]],
+    list[int],
+]:
     """Daily rebalancing = fixed-weight returns each day.
 
     Portfolio return is the weighted sum of individual leg returns.
@@ -348,25 +371,28 @@ def _compute_daily_rebalance(
     """
     portfolio_returns = np.full(n, np.nan, dtype=np.float64)
 
+    # Index 0 stays NaN (no prior bar). Accumulate from a zeroed base so a
+    # NaN return in ONE leg at one bar (a leg with a different listing
+    # history, or an internal gap) contributes 0 for that bar rather than
+    # poisoning the whole running sum — ``NaN + x = NaN`` would otherwise
+    # leave every bar from that point on NaN, and ``compute_equity_curve``
+    # (cumprod / exp-cumsum) would propagate the NaN to the end of the
+    # curve. The periodic and buy-and-hold paths already hold a NaN leg
+    # flat; this mirrors that so the SAME inputs don't diverge by rebalance
+    # frequency. (For both "normal" and "log" the portfolio return is the
+    # weighted sum of per-leg returns — the standard approximation for the
+    # log basis — so the two cases share one accumulation.)
+    acc = np.zeros(n - 1, dtype=np.float64)
     for lbl in labels:
         w = norm_weights[lbl]
         leg_ret = per_leg_returns[lbl]
-        # Skip index 0 (NaN)
-        if return_type == "normal":
-            portfolio_returns[1:] = np.where(
-                np.isnan(portfolio_returns[1:]),
-                w * leg_ret[1:],
-                portfolio_returns[1:] + w * leg_ret[1:],
-            )
-        else:  # log -- weighted sum of log returns is NOT strictly correct for
-               # portfolio-level log returns, but is the standard approximation
-            portfolio_returns[1:] = np.where(
-                np.isnan(portfolio_returns[1:]),
-                w * leg_ret[1:],
-                portfolio_returns[1:] + w * leg_ret[1:],
-            )
+        # Treat a missing (NaN) leg return as a 0 contribution for that bar.
+        acc += w * np.nan_to_num(leg_ret[1:], nan=0.0)
+    portfolio_returns[1:] = acc
 
-    portfolio_equity = compute_equity_curve(portfolio_returns, return_type, initial_value=100.0)
+    portfolio_equity = compute_equity_curve(
+        portfolio_returns, return_type, initial_value=100.0
+    )
 
     # Per-leg equities: each leg gets its weight fraction of the portfolio at all times
     per_leg_equities: dict[str, npt.NDArray[np.float64]] = {}
@@ -382,7 +408,12 @@ def _compute_buy_and_hold(
     return_type: str,
     n: int,
     labels: list[str],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]], list[int]]:
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    dict[str, npt.NDArray[np.float64]],
+    list[int],
+]:
     """Buy-and-hold: legs drift independently from initial allocation.
 
     Each leg starts at (weight * 100) and grows with its own returns.
@@ -396,7 +427,9 @@ def _compute_buy_and_hold(
         w = norm_weights[lbl]
         leg_initial = abs(w) * initial_total
         leg_ret = per_leg_returns[lbl]
-        leg_equity = compute_equity_curve(leg_ret, return_type, initial_value=leg_initial)
+        leg_equity = compute_equity_curve(
+            leg_ret, return_type, initial_value=leg_initial
+        )
 
         # For short legs (negative weight), returns are inverted:
         # When the underlying goes up, the short position loses value.
@@ -426,7 +459,12 @@ def _compute_periodic_rebalance(
     labels: list[str],
     dates: npt.NDArray[np.int64],
     rebalance_freq: str,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], dict[str, npt.NDArray[np.float64]], list[int]]:
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    dict[str, npt.NDArray[np.float64]],
+    list[int],
+]:
     """Periodic rebalancing: within each period, legs drift independently.
 
     At each rebalance boundary, total portfolio value is redistributed
@@ -435,9 +473,7 @@ def _compute_periodic_rebalance(
     boundaries = _detect_rebalance_boundaries(dates, rebalance_freq)
 
     # Collect rebalance dates (exclude index 0 — that's the initial allocation)
-    rebalance_dates: list[int] = [
-        int(dates[i]) for i in range(1, n) if boundaries[i]
-    ]
+    rebalance_dates: list[int] = [int(dates[i]) for i in range(1, n) if boundaries[i]]
 
     initial_total = 100.0
     portfolio_equity = np.empty(n, dtype=np.float64)
@@ -474,13 +510,13 @@ def _compute_periodic_rebalance(
                 w = norm_weights[lbl]
                 if w >= 0:
                     if return_type == "normal":
-                        leg_values[lbl] *= (1.0 + r)
+                        leg_values[lbl] *= 1.0 + r
                     else:  # log
                         leg_values[lbl] *= np.exp(r)
                 else:
                     # Short position: inverted returns
                     if return_type == "normal":
-                        leg_values[lbl] *= (1.0 - r)
+                        leg_values[lbl] *= 1.0 - r
                     else:  # log
                         leg_values[lbl] *= np.exp(-r)
 
@@ -502,6 +538,7 @@ def _compute_periodic_rebalance(
 def compute_metrics(
     equity_values: npt.NDArray[np.float64],
     risk_free_rate: float = 0.0,
+    return_type: str = "normal",
 ) -> MetricsSuite:
     """Compute performance metrics from an equity curve.
 
@@ -511,6 +548,14 @@ def compute_metrics(
         Portfolio value at each bar (length N).
     risk_free_rate:
         Annualized risk-free rate (e.g. 0.05 for 5%).
+    return_type:
+        Return basis the equity curve was BUILT with — ``"normal"``
+        (simple returns, the default) or ``"log"``. The per-bar returns
+        used for volatility / Sharpe / Sortino are derived consistently
+        with this basis: ``(eq[t]-eq[t-1])/eq[t-1]`` for ``"normal"``,
+        ``log(eq[t]/eq[t-1])`` for ``"log"``. ``total_return`` / CAGR /
+        max-drawdown are price-ratio (level) quantities and are
+        basis-independent, so they are unaffected.
 
     Returns
     -------
@@ -518,14 +563,20 @@ def compute_metrics(
         Frozen dataclass with all computed metrics.
         ``num_trades=0`` and ``win_rate=None`` (portfolios have no trades).
     """
+    if return_type not in ("normal", "log"):
+        raise ValueError(f"return_type must be 'normal' or 'log', got {return_type!r}")
+
     equity = np.asarray(equity_values, dtype=np.float64)
     n = len(equity)
 
     if n < 2:
         return _empty_metrics()
 
-    # ── Daily returns ──
-    daily_returns = np.diff(equity) / equity[:-1]
+    # ── Daily returns (consistent with the curve's return basis) ──
+    if return_type == "normal":
+        daily_returns = np.diff(equity) / equity[:-1]
+    else:  # log
+        daily_returns = np.log(equity[1:] / equity[:-1])
     daily_returns = np.nan_to_num(daily_returns, nan=0.0, posinf=0.0, neginf=0.0)
 
     # ── Total return ──
@@ -564,12 +615,10 @@ def compute_metrics(
     # count of losing days.
     downside = excess[excess < 0]
     if len(excess) > 0 and len(downside) > 0:
-        downside_std = float(np.sqrt(np.sum(downside ** 2) / len(excess)))
+        downside_std = float(np.sqrt(np.sum(downside**2) / len(excess)))
         annualized_downside = downside_std * np.sqrt(252.0)
         if annualized_downside > 0:
-            sortino_ratio = float(
-                (np.mean(excess) * 252.0) / annualized_downside
-            )
+            sortino_ratio = float((np.mean(excess) * 252.0) / annualized_downside)
         else:
             sortino_ratio = 0.0
     else:
@@ -666,7 +715,9 @@ def aggregate_returns(
         Sorted chronologically. Periods with all-NaN data are omitted.
     """
     if granularity not in ("monthly", "yearly"):
-        raise ValueError(f"granularity must be 'monthly' or 'yearly', got {granularity!r}")
+        raise ValueError(
+            f"granularity must be 'monthly' or 'yearly', got {granularity!r}"
+        )
 
     dates_arr = np.asarray(dates, dtype=np.int64)
     ret_arr = np.asarray(returns, dtype=np.float64)

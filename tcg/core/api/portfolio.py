@@ -19,7 +19,7 @@ from tcg.core.api._options_materialise import (
     PRICE_LIKE_STREAMS,
     materialise_option_streams,
 )
-from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.api.common import get_market_data
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
@@ -325,9 +325,7 @@ async def _evaluate_signal_leg(
         resolved_inputs = await _resolve_basket_inputs(
             leg.signal_spec.spec.inputs, repo, svc
         )
-        signal = parse_signal(
-            leg.signal_spec.spec, resolved_inputs=resolved_inputs
-        )
+        signal = parse_signal(leg.signal_spec.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
 
@@ -774,9 +772,13 @@ async def compute_portfolio(
 
     # ── 8. Compute metrics ──
 
-    metrics = compute_metrics(result.portfolio_equity)
+    # Risk stats must use the same return basis the equity curve was built
+    # with (HIGH#3): a log-built curve's vol/Sharpe/Sortino are otherwise
+    # computed on the wrong (simple-return) basis.
+    metrics = compute_metrics(result.portfolio_equity, return_type=body.return_type)
     leg_metrics = {
-        label: compute_metrics(eq) for label, eq in result.per_leg_equities.items()
+        label: compute_metrics(eq, return_type=body.return_type)
+        for label, eq in result.per_leg_equities.items()
     }
 
     # ── 9. Aggregate returns ──
@@ -885,9 +887,7 @@ async def compute_portfolio(
             }
         )
 
-    aggregated_trades.sort(
-        key=lambda t: (t["open_bar"], t["entry_block_id"])
-    )
+    aggregated_trades.sort(key=lambda t: (t["open_bar"], t["entry_block_id"]))
 
     # Build top-level positions payload (matches signals response shape).
     # First leg that references a given input_id wins; downstream conflicts
@@ -899,9 +899,7 @@ async def compute_portfolio(
         sig_idx = signal_dates_map[label]
         # Projection from common_dates onto signal-bar indices: -1 marks
         # portfolio bars where the signal has no data (rendered as null).
-        sig_index_of_date: dict[int, int] = {
-            int(d): j for j, d in enumerate(sig_idx)
-        }
+        sig_index_of_date: dict[int, int] = {int(d): j for j, d in enumerate(sig_idx)}
         proj = [sig_index_of_date.get(int(d), -1) for d in common_dates]
         for pos in pos_list:
             iid = pos["input_id"]
@@ -935,7 +933,9 @@ async def compute_portfolio(
             price_label = f"{leg.symbol}.close" if leg.symbol else f"{label}.close"
         elif leg.type == "continuous":
             direct_input_id = leg.collection or label
-            price_label = f"{leg.collection}.close" if leg.collection else f"{label}.close"
+            price_label = (
+                f"{leg.collection}.close" if leg.collection else f"{label}.close"
+            )
         else:
             direct_input_id = label
             price_label = f"{label}.close"
@@ -966,10 +966,14 @@ async def compute_portfolio(
             label: eq.tolist() for label, eq in result.raw_leg_equities.items()
         },
         "rebalance_dates": [int_to_iso(int(d)) for d in result.rebalance_dates],
-        "metrics": asdict(metrics),
-        "leg_metrics": {label: asdict(m) for label, m in leg_metrics.items()},
-        "monthly_returns": monthly,
-        "yearly_returns": yearly,
+        # NaN/inf in these aggregate blocks must serialize as JSON null
+        # (RFC-8259) so the browser's strict res.json() doesn't choke (#6).
+        "metrics": sanitize_json_floats(asdict(metrics)),
+        "leg_metrics": {
+            label: sanitize_json_floats(asdict(m)) for label, m in leg_metrics.items()
+        },
+        "monthly_returns": sanitize_json_floats(monthly),
+        "yearly_returns": sanitize_json_floats(yearly),
         "date_range": {"start": dates_iso[0], "end": dates_iso[-1]},
         "full_date_range": {"start": full_start_iso, "end": full_end_iso},
         "rebalance": rebalance_freq.value,

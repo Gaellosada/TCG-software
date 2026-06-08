@@ -35,8 +35,16 @@ def _price_series(dates: list[int], close_vals: list[float]) -> PriceSeries:
 
 # Common dates: 10 days in Jan 2024
 DATES = [
-    20240102, 20240103, 20240104, 20240105, 20240108,
-    20240109, 20240110, 20240111, 20240112, 20240115,
+    20240102,
+    20240103,
+    20240104,
+    20240105,
+    20240108,
+    20240109,
+    20240110,
+    20240111,
+    20240112,
+    20240115,
 ]
 
 # Two legs: one trending up, one flat
@@ -102,7 +110,6 @@ VALID_BODY = {
 
 
 class TestPortfolioCompute:
-
     async def test_success_returns_200(self, client: AsyncClient):
         resp = await client.post("/api/portfolio/compute", json=VALID_BODY)
         assert resp.status_code == 200
@@ -113,10 +120,17 @@ class TestPortfolioCompute:
 
         # Top-level keys
         expected_keys = {
-            "dates", "portfolio_equity", "leg_equities",
-            "metrics", "leg_metrics",
-            "monthly_returns", "yearly_returns", "date_range",
-            "full_date_range", "rebalance", "return_type",
+            "dates",
+            "portfolio_equity",
+            "leg_equities",
+            "metrics",
+            "leg_metrics",
+            "monthly_returns",
+            "yearly_returns",
+            "date_range",
+            "full_date_range",
+            "rebalance",
+            "return_type",
         }
         assert expected_keys <= set(body.keys())
 
@@ -168,12 +182,47 @@ class TestPortfolioCompute:
         assert "period" in body["monthly_returns"][0]
         assert "portfolio" in body["monthly_returns"][0]
 
+    async def test_metrics_nan_is_sanitized_to_null_in_json(self, client: AsyncClient):
+        """#6 regression: a NaN inside the ``metrics`` block must be
+        emitted as JSON ``null`` — NOT a bare ``NaN`` token (invalid per
+        RFC-8259, which the browser's strict ``res.json()`` rejects).
+
+        We force a NaN metric by patching ``compute_metrics`` (as bound in
+        the portfolio router) to return a suite with a NaN field.
+        """
+        from tcg.types.metrics import MetricsSuite
+
+        nan_suite = MetricsSuite(
+            total_return=float("nan"),
+            annualized_return=0.0,
+            sharpe_ratio=float("inf"),
+            max_drawdown=0.0,
+            calmar_ratio=0.0,
+            cvar_5=0.0,
+            time_underwater_days=0,
+            annualized_volatility=0.0,
+            sortino_ratio=0.0,
+            num_trades=0,
+            win_rate=None,
+        )
+        with patch("tcg.core.api.portfolio.compute_metrics", return_value=nan_suite):
+            resp = await client.post("/api/portfolio/compute", json=VALID_BODY)
+        assert resp.status_code == 200, resp.text
+
+        # The RAW response text must not carry bare non-finite JSON tokens.
+        raw = resp.text
+        assert "NaN" not in raw, f"bare NaN leaked into JSON: {raw[:400]}"
+        assert "Infinity" not in raw, f"bare Infinity leaked into JSON: {raw[:400]}"
+
+        body = resp.json()
+        assert body["metrics"]["total_return"] is None
+        assert body["metrics"]["sharpe_ratio"] is None
+
 
 # ── Validation errors ──────────────────────────────────────────────────
 
 
 class TestPortfolioValidation:
-
     async def test_empty_legs(self, client: AsyncClient):
         body = {**VALID_BODY, "legs": {}}
         resp = await client.post("/api/portfolio/compute", json=body)
@@ -241,7 +290,11 @@ class TestPortfolioValidation:
         body = {
             **VALID_BODY,
             "legs": {
-                "BAD": {"type": "instrument", "collection": "UNKNOWN_COL", "symbol": "X"},
+                "BAD": {
+                    "type": "instrument",
+                    "collection": "UNKNOWN_COL",
+                    "symbol": "X",
+                },
                 "VIX Futures": VALID_BODY["legs"]["VIX Futures"],
             },
             "weights": {"BAD": 60, "VIX Futures": 40},
@@ -255,15 +308,17 @@ class TestPortfolioValidation:
 
 
 class TestIntToIso:
-
     def test_standard_date(self):
         from tcg.data._utils import int_to_iso
+
         assert int_to_iso(20240115) == "2024-01-15"
 
     def test_single_digit_month_and_day(self):
         from tcg.data._utils import int_to_iso
+
         assert int_to_iso(20000101) == "2000-01-01"
 
     def test_end_of_year(self):
         from tcg.data._utils import int_to_iso
+
         assert int_to_iso(20231231) == "2023-12-31"
