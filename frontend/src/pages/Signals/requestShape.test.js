@@ -517,3 +517,145 @@ describe('normaliseBlock — requires_reset_block_id whitelist', () => {
     expect('requires_reset_block_id' in body.spec.rules.resets[0]).toBe(false);
   });
 });
+
+// requires_reset_count is whitelisted on entries+exits (the count of
+// reset fires required before the block re-arms) and OMITTED from resets
+// (the count lives on the binder, never on the reset itself). Whitelist
+// note in requestBuilder.js mandates this matching round-trip test.
+describe('normaliseBlock — requires_reset_count whitelist', () => {
+  it('emits requires_reset_count on entries (verbatim integer)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: '',
+          conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
+          requires_reset_block_id: 'reset-uuid-42',
+          requires_reset_count: 3,
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].requires_reset_count).toBe(3);
+  });
+
+  it('emits requires_reset_count on exits (verbatim integer)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [{
+          id: 'x1', name: '', target_entry_block_name: 'Alpha',
+          conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
+          requires_reset_block_id: 'reset-uuid-42',
+          requires_reset_count: 5,
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.exits[0].requires_reset_count).toBe(5);
+  });
+
+  it('defaults requires_reset_count to 1 when missing/invalid on entries+exits', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [],
+          // requires_reset_count absent
+        }],
+        exits: [{
+          id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [],
+          requires_reset_count: 0, // invalid (<1) → clamp to 1
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].requires_reset_count).toBe(1);
+    expect(body.spec.rules.exits[0].requires_reset_count).toBe(1);
+  });
+
+  it('coerces a non-integer requires_reset_count to an integer on the wire', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [],
+          // Bind a reset so the COERCION (floor) path is exercised — an
+          // unbound block would be forced to 1 by the orphan-kill rule.
+          requires_reset_block_id: 'reset-uuid-42',
+          requires_reset_count: 2.9,
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    const v = body.spec.rules.entries[0].requires_reset_count;
+    expect(Number.isInteger(v)).toBe(true);
+    expect(v).toBe(2);
+  });
+
+  it('OMITS requires_reset_count from reset blocks', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [],
+        resets: [{
+          id: 'r1', name: 'Arm', conditions: [],
+          // Tampered upstream payload — must not leak to the wire.
+          requires_reset_count: 7,
+        }],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect('requires_reset_count' in body.spec.rules.resets[0]).toBe(false);
+  });
+});
+
+// Orphan-count-on-wire: a block with NO reset bound must emit
+// requires_reset_count = 1, regardless of any stale stored count. The wire
+// binding (requires_reset_block_id) and the wire count must agree — a count
+// only has meaning when a reset is bound.
+describe('normaliseBlock — orphan requires_reset_count is forced to 1 on the wire', () => {
+  it('forces the count to 1 on an unbound entry block (stored count 5)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [],
+          requires_reset_block_id: null, // no binding
+          requires_reset_count: 5, // orphan — must not ride the wire
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.entries[0].requires_reset_block_id).toBe(null);
+    expect(body.spec.rules.entries[0].requires_reset_count).toBe(1);
+  });
+
+  it('forces the count to 1 on an unbound exit block (stored count 5)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [{
+          id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [],
+          requires_reset_block_id: null, // no binding
+          requires_reset_count: 5, // orphan — must not ride the wire
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect(body.spec.rules.exits[0].requires_reset_block_id).toBe(null);
+    expect(body.spec.rules.exits[0].requires_reset_count).toBe(1);
+  });
+});

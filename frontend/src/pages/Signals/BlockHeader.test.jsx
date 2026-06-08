@@ -335,3 +335,138 @@ describe('BlockHeader — require-reset select', () => {
     expect(labels).toEqual(['None', 'Arm Long', 'Reset 2', 'Reset 3']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// requires_reset_count input — countdown of reset fires before re-arm.
+// Shown only when a reset is bound (requires_reset_block_id set); integer
+// >= 1; commits on blur/Enter (weight-input draft pattern). Suppressed on
+// reset blocks (resets carry no count).
+// ---------------------------------------------------------------------------
+
+describe('BlockHeader — requires_reset_count input', () => {
+  const RESET_BLOCKS = [{ id: 'r1', name: 'Arm Long' }];
+
+  function renderEntryWithResetCount(blockOverrides = {}, section = 'entries', extra = {}) {
+    const block = section === 'exits'
+      ? { ...exitBlock(), ...blockOverrides }
+      : { ...entryBlock(50), ...blockOverrides };
+    const onChange = vi.fn();
+    render(
+      <BlockHeader
+        block={block}
+        section={section}
+        inputs={NO_INPUTS}
+        entryBlocks={[]}
+        resetBlocks={RESET_BLOCKS}
+        onChange={onChange}
+        onDelete={noop}
+        blockIndex={1}
+        {...extra}
+      />,
+    );
+    return { onChange };
+  }
+
+  it('does NOT render the count input when no reset is bound (entry)', () => {
+    renderEntryWithResetCount({ requires_reset_block_id: null });
+    expect(screen.queryByTestId('reset-count-input-0')).toBeNull();
+  });
+
+  it('renders the count input when a reset is bound (entry)', () => {
+    renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 1 });
+    expect(screen.getByTestId('reset-count-input-0')).toBeDefined();
+  });
+
+  it('renders the count input when a reset is bound (exit)', () => {
+    renderEntryWithResetCount(
+      { requires_reset_block_id: 'r1', requires_reset_count: 1 },
+      'exits',
+    );
+    expect(screen.getByTestId('reset-count-input-0')).toBeDefined();
+  });
+
+  it('reflects the committed count from the block prop', () => {
+    renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 4 });
+    const input = screen.getByTestId('reset-count-input-0');
+    expect(Number(input.value)).toBe(4);
+  });
+
+  it('defaults the displayed count to 1 when the field is absent but a reset is bound', () => {
+    renderEntryWithResetCount({ requires_reset_block_id: 'r1' });
+    const input = screen.getByTestId('reset-count-input-0');
+    expect(Number(input.value)).toBe(1);
+  });
+
+  it('has min=1 and integer step', () => {
+    renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 1 });
+    const input = screen.getByTestId('reset-count-input-0');
+    expect(input.getAttribute('min')).toBe('1');
+    expect(input.getAttribute('step')).toBe('1');
+    expect(input.getAttribute('type')).toBe('number');
+  });
+
+  it('commits an integer >= 1 on blur', () => {
+    const { onChange } = renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 1 });
+    const input = screen.getByTestId('reset-count-input-0');
+    fireEvent.change(input, { target: { value: '3' } });
+    fireEvent.blur(input, { target: { value: '3' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ requires_reset_count: 3 }),
+    );
+  });
+
+  it('clamps a sub-1 entry to 1 on blur', () => {
+    const { onChange } = renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 5 });
+    const input = screen.getByTestId('reset-count-input-0');
+    fireEvent.change(input, { target: { value: '0' } });
+    fireEvent.blur(input, { target: { value: '0' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ requires_reset_count: 1 }),
+    );
+  });
+
+  it('floors a non-integer entry on blur', () => {
+    const { onChange } = renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 1 });
+    const input = screen.getByTestId('reset-count-input-0');
+    fireEvent.change(input, { target: { value: '2.8' } });
+    fireEvent.blur(input, { target: { value: '2.8' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ requires_reset_count: 2 }),
+    );
+  });
+
+  it('commits 1 on blur for an empty / non-numeric value', () => {
+    const { onChange } = renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 5 });
+    const input = screen.getByTestId('reset-count-input-0');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input, { target: { value: '' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ requires_reset_count: 1 }),
+    );
+  });
+
+  it('commits on Enter keydown', () => {
+    const { onChange } = renderEntryWithResetCount({ requires_reset_block_id: 'r1', requires_reset_count: 1 });
+    const input = screen.getByTestId('reset-count-input-0');
+    fireEvent.change(input, { target: { value: '7' } });
+    fireEvent.keyDown(input, { key: 'Enter', target: { value: '7' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ requires_reset_count: 7 }),
+    );
+  });
+
+  it('does NOT render the count input on reset blocks even if a value is present', () => {
+    render(
+      <BlockHeader
+        block={{ id: 'r1', conditions: [], requires_reset_block_id: 'r1', requires_reset_count: 3 }}
+        section="resets"
+        inputs={NO_INPUTS}
+        resetBlocks={RESET_BLOCKS}
+        onChange={noop}
+        onDelete={noop}
+        blockIndex={1}
+      />,
+    );
+    expect(screen.queryByTestId('reset-count-input-0')).toBeNull();
+  });
+});

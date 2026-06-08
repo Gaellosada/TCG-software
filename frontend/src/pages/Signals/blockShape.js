@@ -33,7 +33,14 @@
 // ``target_entry_block_name`` to resolve against the signal's entry blocks.
 
 import { operandSlots } from './conditionOps';
-import { newBlockId, MAX_ABS_WEIGHT } from './storage';
+import { newBlockId, MAX_ABS_WEIGHT, coerceResetCount } from './storage';
+
+// Re-export the canonical reset-count coercion so UI/validation callers can
+// import it from blockShape (the validation hub) without reaching into
+// storage directly. Single source of truth lives in storage.js — keeping it
+// there avoids a storage⇄blockShape import cycle (blockShape already depends
+// on storage; the reverse edge would be circular).
+export { coerceResetCount };
 
 /**
  * Build a brand-new empty block.
@@ -57,13 +64,18 @@ export function defaultBlock(section = 'entries') {
     base.target_entry_block_name = '';
     // Optional per-block reset binding; null = no gate.
     base.requires_reset_block_id = null;
+    // Reset fires required before re-arm; 1 == single-fire (current behavior).
+    base.requires_reset_count = 1;
   } else if (section === 'resets') {
     // Reset blocks are signal-global: no input_id, no weight, no target,
-    // and no requires_reset_block_id (a reset cannot gate itself).
+    // no requires_reset_block_id (a reset cannot gate itself), and no
+    // requires_reset_count (the count lives on the binder, not the reset).
   } else {
     base.input_id = '';
     base.weight = 0;
     base.requires_reset_block_id = null;
+    // Reset fires required before re-arm; 1 == single-fire (current behavior).
+    base.requires_reset_count = 1;
   }
   return base;
 }

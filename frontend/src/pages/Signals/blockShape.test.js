@@ -107,6 +107,31 @@ describe('defaultBlock (v5)', () => {
     expect('weight' in b).toBe(false);
     expect('target_entry_block_name' in b).toBe(false);
   });
+
+  // requires_reset_count — per-binding reset countdown. Lives on the
+  // entry/exit block (mirrors requires_reset_block_id); default 1 (==
+  // current single-fire re-arm). ABSENT on resets (a reset has no count).
+  it('entry defaultBlock includes requires_reset_count: 1', () => {
+    const b = defaultBlock('entries');
+    expect('requires_reset_count' in b).toBe(true);
+    expect(b.requires_reset_count).toBe(1);
+  });
+
+  it('exit defaultBlock includes requires_reset_count: 1', () => {
+    const b = defaultBlock('exits');
+    expect('requires_reset_count' in b).toBe(true);
+    expect(b.requires_reset_count).toBe(1);
+  });
+
+  it('default-section (entries) defaultBlock includes requires_reset_count: 1', () => {
+    const b = defaultBlock();
+    expect(b.requires_reset_count).toBe(1);
+  });
+
+  it('reset defaultBlock does NOT include requires_reset_count', () => {
+    const b = defaultBlock('resets');
+    expect('requires_reset_count' in b).toBe(false);
+  });
 });
 
 describe('isInputConfigured', () => {

@@ -200,6 +200,10 @@ class _BlockIn(BaseModel):
     # references a reset block's ``id`` in the same signal's
     # ``rules.resets``. Validated at parse time after resets are parsed.
     requires_reset_block_id: str | None = None
+    # Cumulative re-arm count for the binding above (entries/exits only).
+    # Validated at parse time (integer >= 1; rejected on reset blocks).
+    # Default 1 reproduces the original single-flip re-arm.
+    requires_reset_count: int = 1
     # DEPRECATED (v4): kept so Pydantic does not silently drop it; API
     # validation rejects any request that sets this field. Remove once
     # no legacy clients remain (target: v5 or 2026-Q3).
@@ -286,9 +290,7 @@ class _ResolvedBasketInput:
 
 
 def _materialise_leg_instrument(
-    instrument_ref: SpotInstrumentRef
-    | ContinuousInstrumentRef
-    | OptionStreamRef,
+    instrument_ref: SpotInstrumentRef | ContinuousInstrumentRef | OptionStreamRef,
     *,
     input_id: str,
     leg_index: int,
@@ -387,9 +389,7 @@ def _saved_basket_leg_to_typed(
     basket_id: str,
     leg_index: int,
     asset_class: str,
-) -> tuple[
-    "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream", float
-]:
+) -> tuple["InstrumentSpot | InstrumentContinuous | InstrumentOptionStream", float]:
     """Materialise one persisted ``BasketDoc.legs[i]`` dict into a
     ``(typed-instrument, weight)`` pair.
 
@@ -411,9 +411,7 @@ def _saved_basket_leg_to_typed(
             f"missing 'instrument' or 'weight' — re-save the basket"
         )
     inst_type = (
-        instrument_payload.get("type")
-        if isinstance(instrument_payload, dict)
-        else None
+        instrument_payload.get("type") if isinstance(instrument_payload, dict) else None
     )
     _validate_saved_basket_leg_against_asset_class(
         asset_class=asset_class,
@@ -424,9 +422,7 @@ def _saved_basket_leg_to_typed(
     if inst_type == "spot":
         instrument_ref = SpotInstrumentRef.model_validate(instrument_payload)
     elif inst_type == "continuous":
-        instrument_ref = ContinuousInstrumentRef.model_validate(
-            instrument_payload
-        )
+        instrument_ref = ContinuousInstrumentRef.model_validate(instrument_payload)
     elif inst_type == "option_stream":
         instrument_ref = OptionStreamRef.model_validate(instrument_payload)
     else:
@@ -465,9 +461,7 @@ async def _resolve_basket_inputs(
     ``asset_class``.
     """
     # Short-circuit: avoid repo reads when no input is a saved basket.
-    any_saved = any(
-        isinstance(inp.instrument, BasketRefSaved) for inp in raw_inputs
-    )
+    any_saved = any(isinstance(inp.instrument, BasketRefSaved) for inp in raw_inputs)
     _ = svc  # not consulted under the polymorphic-leg flow; kept on the
     # signature so the saved-basket short-circuit invariant call site
     # in tests doesn't shift.
@@ -706,6 +700,7 @@ def _parse_blocks(
         tgt_name = blk.target_entry_block_name or None
         legacy_tgt = blk.target_entry_block_id or None
         rrb = blk.requires_reset_block_id or None
+        rrc = blk.requires_reset_count
 
         # Placeholder blocks (no conditions + no input) are accepted
         # as sentinels; they skip evaluation. Otherwise full validation.
@@ -743,6 +738,14 @@ def _parse_blocks(
                 if blk.requires_reset_block_id is not None:
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set requires_reset_block_id"
+                    )
+                # ``requires_reset_count`` is meaningless on a reset block
+                # (counting lives on the entry/exit binder). The default 1
+                # is tolerated; any explicit non-default is rejected loudly,
+                # mirroring the requires_reset_block_id rejection above.
+                if rrc != 1:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set requires_reset_count"
                     )
             elif is_entry:
                 if tgt_name is not None:
@@ -821,6 +824,18 @@ def _parse_blocks(
                         f"not match any reset block id in this signal's "
                         f"rules.resets"
                     )
+            # Per-block reset count (entries+exits only). Must be an
+            # integer >= 1. The reset branch above already rejects a
+            # non-default count; here we enforce the lower bound on the
+            # binder. ``bool`` is rejected explicitly (it subclasses int
+            # but is never a valid count).
+            if not is_reset and (
+                isinstance(rrc, bool) or not isinstance(rrc, int) or rrc < 1
+            ):
+                raise SignalValidationError(
+                    f"{path}: requires_reset_count must be an integer "
+                    f">= 1 (got {rrc!r})"
+                )
 
         out.append(
             Block(
@@ -833,6 +848,7 @@ def _parse_blocks(
                 enabled=bool(blk.enabled),
                 description=str(blk.description or ""),
                 requires_reset_block_id=rrb,
+                requires_reset_count=int(rrc),
             )
         )
     return tuple(out)
@@ -927,8 +943,7 @@ async def _date_array_for_leaf_instrument(
             raise SignalDataError(f"{err_prefix}: {exc}") from exc
         if cseries is None:
             raise SignalDataError(
-                f"{err_prefix}: continuous series unavailable for "
-                f"{inst.collection!r}"
+                f"{err_prefix}: continuous series unavailable for {inst.collection!r}"
             )
         return cseries.prices.dates
     if isinstance(inst, InstrumentOptionStream):
@@ -959,14 +974,13 @@ async def _date_array_for_leaf_instrument(
             )
         return np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
     raise SignalDataError(
-        f"{err_prefix}: unsupported leaf instrument type "
-        f"{type(inst).__name__!r}"
+        f"{err_prefix}: unsupported leaf instrument type {type(inst).__name__!r}"
     )
 
 
 def _has_option_stream_dependency(
     inst: "InstrumentSpot | InstrumentContinuous | InstrumentOptionStream "
-          "| InstrumentBasket",
+    "| InstrumentBasket",
 ) -> bool:
     """True iff resolving this instrument requires an option-stream date
     enumeration (which needs an explicit date window via
@@ -984,8 +998,7 @@ def _has_option_stream_dependency(
         return True
     if isinstance(inst, InstrumentBasket):
         return any(
-            isinstance(leg_inst, InstrumentOptionStream)
-            for leg_inst, _w in inst.legs
+            isinstance(leg_inst, InstrumentOptionStream) for leg_inst, _w in inst.legs
         )
     return False
 
@@ -1201,9 +1214,7 @@ def make_signal_fetcher(
             weighted_dates: npt.NDArray[np.int64] | None = None
             weighted_values: npt.NDArray[np.float64] | None = None
 
-            for leg_index, (leg_inst, leg_weight_raw) in enumerate(
-                instrument.legs
-            ):
+            for leg_index, (leg_inst, leg_weight_raw) in enumerate(instrument.legs):
                 leg_weight = float(leg_weight_raw)
                 try:
                     leg_dates, leg_values = await fetch(leg_inst, field)
@@ -1226,8 +1237,7 @@ def make_signal_fetcher(
                     )
                     if common.size == 0:
                         raise SignalDataError(
-                            f"basket {basket_desc}: no overlapping "
-                            f"dates between legs"
+                            f"basket {basket_desc}: no overlapping dates between legs"
                         )
                     weighted_dates = common
                     assert weighted_values is not None
@@ -1236,9 +1246,7 @@ def make_signal_fetcher(
                     )
 
             if weighted_dates is None or weighted_values is None:
-                raise SignalDataError(
-                    f"basket {basket_desc} has no legs"
-                )
+                raise SignalDataError(f"basket {basket_desc} has no legs")
             return weighted_dates, weighted_values
 
         # continuous
@@ -1347,9 +1355,7 @@ async def compute_signal(
         return error_response("validation", str(exc))
 
     try:
-        resolved_inputs = await _resolve_basket_inputs(
-            body.spec.inputs, repo, svc
-        )
+        resolved_inputs = await _resolve_basket_inputs(body.spec.inputs, repo, svc)
         signal = parse_signal(body.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         return error_response("validation", str(exc))

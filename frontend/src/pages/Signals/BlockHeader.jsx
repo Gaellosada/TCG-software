@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import ConfirmDialog from '../../components/ConfirmDialog';
-import { isInputConfigured } from './blockShape';
+import { isInputConfigured, coerceResetCount } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
@@ -28,6 +28,8 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   const [editing, setEditing] = useState(false);
   // Local draft for the weight input so the user can type freely before blur
   const [weightDraft, setWeightDraft] = useState(null);
+  // Local draft for the reset-count input (same draft-on-blur pattern as weight)
+  const [countDraft, setCountDraft] = useState(null);
   const nameRef = useRef(null);
 
   const isEntry = section === 'entries';
@@ -43,6 +45,11 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   // Committed weight (number, clamped by storage / parent) used for badge
   const committedWeight = Number.isFinite(block.weight) ? block.weight : 0;
 
+  // Committed reset count — integer ≥ 1; default 1 when absent/invalid so
+  // a freshly-bound block (no stored count yet) shows the single-fire value.
+  // Uses the ONE shared coercion (storage/wire/UI byte-identical).
+  const committedCount = coerceResetCount(block.requires_reset_count);
+
   useEffect(() => {
     if (editing && nameRef.current) {
       nameRef.current.focus();
@@ -54,6 +61,11 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   useEffect(() => {
     setWeightDraft(null);
   }, [block.weight]);
+
+  // Sync countDraft when the committed count changes from outside (load).
+  useEffect(() => {
+    setCountDraft(null);
+  }, [block.requires_reset_count]);
 
   function commitName() {
     if (!nameRef.current) return;
@@ -85,6 +97,18 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
     onChange({ ...block, weight: clamped });
   }
 
+  /**
+   * Commit the reset-count on blur / Enter. Delegates to the ONE shared
+   * coercion so the committed value is byte-identical to what storage and
+   * the wire produce: integer ≥ 1; empty / non-numeric / sub-1 → 1
+   * (single-fire default). ``Number('')`` is 0 → <1 → 1, so the empty case
+   * needs no special handling here.
+   */
+  function commitCount(raw) {
+    setCountDraft(null);
+    onChange({ ...block, requires_reset_count: coerceResetCount(raw) });
+  }
+
   const showUnconfiguredWarning = resolved && !resolvedConfigured;
   const showUnknownWarning = !!selectedId && !resolved;
 
@@ -106,6 +130,11 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   const weightDisplayValue = weightDraft !== null
     ? weightDraft
     : committedWeight;
+
+  // Same draft-or-committed display rule for the reset-count input.
+  const countDisplayValue = countDraft !== null
+    ? countDraft
+    : committedCount;
 
   return (
     <div className={styles.blockHeaderRow} data-testid={`block-header-${blockIndex - 1}`}>
@@ -255,6 +284,29 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
               ))}
             </select>
           </div>
+          {block.requires_reset_block_id && (
+            <div className={styles.blockWeightCell}>
+              {/* Single trailing "×" suffix (reads like "3×"), mirroring the
+                  weight input's single "%" suffix — no separate "×" label. */}
+              <div className={styles.weightInputWrap}>
+                <input
+                  id={`reset-count-${blockIndex}`}
+                  type="number"
+                  step="1"
+                  min="1"
+                  className={styles.weightInput}
+                  value={countDisplayValue}
+                  onChange={(e) => setCountDraft(e.target.value)}
+                  onBlur={(e) => commitCount(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') commitCount(e.target.value); }}
+                  aria-label={`Reset count for block ${blockIndex}`}
+                  title="Number of times the bound reset must fire before this block re-arms"
+                  data-testid={`reset-count-input-${blockIndex - 1}`}
+                />
+                <span className={styles.weightSuffix} aria-hidden="true">×</span>
+              </div>
+            </div>
+          )}
         </>
       )}
 

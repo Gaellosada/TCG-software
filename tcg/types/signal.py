@@ -311,6 +311,14 @@ class Block:
     # when the bound reset fires. Default ``None`` means "no gate" (unconditional
     # firing — entry triggers whenever its condition is true).
     requires_reset_block_id: str | None = None
+    # Cumulative re-arm count for the binding above (entries/exits only —
+    # reset blocks MUST keep the default 1; the API rejects a non-default
+    # on resets). Meaningful only when ``requires_reset_block_id`` is set:
+    # after this block disarms, the bound reset must fire this many times
+    # (CUMULATIVE, gaps allowed) before the per-block arm is restored. The
+    # countdown is re-seeded on every disarm. Default ``1`` reproduces the
+    # original single-flip re-arm exactly.
+    requires_reset_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -362,7 +370,8 @@ class SignalRules:
     Reset blocks reuse :class:`Block` verbatim but only honour
     ``id``/``name``/``conditions``/``enabled``/``description`` — they
     must not carry ``input_id``, ``weight``, ``target_entry_block_name``,
-    or ``requires_reset_block_id`` (the API layer rejects such payloads).
+    ``requires_reset_block_id``, or a non-default ``requires_reset_count``
+    (the API layer rejects such payloads).
     """
 
     entries: tuple[Block, ...] = ()

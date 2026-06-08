@@ -33,7 +33,12 @@
 // ``normaliseBlock`` AND a new round-trip test in ``requestShape.test.js``.
 
 import { collectIndicatorIds } from '../../api/signals';
-import { MAX_ABS_WEIGHT, SECTIONS } from './storage';
+import { MAX_ABS_WEIGHT, SECTIONS, coerceResetCount } from './storage';
+
+// Re-exported under a test-only name so the cross-module identity test in
+// storage.test.js can assert the wire path uses the SAME coercion as storage
+// and the UI (one helper, no drift). Not part of the public request API.
+export { coerceResetCount as __coerceResetCountForTests };
 
 /**
  * Normalise every indicator operand inside a signal spec so that
@@ -92,6 +97,14 @@ function normaliseBlock(block, section) {
       conditions,
     };
   }
+  // Normalise the reset binding once so the wire binding and the wire count
+  // agree: a count only rides the wire when a reset is actually bound
+  // (orphan-kill — no binding forces the single-fire default of 1).
+  const resetBlockId = typeof block.requires_reset_block_id === 'string'
+    && block.requires_reset_block_id
+    ? block.requires_reset_block_id
+    : null;
+  const resetCount = resetBlockId ? coerceResetCount(block.requires_reset_count) : 1;
   if (section === 'exits') {
     // Exit blocks omit block-level input_id entirely (not empty-string)
     // so the backend invariant "exits must not carry input_id" is met.
@@ -105,10 +118,8 @@ function normaliseBlock(block, section) {
       target_entry_block_name: typeof block.target_entry_block_name === 'string'
         ? block.target_entry_block_name
         : '',
-      requires_reset_block_id: typeof block.requires_reset_block_id === 'string'
-        && block.requires_reset_block_id
-        ? block.requires_reset_block_id
-        : null,
+      requires_reset_block_id: resetBlockId,
+      requires_reset_count: resetCount,
     };
   }
   return {
@@ -119,10 +130,8 @@ function normaliseBlock(block, section) {
     input_id: typeof block.input_id === 'string' ? block.input_id : '',
     weight: clampWeight(block.weight),
     conditions,
-    requires_reset_block_id: typeof block.requires_reset_block_id === 'string'
-      && block.requires_reset_block_id
-      ? block.requires_reset_block_id
-      : null,
+    requires_reset_block_id: resetBlockId,
+    requires_reset_count: resetCount,
   };
 }
 

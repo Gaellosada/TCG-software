@@ -70,13 +70,13 @@ from tcg.types.signal import (
 
 
 DATES = np.array(
-    [20240102, 20240103, 20240104, 20240105, 20240108,
-     20240109, 20240110, 20240111], dtype=np.int64,
+    [20240102, 20240103, 20240104, 20240105, 20240108, 20240109, 20240110, 20240111],
+    dtype=np.int64,
 )
 
 
 def _make_fetcher(
-    by_key: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]]
+    by_key: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]],
 ) -> Callable:
     async def fetch(instrument, field):
         if isinstance(instrument, InstrumentSpot):
@@ -141,11 +141,15 @@ async def test_t1_resets_empty_byte_identical_to_legacy():
     )
 
     legacy = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(exit_blk,)),
     )
     with_empty_resets = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=()),
     )
     r_legacy = await evaluate_signal(legacy, indicators={}, fetcher=fetcher)
@@ -170,7 +174,10 @@ async def test_t2_reset_never_fires_locks_after_first_trade():
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 12.0, 11.0, 12.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
         requires_reset_block_id="R1",
     )
@@ -181,9 +188,13 @@ async def test_t2_reset_never_fires_locks_after_first_trade():
     )
     reset = Block(id="R1", conditions=(_gt("X", 1000.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -204,7 +215,10 @@ async def test_t3_single_midrun_reset_yields_two_trades():
     closes = np.array([10.0, 11.0, 13.0, 14.0, 15.0, 11.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
         requires_reset_block_id="R1",
     )
@@ -215,9 +229,13 @@ async def test_t3_single_midrun_reset_yields_two_trades():
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -236,7 +254,10 @@ async def test_t4_same_bar_entry_and_reset_arm_holds():
     closes = np.array([10.0, 12.0, 12.0, 11.0, 12.0, 12.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -247,9 +268,13 @@ async def test_t4_same_bar_entry_and_reset_arm_holds():
     )
     reset = Block(id="R1", conditions=(_eq("X", 12.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -269,7 +294,10 @@ async def test_t5_same_bar_exit_and_reset():
     closes = np.array([10.0, 12.0, 13.0, 11.0, 13.0, 12.0, 11.0, 13.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -280,9 +308,13 @@ async def test_t5_same_bar_exit_and_reset():
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -302,7 +334,10 @@ async def test_t6_reset_while_open_is_silent():
     closes = np.array([10.0, 12.0, 13.0, 14.0, 11.0, 13.0, 14.0, 15.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -313,9 +348,13 @@ async def test_t6_reset_while_open_is_silent():
     )
     reset = Block(id="R1", conditions=(_gt("X", 12.5),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -334,7 +373,10 @@ async def test_t7_reset_before_any_entry():
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 11.0, 12.0, 13.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -345,9 +387,13 @@ async def test_t7_reset_before_any_entry():
     )
     reset = Block(id="R1", conditions=(_eq("X", 10.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -370,7 +416,10 @@ async def test_t8_legacy_parity_default_constructed_rules():
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 13.0, 12.0, 11.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
     )
     exit_blk = Block(
@@ -396,7 +445,8 @@ async def test_t8_legacy_parity_default_constructed_rules():
 @pytest.mark.asyncio
 async def test_t9_multiple_resets_or_semantics():
     INPUT_Y = Input(
-        id="Y", instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
     )
     closes_x = np.array([10.0, 12.0, 13.0, 11.0, 14.0, 13.0, 12.0, 13.0])
     closes_y = np.array([10.0, 12.0, 13.0, 14.0, 13.0, 12.0, 11.0, 13.0])
@@ -404,12 +454,18 @@ async def test_t9_multiple_resets_or_semantics():
         {("INDEX", "SPX"): (DATES, closes_x), ("INDEX", "NDX"): (DATES, closes_y)}
     )
     eX = Block(
-        id="EX", name="EX", input_id="X", weight=100.0,
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
     eY = Block(
-        id="EY", name="EY", input_id="Y", weight=100.0,
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=100.0,
         conditions=(_gt("Y", 11.5),),
         requires_reset_block_id="R2",
     )
@@ -419,9 +475,13 @@ async def test_t9_multiple_resets_or_semantics():
     r1 = Block(id="R1", conditions=(_eq("X", 11.0),))
     r2 = Block(id="R2", conditions=(_eq("X", 99.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X, INPUT_Y),
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
         rules=SignalRules(
-            entries=(eX, eY), exits=(xX, xY), resets=(r1, r2),
+            entries=(eX, eY),
+            exits=(xX, xY),
+            resets=(r1, r2),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -441,7 +501,10 @@ async def test_t10_reset_nan_operand_excluded():
     closes = np.array([10.0, 12.0, 13.0, np.nan, 14.0, 11.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -461,9 +524,13 @@ async def test_t10_reset_nan_operand_excluded():
         ),
     )
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -485,7 +552,10 @@ async def test_t11_disabled_reset_excluded():
     closes = np.array([10.0, 12.0, 13.0, 11.0, 14.0, 13.0, 12.0, 13.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -497,9 +567,13 @@ async def test_t11_disabled_reset_excluded():
     r1 = Block(id="R1", conditions=(_eq("X", 11.0),))
     r2 = Block(id="R2", conditions=(_eq("X", 11.0),), enabled=False)
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(r1, r2),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(r1, r2),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -519,7 +593,10 @@ async def test_t12_all_resets_disabled_acts_as_empty():
     closes = np.array([10.0, 12.0, 13.0, 11.0, 13.0, 11.0, 13.0, 11.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -529,13 +606,19 @@ async def test_t12_all_resets_disabled_acts_as_empty():
         target_entry_block_name="Entry",
     )
     r_disabled = Block(
-        id="R1", conditions=(_eq("X", 99.0),), enabled=False,
+        id="R1",
+        conditions=(_eq("X", 99.0),),
+        enabled=False,
     )
 
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(r_disabled,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(r_disabled,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -555,7 +638,10 @@ async def test_t13_reset_block_event_payload():
     closes = np.array([10.0, 12.0, 13.0, 11.0, 13.0, 11.0, 13.0, 11.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -566,9 +652,13 @@ async def test_t13_reset_block_event_payload():
     )
     reset = Block(id="R1", name="Arm", conditions=(_eq("X", 11.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -589,7 +679,8 @@ async def test_t13_reset_block_event_payload():
 @pytest.mark.asyncio
 async def test_t14_multi_entry_arm_sharing():
     INPUT_Y = Input(
-        id="Y", instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
     )
     spx = np.array([10.0, 12.0, 13.0, 11.0, 13.0, 14.0, 15.0, 16.0])
     ndx = np.array([10.0, 12.0, 13.0, 11.0, 13.0, 14.0, 15.0, 16.0])
@@ -597,28 +688,40 @@ async def test_t14_multi_entry_arm_sharing():
         {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
     )
     eX = Block(
-        id="EX", name="EX", input_id="X", weight=100.0,
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
     eY = Block(
-        id="EY", name="EY", input_id="Y", weight=100.0,
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=100.0,
         conditions=(_gt("Y", 11.5),),
         requires_reset_block_id="R1",
     )
     xX = Block(
-        id="XX", conditions=(_lt("X", 12.0),),
+        id="XX",
+        conditions=(_lt("X", 12.0),),
         target_entry_block_name="EX",
     )
     xY = Block(
-        id="XY", conditions=(_lt("Y", 12.0),),
+        id="XY",
+        conditions=(_lt("Y", 12.0),),
         target_entry_block_name="EY",
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X, INPUT_Y),
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
         rules=SignalRules(
-            entries=(eX, eY), exits=(xX, xY), resets=(reset,),
+            entries=(eX, eY),
+            exits=(xX, xY),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -650,7 +753,10 @@ async def test_t15_reset_fires_every_bar_equivalent_to_no_resets():
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     # Control: unbound entry, no resets.
     entry_ctrl = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
     )
     exit_blk = Block(
@@ -660,25 +766,36 @@ async def test_t15_reset_fires_every_bar_equivalent_to_no_resets():
     )
     # Bound: identical entry, binding to a reset that fires every bar.
     entry_bound = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
         requires_reset_block_id="R1",
     )
     always_reset = Block(id="R1", conditions=(_gt("X", 0.0),))
 
     control = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry_ctrl,), exits=(exit_blk,), resets=()),
     )
     with_always_reset = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry_bound,), exits=(exit_blk,), resets=(always_reset,),
+            entries=(entry_bound,),
+            exits=(exit_blk,),
+            resets=(always_reset,),
         ),
     )
     r_ctrl = await evaluate_signal(control, indicators={}, fetcher=fetcher)
     r_armed = await evaluate_signal(
-        with_always_reset, indicators={}, fetcher=fetcher,
+        with_always_reset,
+        indicators={},
+        fetcher=fetcher,
     )
 
     assert list(r_ctrl.positions[0].values) == list(r_armed.positions[0].values)
@@ -700,7 +817,10 @@ async def test_b1_resets_with_zero_bindings_equals_no_resets():
     closes = np.array([10.0, 12.0, 13.0, 11.0, 14.0, 11.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
     )
     exit_blk = Block(
@@ -711,15 +831,21 @@ async def test_b1_resets_with_zero_bindings_equals_no_resets():
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
 
     control = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(exit_blk,)),
     )
     with_unbound_reset = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(reset,)),
     )
     r_ctrl = await evaluate_signal(control, indicators={}, fetcher=fetcher)
-    r_unbound = await evaluate_signal(with_unbound_reset, indicators={}, fetcher=fetcher)
+    r_unbound = await evaluate_signal(
+        with_unbound_reset, indicators={}, fetcher=fetcher
+    )
 
     # Positions and trades byte-identical.
     assert list(r_ctrl.positions[0].values) == list(r_unbound.positions[0].values)
@@ -749,7 +875,10 @@ async def test_b2_bound_entry_first_fire_passes_second_blocked():
     closes = np.array([10.0, 11.0, 13.0, 14.0, 15.0, 11.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
         requires_reset_block_id="R1",
     )
@@ -760,9 +889,13 @@ async def test_b2_bound_entry_first_fire_passes_second_blocked():
     )
     reset = Block(id="R1", conditions=(_eq("X", 99.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -783,7 +916,10 @@ async def test_b3_reset_after_exit_rearms_bound_entry():
     closes = np.array([10.0, 11.0, 13.0, 14.0, 15.0, 11.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
         requires_reset_block_id="R1",
     )
@@ -796,15 +932,23 @@ async def test_b3_reset_after_exit_rearms_bound_entry():
     never_reset = Block(id="R1", conditions=(_eq("X", 99.0),))
 
     s_arming = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(arming_reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(arming_reset,),
         ),
     )
     s_never = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(never_reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(never_reset,),
         ),
     )
     r_arming = await evaluate_signal(s_arming, indicators={}, fetcher=fetcher)
@@ -830,7 +974,10 @@ async def test_b4_bound_exit_arm_after_fire():
     closes = np.array([10.0, 11.0, 13.0, 14.0, 13.0, 11.0, 13.0, 11.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
     )
     exit_bound = Block(
@@ -842,9 +989,13 @@ async def test_b4_bound_exit_arm_after_fire():
     # Reset never fires.
     reset = Block(id="R1", conditions=(_eq("X", 99.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_bound,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_bound,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -866,7 +1017,8 @@ async def test_b4_bound_exit_arm_after_fire():
 @pytest.mark.asyncio
 async def test_b5_two_entries_same_reset_one_marker():
     INPUT_Y = Input(
-        id="Y", instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
     )
     spx = np.array([10.0, 12.0, 13.0, 11.0, 13.0, 14.0, 15.0, 16.0])
     ndx = np.array([10.0, 12.0, 13.0, 11.0, 13.0, 14.0, 15.0, 16.0])
@@ -874,12 +1026,18 @@ async def test_b5_two_entries_same_reset_one_marker():
         {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
     )
     eX = Block(
-        id="EX", name="EX", input_id="X", weight=100.0,
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
     eY = Block(
-        id="EY", name="EY", input_id="Y", weight=100.0,
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=100.0,
         conditions=(_gt("Y", 11.5),),
         requires_reset_block_id="R1",
     )
@@ -887,9 +1045,13 @@ async def test_b5_two_entries_same_reset_one_marker():
     xY = Block(id="XY", conditions=(_lt("Y", 12.0),), target_entry_block_name="EY")
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X, INPUT_Y),
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
         rules=SignalRules(
-            entries=(eX, eY), exits=(xX, xY), resets=(reset,),
+            entries=(eX, eY),
+            exits=(xX, xY),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -907,7 +1069,8 @@ async def test_b5_two_entries_same_reset_one_marker():
 @pytest.mark.asyncio
 async def test_b6_two_entries_different_resets_independent_arms():
     INPUT_Y = Input(
-        id="Y", instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
     )
     # X: open at t=1, close at t=3, refire at t=4.
     # Y: open at t=1, close at t=3, refire at t=4 — but ONLY if its R2
@@ -918,12 +1081,18 @@ async def test_b6_two_entries_different_resets_independent_arms():
         {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
     )
     eX = Block(
-        id="EX", name="EX", input_id="X", weight=100.0,
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
     eY = Block(
-        id="EY", name="EY", input_id="Y", weight=100.0,
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=100.0,
         conditions=(_gt("Y", 11.5),),
         requires_reset_block_id="R2",
     )
@@ -933,9 +1102,13 @@ async def test_b6_two_entries_different_resets_independent_arms():
     r1 = Block(id="R1", conditions=(_eq("X", 11.0),))
     r2 = Block(id="R2", conditions=(_eq("X", 99.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X, INPUT_Y),
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
         rules=SignalRules(
-            entries=(eX, eY), exits=(xX, xY), resets=(r1, r2),
+            entries=(eX, eY),
+            exits=(xX, xY),
+            resets=(r1, r2),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -955,10 +1128,12 @@ async def test_b6_two_entries_different_resets_independent_arms():
 @pytest.mark.asyncio
 async def test_b7_reset_arms_one_of_three_emits_marker():
     INPUT_Y = Input(
-        id="Y", instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
     )
     INPUT_Z = Input(
-        id="Z", instrument=InstrumentSpot(collection="INDEX", instrument_id="DJI"),
+        id="Z",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="DJI"),
     )
     # Three entries all bound to R1. Engineered so only ONE (EX) actually
     # fires + disarms before R1 fires. EY and EZ never fire (their entry
@@ -977,26 +1152,39 @@ async def test_b7_reset_arms_one_of_three_emits_marker():
         }
     )
     eX = Block(
-        id="EX", name="EX", input_id="X", weight=50.0,
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=50.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
     eY = Block(
-        id="EY", name="EY", input_id="Y", weight=50.0,
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=50.0,
         conditions=(_gt("Y", 100.0),),
         requires_reset_block_id="R1",
     )
     eZ = Block(
-        id="EZ", name="EZ", input_id="Z", weight=50.0,
+        id="EZ",
+        name="EZ",
+        input_id="Z",
+        weight=50.0,
         conditions=(_gt("Z", 100.0),),
         requires_reset_block_id="R1",
     )
     xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_name="EX")
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X, INPUT_Y, INPUT_Z),
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y, INPUT_Z),
         rules=SignalRules(
-            entries=(eX, eY, eZ), exits=(xX,), resets=(reset,),
+            entries=(eX, eY, eZ),
+            exits=(xX,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -1018,13 +1206,18 @@ async def test_b8_reset_with_all_armed_emits_no_marker():
     closes = np.array([10.0, 9.0, 8.0, 11.0, 7.0, 6.0, 5.0, 4.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 100.0),),  # never fires
         requires_reset_block_id="R1",
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), resets=(reset,)),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -1051,13 +1244,18 @@ async def test_b9_bound_entry_no_double_latch_when_already_latched():
     closes = np.array([10.0, 12.0, 12.0, 12.0, 9.0, 9.0, 9.0, 9.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.5),),
         requires_reset_block_id="R1",
     )
     reset = Block(id="R1", conditions=(_eq("X", 12.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), resets=(reset,)),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -1082,7 +1280,10 @@ async def test_b10_bound_exit_target_not_latched_preserves_arm():
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 100.0),),
     )
     exit_blk = Block(
@@ -1093,9 +1294,13 @@ async def test_b10_bound_exit_target_not_latched_preserves_arm():
     )
     reset = Block(id="R1", conditions=(_eq("X", 12.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -1229,7 +1434,10 @@ async def test_b13_binding_to_disabled_reset_locks_after_first_fire():
     closes = np.array([10.0, 11.0, 13.0, 14.0, 15.0, 11.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
         requires_reset_block_id="R1",
     )
@@ -1243,12 +1451,18 @@ async def test_b13_binding_to_disabled_reset_locks_after_first_fire():
     # reset has that id, so block_arm[E] never flips True after the
     # first disarm.
     reset = Block(
-        id="R1", conditions=(_eq("X", 11.0),), enabled=False,
+        id="R1",
+        conditions=(_eq("X", 11.0),),
+        enabled=False,
     )
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -1267,7 +1481,10 @@ async def test_b14_reset_nan_no_arm_transition():
     closes = np.array([10.0, 11.0, 13.0, 14.0, 15.0, np.nan, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 11.0),),
         requires_reset_block_id="R1",
     )
@@ -1279,9 +1496,13 @@ async def test_b14_reset_nan_no_arm_transition():
     # Reset condition would fire at any X bar, but t=5 has NaN.
     reset = Block(id="R1", conditions=(_gt("X", 0.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -1308,7 +1529,10 @@ async def test_b16_nan_on_bound_entry_preserves_arm():
     closes = np.array([10.0, np.nan, 14.0, 10.0, 14.0, 10.0, 10.0, 10.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt("X", 12.0),),
         requires_reset_block_id="R1",
     )
@@ -1320,9 +1544,13 @@ async def test_b16_nan_on_bound_entry_preserves_arm():
     # Reset cond never satisfied (X < 0 is impossible for these closes).
     reset = Block(id="R1", conditions=(_lt("X", 0.0),))
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(entry,), exits=(exit_blk,), resets=(reset,),
+            entries=(entry,),
+            exits=(exit_blk,),
+            resets=(reset,),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -1391,3 +1619,427 @@ def test_b15_placeholder_block_with_binding_accepted():
     # Placeholder accepted; binding is on the resulting Block.
     assert signal.rules.entries[0].requires_reset_block_id == "R1"
     assert signal.rules.entries[0].id == ""
+
+
+# ===========================================================================
+# COUNT feature (requires_reset_count) — cumulative countdown re-arm.
+#
+#   C1   count=1 explicit == default (parity with today's single-flip).
+#   C2   count=3 needs exactly 3 bound-reset fires to re-arm → exactly 2
+#        trades; the second open occurs ONLY after the 3rd fire, NOT at an
+#        eligible bar in between (discriminates from count=1).
+#   C3   count=3 with only 2 fires mid-run → re-arm never reached → 1 trade.
+#   C4   cumulative across NON-consecutive fires (gaps between reset bars do
+#        not reset the tally) — same as C2's spacing, asserted explicitly.
+#   C5   reset event marker recorded ONLY on the effective re-arm (the bar
+#        the countdown reaches 0), not on the intermediate decrement bars.
+#   C6   count=N seeded on EACH disarm: after a full re-arm + second trade,
+#        the countdown is re-seeded so a subsequent re-arm again needs N.
+#   C7   one reset fire decrements ALL its disarmed bound blocks by 1 (shared
+#        reset, two entries, count=2) → both re-arm together after 2 fires.
+#   C8   two blocks bound to the SAME reset with DIFFERENT counts → each has
+#        an INDEPENDENT countdown; the smaller-count block re-arms (and
+#        re-fires) strictly earlier than the larger-count one.
+#   C9   reset operand NaN at a fire bar under count>1 does NOT decrement the
+#        countdown (and does not re-arm): the NaN bar is absent from fired/
+#        latched and the block stays disarmed exactly as if that bar were a
+#        non-firing gap.
+# ---------------------------------------------------------------------------
+
+
+# Reset uses a distinct sentinel value (X==5) so reset fires are fully
+# decoupled from entry (X>11) and exit (X<11.5) conditions.
+def _reset_at5() -> Block:
+    return Block(id="R1", conditions=(_eq("X", 5.0),))
+
+
+@pytest.mark.asyncio
+async def test_c1_count_one_explicit_equals_default():
+    # T3 scenario, but with requires_reset_count=1 set explicitly. Must be
+    # byte-identical to the default (count omitted) — proves count=1 parity.
+    closes = np.array([10.0, 11.0, 13.0, 14.0, 15.0, 11.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    reset = Block(id="R1", conditions=(_eq("X", 11.0),))
+
+    entry_default = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.0),),
+        requires_reset_block_id="R1",
+    )
+    entry_count1 = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.0),),
+        requires_reset_block_id="R1",
+        requires_reset_count=1,
+    )
+    s_default = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry_default,), exits=(exit_blk,), resets=(reset,)),
+    )
+    s_count1 = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry_count1,), exits=(exit_blk,), resets=(reset,)),
+    )
+    r_default = await evaluate_signal(s_default, indicators={}, fetcher=fetcher)
+    r_count1 = await evaluate_signal(s_count1, indicators={}, fetcher=fetcher)
+    assert r_default.trades == r_count1.trades
+    assert r_default.events == r_count1.events
+    assert list(r_default.positions[0].values) == list(r_count1.positions[0].values)
+
+
+@pytest.mark.asyncio
+async def test_c2_count_three_needs_three_fires_to_rearm():
+    # t1 entry opens (initial arm) → t2 exit closes → reset fires at t3,t5,t6
+    # (X==5). Countdown 3→2→1→0; re-arm only at t6's fire. Entry is ELIGIBLE
+    # at t4 (X=13>11) but arm is still down (countdown=2) → NO open there.
+    # Second trade opens at t7. Exactly TWO trades.
+    closes = np.array([10.0, 13.0, 11.0, 5.0, 13.0, 5.0, 5.0, 13.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.0),),
+        requires_reset_block_id="R1",
+        requires_reset_count=3,
+    )
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(_reset_at5(),)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    assert len(result.trades) == 2, result.trades
+    assert (result.trades[0].open_bar, result.trades[0].close_bar) == (1, 2)
+    # Critical discriminator: NOT t4 (count=1 would re-arm at t3 and open t4).
+    assert result.trades[1].open_bar == 7
+
+
+@pytest.mark.asyncio
+async def test_c3_count_three_with_two_fires_never_rearms():
+    # Same shape as C2 but the reset only fires TWICE (t3, t5); the third
+    # X==5 bar is replaced by X=10. Countdown 3→2→1, never 0 → no re-arm →
+    # exactly ONE trade.
+    closes = np.array([10.0, 13.0, 11.0, 5.0, 13.0, 5.0, 10.0, 13.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.0),),
+        requires_reset_block_id="R1",
+        requires_reset_count=3,
+    )
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(_reset_at5(),)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    assert len(result.trades) == 1, result.trades
+    assert (result.trades[0].open_bar, result.trades[0].close_bar) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_c4_cumulative_across_non_consecutive_fires():
+    # Reset fires are non-consecutive (t3, then a non-firing bar t4, then
+    # t5, t6). The tally must NOT reset on the non-firing bar t4 — proving
+    # CUMULATIVE (not consecutive) counting. Same data as C2.
+    closes = np.array([10.0, 13.0, 11.0, 5.0, 13.0, 5.0, 5.0, 13.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.0),),
+        requires_reset_block_id="R1",
+        requires_reset_count=3,
+    )
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(_reset_at5(),)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # Non-firing bar t4 did NOT reset the tally → re-arm still reached at t6.
+    assert len(result.trades) == 2, result.trades
+    assert result.trades[1].open_bar == 7
+
+
+@pytest.mark.asyncio
+async def test_c5_reset_marker_only_on_effective_rearm():
+    # The reset fires at t3,t5,t6. Only the LAST (t6) drives countdown to 0
+    # and re-arms → latched_indices must be exactly (6,), NOT the intermediate
+    # decrement bars t3,t5 (consistent with T7/B8: no marker without an
+    # effective False→True arm transition).
+    closes = np.array([10.0, 13.0, 11.0, 5.0, 13.0, 5.0, 5.0, 13.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.0),),
+        requires_reset_block_id="R1",
+        requires_reset_count=3,
+    )
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(_reset_at5(),)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    r = events_by[("R1", "reset")]
+    # All three fires recorded; only the effective re-arm latched.
+    assert all(i in r.fired_indices for i in (3, 5, 6))
+    assert r.latched_indices == (6,)
+
+
+@pytest.mark.asyncio
+async def test_c6_countdown_reseeded_on_each_disarm():
+    # count=2. First cycle: open t1, exit t2; reset fires t3,t4 → re-arm at
+    # t4 (countdown 2→1→0). Second open t5; exit t6; reset must fire TWO MORE
+    # times to re-arm again (t7,t... only one bar left). With a single reset
+    # bar after the second disarm, NO third trade — proving the countdown is
+    # re-seeded to N=2 on the second disarm rather than left at 0.
+    closes = np.array([13.0, 13.0, 11.0, 5.0, 5.0, 13.0, 11.0, 5.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.0),),
+        requires_reset_block_id="R1",
+        requires_reset_count=2,
+    )
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(_reset_at5(),)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # t0 open (initial arm), t2 exit closes; resets t3,t4 → re-arm at t4.
+    # t5 second open; t6 exit closes; only reset bar t7 (1 of 2 needed) →
+    # NO third trade. Exactly TWO trades.
+    assert len(result.trades) == 2, result.trades
+    assert (result.trades[0].open_bar, result.trades[0].close_bar) == (0, 2)
+    assert (result.trades[1].open_bar, result.trades[1].close_bar) == (5, 6)
+
+
+@pytest.mark.asyncio
+async def test_c7_one_fire_decrements_all_disarmed_bound_blocks():
+    # Two entries (EX, EY) bound to the SAME reset R1 with count=2. Both
+    # disarm on their first fire. ONE reset fire decrements BOTH disarmed
+    # blocks by 1; after TWO fires both re-arm together → each gets a 2nd
+    # trade. (Mirrors T14/B5 arm-sharing but under the countdown.)
+    INPUT_Y = Input(
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+    )
+    spx = np.array([13.0, 11.0, 5.0, 5.0, 13.0, 13.0, 13.0, 13.0])
+    ndx = np.array([13.0, 11.0, 5.0, 5.0, 13.0, 13.0, 13.0, 13.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
+    )
+    eX = Block(
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=2,
+    )
+    eY = Block(
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=100.0,
+        conditions=(_gt("Y", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=2,
+    )
+    xX = Block(id="XX", conditions=(_lt("X", 11.5),), target_entry_block_name="EX")
+    xY = Block(id="XY", conditions=(_lt("Y", 11.5),), target_entry_block_name="EY")
+    reset = _reset_at5()  # fires at t2 and t3 (X==5)
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(entries=(eX, eY), exits=(xX, xY), resets=(reset,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    by_entry: dict[str, list] = {"EX": [], "EY": []}
+    for tr in result.trades:
+        by_entry[tr.entry_block_id].append(tr)
+    # Both open t0, close t1; both re-arm after 2 fires (t2,t3) → 2nd open t4.
+    assert len(by_entry["EX"]) == 2, by_entry["EX"]
+    assert len(by_entry["EY"]) == 2, by_entry["EY"]
+    assert by_entry["EX"][1].open_bar == 4
+    assert by_entry["EY"][1].open_bar == 4
+    # Re-arm reached at the 2nd fire (t3) for both → ONE marker at t3.
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    assert events_by[("R1", "reset")].latched_indices == (3,)
+
+
+@pytest.mark.asyncio
+async def test_c8_same_reset_different_counts_independent_countdowns():
+    # Two entries (EX, EY) bound to the SAME reset R1 but with DIFFERENT
+    # counts: EX count=2, EY count=3. Both open t0 (13) and close t1 (11).
+    # R1 (X==5) fires on NON-consecutive bars t2, t4, t6 — leaving eligible
+    # reopen bars (X=Y=13) at t3, t5, t7.
+    #   EX (count=2) re-arms at its 2nd fire (t4) → reopens at the next
+    #     eligible bar t5.
+    #   EY (count=3) re-arms only at its 3rd fire (t6) → reopens at t7, NOT
+    #     at t5 (its countdown is still 1 there).
+    # The strictly-later EY reopen proves the countdowns are PER-BLOCK and
+    # do not share the tally; R1 also records TWO distinct effective-re-arm
+    # markers (one per bound block), at t4 (EX) and t6 (EY).
+    INPUT_Y = Input(
+        id="Y",
+        instrument=InstrumentSpot(collection="INDEX", instrument_id="NDX"),
+    )
+    spx = np.array([13.0, 11.0, 5.0, 13.0, 5.0, 13.0, 5.0, 13.0])
+    ndx = np.array([13.0, 11.0, 5.0, 13.0, 5.0, 13.0, 5.0, 13.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
+    )
+    eX = Block(
+        id="EX",
+        name="EX",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=2,
+    )
+    eY = Block(
+        id="EY",
+        name="EY",
+        input_id="Y",
+        weight=100.0,
+        conditions=(_gt("Y", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=3,
+    )
+    xX = Block(id="XX", conditions=(_lt("X", 11.5),), target_entry_block_name="EX")
+    xY = Block(id="XY", conditions=(_lt("Y", 11.5),), target_entry_block_name="EY")
+    reset = _reset_at5()  # fires at t2, t4, t6 (X==5)
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(entries=(eX, eY), exits=(xX, xY), resets=(reset,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    by_entry: dict[str, list] = {"EX": [], "EY": []}
+    for tr in result.trades:
+        by_entry[tr.entry_block_id].append(tr)
+    # EX (count=2) re-arms at t4 → reopens at t5.
+    assert len(by_entry["EX"]) == 2, by_entry["EX"]
+    assert by_entry["EX"][1].open_bar == 5
+    # EY (count=3) re-arms at t6 → reopens at t7 (strictly later than EX),
+    # NOT at t5: independent, longer countdown.
+    assert len(by_entry["EY"]) == 2, by_entry["EY"]
+    assert by_entry["EY"][1].open_bar == 7
+    # Two distinct effective re-arms: EX at t4, EY at t6.
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    assert events_by[("R1", "reset")].latched_indices == (4, 6)
+
+
+@pytest.mark.asyncio
+async def test_c9_reset_nan_bar_does_not_decrement_countdown():
+    # count=2. Entry opens t0 (13), closes t1 (11). The bound reset R1
+    # (X==5) would fire at t2 AND t3, which under count=2 would re-arm the
+    # block. But t3 is NaN → its reset truth is masked, so ONLY t2 counts:
+    # the countdown stalls at 1 and never reaches 0. Result: NO re-arm, so
+    # the entry never reopens despite eligible bars at t4..t7 → ONE trade.
+    # The NaN bar t3 must be absent from BOTH fired_indices and
+    # latched_indices (a NaN reset bar behaves like a non-firing gap, not a
+    # decrement).
+    closes = np.array([13.0, 11.0, 5.0, np.nan, 13.0, 13.0, 13.0, 13.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    entry = Block(
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
+        conditions=(_gt("X", 11.5),),
+        requires_reset_block_id="R1",
+        requires_reset_count=2,
+    )
+    exit_blk = Block(
+        id="X1",
+        conditions=(_lt("X", 11.5),),
+        target_entry_block_name="Entry",
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,), exits=(exit_blk,), resets=(_reset_at5(),)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # NaN at t3 did not count toward the countdown (only t2 fired) → the
+    # block never re-arms → exactly ONE trade.
+    assert len(result.trades) == 1, result.trades
+    assert (result.trades[0].open_bar, result.trades[0].close_bar) == (0, 1)
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    r = events_by[("R1", "reset")]
+    # Only the real fire (t2) is recorded; the NaN bar is neither fired nor
+    # an (ineffective) re-arm.
+    assert 2 in r.fired_indices
+    assert 3 not in r.fired_indices
+    assert 3 not in r.latched_indices
+    # No effective re-arm occurred at all (countdown stalled at 1).
+    assert r.latched_indices == ()
