@@ -28,6 +28,8 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   const [editing, setEditing] = useState(false);
   // Local draft for the weight input so the user can type freely before blur
   const [weightDraft, setWeightDraft] = useState(null);
+  // Local draft for the reset-count input (same draft-on-blur pattern as weight)
+  const [countDraft, setCountDraft] = useState(null);
   const nameRef = useRef(null);
 
   const isEntry = section === 'entries';
@@ -43,6 +45,13 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   // Committed weight (number, clamped by storage / parent) used for badge
   const committedWeight = Number.isFinite(block.weight) ? block.weight : 0;
 
+  // Committed reset count — integer ≥ 1; default 1 when absent/invalid so
+  // a freshly-bound block (no stored count yet) shows the single-fire value.
+  const committedCount = Number.isInteger(block.requires_reset_count)
+    && block.requires_reset_count >= 1
+    ? block.requires_reset_count
+    : 1;
+
   useEffect(() => {
     if (editing && nameRef.current) {
       nameRef.current.focus();
@@ -54,6 +63,11 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   useEffect(() => {
     setWeightDraft(null);
   }, [block.weight]);
+
+  // Sync countDraft when the committed count changes from outside (load).
+  useEffect(() => {
+    setCountDraft(null);
+  }, [block.requires_reset_count]);
 
   function commitName() {
     if (!nameRef.current) return;
@@ -85,6 +99,21 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
     onChange({ ...block, weight: clamped });
   }
 
+  /**
+   * Commit the reset-count on blur / Enter. Coerce to an integer ≥ 1;
+   * empty / non-numeric / sub-1 falls back to 1 (single-fire default).
+   */
+  function commitCount(raw) {
+    setCountDraft(null);
+    const n = raw === '' ? NaN : parseFloat(raw);
+    if (!Number.isFinite(n)) {
+      onChange({ ...block, requires_reset_count: 1 });
+      return;
+    }
+    const i = Math.floor(n);
+    onChange({ ...block, requires_reset_count: i < 1 ? 1 : i });
+  }
+
   const showUnconfiguredWarning = resolved && !resolvedConfigured;
   const showUnknownWarning = !!selectedId && !resolved;
 
@@ -106,6 +135,11 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
   const weightDisplayValue = weightDraft !== null
     ? weightDraft
     : committedWeight;
+
+  // Same draft-or-committed display rule for the reset-count input.
+  const countDisplayValue = countDraft !== null
+    ? countDraft
+    : committedCount;
 
   return (
     <div className={styles.blockHeaderRow} data-testid={`block-header-${blockIndex - 1}`}>
@@ -255,6 +289,33 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
               ))}
             </select>
           </div>
+          {block.requires_reset_block_id && (
+            <div className={styles.blockWeightCell}>
+              <label
+                className={styles.conditionInlineLabel}
+                htmlFor={`reset-count-${blockIndex}`}
+              >
+                ×
+              </label>
+              <div className={styles.weightInputWrap}>
+                <input
+                  id={`reset-count-${blockIndex}`}
+                  type="number"
+                  step="1"
+                  min="1"
+                  className={styles.weightInput}
+                  value={countDisplayValue}
+                  onChange={(e) => setCountDraft(e.target.value)}
+                  onBlur={(e) => commitCount(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') commitCount(e.target.value); }}
+                  aria-label={`Reset count for block ${blockIndex}`}
+                  title="Number of times the bound reset must fire before this block re-arms"
+                  data-testid={`reset-count-input-${blockIndex - 1}`}
+                />
+                <span className={styles.weightSuffix} aria-hidden="true">×</span>
+              </div>
+            </div>
+          )}
         </>
       )}
 

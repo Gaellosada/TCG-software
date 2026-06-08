@@ -199,6 +199,24 @@ function sanitiseRequiresResetBlockId(raw) {
   return null;
 }
 
+/**
+ * Sanitise a per-block reset-count value.
+ *   - Coerce to a number, floor to an integer.
+ *   - Anything non-finite or < 1 → 1 (the single-fire default == current
+ *     re-arm behavior).
+ * Field-local only; the count is meaningful solely when
+ * requires_reset_block_id is set (the UI hides it otherwise) but we always
+ * store a valid integer so the wire payload and the engine see a clean ≥ 1.
+ * No SCHEMA_VERSION bump: defaulting missing values to 1 gives forward-
+ * compat for existing v5 signals that predate the field.
+ */
+function sanitiseResetCount(raw) {
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n)) return 1;
+  const i = Math.floor(n);
+  return i < 1 ? 1 : i;
+}
+
 function sanitiseBlock(raw, section) {
   const id = (typeof raw.id === 'string' && raw.id) ? raw.id : newBlockId();
   const name = typeof raw.name === 'string' ? raw.name : '';
@@ -230,6 +248,7 @@ function sanitiseBlock(raw, section) {
         ? raw.target_entry_block_name
         : '',
       requires_reset_block_id: sanitiseRequiresResetBlockId(raw.requires_reset_block_id),
+      requires_reset_count: sanitiseResetCount(raw.requires_reset_count),
     };
   }
   const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
@@ -243,6 +262,7 @@ function sanitiseBlock(raw, section) {
     enabled,
     description,
     requires_reset_block_id: sanitiseRequiresResetBlockId(raw.requires_reset_block_id),
+    requires_reset_count: sanitiseResetCount(raw.requires_reset_count),
   };
 }
 

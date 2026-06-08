@@ -57,13 +57,18 @@ export function defaultBlock(section = 'entries') {
     base.target_entry_block_name = '';
     // Optional per-block reset binding; null = no gate.
     base.requires_reset_block_id = null;
+    // Reset fires required before re-arm; 1 == single-fire (current behavior).
+    base.requires_reset_count = 1;
   } else if (section === 'resets') {
     // Reset blocks are signal-global: no input_id, no weight, no target,
-    // and no requires_reset_block_id (a reset cannot gate itself).
+    // no requires_reset_block_id (a reset cannot gate itself), and no
+    // requires_reset_count (the count lives on the binder, not the reset).
   } else {
     base.input_id = '';
     base.weight = 0;
     base.requires_reset_block_id = null;
+    // Reset fires required before re-arm; 1 == single-fire (current behavior).
+    base.requires_reset_count = 1;
   }
   return base;
 }

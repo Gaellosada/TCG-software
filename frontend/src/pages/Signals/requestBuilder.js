@@ -75,6 +75,16 @@ function clampWeight(w) {
   return n;
 }
 
+// Reset-count whitelist value: integer ≥ 1; non-finite/sub-1 → 1 (the
+// single-fire default == current re-arm). Keeps the wire deterministic so
+// the backend never sees a fractional or <1 count.
+function clampResetCount(c) {
+  const n = typeof c === 'number' ? c : Number(c);
+  if (!Number.isFinite(n)) return 1;
+  const i = Math.floor(n);
+  return i < 1 ? 1 : i;
+}
+
 function normaliseBlock(block, section) {
   if (!block || typeof block !== 'object') return block;
   const conditions = Array.isArray(block.conditions)
@@ -109,6 +119,7 @@ function normaliseBlock(block, section) {
         && block.requires_reset_block_id
         ? block.requires_reset_block_id
         : null,
+      requires_reset_count: clampResetCount(block.requires_reset_count),
     };
   }
   return {
@@ -123,6 +134,7 @@ function normaliseBlock(block, section) {
       && block.requires_reset_block_id
       ? block.requires_reset_block_id
       : null,
+    requires_reset_count: clampResetCount(block.requires_reset_count),
   };
 }
 
