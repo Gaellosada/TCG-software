@@ -781,9 +781,7 @@ async def evaluate_signal(
     # Exits may have duplicate ids across entries; but distinct ids from
     # each other are preferred for trace clarity — not enforced here.
 
-    reset_blocks: list[Block] = [
-        b for b in signal.rules.resets if _usable_reset(b)
-    ]
+    reset_blocks: list[Block] = [b for b in signal.rules.resets if _usable_reset(b)]
 
     # Referenced inputs = union of usable blocks' input_ids, in
     # declaration order (entries then exits). Exits contribute the
@@ -928,18 +926,29 @@ async def evaluate_signal(
         for b in (entry_blocks + exit_blocks)
         if b.requires_reset_block_id is not None
     }
+    # Per-binding cumulative re-arm count (>= 1). With count = N the bound
+    # reset must fire N times (CUMULATIVE) after a disarm before the block
+    # re-arms. Clamped to >= 1 defensively (the API validates, but a
+    # directly-constructed Signal could carry a smaller value).
+    bound_count: dict[str, int] = {
+        b.id: max(1, int(b.requires_reset_count))
+        for b in (entry_blocks + exit_blocks)
+        if b.requires_reset_block_id is not None
+    }
     # All bound blocks start armed — first fire of a bound block does
     # NOT require a prior reset (it consumes the initial arm).
     block_arm: dict[str, bool] = {b_id: True for b_id in bound_target}
+    # Remaining bound-reset fires needed to re-arm a DISARMED block. Seeded
+    # to its count on each disarm; decremented once per bound-reset fire;
+    # at 0 the block re-arms. Entries absent/irrelevant while armed.
+    arm_countdown: dict[str, int] = {}
 
     # Per-entry trade ledger — parallel lists keyed by entry block id.
     # ``opens[i]`` pairs with ``closes[i]`` (when present) to form one
     # trade. ``closes[i]`` records (close_bar, exit_block_id) for the
     # exit that actually cleared this latch open.
     trade_opens: dict[str, list[int]] = {b.id: [] for b in entry_blocks}
-    trade_closes: dict[str, list[tuple[int, str]]] = {
-        b.id: [] for b in entry_blocks
-    }
+    trade_closes: dict[str, list[tuple[int, str]]] = {b.id: [] for b in entry_blocks}
 
     for t in range(T):
         # --- (a) record fired-indices ---
@@ -971,9 +980,11 @@ async def evaluate_signal(
                 latched[target_entry.id] = False
                 exit_latched[b.id].append(t)
                 trade_closes[target_entry.id].append((t, b.id))
-                # Disarm AFTER a successful fire — bound exits only.
+                # Disarm AFTER a successful fire — bound exits only. Seed
+                # the cumulative re-arm countdown to this binding's count.
                 if b.id in block_arm:
                     block_arm[b.id] = False
+                    arm_countdown[b.id] = bound_count[b.id]
 
         # --- (c) entry pass: declaration order; leverage allowed ---
         # Bound entries gated by their own per-block arm. Unbound entries
@@ -990,9 +1001,11 @@ async def evaluate_signal(
             latched[b.id] = True
             entry_latched[b.id].append(t)
             trade_opens[b.id].append(t)
-            # Disarm AFTER a successful latch — bound entries only.
+            # Disarm AFTER a successful latch — bound entries only. Seed
+            # the cumulative re-arm countdown to this binding's count.
             if b.id in block_arm:
                 block_arm[b.id] = False
+                arm_countdown[b.id] = bound_count[b.id]
 
         # --- (c.5) reset pass: per-fire effectiveness (Sign 2).
         # Runs AFTER entries so same-bar entry+reset → entry-at-t,
@@ -1005,10 +1018,17 @@ async def evaluate_signal(
             for b_id in block_arm:
                 if bound_target[b_id] != r.id:
                     continue
-                if not block_arm[b_id]:
+                if block_arm[b_id]:
+                    # Already armed → this fire is a no-op for this block
+                    # (Sign 2; matches T7/B8/B10). No countdown, no marker.
+                    continue
+                # Disarmed: this fire counts toward the cumulative re-arm.
+                # ``arm_countdown`` was seeded on disarm; one fire = -1.
+                arm_countdown[b_id] -= 1
+                if arm_countdown[b_id] <= 0:
                     block_arm[b_id] = True
                     armed_at_least_one = True
-                # else: already armed → no transition → ineffective.
+                # else: still counting down → no transition → ineffective.
             if armed_at_least_one:
                 reset_latched[r.id].append(t)
 
@@ -1053,9 +1073,7 @@ async def evaluate_signal(
                 if inp.instrument.basket_id is not None:
                     price_label = f"basket:{inp.instrument.basket_id}.close"
                 else:
-                    price_label = (
-                        f"basket:inline[{inp.instrument.asset_class}].close"
-                    )
+                    price_label = f"basket:inline[{inp.instrument.asset_class}].close"
             else:
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]

@@ -22,8 +22,16 @@ from tcg.types.market import PriceSeries
 
 DATES = np.array(
     [
-        20240102, 20240103, 20240104, 20240105, 20240108,
-        20240109, 20240110, 20240111, 20240112, 20240115,
+        20240102,
+        20240103,
+        20240104,
+        20240105,
+        20240108,
+        20240109,
+        20240110,
+        20240111,
+        20240112,
+        20240115,
     ],
     dtype=np.int64,
 )
@@ -84,10 +92,7 @@ SPX_INPUT = {
 
 
 class TestComputeEndpointV4:
-
-    async def test_happy_path_single_input_indicator_operand(
-        self, client: AsyncClient
-    ):
+    async def test_happy_path_single_input_indicator_operand(self, client: AsyncClient):
         body = {
             "spec": {
                 "id": "sig1",
@@ -259,9 +264,7 @@ class TestComputeEndpointV4:
         assert vals[5] == pytest.approx(0.0)
         assert vals[-1] == pytest.approx(0.0)
 
-    async def test_unknown_target_entry_block_name_rejected(
-        self, client: AsyncClient
-    ):
+    async def test_unknown_target_entry_block_name_rejected(self, client: AsyncClient):
         body = {
             "spec": {
                 "id": "sig",
@@ -554,9 +557,7 @@ class TestComputeEndpointV4:
         assert data["error_type"] == "validation"
         assert "non-zero" in data["message"]
 
-    async def test_entry_weight_out_of_range_rejected(
-        self, client: AsyncClient
-    ):
+    async def test_entry_weight_out_of_range_rejected(self, client: AsyncClient):
         body = {
             "spec": {
                 "id": "sig",
@@ -1068,14 +1069,9 @@ class TestResetBlocksAPI:
         assert resp.status_code == 400
         data = resp.json()
         assert data["error_type"] == "validation"
-        assert (
-            "reset blocks must not set target_entry_block_name"
-            in data["message"]
-        )
+        assert "reset blocks must not set target_entry_block_name" in data["message"]
 
-    async def test_t23_reset_with_nonzero_weight_rejected(
-        self, client: AsyncClient
-    ):
+    async def test_t23_reset_with_nonzero_weight_rejected(self, client: AsyncClient):
         body = {
             "spec": {
                 "id": "sig",
@@ -1111,3 +1107,208 @@ class TestResetBlocksAPI:
         data = resp.json()
         assert data["error_type"] == "validation"
         assert "reset blocks must not set weight" in data["message"]
+
+    # ----- requires_reset_count (COUNT feature) -----------------------
+
+    async def test_t24_reset_count_below_one_rejected(self, client: AsyncClient):
+        # requires_reset_count must be >= 1; 0 is rejected at parse time.
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E",
+                            "name": "Entry",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 1.0},
+                                }
+                            ],
+                            "requires_reset_block_id": "R1",
+                            "requires_reset_count": 0,
+                        }
+                    ],
+                    "exits": [],
+                    "resets": [
+                        {
+                            "id": "R1",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "requires_reset_count" in data["message"]
+
+    async def test_t25_reset_block_with_count_rejected(self, client: AsyncClient):
+        # A reset block must NOT carry requires_reset_count (mirrors the
+        # requires_reset_block_id rejection). The default value 1 is the
+        # only acceptable value on a reset; any explicit non-default is
+        # rejected loudly.
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [],
+                    "exits": [],
+                    "resets": [
+                        {
+                            "id": "R1",
+                            "requires_reset_count": 3,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "reset blocks must not set requires_reset_count" in data["message"]
+
+    async def test_t26_valid_count_threads_into_block(self, client: AsyncClient):
+        # A valid requires_reset_count on a bound entry parses and is
+        # threaded onto the resulting Block. Asserted via parse_signal so
+        # the typed field is inspectable.
+        from tcg.core.api.signals import SignalIn, parse_signal
+
+        spec = SignalIn.model_validate(
+            {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E",
+                            "name": "Entry",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 1.0},
+                                }
+                            ],
+                            "requires_reset_block_id": "R1",
+                            "requires_reset_count": 4,
+                        }
+                    ],
+                    "exits": [],
+                    "resets": [
+                        {
+                            "id": "R1",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+        signal = parse_signal(spec)
+        assert signal.rules.entries[0].requires_reset_count == 4
+        # Default applies when omitted on another bound block.
+        assert signal.rules.resets[0].requires_reset_count == 1
+
+    async def test_t27_count_omitted_defaults_to_one(self, client: AsyncClient):
+        # Backward-compat: a stored/legacy spec that omits requires_reset_count
+        # parses with the default 1 (no schema-version change required).
+        from tcg.core.api.signals import SignalIn, parse_signal
+
+        spec = SignalIn.model_validate(
+            {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "E",
+                            "name": "Entry",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 1.0},
+                                }
+                            ],
+                            "requires_reset_block_id": "R1",
+                        }
+                    ],
+                    "exits": [],
+                    "resets": [
+                        {
+                            "id": "R1",
+                            "conditions": [
+                                {
+                                    "op": "gt",
+                                    "lhs": {
+                                        "kind": "instrument",
+                                        "input_id": "X",
+                                    },
+                                    "rhs": {"kind": "constant", "value": 0.0},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+        signal = parse_signal(spec)
+        assert signal.rules.entries[0].requires_reset_count == 1
