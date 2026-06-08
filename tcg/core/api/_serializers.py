@@ -18,10 +18,14 @@ def nan_safe_floats(
 ) -> list[float | None]:
     """Convert a float array to a JSON-safe list with NaN → ``None``.
 
-    Note: this helper only maps ``NaN`` to ``None`` and lets ``inf`` pass
-    through (historical price-array behaviour). For nested
-    metrics / aggregate-return blocks that must be strictly RFC-8259
-    finite, use :func:`sanitize_json_floats`, which also nulls ``inf``.
+    Note: on its own this helper maps ``NaN`` to ``None`` and lets ``inf``
+    pass through (historical price-array behaviour). But any payload that
+    is then routed through :func:`sanitize_json_floats` — as the portfolio
+    compute response now is, in full — has its ``inf`` nulled at that
+    boundary too, so the "inf passes through" contract only holds for
+    callers that do NOT apply the terminal sanitizer. For blocks that must
+    be strictly RFC-8259 finite on their own, use
+    :func:`sanitize_json_floats`, which nulls both ``NaN`` and ``inf``.
     """
     if arr is None:
         return []

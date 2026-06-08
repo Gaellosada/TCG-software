@@ -77,7 +77,7 @@ def _deserialize_skipping_malformed(rows: list[dict[str, Any]]) -> list[Persiste
     for r in rows:
         try:
             out.append(from_mongo_dict(r))
-        except (ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
             _log.warning(
                 "persistence: skipping malformed stored doc _id=%r type=%r: %s",
                 r.get("_id", "?") if isinstance(r, dict) else "?",
