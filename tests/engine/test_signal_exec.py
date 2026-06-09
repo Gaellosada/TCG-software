@@ -35,13 +35,11 @@ from tcg.types.signal import (
 )
 
 
-DATES = np.array(
-    [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
-)
+DATES = np.array([20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64)
 
 
 def _make_fetcher(
-    by_key: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]]
+    by_key: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]],
 ) -> Callable:
     async def fetch(instrument, field):
         if isinstance(instrument, InstrumentSpot):
@@ -176,9 +174,7 @@ async def test_two_inputs_independent_positions():
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
     by_id = {p.input_id: p for p in result.positions}
     assert list(by_id["X"].values) == pytest.approx([0.0, 0.0, 0.6, 0.6, 0.6])
-    assert list(by_id["Y"].values) == pytest.approx(
-        [0.0, -0.4, -0.4, -0.4, -0.4]
-    )
+    assert list(by_id["Y"].values) == pytest.approx([0.0, -0.4, -0.4, -0.4, -0.4])
 
 
 @pytest.mark.asyncio
@@ -287,7 +283,13 @@ async def test_exit_reentry_same_bar_relatches():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(entry,)),
+                Block(
+                    id="E",
+                    name="Entry",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(entry,),
+                ),
             ),
             exits=(
                 Block(
@@ -295,7 +297,7 @@ async def test_exit_reentry_same_bar_relatches():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_c,),
-                    target_entry_block_name="Entry",
+                    target_entry_block_names=("Entry",),
                 ),
             ),
         ),
@@ -320,15 +322,11 @@ async def test_latched_entry_persists_without_condition():
         name="s",
         inputs=(INPUT_X,),
         rules=SignalRules(
-            entries=(
-                Block(id="E", input_id="X", weight=50.0, conditions=(entry,)),
-            ),
+            entries=(Block(id="E", input_id="X", weight=50.0, conditions=(entry,)),),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
-    assert list(result.positions[0].values) == pytest.approx(
-        [0.0, 0.5, 0.5, 0.5, 0.5]
-    )
+    assert list(result.positions[0].values) == pytest.approx([0.0, 0.5, 0.5, 0.5, 0.5])
 
 
 @pytest.mark.asyncio
@@ -353,8 +351,20 @@ async def test_exit_clears_only_target_entry():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E1", name="Entry1", input_id="X", weight=50.0, conditions=(always,)),
-                Block(id="E2", name="Entry2", input_id="X", weight=30.0, conditions=(always,)),
+                Block(
+                    id="E1",
+                    name="Entry1",
+                    input_id="X",
+                    weight=50.0,
+                    conditions=(always,),
+                ),
+                Block(
+                    id="E2",
+                    name="Entry2",
+                    input_id="X",
+                    weight=30.0,
+                    conditions=(always,),
+                ),
             ),
             exits=(
                 # Exit targets Entry1 only.
@@ -363,7 +373,7 @@ async def test_exit_clears_only_target_entry():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_at_t3,),
-                    target_entry_block_name="Entry1",
+                    target_entry_block_names=("Entry1",),
                 ),
             ),
         ),
@@ -405,8 +415,20 @@ async def test_exit_clears_only_target_entry_not_other():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E1", name="Entry1", input_id="X", weight=50.0, conditions=(e1_cond,)),
-                Block(id="E2", name="Entry2", input_id="X", weight=30.0, conditions=(e2_cond,)),
+                Block(
+                    id="E1",
+                    name="Entry1",
+                    input_id="X",
+                    weight=50.0,
+                    conditions=(e1_cond,),
+                ),
+                Block(
+                    id="E2",
+                    name="Entry2",
+                    input_id="X",
+                    weight=30.0,
+                    conditions=(e2_cond,),
+                ),
             ),
             exits=(
                 Block(
@@ -414,7 +436,7 @@ async def test_exit_clears_only_target_entry_not_other():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_name="Entry1",
+                    target_entry_block_names=("Entry1",),
                 ),
             ),
         ),
@@ -463,8 +485,20 @@ async def test_exit_does_not_clear_opposite_side_entry():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="EL", name="EntryLong", input_id="X", weight=50.0, conditions=(e_l_cond,)),
-                Block(id="ES", name="EntryShort", input_id="X", weight=-50.0, conditions=(always,)),
+                Block(
+                    id="EL",
+                    name="EntryLong",
+                    input_id="X",
+                    weight=50.0,
+                    conditions=(e_l_cond,),
+                ),
+                Block(
+                    id="ES",
+                    name="EntryShort",
+                    input_id="X",
+                    weight=-50.0,
+                    conditions=(always,),
+                ),
             ),
             exits=(
                 Block(
@@ -472,7 +506,7 @@ async def test_exit_does_not_clear_opposite_side_entry():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_name="EntryLong",
+                    target_entry_block_names=("EntryLong",),
                 ),
             ),
         ),
@@ -537,8 +571,12 @@ async def test_indicator_operand_binds_through_input():
             ),
         )
 
-    r_x = await evaluate_signal(_sig("X"), indicators={"sma": ind_spec}, fetcher=fetcher)
-    r_y = await evaluate_signal(_sig("Y"), indicators={"sma": ind_spec}, fetcher=fetcher)
+    r_x = await evaluate_signal(
+        _sig("X"), indicators={"sma": ind_spec}, fetcher=fetcher
+    )
+    r_y = await evaluate_signal(
+        _sig("Y"), indicators={"sma": ind_spec}, fetcher=fetcher
+    )
     assert r_x.positions[0].values.sum() > 0
     assert r_y.positions[0].values.sum() == 0.0
 
@@ -597,7 +635,7 @@ async def test_duplicate_input_ids_rejected():
 
 @pytest.mark.asyncio
 async def test_exit_with_dangling_target_is_noop():
-    """A usable exit whose target_entry_block_name does not match any
+    """A usable exit whose target_entry_block_names do not match any
     usable entry name is silently skipped (the API validation layer
     rejects such payloads before they reach the engine; the engine
     tolerates latent bad state gracefully)."""
@@ -619,7 +657,9 @@ async def test_exit_with_dangling_target_is_noop():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", name="Entry", input_id="X", weight=50.0, conditions=(entry,)),
+                Block(
+                    id="E", name="Entry", input_id="X", weight=50.0, conditions=(entry,)
+                ),
             ),
             exits=(
                 Block(
@@ -627,22 +667,20 @@ async def test_exit_with_dangling_target_is_noop():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_c,),
-                    target_entry_block_name="DOES_NOT_EXIST",
+                    target_entry_block_names=("DOES_NOT_EXIST",),
                 ),
             ),
         ),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
     # Exit never fires (no usable target) → entry latches and stays.
-    assert list(result.positions[0].values) == pytest.approx(
-        [0.5, 0.5, 0.5, 0.5, 0.5]
-    )
+    assert list(result.positions[0].values) == pytest.approx([0.5, 0.5, 0.5, 0.5, 0.5])
 
 
 @pytest.mark.asyncio
 async def test_events_schema_entry_and_exit():
     """Verify event records carry id, kind, fired/latched/active and
-    target_entry_block_name per the v4 trace schema."""
+    target_entry_block_names per the v4 trace schema."""
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
     e_cond = CompareCondition(
@@ -661,7 +699,13 @@ async def test_events_schema_entry_and_exit():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(e_cond,)),
+                Block(
+                    id="E",
+                    name="Entry",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(e_cond,),
+                ),
             ),
             exits=(
                 Block(
@@ -669,7 +713,7 @@ async def test_events_schema_entry_and_exit():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_name="Entry",
+                    target_entry_block_names=("Entry",),
                 ),
             ),
         ),
@@ -681,14 +725,14 @@ async def test_events_schema_entry_and_exit():
     assert e.latched_indices == (1,)
     # Active at t=1, 2 (latch held until cleared at t=3 by the exit).
     assert e.active_indices == (1, 2)
-    assert e.target_entry_block_name is None
+    assert e.target_entry_block_names == ()
 
     x = events_by[("X1", "exit")]
     assert x.fired_indices == (3,)
     # Effective exit: t=3, since E was open.
     assert x.latched_indices == (3,)
     assert x.active_indices == ()
-    assert x.target_entry_block_name == "Entry"
+    assert x.target_entry_block_names == ("Entry",)
 
 
 @pytest.mark.asyncio
@@ -713,7 +757,13 @@ async def test_exit_firing_on_closed_entry_is_not_effective():
         inputs=(INPUT_X,),
         rules=SignalRules(
             entries=(
-                Block(id="E", name="Entry", input_id="X", weight=100.0, conditions=(never,)),
+                Block(
+                    id="E",
+                    name="Entry",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(never,),
+                ),
             ),
             exits=(
                 Block(
@@ -721,7 +771,7 @@ async def test_exit_firing_on_closed_entry_is_not_effective():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_name="Entry",
+                    target_entry_block_names=("Entry",),
                 ),
             ),
         ),
@@ -772,11 +822,15 @@ async def test_disabled_entry_block_equivalent_to_deletion():
     )
 
     with_disabled = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(enabled_block, disabled_block)),
     )
     without = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(enabled_block,)),
     )
 
@@ -799,20 +853,29 @@ async def test_disabled_exit_block_equivalent_to_deletion():
         id="E", name="Entry", input_id="X", weight=100.0, conditions=(_gt(0.0),)
     )
     enabled_exit = Block(
-        id="X1", weight=0.0, conditions=(_gt(12.5),),
-        target_entry_block_name="Entry",
+        id="X1",
+        weight=0.0,
+        conditions=(_gt(12.5),),
+        target_entry_block_names=("Entry",),
     )
     disabled_exit = Block(
-        id="X2", weight=0.0, conditions=(_gt(10.5),),
-        target_entry_block_name="Entry", enabled=False,
+        id="X2",
+        weight=0.0,
+        conditions=(_gt(10.5),),
+        target_entry_block_names=("Entry",),
+        enabled=False,
     )
 
     with_disabled = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(enabled_exit, disabled_exit)),
     )
     without = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(enabled_exit,)),
     )
 
@@ -833,7 +896,8 @@ async def test_trades_two_round_trips_back_to_back():
         id="E", name="Entry", input_id="X", weight=100.0, conditions=(_gt(0.0),)
     )
     exit_b = Block(
-        id="X1", weight=0.0,
+        id="X1",
+        weight=0.0,
         conditions=(
             CompareCondition(
                 op="eq",
@@ -841,10 +905,11 @@ async def test_trades_two_round_trips_back_to_back():
                 rhs=ConstantOperand(value=11.0),
             ),
         ),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     exit_c = Block(
-        id="X2", weight=0.0,
+        id="X2",
+        weight=0.0,
         conditions=(
             CompareCondition(
                 op="eq",
@@ -852,10 +917,12 @@ async def test_trades_two_round_trips_back_to_back():
                 rhs=ConstantOperand(value=13.0),
             ),
         ),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(exit_b, exit_c)),
     )
 
@@ -883,11 +950,16 @@ async def test_trades_open_at_end():
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
 
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=-25.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=-25.0,
         conditions=(_gt(11.5),),
     )
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,)),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -907,12 +979,17 @@ async def test_trades_disabled_block_yields_no_trades():
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
 
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt(0.0),),
         enabled=False,
     )
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,)),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -928,16 +1005,22 @@ async def test_trades_same_bar_entry_then_exit_then_reentry():
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
 
     entry = Block(
-        id="E", name="Entry", input_id="X", weight=100.0,
+        id="E",
+        name="Entry",
+        input_id="X",
+        weight=100.0,
         conditions=(_gt(0.0),),  # fires every bar
     )
     exit_b = Block(
-        id="X1", weight=0.0,
+        id="X1",
+        weight=0.0,
         conditions=(_gt(0.0),),  # fires every bar
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(entry,), exits=(exit_b,)),
     )
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
@@ -977,11 +1060,17 @@ async def test_disabled_block_does_not_trigger_operand_fetch():
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
 
     enabled_block = Block(
-        id="A", name="A", input_id="X", weight=50.0,
+        id="A",
+        name="A",
+        input_id="X",
+        weight=50.0,
         conditions=(_gt(0.0),),  # references INPUT_X (SPX) only
     )
     disabled_broken_block = Block(
-        id="B", name="B", input_id="B", weight=50.0,
+        id="B",
+        name="B",
+        input_id="B",
+        weight=50.0,
         conditions=(
             CompareCondition(
                 op="gt",
@@ -993,7 +1082,9 @@ async def test_disabled_block_does_not_trigger_operand_fetch():
     )
 
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X, INPUT_BROKEN),
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_BROKEN),
         rules=SignalRules(entries=(enabled_block, disabled_broken_block)),
     )
 
@@ -1001,7 +1092,9 @@ async def test_disabled_block_does_not_trigger_operand_fetch():
     result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
     # Only block A's behavior is reflected.
     enabled_only = Signal(
-        id="s", name="s", inputs=(INPUT_X,),
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
         rules=SignalRules(entries=(enabled_block,)),
     )
     expected = await evaluate_signal(enabled_only, indicators={}, fetcher=fetcher)
@@ -1021,12 +1114,18 @@ async def test_disabled_block_negative_control_broken_when_enabled():
     fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
 
     disabled_ok_block = Block(
-        id="A", name="A", input_id="X", weight=50.0,
+        id="A",
+        name="A",
+        input_id="X",
+        weight=50.0,
         conditions=(_gt(0.0),),
         enabled=False,  # flipped vs above
     )
     enabled_broken_block = Block(
-        id="B", name="B", input_id="B", weight=50.0,
+        id="B",
+        name="B",
+        input_id="B",
+        weight=50.0,
         conditions=(
             CompareCondition(
                 op="gt",
@@ -1038,9 +1137,177 @@ async def test_disabled_block_negative_control_broken_when_enabled():
     )
 
     signal = Signal(
-        id="s", name="s", inputs=(INPUT_X, INPUT_BROKEN),
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_BROKEN),
         rules=SignalRules(entries=(disabled_ok_block, enabled_broken_block)),
     )
 
     with pytest.raises(SignalDataError):
         await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+
+
+# ---------------------------------------------------------------------------
+# F1 — multi-target exits (one exit closes MULTIPLE entries)
+# ---------------------------------------------------------------------------
+
+
+def _eq_x(value: float) -> CompareCondition:
+    return CompareCondition(
+        op="eq",
+        lhs=InstrumentOperand(input_id="X"),
+        rhs=ConstantOperand(value=value),
+    )
+
+
+def _eq_y(value: float) -> CompareCondition:
+    return CompareCondition(
+        op="eq",
+        lhs=InstrumentOperand(input_id="Y"),
+        rhs=ConstantOperand(value=value),
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_target_exit_closes_two_entries_same_input():
+    """One exit targeting TWO entries on the SAME input clears both
+    latches at the firing bar, and the engine emits two Trades that
+    share the exit's block id.
+
+    SPX closes ``[10, 11, 12, 13, 14]``:
+      * E1 (w=+50) fires only at t=0  → latched 0.5 from t=0;
+      * E2 (w=+30) fires only at t=1  → latched +0.3 → 0.8 from t=1;
+      * exit (X==13) fires only at t=3, targets BOTH E1 and E2 → both
+        latches clear at t=3 → position drops 0.8 → 0.0.
+    Neither entry re-fires after t=3 (conditions false), so the clear
+    is persistent.
+    """
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="E1",
+                    name="E1",
+                    input_id="X",
+                    weight=50.0,
+                    conditions=(_eq_x(10.0),),
+                ),
+                Block(
+                    id="E2",
+                    name="E2",
+                    input_id="X",
+                    weight=30.0,
+                    conditions=(_eq_x(11.0),),
+                ),
+            ),
+            exits=(
+                Block(
+                    id="XBOTH",
+                    weight=0.0,
+                    conditions=(_eq_x(13.0),),
+                    target_entry_block_names=("E1", "E2"),
+                ),
+            ),
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    vals = list(result.positions[0].values)
+    # t0: E1 → 0.5; t1: E2 → 0.8; t2: 0.8; t3: both cleared → 0.0; t4: 0.0
+    assert vals == pytest.approx([0.5, 0.8, 0.8, 0.0, 0.0])
+
+    # Exactly two closed trades, both stamped with the shared exit id and
+    # the same close bar (the single firing closes both entries at t=3).
+    assert len(result.trades) == 2
+    by_entry = {tr.entry_block_id: tr for tr in result.trades}
+    assert set(by_entry) == {"E1", "E2"}
+    assert by_entry["E1"].open_bar == 0
+    assert by_entry["E2"].open_bar == 1
+    for tr in result.trades:
+        assert tr.close_bar == 3
+        assert tr.exit_block_id == "XBOTH"
+        assert tr.direction == "long"
+
+    # The exit's "effective" bar (cleared ≥1 latch) is recorded once.
+    ev = {(e.block_id, e.kind): e for e in result.events}
+    x = ev[("XBOTH", "exit")]
+    assert x.fired_indices == (3,)
+    assert x.latched_indices == (3,)
+    assert set(x.target_entry_block_names) == {"E1", "E2"}
+
+
+@pytest.mark.asyncio
+async def test_multi_target_exit_closes_two_entries_cross_input():
+    """One exit targeting two entries on DIFFERENT inputs steps BOTH
+    inputs' positions down at the firing bar (cross-input is allowed).
+
+    SPX closes ``[10, 11, 12, 13, 14]``, NDX closes ``[20, 19, 18, 17, 16]``:
+      * EntryX (input X, w=+50) fires only at t=0 → X-position 0.5;
+      * EntryY (input Y, w=-40) fires only at t=1 → Y-position -0.4;
+      * exit condition on X (X==13) fires only at t=3 and targets BOTH
+        EntryX and EntryY → both inputs clear at t=3.
+    """
+    spx = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    ndx = np.array([20.0, 19.0, 18.0, 17.0, 16.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (DATES, spx), ("INDEX", "NDX"): (DATES, ndx)}
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="EX",
+                    name="EntryX",
+                    input_id="X",
+                    weight=50.0,
+                    conditions=(_eq_x(10.0),),
+                ),
+                Block(
+                    id="EY",
+                    name="EntryY",
+                    input_id="Y",
+                    weight=-40.0,
+                    conditions=(_eq_y(19.0),),
+                ),
+            ),
+            exits=(
+                Block(
+                    id="XALL",
+                    weight=0.0,
+                    conditions=(_eq_x(13.0),),  # exit's condition reads input X
+                    target_entry_block_names=("EntryX", "EntryY"),
+                ),
+            ),
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    pos = {p.input_id: list(p.values) for p in result.positions}
+    # X: 0.5 from t=0, cleared at t=3.
+    assert pos["X"] == pytest.approx([0.5, 0.5, 0.5, 0.0, 0.0])
+    # Y: -0.4 from t=1, cleared at t=3 (closed by the X-driven exit).
+    assert pos["Y"] == pytest.approx([0.0, -0.4, -0.4, 0.0, 0.0])
+
+    # Two closed trades on two inputs, both via the shared exit id.
+    assert len(result.trades) == 2
+    by_entry = {tr.entry_block_id: tr for tr in result.trades}
+    assert by_entry["EX"].input_id == "X"
+    assert by_entry["EX"].direction == "long"
+    assert by_entry["EY"].input_id == "Y"
+    assert by_entry["EY"].direction == "short"
+    for tr in result.trades:
+        assert tr.close_bar == 3
+        assert tr.exit_block_id == "XALL"
+
+    # The exit event references both targets; its ``input_id`` carries the
+    # first resolvable target's operating input (declaration order → X).
+    ev = {(e.block_id, e.kind): e for e in result.events}
+    x = ev[("XALL", "exit")]
+    assert x.input_id == "X"
+    assert set(x.target_entry_block_names) == {"EntryX", "EntryY"}

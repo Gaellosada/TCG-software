@@ -1,11 +1,11 @@
-// Local persistence for the Signals page state — schema v5.
+// Local persistence for the Signals page state — schema v6.
 //
 // All direct ``localStorage`` access for signals lives in this module —
 // other modules MUST go through load/save here.
 //
-// Schema v5:
+// Schema v6:
 //   {
-//     "version": 5,
+//     "version": 6,
 //     "signals": [
 //       {
 //         "id", "name", "doc",
@@ -29,11 +29,13 @@
 // Exit Block = {
 //   id: <uuid>,                      // stable, generated on creation
 //   name: <string>,                  // editable display name
-//   target_entry_block_name: <string>, // matches an entry's editable `name`
+//   target_entry_block_names: <string[]>, // each matches an entry's editable
+//                                          // `name`; one exit may close many
+//                                          // entries (v6). Cross-input allowed.
 //   conditions: Condition[],
 // }
 // Exit blocks do NOT carry block-level input_id or weight; the
-// operating input is derived from the target entry's input_id. The
+// operating input is derived from each target entry's input_id. The
 // sanitiser strips any such legacy fields on load.
 //
 // InputInstrument is a discriminated union:
@@ -49,12 +51,22 @@
 //   - instrument:  { kind:'instrument', input_id, field }
 //   - constant:    { kind:'constant', value }
 //
-// Migration policy (v5): ANY payload with version !== 5 is DROPPED on load
-// (single console.warn per page load). Clean break from v4 — no migration.
+// Migration policy:
+//   - v6 (current): the canonical version.
+//   - v5 → v6: in-place migration of exit blocks. The singular
+//     ``target_entry_block_name`` (string) is folded into the plural
+//     ``target_entry_block_names`` (string[]): a non-empty name becomes
+//     ``[name]``; an empty string becomes ``[]``. The singular key is
+//     dropped. No other shape change — v5 and v6 are otherwise identical,
+//     so the migration is loss-free.
+//   - any OTHER version: DROPPED on load (single console.warn per page load).
+//
+// The migration runs on the raw parsed payload BEFORE per-signal
+// sanitisation so the sanitiser only ever sees the plural shape.
 
 import { SIGNALS_STORAGE_KEY } from './storageKeys';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /** Canonical list of rule sections. */
 export const SECTIONS = Object.freeze(['entries', 'exits', 'resets']);
@@ -200,6 +212,40 @@ function sanitiseRequiresResetBlockId(raw) {
 }
 
 /**
+ * Field-local sanitiser for an exit block's target-entry names (v6).
+ *
+ * Reads ``raw.target_entry_block_names`` (the canonical plural array) and,
+ * for forward-compat, folds in a stray legacy singular
+ * ``target_entry_block_name`` if the plural key is absent. Returns a
+ * de-duplicated array of non-empty string names (order preserved, first
+ * occurrence wins). Empty / malformed input → ``[]``.
+ *
+ * Cross-section validity (does each name resolve to exactly one entry?) is
+ * NOT this function's job — that lives in blockShape/runGate. The sanitiser
+ * only guarantees the field is a clean string[] with no blanks or dupes.
+ */
+function sanitiseTargetEntryNames(raw) {
+  let source;
+  if (Array.isArray(raw.target_entry_block_names)) {
+    source = raw.target_entry_block_names;
+  } else if (typeof raw.target_entry_block_name === 'string') {
+    // Legacy singular survivor — fold to an array. Empty string → [].
+    source = raw.target_entry_block_name ? [raw.target_entry_block_name] : [];
+  } else {
+    source = [];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const n of source) {
+    if (typeof n === 'string' && n && !seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+/**
  * Coerce a raw per-block reset-count to a canonical integer ≥ 1.
  *   - Coerce to a number (numbers pass through; everything else via Number).
  *   - If the result is finite and ≥ 1, floor it; otherwise → 1.
@@ -251,7 +297,7 @@ function sanitiseBlock(raw, section) {
   }
   if (section === 'exits') {
     // Exit blocks carry no block-level input_id or weight — the
-    // operating input is derived from the target entry. Legacy
+    // operating input is derived from each target entry. Legacy
     // payloads may include these fields; strip them.
     // Legacy target_entry_block_id is also stripped — exits now
     // reference entries by their editable name string.
@@ -262,9 +308,11 @@ function sanitiseBlock(raw, section) {
       conditions,
       enabled,
       description,
-      target_entry_block_name: typeof raw.target_entry_block_name === 'string'
-        ? raw.target_entry_block_name
-        : '',
+      // v6: plural array of target names. ``sanitiseTargetEntryNames``
+      // also folds a stray legacy singular ``target_entry_block_name`` in
+      // (belt-and-braces alongside the top-level v5→v6 migration) so a
+      // mangled payload can't smuggle the singular key past us.
+      target_entry_block_names: sanitiseTargetEntryNames(raw),
       requires_reset_block_id: exitReset,
       // Orphan-kill: a count only means something when a reset is bound.
       // No binding → force the single-fire default so a stale count can't
@@ -315,6 +363,47 @@ function sanitiseSignal(raw) {
   return { id: raw.id, name, inputs, rules, settings, doc };
 }
 
+/**
+ * Migrate a parsed v5 payload to v6 in place (returns a new object graph).
+ *
+ * The ONLY shape change between v5 and v6 is on exit blocks: the singular
+ * ``target_entry_block_name`` (string) becomes the plural
+ * ``target_entry_block_names`` (string[]). A non-empty name → ``[name]``;
+ * an empty / missing name → ``[]``. The singular key is dropped. If a v5
+ * exit somehow already carries the plural array it is honoured as-is and
+ * the singular key (if any) is dropped.
+ *
+ * Pure — does not mutate the input. Bumps ``version`` to 6.
+ *
+ * @param {object} parsed  parsed localStorage payload with ``version === 5``
+ * @returns {object}       a v6-shaped payload
+ */
+export function migrateV5ToV6(parsed) {
+  const rawSignals = Array.isArray(parsed.signals) ? parsed.signals : [];
+  const signals = rawSignals.map((sig) => {
+    if (!sig || typeof sig !== 'object') return sig;
+    const rules = (sig.rules && typeof sig.rules === 'object') ? sig.rules : {};
+    const exits = Array.isArray(rules.exits) ? rules.exits : [];
+    const nextExits = exits.map((ex) => {
+      if (!ex || typeof ex !== 'object') return ex;
+      // Drop the singular key regardless; derive the plural array from
+      // whichever source is present (plural wins if both exist).
+      const { target_entry_block_name: legacy, ...rest } = ex;
+      let names;
+      if (Array.isArray(ex.target_entry_block_names)) {
+        names = ex.target_entry_block_names;
+      } else if (typeof legacy === 'string' && legacy) {
+        names = [legacy];
+      } else {
+        names = [];
+      }
+      return { ...rest, target_entry_block_names: names };
+    });
+    return { ...sig, rules: { ...rules, exits: nextExits } };
+  });
+  return { ...parsed, version: SCHEMA_VERSION, signals };
+}
+
 export function loadState() {
   const empty = { signals: [] };
   const ls = getStorage();
@@ -333,6 +422,12 @@ export function loadState() {
     return empty;
   }
   if (!parsed || typeof parsed !== 'object') return empty;
+  // v5 → v6: loss-free in-place migration of exit blocks (singular target
+  // name → plural array). Anything else that isn't the current version is
+  // dropped. Run BEFORE sanitisation so the sanitiser sees plural shape.
+  if (parsed.version === 5) {
+    parsed = migrateV5ToV6(parsed);
+  }
   if (parsed.version !== SCHEMA_VERSION) {
     if (!incompatibleVersionWarned) {
       incompatibleVersionWarned = true;
@@ -369,9 +464,12 @@ export function saveState(state) {
 }
 
 /**
- * Return a new signal with the entry block ``entryId`` removed, and every
- * exit referencing that entry's name also removed (cascade delete per PLAN.md).
- * Pure — does not mutate the input.
+ * Return a new signal with the entry block ``entryId`` removed, and the
+ * deleted entry's name STRIPPED from every exit's
+ * ``target_entry_block_names`` array (v6 cascade delete). An exit is
+ * removed entirely only if stripping the name leaves its target array
+ * EMPTY — exits that still target other surviving entries are kept (with
+ * the deleted name pruned). Pure — does not mutate the input.
  *
  * If ``entryId`` does not match any existing entry, the signal is
  * returned unchanged (structurally equal — still a new shallow clone for
@@ -385,9 +483,25 @@ export function cascadeDeleteEntry(signal, entryId) {
   const deleted = entries.find((b) => b && b.id === entryId);
   const nextEntries = entries.filter((b) => b && b.id !== entryId);
   const deletedName = deleted && typeof deleted.name === 'string' ? deleted.name : '';
-  const nextExits = deletedName
-    ? exits.filter((b) => b && b.target_entry_block_name !== deletedName)
-    : exits;
+  let nextExits = exits;
+  if (deletedName) {
+    nextExits = [];
+    for (const b of exits) {
+      if (!b) continue;
+      const names = Array.isArray(b.target_entry_block_names)
+        ? b.target_entry_block_names
+        : [];
+      const pruned = names.filter((n) => n !== deletedName);
+      // Only drop the exit when removing this target empties its list.
+      // An exit that still targets another entry survives, name pruned.
+      if (pruned.length === 0) continue;
+      nextExits.push(
+        pruned.length === names.length
+          ? b // nothing changed for this exit — keep the same reference
+          : { ...b, target_entry_block_names: pruned },
+      );
+    }
+  }
   // Spread the existing rules so sections like ``resets`` (and any future
   // section listed in ``SECTIONS``) survive the cascade — otherwise the
   // next autosave would silently drop them via sanitiseSignal.

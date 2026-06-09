@@ -60,9 +60,10 @@ describe('defaultBlock (v5)', () => {
     expect('target_entry_block_id' in b).toBe(false);
   });
 
-  it('exit block adds target_entry_block_name: "" and omits block-level input_id/weight', () => {
+  it('exit block adds target_entry_block_names: [] and omits block-level input_id/weight', () => {
     const b = defaultBlock('exits');
-    expect(b.target_entry_block_name).toBe('');
+    expect(b.target_entry_block_names).toEqual([]);
+    expect('target_entry_block_name' in b).toBe(false);
     expect(b.enabled).toBe(true);
     expect(b.description).toBe('');
     expect('target_entry_block_id' in b).toBe(false);
@@ -72,6 +73,7 @@ describe('defaultBlock (v5)', () => {
 
   it('defaults to entries when no section given', () => {
     const b = defaultBlock();
+    expect('target_entry_block_names' in b).toBe(false);
     expect('target_entry_block_name' in b).toBe(false);
     expect('target_entry_block_id' in b).toBe(false);
     expect(b.enabled).toBe(true);
@@ -106,6 +108,7 @@ describe('defaultBlock (v5)', () => {
     expect('input_id' in b).toBe(false);
     expect('weight' in b).toBe(false);
     expect('target_entry_block_name' in b).toBe(false);
+    expect('target_entry_block_names' in b).toBe(false);
   });
 
   // requires_reset_count — per-binding reset countdown. Lives on the
@@ -702,27 +705,31 @@ describe('isBlockRunnable (v5 — entries)', () => {
   });
 });
 
-describe('isBlockRunnable (v5 — exits)', () => {
+describe('isBlockRunnable (v6 — exits, plural targets)', () => {
   const runnableCondition = { op: 'gt', lhs: CONST_OK, rhs: CONST_OK };
   const exitBlock = (over = {}) => ({
     id: 'x1',
     conditions: [runnableCondition],
-    target_entry_block_name: 'Alpha',
+    target_entry_block_names: ['Alpha'],
     ...over,
   });
   // Entry blocks array with names for name-based resolution
   const entryBlocks = [{ id: 'entry-1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] }];
 
-  it('happy path: exit with valid target name → true (weight ignored)', () => {
+  it('happy path: exit with one valid target name → true (weight ignored)', () => {
     expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, entryBlocks)).toBe(true);
   });
 
-  it('missing target_entry_block_name → false', () => {
-    expect(isBlockRunnable(exitBlock({ target_entry_block_name: '' }), 'exits', INPUTS, entryBlocks)).toBe(false);
+  it('empty target array → false', () => {
+    expect(isBlockRunnable(exitBlock({ target_entry_block_names: [] }), 'exits', INPUTS, entryBlocks)).toBe(false);
   });
 
-  it('target does not match any entry name → false', () => {
-    expect(isBlockRunnable(exitBlock({ target_entry_block_name: 'orphan' }), 'exits', INPUTS, entryBlocks)).toBe(false);
+  it('missing target array (undefined) → false', () => {
+    expect(isBlockRunnable(exitBlock({ target_entry_block_names: undefined }), 'exits', INPUTS, entryBlocks)).toBe(false);
+  });
+
+  it('a target that does not match any entry name → false', () => {
+    expect(isBlockRunnable(exitBlock({ target_entry_block_names: ['orphan'] }), 'exits', INPUTS, entryBlocks)).toBe(false);
   });
 
   it('exit + weight=0 → true (exit blocks don\'t participate in position sizing)', () => {
@@ -734,7 +741,7 @@ describe('isBlockRunnable (v5 — exits)', () => {
   });
 
   // When callers pass an array of entry Block objects (rich check), the
-  // exit's runnability additionally requires the target entry's input_id
+  // exit's runnability additionally requires every target entry's input_id
   // to resolve to a configured input — exits inherit that input.
   it('rich check: target entry has no input_id → false', () => {
     const blocks = [{ id: 'entry-1', name: 'Alpha', input_id: '', weight: 10, conditions: [] }];
@@ -751,11 +758,51 @@ describe('isBlockRunnable (v5 — exits)', () => {
     expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, blocks)).toBe(true);
   });
 
-  it('ambiguous: two entries share the same name → false', () => {
+  it('ambiguous: two entries share a targeted name → false', () => {
     const blocks = [
       { id: 'entry-1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] },
       { id: 'entry-2', name: 'Alpha', input_id: 'X', weight: 20, conditions: [] },
     ];
     expect(isBlockRunnable(exitBlock(), 'exits', INPUTS, blocks)).toBe(false);
+  });
+
+  // --- Multi-target (v6) ---
+  it('two valid targets, both configured (cross-input allowed) → true', () => {
+    const blocks = [
+      { id: 'e1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] },
+      { id: 'e2', name: 'Beta', input_id: 'Y', weight: -5, conditions: [] },
+    ];
+    const ins = [...INPUTS, { id: 'Y', instrument: INPUTS[0].instrument }];
+    expect(isBlockRunnable(
+      exitBlock({ target_entry_block_names: ['Alpha', 'Beta'] }),
+      'exits', ins, blocks,
+    )).toBe(true);
+  });
+
+  it('one valid + one dangling target → false (every target must resolve)', () => {
+    const blocks = [{ id: 'e1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(
+      exitBlock({ target_entry_block_names: ['Alpha', 'ghost'] }),
+      'exits', INPUTS, blocks,
+    )).toBe(false);
+  });
+
+  it('one valid + one targeting an entry with no input → false', () => {
+    const blocks = [
+      { id: 'e1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] },
+      { id: 'e2', name: 'Beta', input_id: '', weight: 5, conditions: [] },
+    ];
+    expect(isBlockRunnable(
+      exitBlock({ target_entry_block_names: ['Alpha', 'Beta'] }),
+      'exits', INPUTS, blocks,
+    )).toBe(false);
+  });
+
+  it('a blank string inside the target array → false', () => {
+    const blocks = [{ id: 'e1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] }];
+    expect(isBlockRunnable(
+      exitBlock({ target_entry_block_names: ['Alpha', ''] }),
+      'exits', INPUTS, blocks,
+    )).toBe(false);
   });
 });

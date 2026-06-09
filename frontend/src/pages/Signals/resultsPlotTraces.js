@@ -13,11 +13,11 @@
  *   - ``realized_pnl: number[][]`` — one array per input (order matches
  *     ``positions``).
  *   - ``events: [{input_id, block_id, kind, fired_indices,
- *     latched_indices, active_indices, target_entry_block_name}]`` —
+ *     latched_indices, active_indices, target_entry_block_names}]`` —
  *     ``kind`` is ``"entry"`` or ``"exit"``. Color/direction comes from
  *     the sign of the originating block's signed weight (for entries) or
- *     the targeted entry's weight (for exits). That mapping lives in the
- *     caller — we receive it via ``blockWeightSigns``.
+ *     the first targeted entry's weight (for exits). That mapping lives in
+ *     the caller — we receive it via ``blockWeightSigns``.
  *   - ``indicators: [{input_id, indicator_id, series}]`` — indicator
  *     traces to overlay on the bottom plot.
  *
@@ -141,15 +141,23 @@ export function buildBlockWeightSignMap(rules) {
   }
   for (const x of exits) {
     if (!x || !x.id) continue;
-    const tgt = x.target_entry_block_name;
-    // Resolve by name: find the entry whose name matches.
+    // v6: an exit may target several entries. For marker colouring we use
+    // the sign of the FIRST target that resolves (deterministic by array
+    // order). Mixed-sign targets still colour by the first; the per-event
+    // label still names the exit block, so this is purely cosmetic.
+    const targets = Array.isArray(x.target_entry_block_names)
+      ? x.target_entry_block_names
+      : [];
     let s = 0;
-    if (tgt) {
-      for (const e of entries) {
-        if (e && e.name === tgt && Object.prototype.hasOwnProperty.call(entrySignById, e.id)) {
-          s = entrySignById[e.id];
-          break;
-        }
+    for (const tgt of targets) {
+      if (!tgt) continue;
+      const hit = entries.find(
+        (e) => e && e.name === tgt
+          && Object.prototype.hasOwnProperty.call(entrySignById, e.id),
+      );
+      if (hit) {
+        s = entrySignById[hit.id];
+        break;
       }
     }
     map[x.id] = s;

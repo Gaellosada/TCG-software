@@ -23,6 +23,12 @@ _EXPECTED_PUBLIC_METHODS = frozenset(
         "list_by_type_and_category",
         "update",
         "archive",
+        # ``set_locked`` flips the per-doc write-lock flag and is the
+        # ONLY mutation that bypasses the lock guard (so a locked doc can
+        # be unlocked). It takes ``(doc_type, doc_id, locked)`` — no
+        # collection/db handle — so the escape-hatch guarantees below
+        # still hold. Registered here as an intentional surface addition.
+        "set_locked",
     }
 )
 

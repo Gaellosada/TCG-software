@@ -26,6 +26,7 @@ function defaultProps(overrides = {}) {
     onAdd: vi.fn(),
     onDelete: vi.fn(),
     onRename: vi.fn(),
+    onSetIndicatorLocked: vi.fn(),
     search: '',
     onSearchChange: vi.fn(),
     ...overrides,
@@ -318,6 +319,62 @@ describe('<IndicatorsList>', () => {
       expect(smaRow.getAttribute('data-incompat')).toBe('false');
       // ATM IV is option-only but has defaultSeries → not greyed.
       expect(atmRow.getAttribute('data-incompat')).toBe('false');
+    });
+  });
+
+  // --- Lock toggle ---------------------------------------------------
+  describe('lock toggle', () => {
+    const LOCK_INDS = [
+      { id: 'd1', name: 'SMA', readonly: true },
+      { id: 'u1', name: 'My RSI', readonly: false, locked: false },
+      { id: 'u2', name: 'My MACD', readonly: false, locked: true },
+    ];
+
+    it('shows LockToggle only for user-created (non-readonly) indicators', () => {
+      render(<IndicatorsList {...defaultProps({ indicators: LOCK_INDS })} />);
+      // Both sections start expanded; lock toggles visible.
+      const lockBtns = screen.queryAllByTestId('lock-toggle-btn');
+      // u1 and u2 have lock buttons; d1 (readonly) does not.
+      expect(lockBtns).toHaveLength(2);
+    });
+
+    it('does NOT show LockToggle for readonly (built-in) indicators', () => {
+      render(<IndicatorsList
+        {...defaultProps({
+          indicators: [{ id: 'd1', name: 'SMA', readonly: true }],
+        })}
+      />);
+      expect(screen.queryByTestId('lock-toggle-btn')).toBeNull();
+    });
+
+    it('disables the edit (rename) button when the indicator is locked', () => {
+      render(<IndicatorsList {...defaultProps({ indicators: LOCK_INDS })} />);
+      const renameBtn = screen.getByLabelText('Rename My MACD');
+      expect(renameBtn.disabled).toBe(true);
+    });
+
+    it('disables the delete button when the indicator is locked', () => {
+      render(<IndicatorsList {...defaultProps({ indicators: LOCK_INDS })} />);
+      const deleteBtn = screen.getByLabelText('Delete My MACD');
+      expect(deleteBtn.disabled).toBe(true);
+    });
+
+    it('rename and delete buttons are enabled for an unlocked user indicator', () => {
+      render(<IndicatorsList {...defaultProps({ indicators: LOCK_INDS })} />);
+      expect(screen.getByLabelText('Rename My RSI').disabled).toBe(false);
+      expect(screen.getByLabelText('Delete My RSI').disabled).toBe(false);
+    });
+
+    it('lock toggle on unlocked indicator calls onSetIndicatorLocked(id, true)', () => {
+      const onSetIndicatorLocked = vi.fn();
+      render(<IndicatorsList
+        {...defaultProps({ indicators: LOCK_INDS, onSetIndicatorLocked })}
+      />);
+      // u1 is unlocked — clicking its lock toggle should immediately call with true.
+      const lockBtns = screen.queryAllByTestId('lock-toggle-btn');
+      // First lock button corresponds to u1 (unlocked), second to u2 (locked).
+      fireEvent.click(lockBtns[0]);
+      expect(onSetIndicatorLocked).toHaveBeenCalledWith('u1', true);
     });
   });
 });

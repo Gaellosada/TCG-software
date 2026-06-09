@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import BlockHeader from './BlockHeader';
@@ -10,9 +11,9 @@ function entryBlock(weight = 50) {
   return { id: 'blk-1', input_id: '', weight, conditions: [] };
 }
 
-// Exit block fixture
+// Exit block fixture (v6 — plural target array)
 function exitBlock() {
-  return { id: 'blk-2', conditions: [], target_entry_block_name: '' };
+  return { id: 'blk-2', conditions: [], target_entry_block_names: [] };
 }
 
 const NO_INPUTS = [];
@@ -468,5 +469,148 @@ describe('BlockHeader — requires_reset_count input', () => {
       />,
     );
     expect(screen.queryByTestId('reset-count-input-0')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exit-block multi-target picker (v6) — vertical list of dropdowns with
+// "+ Add block", per-row remove, and cross-row dedupe.
+// ---------------------------------------------------------------------------
+describe('BlockHeader — exit multi-target picker', () => {
+  const ENTRIES = [
+    { id: 'e1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] },
+    { id: 'e2', name: 'Beta', input_id: 'X', weight: -5, conditions: [] },
+    { id: 'e3', name: 'Gamma', input_id: 'X', weight: 7, conditions: [] },
+  ];
+
+  function renderExit(names, entryBlocks = ENTRIES) {
+    const onChange = vi.fn();
+    render(
+      <BlockHeader
+        block={{ id: 'x1', conditions: [], target_entry_block_names: names }}
+        section="exits"
+        inputs={NO_INPUTS}
+        entryBlocks={entryBlocks}
+        onChange={onChange}
+        onDelete={noop}
+        blockIndex={1}
+      />,
+    );
+    return { onChange };
+  }
+
+  it('renders one dropdown row per chosen target', () => {
+    renderExit(['Alpha', 'Beta']);
+    expect(screen.getByTestId('target-entry-select-0-0')).toBeDefined();
+    expect(screen.getByTestId('target-entry-select-0-1')).toBeDefined();
+    expect(screen.queryByTestId('target-entry-select-0-2')).toBeNull();
+  });
+
+  it('an empty target array still renders exactly one (implicit) dropdown', () => {
+    renderExit([]);
+    expect(screen.getByTestId('target-entry-select-0-0')).toBeDefined();
+    expect(screen.queryByTestId('target-entry-select-0-1')).toBeNull();
+  });
+
+  it('cross-row dedupe: row 1 excludes the name chosen in row 0 but keeps its own', () => {
+    renderExit(['Alpha', 'Beta']);
+    const row0 = Array.from(screen.getByTestId('target-entry-select-0-0').querySelectorAll('option')).map((o) => o.value);
+    const row1 = Array.from(screen.getByTestId('target-entry-select-0-1').querySelectorAll('option')).map((o) => o.value);
+    // Row 0 keeps Alpha (its own) + Gamma, excludes Beta (row 1's choice).
+    expect(row0).toContain('Alpha');
+    expect(row0).toContain('Gamma');
+    expect(row0).not.toContain('Beta');
+    // Row 1 keeps Beta (its own) + Gamma, excludes Alpha (row 0's choice).
+    expect(row1).toContain('Beta');
+    expect(row1).toContain('Gamma');
+    expect(row1).not.toContain('Alpha');
+  });
+
+  it('"+ Add block" reveals a new empty dropdown row', () => {
+    renderExit(['Alpha']);
+    expect(screen.queryByTestId('target-entry-select-0-1')).toBeNull();
+    fireEvent.click(screen.getByTestId('add-target-0'));
+    expect(screen.getByTestId('target-entry-select-0-1')).toBeDefined();
+  });
+
+  it('"+ Add block" is disabled when every selectable entry is already chosen', () => {
+    renderExit(['Alpha', 'Beta', 'Gamma']);
+    expect(screen.getByTestId('add-target-0').disabled).toBe(true);
+  });
+
+  it('"+ Add block" is disabled when there are no entries at all', () => {
+    renderExit([], []);
+    expect(screen.getByTestId('add-target-0').disabled).toBe(true);
+  });
+
+  it('picking a value in row 0 commits a one-element array', () => {
+    const { onChange } = renderExit([]);
+    fireEvent.change(screen.getByTestId('target-entry-select-0-0'), { target: { value: 'Beta' } });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ target_entry_block_names: ['Beta'] }),
+    );
+  });
+
+  it('removing row 0 of a two-target exit strips that name', () => {
+    const { onChange } = renderExit(['Alpha', 'Beta']);
+    fireEvent.click(screen.getByTestId('remove-target-0-0'));
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ target_entry_block_names: ['Beta'] }),
+    );
+  });
+
+  it('shows a dangling-target warning when a chosen name no longer resolves', () => {
+    renderExit(['ghost']);
+    // The warning marker carries a title naming the missing target.
+    expect(screen.getByTitle('Target "ghost" no longer exists')).toBeDefined();
+  });
+
+  it('disabled entries: unnamed and duplicate-named options are present but disabled', () => {
+    const entries = [
+      { id: 'e1', name: 'Alpha', input_id: 'X', weight: 10, conditions: [] },
+      { id: 'e2', name: '', input_id: 'X', weight: 5, conditions: [] },       // unnamed
+      { id: 'e3', name: 'Dup', input_id: 'X', weight: 5, conditions: [] },
+      { id: 'e4', name: 'Dup', input_id: 'X', weight: 5, conditions: [] },     // duplicate
+    ];
+    renderExit([], entries);
+    const opts = Array.from(screen.getByTestId('target-entry-select-0-0').querySelectorAll('option'));
+    const byText = (frag) => opts.find((o) => o.textContent.includes(frag));
+    expect(byText('(unnamed)').disabled).toBe(true);
+    expect(byText('(duplicate)').disabled).toBe(true);
+    expect(byText('Alpha').disabled).toBe(false);
+  });
+
+  // Stable-key regression: removing a MIDDLE row must not bleed values
+  // between the surviving rows. The picker is controlled, so we drive it
+  // through a wrapper that owns the names array and applies the committed
+  // value from onChange (mirroring how BlockEditor wires it).
+  it('removing a middle target row keeps the surviving rows\' values (stable keys)', () => {
+    function ControlledExit({ initial }) {
+      const [names, setNames] = useState(initial);
+      return (
+        <BlockHeader
+          block={{ id: 'x1', conditions: [], target_entry_block_names: names }}
+          section="exits"
+          inputs={NO_INPUTS}
+          entryBlocks={ENTRIES}
+          onChange={(next) => setNames(next.target_entry_block_names)}
+          onDelete={noop}
+          blockIndex={1}
+        />
+      );
+    }
+    render(<ControlledExit initial={['Alpha', 'Beta', 'Gamma']} />);
+    // Three rows, in order.
+    expect(screen.getByTestId('target-entry-select-0-0').value).toBe('Alpha');
+    expect(screen.getByTestId('target-entry-select-0-1').value).toBe('Beta');
+    expect(screen.getByTestId('target-entry-select-0-2').value).toBe('Gamma');
+
+    // Remove the MIDDLE row (Beta).
+    fireEvent.click(screen.getByTestId('remove-target-0-1'));
+
+    // Two rows remain, holding Alpha and Gamma — no bleed from the removal.
+    expect(screen.getByTestId('target-entry-select-0-0').value).toBe('Alpha');
+    expect(screen.getByTestId('target-entry-select-0-1').value).toBe('Gamma');
+    expect(screen.queryByTestId('target-entry-select-0-2')).toBeNull();
   });
 });

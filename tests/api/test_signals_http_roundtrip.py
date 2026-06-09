@@ -2,8 +2,8 @@
 
 Submits a full v4 signal through the ASGI stack and asserts the
 response-shape contract: top-level keys, per-position shape, per-event
-schema (id/kind/fired/latched/active/target_entry_block_name), and
-latching semantics (per-target-entry clearing).
+schema (id/kind/fired/latched/active/target_entry_block_names), and
+latching semantics (per-target-entry clearing, incl. multi-target exits).
 """
 
 from __future__ import annotations
@@ -26,8 +26,14 @@ DATES = np.array(
 )
 LATCH_DATES = np.array(
     [
-        20240102, 20240103, 20240104, 20240105,
-        20240108, 20240109, 20240110, 20240111,
+        20240102,
+        20240103,
+        20240104,
+        20240105,
+        20240108,
+        20240109,
+        20240110,
+        20240111,
     ],
     dtype=np.int64,
 )
@@ -220,7 +226,7 @@ async def test_http_roundtrip_v4_two_inputs_indicator_operand(
     # Events carry the new v4 schema.
     ev_by_id = {ev["block_id"]: ev for ev in data["events"]}
     assert ev_by_id["EX"]["kind"] == "entry"
-    assert ev_by_id["EX"]["target_entry_block_name"] is None
+    assert ev_by_id["EX"]["target_entry_block_names"] == []
     assert "active_indices" in ev_by_id["EX"]
 
 
@@ -229,9 +235,7 @@ async def test_http_roundtrip_v4_two_inputs_indicator_operand(
 # ---------------------------------------------------------------------------
 
 
-LATCH_CLOSES = np.array(
-    [100.0, 11.0, 100.0, 33.0, 44.0, 11.0, 66.0, 22.0]
-)
+LATCH_CLOSES = np.array([100.0, 11.0, 100.0, 33.0, 44.0, 11.0, 66.0, 22.0])
 
 
 def _latch_price_series(closes: np.ndarray) -> PriceSeries:
@@ -287,7 +291,10 @@ def _eq_block(
     contract — the operating input is derived from the target entry.
 
     ``name`` is set on entry blocks (the user-editable display name).
-    ``target`` is the ``target_entry_block_name`` for exit blocks.
+    ``target`` is sent on the LEGACY singular ``target_entry_block_name``
+    key for exit blocks — exercising the backward-compat normalisation
+    path end-to-end (the plural key is exercised by the dedicated
+    multi-target round-trip test).
     """
     blk: dict = {
         "id": bid,
@@ -340,9 +347,15 @@ async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
             ],
             "rules": {
                 "entries": [
-                    _eq_block("A", "X", 60.0, 11.0, name="EntryA"),   # long, close=11 → t=1,5
-                    _eq_block("B", "X", -40.0, 44.0, name="EntryB"),  # short, close=44 → t=4
-                    _eq_block("C", "X", 50.0, 22.0, name="EntryC"),   # long, close=22 → t=7
+                    _eq_block(
+                        "A", "X", 60.0, 11.0, name="EntryA"
+                    ),  # long, close=11 → t=1,5
+                    _eq_block(
+                        "B", "X", -40.0, 44.0, name="EntryB"
+                    ),  # short, close=44 → t=4
+                    _eq_block(
+                        "C", "X", 50.0, 22.0, name="EntryC"
+                    ),  # long, close=22 → t=7
                 ],
                 "exits": [
                     # Targets entry named "EntryA"; fires at close=33 → t=3.
@@ -377,7 +390,7 @@ async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
     assert ev_by["A"]["latched_indices"] == [1, 5]
     # Active = bars where A's latch held at emission.
     assert ev_by["A"]["active_indices"] == [1, 2, 5, 6, 7]
-    assert ev_by["A"]["target_entry_block_name"] is None
+    assert ev_by["A"]["target_entry_block_names"] == []
 
     assert ev_by["B"]["fired_indices"] == [4]
     assert ev_by["B"]["latched_indices"] == [4]
@@ -391,7 +404,7 @@ async def test_http_roundtrip_latched_semantics_v4(latch_client: AsyncClient):
     assert ev_by["XA"]["fired_indices"] == [3]
     # Effective exit: A was open at t=3 → actually cleared.
     assert ev_by["XA"]["latched_indices"] == [3]
-    assert ev_by["XA"]["target_entry_block_name"] == "EntryA"
+    assert ev_by["XA"]["target_entry_block_names"] == ["EntryA"]
     assert ev_by["XA"]["active_indices"] == []
 
     # realized_pnl exposed as list of lists.
@@ -495,8 +508,9 @@ async def test_http_roundtrip_disabled_block_equivalent_to_deletion(
     r_without = await latch_client.post("/api/signals/compute", json=_body(False))
     assert r_with.status_code == 200, r_with.text
     assert r_without.status_code == 200, r_without.text
-    assert r_with.json()["positions"][0]["values"] == (
-        r_without.json()["positions"][0]["values"]
+    assert (
+        r_with.json()["positions"][0]["values"]
+        == (r_without.json()["positions"][0]["values"])
     )
     assert r_with.json()["trades"] == r_without.json()["trades"]
 
@@ -550,3 +564,77 @@ async def test_http_roundtrip_trades_payload_shape(latch_client: AsyncClient):
     assert t1["close_bar"] is None
     assert t1["direction"] == "long"
     assert t1["signed_weight"] == pytest.approx(0.6)
+
+
+async def test_http_roundtrip_multi_target_exit_plural_key(
+    latch_client: AsyncClient,
+):
+    """End-to-end round-trip of a multi-target exit using the PLURAL
+    ``target_entry_block_names`` wire key.
+
+    SPX closes ``[100, 11, 100, 33, 44, 11, 66, 22]``. EntryA (w=60,
+    close==11 → latches t1) and EntryB (w=50, close==44 → latches t4); a
+    single exit (close==66 → t6) targets BOTH. Position holds 0.6 from
+    t1, 1.1 from t4, then drops to 0.0 at t6 when both latches clear.
+    """
+    body = {
+        "spec": {
+            "id": "multi-target-demo",
+            "name": "multi-target",
+            "inputs": [
+                {
+                    "id": "X",
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "INDEX",
+                        "instrument_id": "SPX",
+                    },
+                }
+            ],
+            "rules": {
+                "entries": [
+                    _eq_block("A", "X", 60.0, 11.0, name="EntryA"),
+                    _eq_block("B", "X", 50.0, 44.0, name="EntryB"),
+                ],
+                "exits": [
+                    {
+                        "id": "X1",
+                        "target_entry_block_names": ["EntryA", "EntryB"],
+                        "conditions": [
+                            {
+                                "op": "eq",
+                                "lhs": {
+                                    "kind": "instrument",
+                                    "input_id": "X",
+                                    "field": "close",
+                                },
+                                "rhs": {"kind": "constant", "value": 66.0},
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+    resp = await latch_client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    vals = data["positions"][0]["values"]
+    # t0:0 t1:0.6(A) t2:0.6 t3:0.6 t4:1.1(B) t5:1.1 t6:0(both cleared) t7:0
+    assert vals == pytest.approx([0.0, 0.6, 0.6, 0.6, 1.1, 1.1, 0.0, 0.0])
+
+    # Exit event emits the plural key with both resolved targets.
+    ev_by = {ev["block_id"]: ev for ev in data["events"]}
+    assert set(ev_by["X1"]["target_entry_block_names"]) == {"EntryA", "EntryB"}
+    assert ev_by["X1"]["latched_indices"] == [6]  # effective once, closing both
+
+    # Two closed trades, both stamped with the shared exit id at t=6.
+    trades = data["trades"]
+    closed = [t for t in trades if t["close_bar"] is not None]
+    assert len(closed) == 2
+    for tr in closed:
+        assert tr["close_bar"] == 6
+        assert tr["exit_block_id"] == "X1"
+    assert {tr["entry_block_id"] for tr in closed} == {"A", "B"}

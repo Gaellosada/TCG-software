@@ -103,6 +103,18 @@ class ConcurrentUpdateError(Exception):
     """
 
 
+class LockedError(Exception):
+    """Raised by :meth:`WriteRepository.update` / :meth:`WriteRepository.archive`
+    when the *stored* document has ``locked == True``.
+
+    The guard reads the persisted ``locked`` flag (NOT the incoming
+    payload — a client cannot escape the lock by sending
+    ``locked: false`` in an update), and refuses to mutate. Only
+    :meth:`WriteRepository.set_locked` bypasses this guard. The API
+    layer maps this to HTTP 423 (Locked).
+    """
+
+
 def _utcnow() -> datetime:
     """Single source of truth for server-set timestamps.
 
@@ -287,7 +299,16 @@ class WriteRepository:
 
         Also raises :class:`DocumentTooLargeError` when the replacement
         BSON would exceed MongoDB's 16 MB cap.
+
+        Lock guard: BEFORE mutating, the *stored* document's ``locked``
+        flag is read. If it is ``True``, :class:`LockedError` is raised
+        and nothing is written — the incoming ``doc.locked`` is NOT
+        trusted, so a client cannot escape the lock by sending
+        ``locked: false`` in the update body. Category changes flow
+        through this method, so they are covered automatically. Use
+        :meth:`set_locked` to flip the flag.
         """
+        await self._raise_if_locked(doc.type, doc.id)
         bumped = replace(doc, updated_at=_utcnow())
         payload = to_mongo_dict(bumped)
         filter_: dict = {"_id": doc.id, "type": doc.type}
@@ -328,7 +349,12 @@ class WriteRepository:
         Raises ``KeyError`` if the doc does not exist. Idempotent
         otherwise — archiving an already-archived doc just refreshes
         ``updated_at``.
+
+        Lock guard: a locked doc (stored ``locked == True``) cannot be
+        archived — :class:`LockedError` is raised before any write. Use
+        :meth:`set_locked` to unlock first.
         """
+        await self._raise_if_locked(doc_type, doc_id)
         now = _utcnow()
         if doc_type == DocType.INDICATOR.value:
             update_payload = {"$set": {"deleted": True, "updated_at": now}}
@@ -351,9 +377,72 @@ class WriteRepository:
         if result.matched_count == 0:
             raise KeyError(f"persistence: no {doc_type} with id={doc_id!r} to archive")
 
+    async def _raise_if_locked(
+        self,
+        doc_type: str,
+        doc_id: str,
+    ) -> None:
+        """Raise :class:`LockedError` if the *stored* doc is locked.
+
+        Reads only the persisted ``locked`` flag — never the incoming
+        payload — so a client cannot escape the lock by sending
+        ``locked: false`` in an update body. A missing doc is NOT a lock
+        violation: we return silently and let the caller's own
+        existence check (``replace_one``/``update_one`` matched_count)
+        surface the ``KeyError`` 404. Filters by ``(_id, type)`` so a
+        cross-type id collision can't trip the guard.
+        """
+        stored = await self._coll.find_one(
+            {"_id": doc_id, "type": doc_type}, projection={"locked": 1}
+        )
+        if stored is not None and stored.get("locked", False):
+            raise LockedError(
+                f"persistence: {doc_type} id={doc_id!r} is locked — "
+                f"unlock it before mutating"
+            )
+
+    async def set_locked(
+        self,
+        doc_type: Literal["indicator", "signal", "portfolio"],
+        doc_id: str,
+        locked: bool,
+    ) -> PersistenceDoc:
+        """Set ONLY the ``locked`` flag on the doc and bump ``updated_at``.
+
+        This is the *only* mutation that bypasses the lock guard — it is
+        how a locked doc gets unlocked (and how an unlocked doc gets
+        locked). Baskets are intentionally excluded (the literal narrows
+        callers to the three lockable types); a basket ``doc_type`` is
+        rejected at runtime to keep the contract honest.
+
+        Returns the updated doc (re-read from Mongo so the returned
+        dataclass reflects the persisted state). Raises ``KeyError`` if
+        no matching document exists.
+        """
+        if doc_type not in (
+            DocType.INDICATOR.value,
+            DocType.SIGNAL.value,
+            DocType.PORTFOLIO.value,
+        ):
+            raise ValueError(
+                f"set_locked supports indicator/signal/portfolio only, got {doc_type!r}"
+            )
+        now = _utcnow()
+        result = await self._coll.update_one(
+            {"_id": doc_id, "type": doc_type},
+            {"$set": {"locked": bool(locked), "updated_at": now}},
+        )
+        if result.matched_count == 0:
+            raise KeyError(f"persistence: no {doc_type} with id={doc_id!r} to set lock")
+        raw = await self._coll.find_one({"_id": doc_id, "type": doc_type})
+        if raw is None:  # pragma: no cover - racing delete between set and read
+            raise KeyError(f"persistence: no {doc_type} with id={doc_id!r} to set lock")
+        return from_mongo_dict(raw)
+
 
 __all__ = [
     "WriteRepository",
     "ConcurrentUpdateError",
     "DocumentTooLargeError",
+    "LockedError",
 ]

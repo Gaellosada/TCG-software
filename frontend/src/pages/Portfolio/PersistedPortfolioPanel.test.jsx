@@ -16,8 +16,8 @@ import PersistedPortfolioPanel from './PersistedPortfolioPanel';
 afterEach(cleanup);
 
 const SAMPLE_PORTFOLIOS = [
-  { id: 'p1', name: 'Alpha Portfolio', category: 'RESEARCH', instruments: [], rebalance: {} },
-  { id: 'p2', name: 'Beta Portfolio', category: 'DEV', instruments: [], rebalance: {} },
+  { id: 'p1', name: 'Alpha Portfolio', category: 'RESEARCH', instruments: [], rebalance: {}, locked: false },
+  { id: 'p2', name: 'Beta Portfolio', category: 'DEV', instruments: [], rebalance: {}, locked: false },
 ];
 
 function defaultProps(overrides = {}) {
@@ -30,6 +30,7 @@ function defaultProps(overrides = {}) {
     saveDisabled: false,
     onChangeItemCat: vi.fn(),
     onArchive: vi.fn(),
+    onSetPortfolioLocked: vi.fn(),
     ...overrides,
   };
 }
@@ -113,5 +114,40 @@ describe('<PersistedPortfolioPanel>', () => {
     render(<PersistedPortfolioPanel {...props} />);
     fireEvent.click(screen.getByTestId('archive-portfolio-p1'));
     expect(props.onArchive).toHaveBeenCalledWith('p1');
+  });
+
+  it('disables category select and archive button when row is locked', () => {
+    const lockedPortfolios = [
+      { id: 'p1', name: 'Alpha Portfolio', category: 'RESEARCH', locked: true },
+    ];
+    render(<PersistedPortfolioPanel {...defaultProps({ portfolios: lockedPortfolios })} />);
+    expect(screen.getByTestId('portfolio-cat-select-p1').disabled).toBe(true);
+    expect(screen.getByTestId('archive-portfolio-p1').disabled).toBe(true);
+  });
+
+  it('does not disable category select or archive when row is not locked', () => {
+    const unlockedPortfolios = [
+      { id: 'p1', name: 'Alpha Portfolio', category: 'RESEARCH', locked: false },
+    ];
+    render(<PersistedPortfolioPanel {...defaultProps({ portfolios: unlockedPortfolios })} />);
+    expect(screen.getByTestId('portfolio-cat-select-p1').disabled).toBe(false);
+    expect(screen.getByTestId('archive-portfolio-p1').disabled).toBe(false);
+  });
+
+  it('renders a LockToggle per row', () => {
+    render(<PersistedPortfolioPanel {...defaultProps()} />);
+    // Each row has a lock-toggle-btn (two rows → two buttons).
+    const lockBtns = screen.getAllByTestId('lock-toggle-btn');
+    expect(lockBtns).toHaveLength(2);
+  });
+
+  it('calls onSetPortfolioLocked with (id, true) when unlocked toggle is clicked', () => {
+    const props = defaultProps({
+      portfolios: [{ id: 'p1', name: 'Alpha Portfolio', category: 'RESEARCH', locked: false }],
+    });
+    render(<PersistedPortfolioPanel {...props} />);
+    const lockBtn = screen.getByTestId('lock-toggle-btn');
+    fireEvent.click(lockBtn);
+    expect(props.onSetPortfolioLocked).toHaveBeenCalledWith('p1', true);
   });
 });

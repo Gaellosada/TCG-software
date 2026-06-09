@@ -102,15 +102,39 @@ describe('buildBlockWeightSignMap', () => {
         { id: 'e2', name: 'Beta', input_id: 'X', weight: -25, conditions: [] },
       ],
       exits: [
-        { id: 'x1', input_id: 'X', weight: 0, target_entry_block_name: 'Alpha', conditions: [] },
-        { id: 'x2', input_id: 'X', weight: 0, target_entry_block_name: 'Beta', conditions: [] },
-        { id: 'x3', input_id: 'X', weight: 0, target_entry_block_name: 'unknown', conditions: [] },
+        { id: 'x1', input_id: 'X', weight: 0, target_entry_block_names: ['Alpha'], conditions: [] },
+        { id: 'x2', input_id: 'X', weight: 0, target_entry_block_names: ['Beta'], conditions: [] },
+        { id: 'x3', input_id: 'X', weight: 0, target_entry_block_names: ['unknown'], conditions: [] },
       ],
     };
     const map = buildBlockWeightSignMap(rules);
     expect(map.x1).toBe(1);
     expect(map.x2).toBe(-1);
     expect(map.x3).toBe(0); // dangling target → neutral fallback
+  });
+
+  it('v6: an exit with MULTIPLE targets colours by the FIRST resolving target', () => {
+    const rules = {
+      entries: [
+        { id: 'e1', name: 'Alpha', input_id: 'X', weight: 75, conditions: [] },
+        { id: 'e2', name: 'Beta', input_id: 'X', weight: -25, conditions: [] },
+      ],
+      exits: [
+        // First target Alpha (long) wins, even though Beta is short.
+        { id: 'x1', target_entry_block_names: ['Alpha', 'Beta'], conditions: [] },
+        // First target is dangling → falls through to Beta (short).
+        { id: 'x2', target_entry_block_names: ['ghost', 'Beta'], conditions: [] },
+        // All dangling → neutral.
+        { id: 'x3', target_entry_block_names: ['ghost1', 'ghost2'], conditions: [] },
+        // Empty array → neutral.
+        { id: 'x4', target_entry_block_names: [], conditions: [] },
+      ],
+    };
+    const map = buildBlockWeightSignMap(rules);
+    expect(map.x1).toBe(1);
+    expect(map.x2).toBe(-1);
+    expect(map.x3).toBe(0);
+    expect(map.x4).toBe(0);
   });
 
   it('returns {} for null / malformed rules', () => {
@@ -149,7 +173,7 @@ describe('buildEventMarkerTraces', () => {
     const events = [
       {
         input_id: 'X', block_id: 'x1', kind: 'exit',
-        fired_indices: [1], latched_indices: [1], target_entry_block_name: 'e1',
+        fired_indices: [1], latched_indices: [1], target_entry_block_names: ['e1'],
       },
     ];
     // Exit targets a LONG entry (positive weight) → green open triangle-down
@@ -168,7 +192,7 @@ describe('buildEventMarkerTraces', () => {
     );
     // Short exit: kind=exit + targets a negative-weight entry → red OPEN triangle-up
     const exit = buildEventMarkerTraces(
-      [{ input_id: 'X', block_id: 'b3', kind: 'exit', fired_indices: [2], latched_indices: [2], target_entry_block_name: 'b2' }],
+      [{ input_id: 'X', block_id: 'b3', kind: 'exit', fired_indices: [2], latched_indices: [2], target_entry_block_names: ['b2'] }],
       positions, dates, undefined, { blockWeightSigns: { b3: -1 } },
     );
     expect(entry[0].marker.color).toBe('#ef4444');
@@ -974,7 +998,7 @@ describe('buildResultsPlot — Tasks 2 & 3 integration', () => {
     };
     const signalRules = {
       entries: [{ id: 'e1', name: 'GoldenCross', input_id: 'X', weight: 40, conditions: [] }],
-      exits: [{ id: 'x1', name: '', input_id: 'X', weight: 0, target_entry_block_name: 'GoldenCross', conditions: [] }],
+      exits: [{ id: 'x1', name: '', input_id: 'X', weight: 0, target_entry_block_names: ['GoldenCross'], conditions: [] }],
     };
     const { traces } = buildResultsPlot(result, { signalRules });
     const entryTrace = traces.find((t) => t.name && t.name.startsWith('long entry'));

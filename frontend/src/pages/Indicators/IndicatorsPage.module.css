@@ -152,3 +152,13 @@
   display: flex;
   flex-direction: column;
 }
+
+/*
+ * Lock banner — visual style now lives in the shared <LockBanner> component
+ * (UI-consistency: one banner across Indicators/Signals/Portfolio). This class
+ * only supplies the small bottom spacing so the bordered banner does not abut
+ * the EditorPanel below it.
+ */
+.lockBanner {
+  margin-bottom: 8px;
+}

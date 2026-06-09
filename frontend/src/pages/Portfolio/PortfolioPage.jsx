@@ -10,7 +10,9 @@ import ReturnsGrid from './ReturnsGrid';
 import SaveControls from '../../components/SaveControls';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import useBackendAutosave from '../../hooks/useBackendAutosave';
+import useEntityLock from '../../hooks/useEntityLock';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import LockBanner from '../../components/LockBanner';
 import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
@@ -20,7 +22,9 @@ import {
   createPortfolio,
   updatePortfolio,
   archivePortfolio,
+  setPortfolioLocked,
   describePersistenceError,
+  isLockedError,
 } from '../../api/persistence';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
@@ -211,6 +215,38 @@ function PortfolioPage() {
     }
   }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.clearAll, fetchPortfolios]);
 
+  // Set the locked state on a persisted portfolio. Calls the lock API,
+  // then updates both the list state and (when it's the currently loaded
+  // portfolio) the hook's locked flag so the read-only banner reacts.
+  // Shared lock-handler hook (same shape across all three pages); this page
+  // is server-confirmed (no optimistic flip) and also syncs the hook flag.
+  const applyPortfolioLocked = useCallback((id, lockedVal) => {
+    // Update the list row so the LockToggle and disabled states reflect
+    // the new lock state immediately (same pattern as category change).
+    setPortfolios((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, locked: lockedVal } : p)),
+    );
+    // If the currently loaded portfolio was just locked/unlocked, sync the
+    // hook flag so the read-only builder banner updates.
+    if (portfolio.persistedId === id) {
+      portfolio.setPersistedLocked(!!lockedVal);
+    }
+  }, [portfolio.persistedId, portfolio.setPersistedLocked]);
+  const handleSetPortfolioLocked = useEntityLock({
+    // Lazy wrapper — defers the api import access to call time so test
+    // mocks that omit setPortfolioLocked don't trip a render-time getter.
+    setLocked: useCallback((id, next) => setPortfolioLocked(id, next), []),
+    applyLocked: applyPortfolioLocked,
+    onStart: useCallback(() => setOneshotStatus('saving'), []),
+    onSuccess: useCallback(() => { setOneshotError(null); setOneshotStatus('saved'); }, []),
+    onError: useCallback((err) => {
+      setOneshotError(describePersistenceError(err));
+      setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('setPortfolioLocked failed:', err);
+    }, []),
+  });
+
   // Mirror of ``cloudDirty`` accessible from event handlers declared
   // before ``cloudDirty`` itself is defined (synced via assignment below).
   const cloudDirtyRef = useRef(false);
@@ -284,6 +320,11 @@ function PortfolioPage() {
   // can read the current dirty state without a closure dependency.
   cloudDirtyRef.current = cloudDirty;
 
+  // Ref to the autosave hook's reset() so the locked-save handler (declared
+  // before the hook) can clear a transient 'saving'/'error' status when it
+  // flips the portfolio to locked. Seeded just below the hook.
+  const resetCloudStatusRef = useRef(() => {});
+
   const handleCloudSave = useCallback(async (payloadStr, { signal } = {}) => {
     if (!portfolio.persistedId || !payloadStr) return;
     const body = JSON.parse(payloadStr);
@@ -291,6 +332,19 @@ function PortfolioPage() {
       await updatePortfolio(portfolio.persistedId, body, { signal });
     } catch (err) {
       if (err && err.name === 'AbortError') throw err;
+      // 423 Locked: flip the LOCAL locked flag (hook flag + list row) so the
+      // editor goes read-only with the normal lock banner instead of a
+      // generic error. The hook's enabled gate already excludes locked, so
+      // no re-fire loop. Also patch the matching list row's lock state.
+      if (isLockedError(err)) {
+        portfolio.setPersistedLocked(true);
+        setPortfolios((prev) =>
+          prev.map((p) => (p.id === portfolio.persistedId ? { ...p, locked: true } : p)),
+        );
+        setCloudError(null);
+        resetCloudStatusRef.current();
+        return;
+      }
       setCloudError(describePersistenceError(err));
       // eslint-disable-next-line no-console
       console.error('updatePortfolio (autosave) failed:', err);
@@ -308,16 +362,17 @@ function PortfolioPage() {
     // every autosave — it would cause flicker and reset scroll position
     // during rapid editing. The local state is authoritative until a
     // category change, add, or archive operation.
-  }, [portfolio.persistedId, portfolio.persistedCategory]);
+  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked]);
 
   const {
     status: cloudStatus,
     reset: resetCloudStatus,
   } = useBackendAutosave({
-    enabled: !!portfolio.persistedId && cloudDirty && portfolio.autosave,
+    enabled: !!portfolio.persistedId && cloudDirty && portfolio.autosave && !portfolio.persistedLocked,
     payload: cloudPayload,
     onSave: handleCloudSave,
   });
+  resetCloudStatusRef.current = resetCloudStatus;
 
   // Reset cloud status indicator on portfolio (de)selection.
   useEffect(() => {
@@ -413,14 +468,17 @@ function PortfolioPage() {
             {/* Shared Save button + Auto save checkbox. */}
             <SaveControls
               dirty={
-                portfolio.dirty
-                || (saveInput.trim() !== '' && saveInput.trim() !== portfolio.portfolioName)
+                !portfolio.persistedLocked && (
+                  portfolio.dirty
+                  || (saveInput.trim() !== '' && saveInput.trim() !== portfolio.portfolioName)
+                )
               }
               autosave={portfolio.autosave}
               onSave={handleSave}
               onToggleAutosave={portfolio.setAutosave}
               saveDisabled={
-                (!saveInput.trim() && !portfolio.portfolioName)
+                portfolio.persistedLocked
+                || (!saveInput.trim() && !portfolio.portfolioName)
                 || portfolio.legs.length === 0
               }
             />
@@ -454,6 +512,15 @@ function PortfolioPage() {
           </div>
         )}
 
+        {/* ── Lock banner — shown when the loaded portfolio is locked ── */}
+        {portfolio.persistedLocked && (
+          <LockBanner
+            entityLabel="portfolio"
+            className={styles.lockBanner}
+            testId="portfolio-lock-banner"
+          />
+        )}
+
         {/* ── Saved portfolios panel ── */}
         <div className={styles.section}>
           {fetchError && (
@@ -472,11 +539,23 @@ function PortfolioPage() {
             onArchive={handleArchivePortfolio}
             selectedId={portfolio.persistedId}
             onSelect={handleSelectPersisted}
+            onSetPortfolioLocked={handleSetPortfolioLocked}
           />
         </div>
 
         {/* ── Holdings section ── */}
-        <div className={styles.section}>
+        {/* When the loaded portfolio is locked, the native disabled <fieldset>
+            makes every holdings control non-interactive (mirrors the
+            Indicators editor's read-only definition). Compute and the view
+            slider stay enabled below so a locked portfolio is still
+            inspectable — loading a persisted portfolio does not auto-compute,
+            so the user must Compute to view it. The unlock control lives in
+            the saved-portfolios list, so this never traps the user. */}
+        <fieldset
+          className={`${styles.section} ${styles.editorFieldset}`}
+          disabled={portfolio.persistedLocked}
+          data-testid="portfolio-editor-fieldset"
+        >
           <HoldingsList
             legs={portfolio.legs}
             legDateRanges={portfolio.legDateRanges}
@@ -485,14 +564,18 @@ function PortfolioPage() {
             onOpenAddModal={handleOpenModal}
             onOpenSignalModal={() => setSignalModalOpen(true)}
           />
-        </div>
+        </fieldset>
 
         {/* ── Configuration bar ── */}
         <div className={`${styles.section} ${styles.configBar}`}>
           <div className={styles.configRow}>
-            {/* Rebalance frequency */}
-            <div
-              className={styles.configItem}
+            {/* Rebalance frequency — part of the saved portfolio definition,
+                so it is disabled (via the native fieldset) when locked.
+                Compute stays outside this fieldset and remains enabled so a
+                locked portfolio can still be computed and inspected. */}
+            <fieldset
+              className={`${styles.configItem} ${styles.editorFieldset}`}
+              disabled={portfolio.persistedLocked}
               title="Periodically reset allocations to target weights. Without rebalancing, positions drift as prices move."
             >
               <label className={styles.configLabel} htmlFor="rebalance-select">
@@ -508,7 +591,7 @@ function PortfolioPage() {
                   <option key={opt.value} value={opt.value}>{opt.label}</option>
                 ))}
               </select>
-            </div>
+            </fieldset>
 
             {/* Compute button */}
             <button

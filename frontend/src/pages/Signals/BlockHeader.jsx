@@ -4,15 +4,17 @@ import { isInputConfigured, coerceResetCount } from './blockShape';
 import styles from './Signals.module.css';
 
 /**
- * Per-block controls (v4): for entries, input dropdown (references one
+ * Per-block controls (v6): for entries, input dropdown (references one
  * of the signal's declared inputs), signed weight input with % suffix
- * and direction badge; for exits, a target entry name picker is shown
- * in the same position as the input dropdown. Delete-block button is
- * gated by ConfirmDialog.
+ * and direction badge; for exits, a VERTICAL LIST of target-entry name
+ * pickers (one exit may close several entries — cross-input allowed) is
+ * shown in the same position as the input dropdown, with a "+ Add block"
+ * button to append rows and a per-row remove (×) control. Delete-block
+ * button is gated by ConfirmDialog.
  *
  * Props:
  *   block       {Object}   { id, [input_id, weight on entries,
- *                            target_entry_block_name on exits] }
+ *                            target_entry_block_names (string[]) on exits] }
  *   section     {string}   'entries' | 'exits' | 'resets'
  *   inputs      {Array}    the signal's declared inputs
  *   entryBlocks {Array}    the signal's entry blocks (used by exits to list targets)
@@ -217,46 +219,12 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
           )}
         </div>
       ) : (
-        (() => {
-          const entryList = Array.isArray(entryBlocks) ? entryBlocks : [];
-          const empty = entryList.length === 0;
-          return (
-            <div className={styles.blockInstrumentCell}>
-              <select
-                className={styles.blockInputSelect}
-                value={block.target_entry_block_name || ''}
-                disabled={empty}
-                onChange={(e) => onChange({ ...block, target_entry_block_name: e.target.value })}
-                aria-label={`Target entry for exit block ${blockIndex}`}
-                data-testid={`target-entry-select-${blockIndex - 1}`}
-              >
-                {empty ? (
-                  <option value="">No entries yet — create an entry block first</option>
-                ) : (
-                  <>
-                    <option value="">Pick an entry…</option>
-                    {entryList.map((entry, i) => {
-                      const eName = entry.name || `Block ${i + 1}`;
-                      const isDuplicate = entryList.filter((e) => e.name && e.name === entry.name).length > 1;
-                      return (
-                        <option
-                          key={entry.id || i}
-                          value={entry.name || ''}
-                          disabled={!entry.name || isDuplicate}
-                        >
-                          {eName}{isDuplicate ? ' (duplicate)' : ''}{!entry.name ? ' (unnamed)' : ''}
-                        </option>
-                      );
-                    })}
-                  </>
-                )}
-              </select>
-              {block.target_entry_block_name && !entryList.some((e) => e.name === block.target_entry_block_name) && (
-                <span className={styles.blockInputWarn} title={`Target "${block.target_entry_block_name}" no longer exists`}>!</span>
-              )}
-            </div>
-          );
-        })()
+        <ExitTargetPicker
+          block={block}
+          entryBlocks={entryBlocks}
+          onChange={onChange}
+          blockIndex={blockIndex}
+        />
       )}
 
       {!isReset && (
@@ -363,6 +331,225 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
         onConfirm={() => { setConfirmDelete(false); onDelete(); }}
         onCancel={() => setConfirmDelete(false)}
       />
+    </div>
+  );
+}
+
+/**
+ * Exit-block target picker (v6).
+ *
+ * Renders a VERTICAL LIST of entry dropdowns bound to
+ * ``block.target_entry_block_names`` (array). The first row is always
+ * present (it doubles as the empty-state dropdown when no targets are
+ * chosen yet). "+ Add block" appends another dropdown row; each row has a
+ * remove (×) control.
+ *
+ * Cross-row dedupe: each dropdown lists every entry EXCEPT those already
+ * chosen in OTHER rows — but a row's OWN current value always stays
+ * visible/selected in its own dropdown. Unnamed / duplicate-named entries
+ * remain present-but-disabled (you can't target them unambiguously).
+ *
+ * "+ Add block" is disabled when every selectable entry is already chosen
+ * or there are no entries at all.
+ */
+function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
+  // Number of *extra* empty rows the user has opened beyond the stored
+  // names (so "+ Add block" can reveal a fresh dropdown before a value is
+  // picked). Reset whenever the stored names array changes so we never
+  // show stale empties. Declared first — hooks must run unconditionally.
+  const [extraRows, setExtraRows] = useState(0);
+
+  const entryList = Array.isArray(entryBlocks) ? entryBlocks : [];
+  const empty = entryList.length === 0;
+
+  // Canonical array of currently-chosen target names.
+  const names = Array.isArray(block.target_entry_block_names)
+    ? block.target_entry_block_names
+    : [];
+
+  const namesKey = names.join(' ');
+  useEffect(() => {
+    setExtraRows(0);
+  }, [namesKey]);
+
+  // Names that can be unambiguously targeted: named AND not duplicated.
+  const nameCounts = new Map();
+  for (const e of entryList) {
+    if (e && e.name) nameCounts.set(e.name, (nameCounts.get(e.name) || 0) + 1);
+  }
+  const selectableNames = [];
+  for (const [n, c] of nameCounts) {
+    if (c === 1) selectableNames.push(n);
+  }
+  // How many distinct selectable names are already chosen.
+  const chosenSelectable = new Set(
+    names.filter((n) => selectableNames.includes(n)),
+  );
+  // "+ Add block" is dead when there's nothing left to add: no entries,
+  // no unambiguously-selectable entry, or every selectable one is taken.
+  const addDisabled = empty
+    || selectableNames.length === 0
+    || chosenSelectable.size >= selectableNames.length;
+
+  function commit(nextNames) {
+    onChange({ ...block, target_entry_block_names: nextNames });
+  }
+
+  function setRow(rowIdx, value) {
+    // Operate on the FULLY-rendered row set so editing the implicit first
+    // row of an empty array — or a just-added empty row — slots the value
+    // at the right index.
+    const rendered = names.length > 0
+      ? [...names, ...Array(extraRows).fill('')]
+      : [''];
+    const next = rendered.slice();
+    next[rowIdx] = value;
+    // Drop blanks (a row reset to "Pick an entry…") so the stored array
+    // only ever holds real target names — empty array == "no targets yet".
+    commit(next.filter((n) => typeof n === 'string' && n));
+  }
+
+  function removeRow(rowIdx) {
+    // Operate on the FULLY-rendered row set (stored names + any opened
+    // empty rows) so removing a trailing just-added empty row works too.
+    const rendered = names.length > 0
+      ? [...names, ...Array(extraRows).fill('')]
+      : [''];
+    const next = rendered.slice();
+    next.splice(rowIdx, 1);
+    const kept = next.filter((n) => typeof n === 'string' && n);
+    // If an empty row was removed, also shrink the extra-row counter so the
+    // committed names (which are unchanged) don't re-grow the render.
+    if (rowIdx >= names.length) {
+      setExtraRows((n) => Math.max(0, n - 1));
+    }
+    commit(kept);
+  }
+
+  function addRow() {
+    if (addDisabled) return;
+    // Reveal a fresh empty dropdown row. The stored array is unchanged
+    // until a real name is chosen in it (setRow drops blanks), so we only
+    // grow the rendered rows via a local counter.
+    setExtraRows((n) => n + 1);
+  }
+
+
+  // Final render rows = stored names (or one implicit empty row) followed
+  // by any user-opened extra empty rows.
+  const renderRows = names.length > 0
+    ? [...names, ...Array(extraRows).fill('')]
+    : [''];
+
+  // Stable React keys per rendered row. A named row is keyed by its target
+  // name (``name:<name>``) so removing/reordering rows can't bleed a row's
+  // identity onto its neighbour; empty rows fall back to a positional token
+  // (``empty:<k>``). A defensive ``#n`` suffix disambiguates the rare case
+  // where the committed array transiently holds the same name twice (e.g. a
+  // dangling name colliding with a real one) so React never sees dupes.
+  const seenKeys = new Map();
+  let emptyCount = 0;
+  const rowKeys = renderRows.map((current) => {
+    const base = current ? `name:${current}` : `empty:${emptyCount++}`;
+    const n = (seenKeys.get(base) || 0) + 1;
+    seenKeys.set(base, n);
+    return n === 1 ? base : `${base}#${n}`;
+  });
+
+  return (
+    <div className={styles.exitTargetList} data-testid={`exit-targets-${blockIndex - 1}`}>
+      {renderRows.map((current, rowIdx) => {
+        // Names chosen in OTHER rows — excluded from this row's options.
+        const chosenElsewhere = new Set(
+          renderRows.filter((_, i) => i !== rowIdx).filter((n) => n),
+        );
+        const isLastRow = rowIdx === renderRows.length - 1;
+        const danglingWarn = current && !entryList.some((e) => e.name === current);
+        return (
+          <div
+            className={styles.exitTargetRow}
+            key={rowKeys[rowIdx]}
+            data-testid={`exit-target-row-${blockIndex - 1}-${rowIdx}`}
+          >
+            <div className={styles.blockInstrumentCell}>
+              <select
+                className={styles.blockInputSelect}
+                value={current || ''}
+                disabled={empty}
+                onChange={(e) => setRow(rowIdx, e.target.value)}
+                aria-label={`Target entry ${rowIdx + 1} for exit block ${blockIndex}`}
+                data-testid={`target-entry-select-${blockIndex - 1}-${rowIdx}`}
+              >
+                {empty ? (
+                  <option value="">No entries yet — create an entry block first</option>
+                ) : (
+                  <>
+                    <option value="">Pick an entry…</option>
+                    {entryList.map((entry, i) => {
+                      const eName = entry.name || `Block ${i + 1}`;
+                      const isDuplicate = !!entry.name
+                        && nameCounts.get(entry.name) > 1;
+                      // Hide entries already chosen in OTHER rows, EXCEPT
+                      // this row's own current value (must stay visible).
+                      if (entry.name
+                          && entry.name !== current
+                          && chosenElsewhere.has(entry.name)) {
+                        return null;
+                      }
+                      return (
+                        <option
+                          key={entry.id || i}
+                          value={entry.name || ''}
+                          disabled={!entry.name || isDuplicate}
+                        >
+                          {eName}{isDuplicate ? ' (duplicate)' : ''}{!entry.name ? ' (unnamed)' : ''}
+                        </option>
+                      );
+                    })}
+                  </>
+                )}
+              </select>
+              {danglingWarn && (
+                <span
+                  className={styles.blockInputWarn}
+                  title={`Target "${current}" no longer exists`}
+                >
+                  !
+                </span>
+              )}
+            </div>
+            {/* Remove control on every row EXCEPT a lone implicit empty row
+                (nothing to remove there). */}
+            {!(renderRows.length === 1 && !current) && (
+              <button
+                type="button"
+                className={styles.exitTargetRemoveBtn}
+                onClick={() => removeRow(rowIdx)}
+                title="Remove this target"
+                aria-label={`Remove target ${rowIdx + 1} from exit block ${blockIndex}`}
+                data-testid={`remove-target-${blockIndex - 1}-${rowIdx}`}
+              >
+                ×
+              </button>
+            )}
+            {isLastRow && (
+              <button
+                type="button"
+                className={styles.exitTargetAddBtn}
+                onClick={addRow}
+                disabled={addDisabled}
+                title={addDisabled
+                  ? 'No more entries available to target'
+                  : 'Target another entry block'}
+                aria-label={`Add another target to exit block ${blockIndex}`}
+                data-testid={`add-target-${blockIndex - 1}`}
+              >
+                + Add block
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

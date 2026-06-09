@@ -20,6 +20,7 @@
 //   onSelect              {Function} (id) => void — load this portfolio into editor
 
 import Card from '../../components/Card';
+import LockToggle from '../../components/LockToggle';
 import styles from './PersistedPortfolioPanel.module.css';
 import { CATEGORIES } from '../../api/persistence';
 
@@ -34,6 +35,7 @@ function PersistedPortfolioPanel({
   onArchive,
   selectedId,
   onSelect,
+  onSetPortfolioLocked,
 }) {
   const headerRight = (
     <div className={styles.headerActions}>
@@ -82,6 +84,7 @@ function PersistedPortfolioPanel({
         ) : (
           portfolios.map((p) => {
             const isSelected = p.id === selectedId;
+            const isLocked = !!p.locked;
             return (
               <div
                 key={p.id}
@@ -98,13 +101,25 @@ function PersistedPortfolioPanel({
                 >
                   {p.name}
                 </button>
+                {/* Render the shared LockToggle for every persisted portfolio
+                    when a lock handler is provided — same idiom as the Signals
+                    and Indicators lists (Indicators additionally excludes
+                    built-in/readonly rows, which portfolios don't have). */}
+                {onSetPortfolioLocked && (
+                  <LockToggle
+                    entityLabel="portfolio"
+                    locked={isLocked}
+                    onSetLocked={(next) => onSetPortfolioLocked(p.id, next)}
+                  />
+                )}
                 <select
                   className={styles.rowCatSelect}
                   value={p.category}
                   onChange={(e) => onChangeItemCat(p.id, e.target.value)}
                   aria-label={`Category for ${p.name}`}
                   data-testid={`portfolio-cat-select-${p.id}`}
-                  title="Move to category"
+                  title={isLocked ? 'Locked — unlock to move' : 'Move to category'}
+                  disabled={isLocked}
                 >
                   {CATEGORIES.map((cat) => (
                     <option key={cat} value={cat}>{cat}</option>
@@ -114,9 +129,10 @@ function PersistedPortfolioPanel({
                   type="button"
                   className={styles.rowDeleteBtn}
                   onClick={() => onArchive(p.id)}
-                  title="Archive portfolio"
+                  title={isLocked ? 'Locked — unlock to archive' : 'Archive portfolio'}
                   aria-label={`Archive ${p.name}`}
                   data-testid={`archive-portfolio-${p.id}`}
+                  disabled={isLocked}
                 >
                   ×
                 </button>

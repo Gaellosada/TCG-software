@@ -12,7 +12,7 @@ import { emptyRules, defaultSettings } from './storage';
  *
  * @param {object} persisted  Backend SignalOut payload.
  * @returns {{ id: string, name: string, inputs: Array<object>,
- *   rules: object, settings: object, doc: string }}
+ *   rules: object, settings: object, doc: string, locked: boolean }}
  */
 export function hydrateFromPersisted(persisted) {
   const inputs = Array.isArray(persisted.inputs) ? persisted.inputs : [];
@@ -29,5 +29,7 @@ export function hydrateFromPersisted(persisted) {
     rules,
     settings,
     doc: typeof persisted.description === 'string' ? persisted.description : '',
+    // Lock state (defaults to false for older docs that predate the field).
+    locked: persisted.locked === true,
   };
 }

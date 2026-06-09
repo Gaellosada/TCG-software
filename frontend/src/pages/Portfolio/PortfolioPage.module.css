@@ -171,10 +171,31 @@
   line-height: 1;
 }
 
+/* ── Lock banner — visual style now lives in the shared <LockBanner>. This
+   class only supplies the Portfolio-specific bottom spacing. ── */
+
+.lockBanner {
+  margin-bottom: 16px;
+}
+
 /* ── Sections ── */
 
 .section {
   margin-bottom: 16px;
+}
+
+/*
+ * Reset the browser's default <fieldset> chrome so a fieldset can stand in for
+ * a plain wrapper (used to natively disable holdings/config controls when the
+ * portfolio is locked). Only the fieldset-specific UA defaults are neutralised
+ * — block margin/display come from the co-applied .section / .configItem
+ * classes, so they are left untouched here.
+ */
+.editorFieldset {
+  border: 0;
+  margin-inline: 0;
+  padding: 0;
+  min-inline-size: 0;
 }
 
 /* ── Configuration bar ── */

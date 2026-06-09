@@ -31,11 +31,13 @@ const ADD_BLOCK_LABELS = {
  * Middle panel — block/condition editor (v4 / signals-refactor-v4).
  *
  * Three-section model: `entries`, `exits`, and `resets`. A block in the
- * exits section additionally picks a `target_entry_block_name` from the
- * signal's entry blocks. Reset blocks are signal-global (no per-block
- * input or target). Entry deletion cascades through `cascadeDeleteEntry`
- * from storage.js so referencing exits are removed and a brief inline
- * banner surfaces above the Exits list.
+ * exits section picks one OR MORE `target_entry_block_names` from the
+ * signal's entry blocks (v6 — one exit may close several entries). Reset
+ * blocks are signal-global (no per-block input or target). Entry deletion
+ * cascades through `cascadeDeleteEntry` from storage.js: the deleted
+ * entry's name is stripped from every exit's target list and an exit is
+ * removed only if its list becomes empty; a brief inline banner surfaces
+ * above the Exits list when whole exits are removed.
  *
  * Props:
  *   rules              {Object}     { entries: [], exits: [], resets: [] }
@@ -89,8 +91,8 @@ function BlockEditor({
   }
 
   function handleAddBlock() {
-    // v4: defaults come from blockShape.defaultBlock(section), which stamps
-    // a stable id and adds target_entry_block_name on exits.
+    // defaults come from blockShape.defaultBlock(section), which stamps
+    // a stable id and adds target_entry_block_names: [] on exits.
     updateBlocks([...blocks, defaultBlock(section)]);
   }
 

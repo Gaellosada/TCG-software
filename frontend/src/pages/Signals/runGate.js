@@ -6,9 +6,10 @@
 //   - ``missingIds`` is the list of indicator_ids referenced by the
 //     signal that don't have a spec in ``availableIndicators``.
 //
-// v4 section model: ``rules = { entries, exits }``. Exits target a
-// specific entry by ``target_entry_block_name``; an exit whose target has
-// been deleted is not runnable.
+// section model: ``rules = { entries, exits }``. Exits target one or more
+// entries by ``target_entry_block_names`` (array); an exit with no targets,
+// or any dangling/ambiguous target, is not runnable. Cross-input targeting
+// is allowed.
 import { buildComputeRequestBody } from './requestBuilder';
 import {
   isBlockRunnable,
@@ -67,14 +68,16 @@ export function computeRunGate(selectedSignal, availableIndicators) {
   ];
   // A block is "non-empty" if the user has interacted with it at all.
   // For entries that means any condition or picked input; for exits it
-  // means any condition or picked target (exits no longer carry input_id);
-  // for resets it means any condition (resets carry nothing else).
+  // means any condition or at least one picked target (exits no longer
+  // carry input_id); for resets it means any condition (resets carry
+  // nothing else).
   const nonEmpty = blocksWithSection.filter(({ block: b, section }) => {
     if (!b) return false;
     const hasCond = (b.conditions || []).length > 0;
     if (section === 'entries') return hasCond || !!b.input_id;
     if (section === 'resets') return hasCond;
-    return hasCond || !!b.target_entry_block_name;
+    const targets = Array.isArray(b.target_entry_block_names) ? b.target_entry_block_names : [];
+    return hasCond || targets.length > 0;
   });
   if (nonEmpty.length === 0) {
     return {
@@ -127,21 +130,31 @@ export function computeRunGate(selectedSignal, availableIndicators) {
       }
     }
     if (section === 'exits') {
-      const tgt = b.target_entry_block_name;
-      if (typeof tgt !== 'string' || !tgt) {
+      const targets = Array.isArray(b.target_entry_block_names)
+        ? b.target_entry_block_names
+        : [];
+      if (targets.length === 0) {
         return {
-          runDisabledReason: 'Every exit block must target an entry block — pick one in the block header.',
+          runDisabledReason: 'Every exit block must target at least one entry block — pick one in the block header.',
           missingIds: [],
         };
       }
-      const matchingEntries = entries.filter((e) => e && e.name === tgt);
-      if (matchingEntries.length === 0) {
-        return {
-          runDisabledReason: `exit-target-not-found: "${tgt}" — this exit references an entry name that doesn't exist. Pick a valid target.`,
-          missingIds: [],
-        };
+      for (const tgt of targets) {
+        if (typeof tgt !== 'string' || !tgt) {
+          return {
+            runDisabledReason: 'Every exit block must target at least one entry block — pick one in the block header.',
+            missingIds: [],
+          };
+        }
+        const matchingEntries = entries.filter((e) => e && e.name === tgt);
+        if (matchingEntries.length === 0) {
+          return {
+            runDisabledReason: `exit-target-not-found: "${tgt}" — this exit references an entry name that doesn't exist. Pick a valid target.`,
+            missingIds: [],
+          };
+        }
+        // matchingEntries.length > 1 is already caught by the duplicate-name check above
       }
-      // matchingEntries.length > 1 is already caught by the duplicate-name check above
     }
     // For exits we pass the entry blocks themselves so isBlockRunnable
     // can additionally verify the resolved target entry has a configured
@@ -191,7 +204,7 @@ export function computeRunGate(selectedSignal, availableIndicators) {
  *   - ``latched_indices``: the *effective* subset — for entries, bars where
  *                          the block actually opened a position; for exits,
  *                          bars where the exit actually closed something on
- *                          its ``target_entry_block_name``.
+ *                          one of its ``target_entry_block_names``.
  *
  * When ``dontRepeat`` is true the UI should present ``latched_indices`` as
  * the canonical trigger set (no accidental repeats on already-open
