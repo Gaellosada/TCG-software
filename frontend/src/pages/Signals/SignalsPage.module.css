@@ -46,6 +46,25 @@
   padding: 24px 6px;
 }
 
+/*
+ * Wrapper around the editor body (InputsPanel + BlockEditor). It is a native
+ * <fieldset disabled> when the signal is locked, which makes every nested form
+ * control non-interactive. Reset the browser's default fieldset chrome (border,
+ * margin, padding) and the implicit ``min-inline-size: min-content`` so the
+ * children flow exactly as they did before, and behave as a flex column to
+ * preserve the vertical stack inside the scrollable editor panel.
+ */
+.editorFieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  min-inline-size: 0;
+}
+
 .nameInput {
   width: 100%;
   background: var(--bg-tertiary);
@@ -119,3 +138,5 @@
   display: flex;
   flex-direction: column;
 }
+
+/* Read-only banner moved to the shared <LockBanner> component. */

@@ -1,10 +1,10 @@
-// Pure data helpers for Block-level validation — v5.
+// Pure data helpers for Block-level validation — v6.
 //
 // Single source of truth for "is this block complete enough to Run?".
 // Used by the UI (Run gate, per-block status dot) and the request
 // builder. No React imports — unit-testable in isolation.
 //
-// v5 Block shape:
+// v6 Block shape:
 //   entry: {
 //     id: <uuid>,
 //     input_id: <string>,
@@ -15,11 +15,14 @@
 //     id: <uuid>,
 //     weight: <ignored>,
 //     conditions: Condition[],
-//     target_entry_block_name: <string>,  // matches an entry's editable name
+//     target_entry_block_names: <string[]>,  // each matches an entry's
+//                                             // editable name; one exit may
+//                                             // close several entries.
 //   }
 // Exit blocks do NOT carry a block-level input_id — the operating
-// input is derived from the target entry's input_id. The backend
-// rejects exit payloads containing input_id with HTTP 400.
+// input is derived from each target entry's input_id (cross-input
+// targeting is allowed). The backend rejects exit payloads containing
+// input_id with HTTP 400.
 //
 // v5 Operand shapes (unchanged from v3):
 //   - indicator:  { kind:'indicator', indicator_id, input_id, output,
@@ -29,8 +32,8 @@
 //
 // Runnability additionally requires every referenced input_id to resolve
 // against the signal's ``inputs`` list AND every such input's instrument
-// to be fully configured. Exit blocks additionally require their
-// ``target_entry_block_name`` to resolve against the signal's entry blocks.
+// to be fully configured. Exit blocks additionally require every name in
+// ``target_entry_block_names`` to resolve to exactly one entry block.
 
 import { operandSlots } from './conditionOps';
 import { newBlockId, MAX_ABS_WEIGHT, coerceResetCount } from './storage';
@@ -47,8 +50,8 @@ export { coerceResetCount };
  *   - id: fresh uuid.
  *   - conditions: []
  *   - entries: input_id: '' (user must pick), weight: 0 (user must set signed value).
- *   - exits:   target_entry_block_name: '' (user must pick);
- *              NO input_id (derived from target entry).
+ *   - exits:   target_entry_block_names: [] (user must pick ≥1);
+ *              NO input_id (derived from each target entry).
  *
  * @param {'entries'|'exits'|'resets'} section
  */
@@ -61,7 +64,7 @@ export function defaultBlock(section = 'entries') {
     description: '',
   };
   if (section === 'exits') {
-    base.target_entry_block_name = '';
+    base.target_entry_block_names = [];
     // Optional per-block reset binding; null = no gate.
     base.requires_reset_block_id = null;
     // Reset fires required before re-arm; 1 == single-fire (current behavior).
@@ -283,9 +286,11 @@ export function indexEntryNames(entryBlocks) {
  *   - entries: ``input_id`` resolves to a declared Input that is fully
  *     configured (isInputConfigured); signed weight with |weight| in
  *     (0, MAX_ABS_WEIGHT].
- *   - exits: ``target_entry_block_name`` resolves against ``entryBlocks``
- *     AND the resolved target entry itself has an ``input_id`` set (the
- *     exit inherits it).
+ *   - exits: ``target_entry_block_names`` is a NON-EMPTY array AND every
+ *     name in it resolves to EXACTLY ONE entry in ``entryBlocks`` (no
+ *     dangling, no ambiguous duplicate-named target) AND each resolved
+ *     target entry has a configured ``input_id`` (the exit inherits it;
+ *     cross-input targeting is allowed). No same-input restriction.
  *   - both: at least one condition; every condition complete (every
  *     operand complete and every referenced input_id resolves).
  *
@@ -293,10 +298,10 @@ export function indexEntryNames(entryBlocks) {
  * @param {'entries'|'exits'} section
  * @param {Array<Input>} inputs  the signal's declared inputs.
  * @param {Set<string>|Array<Object>} [entryIdsOrBlocks]
- *   For legacy callers: a Set or Array of entry ids (strings) — the
- *   target id resolution still works but we can't check whether the
- *   target's input is set. For the richer check, pass an Array of entry
- *   Block objects. Required when section === 'exits'; ignored otherwise.
+ *   For legacy callers: a Set or Array of entry ids (strings) — name
+ *   resolution requires the richer form. For the exit check, pass an
+ *   Array of entry Block objects (so names + input configuration can be
+ *   resolved). Required when section === 'exits'; ignored otherwise.
  */
 export function isBlockRunnable(block, section, inputs, entryIdsOrBlocks) {
   if (!block || typeof block !== 'object') return false;
@@ -320,17 +325,22 @@ export function isBlockRunnable(block, section, inputs, entryIdsOrBlocks) {
     if (block.weight === 0) return false;
     if (Math.abs(block.weight) > MAX_ABS_WEIGHT) return false;
   } else if (section === 'exits') {
-    const tgt = block.target_entry_block_name;
-    if (typeof tgt !== 'string' || !tgt) return false;
-    // Resolve by name: find exactly one entry with this name
-    const matches = (Array.isArray(entryIdsOrBlocks) ? entryIdsOrBlocks : [])
-      .filter((b) => b && b.name === tgt);
-    if (matches.length !== 1) return false; // 0 = dangling, >1 = ambiguous
-    const targetEntry = matches[0];
-    if (typeof targetEntry.input_id !== 'string' || !targetEntry.input_id) return false;
-    const boundInput = byId[targetEntry.input_id];
-    if (!boundInput) return false;
-    if (!isInputConfigured(boundInput)) return false;
+    const targets = block.target_entry_block_names;
+    // v6: require a NON-EMPTY array of target names.
+    if (!Array.isArray(targets) || targets.length === 0) return false;
+    const blocks = Array.isArray(entryIdsOrBlocks) ? entryIdsOrBlocks : [];
+    for (const tgt of targets) {
+      if (typeof tgt !== 'string' || !tgt) return false;
+      // Resolve by name: each must hit EXACTLY ONE entry.
+      const matches = blocks.filter((b) => b && b.name === tgt);
+      if (matches.length !== 1) return false; // 0 = dangling, >1 = ambiguous
+      const targetEntry = matches[0];
+      // Each resolved target must have a configured input (cross-input OK).
+      if (typeof targetEntry.input_id !== 'string' || !targetEntry.input_id) return false;
+      const boundInput = byId[targetEntry.input_id];
+      if (!boundInput) return false;
+      if (!isInputConfigured(boundInput)) return false;
+    }
   }
   return true;
 }

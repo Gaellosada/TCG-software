@@ -24,6 +24,7 @@ function defaultProps(overrides = {}) {
     category: 'RESEARCH',
     onCategoryChange: vi.fn(),
     onChangeItemCat: vi.fn(),
+    onSetSignalLocked: vi.fn(),
     loading: false,
     ...overrides,
   };
@@ -149,5 +150,66 @@ describe('<SignalsList>', () => {
   it('shows loading hint when loading=true', () => {
     render(<SignalsList {...defaultProps({ loading: true, signals: [] })} />);
     expect(screen.getByText('Loading...')).toBeTruthy();
+  });
+
+  // --- Lock toggle (Feature 2) ---
+
+  it('renders a LockToggle per row when onSetSignalLocked is provided', () => {
+    render(<SignalsList {...defaultProps()} />);
+    expect(screen.getAllByTestId('lock-toggle-btn')).toHaveLength(2);
+  });
+
+  it('does NOT render LockToggle when onSetSignalLocked is omitted', () => {
+    render(<SignalsList {...defaultProps({ onSetSignalLocked: undefined })} />);
+    expect(screen.queryByTestId('lock-toggle-btn')).toBeNull();
+  });
+
+  it('clicking the padlock on an UNLOCKED signal calls onSetSignalLocked(id, true) immediately', () => {
+    const props = defaultProps();
+    render(<SignalsList {...props} />);
+    // Row s1 is unlocked → first lock toggle.
+    const [toggle] = screen.getAllByTestId('lock-toggle-btn');
+    fireEvent.click(toggle);
+    expect(props.onSetSignalLocked).toHaveBeenCalledWith('s1', true);
+  });
+
+  it('disables rename, category and delete on a LOCKED row but keeps the lock toggle active', () => {
+    const signals = [{ id: 's1', name: 'Locked One', category: 'RESEARCH', locked: true }];
+    render(<SignalsList {...defaultProps({ signals, selectedId: 's1' })} />);
+    expect(screen.getByRole('button', { name: /rename locked one/i }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: /delete locked one/i }).disabled).toBe(true);
+    expect(screen.getByTestId('signal-cat-select-s1').disabled).toBe(true);
+    // Lock toggle stays clickable so the user can unlock.
+    expect(screen.getByTestId('lock-toggle-btn').disabled).toBe(false);
+  });
+
+  it('a locked row exposes data-locked="true"; an unlocked row "false"', () => {
+    const signals = [
+      { id: 's1', name: 'Locked', category: 'RESEARCH', locked: true },
+      { id: 's2', name: 'Open', category: 'RESEARCH', locked: false },
+    ];
+    render(<SignalsList {...defaultProps({ signals })} />);
+    expect(screen.getByTestId('signal-row-s1').getAttribute('data-locked')).toBe('true');
+    expect(screen.getByTestId('signal-row-s2').getAttribute('data-locked')).toBe('false');
+  });
+
+  it('clicking the padlock on a LOCKED signal opens the unlock confirm dialog (does not unlock immediately)', () => {
+    const signals = [{ id: 's1', name: 'Locked One', category: 'RESEARCH', locked: true }];
+    const props = defaultProps({ signals, selectedId: 's1' });
+    render(<SignalsList {...props} />);
+    fireEvent.click(screen.getByTestId('lock-toggle-btn'));
+    // Neutral ConfirmDialog appears; onSetSignalLocked NOT yet called.
+    expect(screen.getByTestId('confirm-dialog')).toBeTruthy();
+    expect(props.onSetSignalLocked).not.toHaveBeenCalled();
+    // Confirming the unlock calls onSetSignalLocked(id, false).
+    fireEvent.click(screen.getByRole('button', { name: /^unlock$/i }));
+    expect(props.onSetSignalLocked).toHaveBeenCalledWith('s1', false);
+  });
+
+  it('does NOT enter rename mode on double-click when the row is locked', () => {
+    const signals = [{ id: 's1', name: 'Locked One', category: 'RESEARCH', locked: true }];
+    render(<SignalsList {...defaultProps({ signals, selectedId: 's1' })} />);
+    fireEvent.doubleClick(screen.getByTestId('signal-row-s1'));
+    expect(screen.queryByRole('textbox', { name: /rename locked one/i })).toBeNull();
   });
 });

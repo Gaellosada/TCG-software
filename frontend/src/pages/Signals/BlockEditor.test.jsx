@@ -36,7 +36,7 @@ function seededExit(overrides = {}) {
     id: overrides.id || 'exit-1',
     name: overrides.name || '',
     conditions: overrides.conditions || [],
-    target_entry_block_name: overrides.target_entry_block_name ?? '',
+    target_entry_block_names: overrides.target_entry_block_names ?? [],
     enabled: overrides.enabled !== undefined ? overrides.enabled : true,
     description: overrides.description || '',
     ...overrides,
@@ -103,8 +103,9 @@ describe('BlockEditor (v4 / two-section model)', () => {
     // Stable id stamped by defaultBlock
     expect(typeof b.id).toBe('string');
     expect(b.id.length).toBeGreaterThan(0);
-    // Entry blocks have NO target_entry_block_name field
+    // Entry blocks have NO target-entry field (singular or plural)
     expect(b.target_entry_block_name).toBeUndefined();
+    expect(b.target_entry_block_names).toBeUndefined();
     expect(next.exits).toEqual([]);
   });
 
@@ -116,7 +117,7 @@ describe('BlockEditor (v4 / two-section model)', () => {
     const next = onRulesChange.mock.calls[0][0];
     expect(next.exits).toHaveLength(1);
     const b = next.exits[0];
-    expect(b.target_entry_block_name).toBe('');
+    expect(b.target_entry_block_names).toEqual([]);
     expect(typeof b.id).toBe('string');
     expect(next.entries).toEqual([]);
   });
@@ -133,7 +134,7 @@ describe('BlockEditor (v4 / two-section model)', () => {
   it('exit block renders a target-entry picker disabled when no entries exist', () => {
     const seeded = { entries: [], exits: [seededExit()] };
     renderEditor(seeded, { section: 'exits' });
-    const picker = screen.getByTestId('target-entry-select-0');
+    const picker = screen.getByTestId('target-entry-select-0-0');
     expect(picker).toBeDefined();
     expect(picker.disabled).toBe(true);
     expect(picker.textContent).toContain('No entries yet');
@@ -142,10 +143,10 @@ describe('BlockEditor (v4 / two-section model)', () => {
   it('exit block picker lists existing entries as options by name', () => {
     const entry1 = seededEntry({ id: 'ent-aaaaaa', name: 'Momentum' });
     const entry2 = seededEntry({ id: 'ent-bbbbbb', name: '' });
-    const exit1 = seededExit({ target_entry_block_name: '' });
+    const exit1 = seededExit({ target_entry_block_names: [] });
     const seeded = { entries: [entry1, entry2], exits: [exit1] };
     renderEditor(seeded, { section: 'exits' });
-    const picker = screen.getByTestId('target-entry-select-0');
+    const picker = screen.getByTestId('target-entry-select-0-0');
     expect(picker.disabled).toBe(false);
     const options = Array.from(picker.querySelectorAll('option')).map((o) => ({
       value: o.value,
@@ -158,23 +159,72 @@ describe('BlockEditor (v4 / two-section model)', () => {
     expect(options.find((o) => o.text.includes('Block 2')).text).toContain('(unnamed)');
   });
 
-  it('picking a target entry writes target_entry_block_name on the exit block', () => {
+  it('picking a target entry writes target_entry_block_names on the exit block', () => {
     const entry1 = seededEntry({ id: 'ent-xyz', name: 'Alpha' });
-    const exit1 = seededExit({ target_entry_block_name: '' });
+    const exit1 = seededExit({ target_entry_block_names: [] });
     const seeded = { entries: [entry1], exits: [exit1] };
     const { onRulesChange } = renderEditor(seeded, { section: 'exits' });
-    const picker = screen.getByTestId('target-entry-select-0');
+    const picker = screen.getByTestId('target-entry-select-0-0');
     fireEvent.change(picker, { target: { value: 'Alpha' } });
     const next = onRulesChange.mock.calls.pop()[0];
-    expect(next.exits[0].target_entry_block_name).toBe('Alpha');
+    expect(next.exits[0].target_entry_block_names).toEqual(['Alpha']);
+  });
+
+  it('+ Add block appends a second target dropdown that dedupes the first row', () => {
+    const entry1 = seededEntry({ id: 'e1', name: 'Alpha' });
+    const entry2 = seededEntry({ id: 'e2', name: 'Beta' });
+    // Exit already targets Alpha; opening a 2nd row should exclude Alpha.
+    const exit1 = seededExit({ target_entry_block_names: ['Alpha'] });
+    const seeded = { entries: [entry1, entry2], exits: [exit1] };
+    renderEditor(seeded, { section: 'exits' });
+    // Row 0 exists with Alpha; click "+ Add block".
+    fireEvent.click(screen.getByTestId('add-target-0'));
+    const row1 = screen.getByTestId('target-entry-select-0-1');
+    const opts = Array.from(row1.querySelectorAll('option')).map((o) => o.value);
+    // Placeholder + Beta only — Alpha is excluded (chosen in row 0).
+    expect(opts).toContain('Beta');
+    expect(opts).not.toContain('Alpha');
+  });
+
+  it('picking a second target commits a two-element array', () => {
+    const entry1 = seededEntry({ id: 'e1', name: 'Alpha' });
+    const entry2 = seededEntry({ id: 'e2', name: 'Beta' });
+    const exit1 = seededExit({ target_entry_block_names: ['Alpha'] });
+    const seeded = { entries: [entry1, entry2], exits: [exit1] };
+    const { onRulesChange } = renderEditor(seeded, { section: 'exits' });
+    fireEvent.click(screen.getByTestId('add-target-0'));
+    fireEvent.change(screen.getByTestId('target-entry-select-0-1'), { target: { value: 'Beta' } });
+    const next = onRulesChange.mock.calls.pop()[0];
+    expect(next.exits[0].target_entry_block_names).toEqual(['Alpha', 'Beta']);
+  });
+
+  it('removing a target row strips that name from the array', () => {
+    const entry1 = seededEntry({ id: 'e1', name: 'Alpha' });
+    const entry2 = seededEntry({ id: 'e2', name: 'Beta' });
+    const exit1 = seededExit({ target_entry_block_names: ['Alpha', 'Beta'] });
+    const seeded = { entries: [entry1, entry2], exits: [exit1] };
+    const { onRulesChange } = renderEditor(seeded, { section: 'exits' });
+    // Remove the first target row (Alpha).
+    fireEvent.click(screen.getByTestId('remove-target-0-0'));
+    const next = onRulesChange.mock.calls.pop()[0];
+    expect(next.exits[0].target_entry_block_names).toEqual(['Beta']);
+  });
+
+  it('+ Add block is disabled once every selectable entry is chosen', () => {
+    const entry1 = seededEntry({ id: 'e1', name: 'Alpha' });
+    const entry2 = seededEntry({ id: 'e2', name: 'Beta' });
+    const exit1 = seededExit({ target_entry_block_names: ['Alpha', 'Beta'] });
+    const seeded = { entries: [entry1, entry2], exits: [exit1] };
+    renderEditor(seeded, { section: 'exits' });
+    expect(screen.getByTestId('add-target-0').disabled).toBe(true);
   });
 
   it('deleting an entry cascades: referencing exits are removed and a notice appears', () => {
     const entry1 = seededEntry({ id: 'ent-1', name: 'Alpha' });
     const entry2 = seededEntry({ id: 'ent-2', name: 'Beta' });
-    const exit1 = seededExit({ id: 'x-1', target_entry_block_name: 'Alpha' });
-    const exit2 = seededExit({ id: 'x-2', target_entry_block_name: 'Beta' });
-    const exit3 = seededExit({ id: 'x-3', target_entry_block_name: 'Alpha' });
+    const exit1 = seededExit({ id: 'x-1', target_entry_block_names: ['Alpha'] });
+    const exit2 = seededExit({ id: 'x-2', target_entry_block_names: ['Beta'] });
+    const exit3 = seededExit({ id: 'x-3', target_entry_block_names: ['Alpha'] });
     const seeded = { entries: [entry1, entry2], exits: [exit1, exit2, exit3] };
     const { onRulesChange, rerender } = renderEditor(seeded);
     // Trigger delete on entry block index 0 via the BlockHeader's delete path.
@@ -210,7 +260,7 @@ describe('BlockEditor (v4 / two-section model)', () => {
   it('deleting an entry with no referencing exits does NOT show a cascade notice', () => {
     const entry1 = seededEntry({ id: 'ent-1', name: 'Alpha' });
     const entry2 = seededEntry({ id: 'ent-2', name: 'Beta' });
-    const exit1 = seededExit({ id: 'x-1', target_entry_block_name: 'Beta' });
+    const exit1 = seededExit({ id: 'x-1', target_entry_block_names: ['Beta'] });
     const seeded = { entries: [entry1, entry2], exits: [exit1] };
     const { onRulesChange, rerender } = renderEditor(seeded);
     const deleteBtn = screen.getByTestId('remove-block-0');
@@ -230,12 +280,30 @@ describe('BlockEditor (v4 / two-section model)', () => {
     expect(screen.queryByTestId('cascade-notice')).toBeNull();
   });
 
+  it('v6 cascade: an exit that also targets a SURVIVING entry is kept, name pruned', () => {
+    const entry1 = seededEntry({ id: 'ent-1', name: 'Alpha' });
+    const entry2 = seededEntry({ id: 'ent-2', name: 'Beta' });
+    // x-1 targets BOTH; x-2 targets only Alpha.
+    const exit1 = seededExit({ id: 'x-1', target_entry_block_names: ['Alpha', 'Beta'] });
+    const exit2 = seededExit({ id: 'x-2', target_entry_block_names: ['Alpha'] });
+    const seeded = { entries: [entry1, entry2], exits: [exit1, exit2] };
+    const { onRulesChange } = renderEditor(seeded);
+    const deleteBtn = screen.getByTestId('remove-block-0'); // deletes Alpha
+    act(() => { fireEvent.click(deleteBtn); });
+    const confirmBtn = screen.getByRole('button', { name: /delete/i });
+    act(() => { fireEvent.click(confirmBtn); });
+    const nextRules = onRulesChange.mock.calls.pop()[0];
+    // x-1 survives (still targets Beta); x-2 removed (only targeted Alpha).
+    expect(nextRules.exits.map((b) => b.id)).toEqual(['x-1']);
+    expect(nextRules.exits[0].target_entry_block_names).toEqual(['Beta']);
+  });
+
   it('exits tab shows count badge reflecting number of exit blocks', () => {
     const seeded = {
       entries: [seededEntry({ id: 'e1' })],
       exits: [
-        seededExit({ id: 'x1', target_entry_block_name: '' }),
-        seededExit({ id: 'x2', target_entry_block_name: '' }),
+        seededExit({ id: 'x1', target_entry_block_names: [] }),
+        seededExit({ id: 'x2', target_entry_block_names: [] }),
       ],
     };
     renderEditor(seeded);
@@ -251,7 +319,7 @@ describe('BlockEditor (v4 / two-section model)', () => {
     renderEditor(seeded, { section: 'exits' });
     // Should be rendering the exit block, not the entry section.
     expect(screen.getByTestId('block-0')).toBeDefined();
-    expect(screen.getByTestId('target-entry-select-0')).toBeDefined();
+    expect(screen.getByTestId('target-entry-select-0-0')).toBeDefined();
   });
 
   it('entry blocks carry their id in a data attribute for picker display', () => {
@@ -351,6 +419,7 @@ describe('BlockEditor (v4 / two-section model)', () => {
       expect('input_id' in block).toBe(false);
       expect('weight' in block).toBe(false);
       expect('target_entry_block_name' in block).toBe(false);
+      expect('target_entry_block_names' in block).toBe(false);
     });
 
     it('reset block header hides input picker, weight input, and target-entry picker', () => {
@@ -367,7 +436,7 @@ describe('BlockEditor (v4 / two-section model)', () => {
       // No weight input
       expect(screen.queryByTestId('block-weight-0')).toBeNull();
       // No target entry picker
-      expect(screen.queryByTestId('target-entry-select-0')).toBeNull();
+      expect(screen.queryByTestId('target-entry-select-0-0')).toBeNull();
       // The block IS rendered (header with status dot + name)
       expect(screen.getByTestId('block-header-0')).toBeDefined();
     });

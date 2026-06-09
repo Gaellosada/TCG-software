@@ -164,7 +164,7 @@ async def test_rolling_warmup_does_not_generate_false_negative_signals():
                     input_id="X",
                     weight=0.0,
                     conditions=(exit_cond,),
-                    target_entry_block_name="Entry",
+                    target_entry_block_names=("Entry",),
                 ),
             ),
         ),

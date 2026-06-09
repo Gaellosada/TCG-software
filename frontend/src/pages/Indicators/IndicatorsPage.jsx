@@ -29,12 +29,14 @@ import {
 import SaveControls, { useAutosave } from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import LockBanner from '../../components/LockBanner';
 import InlineNameInput from '../../components/InlineNameInput';
 import useAbortableAction from '../../hooks/useAbortableAction';
 import useBackendAutosave from '../../hooks/useBackendAutosave';
+import useEntityLock from '../../hooks/useEntityLock';
 import {
   createIndicator, listIndicators, updateIndicator, archiveIndicator,
-  describePersistenceError,
+  setIndicatorLocked, describePersistenceError, isLockedError,
 } from '../../api/persistence';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import { classifyFetchError } from '../../utils/fetchError';
@@ -185,6 +187,7 @@ function unpackBackendIndicator(doc) {
   return {
     id: doc.id,
     name: doc.name || 'Untitled',
+    locked: typeof doc.locked === 'boolean' ? doc.locked : false,
     code,
     doc: typeof def.doc === 'string' ? def.doc : '',
     params: reconcileParams(def.params || {}, spec.params),
@@ -382,6 +385,11 @@ function IndicatorsPage() {
     && (lastHydratedPayloadRef.current.id !== selectedId
         || lastHydratedPayloadRef.current.payload !== selectedPayloadSerialized);
 
+  // Ref to the autosave hook's reset() so the locked-save handler (declared
+  // before the hook) can clear a transient 'saving'/'error' status when it
+  // flips the indicator to locked. Seeded just below the hook.
+  const resetCloudStatusRef = useRef(() => {});
+
   const handleBackendSave = useCallback(async (payloadStr, { signal } = {}) => {
     if (!selectedId || !payloadStr) return;
     const body = JSON.parse(payloadStr);
@@ -389,6 +397,15 @@ function IndicatorsPage() {
       await updateIndicator(selectedId, body, { signal });
     } catch (err) {
       if (err && err.name === 'AbortError') throw err;
+      // 423 Locked: flip the LOCAL locked flag so the editor goes read-only
+      // with the normal lock banner instead of a generic error. Defaults
+      // (readonly) are never the autosave target, so no readonly guard here.
+      if (isLockedError(err)) {
+        setIndicators((prev) => prev.map((ind) => (ind.id !== selectedId ? ind : { ...ind, locked: true })));
+        setCloudError(null);
+        resetCloudStatusRef.current();
+        return;
+      }
       setCloudError(describePersistenceError(err));
       // eslint-disable-next-line no-console
       console.error('updateIndicator (autosave) failed:', err);
@@ -404,10 +421,15 @@ function IndicatorsPage() {
     flush: flushCloudSave,
     reset: resetCloudStatus,
   } = useBackendAutosave({
-    enabled: autosave && backendDirty,
+    // Suspend autosave while the indicator is locked — the server would 423,
+    // and the editor is already read-only. Mirrors SignalsPage. Without this,
+    // flipping ``locked`` on a 423 (below) would re-fire the same save in a
+    // loop since the lock flag is not part of the dirty-tracked payload.
+    enabled: autosave && backendDirty && !(selectedIndicator && selectedIndicator.locked),
     payload: selectedPayloadSerialized,
     onSave: handleBackendSave,
   });
+  resetCloudStatusRef.current = resetCloudStatus;
 
   // When the selection changes, reset cloud status and seed the
   // hydrated ref so the new selection doesn't trigger a spurious save.
@@ -558,6 +580,29 @@ function IndicatorsPage() {
       return { ...ind, name: newName };
     }));
   }, []);
+
+  // Shared lock-handler hook (same shape across all three pages). Indicators
+  // uses an OPTIMISTIC flip + rollback; readonly defaults never carry a lock
+  // toggle, so the readonly guard here is purely defensive.
+  const applyIndicatorLocked = useCallback((id, lockedVal) => {
+    setIndicators((prev) => prev.map((ind) => {
+      if (ind.id !== id) return ind;
+      if (ind.readonly) return ind;
+      return { ...ind, locked: lockedVal };
+    }));
+  }, []);
+  const handleSetIndicatorLocked = useEntityLock({
+    // Lazy wrapper — defers the api import access to call time so test
+    // mocks that omit setIndicatorLocked don't trip a render-time getter.
+    setLocked: useCallback((id, next) => setIndicatorLocked(id, next), []),
+    applyLocked: applyIndicatorLocked,
+    optimistic: true,
+    onError: useCallback((err) => {
+      setCloudError(describePersistenceError(err));
+      // eslint-disable-next-line no-console
+      console.error('setIndicatorLocked failed:', err);
+    }, []),
+  });
 
   const handleCodeChange = useCallback((code) => {
     setIndicators((prev) => prev.map((ind) => {
@@ -888,19 +933,27 @@ function IndicatorsPage() {
           onAdd={handleAdd}
           onDelete={handleDelete}
           onRename={handleRename}
+          onSetIndicatorLocked={handleSetIndicatorLocked}
           search={search}
           onSearchChange={setSearch}
           currentAssetType={currentAssetType}
         />
       </div>
       <div className={styles.editorPanel}>
+        {selectedIndicator && !selectedIndicator.readonly && selectedIndicator.locked && (
+          <LockBanner
+            entityLabel="indicator"
+            className={styles.lockBanner}
+            testId="editor-lock-banner"
+          />
+        )}
         <EditorPanel
           indicatorId={selectedIndicator?.id ?? null}
           code={selectedIndicator?.code ?? ''}
           onCodeChange={handleCodeChange}
           doc={selectedIndicator?.doc ?? ''}
           onDocChange={handleDocChange}
-          readOnly={!selectedIndicator || !!selectedIndicator?.readonly}
+          readOnly={!selectedIndicator || !!selectedIndicator?.readonly || !!selectedIndicator?.locked}
           viewMode={viewMode}
           onViewModeChange={setViewMode}
         />
@@ -913,6 +966,7 @@ function IndicatorsPage() {
             autosave={autosave}
             onSave={commitSave}
             onToggleAutosave={setAutosave}
+            saveDisabled={!!(selectedIndicator && !selectedIndicator.readonly && selectedIndicator.locked)}
             leftSlot={
               <InlineNameInput
                 entity={selectedIndicator}

@@ -21,14 +21,17 @@ Request::
     }
 
 Where ``Block = {id, name, input_id, weight, conditions,
-target_entry_block_name?}``. ``weight`` is a signed percentage in
+target_entry_block_names?}``. ``weight`` is a signed percentage in
 ``[-100, +100]``; sign decides long/short. ``id`` is a stable
 frontend-generated UUID. ``name`` is a user-editable string used by
-exits to reference entries. ``target_entry_block_name`` is REQUIRED on
-exits and FORBIDDEN on entries, and must reference an existing entry
-block name within the same signal. ``input_id`` is REQUIRED on entries
-and FORBIDDEN on exits — an exit's operating input is derived from its
-target entry's ``input_id`` at validation time.
+exits to reference entries. ``target_entry_block_names`` (list) holds
+one or more entry names and is REQUIRED on exits (≥1) and FORBIDDEN on
+entries; every name must reference an existing entry block name within
+the same signal (cross-input targets are allowed). The legacy singular
+``target_entry_block_name`` (string) is still accepted and normalised to
+a one-element list. ``input_id`` is REQUIRED on entries and FORBIDDEN on
+exits — an exit's operating inputs are derived from its targeted
+entries' ``input_id`` values at validation time.
 
 Response — per-input positions + per-block events::
 
@@ -52,7 +55,7 @@ Response — per-input positions + per-block events::
           "fired_indices":   int[],           // bars where AND-condition fired
           "latched_indices": int[],           // "effective" bars (see below)
           "active_indices":  int[],           // entries only: bars with latch open
-          "target_entry_block_name": str | null
+          "target_entry_block_names": str[]   // exits: targeted entry names; [] otherwise
         }
       ],
       "indicators": [
@@ -181,18 +184,30 @@ class _ConditionIn(BaseModel):
 class _BlockIn(BaseModel):
     """v4 block: stable ``id`` + ``name`` + ``input_id`` + signed ``weight``.
 
-    On exit blocks ``target_entry_block_name`` references the entry
-    block (by name) whose latch this exit clears. Entries must leave
-    it unset.
-    """
+    On exit blocks ``target_entry_block_names`` references the entry
+    blocks (by name) whose latches this exit clears — one or more, and
+    they may span multiple inputs. Entries must leave it empty.
 
-    # API accepts orphaned target_entry_block_name for persistence flexibility; engine no-ops them via _usable_exit.
+    Legacy ``target_entry_block_name`` (singular string) is still
+    accepted on the wire for backward compatibility. The two encodings
+    are reconciled by SILENT normalisation, never by a conflict check: if
+    the plural key is present (even as an explicit empty list) it wins and
+    the singular is dropped; otherwise a non-empty singular is normalised
+    to a one-element list. Sending both keys is therefore accepted — the
+    singular is simply ignored whenever the plural is present, with no
+    rejection on disagreement (intentional back-compat behaviour).
+    """
 
     id: str = ""
     name: str = ""
     conditions: list[_ConditionIn] = Field(default_factory=list)
     input_id: str = ""
     weight: float = 0.0
+    # New canonical exit-target field (one or more entry names).
+    target_entry_block_names: list[str] | None = None
+    # Legacy singular exit-target field — accepted for backward
+    # compatibility and normalised into ``target_entry_block_names`` at
+    # parse time (plural wins when both present).
     target_entry_block_name: str | None = None
     enabled: bool = True
     description: str = ""
@@ -672,11 +687,13 @@ def _parse_blocks(
     """Parse request-shape blocks into typed :class:`Block` tuples.
 
     Validates v4 invariants:
-      * entries: ``target_entry_block_name`` must be unset; ``weight``
+      * entries: ``target_entry_block_names`` must be unset; ``weight``
         is a signed percentage in ``[-100, +100]`` and ``!= 0``.
         Non-empty ``name`` values must be unique across entries.
-      * exits: ``target_entry_block_name`` is required and must
-        reference a name in ``entry_names``.
+      * exits: ``target_entry_block_names`` is required (≥1 name), every
+        name must reference a name in ``entry_names``, and names must be
+        unique within the exit. The legacy singular
+        ``target_entry_block_name`` is accepted and normalised.
       * both: ``id`` is required (non-empty) on any block that has at
         least one condition. Empty-id + empty-conditions blocks are
         the "placeholder" state from the UI and are passed through as
@@ -697,7 +714,28 @@ def _parse_blocks(
         name = blk.name or ""
         iid = blk.input_id or ""
         weight = float(blk.weight)
-        tgt_name = blk.target_entry_block_name or None
+        # Normalise exit targets: plural key wins when present, else fall
+        # back to the legacy singular (one-element list), else empty. The
+        # plural may be an explicit empty list — that still counts as
+        # "the plural key was supplied" so the singular is NOT consulted.
+        if blk.target_entry_block_names is not None:
+            tgt_names: tuple[str, ...] = tuple(blk.target_entry_block_names)
+        elif blk.target_entry_block_name:
+            tgt_names = (blk.target_entry_block_name,)
+        else:
+            tgt_names = ()
+        # ``has_target`` flags whether a NON-EMPTY exit target was supplied
+        # (by either key) — used by the placeholder / reset / entry checks
+        # that must reject a target on the wrong block kind. It keys off the
+        # truthiness of BOTH encodings symmetrically: an explicit empty
+        # plural list (``[]``) is treated the SAME as an empty/absent
+        # singular (no target supplied), so the two encodings behave
+        # identically on entry/reset blocks. (Exits separately require ≥1
+        # target via the ``not tgt_names`` check below, so an empty list on
+        # an exit is still rejected there, not here.)
+        has_target = bool(blk.target_entry_block_names) or bool(
+            blk.target_entry_block_name
+        )
         legacy_tgt = blk.target_entry_block_id or None
         rrb = blk.requires_reset_block_id or None
         rrc = blk.requires_reset_count
@@ -705,7 +743,7 @@ def _parse_blocks(
         # Placeholder blocks (no conditions + no input) are accepted
         # as sentinels; they skip evaluation. Otherwise full validation.
         placeholder = (
-            not conds and not iid and not bid and weight == 0.0 and tgt_name is None
+            not conds and not iid and not bid and weight == 0.0 and not has_target
         )
         if not placeholder:
             if not bid:
@@ -724,7 +762,7 @@ def _parse_blocks(
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set weight"
                     )
-                if tgt_name is not None:
+                if has_target:
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set target_entry_block_name"
                     )
@@ -748,7 +786,7 @@ def _parse_blocks(
                         f"{path}: reset blocks must not set requires_reset_count"
                     )
             elif is_entry:
-                if tgt_name is not None:
+                if has_target:
                     raise SignalValidationError(
                         f"{path}: entry blocks must not set 'target_entry_block_name'"
                     )
@@ -793,21 +831,39 @@ def _parse_blocks(
                 if legacy_tgt is not None:
                     raise SignalValidationError(
                         f"{path}: exit blocks must use "
-                        f"'target_entry_block_name' (string), not the "
-                        f"removed 'target_entry_block_id' (uuid)"
+                        f"'target_entry_block_names' (list of strings), not "
+                        f"the removed 'target_entry_block_id' (uuid)"
                     )
-                if not tgt_name:
+                if not tgt_names:
                     raise SignalValidationError(
-                        f"{path}: exit blocks require 'target_entry_block_name'"
+                        f"{path}: exit blocks require at least one "
+                        f"'target_entry_block_name' (use "
+                        f"'target_entry_block_names')"
                     )
+                # Reject duplicate target names within a single exit — an
+                # exit clearing the same entry twice is a malformed
+                # payload (the second clear is always a no-op).
+                seen_targets: set[str] = set()
+                for tname in tgt_names:
+                    if tname in seen_targets:
+                        raise SignalValidationError(
+                            f"{path}: duplicate target_entry_block_name "
+                            f"{tname!r} in exit block — each target must "
+                            f"appear at most once"
+                        )
+                    seen_targets.add(tname)
                 assert entry_names is not None
-                if tgt_name not in entry_names:
-                    raise SignalValidationError(
-                        f"{path}: target_entry_block_name {tgt_name!r} "
-                        f"does not match any entry block name in this "
-                        f"signal's rules; declared entry names: "
-                        f"{sorted(entry_names)!r}"
-                    )
+                # Every target must reference a declared entry name. Reject
+                # dangling names loudly (engine tolerates them, API does
+                # not) so the user sees the typo immediately.
+                for tname in tgt_names:
+                    if tname not in entry_names:
+                        raise SignalValidationError(
+                            f"{path}: target_entry_block_name {tname!r} "
+                            f"does not match any entry block name in this "
+                            f"signal's rules; declared entry names: "
+                            f"{sorted(entry_names)!r}"
+                        )
             # Per-block reset binding (entries+exits only). The
             # ``is_reset`` branch already rejects non-None values; here
             # we enforce type + cross-reference against the signal's
@@ -844,7 +900,7 @@ def _parse_blocks(
                 conditions=conds,
                 input_id=iid,
                 weight=weight,
-                target_entry_block_name=tgt_name,
+                target_entry_block_names=tgt_names,
                 enabled=bool(blk.enabled),
                 description=str(blk.description or ""),
                 requires_reset_block_id=rrb,
@@ -1434,7 +1490,7 @@ async def compute_signal(
                 "fired_indices": [int(i) for i in ev.fired_indices],
                 "latched_indices": [int(i) for i in ev.latched_indices],
                 "active_indices": [int(i) for i in ev.active_indices],
-                "target_entry_block_name": ev.target_entry_block_name,
+                "target_entry_block_names": list(ev.target_entry_block_names),
             }
         )
 

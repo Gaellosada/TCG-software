@@ -92,6 +92,7 @@ vi.mock('../../api/persistence', () => ({
   updatePortfolio: (...args) => mockUpdatePortfolio(...args),
   archivePortfolio: (...args) => mockArchivePortfolio(...args),
   describePersistenceError: (err) => (err && err.message) || String(err),
+  isLockedError: (err) => !!err && err.status === 423,
 }));
 
 import PortfolioPage from './PortfolioPage';
@@ -177,6 +178,65 @@ describe('<PortfolioPage> — backend hydrate + autosave', () => {
       expect(body.legs[1].weight).toBe(40);
       expect(body.rebalance).toBe('monthly');
       expect(body.category).toBe('RESEARCH');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('<PortfolioPage> — 423 on autosave flips to read-only', () => {
+  it('shows the lock banner when the debounced autosave is rejected with 423', async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => { render(<PortfolioPage />); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      // Load the persisted (unlocked) portfolio — no banner yet.
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('load-portfolio-ptf-1'));
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.queryByTestId('portfolio-lock-banner')).toBeNull();
+
+      // Next autosave rejects with HTTP 423 (locked elsewhere).
+      const e = new Error('Document is locked');
+      e.status = 423;
+      mockUpdatePortfolio.mockRejectedValueOnce(e);
+
+      // Edit a leg to make it dirty, then advance past the debounce.
+      await act(async () => { capturedUpdateLeg(0, { weight: 75 }); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      expect(mockUpdatePortfolio).toHaveBeenCalled();
+      // The 423 flips the LOCAL locked flag → read-only lock banner appears.
+      expect(screen.getByTestId('portfolio-lock-banner')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a NON-locked autosave error (500) does NOT show the lock banner', async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => { render(<PortfolioPage />); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('load-portfolio-ptf-1'));
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      const e = new Error('boom');
+      e.status = 500;
+      mockUpdatePortfolio.mockRejectedValueOnce(e);
+
+      await act(async () => { capturedUpdateLeg(0, { weight: 75 }); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      expect(mockUpdatePortfolio).toHaveBeenCalled();
+      // Generic error must NOT flip the editor to read-only.
+      expect(screen.queryByTestId('portfolio-lock-banner')).toBeNull();
     } finally {
       vi.useRealTimers();
     }

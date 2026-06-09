@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import LockToggle from '../../components/LockToggle';
 import styles from './IndicatorsList.module.css';
 import { LIST_COLLAPSED_KEY } from './storageKeys';
 
@@ -21,15 +22,16 @@ import { LIST_COLLAPSED_KEY } from './storageKeys';
  * remains visible even when CUSTOM is collapsed.
  *
  * Props:
- *   indicators        {Array}   list of indicator objects { id, name, readonly?, compatibleAssetTypes? }
- *   selectedId        {string}  currently selected indicator id
- *   onSelect          {Function} (id) => void
- *   onAdd             {Function} () => void
- *   onDelete          {Function} (id) => void (caller handles confirmation)
- *   onRename          {Function} (id, newName) => void
- *   search            {string}
- *   onSearchChange    {Function} (q) => void
- *   currentAssetType  {'index'|'equity'|'option'|null}
+ *   indicators           {Array}    list of indicator objects { id, name, readonly?, locked?, compatibleAssetTypes? }
+ *   selectedId           {string}   currently selected indicator id
+ *   onSelect             {Function} (id) => void
+ *   onAdd                {Function} () => void
+ *   onDelete             {Function} (id) => void (caller handles confirmation)
+ *   onRename             {Function} (id, newName) => void
+ *   onSetIndicatorLocked {Function} (id, nextBool) => void — wired to the lock API
+ *   search               {string}
+ *   onSearchChange       {Function} (q) => void
+ *   currentAssetType     {'index'|'equity'|'option'|null}
  *                     the inferred asset_type of the currently-selected
  *                     indicator's seriesMap. When non-null, indicator
  *                     rows whose ``compatibleAssetTypes`` array does
@@ -70,6 +72,7 @@ function IndicatorsList({
   onAdd,
   onDelete,
   onRename,
+  onSetIndicatorLocked,
   search,
   onSearchChange,
   currentAssetType = null,
@@ -119,6 +122,9 @@ function IndicatorsList({
 
   function renderRow(ind) {
     const isRenaming = renamingId === ind.id;
+    // Normalised lock flag — single source for the locked-disable idiom,
+    // matching SignalsList/PersistedPortfolioPanel (``const locked = !!…``).
+    const locked = !!ind.locked;
     // Asset-type compat decoration. Only applies when:
     //   * the parent passed a non-null currentAssetType, AND
     //   * this indicator declares a non-empty compatibleAssetTypes
@@ -186,9 +192,10 @@ function IndicatorsList({
         {!ind.readonly && !isRenaming && (
           <button
             className={styles.iconBtn}
-            onClick={(e) => { e.stopPropagation(); startRename(ind); }}
-            title="Rename"
+            onClick={(e) => { e.stopPropagation(); if (!locked) startRename(ind); }}
+            title={locked ? 'Locked — unlock to rename' : 'Rename'}
             aria-label={`Rename ${ind.name}`}
+            disabled={locked}
           >
             ✎
           </button>
@@ -196,12 +203,20 @@ function IndicatorsList({
         {!ind.readonly && !isRenaming && (
           <button
             className={styles.deleteBtn}
-            onClick={(e) => { e.stopPropagation(); onDelete(ind.id); }}
-            title="Delete"
+            onClick={(e) => { e.stopPropagation(); if (!locked) onDelete(ind.id); }}
+            title={locked ? 'Locked — unlock to delete' : 'Delete'}
             aria-label={`Delete ${ind.name}`}
+            disabled={locked}
           >
             ×
           </button>
+        )}
+        {!ind.readonly && !isRenaming && onSetIndicatorLocked && (
+          <LockToggle
+            locked={locked}
+            onSetLocked={(next) => onSetIndicatorLocked(ind.id, next)}
+            entityLabel="indicator"
+          />
         )}
       </div>
     );

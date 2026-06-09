@@ -56,6 +56,7 @@ from tcg.persistence import (
     DocumentTooLargeError,
     WriteRepository,
 )
+from tcg.persistence.repository import LockedError
 from tcg.types.persistence import (
     BasketDoc,
     Category,
@@ -368,6 +369,18 @@ class PortfolioUpdateIn(_PortfolioFields):
     pass
 
 
+class LockIn(_BaseWriteModel):
+    """Body for the dedicated ``PUT .../{id}/lock`` endpoints.
+
+    Carries ONLY the desired ``locked`` state. This is the single
+    sanctioned way to mutate the lock flag — it bypasses the repository
+    lock guard so a locked doc can be unlocked. ``extra="forbid"``
+    (inherited) means no other field can ride along on this request.
+    """
+
+    locked: bool
+
+
 # ---------------------------------------------------------------------------
 # Basket wire models
 # ---------------------------------------------------------------------------
@@ -532,6 +545,7 @@ class IndicatorOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted: bool
+    locked: bool
 
 
 class SignalOut(BaseModel):
@@ -545,6 +559,7 @@ class SignalOut(BaseModel):
     rules: dict
     settings: dict
     description: str
+    locked: bool
 
 
 class PortfolioOut(BaseModel):
@@ -556,6 +571,7 @@ class PortfolioOut(BaseModel):
     updated_at: datetime
     legs: list[dict]
     rebalance: str
+    locked: bool
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +588,7 @@ def _indicator_to_out(doc: IndicatorDoc) -> IndicatorOut:
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         deleted=doc.deleted,
+        locked=doc.locked,
     )
 
 
@@ -587,6 +604,7 @@ def _signal_to_out(doc: SignalDoc) -> SignalOut:
         rules=doc.rules,
         settings=doc.settings,
         description=doc.description,
+        locked=doc.locked,
     )
 
 
@@ -600,6 +618,7 @@ def _portfolio_to_out(doc: PortfolioDoc) -> PortfolioOut:
         updated_at=doc.updated_at,
         legs=list(doc.legs),
         rebalance=doc.rebalance,
+        locked=doc.locked,
     )
 
 
@@ -748,6 +767,12 @@ async def update_indicator(
         created_at=existing.created_at,
         updated_at=existing.updated_at,  # repo bumps it
         deleted=body.deleted,
+        # Preserve the stored lock flag verbatim — the lock state is
+        # owned exclusively by the /lock endpoint, never the update
+        # body. (The repo guard already rejects updates to a locked
+        # doc, so this only ever carries ``False`` through, but we keep
+        # it faithful to stored state rather than relying on the default.)
+        locked=existing.locked,
     )
     try:
         stored = await repo.update(updated, expected_updated_at=existing.updated_at)
@@ -759,6 +784,9 @@ async def update_indicator(
         # Optimistic CAS: another writer touched the doc between our
         # read and our replace — refuse to clobber.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LockedError as exc:
+        # The stored doc is locked — refuse the mutation with 423.
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     stored = _checked(stored, IndicatorDoc)
@@ -771,6 +799,23 @@ async def archive_indicator(doc_id: DocId, repo: RepoDep) -> None:
         await repo.archive(DocType.INDICATOR.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LockedError as exc:
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
+
+
+@router.put("/indicators/{doc_id}/lock", response_model=IndicatorOut)
+async def lock_indicator(doc_id: DocId, body: LockIn, repo: RepoDep) -> IndicatorOut:
+    """Set the indicator's ``locked`` flag (the only way to mutate it).
+
+    Bypasses the lock guard so a locked indicator can be unlocked.
+    Mutates ONLY ``locked`` (and ``updated_at``). 404 if missing.
+    """
+    try:
+        stored = await repo.set_locked(DocType.INDICATOR.value, doc_id, body.locked)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    stored = _checked(stored, IndicatorDoc)
+    return _indicator_to_out(stored)
 
 
 # ---------------------------------------------------------------------------
@@ -857,6 +902,9 @@ async def update_signal(
         rules=body.rules,
         settings=body.settings,
         description=body.description,
+        # See update_indicator: lock state is owned by /lock, never the
+        # update body — preserve the stored flag verbatim.
+        locked=existing.locked,
     )
     try:
         stored = await repo.update(updated, expected_updated_at=existing.updated_at)
@@ -864,6 +912,8 @@ async def update_signal(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LockedError as exc:
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     stored = _checked(stored, SignalDoc)
@@ -876,6 +926,23 @@ async def archive_signal(doc_id: DocId, repo: RepoDep) -> None:
         await repo.archive(DocType.SIGNAL.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LockedError as exc:
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
+
+
+@router.put("/signals/{doc_id}/lock", response_model=SignalOut)
+async def lock_signal(doc_id: DocId, body: LockIn, repo: RepoDep) -> SignalOut:
+    """Set the signal's ``locked`` flag (the only way to mutate it).
+
+    Bypasses the lock guard so a locked signal can be unlocked.
+    Mutates ONLY ``locked`` (and ``updated_at``). 404 if missing.
+    """
+    try:
+        stored = await repo.set_locked(DocType.SIGNAL.value, doc_id, body.locked)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    stored = _checked(stored, SignalDoc)
+    return _signal_to_out(stored)
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +1025,9 @@ async def update_portfolio(
         updated_at=existing.updated_at,
         legs=tuple(body.legs),
         rebalance=body.rebalance,
+        # See update_indicator: lock state is owned by /lock, never the
+        # update body — preserve the stored flag verbatim.
+        locked=existing.locked,
     )
     try:
         stored = await repo.update(updated, expected_updated_at=existing.updated_at)
@@ -965,6 +1035,8 @@ async def update_portfolio(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LockedError as exc:
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
     except DocumentTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     stored = _checked(stored, PortfolioDoc)
@@ -977,6 +1049,23 @@ async def archive_portfolio(doc_id: DocId, repo: RepoDep) -> None:
         await repo.archive(DocType.PORTFOLIO.value, doc_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LockedError as exc:
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
+
+
+@router.put("/portfolios/{doc_id}/lock", response_model=PortfolioOut)
+async def lock_portfolio(doc_id: DocId, body: LockIn, repo: RepoDep) -> PortfolioOut:
+    """Set the portfolio's ``locked`` flag (the only way to mutate it).
+
+    Bypasses the lock guard so a locked portfolio can be unlocked.
+    Mutates ONLY ``locked`` (and ``updated_at``). 404 if missing.
+    """
+    try:
+        stored = await repo.set_locked(DocType.PORTFOLIO.value, doc_id, body.locked)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    stored = _checked(stored, PortfolioDoc)
+    return _portfolio_to_out(stored)
 
 
 # ---------------------------------------------------------------------------

@@ -85,7 +85,9 @@ class IndicatorDoc:
 
     ``definition`` is an opaque dict — the persistence layer does not
     interpret its contents. ``deleted`` is the soft-delete flag (no
-    category for indicators).
+    category for indicators). ``locked`` is the write-lock flag: a
+    locked doc cannot be updated, recategorized, or archived/deleted —
+    only the dedicated lock endpoint may flip it back.
     """
 
     id: str
@@ -95,6 +97,7 @@ class IndicatorDoc:
     created_at: datetime
     updated_at: datetime
     deleted: bool = False
+    locked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +107,9 @@ class SignalDoc:
     Editable payload fields (``inputs`` / ``rules`` / ``settings`` /
     ``description``) are opaque to this module. The frontend owns
     their inner shape. Persisted as tuples / dicts so the frozen
-    dataclass stays immutable.
+    dataclass stays immutable. ``locked`` is the write-lock flag:
+    a locked signal cannot be updated, recategorized, or archived —
+    only the dedicated lock endpoint may flip it back.
     """
 
     id: str
@@ -117,6 +122,7 @@ class SignalDoc:
     rules: dict = field(default_factory=dict)
     settings: dict = field(default_factory=dict)
     description: str = ""
+    locked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +130,9 @@ class PortfolioDoc:
     """Persisted portfolio — the full editable state of one portfolio.
 
     Editable payload fields (``legs`` / ``rebalance``) are opaque to
-    this module. The frontend owns their inner shape.
+    this module. The frontend owns their inner shape. ``locked`` is the
+    write-lock flag: a locked portfolio cannot be updated, recategorized,
+    or archived — only the dedicated lock endpoint may flip it back.
     """
 
     id: str
@@ -135,6 +143,7 @@ class PortfolioDoc:
     updated_at: datetime
     legs: tuple[dict, ...] = field(default_factory=tuple)
     rebalance: str = "none"
+    locked: bool = False
 
 
 @dataclass(frozen=True, slots=True)

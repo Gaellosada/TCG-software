@@ -8,15 +8,17 @@ lists:
   * ``rules.entries`` -- blocks with stable ``id``, user-editable
     ``name``, and signed ``weight`` in ``[-100, +100]``;
     ``sign(weight)`` decides long/short.
-  * ``rules.exits`` -- blocks that each target *exactly one* entry via
-    ``target_entry_block_name``. When an exit's AND-condition fires at
-    bar ``t``, the referenced entry block's latch is cleared; no other
-    latches are touched (no "same-side-under-input" blanket clear).
+  * ``rules.exits`` -- blocks that each target *one or more* entries via
+    ``target_entry_block_names``. When an exit's AND-condition fires at
+    bar ``t``, the latch of every targeted entry that is currently open
+    is cleared; no other latches are touched (no "same-side-under-input"
+    blanket clear). Targeted entries may live on different inputs.
 
 Per-bar execution (declaration order within each list):
 
   1. **Clear pass.** For every usable exit block whose condition fires
-     at ``t``: look up the entry latch by name → id, if True set False.
+     at ``t``: for each targeted entry name, look up its latch by
+     name → id, and if True set False.
   2. **Entry pass.** For every usable entry block whose condition
      fires at ``t`` AND whose latch is currently False: set latch True.
      Leverage is allowed — no budget cap, no same-bar conflict logic
@@ -35,13 +37,14 @@ A block is "usable" iff
   * ``id`` is non-empty (required for stable tracking / exit targeting);
   * entry blocks require ``input_id`` resolves to a declared Input,
     ``weight != 0`` AND ``|weight| <= 100``;
-  * exit blocks require ``target_entry_block_name`` referencing a
-    usable entry block's name in the same signal's rules (a dangling
-    target makes the exit a no-op — the engine tolerates this so
-    latent bad state degrades gracefully; the API layer rejects it
-    with HTTP 400). Exit blocks do NOT carry their own ``input_id``;
-    the operating input is always derived from the target entry's
-    ``input_id``.
+  * exit blocks require ``target_entry_block_names`` with at least one
+    name referencing a usable entry block's name in the same signal's
+    rules (any name not resolving to a usable entry is ignored; an exit
+    with no resolvable target is a no-op — the engine tolerates this so
+    latent bad state degrades gracefully; the API layer rejects dangling
+    targets with HTTP 400). Exit blocks do NOT carry their own
+    ``input_id``; the operating inputs are always derived from the
+    targeted entries' ``input_id`` values (possibly several).
   * every operand's ``input_id`` resolves;
   * the bound Input's instrument is fully configured.
 
@@ -322,29 +325,61 @@ def _operand_key(
 # ---------------------------------------------------------------------------
 
 
-def _walk_operands(signal: Signal) -> list[Operand]:
-    # Skip disabled blocks so a disabled block referencing a broken
-    # indicator does not trigger a fetch — matches the "disabled ≡ deleted"
-    # parity invariant from _usable_entry / _usable_exit.
+def _walk_operands(
+    signal: Signal,
+    inputs: dict[str, Input],
+    entry_names: set[str],
+) -> list[Operand]:
+    # Skip blocks that the engine drops from its block lists so their
+    # operands are never fetched — a dropped block contributes nothing to
+    # positions/events, so walking its operands is at best wasteful and at
+    # worst harmful (it can fetch/raise on data no usable block needs).
+    #
+    # Gating differs by block kind, on purpose:
+    #   * EXITS use the full ``_usable_exit`` predicate. This is the S1
+    #     fix: an ENABLED exit whose targets ALL dangle is usable()==False
+    #     and is dropped from ``exit_blocks`` (becomes a no-op), so its
+    #     operands must NOT be walked — otherwise a no-op exit could fetch
+    #     or raise. Exits carry no input_id of their own and surface no
+    #     input-resolution errors, so skipping them loses no validation.
+    #   * ENTRIES and RESETS gate on ``enabled`` ONLY (NOT full usability).
+    #     An enabled entry referencing an UNDECLARED input_id is dropped
+    #     from ``entry_blocks`` by ``_usable_entry``, but walking its
+    #     operand is exactly how that user error surfaces as a
+    #     SignalValidationError (the API has no separate declared-input
+    #     check; see test_unknown_input_id_validation). Gating entries on
+    #     full usability would silently swallow that error — a regression.
+    #     Disabled entries/resets are still skipped (the ``enabled`` gate),
+    #     preserving the "disabled ≡ deleted" no-fetch behaviour.
     out: list[Operand] = []
-    for rules in (signal.rules.entries, signal.rules.exits, signal.rules.resets):
-        for block in rules:
-            if not block.enabled:
-                continue
-            for cond in block.conditions:
-                if isinstance(cond, (CompareCondition, CrossCondition)):
-                    out.append(cond.lhs)
-                    out.append(cond.rhs)
-                elif isinstance(cond, InRangeCondition):
-                    out.append(cond.operand)
-                    out.append(cond.min)
-                    out.append(cond.max)
-                elif isinstance(cond, RollingCondition):
-                    out.append(cond.operand)
-                else:
-                    raise SignalValidationError(
-                        f"unknown condition type: {type(cond).__name__}"
-                    )
+    for block in signal.rules.exits:
+        if not _usable_exit(block, inputs, entry_names):
+            continue
+        out.extend(_block_operands(block))
+    for block in (*signal.rules.entries, *signal.rules.resets):
+        if not block.enabled:
+            continue
+        out.extend(_block_operands(block))
+    return out
+
+
+def _block_operands(block: Block) -> list[Operand]:
+    """Return every operand referenced by a block's conditions."""
+    out: list[Operand] = []
+    for cond in block.conditions:
+        if isinstance(cond, (CompareCondition, CrossCondition)):
+            out.append(cond.lhs)
+            out.append(cond.rhs)
+        elif isinstance(cond, InRangeCondition):
+            out.append(cond.operand)
+            out.append(cond.min)
+            out.append(cond.max)
+        elif isinstance(cond, RollingCondition):
+            out.append(cond.operand)
+        else:
+            raise SignalValidationError(
+                f"unknown condition type: {type(cond).__name__}"
+            )
     return out
 
 
@@ -606,7 +641,7 @@ def _usable_reset(block: Block) -> bool:
     """Reset block is usable iff it has id + ≥1 condition AND is enabled.
 
     Reset blocks are signal-global: they carry no ``input_id``, no
-    ``weight``, no ``target_entry_block_name``. Those fields, if
+    ``weight``, no ``target_entry_block_names``. Those fields, if
     present, are ignored at the engine layer (API layer rejects them
     at parse time).
     """
@@ -620,11 +655,15 @@ def _usable_reset(block: Block) -> bool:
 
 
 def _usable_exit(block: Block, inputs: dict[str, Input], entry_names: set[str]) -> bool:
-    """Exit block is usable iff it has id + conditions AND
-    target_entry_block_name references a usable entry's name AND is enabled.
+    """Exit block is usable iff it is enabled, has an id, has conditions,
+    AND at least one name in ``target_entry_block_names`` references a
+    usable entry's name.
 
-    Exit blocks do not carry their own ``input_id``; the operating input
-    is derived from the target entry at execution time.
+    Names that do not resolve to a usable entry are tolerated (ignored at
+    the clear pass); an exit whose targets ALL fail to resolve is not
+    usable. Exit blocks do not carry their own ``input_id``; the
+    operating inputs are derived from the targeted entries at execution
+    time (and may span multiple inputs).
     """
     if not block.enabled:
         return False
@@ -632,26 +671,31 @@ def _usable_exit(block: Block, inputs: dict[str, Input], entry_names: set[str]) 
         return False
     if not block.conditions:
         return False
-    if not block.target_entry_block_name:
-        return False
-    if block.target_entry_block_name not in entry_names:
-        return False
-    return True
+    # At least one target must resolve to a usable entry name.
+    return any(name in entry_names for name in block.target_entry_block_names)
 
 
-def _exit_input_id(exit_block: Block, entries_by_name: dict[str, Block]) -> str:
-    """Return the operating input id for an exit block, derived from its
-    target entry.
+def _exit_input_ids(exit_block: Block, entries_by_name: dict[str, Block]) -> list[str]:
+    """Return the operating input ids for an exit block, derived from its
+    targeted entries (one per resolvable target, de-duplicated, order
+    preserved).
 
     Callers must only pass exit blocks that are already known to be
-    usable (i.e. ``target_entry_block_name`` resolves in
-    ``entries_by_name``); this helper does not re-validate. Returns
-    the target entry's ``input_id``.
+    usable (i.e. at least one name resolves in ``entries_by_name``);
+    targets that do not resolve are skipped. An exit targeting entries on
+    multiple inputs yields multiple input ids.
     """
-    target = exit_block.target_entry_block_name
-    assert target is not None, "exit_block must have target_entry_block_name"
-    entry = entries_by_name[target]
-    return entry.input_id
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in exit_block.target_entry_block_names:
+        entry = entries_by_name.get(name)
+        if entry is None:
+            continue
+        if entry.input_id in seen:
+            continue
+        seen.add(entry.input_id)
+        out.append(entry.input_id)
+    return out
 
 
 def _eval_block_activity(
@@ -708,9 +752,13 @@ class BlockEvent:
     * ``active_indices``: entries only — bars where this entry's latch
       was True *at emission time* (i.e. contributed to position[t]).
       Empty for exit and reset blocks.
-    * ``target_entry_block_name``: exits only — the name of the entry
-      this exit targets. ``None`` on entries and resets. For resets the
-      ``input_id`` field is always ``""`` (resets are signal-global).
+    * ``target_entry_block_names``: exits only — the names of the
+      entries this exit targets (one or more). Empty tuple ``()`` on
+      entries and resets. For resets the ``input_id`` field is always
+      ``""`` (resets are signal-global). On exits, ``input_id`` carries
+      the operating input of the FIRST resolvable targeted entry (a
+      cross-input exit spans several inputs; the per-target detail lives
+      in ``target_entry_block_names``).
 
     The frontend computes the "don't repeat" effective filter directly
     from these: effective entry bars = ``latched_indices`` on entry
@@ -723,7 +771,7 @@ class BlockEvent:
     fired_indices: tuple[int, ...]
     latched_indices: tuple[int, ...]
     active_indices: tuple[int, ...] = ()
-    target_entry_block_name: str | None = None
+    target_entry_block_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -785,7 +833,8 @@ async def evaluate_signal(
 
     # Referenced inputs = union of usable blocks' input_ids, in
     # declaration order (entries then exits). Exits contribute the
-    # target entry's input_id (there is no block-level input_id on exits).
+    # input_id of each targeted entry (there is no block-level input_id
+    # on exits); a cross-input exit therefore contributes several.
     referenced_ids: list[str] = []
     seen_ids: set[str] = set()
     for blk in entry_blocks:
@@ -794,14 +843,14 @@ async def evaluate_signal(
         seen_ids.add(blk.input_id)
         referenced_ids.append(blk.input_id)
     for blk in exit_blocks:
-        iid = _exit_input_id(blk, entries_by_name)
-        if iid in seen_ids:
-            continue
-        seen_ids.add(iid)
-        referenced_ids.append(iid)
+        for iid in _exit_input_ids(blk, entries_by_name):
+            if iid in seen_ids:
+                continue
+            seen_ids.add(iid)
+            referenced_ids.append(iid)
 
     # ── 3. Collect operands + implicit close-price operands per input ──
-    operands: list[Operand] = list(_walk_operands(signal))
+    operands: list[Operand] = list(_walk_operands(signal, inputs, entry_names))
     for ref_id in referenced_ids:
         operands.append(InstrumentOperand(input_id=ref_id, field="close"))
 
@@ -886,9 +935,10 @@ async def evaluate_signal(
         if blk.input_id in nan_poison:
             nan_poison[blk.input_id] = nan_poison[blk.input_id] | entry_nan[blk.id]
     for blk in exit_blocks:
-        iid = _exit_input_id(blk, entries_by_name)
-        if iid in nan_poison:
-            nan_poison[iid] = nan_poison[iid] | exit_nan[blk.id]
+        # A cross-input exit's NaN mask poisons every input it operates on.
+        for iid in _exit_input_ids(blk, entries_by_name):
+            if iid in nan_poison:
+                nan_poison[iid] = nan_poison[iid] | exit_nan[blk.id]
 
     # ── 5. Latch state + per-bar positions (sequential) ──
     #
@@ -964,24 +1014,39 @@ async def evaluate_signal(
             if bool(reset_truth[b.id][t]) and not bool(reset_nan[b.id][t]):
                 reset_fired[b.id].append(t)
 
-        # --- (b) clear pass: exits clear their target-entry latch only ---
+        # --- (b) clear pass: exits clear every targeted entry latch ---
         for b in exit_blocks:
             if not bool(exit_truth[b.id][t]):
                 continue
             # Per-block arm gate (Sign 1): bound exits need their arm
-            # True. Unbound exits short-circuit via membership test.
+            # True. Unbound exits short-circuit via membership test. The
+            # gate is per-EXIT and applies to the WHOLE firing — one
+            # firing closes all targets and consumes one arm.
             if b.id in block_arm and not block_arm[b.id]:
                 continue
-            target_name = b.target_entry_block_name
-            target_entry = entries_by_name.get(target_name)
-            # Position-state guard (Sign 3) preserved INDEPENDENTLY of
-            # the arm — only an actually-open target latch can clear.
-            if target_entry and latched.get(target_entry.id, False):
-                latched[target_entry.id] = False
+            # Loop over every targeted entry name. Targets are resolved
+            # against usable entries only; unresolvable names are ignored
+            # (the API rejects dangling names, but a directly-constructed
+            # Signal could carry them). All resolvable, currently-open
+            # targets are cleared at this same bar t.
+            cleared_any = False
+            for target_name in b.target_entry_block_names:
+                target_entry = entries_by_name.get(target_name)
+                # Position-state guard (Sign 3) preserved INDEPENDENTLY of
+                # the arm — only an actually-open target latch can clear.
+                if target_entry and latched.get(target_entry.id, False):
+                    latched[target_entry.id] = False
+                    trade_closes[target_entry.id].append((t, b.id))
+                    cleared_any = True
+            if cleared_any:
+                # Effective exit at t (cleared ≥1 latch). Record once.
                 exit_latched[b.id].append(t)
-                trade_closes[target_entry.id].append((t, b.id))
-                # Disarm AFTER a successful fire — bound exits only. Seed
-                # the cumulative re-arm countdown to this binding's count.
+                # Disarm AFTER a successful fire — bound exits only, and
+                # only when the firing actually cleared something (matches
+                # the single-target semantics: an arm is consumed by an
+                # EFFECTIVE exit, not by a fire over zero open targets).
+                # Seed the cumulative re-arm countdown to this binding's
+                # count.
                 if b.id in block_arm:
                     block_arm[b.id] = False
                     arm_countdown[b.id] = bound_count[b.id]
@@ -1114,19 +1179,27 @@ async def evaluate_signal(
                 fired_indices=tuple(entry_fired[b.id]),
                 latched_indices=tuple(entry_latched[b.id]),
                 active_indices=tuple(entry_active[b.id]),
-                target_entry_block_name=None,
+                target_entry_block_names=(),
             )
         )
     for b in exit_blocks:
+        # ``input_id`` carries the FIRST resolvable target's operating
+        # input (the exit is usable, so at least one resolves). The full
+        # per-target detail lives in ``target_entry_block_names``; only
+        # names that resolve to a usable entry are emitted.
+        exit_input_ids = _exit_input_ids(b, entries_by_name)
+        resolved_targets = tuple(
+            name for name in b.target_entry_block_names if name in entries_by_name
+        )
         events.append(
             BlockEvent(
-                input_id=_exit_input_id(b, entries_by_name),
+                input_id=exit_input_ids[0] if exit_input_ids else "",
                 block_id=b.id,
                 kind="exit",
                 fired_indices=tuple(exit_fired[b.id]),
                 latched_indices=tuple(exit_latched[b.id]),
                 active_indices=(),
-                target_entry_block_name=b.target_entry_block_name,
+                target_entry_block_names=resolved_targets,
             )
         )
     for b in reset_blocks:
@@ -1138,7 +1211,7 @@ async def evaluate_signal(
                 fired_indices=tuple(reset_fired[b.id]),
                 latched_indices=tuple(reset_latched[b.id]),
                 active_indices=(),
-                target_entry_block_name=None,
+                target_entry_block_names=(),
             )
         )
 
@@ -1148,7 +1221,7 @@ async def evaluate_signal(
     # the same input produces separate series in the response.
     indicator_series: list[IndicatorSeriesResult] = []
     seen_keys: set[tuple] = set()
-    for op in _walk_operands(signal):
+    for op in _walk_operands(signal, inputs, entry_names):
         if not isinstance(op, IndicatorOperand):
             continue
         k = _operand_key(op, indicators, inputs)

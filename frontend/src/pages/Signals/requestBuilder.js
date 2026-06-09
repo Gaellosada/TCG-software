@@ -12,7 +12,7 @@
 //   - Block = {
 //       id, name, enabled, description,
 //       input_id, weight (signed, [-100, +100]),
-//       conditions, [exits only] target_entry_block_name
+//       conditions, [exits only] target_entry_block_names (string[])
 //     }
 //   - settings = { dont_repeat: boolean }
 //   - IndicatorSpec = { id, name, code, params, seriesMap }
@@ -48,7 +48,7 @@ export { coerceResetCount as __coerceResetCountForTests };
  * preserved verbatim.
  *
  * Weights are clamped to [-MAX_ABS_WEIGHT, +MAX_ABS_WEIGHT]. Block ids
- * and exit ``target_entry_block_name`` are carried through verbatim.
+ * and exit ``target_entry_block_names`` are carried through verbatim.
  *
  * Returns a NEW object graph — the caller's ``signal`` is not mutated.
  */
@@ -109,15 +109,19 @@ function normaliseBlock(block, section) {
     // Exit blocks omit block-level input_id entirely (not empty-string)
     // so the backend invariant "exits must not carry input_id" is met.
     // Weight is meaningless on exits and also omitted.
+    // v6: emit the plural ``target_entry_block_names`` array (the backend
+    // accepts both the array and the legacy singular, but we always send
+    // the array). Non-array / blank entries are dropped defensively.
+    const targetNames = Array.isArray(block.target_entry_block_names)
+      ? block.target_entry_block_names.filter((n) => typeof n === 'string' && n)
+      : [];
     return {
       id: typeof block.id === 'string' ? block.id : '',
       name: typeof block.name === 'string' ? block.name : '',
       enabled: block.enabled !== false,
       description: typeof block.description === 'string' ? block.description : '',
       conditions,
-      target_entry_block_name: typeof block.target_entry_block_name === 'string'
-        ? block.target_entry_block_name
-        : '',
+      target_entry_block_names: targetNames,
       requires_reset_block_id: resetBlockId,
       requires_reset_count: resetCount,
     };

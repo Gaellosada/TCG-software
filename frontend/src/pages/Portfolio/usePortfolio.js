@@ -52,6 +52,10 @@ export default function usePortfolio() {
   // backend autosave payload can include it without depending on the
   // page-level persistedPortfolios list.
   const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
+  // Whether the currently loaded portfolio is locked (read-only).
+  // Mirrors the `locked` field from the backend doc; updated on load and
+  // when the lock API call returns an updated doc.
+  const [persistedLocked, setPersistedLocked] = useState(false);
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -230,6 +234,7 @@ export default function usePortfolio() {
     setDirty(false);
     setPersistedId(null);
     setPersistedCategory('RESEARCH');
+    setPersistedLocked(false);
   }, [abortCalculate]);
 
   /**
@@ -250,6 +255,7 @@ export default function usePortfolio() {
     setPortfolioName(doc.name || '');
     setPersistedId(doc.id);
     setPersistedCategory(doc.category || 'RESEARCH');
+    setPersistedLocked(!!doc.locked);
     setResults(null);
     setError(null);
     setLegDateRanges({});
@@ -402,6 +408,8 @@ export default function usePortfolio() {
     setPersistedId: setPersistedIdExternal,
     persistedCategory,
     setPersistedCategory,
+    persistedLocked,
+    setPersistedLocked,
     loadFromPersisted,
   };
 }

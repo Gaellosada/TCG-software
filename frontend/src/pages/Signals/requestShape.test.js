@@ -51,7 +51,7 @@ describe('computeSignal request body shape (v4)', () => {
     expect(body.spec.settings).toEqual({ dont_repeat: true });
   });
 
-  it('block id, name, input_id, signed weight and target_entry_block_name flow through verbatim', () => {
+  it('block id, name, input_id, signed weight and target_entry_block_names flow through verbatim', () => {
     const signal = {
       id: 's1', name: 'S1', inputs: V4_INPUTS,
       rules: {
@@ -73,7 +73,8 @@ describe('computeSignal request body shape (v4)', () => {
           // the wire payload never carries block-level input_id on exits.
           input_id: 'X',
           weight: 0,
-          target_entry_block_name: 'Alpha',
+          // v6: plural target-names array on the wire.
+          target_entry_block_names: ['Alpha'],
           conditions: [
             { op: 'gt',
               lhs: { kind: 'constant', value: 1 },
@@ -88,13 +89,16 @@ describe('computeSignal request body shape (v4)', () => {
     expect(entry.name).toBe('Alpha');
     expect(entry.input_id).toBe('X');
     expect(entry.weight).toBe(-30);
-    // Entry blocks do NOT carry target_entry_block_name or target_entry_block_id.
+    // Entry blocks do NOT carry target_entry_block_names or the legacy keys.
+    expect('target_entry_block_names' in entry).toBe(false);
     expect('target_entry_block_name' in entry).toBe(false);
     expect('target_entry_block_id' in entry).toBe(false);
     const exit = body.spec.rules.exits[0];
     expect(exit.id).toBe('exit-9');
     expect(exit.name).toBe('Exit1');
-    expect(exit.target_entry_block_name).toBe('Alpha');
+    expect(exit.target_entry_block_names).toEqual(['Alpha']);
+    // The singular legacy key must NOT ride the wire.
+    expect('target_entry_block_name' in exit).toBe(false);
     // Exit blocks must NOT carry legacy target_entry_block_id.
     expect('target_entry_block_id' in exit).toBe(false);
     // Exit blocks must NOT carry block-level input_id or weight on the
@@ -294,13 +298,13 @@ describe('computeSignal request body shape (v4)', () => {
           ] },
         ],
         exits: [
-          { id: 'x1', input_id: 'X', weight: 0, target_entry_block_name: 'e1', conditions: [
+          { id: 'x1', input_id: 'X', weight: 0, target_entry_block_names: ['e1'], conditions: [
             { op: 'in_range',
               operand: { kind: 'indicator', indicator_id: 'b', input_id: 'X', output: 'default' },
               min:     { kind: 'indicator', indicator_id: 'c', input_id: 'X', output: 'default' },
               max:     { kind: 'constant', value: 1 } },
           ] },
-          { id: 'x2', input_id: 'X', weight: 0, target_entry_block_name: 'e2', conditions: [
+          { id: 'x2', input_id: 'X', weight: 0, target_entry_block_names: ['e2'], conditions: [
             { op: 'cross_below',
               lhs: { kind: 'indicator', indicator_id: 'e', input_id: 'X', output: 'default' },
               rhs: { kind: 'instrument', input_id: 'X', field: 'close' } },
@@ -319,7 +323,7 @@ describe('enabled and description round-trip through normaliseBlock (B1 regressi
     conditions: [],
   };
   const baseExit = {
-    id: 'x1', name: 'X1', target_entry_block_name: 'E1',
+    id: 'x1', name: 'X1', target_entry_block_names: ['E1'],
     conditions: [],
   };
 
@@ -437,6 +441,7 @@ describe('normaliseSpecForRequest does not mutate caller data', () => {
     expect('input_id' in r).toBe(false);
     expect('weight' in r).toBe(false);
     expect('target_entry_block_name' in r).toBe(false);
+    expect('target_entry_block_names' in r).toBe(false);
   });
 });
 
@@ -469,7 +474,7 @@ describe('normaliseBlock — requires_reset_block_id whitelist', () => {
       rules: {
         entries: [],
         exits: [{
-          id: 'x1', name: '', target_entry_block_name: 'Alpha',
+          id: 'x1', name: '', target_entry_block_names: ['Alpha'],
           conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
           requires_reset_block_id: RESET_ID,
         }],
@@ -489,7 +494,7 @@ describe('normaliseBlock — requires_reset_block_id whitelist', () => {
           // field absent
         }],
         exits: [{
-          id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [],
+          id: 'x1', name: '', target_entry_block_names: ['Alpha'], conditions: [],
           requires_reset_block_id: '',  // empty string → null
         }],
         resets: [],
@@ -547,7 +552,7 @@ describe('normaliseBlock — requires_reset_count whitelist', () => {
       rules: {
         entries: [],
         exits: [{
-          id: 'x1', name: '', target_entry_block_name: 'Alpha',
+          id: 'x1', name: '', target_entry_block_names: ['Alpha'],
           conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
           requires_reset_block_id: 'reset-uuid-42',
           requires_reset_count: 5,
@@ -568,7 +573,7 @@ describe('normaliseBlock — requires_reset_count whitelist', () => {
           // requires_reset_count absent
         }],
         exits: [{
-          id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [],
+          id: 'x1', name: '', target_entry_block_names: ['Alpha'], conditions: [],
           requires_reset_count: 0, // invalid (<1) → clamp to 1
         }],
         resets: [],
@@ -647,7 +652,7 @@ describe('normaliseBlock — orphan requires_reset_count is forced to 1 on the w
       rules: {
         entries: [],
         exits: [{
-          id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [],
+          id: 'x1', name: '', target_entry_block_names: ['Alpha'], conditions: [],
           requires_reset_block_id: null, // no binding
           requires_reset_count: 5, // orphan — must not ride the wire
         }],

@@ -1,0 +1,59 @@
+/* LockToggle — icon-button that mirrors the iconBtn/deleteBtn pattern
+ * from IndicatorsList and SignalsList. Intended for embedding inside
+ * list rows alongside other action buttons. */
+
+.lockBtn {
+  background: none;
+  border: none;
+  /* At-rest colour MUST clear the WCAG non-text-contrast minimum (3:1) in
+   * BOTH themes so the padlock is actually visible — the old --text-dim
+   * measured ~1.9:1 (dark) / ~1.6:1 (light) and read as invisible. We use
+   * --text-secondary: it measures ~7.4:1 (dark) / ~6.1:1 (light) on the row
+   * background. --text-muted was rejected — it fails 3:1 in the LIGHT theme
+   * (~2.6–2.9:1 on the row backgrounds). */
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0 2px;
+  /* Always visible — the padlock is the entry point to lock/unlock, so it
+   * must be discoverable at rest (not hover-gated). It can't rely on a parent
+   * .row:hover rule: CSS-module scoping means the list's hover rule targets
+   * the list's own .iconBtn, never this separately-scoped .lockBtn.
+   * Brightens on hover; the closed-padlock icon + bolder weight mark the
+   * locked state. */
+  opacity: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.lockBtn:hover {
+  color: var(--accent);
+}
+
+.lockBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* When the entity is locked, keep the (accessible) --text-secondary colour
+ * but render the closed-padlock glyph heavier so lock status still reads at a
+ * glance now that at-rest and locked share the same colour token. */
+.lockBtn[data-locked='true'] {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.lockBtn[data-locked='true']:hover {
+  color: var(--accent);
+}
+
+.lockBtnDisabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed;
+  pointer-events: none;
+}

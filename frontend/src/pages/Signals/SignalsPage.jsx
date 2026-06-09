@@ -8,12 +8,13 @@ import TradeLog from '../../components/TradeLog';
 import { buildSignalStatsInputs } from './signalStatsInputs';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
+import LockBanner from '../../components/LockBanner';
 import { emptyRules, defaultSettings } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import {
   listSignals, createSignal, updateSignal, archiveSignal,
-  describePersistenceError,
+  setSignalLocked, describePersistenceError, isLockedError,
 } from '../../api/persistence';
 import { buildComputeRequestBody } from './requestBuilder';
 import { computeRunGate } from './runGate';
@@ -30,6 +31,7 @@ import useBackendAutosave from '../../hooks/useBackendAutosave';
 import Card from '../../components/Card';
 import InlineNameInput from '../../components/InlineNameInput';
 import useAbortableAction from '../../hooks/useAbortableAction';
+import useEntityLock from '../../hooks/useEntityLock';
 import styles from './SignalsPage.module.css';
 
 function nextSignalName(existing) {
@@ -141,6 +143,12 @@ function SignalsPage() {
     () => signals.find((s) => s.id === selectedId) || null,
     [signals, selectedId],
   );
+
+  // When the loaded signal is locked the editor is read-only: autosave is
+  // suspended, the Save button is disabled and a banner is shown. The
+  // server also rejects writes to a locked doc (HTTP 423) — this is the UX
+  // backstop so the user isn't surprised by a failed save.
+  const selectedLocked = !!selectedSignal?.locked;
 
   // All signals are now loaded from the backend — filter the unified list for display.
   const filteredSignals = useMemo(() => {
@@ -285,6 +293,31 @@ function SignalsPage() {
     // via the payload (it's part of the dirty-tracked currentSelectedDoc).
   }, []);
 
+  // Toggle the persisted lock flag. The /lock endpoint only mutates the
+  // ``locked`` field and is exempt from the locked-doc write guard, so we
+  // can call it whether the signal is locked or unlocked. On success we
+  // patch ``locked`` from the returned doc (mirrors how category/rename
+  // update local state); errors surface via the one-shot error path.
+  // Shared lock-handler hook (same shape across all three pages); this page
+  // patches the signal flag without an optimistic flip (server-confirmed).
+  const applySignalLocked = useCallback((id, lockedVal) => {
+    setSignals((prev) => prev.map((s) => (s.id !== id ? s : { ...s, locked: lockedVal })));
+  }, []);
+  const handleSetSignalLocked = useEntityLock({
+    // Lazy wrapper — defers the api import access to call time so test
+    // mocks that omit setSignalLocked don't trip a render-time getter.
+    setLocked: useCallback((id, next) => setSignalLocked(id, next), []),
+    applyLocked: applySignalLocked,
+    onStart: useCallback(() => setOneshotStatus('saving'), []),
+    onSuccess: useCallback(() => { setOneshotError(null); setOneshotStatus('saved'); }, []),
+    onError: useCallback((err) => {
+      setOneshotError(describePersistenceError(err));
+      setOneshotStatus('error');
+      // eslint-disable-next-line no-console
+      console.error('setSignalLocked failed:', err);
+    }, []),
+  });
+
   const handleInputsChange = useCallback((nextInputs) => {
     setSignals((prev) => prev.map((s) => (
       s.id !== selectedId ? s : { ...s, inputs: nextInputs }
@@ -351,6 +384,11 @@ function SignalsPage() {
   // the current dirty state without a closure dependency.
   backendDirtyRef.current = backendDirty;
 
+  // Ref to the autosave hook's reset() so the locked-save handler (declared
+  // before the hook) can clear a transient 'saving'/'error' status when it
+  // flips the page to read-only. Seeded just below where the hook is created.
+  const resetCloudStatusRef = useRef(() => {});
+
   const handleBackendSave = useCallback(async (payloadStr, { signal } = {}) => {
     if (!selectedId || !payloadStr) return;
     const body = JSON.parse(payloadStr);
@@ -362,6 +400,16 @@ function SignalsPage() {
       // and re-throw so the hook moves to 'error'.
       if (err && err.name === 'AbortError') {
         throw err;
+      }
+      // 423 Locked: the doc was locked elsewhere. Flip the LOCAL locked flag
+      // so the editor goes read-only with the normal lock banner (matching
+      // the lock UX) instead of a generic error. Suspending the hook
+      // (enabled gate) follows on re-render; clear the transient status now.
+      if (isLockedError(err)) {
+        setSignals((prev) => prev.map((s) => (s.id !== selectedId ? s : { ...s, locked: true })));
+        setCloudError(null);
+        resetCloudStatusRef.current();
+        return;
       }
       setCloudError(describePersistenceError(err));
       // eslint-disable-next-line no-console
@@ -386,14 +434,18 @@ function SignalsPage() {
     flush: flushCloudSave,
     reset: resetCloudStatus,
   } = useBackendAutosave({
-    enabled: autosave && !!selectedSignal && backendDirty,
+    // Suspend autosave while the signal is locked — the server would 423.
+    enabled: autosave && !!selectedSignal && backendDirty && !selectedLocked,
     payload: selectedDocSerialized,
     onSave: handleBackendSave,
   });
+  resetCloudStatusRef.current = resetCloudStatus;
 
   // Manual Save button: flush the pending backend autosave, or fire a
   // one-shot save when autosave is off.
   const commitSave = useCallback(() => {
+    // A locked signal is read-only — never attempt a write (server 423s).
+    if (selectedLocked) return;
     if (autosave) {
       flushCloudSave();
     } else {
@@ -404,7 +456,7 @@ function SignalsPage() {
         });
       }
     }
-  }, [autosave, flushCloudSave, selectedDocSerialized, selectedId, handleBackendSave]);
+  }, [selectedLocked, autosave, flushCloudSave, selectedDocSerialized, selectedId, handleBackendSave]);
 
   // When the selection changes, reset cloud status so the indicator
   // doesn't show "saved" for the previously selected signal.
@@ -543,6 +595,7 @@ function SignalsPage() {
           category={persistedCategory}
           onCategoryChange={setPersistedCategory}
           onChangeItemCat={handleChangeItemCat}
+          onSetSignalLocked={handleSetSignalLocked}
           loading={persistedLoading}
         />
       </div>
@@ -553,18 +606,32 @@ function SignalsPage() {
           </div>
         ) : selectedSignal ? (
           <>
-            <InputsPanel
-              inputs={selectedSignal.inputs || []}
-              onChange={handleInputsChange}
-            />
-            <BlockEditor
-              rules={selectedSignal.rules}
-              onRulesChange={handleRulesChange}
-              inputs={selectedSignal.inputs || []}
-              indicators={availableIndicators}
-              doc={selectedSignal.doc || ''}
-              onDocChange={handleDocChange}
-            />
+            {selectedLocked && (
+              <LockBanner entityLabel="signal" testId="signal-lock-banner" />
+            )}
+            {/* When locked, the native disabled <fieldset> makes every nested
+                form control non-interactive (mirrors the Indicators editor's
+                readOnly behaviour). Read-only viewing — scrolling, switching
+                BlockEditor tabs — still works; the unlock control lives in the
+                list, so disabling editor controls never traps the user. */}
+            <fieldset
+              className={styles.editorFieldset}
+              disabled={selectedLocked}
+              data-testid="signal-editor-fieldset"
+            >
+              <InputsPanel
+                inputs={selectedSignal.inputs || []}
+                onChange={handleInputsChange}
+              />
+              <BlockEditor
+                rules={selectedSignal.rules}
+                onRulesChange={handleRulesChange}
+                inputs={selectedSignal.inputs || []}
+                indicators={availableIndicators}
+                doc={selectedSignal.doc || ''}
+                onDocChange={handleDocChange}
+              />
+            </fieldset>
           </>
         ) : (
           <div className={styles.editorEmpty}>
@@ -579,6 +646,7 @@ function SignalsPage() {
             autosave={autosave}
             onSave={commitSave}
             onToggleAutosave={setAutosave}
+            saveDisabled={selectedLocked}
             leftSlot={
               <>
                 <InlineNameInput

@@ -1,0 +1,16 @@
+/*
+ * Shared read-only lock banner — one consistent style across the Indicators,
+ * Signals and Portfolio editors. Visually muted (informational, not an error):
+ * a subtle accent left-border with secondary text on an elevated background.
+ * Page-specific spacing is supplied via an extra className on <LockBanner>.
+ */
+.lockBanner {
+  padding: 6px 12px;
+  border: 1px solid var(--border-primary, #d0d0d0);
+  border-left: 3px solid var(--accent, #f59e0b);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-elev-1, rgba(245, 158, 11, 0.08));
+  color: var(--text-secondary, #555);
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}

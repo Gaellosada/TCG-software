@@ -27,9 +27,9 @@ function entryBlock({ id = 'e1', input_id = 'X', weight = 50, name = 'Alpha', co
 }
 
 function exitBlock({
-  id = 'x1', target_entry_block_name = 'Alpha', conditions = [GT_COND],
+  id = 'x1', target_entry_block_names = ['Alpha'], conditions = [GT_COND],
 } = {}) {
-  return { id, target_entry_block_name, conditions };
+  return { id, target_entry_block_names, conditions };
 }
 
 describe('computeRunGate (v4)', () => {
@@ -101,7 +101,7 @@ describe('computeRunGate (v4)', () => {
       rules: {
         ...emptyRules(),
         entries: [entryBlock({ input_id: '' })],
-        exits: [exitBlock({ target_entry_block_name: 'Alpha' })],
+        exits: [exitBlock({ target_entry_block_names: ['Alpha'] })],
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toBe(
@@ -140,18 +140,18 @@ describe('computeRunGate (v4)', () => {
     );
   });
 
-  it('rejects an exit that has no target_entry_block_name', () => {
+  it('rejects an exit that has no targets', () => {
     const sig = {
       id: 's1',
       inputs: [SPOT_INPUT],
       rules: {
         ...emptyRules(),
         entries: [entryBlock()],
-        exits: [exitBlock({ target_entry_block_name: '' })],
+        exits: [exitBlock({ target_entry_block_names: [] })],
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toBe(
-      'Every exit block must target an entry block — pick one in the block header.',
+      'Every exit block must target at least one entry block — pick one in the block header.',
     );
   });
 
@@ -162,7 +162,7 @@ describe('computeRunGate (v4)', () => {
       rules: {
         ...emptyRules(),
         entries: [entryBlock({ id: 'e1', name: 'Alpha' })],
-        exits: [exitBlock({ target_entry_block_name: 'orphan' })],
+        exits: [exitBlock({ target_entry_block_names: ['orphan'] })],
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toContain('exit-target-not-found');
@@ -178,7 +178,7 @@ describe('computeRunGate (v4)', () => {
           entryBlock({ id: 'e1', name: 'Dup' }),
           entryBlock({ id: 'e2', name: 'Dup' }),
         ],
-        exits: [exitBlock({ target_entry_block_name: 'Dup' })],
+        exits: [exitBlock({ target_entry_block_names: ['Dup'] })],
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toContain('duplicate-entry-names');
@@ -191,7 +191,36 @@ describe('computeRunGate (v4)', () => {
       rules: {
         ...emptyRules(),
         entries: [entryBlock({ id: 'e1', name: 'Alpha' })],
-        exits: [exitBlock({ target_entry_block_name: 'NonExistent' })],
+        exits: [exitBlock({ target_entry_block_names: ['NonExistent'] })],
+      },
+    };
+    expect(computeRunGate(sig, []).runDisabledReason).toContain('exit-target-not-found');
+  });
+
+  it('runnable: an exit targeting TWO entries on DIFFERENT inputs (cross-input)', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT, SECOND_SPOT_INPUT],
+      rules: {
+        ...emptyRules(),
+        entries: [
+          entryBlock({ id: 'e1', name: 'Alpha', input_id: 'X', weight: 30 }),
+          entryBlock({ id: 'e2', name: 'Beta', input_id: 'Y', weight: -20 }),
+        ],
+        exits: [exitBlock({ target_entry_block_names: ['Alpha', 'Beta'] })],
+      },
+    };
+    expect(computeRunGate(sig, [])).toEqual({ runDisabledReason: null, missingIds: [] });
+  });
+
+  it('rejects an exit when ONE of its multiple targets is dangling', () => {
+    const sig = {
+      id: 's1',
+      inputs: [SPOT_INPUT],
+      rules: {
+        ...emptyRules(),
+        entries: [entryBlock({ id: 'e1', name: 'Alpha' })],
+        exits: [exitBlock({ target_entry_block_names: ['Alpha', 'ghost'] })],
       },
     };
     expect(computeRunGate(sig, []).runDisabledReason).toContain('exit-target-not-found');
@@ -290,7 +319,7 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
         },
         {
           input_id: 'X', block_id: 'x1', kind: 'exit',
-          target_entry_block_name: 'b1',
+          target_entry_block_names: ['b1'],
           fired_indices: [1, 3],
           latched_indices: [3],
         },
@@ -304,7 +333,7 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
     // Other event fields preserved.
     expect(out.events[0].latched_indices).toEqual([0, 2]);
     expect(out.events[0].active_indices).toEqual([0, 1, 2]);
-    expect(out.events[1].target_entry_block_name).toBe('b1');
+    expect(out.events[1].target_entry_block_names).toEqual(['b1']);
     // Top-level passthrough.
     expect(out.timestamps).toBe(raw.timestamps);
   });
@@ -336,7 +365,7 @@ describe('computeEffectiveTrace (v4 dont_repeat filter)', () => {
     const raw = {
       events: [
         {
-          input_id: 'X', kind: 'exit', block_id: 'x1', target_entry_block_name: 'e1',
+          input_id: 'X', kind: 'exit', block_id: 'x1', target_entry_block_names: ['e1'],
           fired_indices: [1, 2, 3, 4],   // exit condition fired on these bars
           latched_indices: [2, 4],       // only bars 2 and 4 actually closed a position
         },
@@ -383,7 +412,7 @@ describe('computeRunGate — reset block validation', () => {
           entryBlock({ id: 'e1', conditions: [GT_COND], name: 'Alpha' }),
         ],
         exits: [
-          exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] }),
+          exitBlock({ id: 'x1', target_entry_block_names: ['Alpha'], conditions: [GT_COND] }),
         ],
         resets: [
           {
@@ -412,7 +441,7 @@ describe('computeRunGate — reset block validation', () => {
           entryBlock({ id: 'e1', conditions: [GT_COND], name: 'Alpha' }),
         ],
         exits: [
-          exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] }),
+          exitBlock({ id: 'x1', target_entry_block_names: ['Alpha'], conditions: [GT_COND] }),
         ],
         resets: [
           { id: 'r1', name: 'Arm', conditions: [GT_COND], enabled: true },
@@ -436,7 +465,7 @@ describe('computeRunGate — stale require-reset binding', () => {
           ...entryBlock({ id: 'e1', name: 'Alpha', conditions: [GT_COND] }),
           requires_reset_block_id: 'reset-that-was-deleted',
         }],
-        exits: [exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] })],
+        exits: [exitBlock({ id: 'x1', target_entry_block_names: ['Alpha'], conditions: [GT_COND] })],
         resets: [{ id: 'r-other', name: 'Other', conditions: [GT_COND], enabled: true }],
       },
     };
@@ -457,7 +486,7 @@ describe('computeRunGate — stale require-reset binding', () => {
           ...entryBlock({ id: 'e1', name: 'Alpha', conditions: [GT_COND] }),
           requires_reset_block_id: 'r1',
         }],
-        exits: [exitBlock({ id: 'x1', target_entry_block_name: 'Alpha', conditions: [GT_COND] })],
+        exits: [exitBlock({ id: 'x1', target_entry_block_names: ['Alpha'], conditions: [GT_COND] })],
         resets: [{ id: 'r1', name: 'Arm', conditions: [GT_COND], enabled: true }],
       },
     };

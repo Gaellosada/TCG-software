@@ -116,6 +116,25 @@
   border-color: var(--accent, #2563eb);
 }
 
+/* Locked-row disabled controls (shared treatment — see IndicatorsList /
+ * PersistedPortfolioPanel for the identical idiom). background:none kills the
+ * UA grey-out, so without this a disabled control reads as fully enabled
+ * (opacity 1, accent-on-hover, pointer cursor). Dim + not-allowed + dim text
+ * so a locked row's controls clearly READ as disabled. The opacity rule is
+ * repeated under the hover/focus-within reveal selectors so it wins over the
+ * `.row:hover .iconBtn { opacity: 1 }` reveal (equal specificity → later
+ * source order wins). */
+.categoryChipSelect:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--text-dim);
+}
+
+.row:hover .categoryChipSelect:disabled,
+.row:focus-within .categoryChipSelect:disabled {
+  opacity: 0.4;
+}
+
 .listSearchRow {
   padding: 6px 10px;
   flex-shrink: 0;
@@ -248,6 +267,30 @@
   outline: 2px solid var(--accent);
   outline-offset: 1px;
   border-radius: 2px;
+}
+
+/* Locked-row disabled rename/delete controls — shared dim+not-allowed
+ * treatment (see .categoryChipSelect:disabled above and the matching rules in
+ * IndicatorsList / PersistedPortfolioPanel). The disabled colour also
+ * neutralises the accent/error hover so a locked control never lights up. */
+.iconBtn:disabled,
+.deleteBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--text-dim);
+}
+
+.iconBtn:disabled:hover,
+.deleteBtn:disabled:hover {
+  color: var(--text-dim);
+  border-color: transparent;
+}
+
+.row:hover .iconBtn:disabled,
+.row:focus-within .iconBtn:disabled,
+.row:hover .deleteBtn:disabled,
+.row:focus-within .deleteBtn:disabled {
+  opacity: 0.4;
 }
 
 /* ---------- BlockEditor ---------- */
@@ -1406,5 +1449,70 @@
 }
 .indicatorOverrideInlineCheck {
   margin: 0 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Exit-block multi-target picker (v6). A vertical list of target-entry
+   dropdowns sitting in the same flexible slot the single dropdown used to
+   occupy. Each row stacks a dropdown + a remove (x) control; the last row
+   also carries the "+ Add block" button.
+   --------------------------------------------------------------------------- */
+.exitTargetList {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.exitTargetRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.exitTargetRemoveBtn {
+  flex: 0 0 auto;
+  width: var(--signal-control-height);
+  height: var(--signal-control-height);
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.exitTargetRemoveBtn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-primary);
+}
+
+.exitTargetAddBtn {
+  flex: 0 0 auto;
+  align-self: center;
+  background: none;
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.74rem;
+  padding: 2px 8px;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.exitTargetAddBtn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+}
+
+.exitTargetAddBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 

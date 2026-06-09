@@ -83,6 +83,21 @@ export function describePersistenceError(err) {
   return msg;
 }
 
+/**
+ * Detect whether a persistence Error represents a locked-document write
+ * rejection. The backend guards writes to a locked doc with HTTP 423 Locked
+ * (guardrail Sign 6); the ``.status`` is attached by ``_handleResponse`` /
+ * ``_archive``. Callers use this to flip their LOCAL ``locked`` flag → the
+ * editor goes read-only with the normal lock banner instead of surfacing a
+ * generic error toast.
+ *
+ * @param {*} err
+ * @returns {boolean}
+ */
+export function isLockedError(err) {
+  return !!err && err.status === 423;
+}
+
 // ---------------------------------------------------------------------------
 // Signals
 // ---------------------------------------------------------------------------
@@ -300,6 +315,55 @@ export function updateIndicator(id, payload, options = {}) {
  */
 export function archiveIndicator(id) {
   return _archive(`/indicators/${encodeURIComponent(id)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Lock / Unlock
+// ---------------------------------------------------------------------------
+
+/**
+ * Set the ``locked`` flag on a persisted indicator.
+ * Sends ``PUT /api/persistence/indicators/{id}/lock`` with body ``{ locked }``.
+ *
+ * @param {string}  id
+ * @param {boolean} locked
+ * @returns {Promise<IndicatorOut>}  updated doc returned by the server
+ */
+export function setIndicatorLocked(id, locked) {
+  return _fetch(`/indicators/${encodeURIComponent(id)}/lock`, {
+    method: 'PUT',
+    body: { locked },
+  });
+}
+
+/**
+ * Set the ``locked`` flag on a persisted signal.
+ * Sends ``PUT /api/persistence/signals/{id}/lock`` with body ``{ locked }``.
+ *
+ * @param {string}  id
+ * @param {boolean} locked
+ * @returns {Promise<SignalOut>}  updated doc returned by the server
+ */
+export function setSignalLocked(id, locked) {
+  return _fetch(`/signals/${encodeURIComponent(id)}/lock`, {
+    method: 'PUT',
+    body: { locked },
+  });
+}
+
+/**
+ * Set the ``locked`` flag on a persisted portfolio.
+ * Sends ``PUT /api/persistence/portfolios/{id}/lock`` with body ``{ locked }``.
+ *
+ * @param {string}  id
+ * @param {boolean} locked
+ * @returns {Promise<PortfolioOut>}  updated doc returned by the server
+ */
+export function setPortfolioLocked(id, locked) {
+  return _fetch(`/portfolios/${encodeURIComponent(id)}/lock`, {
+    method: 'PUT',
+    body: { locked },
+  });
 }
 
 // ---------------------------------------------------------------------------

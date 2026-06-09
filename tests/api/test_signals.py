@@ -1312,3 +1312,381 @@ class TestResetBlocksAPI:
         )
         signal = parse_signal(spec)
         assert signal.rules.entries[0].requires_reset_count == 1
+
+
+def _eq_cond(value: float) -> dict:
+    """An ``X.close == value`` condition (wire shape)."""
+    return {
+        "op": "eq",
+        "lhs": {"kind": "instrument", "input_id": "X"},
+        "rhs": {"kind": "constant", "value": value},
+    }
+
+
+class TestMultiTargetExitsF1:
+    """F1 — a single exit closing MULTIPLE entry blocks.
+
+    Covers: plural ``target_entry_block_names`` accepted; legacy singular
+    ``target_entry_block_name`` accepted and EQUIVALENT; dangling target
+    rejected (plural key); duplicate target names rejected; exit carrying
+    ``input_id`` rejected even with the plural key.
+    """
+
+    async def test_plural_targets_close_two_entries(self, client: AsyncClient):
+        """One exit with two targets clears BOTH entry latches at once.
+
+        CLOSES = ``[10..19]``. EntryA (w=100, X==10 → t0) and EntryB
+        (w=50, X==11 → t1); exit (X==15 → t5) targets both. Position:
+        t0 1.0, t1 1.5, holds, t5 → 0.0 (both cleared, conds false after).
+        """
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "multi",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "EA",
+                            "name": "EntryA",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [_eq_cond(10.0)],
+                        },
+                        {
+                            "id": "EB",
+                            "name": "EntryB",
+                            "input_id": "X",
+                            "weight": 50.0,
+                            "conditions": [_eq_cond(11.0)],
+                        },
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "target_entry_block_names": ["EntryA", "EntryB"],
+                            "conditions": [_eq_cond(15.0)],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        vals = data["positions"][0]["values"]
+        assert vals[0] == pytest.approx(1.0)
+        assert vals[1] == pytest.approx(1.5)
+        assert vals[4] == pytest.approx(1.5)
+        assert vals[5] == pytest.approx(0.0)
+        assert vals[-1] == pytest.approx(0.0)
+        # Exit event emits the plural key listing both targets.
+        ev = {e["block_id"]: e for e in data["events"]}
+        assert set(ev["X1"]["target_entry_block_names"]) == {"EntryA", "EntryB"}
+        # Entry events carry an empty list (not the legacy null).
+        assert ev["EA"]["target_entry_block_names"] == []
+
+    async def test_legacy_singular_accepted_and_equivalent(self, client: AsyncClient):
+        """A spec using the legacy singular ``target_entry_block_name``
+        produces IDENTICAL positions to the same spec using the plural
+        one-element ``target_entry_block_names`` — proving the migration
+        is behaviour-preserving."""
+
+        def _make_body(exit_block: dict) -> dict:
+            return {
+                "spec": {
+                    "id": "sig",
+                    "name": "eq",
+                    "inputs": [SPX_INPUT],
+                    "rules": {
+                        "entries": [
+                            {
+                                "id": "EA",
+                                "name": "EntryA",
+                                "input_id": "X",
+                                "weight": 100.0,
+                                "conditions": [_eq_cond(10.0)],
+                            }
+                        ],
+                        "exits": [exit_block],
+                    },
+                },
+                "indicators": [],
+                "instruments": {},
+            }
+
+        legacy = _make_body(
+            {
+                "id": "X1",
+                "target_entry_block_name": "EntryA",
+                "conditions": [_eq_cond(15.0)],
+            }
+        )
+        plural = _make_body(
+            {
+                "id": "X1",
+                "target_entry_block_names": ["EntryA"],
+                "conditions": [_eq_cond(15.0)],
+            }
+        )
+        r_legacy = await client.post("/api/signals/compute", json=legacy)
+        r_plural = await client.post("/api/signals/compute", json=plural)
+        assert r_legacy.status_code == 200, r_legacy.text
+        assert r_plural.status_code == 200, r_plural.text
+        v_legacy = r_legacy.json()["positions"][0]["values"]
+        v_plural = r_plural.json()["positions"][0]["values"]
+        assert v_legacy == pytest.approx(v_plural)
+        # And both round-trip to the same typed tuple at parse time.
+        from tcg.core.api.signals import SignalIn, parse_signal
+
+        s_legacy = parse_signal(SignalIn.model_validate(legacy["spec"]))
+        s_plural = parse_signal(SignalIn.model_validate(plural["spec"]))
+        assert (
+            s_legacy.rules.exits[0].target_entry_block_names
+            == s_plural.rules.exits[0].target_entry_block_names
+            == ("EntryA",)
+        )
+
+    async def test_plural_dangling_target_rejected(self, client: AsyncClient):
+        """A plural list containing a name with no matching entry is
+        rejected (every target must resolve)."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "EA",
+                            "name": "EntryA",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [_eq_cond(10.0)],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "target_entry_block_names": ["EntryA", "NOPE"],
+                            "conditions": [_eq_cond(15.0)],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "NOPE" in data["message"]
+        assert "rules.exits[0]" in data["message"]
+
+    async def test_duplicate_target_names_rejected(self, client: AsyncClient):
+        """The same target name twice in one exit is rejected."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "EA",
+                            "name": "EntryA",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [_eq_cond(10.0)],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "target_entry_block_names": ["EntryA", "EntryA"],
+                            "conditions": [_eq_cond(15.0)],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "duplicate" in data["message"].lower()
+        assert "rules.exits[0]" in data["message"]
+
+    async def test_plural_exit_with_input_id_rejected(self, client: AsyncClient):
+        """An exit must not carry ``input_id`` even with the plural key."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "EA",
+                            "name": "EntryA",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [_eq_cond(10.0)],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "input_id": "X",  # forbidden on exits
+                            "target_entry_block_names": ["EntryA"],
+                            "conditions": [_eq_cond(15.0)],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "rules.exits[0]" in data["message"]
+        assert "input_id" in data["message"]
+
+    async def test_empty_plural_list_rejected(self, client: AsyncClient):
+        """An explicit empty ``target_entry_block_names`` list on an exit
+        is rejected (exits require ≥1 target)."""
+        body = {
+            "spec": {
+                "id": "sig",
+                "name": "",
+                "inputs": [SPX_INPUT],
+                "rules": {
+                    "entries": [
+                        {
+                            "id": "EA",
+                            "name": "EntryA",
+                            "input_id": "X",
+                            "weight": 100.0,
+                            "conditions": [_eq_cond(10.0)],
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "id": "X1",
+                            "target_entry_block_names": [],
+                            "conditions": [_eq_cond(15.0)],
+                        }
+                    ],
+                },
+            },
+            "indicators": [],
+            "instruments": {},
+        }
+        resp = await client.post("/api/signals/compute", json=body)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["error_type"] == "validation"
+        assert "target_entry_block_name" in data["message"]
+        assert "rules.exits[0]" in data["message"]
+
+    async def test_entry_empty_plural_target_accepted_like_empty_singular(
+        self, client: AsyncClient
+    ):
+        """M2 parity: an ENTRY carrying ``target_entry_block_names: []``
+        must be ACCEPTED, exactly as ``target_entry_block_name: ""`` is.
+
+        Before the fix the explicit-empty-plural encoding tripped the
+        "entries must not set a target" guard (the guard keyed on
+        plural-is-not-None) while the empty singular sailed through — an
+        asymmetry. Both empty encodings now mean "no target supplied".
+        """
+
+        def _make_body(entry_extra: dict) -> dict:
+            return {
+                "spec": {
+                    "id": "sig",
+                    "name": "m2",
+                    "inputs": [SPX_INPUT],
+                    "rules": {
+                        "entries": [
+                            {
+                                "id": "E1",
+                                "name": "Entry1",
+                                "input_id": "X",
+                                "weight": 100.0,
+                                "conditions": [_eq_cond(10.0)],
+                                **entry_extra,
+                            }
+                        ],
+                        "exits": [],
+                    },
+                },
+                "indicators": [],
+                "instruments": {},
+            }
+
+        empty_plural = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_names": []}),
+        )
+        empty_singular = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_name": ""}),
+        )
+        # Both encodings accepted (the asymmetry is gone).
+        assert empty_plural.status_code == 200, empty_plural.text
+        assert empty_singular.status_code == 200, empty_singular.text
+        # …and they produce identical positions.
+        v_plural = empty_plural.json()["positions"][0]["values"]
+        v_singular = empty_singular.json()["positions"][0]["values"]
+        assert v_plural == pytest.approx(v_singular)
+
+    async def test_reset_empty_plural_target_accepted_like_empty_singular(
+        self, client: AsyncClient
+    ):
+        """M2 parity for RESET blocks: a reset with
+        ``target_entry_block_names: []`` is accepted (same as ``""``),
+        rather than being rejected by the "reset must not set target"
+        guard on the strength of an explicit empty list alone.
+        """
+
+        def _make_body(reset_extra: dict) -> dict:
+            return {
+                "spec": {
+                    "id": "sig",
+                    "name": "m2r",
+                    "inputs": [SPX_INPUT],
+                    "rules": {
+                        "entries": [],
+                        "exits": [],
+                        "resets": [
+                            {
+                                "id": "R1",
+                                "name": "Reset1",
+                                "conditions": [_eq_cond(10.0)],
+                                **reset_extra,
+                            }
+                        ],
+                    },
+                },
+                "indicators": [],
+                "instruments": {},
+            }
+
+        empty_plural = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_names": []}),
+        )
+        empty_singular = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_name": ""}),
+        )
+        assert empty_plural.status_code == 200, empty_plural.text
+        assert empty_singular.status_code == 200, empty_singular.text

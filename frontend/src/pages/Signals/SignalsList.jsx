@@ -1,14 +1,19 @@
 import { useState, useRef, useEffect } from 'react';
 import styles from './Signals.module.css';
 import { CATEGORIES } from '../../api/persistence';
+import LockToggle from '../../components/LockToggle';
 
 /**
  * Left panel — searchable list of signals. Simpler than the Indicators
  * list because signals have no read-only defaults; there is exactly one
  * section (custom) with a ``+ New`` button in the header.
  *
+ * Each row carries a shared ``LockToggle``. When a signal is locked its
+ * rename pencil, category dropdown and delete (×) are disabled (greyed);
+ * only the LockToggle stays active so the user can unlock it.
+ *
  * Props match the Indicators list for consistency:
- *   signals            {Array}    [{id, name, category?}, ...]
+ *   signals            {Array}    [{id, name, category?, locked?}, ...]
  *   selectedId         {string}
  *   onSelect           {Function} (id) => void
  *   onAdd              {Function} () => void
@@ -19,6 +24,7 @@ import { CATEGORIES } from '../../api/persistence';
  *   category           {string}   currently selected category (one of CATEGORIES)
  *   onCategoryChange   {Function} (cat) => void
  *   onChangeItemCat    {Function} (id, newCat) => void — move item to a different category
+ *   onSetSignalLocked  {Function} (id, nextBool) => void — toggle lock state
  *   loading            {boolean}  show a loading hint in the list
  */
 function SignalsList({
@@ -33,6 +39,7 @@ function SignalsList({
   category,
   onCategoryChange,
   onChangeItemCat,
+  onSetSignalLocked,
   loading,
 }) {
   const [renamingId, setRenamingId] = useState(null);
@@ -66,16 +73,18 @@ function SignalsList({
 
   function renderRow(sig) {
     const isRenaming = renamingId === sig.id;
+    const locked = !!sig.locked;
     return (
       <div
         key={sig.id}
         className={`${styles.row} ${sig.id === selectedId ? styles.rowActive : ''}`}
         onClick={() => onSelect(sig.id)}
-        onDoubleClick={() => startRename(sig)}
+        onDoubleClick={() => { if (!locked) startRename(sig); }}
         role="button"
         tabIndex={0}
         onKeyDown={(e) => e.key === 'Enter' && !isRenaming && onSelect(sig.id)}
         data-testid={`signal-row-${sig.id}`}
+        data-locked={locked ? 'true' : 'false'}
       >
         {isRenaming ? (
           <input
@@ -94,13 +103,23 @@ function SignalsList({
         ) : (
           <span className={styles.rowName}>{sig.name}</span>
         )}
+        {/* Lock toggle stays interactive even when locked — it's the only
+            way back to an editable state. Shared component (UI consistency). */}
+        {!isRenaming && onSetSignalLocked && (
+          <LockToggle
+            locked={locked}
+            entityLabel="signal"
+            onSetLocked={(next) => onSetSignalLocked(sig.id, next)}
+          />
+        )}
         {!isRenaming && (
           <button
             type="button"
             className={styles.iconBtn}
-            onClick={(e) => { e.stopPropagation(); startRename(sig); }}
-            title="Rename"
+            onClick={(e) => { e.stopPropagation(); if (!locked) startRename(sig); }}
+            title={locked ? 'Locked — unlock to rename' : 'Rename'}
             aria-label={`Rename ${sig.name}`}
+            disabled={locked}
           >
             ✎
           </button>
@@ -116,7 +135,8 @@ function SignalsList({
             }}
             aria-label={`Category for ${sig.name}`}
             data-testid={`signal-cat-select-${sig.id}`}
-            title="Move to category"
+            title={locked ? 'Locked — unlock to move' : 'Move to category'}
+            disabled={locked}
           >
             {CATEGORIES.map((cat) => (
               <option key={cat} value={cat}>{cat}</option>
@@ -127,9 +147,10 @@ function SignalsList({
           <button
             type="button"
             className={styles.deleteBtn}
-            onClick={(e) => { e.stopPropagation(); onDelete(sig.id); }}
-            title="Delete"
+            onClick={(e) => { e.stopPropagation(); if (!locked) onDelete(sig.id); }}
+            title={locked ? 'Locked — unlock to delete' : 'Delete'}
             aria-label={`Delete ${sig.name}`}
+            disabled={locked}
           >
             ×
           </button>

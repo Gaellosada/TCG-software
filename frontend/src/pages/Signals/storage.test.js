@@ -11,6 +11,7 @@ import {
   newBlockId,
   cascadeDeleteEntry,
   coerceResetCount,
+  migrateV5ToV6,
   __resetIncompatibleVersionWarnedForTests,
 } from './storage';
 import { coerceResetCount as coerceFromBlockShape } from './blockShape';
@@ -43,12 +44,12 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-describe('Signals storage (v5)', () => {
-  it('SCHEMA_VERSION is 5', () => {
-    expect(SCHEMA_VERSION).toBe(5);
+describe('Signals storage (v6)', () => {
+  it('SCHEMA_VERSION is 6', () => {
+    expect(SCHEMA_VERSION).toBe(6);
   });
 
-  it('storage key is tcg.signals.v5', () => {
+  it('storage key is tcg.signals.v5 (key unchanged; v5→v6 migrates in place)', () => {
     expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v5');
   });
 
@@ -65,7 +66,7 @@ describe('Signals storage (v5)', () => {
     expect(loadState()).toEqual({ signals: [] });
   });
 
-  it('discards any pre-v5 payload (no migration) and warns exactly once per page load', () => {
+  it('discards a pre-v5 (v3) payload (no migration) and warns exactly once per page load', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: 3,
       signals: [{ id: 'old', name: 'Old', rules: { entries: [], exits: [] } }],
@@ -147,7 +148,7 @@ describe('Signals storage (v5)', () => {
               {
                 id: 'exit-uuid-1',
                 name: '',
-                target_entry_block_name: '',
+                target_entry_block_names: [],
                 conditions: [
                   {
                     op: 'cross_below',
@@ -301,7 +302,7 @@ describe('Signals storage (v5)', () => {
                 id: 'exit-1',
                 input_id: 'X',        // legacy — must be stripped
                 weight: 42,           // legacy — must be stripped
-                target_entry_block_name: 'MyEntry',
+                target_entry_block_names: ['MyEntry'],
                 conditions: [],
               },
             ],
@@ -311,7 +312,7 @@ describe('Signals storage (v5)', () => {
     }));
     const out = loadState();
     const ex = out.signals[0].rules.exits[0];
-    expect(ex.target_entry_block_name).toBe('MyEntry');
+    expect(ex.target_entry_block_names).toEqual(['MyEntry']);
     expect('input_id' in ex).toBe(false);
     expect('weight' in ex).toBe(false);
   });
@@ -485,8 +486,28 @@ describe('Signals storage (v5)', () => {
     expect(out.signals[0].rules.entries[0].conditions).toHaveLength(1);
   });
 
-  it('preserves target_entry_block_name on exit blocks', () => {
+  it('preserves target_entry_block_names on exit blocks', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [{ id: 'entry-1', input_id: 'X', weight: 50, conditions: [] }],
+            exits: [{ id: 'exit-1', target_entry_block_names: ['MyEntry'], conditions: [] }],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    const exit = out.signals[0].rules.exits[0];
+    expect(exit.target_entry_block_names).toEqual(['MyEntry']);
+    expect('target_entry_block_name' in exit).toBe(false);
+  });
+
+  it('folds a stray legacy singular target_entry_block_name into the plural array (belt-and-braces)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      // Already v6, but a malformed payload still carries the singular key.
       version: SCHEMA_VERSION,
       signals: [
         {
@@ -500,10 +521,11 @@ describe('Signals storage (v5)', () => {
     }));
     const out = loadState();
     const exit = out.signals[0].rules.exits[0];
-    expect(exit.target_entry_block_name).toBe('MyEntry');
+    expect(exit.target_entry_block_names).toEqual(['MyEntry']);
+    expect('target_entry_block_name' in exit).toBe(false);
   });
 
-  it('defaults a missing target_entry_block_name on an exit block to ""', () => {
+  it('defaults a missing target_entry_block_names on an exit block to []', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
@@ -517,10 +539,27 @@ describe('Signals storage (v5)', () => {
       ],
     }));
     const out = loadState();
-    expect(out.signals[0].rules.exits[0].target_entry_block_name).toBe('');
+    expect(out.signals[0].rules.exits[0].target_entry_block_names).toEqual([]);
   });
 
-  it('does NOT add target_entry_block_name to entry blocks', () => {
+  it('de-duplicates repeated names in target_entry_block_names (order preserved)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's1', name: 's1', inputs: [],
+          rules: {
+            entries: [],
+            exits: [{ id: 'exit-1', target_entry_block_names: ['A', 'B', 'A', '', 'B'], conditions: [] }],
+          },
+        },
+      ],
+    }));
+    const out = loadState();
+    expect(out.signals[0].rules.exits[0].target_entry_block_names).toEqual(['A', 'B']);
+  });
+
+  it('does NOT add target_entry_block_names to entry blocks', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
@@ -535,9 +574,10 @@ describe('Signals storage (v5)', () => {
     }));
     const entry = loadState().signals[0].rules.entries[0];
     expect('target_entry_block_name' in entry).toBe(false);
+    expect('target_entry_block_names' in entry).toBe(false);
   });
 
-  it('sanitiser strips legacy target_entry_block_id on exits and preserves target_entry_block_name', () => {
+  it('sanitiser strips legacy target_entry_block_id on exits and preserves target_entry_block_names', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
@@ -548,8 +588,8 @@ describe('Signals storage (v5)', () => {
             exits: [
               {
                 id: 'exit-1',
-                target_entry_block_id: 'old-entry-id',   // legacy — must be stripped
-                target_entry_block_name: 'Momentum',      // new field — must survive
+                target_entry_block_id: 'old-entry-id',          // legacy — must be stripped
+                target_entry_block_names: ['Momentum'],          // new field — must survive
                 conditions: [],
               },
             ],
@@ -559,7 +599,7 @@ describe('Signals storage (v5)', () => {
     }));
     const out = loadState();
     const ex = out.signals[0].rules.exits[0];
-    expect(ex.target_entry_block_name).toBe('Momentum');
+    expect(ex.target_entry_block_names).toEqual(['Momentum']);
     expect('target_entry_block_id' in ex).toBe(false);
   });
 
@@ -630,7 +670,7 @@ describe('Signals storage (v5)', () => {
         id: 's1', name: 's1', inputs: [],
         rules: {
           entries: [],
-          exits: [{ id: 'x1', target_entry_block_name: 'Alpha', conditions: [] }],
+          exits: [{ id: 'x1', target_entry_block_names: ['Alpha'], conditions: [] }],
         },
       }],
     }));
@@ -648,6 +688,101 @@ describe('Signals storage (v5)', () => {
     vi.unstubAllGlobals();
     vi.stubGlobal('localStorage', undefined);
     expect(loadState()).toEqual({ signals: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v5 → v6 migration: singular target_entry_block_name → plural
+// target_entry_block_names. The localStorage KEY is unchanged
+// (tcg.signals.v5); only the in-payload version field flips 5 → 6 and exit
+// blocks gain the plural array. Existing v5 signals must load, run, and
+// round-trip.
+// ---------------------------------------------------------------------------
+describe('migrateV5ToV6 (pure)', () => {
+  it('folds a non-empty singular name into a one-element plural array', () => {
+    const v5 = {
+      version: 5,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [{ id: 'e1', input_id: 'X', weight: 50, name: 'Alpha', conditions: [] }],
+          exits: [{ id: 'x1', target_entry_block_name: 'Alpha', conditions: [] }],
+        },
+      }],
+    };
+    const out = migrateV5ToV6(v5);
+    expect(out.version).toBe(6);
+    const ex = out.signals[0].rules.exits[0];
+    expect(ex.target_entry_block_names).toEqual(['Alpha']);
+    expect('target_entry_block_name' in ex).toBe(false);
+  });
+
+  it('folds an empty singular name into an empty array', () => {
+    const v5 = {
+      version: 5,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: { entries: [], exits: [{ id: 'x1', target_entry_block_name: '', conditions: [] }] },
+      }],
+    };
+    const ex = migrateV5ToV6(v5).signals[0].rules.exits[0];
+    expect(ex.target_entry_block_names).toEqual([]);
+    expect('target_entry_block_name' in ex).toBe(false);
+  });
+
+  it('does not mutate the input payload', () => {
+    const v5 = {
+      version: 5,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: { entries: [], exits: [{ id: 'x1', target_entry_block_name: 'Alpha', conditions: [] }] },
+      }],
+    };
+    migrateV5ToV6(v5);
+    expect(v5.version).toBe(5);
+    expect(v5.signals[0].rules.exits[0].target_entry_block_name).toBe('Alpha');
+  });
+});
+
+describe('loadState — v5 payload is migrated to v6 (not dropped)', () => {
+  it('loads a v5 signal with a singular exit target as a plural array', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: 5,
+      signals: [{
+        id: 's1', name: 'Legacy', doc: '', inputs: [],
+        rules: {
+          entries: [{ id: 'e1', input_id: 'X', weight: 50, name: 'Alpha', conditions: [] }],
+          exits: [{ id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [] }],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const out = loadState();
+    expect(out.signals).toHaveLength(1);
+    const ex = out.signals[0].rules.exits[0];
+    expect(ex.target_entry_block_names).toEqual(['Alpha']);
+    expect('target_entry_block_name' in ex).toBe(false);
+    // No incompatible-version warning for a v5 payload — it migrates.
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('a migrated v5 signal round-trips: load → save → load is stable', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: 5,
+      signals: [{
+        id: 's1', name: 'Legacy', doc: '', inputs: [],
+        rules: {
+          entries: [{ id: 'e1', input_id: 'X', weight: 50, name: 'Alpha', conditions: [] }],
+          exits: [{ id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [] }],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const first = loadState();
+    saveState(first);
+    const second = loadState();
+    expect(second).toEqual(first);
+    expect(second.signals[0].rules.exits[0].target_entry_block_names).toEqual(['Alpha']);
   });
 });
 
@@ -702,23 +837,40 @@ describe('cascadeDeleteEntry', () => {
         { id: 'e2', input_id: 'X', weight: -30, name: 'Beta', conditions: [] },
       ],
       exits: [
-        { id: 'x1', target_entry_block_name: 'Alpha', conditions: [] },
-        { id: 'x2', target_entry_block_name: 'Beta', conditions: [] },
-        { id: 'x3', target_entry_block_name: 'Alpha', conditions: [] },
+        { id: 'x1', target_entry_block_names: ['Alpha'], conditions: [] },
+        { id: 'x2', target_entry_block_names: ['Beta'], conditions: [] },
+        { id: 'x3', target_entry_block_names: ['Alpha'], conditions: [] },
       ],
     },
     settings: { dont_repeat: true },
   };
 
-  it('removes the entry and every exit referencing its name', () => {
+  it('removes the entry and every exit whose ONLY target was its name', () => {
     const next = cascadeDeleteEntry(sig, 'e1');
     expect(next.rules.entries.map((b) => b.id)).toEqual(['e2']);
+    // x1 + x3 targeted only Alpha → removed; x2 (Beta) survives.
     expect(next.rules.exits.map((b) => b.id)).toEqual(['x2']);
   });
   it('leaves untouched entries and unrelated exits alone', () => {
     const next = cascadeDeleteEntry(sig, 'e2');
     expect(next.rules.entries.map((b) => b.id)).toEqual(['e1']);
     expect(next.rules.exits.map((b) => b.id)).toEqual(['x1', 'x3']);
+  });
+  it('v6: strips the deleted name but KEEPS an exit that still targets another entry', () => {
+    const sigMulti = {
+      ...sig,
+      rules: {
+        entries: sig.rules.entries,
+        // x1 targets BOTH Alpha and Beta; deleting Alpha must keep x1 (now [Beta]).
+        exits: [
+          { id: 'x1', target_entry_block_names: ['Alpha', 'Beta'], conditions: [] },
+          { id: 'x2', target_entry_block_names: ['Alpha'], conditions: [] },
+        ],
+      },
+    };
+    const next = cascadeDeleteEntry(sigMulti, 'e1'); // deletes name 'Alpha'
+    expect(next.rules.exits.map((b) => b.id)).toEqual(['x1']);
+    expect(next.rules.exits[0].target_entry_block_names).toEqual(['Beta']);
   });
   it('is a no-op (but still a new object) when the entryId is unknown', () => {
     const next = cascadeDeleteEntry(sig, 'missing');
@@ -740,8 +892,8 @@ describe('cascadeDeleteEntry', () => {
           { id: 'e2', input_id: 'X', weight: -30, name: 'Beta', conditions: [] },
         ],
         exits: [
-          { id: 'x1', target_entry_block_name: '', conditions: [] },
-          { id: 'x2', target_entry_block_name: 'Beta', conditions: [] },
+          { id: 'x1', target_entry_block_names: [], conditions: [] },
+          { id: 'x2', target_entry_block_names: ['Beta'], conditions: [] },
         ],
       },
     };
@@ -867,6 +1019,7 @@ describe('Reset blocks — soft-migration + sanitiser', () => {
     expect('input_id' in reset).toBe(false);
     expect('weight' in reset).toBe(false);
     expect('target_entry_block_name' in reset).toBe(false);
+    expect('target_entry_block_names' in reset).toBe(false);
   });
 
   // T19 — legacy v5 payload without `resets` loads with `resets: []`
@@ -927,7 +1080,7 @@ describe('Signals storage — per-block requires_reset_block_id (v5)', () => {
         rules: {
           entries: [],
           exits: [{
-            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            id: 'x1', name: '', target_entry_block_names: ['Alpha'],
             conditions: [], enabled: true, description: '',
             requires_reset_block_id: 'reset-uuid-9',
           }],
@@ -952,7 +1105,7 @@ describe('Signals storage — per-block requires_reset_block_id (v5)', () => {
             // requires_reset_block_id omitted
           }],
           exits: [{
-            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            id: 'x1', name: '', target_entry_block_names: ['Alpha'],
             conditions: [], enabled: true, description: '',
             // requires_reset_block_id omitted
           }],
@@ -1056,7 +1209,7 @@ describe('Signals storage — orphan requires_reset_count is forced to 1', () =>
         rules: {
           entries: [],
           exits: [{
-            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            id: 'x1', name: '', target_entry_block_names: ['Alpha'],
             conditions: [], enabled: true, description: '',
             requires_reset_block_id: null, // no binding…
             requires_reset_count: 5, // …but a stored count -> orphan
@@ -1126,7 +1279,7 @@ describe('Signals storage — per-block requires_reset_count (v5)', () => {
         rules: {
           entries: [],
           exits: [{
-            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            id: 'x1', name: '', target_entry_block_names: ['Alpha'],
             conditions: [], enabled: true, description: '',
             requires_reset_block_id: 'reset-uuid-9', requires_reset_count: 6,
           }],
@@ -1151,7 +1304,7 @@ describe('Signals storage — per-block requires_reset_count (v5)', () => {
             // requires_reset_count omitted — a pre-feature v5 signal
           }],
           exits: [{
-            id: 'x1', name: '', target_entry_block_name: 'Alpha',
+            id: 'x1', name: '', target_entry_block_names: ['Alpha'],
             conditions: [], enabled: true, description: '',
             // requires_reset_count omitted
           }],

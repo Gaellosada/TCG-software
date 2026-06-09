@@ -137,7 +137,7 @@ async def test_t1_resets_empty_byte_identical_to_legacy():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
 
     legacy = Signal(
@@ -184,7 +184,7 @@ async def test_t2_reset_never_fires_locks_after_first_trade():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_gt("X", 1000.0),))
     signal = Signal(
@@ -225,7 +225,7 @@ async def test_t3_single_midrun_reset_yields_two_trades():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
@@ -264,7 +264,7 @@ async def test_t4_same_bar_entry_and_reset_arm_holds():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 12.0),))
     signal = Signal(
@@ -304,7 +304,7 @@ async def test_t5_same_bar_exit_and_reset():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
@@ -344,7 +344,7 @@ async def test_t6_reset_while_open_is_silent():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_gt("X", 12.5),))
     signal = Signal(
@@ -383,7 +383,7 @@ async def test_t7_reset_before_any_entry():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 10.0),))
     signal = Signal(
@@ -425,7 +425,7 @@ async def test_t8_legacy_parity_default_constructed_rules():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
 
     legacy_rules = SignalRules(entries=(entry,), exits=(exit_blk,))
@@ -469,8 +469,8 @@ async def test_t9_multiple_resets_or_semantics():
         conditions=(_gt("Y", 11.5),),
         requires_reset_block_id="R2",
     )
-    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_name="EX")
-    xY = Block(id="XY", conditions=(_lt("Y", 12.0),), target_entry_block_name="EY")
+    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_names=("EX",))
+    xY = Block(id="XY", conditions=(_lt("Y", 12.0),), target_entry_block_names=("EY",))
     # R1 fires at X==11 (t=3); R2 fires only at X==99 (never).
     r1 = Block(id="R1", conditions=(_eq("X", 11.0),))
     r2 = Block(id="R2", conditions=(_eq("X", 99.0),))
@@ -511,7 +511,7 @@ async def test_t10_reset_nan_operand_excluded():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(
         id="R1",
@@ -562,7 +562,7 @@ async def test_t11_disabled_reset_excluded():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     r1 = Block(id="R1", conditions=(_eq("X", 11.0),))
     r2 = Block(id="R2", conditions=(_eq("X", 11.0),), enabled=False)
@@ -603,7 +603,7 @@ async def test_t12_all_resets_disabled_acts_as_empty():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     r_disabled = Block(
         id="R1",
@@ -648,7 +648,7 @@ async def test_t13_reset_block_event_payload():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", name="Arm", conditions=(_eq("X", 11.0),))
     signal = Signal(
@@ -665,7 +665,7 @@ async def test_t13_reset_block_event_payload():
     events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
     r = events_by[("R1", "reset")]
     assert r.input_id == ""
-    assert r.target_entry_block_name is None
+    assert r.target_entry_block_names == ()
     assert r.active_indices == ()
     # Resets fire at every X==11 bar: t=3,5,7.
     assert all(i in r.fired_indices for i in (3, 5, 7))
@@ -706,12 +706,12 @@ async def test_t14_multi_entry_arm_sharing():
     xX = Block(
         id="XX",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="EX",
+        target_entry_block_names=("EX",),
     )
     xY = Block(
         id="XY",
         conditions=(_lt("Y", 12.0),),
-        target_entry_block_name="EY",
+        target_entry_block_names=("EY",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
@@ -762,7 +762,7 @@ async def test_t15_reset_fires_every_bar_equivalent_to_no_resets():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     # Bound: identical entry, binding to a reset that fires every bar.
     entry_bound = Block(
@@ -826,7 +826,7 @@ async def test_b1_resets_with_zero_bindings_equals_no_resets():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
 
@@ -885,7 +885,7 @@ async def test_b2_bound_entry_first_fire_passes_second_blocked():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 99.0),))
     signal = Signal(
@@ -926,7 +926,7 @@ async def test_b3_reset_after_exit_rearms_bound_entry():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     arming_reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     never_reset = Block(id="R1", conditions=(_eq("X", 99.0),))
@@ -983,7 +983,7 @@ async def test_b4_bound_exit_arm_after_fire():
     exit_bound = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
         requires_reset_block_id="R1",
     )
     # Reset never fires.
@@ -1041,8 +1041,8 @@ async def test_b5_two_entries_same_reset_one_marker():
         conditions=(_gt("Y", 11.5),),
         requires_reset_block_id="R1",
     )
-    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_name="EX")
-    xY = Block(id="XY", conditions=(_lt("Y", 12.0),), target_entry_block_name="EY")
+    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_names=("EX",))
+    xY = Block(id="XY", conditions=(_lt("Y", 12.0),), target_entry_block_names=("EY",))
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
         id="s",
@@ -1096,8 +1096,8 @@ async def test_b6_two_entries_different_resets_independent_arms():
         conditions=(_gt("Y", 11.5),),
         requires_reset_block_id="R2",
     )
-    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_name="EX")
-    xY = Block(id="XY", conditions=(_lt("Y", 12.0),), target_entry_block_name="EY")
+    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_names=("EX",))
+    xY = Block(id="XY", conditions=(_lt("Y", 12.0),), target_entry_block_names=("EY",))
     # R1 fires at t=3 (X==11); R2 never fires.
     r1 = Block(id="R1", conditions=(_eq("X", 11.0),))
     r2 = Block(id="R2", conditions=(_eq("X", 99.0),))
@@ -1175,7 +1175,7 @@ async def test_b7_reset_arms_one_of_three_emits_marker():
         conditions=(_gt("Z", 100.0),),
         requires_reset_block_id="R1",
     )
-    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_name="EX")
+    xX = Block(id="XX", conditions=(_lt("X", 12.0),), target_entry_block_names=("EX",))
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
     signal = Signal(
         id="s",
@@ -1289,7 +1289,7 @@ async def test_b10_bound_exit_target_not_latched_preserves_arm():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 100.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
         requires_reset_block_id="R1",
     )
     reset = Block(id="R1", conditions=(_eq("X", 12.0),))
@@ -1444,7 +1444,7 @@ async def test_b13_binding_to_disabled_reset_locks_after_first_fire():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     # Reset would fire at t=5, but it's disabled → filtered out by
     # _usable_reset. bound_target still maps E -> "R1" but no usable
@@ -1491,7 +1491,7 @@ async def test_b14_reset_nan_no_arm_transition():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     # Reset condition would fire at any X bar, but t=5 has NaN.
     reset = Block(id="R1", conditions=(_gt("X", 0.0),))
@@ -1539,7 +1539,7 @@ async def test_b16_nan_on_bound_entry_preserves_arm():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 12.0),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     # Reset cond never satisfied (X < 0 is impossible for these closes).
     reset = Block(id="R1", conditions=(_lt("X", 0.0),))
@@ -1662,7 +1662,7 @@ async def test_c1_count_one_explicit_equals_default():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     reset = Block(id="R1", conditions=(_eq("X", 11.0),))
 
@@ -1722,7 +1722,7 @@ async def test_c2_count_three_needs_three_fires_to_rearm():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
         id="s",
@@ -1756,7 +1756,7 @@ async def test_c3_count_three_with_two_fires_never_rearms():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
         id="s",
@@ -1788,7 +1788,7 @@ async def test_c4_cumulative_across_non_consecutive_fires():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
         id="s",
@@ -1822,7 +1822,7 @@ async def test_c5_reset_marker_only_on_effective_rearm():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
         id="s",
@@ -1859,7 +1859,7 @@ async def test_c6_countdown_reseeded_on_each_disarm():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
         id="s",
@@ -1909,8 +1909,8 @@ async def test_c7_one_fire_decrements_all_disarmed_bound_blocks():
         requires_reset_block_id="R1",
         requires_reset_count=2,
     )
-    xX = Block(id="XX", conditions=(_lt("X", 11.5),), target_entry_block_name="EX")
-    xY = Block(id="XY", conditions=(_lt("Y", 11.5),), target_entry_block_name="EY")
+    xX = Block(id="XX", conditions=(_lt("X", 11.5),), target_entry_block_names=("EX",))
+    xY = Block(id="XY", conditions=(_lt("Y", 11.5),), target_entry_block_names=("EY",))
     reset = _reset_at5()  # fires at t2 and t3 (X==5)
     signal = Signal(
         id="s",
@@ -1972,8 +1972,8 @@ async def test_c8_same_reset_different_counts_independent_countdowns():
         requires_reset_block_id="R1",
         requires_reset_count=3,
     )
-    xX = Block(id="XX", conditions=(_lt("X", 11.5),), target_entry_block_name="EX")
-    xY = Block(id="XY", conditions=(_lt("Y", 11.5),), target_entry_block_name="EY")
+    xX = Block(id="XX", conditions=(_lt("X", 11.5),), target_entry_block_names=("EX",))
+    xY = Block(id="XY", conditions=(_lt("Y", 11.5),), target_entry_block_names=("EY",))
     reset = _reset_at5()  # fires at t2, t4, t6 (X==5)
     signal = Signal(
         id="s",
@@ -2021,7 +2021,7 @@ async def test_c9_reset_nan_bar_does_not_decrement_countdown():
     exit_blk = Block(
         id="X1",
         conditions=(_lt("X", 11.5),),
-        target_entry_block_name="Entry",
+        target_entry_block_names=("Entry",),
     )
     signal = Signal(
         id="s",
@@ -2043,3 +2043,74 @@ async def test_c9_reset_nan_bar_does_not_decrement_countdown():
     assert 3 not in r.latched_indices
     # No effective re-arm occurred at all (countdown stalled at 1).
     assert r.latched_indices == ()
+
+
+# ---------------------------------------------------------------------------
+# F1 — multi-target exit bound to a reset gate: one firing closes ALL
+#      targets and consumes exactly ONE arm (the arm gate is per-EXIT and
+#      applies to the whole firing, not per-target).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multi_target_bound_exit_one_firing_consumes_one_arm():
+    """A bound exit targeting TWO entries fires once while armed, clears
+    BOTH latches at that bar, and is disarmed afterwards. Because no reset
+    fires before the exit's NEXT condition bar, that later fire is blocked
+    — proving the single firing consumed exactly one arm (gate is
+    per-exit, applied once per firing).
+
+    SPX closes ``[10, 12, 13, 9, 12, 13, 9, 13]`` (8 bars). Entries are
+    UNBOUND (free to re-latch); the EXIT carries the reset binding.
+      * E1 (w=+50, X>9.5)  latches t0; E2 (w=+30, X>11.5) latches t1.
+      * t3 (X=9): exit (X<9.5) fires with arm True → clears E1 AND E2 in
+        one firing → position 0.8 → 0.0; the exit disarms (one arm spent).
+      * t4 (X=12): both entries re-latch → 0.8 again.
+      * t6 (X=9): exit condition fires again but the exit is still
+        disarmed (R1 never fired) → NO clear → position holds 0.8.
+    Net: two closed trades (both at t3 via the shared exit) and two trades
+    still open at the end.
+    """
+    closes = np.array([10.0, 12.0, 13.0, 9.0, 12.0, 13.0, 9.0, 13.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+    e1 = Block(
+        id="E1", name="E1", input_id="X", weight=50.0, conditions=(_gt("X", 9.5),)
+    )
+    e2 = Block(
+        id="E2", name="E2", input_id="X", weight=30.0, conditions=(_gt("X", 11.5),)
+    )
+    exit_bound = Block(
+        id="X1",
+        conditions=(_lt("X", 9.5),),
+        target_entry_block_names=("E1", "E2"),
+        requires_reset_block_id="R1",
+    )
+    reset = Block(id="R1", conditions=(_eq("X", 99.0),))  # never fires
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(e1, e2), exits=(exit_bound,), resets=(reset,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    vals = list(result.positions[0].values)
+    # t0:0.5 t1:0.8 t2:0.8 t3:cleared→0 t4:re-latched→0.8 t5:0.8 t6:0.8(blocked) t7:0.8
+    assert vals == pytest.approx([0.5, 0.8, 0.8, 0.0, 0.8, 0.8, 0.8, 0.8])
+
+    # The single armed firing at t3 cleared BOTH entries (effective once).
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    x = events_by[("X1", "exit")]
+    assert x.fired_indices == (3, 6)  # condition true at t3 and t6
+    assert x.latched_indices == (3,)  # but only t3 was effective (armed)
+
+    # Two trades closed at t3 (one per target, shared exit id) and two
+    # trades re-opened at t4 that never close (arm spent, R1 never fires).
+    assert len(result.trades) == 4
+    closed = [tr for tr in result.trades if tr.close_bar is not None]
+    open_ = [tr for tr in result.trades if tr.close_bar is None]
+    assert len(closed) == 2 and len(open_) == 2
+    for tr in closed:
+        assert tr.close_bar == 3
+        assert tr.exit_block_id == "X1"
+    assert {tr.entry_block_id for tr in closed} == {"E1", "E2"}
+    assert {tr.open_bar for tr in open_} == {4}
