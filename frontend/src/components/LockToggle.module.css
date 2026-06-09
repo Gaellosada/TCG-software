@@ -10,33 +10,32 @@
   font-size: 0.85rem;
   line-height: 1;
   padding: 0 2px;
-  opacity: 0;
+  /* Always visible — the padlock is the entry point to lock/unlock, so it
+   * must be discoverable at rest (not hover-gated). It can't rely on a parent
+   * .row:hover rule: CSS-module scoping means the list's hover rule targets
+   * the list's own .iconBtn, never this separately-scoped .lockBtn. Dim at
+   * rest via colour; brightens on hover; more prominent when locked. */
+  opacity: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: opacity 0.15s, color 0.15s;
+  transition: color 0.15s;
   flex-shrink: 0;
 }
 
-/* Parent rows expose the button on hover/focus — same pattern as
- * iconBtn/deleteBtn in IndicatorsList. The parent row class is
- * expected to apply the same .row:hover/.row:focus-within rule;
- * pages can override opacity or use a dedicated class. */
 .lockBtn:hover {
   color: var(--accent);
 }
 
 .lockBtn:focus-visible {
-  opacity: 1;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
   border-radius: 2px;
 }
 
-/* When the entity is locked, keep the button visible at full opacity
- * so users can see the lock status at a glance. */
+/* When the entity is locked, use a more prominent colour so lock status
+ * reads at a glance. */
 .lockBtn[data-locked='true'] {
-  opacity: 1;
   color: var(--text-secondary);
 }
 
