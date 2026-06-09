@@ -355,8 +355,15 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
 function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
   // Number of *extra* empty rows the user has opened beyond the stored
   // names (so "+ Add block" can reveal a fresh dropdown before a value is
-  // picked). Reset whenever the stored names array changes so we never
-  // show stale empties. Declared first — hooks must run unconditionally.
+  // picked). Declared first — hooks must run unconditionally.
+  //
+  // R3 fix: this counter is adjusted PRECISELY in setRow/removeRow, never via
+  // a blanket "reset to 0 on any name change" effect. The old effect reset it
+  // whenever ANY target name changed, so editing one row (e.g. renaming a
+  // sibling target) made an opened-but-still-empty extra row vanish. An opened
+  // empty row must persist until the user fills it or explicitly removes it.
+  // (Switching blocks remounts this component — BlockEditor keys each row by
+  // block.id — so cross-block state never leaks; no effect needed for that.)
   const [extraRows, setExtraRows] = useState(0);
 
   const entryList = Array.isArray(entryBlocks) ? entryBlocks : [];
@@ -366,11 +373,6 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
   const names = Array.isArray(block.target_entry_block_names)
     ? block.target_entry_block_names
     : [];
-
-  const namesKey = names.join(' ');
-  useEffect(() => {
-    setExtraRows(0);
-  }, [namesKey]);
 
   // Names that can be unambiguously targeted: named AND not duplicated.
   const nameCounts = new Map();
@@ -402,10 +404,19 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
     const rendered = names.length > 0
       ? [...names, ...Array(extraRows).fill('')]
       : [''];
+    // Was this an opened EXTRA empty row (beyond the stored names)? If so and
+    // the user just picked a real name, that row graduates into the stored
+    // array — shrink the extra-row counter by one so the rendered row count
+    // stays put (the new name re-supplies the row). Editing an already-stored
+    // row leaves the counter alone, so sibling empty rows survive (R3).
+    const wasExtraEmptyRow = rowIdx >= names.length && !rendered[rowIdx];
     const next = rendered.slice();
     next[rowIdx] = value;
     // Drop blanks (a row reset to "Pick an entry…") so the stored array
     // only ever holds real target names — empty array == "no targets yet".
+    if (wasExtraEmptyRow && typeof value === 'string' && value) {
+      setExtraRows((n) => Math.max(0, n - 1));
+    }
     commit(next.filter((n) => typeof n === 'string' && n));
   }
 

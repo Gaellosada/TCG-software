@@ -1595,3 +1595,98 @@ class TestMultiTargetExitsF1:
         assert data["error_type"] == "validation"
         assert "target_entry_block_name" in data["message"]
         assert "rules.exits[0]" in data["message"]
+
+    async def test_entry_empty_plural_target_accepted_like_empty_singular(
+        self, client: AsyncClient
+    ):
+        """M2 parity: an ENTRY carrying ``target_entry_block_names: []``
+        must be ACCEPTED, exactly as ``target_entry_block_name: ""`` is.
+
+        Before the fix the explicit-empty-plural encoding tripped the
+        "entries must not set a target" guard (the guard keyed on
+        plural-is-not-None) while the empty singular sailed through — an
+        asymmetry. Both empty encodings now mean "no target supplied".
+        """
+
+        def _make_body(entry_extra: dict) -> dict:
+            return {
+                "spec": {
+                    "id": "sig",
+                    "name": "m2",
+                    "inputs": [SPX_INPUT],
+                    "rules": {
+                        "entries": [
+                            {
+                                "id": "E1",
+                                "name": "Entry1",
+                                "input_id": "X",
+                                "weight": 100.0,
+                                "conditions": [_eq_cond(10.0)],
+                                **entry_extra,
+                            }
+                        ],
+                        "exits": [],
+                    },
+                },
+                "indicators": [],
+                "instruments": {},
+            }
+
+        empty_plural = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_names": []}),
+        )
+        empty_singular = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_name": ""}),
+        )
+        # Both encodings accepted (the asymmetry is gone).
+        assert empty_plural.status_code == 200, empty_plural.text
+        assert empty_singular.status_code == 200, empty_singular.text
+        # …and they produce identical positions.
+        v_plural = empty_plural.json()["positions"][0]["values"]
+        v_singular = empty_singular.json()["positions"][0]["values"]
+        assert v_plural == pytest.approx(v_singular)
+
+    async def test_reset_empty_plural_target_accepted_like_empty_singular(
+        self, client: AsyncClient
+    ):
+        """M2 parity for RESET blocks: a reset with
+        ``target_entry_block_names: []`` is accepted (same as ``""``),
+        rather than being rejected by the "reset must not set target"
+        guard on the strength of an explicit empty list alone.
+        """
+
+        def _make_body(reset_extra: dict) -> dict:
+            return {
+                "spec": {
+                    "id": "sig",
+                    "name": "m2r",
+                    "inputs": [SPX_INPUT],
+                    "rules": {
+                        "entries": [],
+                        "exits": [],
+                        "resets": [
+                            {
+                                "id": "R1",
+                                "name": "Reset1",
+                                "conditions": [_eq_cond(10.0)],
+                                **reset_extra,
+                            }
+                        ],
+                    },
+                },
+                "indicators": [],
+                "instruments": {},
+            }
+
+        empty_plural = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_names": []}),
+        )
+        empty_singular = await client.post(
+            "/api/signals/compute",
+            json=_make_body({"target_entry_block_name": ""}),
+        )
+        assert empty_plural.status_code == 200, empty_plural.text
+        assert empty_singular.status_code == 200, empty_singular.text

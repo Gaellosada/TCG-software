@@ -325,29 +325,61 @@ def _operand_key(
 # ---------------------------------------------------------------------------
 
 
-def _walk_operands(signal: Signal) -> list[Operand]:
-    # Skip disabled blocks so a disabled block referencing a broken
-    # indicator does not trigger a fetch — matches the "disabled ≡ deleted"
-    # parity invariant from _usable_entry / _usable_exit.
+def _walk_operands(
+    signal: Signal,
+    inputs: dict[str, Input],
+    entry_names: set[str],
+) -> list[Operand]:
+    # Skip blocks that the engine drops from its block lists so their
+    # operands are never fetched — a dropped block contributes nothing to
+    # positions/events, so walking its operands is at best wasteful and at
+    # worst harmful (it can fetch/raise on data no usable block needs).
+    #
+    # Gating differs by block kind, on purpose:
+    #   * EXITS use the full ``_usable_exit`` predicate. This is the S1
+    #     fix: an ENABLED exit whose targets ALL dangle is usable()==False
+    #     and is dropped from ``exit_blocks`` (becomes a no-op), so its
+    #     operands must NOT be walked — otherwise a no-op exit could fetch
+    #     or raise. Exits carry no input_id of their own and surface no
+    #     input-resolution errors, so skipping them loses no validation.
+    #   * ENTRIES and RESETS gate on ``enabled`` ONLY (NOT full usability).
+    #     An enabled entry referencing an UNDECLARED input_id is dropped
+    #     from ``entry_blocks`` by ``_usable_entry``, but walking its
+    #     operand is exactly how that user error surfaces as a
+    #     SignalValidationError (the API has no separate declared-input
+    #     check; see test_unknown_input_id_validation). Gating entries on
+    #     full usability would silently swallow that error — a regression.
+    #     Disabled entries/resets are still skipped (the ``enabled`` gate),
+    #     preserving the "disabled ≡ deleted" no-fetch behaviour.
     out: list[Operand] = []
-    for rules in (signal.rules.entries, signal.rules.exits, signal.rules.resets):
-        for block in rules:
-            if not block.enabled:
-                continue
-            for cond in block.conditions:
-                if isinstance(cond, (CompareCondition, CrossCondition)):
-                    out.append(cond.lhs)
-                    out.append(cond.rhs)
-                elif isinstance(cond, InRangeCondition):
-                    out.append(cond.operand)
-                    out.append(cond.min)
-                    out.append(cond.max)
-                elif isinstance(cond, RollingCondition):
-                    out.append(cond.operand)
-                else:
-                    raise SignalValidationError(
-                        f"unknown condition type: {type(cond).__name__}"
-                    )
+    for block in signal.rules.exits:
+        if not _usable_exit(block, inputs, entry_names):
+            continue
+        out.extend(_block_operands(block))
+    for block in (*signal.rules.entries, *signal.rules.resets):
+        if not block.enabled:
+            continue
+        out.extend(_block_operands(block))
+    return out
+
+
+def _block_operands(block: Block) -> list[Operand]:
+    """Return every operand referenced by a block's conditions."""
+    out: list[Operand] = []
+    for cond in block.conditions:
+        if isinstance(cond, (CompareCondition, CrossCondition)):
+            out.append(cond.lhs)
+            out.append(cond.rhs)
+        elif isinstance(cond, InRangeCondition):
+            out.append(cond.operand)
+            out.append(cond.min)
+            out.append(cond.max)
+        elif isinstance(cond, RollingCondition):
+            out.append(cond.operand)
+        else:
+            raise SignalValidationError(
+                f"unknown condition type: {type(cond).__name__}"
+            )
     return out
 
 
@@ -818,7 +850,7 @@ async def evaluate_signal(
             referenced_ids.append(iid)
 
     # ── 3. Collect operands + implicit close-price operands per input ──
-    operands: list[Operand] = list(_walk_operands(signal))
+    operands: list[Operand] = list(_walk_operands(signal, inputs, entry_names))
     for ref_id in referenced_ids:
         operands.append(InstrumentOperand(input_id=ref_id, field="close"))
 
@@ -1189,7 +1221,7 @@ async def evaluate_signal(
     # the same input produces separate series in the response.
     indicator_series: list[IndicatorSeriesResult] = []
     seen_keys: set[tuple] = set()
-    for op in _walk_operands(signal):
+    for op in _walk_operands(signal, inputs, entry_names):
         if not isinstance(op, IndicatorOperand):
             continue
         k = _operand_key(op, indicators, inputs)

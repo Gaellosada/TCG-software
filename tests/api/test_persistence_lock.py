@@ -643,3 +643,161 @@ def test_legacy_doc_without_locked_field_defaults_to_false() -> None:
     }
     restored = from_mongo_dict(legacy_raw)
     assert restored.locked is False
+
+
+# ---------------------------------------------------------------------------
+# R2 — archive TOCTOU: the REAL WriteRepository.archive must fold
+# ``locked: {$ne: True}`` into its write filter so a /lock that lands in
+# the window between the pre-read and the write cannot archive a doc that
+# just locked. On a zero-match it disambiguates not-found (KeyError → 404)
+# from just-locked (LockedError → 423).
+#
+# The fake-repo above is a behavioural replica and never runs the real
+# archive code, so these tests drive the REAL repository against a tiny
+# fake async Mongo collection. We bind it through ``object.__setattr__``
+# (the only legitimate way past the repo's immutability guard).
+# ---------------------------------------------------------------------------
+
+
+class _UpdateResult:
+    def __init__(self, matched: int) -> None:
+        self.matched_count = matched
+
+
+def _matches(doc: dict, filt: dict) -> bool:
+    """Minimal Mongo-filter matcher: equality + the single ``$ne`` we use."""
+    for key, cond in filt.items():
+        actual = doc.get(key)
+        if isinstance(cond, dict) and "$ne" in cond:
+            if actual == cond["$ne"]:
+                return False
+        elif actual != cond:
+            return False
+    return True
+
+
+class _RaceColl:
+    """Fake async collection that simulates a concurrent /lock landing in
+    the archive TOCTOU window.
+
+    The stored doc starts unlocked. The FIRST ``find_one`` (the archive
+    pre-read in ``_raise_if_locked``) observes it unlocked AND flips it to
+    locked — modelling a ``set_locked(True)`` that commits right after the
+    pre-read returns. By the time ``update_one`` runs, the doc is locked,
+    so the ``locked: {$ne: True}`` write filter excludes it (matched 0).
+    The disambiguation re-read then sees it locked → LockedError.
+    """
+
+    def __init__(self, doc: dict | None) -> None:
+        self._doc = doc
+        self._find_one_calls = 0
+        self.update_one_calls = 0
+
+    async def find_one(self, filt: dict, projection: dict | None = None) -> dict | None:
+        self._find_one_calls += 1
+        doc = self._doc
+        if doc is None or not _matches(doc, filt):
+            return None
+        snapshot = dict(doc)
+        # Race injection: the concurrent lock commits right after this
+        # first (pre-read) observation returns the still-unlocked state.
+        if self._find_one_calls == 1:
+            self._doc = {**doc, "locked": True}
+        return snapshot
+
+    async def update_one(self, filt: dict, update: dict) -> _UpdateResult:
+        self.update_one_calls += 1
+        if self._doc is not None and _matches(self._doc, filt):
+            self._doc = {**self._doc, **update.get("$set", {})}
+            return _UpdateResult(1)
+        return _UpdateResult(0)
+
+
+class _SimpleColl:
+    """Fake async collection with NO race — faithful equality/``$ne``
+    matching against a single stored doc (or none)."""
+
+    def __init__(self, doc: dict | None) -> None:
+        self._doc = doc
+        self.update_one_calls = 0
+
+    async def find_one(self, filt: dict, projection: dict | None = None) -> dict | None:
+        if self._doc is not None and _matches(self._doc, filt):
+            return dict(self._doc)
+        return None
+
+    async def update_one(self, filt: dict, update: dict) -> _UpdateResult:
+        self.update_one_calls += 1
+        if self._doc is not None and _matches(self._doc, filt):
+            self._doc = {**self._doc, **update.get("$set", {})}
+            return _UpdateResult(1)
+        return _UpdateResult(0)
+
+    @property
+    def doc(self) -> dict | None:
+        return self._doc
+
+
+def _repo_with_coll(coll: object):
+    """Build a real WriteRepository bound to ``coll`` (bypassing the
+    immutability guard via ``object.__setattr__``, exactly as __init__
+    does for the single legitimate construction write)."""
+    from tcg.persistence.repository import WriteRepository
+
+    repo = WriteRepository.__new__(WriteRepository)
+    object.__setattr__(repo, "_coll", coll)
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_archive_loses_toctou_race_raises_locked_not_archived() -> None:
+    """A /lock landing in the archive race window makes the write match
+    zero docs; the repo raises LockedError (423) — it does NOT archive a
+    locked doc, and the stored category stays unchanged."""
+    from tcg.persistence.repository import LockedError
+
+    coll = _RaceColl(
+        {"_id": "sig-1", "type": "signal", "category": "DEV", "locked": False}
+    )
+    repo = _repo_with_coll(coll)
+    with pytest.raises(LockedError):
+        await repo.archive("signal", "sig-1")
+    # The write was issued (proving we reached the filtered update) but it
+    # matched nothing, so the doc was NOT recategorized to ARCHIVE.
+    assert coll.update_one_calls == 1
+    assert coll._doc is not None and coll._doc["category"] == "DEV"
+
+
+@pytest.mark.asyncio
+async def test_archive_missing_doc_still_raises_keyerror() -> None:
+    """No doc at all → the filtered write matches zero AND the
+    disambiguation re-read finds nothing → KeyError (404), unchanged."""
+    coll = _SimpleColl(None)
+    repo = _repo_with_coll(coll)
+    with pytest.raises(KeyError):
+        await repo.archive("signal", "missing")
+
+
+@pytest.mark.asyncio
+async def test_archive_unlocked_doc_happy_path_unchanged() -> None:
+    """Normal path (no race, unlocked): the doc is recategorized to
+    ARCHIVE exactly as before the TOCTOU hardening."""
+    coll = _SimpleColl(
+        {"_id": "sig-1", "type": "signal", "category": "DEV", "locked": False}
+    )
+    repo = _repo_with_coll(coll)
+    await repo.archive("signal", "sig-1")
+    assert coll.doc is not None
+    assert coll.doc["category"] == Category.ARCHIVE.value
+    assert coll.update_one_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_indicator_unlocked_sets_deleted_unchanged() -> None:
+    """Indicator happy path: archive sets ``deleted = True`` (no race)."""
+    coll = _SimpleColl(
+        {"_id": "ind-1", "type": "indicator", "deleted": False, "locked": False}
+    )
+    repo = _repo_with_coll(coll)
+    await repo.archive("indicator", "ind-1")
+    assert coll.doc is not None and coll.doc["deleted"] is True

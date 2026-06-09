@@ -179,3 +179,30 @@
   border-color: var(--error);
   background: var(--error-bg);
 }
+
+/* Locked-row disabled controls — shared dim+not-allowed treatment, identical
+ * to SignalsList / IndicatorsList (consistency rule). background:none kills the
+ * UA grey-out, so without this the disabled category <select> and archive ×
+ * read as fully enabled (accent/error on hover, pointer cursor). The opacity
+ * rule is repeated under the hover/focus-within reveal selectors so it wins
+ * over the `.row:hover … { opacity: 1 }` reveal (equal specificity → later
+ * source order wins). The disabled hover colour neutralises the error glow. */
+.rowCatSelect:disabled,
+.rowDeleteBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--text-dim);
+}
+
+.rowDeleteBtn:disabled:hover {
+  color: var(--text-dim);
+  border-color: transparent;
+  background: none;
+}
+
+.row:hover .rowCatSelect:disabled,
+.row:focus-within .rowCatSelect:disabled,
+.row:hover .rowDeleteBtn:disabled,
+.row:focus-within .rowDeleteBtn:disabled {
+  opacity: 0.4;
+}

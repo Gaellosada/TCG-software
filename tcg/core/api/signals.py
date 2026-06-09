@@ -189,10 +189,13 @@ class _BlockIn(BaseModel):
     they may span multiple inputs. Entries must leave it empty.
 
     Legacy ``target_entry_block_name`` (singular string) is still
-    accepted on the wire for backward compatibility: if the plural key
-    is present it wins; otherwise a non-null singular is normalised to a
-    one-element list. They must not both be set to conflicting values
-    (the singular is ignored whenever the plural is present).
+    accepted on the wire for backward compatibility. The two encodings
+    are reconciled by SILENT normalisation, never by a conflict check: if
+    the plural key is present (even as an explicit empty list) it wins and
+    the singular is dropped; otherwise a non-empty singular is normalised
+    to a one-element list. Sending both keys is therefore accepted — the
+    singular is simply ignored whenever the plural is present, with no
+    rejection on disagreement (intentional back-compat behaviour).
     """
 
     id: str = ""
@@ -721,13 +724,17 @@ def _parse_blocks(
             tgt_names = (blk.target_entry_block_name,)
         else:
             tgt_names = ()
-        # ``has_target`` flags whether ANY exit target was supplied (by
-        # either key) — used by the placeholder / reset / entry checks
-        # that must reject a target on the wrong block kind.
-        has_target = (
-            bool(tgt_names)
-            or bool(blk.target_entry_block_name)
-            or (blk.target_entry_block_names is not None)
+        # ``has_target`` flags whether a NON-EMPTY exit target was supplied
+        # (by either key) — used by the placeholder / reset / entry checks
+        # that must reject a target on the wrong block kind. It keys off the
+        # truthiness of BOTH encodings symmetrically: an explicit empty
+        # plural list (``[]``) is treated the SAME as an empty/absent
+        # singular (no target supplied), so the two encodings behave
+        # identically on entry/reset blocks. (Exits separately require ≥1
+        # target via the ``not tgt_names`` check below, so an empty list on
+        # an exit is still rejected there, not here.)
+        has_target = bool(blk.target_entry_block_names) or bool(
+            blk.target_entry_block_name
         )
         legacy_tgt = blk.target_entry_block_id or None
         rrb = blk.requires_reset_block_id or None

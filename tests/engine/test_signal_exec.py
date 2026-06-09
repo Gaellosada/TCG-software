@@ -677,6 +677,162 @@ async def test_exit_with_dangling_target_is_noop():
     assert list(result.positions[0].values) == pytest.approx([0.5, 0.5, 0.5, 0.5, 0.5])
 
 
+# ---------------------------------------------------------------------------
+# S1 — an ENABLED exit whose targets ALL dangle is a no-op (dropped from
+# exit_blocks), so its operands must NOT be walked/fetched. Before the fix
+# the operand walk gated only on ``block.enabled`` and would fetch (and
+# could raise) for such a no-op exit.
+# ---------------------------------------------------------------------------
+
+
+_BROKEN_INPUT = Input(
+    id="B",
+    instrument=InstrumentSpot(collection="INDEX", instrument_id="MISSING"),
+)
+
+
+@pytest.mark.asyncio
+async def test_enabled_all_dangling_exit_does_not_fetch_operands():
+    """An enabled exit with ALL-dangling targets is dropped (no-op). Its
+    condition references a BROKEN input the fetcher cannot serve; the run
+    must still complete because the no-op exit's operands are NOT walked.
+
+    Negative control below flips the target to a real entry name → the
+    exit becomes usable → the broken operand IS walked → the run raises,
+    proving this test is not vacuously passing.
+    """
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    # Fetcher knows SPX only — the broken input (MISSING) raises.
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    entry = Block(
+        id="E", name="Entry", input_id="X", weight=50.0, conditions=(_gt(0.0),)
+    )
+    # Exit condition references the BROKEN input; ALL targets dangle.
+    dangling_exit = Block(
+        id="X1",
+        weight=0.0,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id="B"),  # broken input
+                rhs=ConstantOperand(value=0.0),
+            ),
+        ),
+        target_entry_block_names=("DOES_NOT_EXIST",),
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, _BROKEN_INPUT),
+        rules=SignalRules(entries=(entry,), exits=(dangling_exit,)),
+    )
+
+    # Must NOT raise — the no-op exit is skipped at the walk.
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # Entry behaves exactly as if the exit were absent (it latches t0+).
+    without = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry,)),
+    )
+    expected = await evaluate_signal(without, indicators={}, fetcher=fetcher)
+    assert list(result.positions[0].values) == list(expected.positions[0].values)
+    assert result.trades == expected.trades
+
+
+@pytest.mark.asyncio
+async def test_enabled_dangling_exit_negative_control_raises_when_usable():
+    """Negative control for the test above: the SAME broken-operand exit
+    now targets a REAL entry name → it is usable → its operand IS walked
+    → the run MUST raise SignalDataError on the broken fetch.
+    """
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    entry = Block(
+        id="E", name="Entry", input_id="X", weight=50.0, conditions=(_gt(0.0),)
+    )
+    usable_broken_exit = Block(
+        id="X1",
+        weight=0.0,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id="B"),  # broken input
+                rhs=ConstantOperand(value=0.0),
+            ),
+        ),
+        target_entry_block_names=("Entry",),  # resolves → exit is usable
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, _BROKEN_INPUT),
+        rules=SignalRules(entries=(entry,), exits=(usable_broken_exit,)),
+    )
+    with pytest.raises(SignalDataError):
+        await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+
+
+@pytest.mark.asyncio
+async def test_multi_target_exit_partial_dangling_closes_only_resolvable():
+    """R5 gap: a multi-target exit where SOME targets resolve and SOME
+    dangle closes ONLY the resolvable targets, with no error.
+
+    EntryA (w=100, X==10 → opens t0) and EntryB (w=50, X==11 → opens t1).
+    The exit targets ["EntryA", "GHOST"] (GHOST dangles) and fires at
+    X==13 (t3). Only EntryA's latch clears; EntryB keeps holding.
+    Position on X: t0 1.0, t1 1.5, t2 1.5, t3 0.5 (A cleared, B holds),
+    t4 0.5.
+    """
+    closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    def _eq(v: float) -> CompareCondition:
+        return CompareCondition(
+            op="eq",
+            lhs=InstrumentOperand(input_id="X"),
+            rhs=ConstantOperand(value=v),
+        )
+
+    entry_a = Block(
+        id="EA", name="EntryA", input_id="X", weight=100.0, conditions=(_eq(10.0),)
+    )
+    entry_b = Block(
+        id="EB", name="EntryB", input_id="X", weight=50.0, conditions=(_eq(11.0),)
+    )
+    # Mixed targets: EntryA resolves, GHOST dangles. (Constructed at the
+    # engine layer directly — the API rejects dangling names before the
+    # engine, but the engine must tolerate latent bad state.)
+    partial_exit = Block(
+        id="X1",
+        weight=0.0,
+        conditions=(_eq(13.0),),
+        target_entry_block_names=("EntryA", "GHOST"),
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(entry_a, entry_b), exits=(partial_exit,)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    vals = list(result.positions[0].values)
+    assert vals == pytest.approx([1.0, 1.5, 1.5, 0.5, 0.5])
+
+    events_by = {(ev.block_id, ev.kind): ev for ev in result.events}
+    # Exit effectively cleared EntryA at t3.
+    assert events_by[("X1", "exit")].latched_indices == (3,)
+    # Only the resolvable target is emitted on the exit event.
+    assert events_by[("X1", "exit")].target_entry_block_names == ("EntryA",)
+    # EntryA closed at t3; EntryB has no close (open trade).
+    trades_by_entry = {tr.entry_block_id: tr for tr in result.trades}
+    assert trades_by_entry["EA"].close_bar == 3
+    assert trades_by_entry["EB"].close_bar is None
+
+
 @pytest.mark.asyncio
 async def test_events_schema_entry_and_exit():
     """Verify event records carry id, kind, fired/latched/active and

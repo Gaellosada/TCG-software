@@ -613,4 +613,67 @@ describe('BlockHeader — exit multi-target picker', () => {
     expect(screen.getByTestId('target-entry-select-0-1').value).toBe('Gamma');
     expect(screen.queryByTestId('target-entry-select-0-2')).toBeNull();
   });
+
+  // R3 regression: an opened-but-still-empty extra dropdown must NOT vanish
+  // when the user fills/changes a DIFFERENT (sibling) row. The old code reset
+  // its extra-row counter to 0 on any target-name change, so the empty row
+  // disappeared the moment a sibling was edited.
+  function ControlledExit({ initial }) {
+    const [names, setNames] = useState(initial);
+    return (
+      <BlockHeader
+        block={{ id: 'x1', conditions: [], target_entry_block_names: names }}
+        section="exits"
+        inputs={NO_INPUTS}
+        entryBlocks={ENTRIES}
+        onChange={(next) => setNames(next.target_entry_block_names)}
+        onDelete={noop}
+        blockIndex={1}
+      />
+    );
+  }
+
+  it('keeps an opened empty row when a SIBLING row\'s value changes (R3)', () => {
+    render(<ControlledExit initial={['Alpha', 'Beta']} />);
+    // Open a third (empty) dropdown row.
+    fireEvent.click(screen.getByTestId('add-target-0'));
+    expect(screen.getByTestId('target-entry-select-0-2')).toBeDefined();
+    expect(screen.getByTestId('target-entry-select-0-2').value).toBe('');
+
+    // Change a SIBLING row (row 0: Alpha → Gamma). The empty row 2 must survive.
+    fireEvent.change(screen.getByTestId('target-entry-select-0-0'), { target: { value: 'Gamma' } });
+
+    expect(screen.getByTestId('target-entry-select-0-0').value).toBe('Gamma');
+    expect(screen.getByTestId('target-entry-select-0-1').value).toBe('Beta');
+    // The still-empty extra dropdown persists.
+    expect(screen.getByTestId('target-entry-select-0-2')).toBeDefined();
+    expect(screen.getByTestId('target-entry-select-0-2').value).toBe('');
+  });
+
+  it('filling an opened empty row graduates it without spawning a stale extra row (R3)', () => {
+    render(<ControlledExit initial={['Alpha']} />);
+    fireEvent.click(screen.getByTestId('add-target-0'));
+    // Two rows now: Alpha + one empty.
+    expect(screen.getByTestId('target-entry-select-0-1').value).toBe('');
+
+    // Fill the empty row with Beta.
+    fireEvent.change(screen.getByTestId('target-entry-select-0-1'), { target: { value: 'Beta' } });
+
+    // Exactly two stored rows — no leftover empty row 2.
+    expect(screen.getByTestId('target-entry-select-0-0').value).toBe('Alpha');
+    expect(screen.getByTestId('target-entry-select-0-1').value).toBe('Beta');
+    expect(screen.queryByTestId('target-entry-select-0-2')).toBeNull();
+  });
+
+  it('keeps the empty row through TWO sibling edits in a row (R3)', () => {
+    render(<ControlledExit initial={['Alpha', 'Beta']} />);
+    fireEvent.click(screen.getByTestId('add-target-0'));
+    // Edit row 0, then row 1 — the empty row must persist across both.
+    fireEvent.change(screen.getByTestId('target-entry-select-0-0'), { target: { value: 'Gamma' } });
+    expect(screen.getByTestId('target-entry-select-0-2').value).toBe('');
+    // Row 1 (Beta) → Alpha (now free again after row 0 moved to Gamma).
+    fireEvent.change(screen.getByTestId('target-entry-select-0-1'), { target: { value: 'Alpha' } });
+    expect(screen.getByTestId('target-entry-select-0-2')).toBeDefined();
+    expect(screen.getByTestId('target-entry-select-0-2').value).toBe('');
+  });
 });

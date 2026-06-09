@@ -353,6 +353,16 @@ class WriteRepository:
         Lock guard: a locked doc (stored ``locked == True``) cannot be
         archived — :class:`LockedError` is raised before any write. Use
         :meth:`set_locked` to unlock first.
+
+        Atomicity: the pre-read ``_raise_if_locked`` handles the common
+        case, but a concurrent ``set_locked(True)`` landing between that
+        read and the write below would otherwise let the archive slip
+        through on a doc that just locked (TOCTOU). To close the window
+        ``"locked": {"$ne": True}`` is folded into the write filter, so a
+        racing lock makes the update match zero docs. On a zero match we
+        then disambiguate not-found (``KeyError`` → 404) from
+        just-locked (``LockedError`` → 423) by re-reading the lock flag,
+        keeping behaviour identical to the non-racing path.
         """
         await self._raise_if_locked(doc_type, doc_id)
         now = _utcnow()
@@ -371,10 +381,18 @@ class WriteRepository:
             }
         else:
             raise ValueError(f"unknown doc_type: {doc_type!r}")
+        # ``locked: {$ne: True}`` makes the write itself reject a doc that
+        # locked after the pre-read — atomic at the document level.
         result = await self._coll.update_one(
-            {"_id": doc_id, "type": doc_type}, update_payload
+            {"_id": doc_id, "type": doc_type, "locked": {"$ne": True}},
+            update_payload,
         )
         if result.matched_count == 0:
+            # Either the doc is gone (404) or it locked under us in the
+            # race window (423). Re-read the lock flag to disambiguate:
+            # ``_raise_if_locked`` raises the SAME LockedError the guard
+            # would; if it returns, the doc is absent → KeyError.
+            await self._raise_if_locked(doc_type, doc_id)
             raise KeyError(f"persistence: no {doc_type} with id={doc_id!r} to archive")
 
     async def _raise_if_locked(
