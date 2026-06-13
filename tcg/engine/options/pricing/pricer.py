@@ -8,8 +8,12 @@ forward price ``F`` regardless of whether the underlying is a future or a spot
 index. Module 6 (`tcg.engine.options.chain`) is responsible for the join.
 
 Invariants (per brief / guardrails):
-- ``r=0.0`` hardcoded, surfaced via ``inputs_used.r=0.0`` on every successful
-  compute (guardrail #5).
+- ``r`` is configurable via ``DefaultOptionsPricer(risk_free_rate=...)``;
+  the **default is 0.0** (Phase 1 behaviour preserved). The chosen rate is
+  surfaced via ``inputs_used.r`` on every successful compute (guardrail #5)
+  and flows into every kernel call (delta/gamma/theta/vega/IV inversion).
+  Downstream the dwh VIX greeks backfill constructs this pricer at
+  ``risk_free_rate=0.04``.
 - OPT_VIX → forward resolved from FUT_VIX (Phase 2): monthly options
   compute normally under Black-76; weeklies (no matching FUT_VIX
   expiration) reach the missing-underlying branch and surface
@@ -53,8 +57,11 @@ from tcg.types.options import (
     OptionDailyRow,
 )
 
-# Phase 1 hardcoded risk-free rate. Surfaced via inputs_used.r per guardrail #5.
-_RISK_FREE_RATE: float = 0.0
+# Default risk-free rate. Configurable per-instance via
+# ``DefaultOptionsPricer(risk_free_rate=...)``; the default preserves the
+# Phase 1 r=0.0 behaviour. Surfaced via inputs_used.r per guardrail #5.
+# (The dwh VIX greeks backfill constructs the pricer at risk_free_rate=0.04.)
+_DEFAULT_RISK_FREE_RATE: float = 0.0
 
 _ALL_GREEKS: tuple[GreekKind, ...] = (
     GreekKind.IV,
@@ -175,9 +182,7 @@ def _classify_iv_inversion_failure(
                 "degenerate. Greek limits at this regime: |delta| approx "
                 "1, gamma approx theta approx vega approx 0."
             )
-            return _missing(
-                IV_ERROR_DEEP_ITM_DEGENERATE, ("iv",), error_detail=detail
-            )
+            return _missing(IV_ERROR_DEEP_ITM_DEGENERATE, ("iv",), error_detail=detail)
         # Shallow-ITM BelowIntrinsic → data-quality bucket.
         detail = (
             "Option mid quote is below intrinsic value at this strike; "
@@ -217,10 +222,18 @@ class DefaultOptionsPricer(OptionsPricer):
     No I/O, no Mongo, no fetching. Caller provides every input.
     """
 
-    def __init__(self, kernel: PricingKernel | None = None) -> None:
+    def __init__(
+        self,
+        kernel: PricingKernel | None = None,
+        *,
+        risk_free_rate: float = _DEFAULT_RISK_FREE_RATE,
+    ) -> None:
         self.kernel: PricingKernel = kernel if kernel is not None else BS76Kernel()
         self._kernel_name: str = type(self.kernel).__name__
         self._model_name: str = "Black-76"
+        # Continuously-compounded risk-free rate fed to every kernel call and
+        # surfaced via ``inputs_used.r``. Default 0.0 preserves Phase 1 goldens.
+        self._risk_free_rate: float = float(risk_free_rate)
 
     # ---- compute ----------------------------------------------------------
 
@@ -268,10 +281,18 @@ class DefaultOptionsPricer(OptionsPricer):
             )
             return ComputedGreeks(
                 iv=iv_result if GreekKind.IV in wanted else _not_requested(),
-                delta=iv_for_greeks_missing if GreekKind.DELTA in wanted else _not_requested(),
-                gamma=iv_for_greeks_missing if GreekKind.GAMMA in wanted else _not_requested(),
-                theta=iv_for_greeks_missing if GreekKind.THETA in wanted else _not_requested(),
-                vega=iv_for_greeks_missing if GreekKind.VEGA in wanted else _not_requested(),
+                delta=iv_for_greeks_missing
+                if GreekKind.DELTA in wanted
+                else _not_requested(),
+                gamma=iv_for_greeks_missing
+                if GreekKind.GAMMA in wanted
+                else _not_requested(),
+                theta=iv_for_greeks_missing
+                if GreekKind.THETA in wanted
+                else _not_requested(),
+                vega=iv_for_greeks_missing
+                if GreekKind.VEGA in wanted
+                else _not_requested(),
             )
 
         # 6) Compute the Greeks.
@@ -290,7 +311,7 @@ class DefaultOptionsPricer(OptionsPricer):
                     "underlying_price": F,
                     "iv": iv_value,
                     "ttm": T,
-                    "r": _RISK_FREE_RATE,
+                    "r": self._risk_free_rate,
                     "sign": flag,
                     "kernel": self._kernel_name,
                 },
@@ -299,29 +320,32 @@ class DefaultOptionsPricer(OptionsPricer):
                 error_detail=None,
             )
 
+        r = self._risk_free_rate
         delta_r = (
-            _ok(self.kernel.delta(F, K, T, _RISK_FREE_RATE, iv_value, flag))
+            _ok(self.kernel.delta(F, K, T, r, iv_value, flag))
             if GreekKind.DELTA in wanted
             else _not_requested()
         )
         gamma_r = (
-            _ok(self.kernel.gamma(F, K, T, _RISK_FREE_RATE, iv_value))
+            _ok(self.kernel.gamma(F, K, T, r, iv_value))
             if GreekKind.GAMMA in wanted
             else _not_requested()
         )
         theta_r = (
-            _ok(self.kernel.theta(F, K, T, _RISK_FREE_RATE, iv_value, flag))
+            _ok(self.kernel.theta(F, K, T, r, iv_value, flag))
             if GreekKind.THETA in wanted
             else _not_requested()
         )
         vega_r = (
-            _ok(self.kernel.vega(F, K, T, _RISK_FREE_RATE, iv_value))
+            _ok(self.kernel.vega(F, K, T, r, iv_value))
             if GreekKind.VEGA in wanted
             else _not_requested()
         )
         iv_out = iv_result if GreekKind.IV in wanted else _not_requested()
 
-        return ComputedGreeks(iv=iv_out, delta=delta_r, gamma=gamma_r, theta=theta_r, vega=vega_r)
+        return ComputedGreeks(
+            iv=iv_out, delta=delta_r, gamma=gamma_r, theta=theta_r, vega=vega_r
+        )
 
     # ---- invert_iv (public) -----------------------------------------------
 
@@ -379,7 +403,7 @@ class DefaultOptionsPricer(OptionsPricer):
                 F=F,
                 K=K,
                 T=T,
-                r=_RISK_FREE_RATE,
+                r=self._risk_free_rate,
                 flag=flag,
             )
         except Exception as exc:  # noqa: BLE001 — py_vollib raises a hierarchy
@@ -402,7 +426,7 @@ class DefaultOptionsPricer(OptionsPricer):
                 "underlying_price": F,
                 "iv": float(iv_value),
                 "ttm": T,
-                "r": _RISK_FREE_RATE,
+                "r": self._risk_free_rate,
                 "sign": flag,
                 "kernel": self._kernel_name,
             },

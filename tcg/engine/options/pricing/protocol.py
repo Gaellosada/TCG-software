@@ -27,20 +27,37 @@ class PricingKernel(Protocol):
 
     Convention notes (mirroring `BasicBlackScholes.java`):
     - `T` is in years.
-    - `r` is the continuously-compounded risk-free rate (Phase 1: 0.0).
+    - `r` is the continuously-compounded risk-free rate (configurable on the
+      pricer via `DefaultOptionsPricer(risk_free_rate=...)`; default 0.0).
     - `sigma` is the annualized volatility.
     - `theta` is per **calendar day** (Java `calcTheta` divides by 365).
     - `vega` is per **1 percentage-point** of vol (Java `calcVega` divides by 100).
     """
 
-    def price_call(self, F: float, K: float, T: float, r: float, sigma: float) -> float: ...
-    def price_put(self, F: float, K: float, T: float, r: float, sigma: float) -> float: ...
+    def price_call(
+        self, F: float, K: float, T: float, r: float, sigma: float
+    ) -> float: ...
+    def price_put(
+        self, F: float, K: float, T: float, r: float, sigma: float
+    ) -> float: ...
     def delta(
-        self, F: float, K: float, T: float, r: float, sigma: float, flag: Literal["c", "p"]
+        self,
+        F: float,
+        K: float,
+        T: float,
+        r: float,
+        sigma: float,
+        flag: Literal["c", "p"],
     ) -> float: ...
     def gamma(self, F: float, K: float, T: float, r: float, sigma: float) -> float: ...
     def theta(
-        self, F: float, K: float, T: float, r: float, sigma: float, flag: Literal["c", "p"]
+        self,
+        F: float,
+        K: float,
+        T: float,
+        r: float,
+        sigma: float,
+        flag: Literal["c", "p"],
     ) -> float: ...
     def vega(self, F: float, K: float, T: float, r: float, sigma: float) -> float: ...
     def implied_vol(
