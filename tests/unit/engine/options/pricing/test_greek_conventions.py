@@ -127,9 +127,7 @@ def test_kernel_vega_is_per_vol_point_not_per_unit_vol(kernel: BS76Kernel) -> No
     The "per unit of vol" convention (i.e. without the /100) would be 100x
     larger.  If this test fails by ~100x, someone changed the convention.
     """
-    actual = kernel.vega(
-        HULL_ATM_F, HULL_ATM_K, HULL_ATM_T, HULL_ATM_R, HULL_ATM_SIGMA
-    )
+    actual = kernel.vega(HULL_ATM_F, HULL_ATM_K, HULL_ATM_T, HULL_ATM_R, HULL_ATM_SIGMA)
     assert actual == pytest.approx(HULL_ATM_VEGA_PER_PCT, abs=1e-2)
     # Sanity: per-unit-vol value would be ~100x — guard the magnitude band.
     assert 0.05 < actual < 0.5, (
@@ -166,23 +164,38 @@ def test_kernel_textbook_atm_call_with_r_nonzero(kernel: BS76Kernel) -> None:
 
     F=100, K=100, sigma=0.20, T=0.5, r=0.05.
 
-    Closed-form: c = exp(-rT) * F * (2 N(sigma*sqrt(T)/2 + r*sqrt(T)/sigma) - 1)
-    using the kernel's d1 = (log(F/K) + (r + sigma^2/2)T) / (sigma*sqrt(T))
-    convention which folds r into d1 (matches Hull §17.8 Black-with-carry form).
+    TRUE Black-76 **forward** d1 (no r in the numerator; carry is in F):
+        d1 = (log(F/K) + (sigma^2/2) T) / (sigma*sqrt(T))
+        c  = exp(-rT) * (F N(d1) - K N(d2))
+    Matches Hull "Options, Futures, and Other Derivatives" Black-76 and
+    py_vollib.black. Hand-computed from math primitives, then cross-checked
+    against py_vollib so this is a genuine anchor, not a restatement of the
+    kernel's own arithmetic.
 
-    Computed by hand from math primitives (no py_vollib).
+    NB: a prior revision of this test hardcoded the Black-SCHOLES spot d1
+    (with an extra ``r +`` term, expected price ~5.4129). That encoded the
+    kernel d1 bug fixed in PR #56; the correct value is ~5.4980.
     """
     F, K, T, r, sigma = 100.0, 100.0, 0.5, 0.05, 0.20
 
-    # Hand-compute the expected price from the kernel's d1 convention.
+    # Hand-compute the expected price from the TRUE Black-76 forward d1.
     sqT = math.sqrt(T)
-    d1 = (math.log(F / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqT)
+    d1 = (math.log(F / K) + (0.5 * sigma * sigma) * T) / (sigma * sqT)
     d2 = d1 - sigma * sqT
     N = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))  # noqa: E731
     expected = math.exp(-r * T) * (F * N(d1) - K * N(d2))
 
+    # Pin the numeric value so a future regression to the spot-d1 form fails
+    # loudly (the buggy value was 5.4129; the correct Black-76 value is 5.4980).
+    assert expected == pytest.approx(5.498014870607143, abs=1e-9)
+
+    # Cross-check the hand value against py_vollib (independent implementation).
+    from py_vollib.black import black as vollib_black
+
+    assert expected == pytest.approx(vollib_black("c", F, K, T, r, sigma), abs=1e-9)
+
     actual = kernel.price_call(F, K, T, r, sigma)
-    assert actual == pytest.approx(expected, abs=1e-2)
+    assert actual == pytest.approx(expected, abs=1e-9)
 
 
 def test_kernel_put_call_parity_at_r_zero(kernel: BS76Kernel) -> None:
@@ -198,6 +211,4 @@ def test_kernel_put_call_parity_at_r_zero(kernel: BS76Kernel) -> None:
     F2, K2, T2, r2, sigma2 = 110.0, 100.0, 0.5, 0.05, 0.20
     c2 = kernel.price_call(F2, K2, T2, r2, sigma2)
     p2 = kernel.price_put(F2, K2, T2, r2, sigma2)
-    assert (c2 - p2) == pytest.approx(
-        math.exp(-r2 * T2) * (F2 - K2), abs=1e-10
-    )
+    assert (c2 - p2) == pytest.approx(math.exp(-r2 * T2) * (F2 - K2), abs=1e-10)

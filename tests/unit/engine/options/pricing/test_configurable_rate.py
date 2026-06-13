@@ -19,21 +19,18 @@ The default-r=0 figures (delta 0.5199388058383725, etc.) live in
 ``test_golden.py`` and MUST remain byte-identical — see
 ``test_default_rate_delta_unchanged_byte_identical``.
 
-KNOWN KERNEL BUG (out of scope for this rate-plumbing task — flagged to Gael):
-  ``BS76Kernel._d1_d2`` uses ``d1 = (ln(F/K) + (r + 0.5 sigma^2) T)/(sigma√T)``
+KERNEL d1 BUG — FIXED in PR #56 (Gael-approved):
+  ``BS76Kernel._d1_d2`` previously used ``d1 = (ln(F/K) + (r + 0.5σ²)T)/(σ√T)``
   — the Black-SCHOLES (spot) convention, which carries an extra ``r`` term.
-  TRUE Black-76 (py_vollib, Hull) uses ``d1 = (ln(F/K) + 0.5 sigma^2 T)/(sigma√T)``
-  — no ``r`` in the numerator, because F is the forward (carry is already in F).
-  At r=0 the two coincide (the rT term vanishes), so every existing golden
-  passes and the bug is invisible. At r=0.04 the kernel's delta (0.5540)
-  diverges from the correct Black-76 delta (0.5148). Since the dwh VIX greeks
-  backfill will call this pricer at r=0.04, this MUST be fixed before any
-  production greek write — but fixing the kernel math is OUT of this task's
-  scope (Sign 4: reuse, don't reinvent the model) and is a model-convention
-  decision (Sign 5: HOLD for Gael). The four ``*_matches_golden`` tests below
-  are therefore xfail(strict=True): they pin the correct py_vollib values and
-  will flip to PASS the instant the kernel d1 is corrected, forcing removal of
-  the xfail marker.
+  TRUE Black-76 (py_vollib, Hull) uses ``d1 = (ln(F/K) + 0.5σ²T)/(σ√T)`` — no
+  ``r`` in the numerator, because F is the forward (carry is already in F).
+  At r=0 the two coincide (the rT term vanishes), so every r=0 golden passed
+  and the bug was invisible; at r=0.04 the kernel's delta was 0.5540 vs the
+  correct 0.5148. The fix dropped the ``r +`` term (rate still enters via the
+  ``exp(-rT)`` discount). The r=0.04 correctness goldens below now PASS;
+  ``test_kernel_greeks_at_r004_match_py_vollib_golden`` and
+  ``test_kernel_delta_agrees_with_py_vollib_at_nonzero_r`` are the regression
+  guards. Every r=0 value (incl. delta 0.5199388058383725) is byte-identical.
 """
 
 from __future__ import annotations
@@ -93,46 +90,81 @@ def test_inputs_used_surfaces_chosen_rate() -> None:
         assert r.inputs_used["r"] == 0.04
 
 
-# --- Correctness goldens at r=0.04 (xfail: blocked by kernel d1 bug) --------
-# These pin the TRUE Black-76 values (py_vollib). They fail today ONLY because
-# of the kernel d1 bug documented in the module docstring, NOT because of the
-# rate plumbing (which is verified by the tests above + below). strict=True so
-# they convert to a hard failure the moment the kernel is fixed.
-_KERNEL_D1_BUG = (
-    "blocked by BS76Kernel d1 bug: kernel uses the Black-Scholes spot d1 "
-    "(extra +rT term) instead of the Black-76 forward d1; correct only at "
-    "r=0. Out of scope for the rate-plumbing task; HOLD for Gael (Sign 4/5)."
-)
+# --- Correctness goldens at r=0.04 (kernel d1 bug FIXED in PR #56) ----------
+# These pin the TRUE Black-76 values (py_vollib). Two layers:
+#   * kernel-level (exact inputs, no IV inversion) → must match py_vollib to 1e-9.
+#     This is the real regression guard against any return of the spot-d1 bug.
+#   * pricer end-to-end (compute() inverts IV from a mid first) → looser tol,
+#     because the inverted IV (~0.20027) carries the mid's float-rounding
+#     residual; this checks the rate flows correctly through the full path.
+# The previous revision marked these xfail(strict) pending the kernel fix.
 
 
-@pytest.mark.xfail(strict=True, reason=_KERNEL_D1_BUG)
+def test_kernel_greeks_at_r004_match_py_vollib_golden() -> None:
+    """The corrected kernel must match py_vollib's Black-76 greeks at r=0.04 to
+    1e-9 at the exact golden inputs (F=K=100, T=0.25, sigma=0.20, call).
+
+    This is the definitive regression guard for the d1 fix: it isolates the
+    kernel from IV inversion, so any reintroduction of the spurious ``+rT``
+    term in d1 (which moved delta to ~0.5540) fails loudly here.
+    """
+    from py_vollib.black.greeks.analytical import delta, gamma, theta, vega
+
+    from tcg.engine.options.pricing.kernel import BS76Kernel
+
+    k = BS76Kernel()
+    F, K, T, r, sigma, flag = 100.0, 100.0, 0.25, 0.04, 0.20, "c"
+
+    assert k.delta(F, K, T, r, sigma, flag) == pytest.approx(
+        _EXPECTED_DELTA_R04, abs=1e-9
+    )
+    assert k.gamma(F, K, T, r, sigma) == pytest.approx(_EXPECTED_GAMMA_R04, abs=1e-9)
+    assert k.theta(F, K, T, r, sigma, flag) == pytest.approx(
+        _EXPECTED_THETA_R04, abs=1e-9
+    )
+    assert k.vega(F, K, T, r, sigma) == pytest.approx(_EXPECTED_VEGA_R04, abs=1e-9)
+
+    # Cross-check the goldens themselves against py_vollib (independent impl).
+    assert _EXPECTED_DELTA_R04 == pytest.approx(
+        delta(flag, F, K, T, r, sigma), abs=1e-9
+    )
+    assert _EXPECTED_GAMMA_R04 == pytest.approx(
+        gamma(flag, F, K, T, r, sigma), abs=1e-9
+    )
+    assert _EXPECTED_THETA_R04 == pytest.approx(
+        theta(flag, F, K, T, r, sigma), abs=1e-9
+    )
+    assert _EXPECTED_VEGA_R04 == pytest.approx(vega(flag, F, K, T, r, sigma), abs=1e-9)
+
+
 def test_delta_at_r004_matches_golden() -> None:
-    """delta = exp(-rT)*N(d1) at r=0.04 — golden via py_vollib."""
+    """End-to-end delta = exp(-rT)*N(d1) at r=0.04 via compute() (IV inverted)."""
     pricer = DefaultOptionsPricer(risk_free_rate=0.04)
     g = pricer.compute(_atm_3m_call_contract(), _atm_3m_call_row(), underlying_price=_F)
+    # Tol 1e-3: the inverted IV (~0.20027) differs from the golden's exact 0.20
+    # by the mid's float-rounding residual; kernel correctness is pinned to
+    # 1e-9 above. Asserts delta is ~0.5148 (Black-76), NOT the buggy ~0.5540.
     assert g.delta.value == pytest.approx(_EXPECTED_DELTA_R04, abs=1e-3)
+    assert g.delta.value < 0.52  # would be ~0.554 under the old spot-d1 bug
 
 
-@pytest.mark.xfail(strict=True, reason=_KERNEL_D1_BUG)
 def test_gamma_at_r004_matches_golden() -> None:
     pricer = DefaultOptionsPricer(risk_free_rate=0.04)
     g = pricer.compute(_atm_3m_call_contract(), _atm_3m_call_row(), underlying_price=_F)
-    assert g.gamma.value == pytest.approx(_EXPECTED_GAMMA_R04, abs=1e-4)
+    assert g.gamma.value == pytest.approx(_EXPECTED_GAMMA_R04, abs=1e-3)
 
 
-@pytest.mark.xfail(strict=True, reason=_KERNEL_D1_BUG)
 def test_theta_at_r004_matches_golden() -> None:
     """theta differs from r=0 by the carry term — golden via py_vollib."""
     pricer = DefaultOptionsPricer(risk_free_rate=0.04)
     g = pricer.compute(_atm_3m_call_contract(), _atm_3m_call_row(), underlying_price=_F)
-    assert g.theta.value == pytest.approx(_EXPECTED_THETA_R04, abs=1e-4)
+    assert g.theta.value == pytest.approx(_EXPECTED_THETA_R04, abs=1e-3)
 
 
-@pytest.mark.xfail(strict=True, reason=_KERNEL_D1_BUG)
 def test_vega_at_r004_matches_golden() -> None:
     pricer = DefaultOptionsPricer(risk_free_rate=0.04)
     g = pricer.compute(_atm_3m_call_contract(), _atm_3m_call_row(), underlying_price=_F)
-    assert g.vega.value == pytest.approx(_EXPECTED_VEGA_R04, abs=1e-4)
+    assert g.vega.value == pytest.approx(_EXPECTED_VEGA_R04, abs=1e-3)
 
 
 def test_chosen_rate_changes_delta_vs_default() -> None:
@@ -192,35 +224,35 @@ def test_invert_iv_uses_chosen_rate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pin the kernel d1 bug precisely (passes today; documents the divergence).
-# Delete this test together with the xfail markers when the kernel is fixed.
+# Regression guard for the d1 fix (PR #56): the kernel must AGREE with the true
+# Black-76 (py_vollib) delta at r != 0, not just at r=0. Before the fix the
+# kernel used the Black-Scholes spot d1 (extra +rT) and delta diverged to
+# ~0.5540 at r=0.04. This test locks the fix in permanently.
 # ---------------------------------------------------------------------------
 
 
-def test_kernel_d1_bug_pinned_delta_diverges_from_py_vollib_at_r004() -> None:
-    """At r=0.04 the kernel delta diverges from the true Black-76 delta.
-
-    This documents the known kernel d1 bug at the kernel level so the rate
-    plumbing's correctness is unambiguous: the plumbing feeds r through fine;
-    it is the kernel math that is wrong at r != 0. At r=0 they must agree.
+def test_kernel_delta_agrees_with_py_vollib_at_nonzero_r() -> None:
+    """The corrected kernel delta must equal py_vollib's Black-76 delta at both
+    r=0 and r!=0, across calls and puts. Guards against any reintroduction of
+    the spurious ``+rT`` term in d1.
     """
     from py_vollib.black.greeks.analytical import delta as vollib_delta
 
     from tcg.engine.options.pricing.kernel import BS76Kernel
 
     k = BS76Kernel()
-    F, K, T, sigma = 100.0, 100.0, 0.25, 0.20
-
-    # r=0: kernel == py_vollib (existing behaviour, must hold).
-    assert k.delta(F, K, T, 0.0, sigma, "c") == pytest.approx(
-        vollib_delta("c", F, K, T, 0.0, sigma), abs=1e-12
-    )
-
-    # r=0.04: kernel diverges from py_vollib by the spurious +rT-in-d1 term.
-    kernel_d = k.delta(F, K, T, 0.04, sigma, "c")
-    vollib_d = vollib_delta("c", F, K, T, 0.04, sigma)
-    assert abs(kernel_d - vollib_d) > 0.03, (
-        "Expected the documented kernel d1 bug to make delta diverge at "
-        f"r=0.04; if this now agrees, the kernel was fixed — remove the "
-        f"xfail markers and this test. kernel={kernel_d}, vollib={vollib_d}"
-    )
+    cases = [
+        (100.0, 100.0, 0.25, 0.0, 0.20, "c"),
+        (100.0, 100.0, 0.25, 0.04, 0.20, "c"),
+        (100.0, 100.0, 0.50, 0.05, 0.20, "c"),
+        (100.0, 110.0, 0.50, 0.05, 0.20, "p"),
+        (100.0, 90.0, 1.0, 0.03, 0.30, "p"),
+    ]
+    for F, K, T, r, sigma, flag in cases:
+        kernel_d = k.delta(F, K, T, r, sigma, flag)  # type: ignore[arg-type]
+        vollib_d = vollib_delta(flag, F, K, T, r, sigma)
+        assert kernel_d == pytest.approx(vollib_d, abs=1e-9), (
+            f"kernel delta diverges from Black-76 at r={r} "
+            f"(F={F},K={K},T={T},sigma={sigma},{flag}): "
+            f"kernel={kernel_d}, vollib={vollib_d} — d1 bug regressed?"
+        )
