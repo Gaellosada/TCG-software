@@ -40,7 +40,6 @@ from datetime import date
 import pytest
 
 from tcg.engine.options.pricing.pricer import DefaultOptionsPricer
-from tcg.types.options import GreekKind
 
 from ._fixtures import make_contract, make_row
 
