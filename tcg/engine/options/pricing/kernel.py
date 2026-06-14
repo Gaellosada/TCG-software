@@ -52,12 +52,27 @@ def _norm_pdf(x: float) -> float:
 def _d1_d2(F: float, K: float, T: float, r: float, sigma: float) -> tuple[float, float]:
     """Compute (d1, d2) under Black-76 (no dividend term: ``d=0``).
 
+    True Black-76 **forward** d1: ``d1 = (ln(F/K) + 0.5 sigma^2 T) / (sigma√T)``.
+    There is NO ``r`` term in the numerator — the carry is already embedded in
+    the forward price ``F`` (the no-arbitrage forward earns the risk-free rate),
+    so the rate enters the model ONLY via the ``exp(-rT)`` discount applied in
+    ``price_call`` / ``price_put`` (and the greeks). This matches py_vollib's
+    ``py_vollib.black`` and Hull, "Options, Futures, and Other Derivatives"
+    (Black-76, eq. for d1/d2).
+
+    NB: a prior revision wrote ``(r + 0.5 sigma^2) T`` in the numerator — that is
+    the Black-SCHOLES **spot** d1 (where the underlying grows at ``r`` rather
+    than the forward already pricing in carry). It is a no-op at ``r=0`` (the
+    ``rT`` term vanishes), which is why every ``r=0`` golden passed and the bug
+    went unnoticed until r≠0 goldens were added. Corrected per the A1 analysis
+    (PR #56) — at r=0 every existing value is byte-identical.
+
     port: BasicBlackScholes.java:113-114 (``calculateBlack(...)`` Black-76 form).
     Note: the Java :26-28 ``calcD1`` carries an extra ``-d`` term; we drop it
     because Black-76 has no separate dividend yield (it is folded into ``F``).
     """
     sqrtT = math.sqrt(T)
-    d1 = (math.log(F / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT)
+    d1 = (math.log(F / K) + (0.5 * sigma * sigma) * T) / (sigma * sqrtT)
     d2 = d1 - sigma * sqrtT
     return d1, d2
 
@@ -81,12 +96,20 @@ class BS76Kernel(PricingKernel):
     def price_put(self, F: float, K: float, T: float, r: float, sigma: float) -> float:
         # port: BasicBlackScholes.java:84-92 (PUT branch: K*(1-N(d2)) - F*(1-N(d1))).
         d1, d2 = _d1_d2(F, K, T, r, sigma)
-        return math.exp(-r * T) * (K * (1.0 - _norm_cdf(d2)) - F * (1.0 - _norm_cdf(d1)))
+        return math.exp(-r * T) * (
+            K * (1.0 - _norm_cdf(d2)) - F * (1.0 - _norm_cdf(d1))
+        )
 
     # ---- greeks -----------------------------------------------------------
 
     def delta(
-        self, F: float, K: float, T: float, r: float, sigma: float, flag: Literal["c", "p"]
+        self,
+        F: float,
+        K: float,
+        T: float,
+        r: float,
+        sigma: float,
+        flag: Literal["c", "p"],
     ) -> float:
         # port: BasicBlackScholes.java:44-49. With d=0 the dividend factor
         # exp(t*d*-1) collapses to 1, leaving N(d1) for calls and N(d1)-1 for puts.
@@ -105,7 +128,13 @@ class BS76Kernel(PricingKernel):
         return math.exp(-r * T) * _norm_pdf(d1) / (F * sigma * math.sqrt(T))
 
     def theta(
-        self, F: float, K: float, T: float, r: float, sigma: float, flag: Literal["c", "p"]
+        self,
+        F: float,
+        K: float,
+        T: float,
+        r: float,
+        sigma: float,
+        flag: Literal["c", "p"],
     ) -> float:
         # port: BasicBlackScholes.java:60-74. Per-day (Java line 70 divides by 365.0).
         # The Java port is generalized Black-Scholes-Merton with separate
