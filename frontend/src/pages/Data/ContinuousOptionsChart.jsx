@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import useAsync from '../../hooks/useAsync';
+import { useOptionRoots } from '../../hooks/marketQueries';
 import Chart from '../../components/Chart';
 import OptionStreamForm, { buildDefaultOptionStream } from '../../components/OptionStreamForm';
 import OptionDateRangeControl, { computePresetRange, DEFAULT_PRESET } from '../../components/OptionDateRangeControl';
-import { getOptionRoots, resolveOptionStream } from '../../api/options';
+import { resolveOptionStream } from '../../api/options';
 import { TRACE_COLORS } from '../../utils/chartTheme';
 import styles from './ChartBase.module.css';
 
@@ -20,11 +20,9 @@ function buildStreamLabel(ref) {
 }
 
 function ContinuousOptionsChart({ collection }) {
-  // ── Fetch option roots for the form dropdown ──
-  const { data: rootsData, loading: rootsLoading, error: rootsError } = useAsync(
-    () => getOptionRoots(),
-    [],
-  );
+  // ── Fetch option roots for the form dropdown (SWR: shared cache with
+  //    CategoryBrowser; renders instantly on re-navigation) ──
+  const { data: rootsData, loading: rootsLoading, error: rootsError } = useOptionRoots();
 
   const availableRoots = useMemo(() => {
     if (!rootsData || !rootsData.roots) return [];
