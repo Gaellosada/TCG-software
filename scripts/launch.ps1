@@ -367,9 +367,30 @@ Write-Section "Checking frontend dependencies"
 
 $frontendDir = Join-Path $ProjectRoot "frontend"
 $nodeModules = Join-Path $frontendDir "node_modules"
+$npmMarker   = Join-Path $nodeModules ".deps-installed"
+$freshModules = -not (Test-Path $nodeModules)
 
-if (-not (Test-Path $nodeModules)) {
-    Write-Info "Installing npm packages (first run)..."
+# Re-install only when the dependency manifests actually change (instead of
+# skipping forever once node_modules exists). Mirrors the Python venv logic so a
+# new frontend dependency (e.g. @tanstack/react-query) self-heals on next launch.
+$npmDepFiles = @("package.json", "package-lock.json") |
+    ForEach-Object { Join-Path $frontendDir $_ } |
+    Where-Object { Test-Path $_ } |
+    Sort-Object
+$npmDepsHash = if ($npmDepFiles) {
+    (($npmDepFiles | ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash }) -join '-')
+} else { '' }
+$npmStoredHash = if (Test-Path $npmMarker) {
+    $m = Get-Content $npmMarker -Raw -ErrorAction SilentlyContinue
+    if ($m) { $m.Trim() } else { '' }
+} else { '' }
+
+if ($freshModules -or ($npmStoredHash -ne $npmDepsHash)) {
+    if ($freshModules) {
+        Write-Info "Installing npm packages (first run)..."
+    } else {
+        Write-Info "Dependency manifest changed since last run -- reinstalling..."
+    }
     Push-Location $frontendDir
     try {
         # Use cmd.exe /c -- PowerShell's npm.ps1 shim can mangle arguments.
@@ -384,9 +405,10 @@ if (-not (Test-Path $nodeModules)) {
         Write-Fail "npm install failed. Check the output above."
         exit 1
     }
+    Set-Content -Path $npmMarker -Value $npmDepsHash -NoNewline
     Write-Ok "Frontend dependencies installed"
 } else {
-    Write-Ok "Already installed (delete frontend/node_modules to force reinstall)"
+    Write-Ok "Already up to date (package.json/package-lock.json unchanged)"
 }
 
 # ---------------------------------------------------------------------------
