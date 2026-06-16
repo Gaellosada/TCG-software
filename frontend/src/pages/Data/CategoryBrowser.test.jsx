@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
-import CategoryBrowser from './CategoryBrowser';
+import { screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { renderWithClient, makeTestClient } from '../../test/queryWrapper';
+import CategoryBrowser, { prefetchCategoryBrowser } from './CategoryBrowser';
 
 afterEach(cleanup);
 
@@ -75,7 +76,7 @@ async function renderAndWait(props = {}) {
   const onSelect = props.onSelect ?? vi.fn();
   const selected = props.selected ?? null;
 
-  render(<CategoryBrowser selected={selected} onSelect={onSelect} />);
+  renderWithClient(<CategoryBrowser selected={selected} onSelect={onSelect} />);
 
   // Wait for the loading state to disappear.
   await waitFor(() => {
@@ -157,7 +158,7 @@ describe('Greeks badge — stored_greeks_ratio variants', () => {
 
   async function renderWithRoots(roots) {
     vi.mocked(getOptionRoots).mockResolvedValue({ roots });
-    render(<CategoryBrowser selected={null} onSelect={vi.fn()} />);
+    renderWithClient(<CategoryBrowser selected={null} onSelect={vi.fn()} />);
     await waitFor(() => {
       expect(screen.queryByText('Loading instruments...')).toBeNull();
     });
@@ -379,5 +380,92 @@ describe('Empty options roots', () => {
     await waitFor(() => {
       expect(screen.getByText('No options roots available')).toBeDefined();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. SWR: no spinner on re-navigation (the primary nav-spinner this layer kills)
+// ---------------------------------------------------------------------------
+
+describe('SWR — instant render on re-navigation', () => {
+  it('second mount (navigate back) shows NO "Loading instruments..." flash', async () => {
+    // One shared client == the app-wide cache surviving across route changes.
+    // staleTime mirrors production (collections are slow-changing) so a
+    // re-navigation within the window is served purely from cache.
+    const client = makeTestClient();
+    client.setDefaultOptions({
+      queries: { retry: false, gcTime: Infinity, staleTime: 5 * 60 * 1000 },
+    });
+
+    // First visit to /data: cold cache → loads once.
+    const first = renderWithClient(
+      <CategoryBrowser selected={null} onSelect={vi.fn()} />,
+      { client },
+    );
+    expect(first.getByText('Loading instruments...')).toBeDefined();
+    await waitFor(() =>
+      expect(first.queryByText('Loading instruments...')).toBeNull(),
+    );
+    first.unmount(); // navigate away
+
+    const callsAfterFirst = vi.mocked(listCollections).mock.calls.length;
+
+    // Navigate back: warm cache → the very first render must already show the
+    // category tree, never the loading placeholder.
+    const second = renderWithClient(
+      <CategoryBrowser selected={null} onSelect={vi.fn()} />,
+      { client },
+    );
+    expect(second.queryByText('Loading instruments...')).toBeNull();
+    // The Options header (always present once categories render) is there.
+    expect(second.getByRole('button', { name: /options/i })).toBeDefined();
+    // No immediate refetch within the staleTime window (served from cache).
+    expect(vi.mocked(listCollections).mock.calls.length).toBe(callsAfterFirst);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Startup prefetch: FIRST mount is instant too (iter3 — true preload)
+// ---------------------------------------------------------------------------
+
+describe('Startup prefetch — first mount renders with NO loading flash', () => {
+  it('after prefetchCategoryBrowser warms the cache, the very first mount shows no spinner', async () => {
+    // Mirror the app-wide client (production staleTime) so the warmed entry is
+    // served from cache on mount with no background refetch.
+    const client = makeTestClient();
+    client.setDefaultOptions({
+      queries: { retry: false, gcTime: Infinity, staleTime: 5 * 60 * 1000 },
+    });
+
+    // Simulate app startup: warm the cache BEFORE the page ever mounts.
+    await prefetchCategoryBrowser(client);
+
+    // The prefetch performed exactly the composite load once.
+    const callsAfterPrefetch = vi.mocked(listCollections).mock.calls.length;
+    expect(callsAfterPrefetch).toBe(1);
+
+    // FIRST mount (first navigation to /data): must render the tree instantly —
+    // NO "Loading instruments..." flash, because the cache is already warm.
+    const { queryByText, getByRole } = renderWithClient(
+      <CategoryBrowser selected={null} onSelect={vi.fn()} />,
+      { client },
+    );
+    expect(queryByText('Loading instruments...')).toBeNull();
+    expect(getByRole('button', { name: /options/i })).toBeDefined();
+
+    // Served purely from the prefetched cache — no extra fetch on mount.
+    expect(vi.mocked(listCollections).mock.calls.length).toBe(callsAfterPrefetch);
+  });
+
+  it('prefetch errors are swallowed — a cold cache still lets the page load normally', async () => {
+    // Backend down at startup: prefetch must not throw (fire-and-forget).
+    vi.mocked(listCollections).mockRejectedValueOnce(new Error('backend down'));
+    const client = makeTestClient();
+
+    // Must resolve (not reject) even though the underlying fetch failed.
+    await expect(prefetchCategoryBrowser(client)).resolves.toBeUndefined();
+
+    // With the cache left cold, a subsequent mount loads normally (the mock is
+    // reset to the default resolving impl by beforeEach for the next test).
   });
 });

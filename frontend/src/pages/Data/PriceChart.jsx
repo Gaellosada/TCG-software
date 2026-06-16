@@ -1,9 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
-import useAsync from '../../hooks/useAsync';
+import { useInstrumentPrices } from '../../hooks/marketQueries';
 import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import Chart from '../../components/Chart';
-import { getInstrumentPrices } from '../../api/data';
 import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
@@ -20,10 +19,9 @@ function PriceChart({ collection, instrument }) {
     setChartType(preference);
   }, [preference]);
 
-  const { data, loading, error } = useAsync(
-    () => getInstrumentPrices(collection, instrument),
-    [collection, instrument]
-  );
+  // SWR: cached price series renders instantly on re-navigation; a stale
+  // entry silently revalidates in the background. Keyed by collection+instrument.
+  const { data, loading, error } = useInstrumentPrices(collection, instrument);
 
   const { traces, layoutOverrides, hasOHLC } = useMemo(() => {
     if (!data || !data.dates || data.dates.length === 0) {
