@@ -550,7 +550,9 @@ try {
 Write-Info "Starting backend server (port $BackendPort)..."
 
 $backendLog = Join-Path $script:logsDir "backend.log"
-$backendArgs = "-m uvicorn tcg.core.app:app --port $BackendPort"
+# Launch via `python -m tcg.core` (not bare uvicorn): on Windows it installs the
+# SelectorEventLoop policy psycopg requires before uvicorn creates the loop.
+$backendArgs = "-m tcg.core --port $BackendPort"
 $env:TCG_CORS_ORIGINS = "http://localhost:$FrontendPort"
 try {
     $script:backendProcess = Start-Process -FilePath $venvPython `
