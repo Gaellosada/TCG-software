@@ -1,40 +1,47 @@
 """SQL read adapter for options data (OPT_* collections).
 
-Replaces tcg.data.options.reader.MongoOptionsDataReader.
-Uses the same DTO builders (doc_to_contract, bar_and_greek_to_row) but pulls
-data from dwh v_option_chain (UNION of greeks and quotes) and fact_price_eod.
+Replaces ``tcg.data.options.reader.MongoOptionsDataReader``. Reads from the dwh
+``v_option_chain`` view (a UNION ALL of a greeks-side and a quotes-only side)
+plus ``fact_price_eod`` / ``fact_option_greeks``, and produces the SAME frozen
+DTOs the Mongo path did (``OptionContractDoc`` / ``OptionDailyRow`` /
+``OptionContractSeries`` / ``OptionRootInfo``) so the FastAPI options routes are
+unchanged.
 
-All 8 gotchas from the recon are honored:
-1. Per-contract grain via symbol (PK = instrument_id)
-2. Parent fact_price_eod (no *_YYYY partitions)
-3. COALESCE(adj_close, close) for close → mid via bid/ask only
-4. DTE from expiration or days_to_expiry, COALESCE fallback
-5. Dollarize crypto BTC/ETH premiums by coin/USD spot
-6. Slice chains by root_symbol NOT underlying (underlying_id NULL for 8/10 roots)
-7. Filter greek_source (vendor vs computed)
-8. Collapse UNION ALL dups, mid only when both bid&ask present and positive
+Collection mapping: ``dim_instrument.source_collection`` == the legacy Mongo
+collection name (OPT_SP_500, …); ``symbol`` == the durable Mongo ``_id`` ==
+``contract_id``. Chains are sliced by ``source_collection`` (equivalently
+``root_symbol``) — NOT ``underlying_id``, which is NULL for 8/10 roots [Gotcha 6].
+
+The 8 gotchas:
+  1 per-contract grain (one contract per symbol);
+  2 parent ``fact_price_eod`` filtered on date (never ``*_YYYY``);
+  3 ``close`` is the raw option close — NEVER used as mid;
+  4 dte = ``COALESCE(days_to_expiry, expiration - trade_date)``, clipped ≥0;
+  5 dollarize Deribit BTC/ETH premiums (× coin/USD spot);
+  6 slice by ``source_collection``/``root_symbol`` not underlying;
+  7 ``greek_source`` (vendor vs computed) — surfaced for filtering, not stored
+    on the row (the Mongo DTO had no such field; parity preserved);
+  8 ``v_option_chain`` is UNION ALL → collapse to one row per
+    ``option_instrument_id`` taking the first non-NULL of each field; mid only
+    when bid&ask both present and >0 (else None); Decimal→float at the boundary.
+
+``underlying_ref`` (the Mongo per-contract FUT ``_id`` an option-on-future
+referenced) is NOT preserved in dwh (only ``underlying_id`` → the INDEX, and
+``underlying_symbol`` → a provider ticker). It is therefore ``None`` here. The
+options route degrades gracefully (VIX resolves its future via
+``find_contract_by_expiration``; BTC uses the row-level underlying price; other
+option-on-future roots fall back to stored greeks). See PROBLEMS.md.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
-from psycopg import AsyncConnection
-
-from tcg.data._sql.connection import DwhConnectionPool
-from tcg.data.options._doc_to_dto import (
-    _parse_yyyymmdd,
-    bar_and_greek_to_row,
-    doc_to_contract,
-    index_greeks_by_date,
-)
-from tcg.data.options._provider import (
-    get_stored_greeks_ratios,
-    has_greeks_for_root,
-    select_provider,
-)
+from tcg.data._sql.connection import SCHEMA, DwhConnectionPool, to_float
+from tcg.data.options._provider import _SEED_RATIOS, has_greeks_for_root
+from tcg.data.options._strike_factor import STRIKE_FACTOR_VERIFIED
 from tcg.types.errors import OptionsContractNotFound, OptionsDataAccessError
 from tcg.types.options import (
     OptionContractDoc,
@@ -42,11 +49,9 @@ from tcg.types.options import (
     OptionDailyRow,
     OptionRootInfo,
 )
-from tcg.data._utils import date_to_int, int_to_date
 
 logger = logging.getLogger(__name__)
 
-SCHEMA = "tcg_instruments"
 _ROOT_DISPLAY_NAMES: dict[str, str] = {
     "OPT_SP_500": "SP 500",
     "OPT_NASDAQ_100": "NASDAQ 100",
@@ -60,6 +65,13 @@ _ROOT_DISPLAY_NAMES: dict[str, str] = {
     "OPT_JPYUSD": "JPY/USD",
 }
 
+# [Gotcha 5] crypto option premiums are quoted in COIN; dollarize by the
+# coin/USD spot (forex asset_class, symbol BTC_USD / ETH_USD).
+_COIN_USD_BY_COLLECTION: dict[str, str] = {
+    "OPT_BTC": "BTC_USD",
+    "OPT_ETH": "ETH_USD",
+}
+
 
 def _display_name(collection: str) -> str:
     if collection in _ROOT_DISPLAY_NAMES:
@@ -67,161 +79,133 @@ def _display_name(collection: str) -> str:
     return collection.removeprefix("OPT_").replace("_", " ").title()
 
 
-class SqlOptionsDataReader:
-    """Read-only SQL adapter for OPT_* collections.
+def _normalize_type(raw: Any) -> Literal["C", "P"]:
+    """Upper-case the call/put marker; default to 'C' on the (impossible by
+    schema) NULL so the frozen DTO's ``Literal["C","P"]`` stays satisfied.
 
-    Satisfies the OptionsDataReader protocol. All queries go to dwh.
+    dwh ``option_type`` is a NOT-NULL single char for every option row, so the
+    default is never hit in practice; it exists only to keep the type total.
     """
+    if isinstance(raw, str) and raw.strip().upper() in ("C", "P"):
+        return raw.strip().upper()  # type: ignore[return-value]
+    return "C"
+
+
+def _sanitize_iv(value: float | None) -> float | None:
+    """IV must be strictly positive. IVolatility uses negative/zero sentinels
+    for non-converged rows — surface those as missing (parity with the Mongo
+    DTO's ``_sanitize_iv``)."""
+    if value is None or value <= 0.0:
+        return None
+    return value
+
+
+def _canonical_mid_inputs_ok(bid: float | None, ask: float | None) -> bool:
+    """True iff *bid* and *ask* admit a valid mid [Gotcha 8].
+
+    The single source of truth for the mid validity rule (both quotes present
+    AND strictly positive), shared by :func:`_mid` and the parity harness so
+    they can never silently disagree. Matches the production Mongo
+    ``_doc_to_dto._compute_mid``.
+    """
+    return bid is not None and ask is not None and bid > 0.0 and ask > 0.0
+
+
+def _mid(bid: float | None, ask: float | None) -> float | None:
+    """``(bid+ask)/2`` only when both present and >0 [Gotcha 8]; else None."""
+    if not _canonical_mid_inputs_ok(bid, ask):
+        return None
+    return (bid + ask) / 2.0
+
+
+def _coalesce_first(current: Any, incoming: Any) -> Any:
+    """Return *current* if it is not None, else *incoming* — the per-field
+    'first non-NULL' rule used to collapse UNION-ALL duplicate rows [Gotcha 8]."""
+    return current if current is not None else incoming
+
+
+class SqlOptionsDataReader:
+    """Read-only SQL adapter for OPT_* collections (satisfies OptionsDataReader)."""
 
     def __init__(self, pool: DwhConnectionPool) -> None:
         self._pool = pool
 
+    # ------------------------------------------------------------------
+    # get_contract
+    # ------------------------------------------------------------------
     async def get_contract(
         self,
         collection: str,
         contract_id: str,
     ) -> OptionContractSeries:
-        """Return a single contract with its full chronological day series.
+        """Return one contract (by ``symbol``) with its full daily series.
 
-        Fetches from fact_price_eod + fact_option_greeks joined on instrument_id+date.
+        Joins ``fact_price_eod`` (quotes/close) with ``fact_option_greeks``
+        (stored greeks) on instrument_id+trade_date. [Gotcha 5] crypto premiums
+        are dollarized per-date.
         """
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    # Find the contract by symbol (contract_id = symbol in dwh)
-                    cur.execute(
-                        f"""SELECT d.instrument_id, d.symbol, d.provider, d.root_symbol,
-                                  d.underlying_id, d.underlying_symbol, d.expiration,
-                                  d.expiration_cycle, d.strike, d.option_type,
-                                  d.contract_size, d.currency
-                           FROM {SCHEMA}.dim_instrument d
-                           WHERE d.source_collection = %s AND d.symbol = %s""",
+                    await cur.execute(
+                        f"""SELECT instrument_id, symbol, provider, root_symbol,
+                                   underlying_symbol, expiration, expiration_cycle,
+                                   strike, option_type, contract_size, currency
+                            FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s AND symbol = %s""",
                         (collection, contract_id),
                     )
-                    doc_row = cur.fetchone()
-                    if not doc_row:
+                    meta = await cur.fetchone()
+                    if meta is None:
                         raise OptionsContractNotFound(
                             f"Contract '{contract_id}' not found in '{collection}'"
                         )
 
-                    (
-                        instrument_id,
-                        symbol,
-                        provider,
-                        root_symbol,
-                        underlying_id,
-                        underlying_symbol,
-                        expiration,
-                        expiration_cycle,
-                        strike,
-                        option_type,
-                        contract_size,
-                        currency,
-                    ) = doc_row
+                    contract = self._meta_to_contract(collection, meta)
+                    allow_greeks = has_greeks_for_root(collection)
 
-                    # Build OptionContractDoc from dwh row
-                    # [Gotcha 6] underlying_ref: if underlying_id is NULL (8/10 roots),
-                    # set to None. Otherwise, fetch the FUT symbol. But underlying_id
-                    # points to INDEX, not FUT — so underlying_ref = None for all cases.
-                    # This is a coverage gap (the Mongo underlying FUT ref is not in dwh).
-                    contract = OptionContractDoc(
-                        collection=collection,
-                        contract_id=symbol,
-                        root_underlying=root_symbol or "",
-                        underlying_ref=None,  # COVERAGE GAP: Mongo FUT underlying not in dwh
-                        underlying_symbol=underlying_symbol,
-                        expiration=expiration,
-                        expiration_cycle=expiration_cycle or "",
-                        strike=float(strike) if strike is not None else 0.0,
-                        type=option_type.upper() if option_type else "C",
-                        contract_size=float(contract_size)
-                        if contract_size is not None
-                        else None,
-                        currency=currency,
-                        provider=provider,
-                        strike_factor_verified=False,  # TODO: populate from dwh
+                    await cur.execute(
+                        f"""SELECT f.trade_date,
+                                   f.close, f.open, f.high, f.low,
+                                   f.bid, f.ask, f.bid_size, f.ask_size,
+                                   f.volume, f.open_interest,
+                                   g.delta, g.gamma, g.vega, g.theta,
+                                   g.implied_vol, g.underlying_price
+                            FROM {SCHEMA}.fact_price_eod f
+                            LEFT JOIN {SCHEMA}.fact_option_greeks g
+                              ON g.instrument_id = f.instrument_id
+                             AND g.trade_date = f.trade_date
+                            WHERE f.instrument_id = %s
+                            ORDER BY f.trade_date""",
+                        (meta["instrument_id"],),
                     )
+                    raw = await cur.fetchall()
 
-                    # Fetch all daily rows for this contract
-                    cur.execute(
-                        f"""SELECT f.trade_date, f.close, f.open, f.high, f.low,
-                                  f.bid, f.ask, f.bid_size, f.ask_size, f.volume, f.open_interest,
-                                  g.delta, g.gamma, g.vega, g.theta, g.rho,
-                                  g.implied_vol, g.underlying_price
-                           FROM {SCHEMA}.fact_price_eod f
-                           LEFT JOIN {SCHEMA}.fact_option_greeks g
-                             ON g.instrument_id = f.instrument_id AND g.trade_date = f.trade_date
-                           WHERE f.instrument_id = %s
-                           ORDER BY f.trade_date""",
-                        (instrument_id,),
+                    # [Gotcha 5] per-date coin/USD spot for crypto dollarization.
+                    spot_by_date = await self._coin_spot_map(
+                        conn, collection, [r["trade_date"] for r in raw]
                     )
 
                     rows: list[OptionDailyRow] = []
-                    for row in cur.fetchall():
-                        (
-                            trade_date,
-                            close_val,
-                            open_val,
-                            high_val,
-                            low_val,
-                            bid,
-                            ask,
-                            bid_size,
-                            ask_size,
-                            volume,
-                            open_interest,
-                            delta,
-                            gamma,
-                            vega,
-                            theta,
-                            rho,
-                            implied_vol,
-                            underlying_price,
-                        ) = row
-
-                        # [Gotcha 8] mid only when both bid & ask present and positive
-                        mid = None
-                        if bid is not None and ask is not None:
-                            if bid > 0 and ask > 0:
-                                mid = (float(bid) + float(ask)) / 2.0
-
-                        # [Gotcha 3] close is the iVolatility "option_close" equivalent
-                        row_obj = OptionDailyRow(
-                            date=trade_date,
-                            open=float(open_val) if open_val is not None else None,
-                            high=float(high_val) if high_val is not None else None,
-                            low=float(low_val) if low_val is not None else None,
-                            close=float(close_val) if close_val is not None else None,
-                            bid=float(bid) if bid is not None else None,
-                            ask=float(ask) if ask is not None else None,
-                            bid_size=float(bid_size) if bid_size is not None else None,
-                            ask_size=float(ask_size) if ask_size is not None else None,
-                            volume=float(volume) if volume is not None else None,
-                            open_interest=float(open_interest)
-                            if open_interest is not None
-                            else None,
-                            mid=mid,
-                            iv_stored=float(implied_vol)
-                            if implied_vol is not None
-                            else None,
-                            delta_stored=float(delta) if delta is not None else None,
-                            gamma_stored=float(gamma) if gamma is not None else None,
-                            theta_stored=float(theta) if theta is not None else None,
-                            vega_stored=float(vega) if vega is not None else None,
-                            underlying_price_stored=float(underlying_price)
-                            if underlying_price is not None
-                            else None,
+                    for r in raw:
+                        rows.append(
+                            self._row_from_fact(
+                                r,
+                                allow_greeks=allow_greeks,
+                                coin_spot=spot_by_date.get(r["trade_date"]),
+                            )
                         )
-                        rows.append(row_obj)
-
                     return OptionContractSeries(contract=contract, rows=tuple(rows))
         except OptionsContractNotFound:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(
                 f"SQL error reading contract '{contract_id}' from '{collection}': {exc}"
             ) from exc
 
+    # ------------------------------------------------------------------
+    # query_chain
+    # ------------------------------------------------------------------
     async def query_chain(
         self,
         root: str,
@@ -233,245 +217,170 @@ class SqlOptionsDataReader:
         strike_max: float | None = None,
         expiration_cycle: str | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
-        """Query one-day option chain (one row per contract that traded that day).
+        """One-day chain (one row per contract that traded that day).
 
-        [Gotcha 6] Filter by root_symbol (not underlying). [Gotcha 8] UNION ALL
-        may produce dups per contract; collapse via groupby(option_instrument_id).
-        [Gotcha 4, 8] Compute DTE and mid via row-level SQL.
+        Slices by ``d.root_symbol`` for the family [Gotcha 6] while keeping the
+        OPT_* ``source_collection`` for the returned ``OptionContractDoc``.
+        Filters (type / strike / expiration window / cycle) are pushed into the
+        WHERE clause and bound positionally so only wanted rows cross the wire.
+        UNION-ALL duplicates are collapsed per ``option_instrument_id`` [Gotcha 8].
         """
+        target_date = date
         try:
-            target_date = date
+            # Map the OPT_* collection name to its dwh root_symbol family.
+            root_symbol = await self._root_symbol_for_collection(root)
+            if root_symbol is None:
+                return []
+
+            where = [
+                "v.trade_date = %s",
+                "d.root_symbol = %s",
+                "d.source_collection = %s",
+                "v.expiration BETWEEN %s AND %s",
+            ]
+            params: list[Any] = [
+                target_date,
+                root_symbol,
+                root,
+                expiration_min,
+                expiration_max,
+            ]
+            if type in ("C", "P"):
+                where.append("v.option_type = %s")
+                params.append(type.upper())
+            if strike_min is not None:
+                where.append("v.strike >= %s")
+                params.append(float(strike_min))
+            if strike_max is not None:
+                where.append("v.strike <= %s")
+                params.append(float(strike_max))
+            if expiration_cycle is not None:
+                where.append("v.expiration_cycle = %s")
+                params.append(expiration_cycle)
+
+            sql = f"""
+                SELECT v.option_instrument_id, v.option_symbol,
+                       d.root_symbol, d.underlying_symbol,
+                       v.strike, v.option_type, v.expiration, v.expiration_cycle,
+                       v.bid, v.ask, v.option_close, v.volume, v.open_interest,
+                       v.delta, v.gamma, v.vega, v.theta,
+                       v.implied_vol, v.underlying_price,
+                       d.contract_size, d.currency, v.provider
+                FROM {SCHEMA}.v_option_chain v
+                JOIN {SCHEMA}.dim_instrument d
+                  ON d.instrument_id = v.option_instrument_id
+                WHERE {" AND ".join(where)}
+                ORDER BY v.option_instrument_id
+            """
+
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    # Build WHERE clause for v_option_chain
-                    where_parts = [
-                        "v.trade_date = %s",
-                        "d.root_symbol = %s",
-                        "v.expiration BETWEEN %s AND %s",
-                    ]
-                    params: list[Any] = [
-                        target_date,
-                        root,
-                        expiration_min,
-                        expiration_max,
-                    ]
+                    await cur.execute(sql, params)
+                    raw = await cur.fetchall()
 
-                    if type in ("C", "P"):
-                        where_parts.append("v.option_type = %s")
-                        params.append(type.upper())
+                # [Gotcha 8] collapse UNION-ALL dups: one merged dict per id,
+                # first non-NULL per field.
+                merged: dict[int, dict[str, Any]] = {}
+                order: list[int] = []
+                for r in raw:
+                    oid = r["option_instrument_id"]
+                    if oid not in merged:
+                        merged[oid] = dict(r)
+                        order.append(oid)
+                    else:
+                        acc = merged[oid]
+                        for k, val in r.items():
+                            acc[k] = _coalesce_first(acc[k], val)
 
-                    if strike_min is not None:
-                        where_parts.append("v.strike >= %s")
-                        params.append(float(strike_min))
+                # [Gotcha 5] dollarize crypto: per-date spot (single value here).
+                coin_spot = None
+                spot_map = await self._coin_spot_map(conn, root, [target_date])
+                coin_spot = spot_map.get(target_date)
 
-                    if strike_max is not None:
-                        where_parts.append("v.strike <= %s")
-                        params.append(float(strike_max))
-
-                    if expiration_cycle is not None:
-                        where_parts.append("d.expiration_cycle = %s")
-                        params.append(expiration_cycle)
-
-                    where_clause = " AND ".join(where_parts)
-
-                    # Query chain via v_option_chain
-                    cur.execute(
-                        f"""SELECT v.option_instrument_id, v.option_symbol,
-                                  d.root_symbol, d.underlying_id, d.underlying_symbol,
-                                  v.strike, v.option_type, v.expiration, v.expiration_cycle,
-                                  v.bid, v.ask, v.option_close, v.volume, v.open_interest,
-                                  v.delta, v.gamma, v.vega, v.theta, v.rho,
-                                  v.implied_vol, v.underlying_price,
-                                  COALESCE(v.days_to_expiry, (v.expiration - v.trade_date)),
-                                  d.contract_size, d.currency, v.provider
-                           FROM {SCHEMA}.v_option_chain v
-                           JOIN {SCHEMA}.dim_instrument d ON d.instrument_id = v.option_instrument_id
-                           WHERE {where_clause}
-                           ORDER BY v.option_instrument_id""",
-                        params,
-                    )
-
-                    # [Gotcha 8] Collapse UNION ALL dups: group by option_instrument_id, keep first
-                    seen_ids: dict[int, tuple[OptionContractDoc, OptionDailyRow]] = {}
-                    for row in cur.fetchall():
-                        (
-                            option_id,
-                            option_symbol,
-                            root_symbol,
-                            underlying_id,
-                            underlying_symbol,
-                            strike,
-                            option_type,
-                            expiration,
-                            expiration_cycle,
-                            bid,
-                            ask,
-                            option_close,
-                            volume,
-                            open_interest,
-                            delta,
-                            gamma,
-                            vega,
-                            theta,
-                            rho,
-                            implied_vol,
-                            underlying_price,
-                            dte_raw,
-                            contract_size,
-                            currency,
-                            provider,
-                        ) = row
-
-                        # Skip if already seen (first wins, per UNION ALL collapse rule)
-                        if option_id in seen_ids:
-                            continue
-
-                        # [Gotcha 8] mid only when both bid & ask present and positive
-                        mid = None
-                        if bid is not None and ask is not None:
-                            if bid > 0 and ask > 0:
-                                mid = (float(bid) + float(ask)) / 2.0
-
-                        # [Gotcha 4] DTE: prefer computed (expiration - trade_date), fallback to days_to_expiry
-                        dte = 0
-                        if expiration:
-                            dte = max(0, (expiration - target_date).days)
-
-                        contract = OptionContractDoc(
-                            collection=root,  # OPT_* collection name derived from root
-                            contract_id=option_symbol,
-                            root_underlying=root_symbol or "",
-                            underlying_ref=None,  # COVERAGE GAP
-                            underlying_symbol=underlying_symbol,
-                            expiration=expiration,
-                            expiration_cycle=expiration_cycle or "",
-                            strike=float(strike) if strike else 0.0,
-                            type=option_type.upper() if option_type else "C",
-                            contract_size=float(contract_size)
-                            if contract_size
-                            else None,
-                            currency=currency,
-                            provider=provider or "UNKNOWN",
-                            strike_factor_verified=False,
-                        )
-
-                        daily_row = OptionDailyRow(
-                            date=target_date,
-                            open=None,  # v_option_chain doesn't have OHLC for intraday
-                            high=None,
-                            low=None,
-                            close=float(option_close)
-                            if option_close is not None
-                            else None,
-                            bid=float(bid) if bid is not None else None,
-                            ask=float(ask) if ask is not None else None,
-                            bid_size=None,  # fact_price_eod.bid_size = NULL for options
-                            ask_size=None,
-                            volume=float(volume) if volume is not None else None,
-                            open_interest=float(open_interest)
-                            if open_interest is not None
-                            else None,
-                            mid=mid,
-                            iv_stored=float(implied_vol)
-                            if implied_vol is not None
-                            else None,
-                            delta_stored=float(delta) if delta is not None else None,
-                            gamma_stored=float(gamma) if gamma is not None else None,
-                            theta_stored=float(theta) if theta is not None else None,
-                            vega_stored=float(vega) if vega is not None else None,
-                            underlying_price_stored=float(underlying_price)
-                            if underlying_price is not None
-                            else None,
-                        )
-
-                        seen_ids[option_id] = (contract, daily_row)
-
-                    return list(seen_ids.values())
-        except Exception as exc:
+            out: list[tuple[OptionContractDoc, OptionDailyRow]] = []
+            for oid in order:
+                m = merged[oid]
+                contract = self._chain_meta_to_contract(root, m)
+                row = self._row_from_chain(
+                    m, target_date=target_date, coin_spot=coin_spot
+                )
+                out.append((contract, row))
+            return out
+        except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(
-                f"SQL error querying chain on '{root}' for {date}: {exc}"
+                f"SQL error querying chain on '{root}' for {target_date}: {exc}"
             ) from exc
 
+    # ------------------------------------------------------------------
+    # list_roots / list_expirations
+    # ------------------------------------------------------------------
     async def list_roots(self) -> list[OptionRootInfo]:
-        """List all OPT_* roots with metadata."""
+        """List every OPT_* collection with display metadata.
+
+        ``stored_greeks_ratio`` uses the measured ``_SEED_RATIOS`` baseline
+        (gated by the data-layer block list) rather than a live scan of the
+        103M-row greeks fact — an exact per-root DISTINCT count cannot finish
+        inside the statement timeout, and the ratio only drives a left-nav
+        badge. ``last_trade_date`` is the true latest bar date from
+        ``fact_price_eod`` (NOT the last expiration).
+        """
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    # Get distinct roots (root_symbol for option collections)
-                    cur.execute(
-                        f"""SELECT DISTINCT source_collection, root_symbol
-                           FROM {SCHEMA}.dim_instrument
-                           WHERE asset_class = 'option'
-                           ORDER BY source_collection"""
+                    await cur.execute(
+                        f"""SELECT source_collection,
+                                   count(*) AS doc_count,
+                                   min(expiration) AS exp_first,
+                                   max(expiration) AS exp_last,
+                                   array_agg(DISTINCT provider) AS providers
+                            FROM {SCHEMA}.dim_instrument
+                            WHERE asset_class = 'option'
+                            GROUP BY source_collection
+                            ORDER BY source_collection""",
                     )
+                    summaries = await cur.fetchall()
 
-                    roots_info: list[OptionRootInfo] = []
-                    for source_coll, root_symbol in cur.fetchall():
-                        # Count docs in this root
-                        cur.execute(
-                            f"""SELECT count(*) FROM {SCHEMA}.dim_instrument
-                               WHERE source_collection = %s""",
-                            (source_coll,),
+                    out: list[OptionRootInfo] = []
+                    for s in summaries:
+                        coll = s["source_collection"]
+                        last_trade = await self._last_trade_date(conn, coll)
+                        ratio = _SEED_RATIOS.get(coll, 0.0)
+                        if not has_greeks_for_root(coll):
+                            ratio = 0.0
+                        out.append(
+                            OptionRootInfo(
+                                collection=coll,
+                                name=_display_name(coll),
+                                has_greeks=ratio > 0.0,
+                                providers=tuple(p for p in (s["providers"] or []) if p),
+                                expiration_first=s["exp_first"],
+                                expiration_last=s["exp_last"],
+                                doc_count_estimated=int(s["doc_count"]),
+                                strike_factor_verified=STRIKE_FACTOR_VERIFIED.get(
+                                    coll, False
+                                ),
+                                last_trade_date=last_trade,
+                                stored_greeks_ratio=ratio,
+                                has_computed_greeks=False,  # API layer overrides.
+                            )
                         )
-                        doc_count = cur.fetchone()[0]
-
-                        # Find expiration range
-                        cur.execute(
-                            f"""SELECT min(expiration), max(expiration)
-                               FROM {SCHEMA}.dim_instrument
-                               WHERE source_collection = %s AND expiration IS NOT NULL""",
-                            (source_coll,),
-                        )
-                        exp_row = cur.fetchone()
-                        exp_first, exp_last = (
-                            (exp_row[0], exp_row[1]) if exp_row else (None, None)
-                        )
-
-                        # Get providers (sample one doc)
-                        cur.execute(
-                            f"""SELECT DISTINCT provider FROM {SCHEMA}.dim_instrument
-                               WHERE source_collection = %s ORDER BY provider""",
-                            (source_coll,),
-                        )
-                        providers = tuple(row[0] for row in cur.fetchall())
-
-                        # Stored greeks ratio (use seed value for now)
-                        stored_ratio = 0.0
-                        if not has_greeks_for_root(source_coll):
-                            stored_ratio = 0.0
-
-                        info = OptionRootInfo(
-                            collection=source_coll,
-                            name=_display_name(source_coll),
-                            has_greeks=stored_ratio > 0.0,
-                            providers=providers,
-                            expiration_first=exp_first,
-                            expiration_last=exp_last,
-                            doc_count_estimated=int(doc_count),
-                            strike_factor_verified=False,
-                            last_trade_date=exp_last,
-                            stored_greeks_ratio=stored_ratio,
-                            has_computed_greeks=False,
-                        )
-                        roots_info.append(info)
-
-                    return roots_info
-        except Exception as exc:
+                    return out
+        except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(f"SQL error listing roots: {exc}") from exc
 
     async def list_expirations(self, root: str) -> list[date]:
-        """Distinct expirations for a root, sorted ascending."""
+        """Distinct expirations on *root*, sorted ascending."""
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    cur.execute(
+                    await cur.execute(
                         f"""SELECT DISTINCT expiration FROM {SCHEMA}.dim_instrument
-                           WHERE source_collection = %s AND expiration IS NOT NULL
-                           ORDER BY expiration""",
+                            WHERE source_collection = %s AND expiration IS NOT NULL
+                            ORDER BY expiration""",
                         (root,),
                     )
-                    return [row[0] for row in cur.fetchall()]
-        except Exception as exc:
+                    return [r["expiration"] for r in await cur.fetchall()]
+        except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(
                 f"SQL error listing expirations on '{root}': {exc}"
             ) from exc
@@ -482,30 +391,281 @@ class SqlOptionsDataReader:
         option_type: Literal["C", "P"] | None = None,
         cycle: str | None = None,
     ) -> list[date]:
-        """Distinct expirations filtered by type and/or cycle."""
+        """Distinct expirations on *root* filtered by type and/or cycle."""
         try:
+            where = ["source_collection = %s", "expiration IS NOT NULL"]
+            params: list[Any] = [root]
+            if option_type is not None:
+                where.append("option_type = %s")
+                params.append(option_type.upper())
+            if cycle is not None:
+                where.append("expiration_cycle = %s")
+                params.append(cycle)
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    where_parts = ["source_collection = %s", "expiration IS NOT NULL"]
-                    params: list[Any] = [root]
-
-                    if option_type is not None:
-                        where_parts.append("option_type = %s")
-                        params.append(option_type.upper())
-
-                    if cycle is not None:
-                        where_parts.append("expiration_cycle = %s")
-                        params.append(cycle)
-
-                    where_clause = " AND ".join(where_parts)
-                    cur.execute(
+                    await cur.execute(
                         f"""SELECT DISTINCT expiration FROM {SCHEMA}.dim_instrument
-                           WHERE {where_clause}
-                           ORDER BY expiration""",
+                            WHERE {" AND ".join(where)}
+                            ORDER BY expiration""",
                         params,
                     )
-                    return [row[0] for row in cur.fetchall()]
-        except Exception as exc:
+                    return [r["expiration"] for r in await cur.fetchall()]
+        except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(
                 f"SQL error listing filtered expirations on '{root}': {exc}"
             ) from exc
+
+    # ------------------------------------------------------------------
+    # Internal: DTO builders
+    # ------------------------------------------------------------------
+    def _meta_to_contract(
+        self, collection: str, m: dict[str, Any]
+    ) -> OptionContractDoc:
+        """Build an ``OptionContractDoc`` from a ``dim_instrument`` row."""
+        return OptionContractDoc(
+            collection=collection,
+            contract_id=m["symbol"],
+            root_underlying=m["root_symbol"] or "",
+            underlying_ref=None,  # COVERAGE GAP: Mongo FUT ref not preserved in dwh.
+            underlying_symbol=m["underlying_symbol"],
+            expiration=m["expiration"],
+            expiration_cycle=m["expiration_cycle"] or "",
+            strike=to_float(m["strike"]) or 0.0,
+            type=_normalize_type(m["option_type"]),
+            contract_size=to_float(m["contract_size"]),
+            currency=m["currency"],
+            provider=m["provider"],
+            strike_factor_verified=STRIKE_FACTOR_VERIFIED.get(collection, False),
+        )
+
+    def _chain_meta_to_contract(
+        self, collection: str, m: dict[str, Any]
+    ) -> OptionContractDoc:
+        """Build an ``OptionContractDoc`` from a merged ``v_option_chain`` row."""
+        return OptionContractDoc(
+            collection=collection,
+            contract_id=m["option_symbol"],
+            root_underlying=m["root_symbol"] or "",
+            underlying_ref=None,  # COVERAGE GAP (see module docstring).
+            underlying_symbol=m["underlying_symbol"],
+            expiration=m["expiration"],
+            expiration_cycle=m["expiration_cycle"] or "",
+            strike=to_float(m["strike"]) or 0.0,
+            type=_normalize_type(m["option_type"]),
+            contract_size=to_float(m["contract_size"]),
+            currency=m["currency"],
+            provider=m["provider"] or "UNKNOWN",
+            strike_factor_verified=STRIKE_FACTOR_VERIFIED.get(collection, False),
+        )
+
+    def _row_from_fact(
+        self,
+        r: dict[str, Any],
+        *,
+        allow_greeks: bool,
+        coin_spot: float | None,
+    ) -> OptionDailyRow:
+        """Build an ``OptionDailyRow`` from a ``fact_price_eod``+greeks join row."""
+        bid = to_float(r["bid"])
+        ask = to_float(r["ask"])
+        close = to_float(r["close"])
+        mid = _mid(bid, ask)
+        # [Gotcha 5] dollarize premium-like fields (NOT strike) by coin/USD spot.
+        if coin_spot is not None and coin_spot > 0:
+            bid = _scale(bid, coin_spot)
+            ask = _scale(ask, coin_spot)
+            close = _scale(close, coin_spot)
+            mid = _scale(mid, coin_spot)
+
+        trade_date: date = r["trade_date"]
+
+        return OptionDailyRow(
+            date=trade_date,
+            open=to_float(r["open"]),
+            high=to_float(r["high"]),
+            low=to_float(r["low"]),
+            close=close,
+            bid=bid,
+            ask=ask,
+            bid_size=to_float(r["bid_size"]),
+            ask_size=to_float(r["ask_size"]),
+            volume=to_float(r["volume"]),
+            open_interest=to_float(r["open_interest"]),
+            mid=mid,
+            iv_stored=_sanitize_iv(to_float(r["implied_vol"]))
+            if allow_greeks
+            else None,
+            delta_stored=to_float(r["delta"]) if allow_greeks else None,
+            gamma_stored=to_float(r["gamma"]) if allow_greeks else None,
+            theta_stored=to_float(r["theta"]) if allow_greeks else None,
+            vega_stored=to_float(r["vega"]) if allow_greeks else None,
+            underlying_price_stored=to_float(r["underlying_price"]),
+        )
+
+    def _row_from_chain(
+        self,
+        m: dict[str, Any],
+        *,
+        target_date: date,
+        coin_spot: float | None,
+    ) -> OptionDailyRow:
+        """Build an ``OptionDailyRow`` from a merged ``v_option_chain`` row.
+
+        The view carries no OHLC (only option_close), so open/high/low are None
+        and bid_size/ask_size are None (the fact has them NULL for options
+        anyway). Greeks come straight from the view; the data-layer block list
+        (OPT_ETH) is enforced by NULLing them when greeks are disallowed.
+        """
+        collection = self._collection_from_symbol(m["option_symbol"])
+        allow_greeks = has_greeks_for_root(collection) if collection else True
+
+        bid = to_float(m["bid"])
+        ask = to_float(m["ask"])
+        close = to_float(m["option_close"])
+        mid = _mid(bid, ask)
+        if coin_spot is not None and coin_spot > 0:
+            bid = _scale(bid, coin_spot)
+            ask = _scale(ask, coin_spot)
+            close = _scale(close, coin_spot)
+            mid = _scale(mid, coin_spot)
+
+        return OptionDailyRow(
+            date=target_date,
+            open=None,
+            high=None,
+            low=None,
+            close=close,
+            bid=bid,
+            ask=ask,
+            bid_size=None,
+            ask_size=None,
+            volume=to_float(m["volume"]),
+            open_interest=to_float(m["open_interest"]),
+            mid=mid,
+            iv_stored=_sanitize_iv(to_float(m["implied_vol"]))
+            if allow_greeks
+            else None,
+            delta_stored=to_float(m["delta"]) if allow_greeks else None,
+            gamma_stored=to_float(m["gamma"]) if allow_greeks else None,
+            theta_stored=to_float(m["theta"]) if allow_greeks else None,
+            vega_stored=to_float(m["vega"]) if allow_greeks else None,
+            underlying_price_stored=to_float(m["underlying_price"]),
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: helpers
+    # ------------------------------------------------------------------
+    async def _root_symbol_for_collection(self, collection: str) -> str | None:
+        """Return the dwh ``root_symbol`` for an OPT_* collection (e.g.
+        OPT_SP_500 → IND_SP_500), or None if the collection is unknown.
+
+        Cached per call site is unnecessary — this is one cheap indexed lookup
+        and chains are not hot-looped per row.
+        """
+        row = await self._pool.fetch_one(
+            f"""SELECT root_symbol FROM {SCHEMA}.dim_instrument
+                WHERE source_collection = %s AND root_symbol IS NOT NULL
+                LIMIT 1""",
+            (collection,),
+        )
+        return row["root_symbol"] if row else None
+
+    def _collection_from_symbol(self, option_symbol: str | None) -> str | None:
+        """Best-effort OPT_* collection from an option symbol for greek gating.
+
+        Only OPT_ETH is block-listed, and ETH option symbols contain ``ETH``;
+        a precise mapping would need a per-row dim lookup, which is not worth a
+        round-trip for a single block-list check. Returns None when unknown
+        (callers then allow greeks, matching the non-blocked default).
+        """
+        if not option_symbol:
+            return None
+        up = option_symbol.upper()
+        if "ETH" in up:
+            return "OPT_ETH"
+        return None
+
+    async def _coin_spot_map(
+        self, conn: Any, collection: str, dates: list[date]
+    ) -> dict[date, float]:
+        """Return ``{trade_date: coin/USD close}`` for crypto roots [Gotcha 5].
+
+        Empty for non-crypto collections (no dollarization needed) or when the
+        forex series has no bars in range.
+        """
+        coin = _COIN_USD_BY_COLLECTION.get(collection)
+        if coin is None or not dates:
+            return {}
+        lo, hi = min(dates), max(dates)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT f.trade_date, f.close
+                    FROM {SCHEMA}.fact_price_eod f
+                    JOIN {SCHEMA}.dim_instrument d ON d.instrument_id = f.instrument_id
+                    WHERE d.symbol = %s AND d.asset_class = 'forex'
+                      AND f.trade_date BETWEEN %s AND %s""",
+                (coin, lo, hi),
+            )
+            out: dict[date, float] = {}
+            for r in await cur.fetchall():
+                f = to_float(r["close"])
+                if f is not None and f > 0:
+                    out[r["trade_date"]] = f
+            return out
+
+    async def _last_trade_date(self, conn: Any, collection: str) -> date | None:
+        """Latest ``trade_date`` with a bar in *collection* (live data cutoff).
+
+        A ``max(trade_date)`` over a whole root joins millions of option bars
+        with no usable ``trade_date`` index (the fact's only btree is the
+        composite PK ``(instrument_id, trade_date)``) — it seq-scans every
+        recent partition and times out. But a ``max`` over a SINGLE
+        ``instrument_id`` is a fast PK index scan (~0.3s).
+
+        So: pick ONE representative live contract — the nearest expiry with
+        ``expiration >= today`` (the active front month, which trades up to the
+        cutoff), via the indexed dim lookup — then ``max(trade_date)`` for just
+        that instrument. Mirrors the Mongo ``_peek_last_trade_date`` logic.
+        Falls back to the furthest-dated contract if none is live (a fully
+        expired root), and returns ``None`` only when the root has no contracts
+        at all. The value drives the frontend's default chain date; per-root
+        precision is approximate by design (the front contract's last bar is
+        the cutoff in practice).
+        """
+        today = date.today()
+        async with conn.cursor() as cur:
+            # Nearest live contract (front month). Indexed dim lookup, 1 row.
+            await cur.execute(
+                f"""SELECT instrument_id FROM {SCHEMA}.dim_instrument
+                    WHERE source_collection = %s AND expiration >= %s
+                    ORDER BY expiration ASC
+                    LIMIT 1""",
+                (collection, today),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                # Fully expired root → use the furthest-dated contract.
+                await cur.execute(
+                    f"""SELECT instrument_id FROM {SCHEMA}.dim_instrument
+                        WHERE source_collection = %s AND expiration IS NOT NULL
+                        ORDER BY expiration DESC
+                        LIMIT 1""",
+                    (collection,),
+                )
+                row = await cur.fetchone()
+            if row is None:
+                return None
+
+            await cur.execute(
+                f"""SELECT max(trade_date) AS d
+                    FROM {SCHEMA}.fact_price_eod
+                    WHERE instrument_id = %s""",
+                (row["instrument_id"],),
+            )
+            res = await cur.fetchone()
+            return res["d"] if res else None
+
+
+def _scale(value: float | None, factor: float) -> float | None:
+    """Multiply *value* by *factor* when present; preserve None."""
+    return None if value is None else value * factor

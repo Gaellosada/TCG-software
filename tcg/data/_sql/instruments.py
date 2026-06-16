@@ -1,8 +1,22 @@
 """SQL read adapters for non-option market data (prices, instruments, continuous futures).
 
-Replaces tcg.data._mongo.instruments.MongoInstrumentReader.
-All queries are read-only, parameterized (%s binding), and push filtering to the
-database. Every gotcha from the recon synthesis is handled here.
+Replaces ``tcg.data._mongo.instruments.MongoInstrumentReader``. All queries are
+read-only, parameterized (``%s`` binding), and push filtering to PostgreSQL.
+
+Collection mapping (verified against dwh): ``dim_instrument.source_collection``
+is exactly the legacy Mongo collection name (INDEX / ETF / FUND / FOREX /
+FUT_* / OPT_*), and ``dim_instrument.symbol`` is the durable Mongo ``_id``.
+So a "collection" filter is ``source_collection = %s`` and an instrument id is
+``symbol = %s`` — no prefix parsing.
+
+Gotchas honoured here:
+  * [2] Read the PARENT ``fact_price_eod`` filtered on ``trade_date`` (the
+    planner prunes yearly partitions) — never a ``*_YYYY`` child.
+  * [3] ``COALESCE(adj_close, close)``: ``adj_close`` is YAHOO-only/sparse;
+    ``close`` is NOT NULL by schema.
+  * Decimal→float at the boundary (NumPy/engine expect float); NULL OHLV →
+    ``0.0`` (matching the Mongo adapter's ``_sanitize_non_critical``), close
+    falls back defensively but is never NULL.
 """
 
 from __future__ import annotations
@@ -11,29 +25,108 @@ import logging
 from datetime import date
 from typing import Any
 
-from psycopg import AsyncConnection
-
-from tcg.data._sql.connection import DwhConnectionPool
-from tcg.types.errors import DataAccessError, DataNotFoundError
-from tcg.types.market import ContractPriceData, InstrumentId, PriceSeries
-from tcg.data._utils import date_to_int, int_to_date
-
 import numpy as np
+
+from tcg.data._sql.connection import SCHEMA, DwhConnectionPool, to_float_or
+from tcg.data._utils import date_to_int, int_to_date
+from tcg.types.errors import DataAccessError
+from tcg.types.market import AssetClass, ContractPriceData, InstrumentId, PriceSeries
 
 logger = logging.getLogger(__name__)
 
-SCHEMA = "tcg_instruments"
+# Sentinel bounds when the caller leaves start/end open. Match the dwh
+# partition span (1980..2050); a wider literal would error against the
+# partitioned parent only if it fell outside every partition, so we keep it
+# inside the covered range.
+_MIN_DATE = date(1980, 1, 1)
+_MAX_DATE = date(2050, 12, 31)
+
+
+def _asset_class_for(raw: str) -> AssetClass:
+    """Map a dwh ``asset_class`` string onto the Mongo-era ``AssetClass`` enum.
+
+    The Mongo registry classified ETF / FUND / FOREX all as ``EQUITY``,
+    ``INDEX`` as ``INDEX``, and ``FUT_*`` as ``FUTURE``. The dwh schema has
+    finer-grained classes (``etf``/``fund``/``forex``/``index``/``future``);
+    collapse them to the coarse enum the API contract expects so
+    ``InstrumentId.asset_class.value`` keeps returning the historical value.
+    """
+    if raw == "future":
+        return AssetClass.FUTURE
+    if raw == "index":
+        return AssetClass.INDEX
+    # etf / fund / forex (and any future addition) → EQUITY, as Mongo did.
+    return AssetClass.EQUITY
 
 
 class SqlInstrumentReader:
     """Read-only SQL adapter for market data (prices, instruments, futures contracts).
 
-    Used exclusively by the SQL-backed MarketDataService. All queries go to
-    PostgreSQL dwh schema tcg_instruments with read-only enforcement.
+    Used exclusively by the SQL-backed ``MarketDataService``. All queries go to
+    the PostgreSQL dwh schema ``tcg_instruments`` with read-only enforcement.
     """
 
     def __init__(self, pool: DwhConnectionPool) -> None:
         self._pool = pool
+
+    async def list_collections(
+        self, asset_class: AssetClass | None = None
+    ) -> list[str]:
+        """List non-option ``source_collection`` names, optionally by asset class.
+
+        Mirrors the Mongo registry's ``all_active`` semantics: options are
+        excluded, and the coarse ``AssetClass`` filter maps onto the finer dwh
+        classes — ``EQUITY`` → {etf, fund, forex}, ``INDEX`` → index,
+        ``FUTURE`` → future. ``None`` returns every non-option collection.
+        """
+        # Map the coarse enum to the concrete dwh asset_class values it covers.
+        if asset_class is None:
+            classes = ["index", "etf", "fund", "forex", "future"]
+        elif asset_class == AssetClass.INDEX:
+            classes = ["index"]
+        elif asset_class == AssetClass.FUTURE:
+            classes = ["future"]
+        else:  # AssetClass.EQUITY
+            classes = ["etf", "fund", "forex"]
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT DISTINCT source_collection
+                            FROM {SCHEMA}.dim_instrument
+                            WHERE asset_class = ANY(%s)
+                            ORDER BY source_collection""",
+                        (classes,),
+                    )
+                    return [r["source_collection"] for r in await cur.fetchall()]
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(f"SQL error listing collections: {exc}") from exc
+
+    async def collection_exists(self, collection: str) -> bool:
+        """True if *collection* names a known non-option ``source_collection``.
+
+        Preserves the Mongo path's up-front collection validation (a clean 404
+        for an unknown collection) without trusting unvalidated route input to
+        simply return empty.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT 1 FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s AND asset_class <> 'option'
+                            LIMIT 1""",
+                        (collection,),
+                    )
+                    return (await cur.fetchone()) is not None
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"SQL error checking collection '{collection}': {exc}"
+            ) from exc
 
     async def list_instruments(
         self,
@@ -41,48 +134,44 @@ class SqlInstrumentReader:
         skip: int = 0,
         limit: int = 50,
     ) -> tuple[list[InstrumentId], int]:
-        """List instruments in *collection* (by source_collection) with pagination.
+        """List instruments in *collection* (by ``source_collection``), paginated.
 
-        Returns (instruments, total_count).
+        Returns ``(instruments, total_count)``. ``total`` is the full count
+        ignoring pagination (the frontend needs it for the pager).
         """
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    # Count total (no pagination)
-                    cur.execute(
-                        f"SELECT count(*) FROM {SCHEMA}.dim_instrument WHERE source_collection = %s",
+                    await cur.execute(
+                        f"SELECT count(*) AS n FROM {SCHEMA}.dim_instrument "
+                        f"WHERE source_collection = %s",
                         (collection,),
                     )
-                    total = cur.fetchone()[0]
+                    row = await cur.fetchone()
+                    total = int(row["n"]) if row else 0
 
-                    # Fetch page (exclude heavy columns)
-                    cur.execute(
-                        f"""SELECT symbol, asset_class, source_collection
-                           FROM {SCHEMA}.dim_instrument
-                           WHERE source_collection = %s
-                           ORDER BY symbol
-                           OFFSET %s LIMIT %s""",
+                    await cur.execute(
+                        f"""SELECT symbol, asset_class, exchange
+                            FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s
+                            ORDER BY symbol
+                            OFFSET %s LIMIT %s""",
                         (collection, skip, limit),
                     )
                     instruments: list[InstrumentId] = []
-                    for row in cur.fetchall():
-                        symbol, asset_class_str, source_coll = row
-                        # Map asset_class string back to enum
-                        if asset_class_str == "future":
-                            asset_class = "future"
-                        elif asset_class_str == "index":
-                            asset_class = "index"
-                        else:
-                            asset_class = "equity"  # etf, fund, forex
+                    for r in await cur.fetchall():
                         instruments.append(
                             InstrumentId(
-                                symbol=symbol,
-                                asset_class=asset_class,
-                                collection=source_coll,
+                                symbol=r["symbol"],
+                                asset_class=_asset_class_for(r["asset_class"]),
+                                collection=collection,
+                                exchange=r["exchange"],
                             )
                         )
                     return instruments, total
-        except Exception as exc:
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface any driver error uniformly
             raise DataAccessError(
                 f"SQL error listing instruments in '{collection}': {exc}"
             ) from exc
@@ -96,77 +185,41 @@ class SqlInstrumentReader:
         start: date | None = None,
         end: date | None = None,
     ) -> PriceSeries | None:
-        """Fetch OHLCV data for a single instrument (by symbol).
+        """Fetch OHLCV for a single instrument (by ``symbol``) → ``PriceSeries``.
 
-        [Gotcha 2] Reads from parent fact_price_eod, filtered by trade_date
-        (planner prunes yearly partitions). [Gotcha 3] close is NOT NULL by schema;
-        adj_close may be NULL → COALESCE(adj_close, close).
+        ``provider`` is accepted for protocol parity but dwh stores one curated
+        series per instrument (no per-provider arrays), so it does not branch
+        the query — the row is whatever the backfill chose. [2] parent table +
+        ``trade_date`` filter. [3] ``COALESCE(adj_close, close)``.
         """
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    # Bind dates as ISO strings for the WHERE clause
-                    start_int = date_to_int(start) if start else 0
-                    end_int = date_to_int(end) if end else 99999999
-
-                    cur.execute(
+                    await cur.execute(
                         f"""SELECT f.trade_date,
-                                  COALESCE(f.adj_close, f.close) AS close_val,
-                                  f.open, f.high, f.low, f.volume
-                           FROM {SCHEMA}.fact_price_eod f
-                           JOIN {SCHEMA}.dim_instrument d ON d.instrument_id = f.instrument_id
-                           WHERE d.source_collection = %s
-                             AND d.symbol = %s
-                             AND f.trade_date BETWEEN %s AND %s
-                           ORDER BY f.trade_date""",
+                                   COALESCE(f.adj_close, f.close) AS close_val,
+                                   f.open, f.high, f.low, f.volume
+                            FROM {SCHEMA}.fact_price_eod f
+                            JOIN {SCHEMA}.dim_instrument d
+                              ON d.instrument_id = f.instrument_id
+                            WHERE d.source_collection = %s
+                              AND d.symbol = %s
+                              AND f.trade_date BETWEEN %s AND %s
+                            ORDER BY f.trade_date""",
                         (
                             collection,
                             instrument_id,
-                            start if start else date(1900, 1, 1),
-                            end if end else date(2100, 12, 31),
+                            start if start is not None else _MIN_DATE,
+                            end if end is not None else _MAX_DATE,
                         ),
                     )
-
-                    rows = cur.fetchall()
+                    rows = await cur.fetchall()
                     if not rows:
                         return None
-
-                    # Build arrays (all trades within the date range)
-                    dates_list = []
-                    opens = []
-                    highs = []
-                    lows = []
-                    closes = []
-                    volumes = []
-
-                    for (
-                        trade_date,
-                        close_val,
-                        open_val,
-                        high_val,
-                        low_val,
-                        volume_val,
-                    ) in rows:
-                        dates_list.append(date_to_int(trade_date))
-                        closes.append(
-                            float(close_val) if close_val is not None else 0.0
-                        )
-                        opens.append(float(open_val) if open_val is not None else 0.0)
-                        highs.append(float(high_val) if high_val is not None else 0.0)
-                        lows.append(float(low_val) if low_val is not None else 0.0)
-                        volumes.append(
-                            float(volume_val) if volume_val is not None else 0.0
-                        )
-
-                    return PriceSeries(
-                        dates=np.array(dates_list, dtype=np.int64),
-                        open=np.array(opens, dtype=np.float64),
-                        high=np.array(highs, dtype=np.float64),
-                        low=np.array(lows, dtype=np.float64),
-                        close=np.array(closes, dtype=np.float64),
-                        volume=np.array(volumes, dtype=np.float64),
-                    )
-        except Exception as exc:
+                    return _rows_to_price_series(rows)
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
             raise DataAccessError(
                 f"SQL error reading prices for '{instrument_id}' in '{collection}': {exc}"
             ) from exc
@@ -177,156 +230,177 @@ class SqlInstrumentReader:
         *,
         cycle: str | None = None,
     ) -> list[ContractPriceData]:
-        """Fetch all futures contracts in a collection, ordered by expiration.
+        """Fetch all contracts in a futures collection, **ordered by expiration**.
 
-        [Gotcha 1] Pulls all contracts for this root (source_collection),
-        ordered by expiration. Each contract = one ContractPriceData with
-        prices aggregated per contract symbol. [Gotcha 2] Reads parent
-        fact_price_eod. [Gotcha 3] COALESCE(adj_close, close).
-        [Gotcha special] Strip zero-close rows (handled by the roller).
+        Returns one :class:`ContractPriceData` per contract symbol, each with a
+        ``PriceSeries`` of its bars. The list is sorted ascending by expiration
+        — the ``ContinuousSeriesBuilder`` (unchanged) requires this ordering;
+        we do NOT reimplement the roll here, only feed it SQL-sourced contracts
+        identical in shape to the old Mongo path.
+
+        [2] parent ``fact_price_eod`` + ``trade_date``-free filter (the whole
+        contract history is needed; the roller trims). [3] ``COALESCE``. Rows
+        with NULL expiration are excluded (a continuous series is undefined for
+        them). Zero-close rows are left in place — ``trim_overlaps`` strips them
+        (this is how the GOLD 2023-04-07 ``close=0.0`` bar is handled, exactly
+        as in the Mongo path).
         """
         try:
+            params: list[Any] = [collection]
+            cycle_clause = ""
+            if cycle is not None:
+                cycle_clause = " AND d.expiration_cycle = %s"
+                params.append(cycle)
+
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    # Build WHERE clause for cycle filter if provided
-                    where_cycle = ""
-                    params: list[Any] = [collection]
-                    if cycle is not None:
-                        where_cycle = " AND d.expiration_cycle = %s"
-                        params.append(cycle)
-
-                    # Fetch all contracts for this collection, ordered by expiration
-                    # (this ordering is CRITICAL for the roller)
-                    cur.execute(
+                    await cur.execute(
                         f"""SELECT d.symbol, d.expiration, f.trade_date,
-                                  COALESCE(f.adj_close, f.close) AS close_val,
-                                  f.open, f.high, f.low, f.volume
-                           FROM {SCHEMA}.fact_price_eod f
-                           JOIN {SCHEMA}.dim_instrument d ON d.instrument_id = f.instrument_id
-                           WHERE d.source_collection = %s {where_cycle}
-                           ORDER BY d.expiration, f.trade_date""",
+                                   COALESCE(f.adj_close, f.close) AS close_val,
+                                   f.open, f.high, f.low, f.volume
+                            FROM {SCHEMA}.fact_price_eod f
+                            JOIN {SCHEMA}.dim_instrument d
+                              ON d.instrument_id = f.instrument_id
+                            WHERE d.source_collection = %s
+                              AND d.expiration IS NOT NULL
+                              {cycle_clause}
+                            ORDER BY d.expiration, d.symbol, f.trade_date""",
                         params,
                     )
-
-                    # Group rows by contract symbol (expiration)
-                    contracts_dict: dict[
-                        str,
-                        tuple[int, list[tuple[int, float, float, float, float, float]]],
-                    ] = {}
-
-                    for (
-                        symbol,
-                        expiration,
-                        trade_date,
-                        close_val,
-                        open_val,
-                        high_val,
-                        low_val,
-                        volume_val,
-                    ) in cur.fetchall():
-                        if symbol not in contracts_dict:
-                            exp_int = date_to_int(expiration)
-                            contracts_dict[symbol] = (exp_int, [])
-
-                        exp_int, bars = contracts_dict[symbol]
-                        bars.append(
-                            (
-                                date_to_int(trade_date),
-                                float(close_val) if close_val is not None else 0.0,
-                                float(open_val) if open_val is not None else 0.0,
-                                float(high_val) if high_val is not None else 0.0,
-                                float(low_val) if low_val is not None else 0.0,
-                                float(volume_val) if volume_val is not None else 0.0,
-                            )
-                        )
-
-                    # Build ContractPriceData for each contract (ordered by expiration)
-                    # [Important] The roller REQUIRES contracts sorted by expiration
-                    contracts: list[ContractPriceData] = []
-                    for symbol in sorted(
-                        contracts_dict.keys(), key=lambda s: contracts_dict[s][0]
-                    ):
-                        exp_int, bars = contracts_dict[symbol]
-                        if not bars:
-                            continue
-
-                        # Sort bars by trade_date (should already be sorted from SQL)
-                        bars.sort(key=lambda b: b[0])
-
-                        dates_arr = np.array([b[0] for b in bars], dtype=np.int64)
-                        closes = np.array([b[1] for b in bars], dtype=np.float64)
-                        opens = np.array([b[2] for b in bars], dtype=np.float64)
-                        highs = np.array([b[3] for b in bars], dtype=np.float64)
-                        lows = np.array([b[4] for b in bars], dtype=np.float64)
-                        volumes = np.array([b[5] for b in bars], dtype=np.float64)
-
-                        contracts.append(
-                            ContractPriceData(
-                                contract_id=symbol,
-                                expiration=exp_int,
-                                prices=PriceSeries(
-                                    dates=dates_arr,
-                                    open=opens,
-                                    high=highs,
-                                    low=lows,
-                                    close=closes,
-                                    volume=volumes,
-                                ),
-                            )
-                        )
-
-                    return contracts
-        except Exception as exc:
+                    rows = await cur.fetchall()
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
             raise DataAccessError(
                 f"SQL error fetching futures contracts from '{collection}': {exc}"
             ) from exc
+
+        # Group bars per contract symbol. The SQL ORDER BY already groups by
+        # (expiration, symbol, trade_date); we preserve first-seen order which
+        # is therefore ascending-by-expiration.
+        grouped: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            sym = r["symbol"]
+            bucket = grouped.get(sym)
+            if bucket is None:
+                bucket = {
+                    "expiration": date_to_int(r["expiration"]),
+                    "dates": [],
+                    "open": [],
+                    "high": [],
+                    "low": [],
+                    "close": [],
+                    "volume": [],
+                }
+                grouped[sym] = bucket
+            bucket["dates"].append(date_to_int(r["trade_date"]))
+            bucket["close"].append(to_float_or(r["close_val"], 0.0))
+            bucket["open"].append(to_float_or(r["open"], 0.0))
+            bucket["high"].append(to_float_or(r["high"], 0.0))
+            bucket["low"].append(to_float_or(r["low"], 0.0))
+            bucket["volume"].append(to_float_or(r["volume"], 0.0))
+
+        contracts: list[ContractPriceData] = []
+        for sym, b in grouped.items():
+            if not b["dates"]:
+                continue
+            contracts.append(
+                ContractPriceData(
+                    contract_id=sym,
+                    expiration=b["expiration"],
+                    prices=PriceSeries(
+                        dates=np.array(b["dates"], dtype=np.int64),
+                        open=np.array(b["open"], dtype=np.float64),
+                        high=np.array(b["high"], dtype=np.float64),
+                        low=np.array(b["low"], dtype=np.float64),
+                        close=np.array(b["close"], dtype=np.float64),
+                        volume=np.array(b["volume"], dtype=np.float64),
+                    ),
+                )
+            )
+        # Defensive: guarantee ascending-by-expiration even if the dict order
+        # ever drifts (the roller raises if it is not sorted).
+        contracts.sort(key=lambda c: c.expiration)
+        return contracts
 
     async def find_contract_by_expiration(
         self,
         collection: str,
         expiration_int: int,
     ) -> str | None:
-        """Return the symbol of the single contract in *collection* whose
-        expiration equals *expiration_int* (YYYYMMDD integer).
+        """Return the ``symbol`` of the single contract in *collection* whose
+        ``expiration`` equals *expiration_int* (YYYYMMDD integer), or ``None``.
 
-        Used by the VIX greeks resolver (find_futures_contract_by_expiration).
-        Returns None when no contract matches.
+        Used by the OPT_VIX underlying resolver to map an option expiration to
+        the matching FUT_VIX contract.
         """
         try:
+            exp_date = int_to_date(expiration_int)
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    # Convert YYYYMMDD int to a date for comparison
-                    exp_date = int_to_date(expiration_int)
-                    cur.execute(
+                    await cur.execute(
                         f"""SELECT symbol FROM {SCHEMA}.dim_instrument
-                           WHERE source_collection = %s AND expiration = %s
-                           LIMIT 1""",
+                            WHERE source_collection = %s AND expiration = %s
+                            ORDER BY symbol
+                            LIMIT 1""",
                         (collection, exp_date),
                     )
-                    row = cur.fetchone()
-                    return row[0] if row else None
-        except Exception as exc:
+                    row = await cur.fetchone()
+                    return row["symbol"] if row else None
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
             raise DataAccessError(
                 f"SQL error finding contract by expiration in '{collection}' "
                 f"(expiration={expiration_int}): {exc}"
             ) from exc
 
-    async def fetch_available_cycles(
-        self,
-        collection: str,
-    ) -> list[str]:
-        """Return distinct expiration_cycle values for a futures collection."""
+    async def fetch_available_cycles(self, collection: str) -> list[str]:
+        """Return distinct non-empty ``expiration_cycle`` values for a collection."""
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
-                    cur.execute(
-                        f"""SELECT DISTINCT expiration_cycle FROM {SCHEMA}.dim_instrument
-                           WHERE source_collection = %s
-                           ORDER BY expiration_cycle""",
+                    await cur.execute(
+                        f"""SELECT DISTINCT expiration_cycle
+                            FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s
+                            ORDER BY expiration_cycle""",
                         (collection,),
                     )
-                    return [row[0] for row in cur.fetchall() if row[0]]
-        except Exception as exc:
+                    return [
+                        r["expiration_cycle"]
+                        for r in await cur.fetchall()
+                        if r["expiration_cycle"]
+                    ]
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
             raise DataAccessError(
                 f"SQL error fetching cycles from '{collection}': {exc}"
             ) from exc
+
+
+def _rows_to_price_series(rows: list[dict[str, Any]]) -> PriceSeries:
+    """Build a ``PriceSeries`` from dict rows (cols: trade_date, close_val, open,
+    high, low, volume). Dates → YYYYMMDD int; NULL OHLV → 0.0; Decimal → float."""
+    dates: list[int] = []
+    opens: list[float] = []
+    highs: list[float] = []
+    lows: list[float] = []
+    closes: list[float] = []
+    volumes: list[float] = []
+    for r in rows:
+        dates.append(date_to_int(r["trade_date"]))
+        closes.append(to_float_or(r["close_val"], 0.0))
+        opens.append(to_float_or(r["open"], 0.0))
+        highs.append(to_float_or(r["high"], 0.0))
+        lows.append(to_float_or(r["low"], 0.0))
+        volumes.append(to_float_or(r["volume"], 0.0))
+    return PriceSeries(
+        dates=np.array(dates, dtype=np.int64),
+        open=np.array(opens, dtype=np.float64),
+        high=np.array(highs, dtype=np.float64),
+        low=np.array(lows, dtype=np.float64),
+        close=np.array(closes, dtype=np.float64),
+        volume=np.array(volumes, dtype=np.float64),
+    )

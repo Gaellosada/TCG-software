@@ -6,7 +6,7 @@ Composes MongoInstrumentReader, CollectionRegistry, and LRUCache.
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Literal
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -61,32 +61,29 @@ class DefaultMarketDataService:
     ) -> list[str]:
         """List all non-option collections (INDEX, ETF, FUND, FOREX, FUT_*).
 
-        Maps dwh asset_class onto Mongo collection-naming semantics:
-        - INDEX → AssetClass.INDEX (collection name "INDEX")
-        - ETF/FUND/FOREX → AssetClass.EQUITY (collection names "ETF"/"FUND"/"FOREX")
-        - FUT_* → AssetClass.FUTURE (collection names FUT_X)
+        Delegates to the reader, which maps dwh ``asset_class`` onto the
+        Mongo-era coarse ``AssetClass`` (ETF/FUND/FOREX → EQUITY, INDEX →
+        INDEX, FUT_* → FUTURE) and excludes OPT_*.
         """
-        async with self._sql._pool.connection() as conn:
-            async with conn.cursor() as cur:
-                if asset_class is None:
-                    # All non-option collections
-                    cur.execute(
-                        "SELECT DISTINCT source_collection FROM tcg_instruments.dim_instrument "
-                        "WHERE asset_class != 'option' ORDER BY source_collection"
-                    )
-                else:
-                    # Filter by asset_class (with mapping)
-                    if asset_class == "index":
-                        ac_filter = "'index'"
-                    elif asset_class == "future":
-                        ac_filter = "'future'"
-                    else:  # equity
-                        ac_filter = "('etf','fund','forex')"
-                    cur.execute(
-                        f"SELECT DISTINCT source_collection FROM tcg_instruments.dim_instrument "
-                        f"WHERE asset_class IN ({ac_filter}) ORDER BY source_collection"
-                    )
-                return [row[0] for row in cur.fetchall()]
+        return await self._sql.list_collections(asset_class)
+
+    @staticmethod
+    def asset_class_for(collection: str) -> AssetClass | None:
+        """Classify a collection NAME into its coarse ``AssetClass``.
+
+        Pure name-prefix logic (no DB hit), preserving the old
+        ``CollectionRegistry.asset_class_for`` contract the portfolio router
+        relies on: ``FUT_*`` → FUTURE, ``INDEX`` → INDEX, ETF/FUND/FOREX →
+        EQUITY. Returns ``None`` for unknown / OPT_* names so callers raise a
+        clean validation error rather than guessing.
+        """
+        if collection.startswith("FUT_"):
+            return AssetClass.FUTURE
+        if collection == "INDEX":
+            return AssetClass.INDEX
+        if collection in ("ETF", "FUND", "FOREX"):
+            return AssetClass.EQUITY
+        return None
 
     async def list_instruments(
         self,
@@ -95,7 +92,13 @@ class DefaultMarketDataService:
         skip: int = 0,
         limit: int = 50,
     ) -> PaginatedResult[InstrumentId]:
-        """List instruments in a collection by source_collection."""
+        """List instruments in a collection by source_collection.
+
+        Rejects unknown collections up-front (clean 404) so unvalidated route
+        input can't silently return an empty page for a typo'd collection.
+        """
+        if not await self._sql.collection_exists(collection):
+            raise DataNotFoundError(f"Collection '{collection}' not found")
         instruments, total = await self._sql.list_instruments(
             collection, skip=skip, limit=limit
         )
@@ -117,7 +120,15 @@ class DefaultMarketDataService:
         end: date | None = None,
         provider: str | None = None,
     ) -> PriceSeries | None:
-        """Fetch OHLCV prices for a single instrument."""
+        """Fetch OHLCV prices for a single instrument.
+
+        Rejects unknown collections up-front (parity with the Mongo path) so
+        unvalidated route input can't probe arbitrary ``source_collection``
+        values; a genuine unknown instrument within a valid collection still
+        returns ``None`` (404 at the route).
+        """
+        if not await self._sql.collection_exists(collection):
+            raise DataNotFoundError(f"Collection '{collection}' not found")
         cache_key = self._make_key(collection, instrument_id, provider, start, end)
         cached = self._cache.get(cache_key)
         if cached is not None:

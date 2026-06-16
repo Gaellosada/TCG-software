@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data.service import DefaultMarketDataService
 from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.market import (
@@ -37,9 +36,10 @@ from tcg.types.market import (
 
 
 def _make_service() -> DefaultMarketDataService:
-    mock_db = MagicMock()
-    registry = CollectionRegistry(["INDEX", "FUT_VIX", "FUT_SP_500", "ETF"])
-    return DefaultMarketDataService(mock_db, registry, cache_size=10)
+    # The dwh-backed service takes a connection pool; these tests patch
+    # ``get_prices`` / ``get_continuous`` directly, so a MagicMock pool that is
+    # never actually queried suffices.
+    return DefaultMarketDataService(MagicMock(), cache_size=10)
 
 
 def _price_series(dates: list[int], close_vals: list[float]) -> PriceSeries:
@@ -73,9 +73,7 @@ def _continuous_series(
 
 
 def _spx_id() -> InstrumentId:
-    return InstrumentId(
-        symbol="SPX", asset_class=AssetClass.INDEX, collection="INDEX"
-    )
+    return InstrumentId(symbol="SPX", asset_class=AssetClass.INDEX, collection="INDEX")
 
 
 def _vix_leg() -> ContinuousLegSpec:
@@ -110,9 +108,7 @@ class TestAlignedPricesSingleLeg:
         ps = _price_series([20240101, 20240102, 20240103], [100.0, 101.0, 102.0])
 
         with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=ps):
-            common_dates, aligned = await svc.get_aligned_prices(
-                {"spx": _spx_id()}
-            )
+            common_dates, aligned = await svc.get_aligned_prices({"spx": _spx_id()})
 
         np.testing.assert_array_equal(common_dates, [20240101, 20240102, 20240103])
         assert "spx" in aligned
@@ -123,10 +119,10 @@ class TestAlignedPricesSingleLeg:
         ps = _price_series([20240101, 20240102], [15.0, 16.0])
         cs = _continuous_series(ps)
 
-        with patch.object(svc, "get_continuous", new_callable=AsyncMock, return_value=cs):
-            common_dates, aligned = await svc.get_aligned_prices(
-                {"vix": _vix_leg()}
-            )
+        with patch.object(
+            svc, "get_continuous", new_callable=AsyncMock, return_value=cs
+        ):
+            common_dates, aligned = await svc.get_aligned_prices({"vix": _vix_leg()})
 
         np.testing.assert_array_equal(common_dates, [20240101, 20240102])
         np.testing.assert_array_equal(aligned["vix"].close, [15.0, 16.0])
@@ -137,20 +133,24 @@ class TestAlignedPricesMultiLeg:
 
     async def test_two_legs_partial_overlap(self):
         svc = _make_service()
-        ps_spx = _price_series(
-            [20240101, 20240102, 20240103], [100.0, 101.0, 102.0]
-        )
-        ps_vix = _price_series(
-            [20240102, 20240103, 20240104], [15.0, 16.0, 17.0]
-        )
+        ps_spx = _price_series([20240101, 20240102, 20240103], [100.0, 101.0, 102.0])
+        ps_vix = _price_series([20240102, 20240103, 20240104], [15.0, 16.0, 17.0])
         cs_vix = _continuous_series(ps_vix)
 
-        with patch.object(svc, "get_prices", new_callable=AsyncMock, return_value=ps_spx), \
-             patch.object(svc, "get_continuous", new_callable=AsyncMock, return_value=cs_vix):
-            common_dates, aligned = await svc.get_aligned_prices({
-                "spx": _spx_id(),
-                "vix": _vix_leg(),
-            })
+        with (
+            patch.object(
+                svc, "get_prices", new_callable=AsyncMock, return_value=ps_spx
+            ),
+            patch.object(
+                svc, "get_continuous", new_callable=AsyncMock, return_value=cs_vix
+            ),
+        ):
+            common_dates, aligned = await svc.get_aligned_prices(
+                {
+                    "spx": _spx_id(),
+                    "vix": _vix_leg(),
+                }
+            )
 
         # Only 20240102 and 20240103 overlap
         np.testing.assert_array_equal(common_dates, [20240102, 20240103])
@@ -170,17 +170,27 @@ class TestAlignedPricesMultiLeg:
         ps_b = _price_series([20240102, 20240103, 20240104], [4.0, 5.0, 6.0])
         ps_c = _price_series([20240103, 20240104, 20240105], [7.0, 8.0, 9.0])
 
-        id_a = InstrumentId(symbol="A", asset_class=AssetClass.INDEX, collection="INDEX")
-        id_b = InstrumentId(symbol="B", asset_class=AssetClass.INDEX, collection="INDEX")
-        id_c = InstrumentId(symbol="C", asset_class=AssetClass.INDEX, collection="INDEX")
+        id_a = InstrumentId(
+            symbol="A", asset_class=AssetClass.INDEX, collection="INDEX"
+        )
+        id_b = InstrumentId(
+            symbol="B", asset_class=AssetClass.INDEX, collection="INDEX"
+        )
+        id_c = InstrumentId(
+            symbol="C", asset_class=AssetClass.INDEX, collection="INDEX"
+        )
 
         async def mock_get_prices(collection, symbol, **kwargs):
             return {"A": ps_a, "B": ps_b, "C": ps_c}[symbol]
 
         with patch.object(svc, "get_prices", side_effect=mock_get_prices):
-            common_dates, aligned = await svc.get_aligned_prices({
-                "a": id_a, "b": id_b, "c": id_c,
-            })
+            common_dates, aligned = await svc.get_aligned_prices(
+                {
+                    "a": id_a,
+                    "b": id_b,
+                    "c": id_c,
+                }
+            )
 
         # Only 20240103 is in all three
         np.testing.assert_array_equal(common_dates, [20240103])
@@ -205,8 +215,12 @@ class TestAlignedPricesMultiLeg:
         ps_a = _price_series([20240101], [100.0])
         ps_b = _price_series([20240102], [200.0])
 
-        id_a = InstrumentId(symbol="A", asset_class=AssetClass.INDEX, collection="INDEX")
-        id_b = InstrumentId(symbol="B", asset_class=AssetClass.INDEX, collection="INDEX")
+        id_a = InstrumentId(
+            symbol="A", asset_class=AssetClass.INDEX, collection="INDEX"
+        )
+        id_b = InstrumentId(
+            symbol="B", asset_class=AssetClass.INDEX, collection="INDEX"
+        )
 
         async def mock_get_prices(collection, symbol, **kwargs):
             return {"A": ps_a, "B": ps_b}[symbol]
@@ -229,7 +243,9 @@ class TestAlignedPricesNotFound:
     async def test_continuous_leg_not_found(self):
         svc = _make_service()
 
-        with patch.object(svc, "get_continuous", new_callable=AsyncMock, return_value=None):
+        with patch.object(
+            svc, "get_continuous", new_callable=AsyncMock, return_value=None
+        ):
             with pytest.raises(DataNotFoundError, match="leg 'vix_fut'"):
                 await svc.get_aligned_prices({"vix_fut": _vix_leg()})
 
@@ -252,16 +268,23 @@ class TestAlignedPricesReturnTypes:
         ps_a = _price_series([20240101, 20240102, 20240103], [1.0, 2.0, 3.0])
         ps_b = _price_series([20240102, 20240103, 20240104], [4.0, 5.0, 6.0])
 
-        id_a = InstrumentId(symbol="A", asset_class=AssetClass.INDEX, collection="INDEX")
-        id_b = InstrumentId(symbol="B", asset_class=AssetClass.INDEX, collection="INDEX")
+        id_a = InstrumentId(
+            symbol="A", asset_class=AssetClass.INDEX, collection="INDEX"
+        )
+        id_b = InstrumentId(
+            symbol="B", asset_class=AssetClass.INDEX, collection="INDEX"
+        )
 
         async def mock_get_prices(collection, symbol, **kwargs):
             return {"A": ps_a, "B": ps_b}[symbol]
 
         with patch.object(svc, "get_prices", side_effect=mock_get_prices):
-            common_dates, aligned = await svc.get_aligned_prices({
-                "a": id_a, "b": id_b,
-            })
+            common_dates, aligned = await svc.get_aligned_prices(
+                {
+                    "a": id_a,
+                    "b": id_b,
+                }
+            )
 
         # Every aligned series must have dates == common_dates
         for label, ps in aligned.items():

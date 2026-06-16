@@ -11,7 +11,6 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tcg.core.api.data import router as data_router
@@ -22,7 +21,7 @@ from tcg.core.api.persistence import router as persistence_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
 from tcg.core.api.statistics import router as statistics_router
-from tcg.core.config import load_config, load_tunnel_config
+from tcg.core.config import load_tunnel_config
 from tcg.core.tunnel import SSMTunnel
 from tcg.data import create_services
 from tcg.data._sql.connection import DwhConnectionPool, load_dwh_config
@@ -68,31 +67,20 @@ async def lifespan(app: FastAPI):
         monitor_task = asyncio.create_task(tunnel.monitor())
 
     dwh_pool = None
-    persistence_client = None
     try:
-        # --- 1. Connect to dwh (market data) ---
-        dwh_config = load_dwh_config()
-        dwh_pool = DwhConnectionPool(**dwh_config)
+        # --- Connect to dwh (PostgreSQL) for ALL market-data reads ---
+        # The persistence layer (tcg-app-data on MongoDB) is NOT wired here:
+        # it lazy-inits its own scoped write client on first request via
+        # tcg.core.api._persistence_wiring.get_write_repository (reads
+        # MONGO_APP_WRITE_URI). Keeping it lazy preserves read-only-dev
+        # ergonomics and test isolation; the market cutover does not touch it.
+        dwh_pool = DwhConnectionPool(**load_dwh_config())
         await dwh_pool.connect()
 
-        # --- 2. Connect to Mongo (persistence only) ---
-        # NOTE: tcg-app-data (persistence) remains on MongoDB. Only market reads moved to SQL.
-        config = load_config()
-        persistence_client = AsyncIOMotorClient(
-            config.app_write_uri,
-            serverSelectionTimeoutMS=30_000,
-            connectTimeoutMS=60_000,
-            socketTimeoutMS=300_000,
-            maxPoolSize=5,
-        )
-        persistence_db = persistence_client[config.app_write_db_name]
-        app.state.persistence_db = persistence_db
-
-        # --- 3. Build market data service (dwh-backed) ---
         services = await create_services(dwh_pool)
         app.state.market_data = services["market_data"]
     except Exception:
-        # Cleanup on failure
+        # Cleanup on failure — stop the tunnel + pool so nothing is orphaned.
         if monitor_task:
             monitor_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -101,15 +89,11 @@ async def lifespan(app: FastAPI):
             await tunnel.stop()
         if dwh_pool:
             await dwh_pool.close()
-        if persistence_client:
-            persistence_client.close()
         raise
 
     yield
 
     # Cleanup on shutdown
-    if persistence_client:
-        persistence_client.close()
     if dwh_pool:
         await dwh_pool.close()
     if monitor_task:

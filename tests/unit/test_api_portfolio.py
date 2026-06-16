@@ -13,6 +13,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from tcg.data._mongo.registry import CollectionRegistry
+from tcg.data.service import DefaultMarketDataService
 from tcg.types.market import PriceSeries
 
 
@@ -70,6 +71,11 @@ def mock_app():
 
     svc = MagicMock()
     svc._registry = registry
+    # The portfolio router now classifies collections via the service's
+    # ``asset_class_for`` (replacing the old registry dependency). Wire the real
+    # static classifier so unknown-collection rejection is exercised correctly
+    # (a bare MagicMock attribute would return a truthy mock for ANY name).
+    svc.asset_class_for = DefaultMarketDataService.asset_class_for
     svc.get_aligned_prices = AsyncMock(return_value=(common_dates, aligned_series))
 
     app = FastAPI()
