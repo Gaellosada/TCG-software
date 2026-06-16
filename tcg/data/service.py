@@ -1,6 +1,8 @@
 """DefaultMarketDataService -- concrete implementation of MarketDataService.
 
-Composes MongoInstrumentReader, CollectionRegistry, and LRUCache.
+Composes the dwh-backed ``SqlInstrumentReader`` + ``SqlOptionsDataReader``
+(PostgreSQL warehouse) and an ``LRUCache``. Continuous futures are built by the
+unchanged ``ContinuousSeriesBuilder`` fed SQL-sourced contracts.
 """
 
 from __future__ import annotations
