@@ -317,9 +317,28 @@ if (-not (Test-Path $venvPython)) {
 
 $depsMarker = Join-Path $venvDir ".deps-installed"
 
-if ($freshVenv -or -not (Test-Path $depsMarker)) {
+# Re-install only when the dependency manifests actually change (instead of
+# skipping forever once a .venv exists). Keeps normal launches fast while
+# auto-healing after a pyproject.toml / uv.lock change (e.g. a new dependency).
+$depFiles = @("pyproject.toml", "uv.lock") |
+    ForEach-Object { Join-Path $ProjectRoot $_ } |
+    Where-Object { Test-Path $_ } |
+    Sort-Object
+$depsHash = if ($depFiles) {
+    (($depFiles | ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash }) -join '-')
+} else { '' }
+$storedHash = if (Test-Path $depsMarker) {
+    $markerText = Get-Content $depsMarker -Raw -ErrorAction SilentlyContinue
+    if ($markerText) { $markerText.Trim() } else { '' }
+} else { '' }
+
+if ($freshVenv -or ($storedHash -ne $depsHash)) {
     Write-Section "Installing Python dependencies"
-    Write-Info "This may take a minute on first run..."
+    if ($freshVenv) {
+        Write-Info "This may take a minute on first run..."
+    } else {
+        Write-Info "Dependency manifest changed since last run -- reinstalling..."
+    }
 
     Push-Location $ProjectRoot
     try {
@@ -333,11 +352,11 @@ if ($freshVenv -or -not (Test-Path $depsMarker)) {
         Write-Fail "Failed to install Python dependencies. See the output above for details."
         exit 1
     }
-    New-Item -Path $depsMarker -ItemType File -Force | Out-Null
+    Set-Content -Path $depsMarker -Value $depsHash -NoNewline
     Write-Ok "Python dependencies installed"
 } else {
     Write-Section "Python dependencies"
-    Write-Ok "Already installed (delete .venv to force reinstall)"
+    Write-Ok "Already up to date (pyproject.toml/uv.lock unchanged)"
 }
 
 # ---------------------------------------------------------------------------
