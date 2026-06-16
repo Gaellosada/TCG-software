@@ -25,6 +25,7 @@ from tcg.core.api.statistics import router as statistics_router
 from tcg.core.config import load_config, load_tunnel_config
 from tcg.core.tunnel import SSMTunnel
 from tcg.data import create_services
+from tcg.data._sql.connection import DwhConnectionPool, load_dwh_config
 from tcg.types.errors import TCGError
 
 
@@ -51,7 +52,7 @@ def _cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: connect to MongoDB, build services. Shutdown: close client."""
+    """Startup: connect to dwh (PostgreSQL) + Mongo (persistence). Shutdown: cleanup."""
     tunnel_config = load_tunnel_config()
     tunnel: SSMTunnel | None = None
     monitor_task: asyncio.Task[None] | None = None
@@ -66,34 +67,51 @@ async def lifespan(app: FastAPI):
             raise
         monitor_task = asyncio.create_task(tunnel.monitor())
 
+    dwh_pool = None
+    persistence_client = None
     try:
+        # --- 1. Connect to dwh (market data) ---
+        dwh_config = load_dwh_config()
+        dwh_pool = DwhConnectionPool(**dwh_config)
+        await dwh_pool.connect()
+
+        # --- 2. Connect to Mongo (persistence only) ---
+        # NOTE: tcg-app-data (persistence) remains on MongoDB. Only market reads moved to SQL.
         config = load_config()
-        # Pool sizes are modest — this is a single-user desktop app and all
-        # connections funnel through the same SSM tunnel (when enabled).
-        # Keeping the pool small avoids overwhelming the forwarded port.
-        client = AsyncIOMotorClient(
-            config.uri,
+        persistence_client = AsyncIOMotorClient(
+            config.app_write_uri,
             serverSelectionTimeoutMS=30_000,
             connectTimeoutMS=60_000,
             socketTimeoutMS=300_000,
             maxPoolSize=5,
         )
-        db = client[config.db_name]
-        services = await create_services(db)
+        persistence_db = persistence_client[config.app_write_db_name]
+        app.state.persistence_db = persistence_db
+
+        # --- 3. Build market data service (dwh-backed) ---
+        services = await create_services(dwh_pool)
+        app.state.market_data = services["market_data"]
     except Exception:
-        # Stop the tunnel if MongoDB setup fails — without this the SSM
-        # subprocess would be orphaned.
+        # Cleanup on failure
         if monitor_task:
             monitor_task.cancel()
             with suppress(asyncio.CancelledError):
                 await monitor_task
         if tunnel:
             await tunnel.stop()
+        if dwh_pool:
+            await dwh_pool.close()
+        if persistence_client:
+            persistence_client.close()
         raise
 
-    app.state.market_data = services["market_data"]
     yield
-    client.close()
+
+    # Cleanup on shutdown
+    if persistence_client:
+        persistence_client.close()
+    if dwh_pool:
+        await dwh_pool.close()
     if monitor_task:
         monitor_task.cancel()
         with suppress(asyncio.CancelledError):

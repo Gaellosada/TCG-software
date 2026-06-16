@@ -13,29 +13,22 @@ from typing import Any
 
 from tcg.data.protocols import MarketDataService, ResultStore, StrategyStore
 from tcg.data.service import DefaultMarketDataService
+from tcg.data._sql.connection import DwhConnectionPool
 
 
-async def create_services(mongo_db: Any) -> dict[str, Any]:
-    """Factory function. Discovers collections, builds all services.
-
-    ``CollectionRegistry`` is created here and passed to the service --
-    it never escapes the data module boundary.
+async def create_services(dwh_pool: DwhConnectionPool) -> dict[str, Any]:
+    """Factory function. Builds market data service from dwh pool.
 
     Parameters
     ----------
-    mongo_db:
-        An ``AsyncIOMotorDatabase`` handle. Typed as ``Any`` to avoid
-        leaking Motor into the public interface.
+    dwh_pool:
+        A ``DwhConnectionPool`` handle (already connected, read-only).
 
     Returns
     -------
     dict with ``"market_data"`` key mapped to a ``DefaultMarketDataService``.
     """
-    from tcg.data._mongo.registry import CollectionRegistry
-
-    raw_names: list[str] = await mongo_db.list_collection_names()
-    registry = CollectionRegistry(raw_names)
-    market_data = DefaultMarketDataService(mongo_db, registry)
+    market_data = DefaultMarketDataService(dwh_pool)
     return {"market_data": market_data}
 
 

@@ -9,7 +9,7 @@ from urllib.parse import quote_plus
 from dotenv import dotenv_values
 
 from tcg.core.tunnel import TunnelConfig
-from tcg.types.config import MongoConfig
+from tcg.types.config import DwhConfig, MongoConfig
 
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
@@ -122,4 +122,48 @@ def load_config() -> MongoConfig:
         db_name=db_name,
         app_write_db_name=_get("MONGO_APP_WRITE_DB_NAME", env, "tcg-app-data"),
         app_write_collection=_get("MONGO_APP_WRITE_COLLECTION", env, "2026-app-data"),
+    )
+
+
+def load_dwh_config() -> DwhConfig:
+    """Load PostgreSQL ``dwh`` configuration for the market-data read path.
+
+    Reads ``DWH_HOST`` / ``DWH_PORT`` / ``DWH_DB`` / ``DWH_USER`` /
+    ``DWH_PASSWORD`` (priority: real env > ``.env`` > defaults), mirroring
+    :func:`load_config`'s python-dotenv style. ``DWH_HOST`` / ``DWH_USER`` /
+    ``DWH_PASSWORD`` are required; the rest have safe defaults. Optional
+    knobs ``DWH_SSLMODE`` (default ``require``) and ``DWH_STATEMENT_TIMEOUT_MS``
+    (default 60000) let an operator tune without code change, so a tunneled
+    localhost (``DWH_SSLMODE=disable``) and an in-VPC host both work.
+
+    Raises ``ValueError`` listing every required variable that is missing.
+    """
+    env = dotenv_values(_ENV_PATH)
+
+    required = ("DWH_HOST", "DWH_USER", "DWH_PASSWORD")
+    missing = [k for k in required if not _get(k, env)]
+    if missing:
+        raise ValueError(
+            "dwh market-data reads require the following variables which "
+            f"are not set: {', '.join(missing)}"
+        )
+
+    port_raw = _get("DWH_PORT", env, "5432")
+    if not port_raw.isdigit():
+        raise ValueError(f"DWH_PORT must be numeric, got {port_raw!r}")
+
+    timeout_raw = _get("DWH_STATEMENT_TIMEOUT_MS", env, "60000")
+    if not timeout_raw.isdigit():
+        raise ValueError(
+            f"DWH_STATEMENT_TIMEOUT_MS must be numeric, got {timeout_raw!r}"
+        )
+
+    return DwhConfig(
+        host=_get("DWH_HOST", env),
+        port=int(port_raw),
+        dbname=_get("DWH_DB", env, "dwh"),
+        user=_get("DWH_USER", env),
+        password=_get("DWH_PASSWORD", env),
+        sslmode=_get("DWH_SSLMODE", env, "require"),
+        statement_timeout_ms=int(timeout_raw),
     )
