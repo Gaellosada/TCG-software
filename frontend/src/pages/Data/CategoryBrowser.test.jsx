@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { renderWithClient, makeTestClient } from '../../test/queryWrapper';
-import CategoryBrowser from './CategoryBrowser';
+import CategoryBrowser, { prefetchCategoryBrowser } from './CategoryBrowser';
 
 afterEach(cleanup);
 
@@ -421,5 +421,51 @@ describe('SWR — instant render on re-navigation', () => {
     expect(second.getByRole('button', { name: /options/i })).toBeDefined();
     // No immediate refetch within the staleTime window (served from cache).
     expect(vi.mocked(listCollections).mock.calls.length).toBe(callsAfterFirst);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Startup prefetch: FIRST mount is instant too (iter3 — true preload)
+// ---------------------------------------------------------------------------
+
+describe('Startup prefetch — first mount renders with NO loading flash', () => {
+  it('after prefetchCategoryBrowser warms the cache, the very first mount shows no spinner', async () => {
+    // Mirror the app-wide client (production staleTime) so the warmed entry is
+    // served from cache on mount with no background refetch.
+    const client = makeTestClient();
+    client.setDefaultOptions({
+      queries: { retry: false, gcTime: Infinity, staleTime: 5 * 60 * 1000 },
+    });
+
+    // Simulate app startup: warm the cache BEFORE the page ever mounts.
+    await prefetchCategoryBrowser(client);
+
+    // The prefetch performed exactly the composite load once.
+    const callsAfterPrefetch = vi.mocked(listCollections).mock.calls.length;
+    expect(callsAfterPrefetch).toBe(1);
+
+    // FIRST mount (first navigation to /data): must render the tree instantly —
+    // NO "Loading instruments..." flash, because the cache is already warm.
+    const { queryByText, getByRole } = renderWithClient(
+      <CategoryBrowser selected={null} onSelect={vi.fn()} />,
+      { client },
+    );
+    expect(queryByText('Loading instruments...')).toBeNull();
+    expect(getByRole('button', { name: /options/i })).toBeDefined();
+
+    // Served purely from the prefetched cache — no extra fetch on mount.
+    expect(vi.mocked(listCollections).mock.calls.length).toBe(callsAfterPrefetch);
+  });
+
+  it('prefetch errors are swallowed — a cold cache still lets the page load normally', async () => {
+    // Backend down at startup: prefetch must not throw (fire-and-forget).
+    vi.mocked(listCollections).mockRejectedValueOnce(new Error('backend down'));
+    const client = makeTestClient();
+
+    // Must resolve (not reject) even though the underlying fetch failed.
+    await expect(prefetchCategoryBrowser(client)).resolves.toBeUndefined();
+
+    // With the cache left cold, a subsequent mount loads normally (the mock is
+    // reset to the default resolving impl by beforeEach for the next test).
   });
 });

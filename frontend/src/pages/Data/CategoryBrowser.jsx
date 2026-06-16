@@ -77,7 +77,7 @@ function renderGreeksBadge(root) {
  * re-render on navigation, silent background revalidate). The ``signal`` is
  * threaded into every api call so a superseded load is cancelled.
  */
-async function loadCategories(signal) {
+export async function loadCategories(signal) {
   const collections = await listCollections(null, { signal });
 
   return Promise.all(
@@ -373,6 +373,26 @@ function CategoryBrowser({ selected, onSelect }) {
       ))}
     </div>
   );
+}
+
+/**
+ * Warm the CategoryBrowser composite cache entry ahead of first navigation.
+ *
+ * Called once on app startup so the FIRST visit to /data renders the sidebar
+ * instantly (no loading flash) — the data is already cached. Uses the EXACT
+ * same query key + queryFn as the component's ``useQuery`` so the warmed entry
+ * is the one CategoryBrowser reads on mount.
+ *
+ * ``prefetchQuery`` is fire-and-forget and swallows errors internally, so a
+ * backend hiccup at startup simply leaves the cache cold — the component then
+ * loads normally (its own error/loading handling stands). Returns the promise
+ * for callers/tests that want to await completion.
+ */
+export function prefetchCategoryBrowser(queryClient) {
+  return queryClient.prefetchQuery({
+    queryKey: queryKeys.market.categoryBrowser(),
+    queryFn: ({ signal }) => loadCategories(signal),
+  });
 }
 
 export default CategoryBrowser;
