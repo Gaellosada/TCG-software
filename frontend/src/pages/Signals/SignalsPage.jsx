@@ -13,9 +13,10 @@ import { emptyRules, defaultSettings } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import {
-  listSignals, createSignal, updateSignal, archiveSignal,
+  createSignal, updateSignal, archiveSignal,
   setSignalLocked, describePersistenceError, isLockedError,
 } from '../../api/persistence';
+import { useSignalsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
 import { buildComputeRequestBody } from './requestBuilder';
 import { computeRunGate } from './runGate';
 import { countOwnPanelIndicators } from './resultsPlotTraces';
@@ -73,9 +74,8 @@ function SignalsPage() {
   // signals is now the single source of truth, loaded from the backend.
   // persistedSignals has been removed — signals IS the persisted list.
   const [persistedCategory, setPersistedCategory] = useState('RESEARCH');
-  const [persistedLoading, setPersistedLoading] = useState(false);
-  // Error state for the initial backend fetch — shown when the backend is unreachable.
-  const [fetchError, setFetchError] = useState(null);
+  // persistedLoading + fetchError are now DERIVED from the signals query
+  // (see below) rather than held as separate state.
 
   const signalsRef = useRef(signals);
   signalsRef.current = signals;
@@ -96,32 +96,40 @@ function SignalsPage() {
     try { localStorage.setItem(AUTOSAVE_KEY, String(on)); } catch { /* ignore */ }
   }, []);
 
-  // --- Fetch signals from backend ------------------------------------------
-  const fetchSignals = useCallback(async (cat) => {
-    setPersistedLoading(true);
-    setFetchError(null);
-    try {
-      const docs = await listSignals(cat);
-      const hydrated = docs.map(hydrateFromPersisted);
-      setSignals(hydrated);
-      // Select the first signal if nothing is selected, or keep current
-      // selection if the signal still exists in the new list.
-      setSelectedId((prev) => {
-        if (prev && hydrated.find((s) => s.id === prev)) return prev;
-        return hydrated.length > 0 ? hydrated[0].id : null;
-      });
-    } catch (err) {
-      setFetchError(describePersistenceError(err));
-      setSignals([]);
-      setSelectedId(null);
-    } finally {
-      setPersistedLoading(false);
-    }
-  }, []);
+  // --- Signals list: TanStack query (the persisted source of truth) --------
+  // The list is now a cached query keyed by category. Changing the category
+  // re-keys it (auto-fetch); a mutation calls invalidate.signals() →
+  // background refetch → the hydration effect below re-syncs local state.
+  // ``signals`` (local state) stays the editable, optimistically-updated copy
+  // — exactly as before; the query only supplies fresh server snapshots.
+  const signalsQuery = useSignalsList(persistedCategory);
+  const invalidate = useInvalidatePersistence();
 
-  // --- Hydrate on mount ----------------------------------------------------
+  // Re-hydrate local state whenever the query lands a new server snapshot.
+  // This is the v5-canonical replacement for the old fetchSignals(): same
+  // hydrate + same selectedId reconciliation, now driven by query data.
+  // Mirrors the previous post-mutation/category-change refresh behaviour.
   useEffect(() => {
-    fetchSignals(persistedCategory);
+    const docs = signalsQuery.data;
+    if (!docs) return;
+    const hydrated = docs.map(hydrateFromPersisted);
+    setSignals(hydrated);
+    setSelectedId((prev) => {
+      if (prev && hydrated.find((s) => s.id === prev)) return prev;
+      return hydrated.length > 0 ? hydrated[0].id : null;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signalsQuery.data]);
+
+  // Surface query loading/error through the existing render props.
+  // ``persistedLoading`` only reflects the first (cold) load — a background
+  // refetch (isFetching with cached data) must NOT flip the list into a
+  // loading state (preserves the no-flicker behaviour the old code relied on).
+  const persistedLoading = signalsQuery.isPending && signalsQuery.fetchStatus !== 'idle';
+  const fetchError = signalsQuery.error ? describePersistenceError(signalsQuery.error) : null;
+
+  // --- Hydrate available indicators on mount -------------------------------
+  useEffect(() => {
     hydrateAvailableIndicators().then(setAvailableIndicators);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -134,10 +142,9 @@ function SignalsPage() {
     return () => window.removeEventListener('focus', refresh);
   }, []);
 
-  // --- Re-fetch signals when category changes ------------------------------
-  useEffect(() => {
-    fetchSignals(persistedCategory);
-  }, [persistedCategory, fetchSignals]);
+  // (Category changes are handled automatically: the signals query is keyed
+  // by persistedCategory, so changing it re-fetches the right list and the
+  // hydration effect re-syncs local state.)
 
   const selectedSignal = useMemo(
     () => signals.find((s) => s.id === selectedId) || null,
@@ -209,7 +216,9 @@ function SignalsPage() {
     }).then(() => {
       setOneshotError(null);
       setOneshotStatus('saved');
-      fetchSignals(persistedCategory);
+      // Refresh the list from the server (picks up created_at, etc.) by
+      // invalidating the signals query → background refetch → re-hydrate.
+      invalidate.signals(id);
     }).catch((err) => {
       // M8: capture error details (status/message) so the user can see
       // what went wrong — not just an opaque "save failed".
@@ -221,7 +230,7 @@ function SignalsPage() {
       // eslint-disable-next-line no-console
       console.error('createSignal failed:', err);
     });
-  }, [persistedCategory, fetchSignals]);
+  }, [persistedCategory, invalidate]);
 
   const handleDelete = useCallback((id) => {
     setConfirmDeleteId(id);
@@ -246,7 +255,8 @@ function SignalsPage() {
     archiveSignal(id).then(() => {
       setOneshotError(null);
       setOneshotStatus('saved');
-      fetchSignals(persistedCategory);
+      // Archive moves the doc to ARCHIVE — refresh every category list.
+      invalidate.signals(id);
     }).catch((err) => {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
@@ -257,7 +267,7 @@ function SignalsPage() {
       // eslint-disable-next-line no-console
       console.error('archiveSignal failed:', err);
     });
-  }, [confirmDeleteId, persistedCategory, fetchSignals]);
+  }, [confirmDeleteId, persistedCategory, invalidate]);
 
   // Move a signal to a different category. Preserves all editable
   // content via the full-replace PUT.
@@ -277,15 +287,16 @@ function SignalsPage() {
       setOneshotError(null);
       setOneshotStatus('saved');
       // If the new category differs from the current filter, the item
-      // disappears from the current view — re-fetch to reflect backend truth.
-      fetchSignals(persistedCategory);
+      // disappears from the current view — invalidate so every category
+      // list reflects backend truth (prefix match covers old + new cat).
+      invalidate.signals(id);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('updateSignal (category change) failed:', err);
     }
-  }, [persistedCategory, fetchSignals]);
+  }, [persistedCategory, invalidate]);
 
   const handleRename = useCallback((id, newName) => {
     setSignals((prev) => prev.map((s) => (s.id !== id ? s : { ...s, name: newName })));
@@ -309,7 +320,14 @@ function SignalsPage() {
     setLocked: useCallback((id, next) => setSignalLocked(id, next), []),
     applyLocked: applySignalLocked,
     onStart: useCallback(() => setOneshotStatus('saving'), []),
-    onSuccess: useCallback(() => { setOneshotError(null); setOneshotStatus('saved'); }, []),
+    onSuccess: useCallback((doc) => {
+      setOneshotError(null);
+      setOneshotStatus('saved');
+      // applyLocked already patched the lock flag from the server doc, so the
+      // UI is correct; invalidate to keep the cached list coherent (the
+      // refetch returns identical data → structural sharing = no flicker).
+      if (doc && doc.id) invalidate.signals(doc.id);
+    }, [invalidate]),
     onError: useCallback((err) => {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');

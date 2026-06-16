@@ -35,9 +35,10 @@ import useAbortableAction from '../../hooks/useAbortableAction';
 import useBackendAutosave from '../../hooks/useBackendAutosave';
 import useEntityLock from '../../hooks/useEntityLock';
 import {
-  createIndicator, listIndicators, updateIndicator, archiveIndicator,
+  createIndicator, updateIndicator, archiveIndicator,
   setIndicatorLocked, describePersistenceError, isLockedError,
 } from '../../api/persistence';
+import { useIndicatorsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import { classifyFetchError } from '../../utils/fetchError';
 import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
@@ -268,6 +269,16 @@ function IndicatorsPage() {
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
 
+  // --- Indicators list: TanStack query (the persisted, user-mutable source) -
+  // The custom-indicator list is now a cached query. ``indicators`` (local
+  // state) remains the editable, optimistically-updated, defaults-merged copy
+  // exactly as before; the query only supplies fresh server snapshots that the
+  // hydration effect merges in. A mutation calls invalidate.indicators() →
+  // background refetch → re-hydrate (defaults preserved; an in-progress edit
+  // on the selected indicator is NOT clobbered — see the merge below).
+  const indicatorsQuery = useIndicatorsList();
+  const invalidate = useInvalidatePersistence();
+
   const setAutosave = useCallback((on) => {
     setAutosaveState(on);
     try { localStorage.setItem(AUTOSAVE_KEY, String(on)); } catch { /* quota — ignore */ }
@@ -277,49 +288,79 @@ function IndicatorsPage() {
   // suppress the FIRST autosave cycle after hydrate-on-mount/select.
   const lastHydratedPayloadRef = useRef({ id: null, payload: null });
 
-  // --- Hydrate on mount ------------------------------------------------
-  // Fetch user-created indicators from backend, merge with hardcoded
-  // defaults. Default-indicator per-session overrides (params/seriesMap
-  // tweaks) still load from localStorage — they're minor UI preferences.
+  // --- Hydrate from the indicators query -------------------------------
+  // Merge hardcoded defaults (always, with localStorage per-session overlays)
+  // with the backend user-indicators supplied by the query. Runs on the first
+  // load AND whenever a mutation-triggered invalidation lands a fresh snapshot.
+  //
+  // Optimistic-edit preservation: if a user indicator currently in local state
+  // is unsaved-dirty (its serialized form differs from the server doc), we KEEP
+  // the local copy in the merge so a background refetch never clobbers an edit
+  // in progress. New docs appear; archived docs drop — both reconcile from the
+  // server. This preserves the existing optimistic model exactly.
+  // (1) Load DEFAULTS immediately on mount — independent of the backend query
+  // so the page always shows the default indicators even if the backend is
+  // unreachable (preserves the original graceful-degradation behaviour and the
+  // synchronous-on-mount selection the tests rely on). Per-session overlays
+  // from localStorage still apply to defaults.
   useEffect(() => {
-    let cancelled = false;
-    async function hydrate() {
-      // Defaults: always from hardcoded registry. Per-session overlays
-      // from localStorage remain functional for default indicators only.
-      const saved = loadState(); // only used for saved.defaultState
-      const defaults = DEFAULT_INDICATORS.map((def) =>
-        hydrateDefault(def, saved.defaultState?.[def.id]),
+    const saved = loadState();
+    const defaults = DEFAULT_INDICATORS.map((def) =>
+      hydrateDefault(def, saved.defaultState?.[def.id]),
+    );
+    setIndicators((prev) => {
+      // Preserve any user-indicators already merged in (query may have landed
+      // first); only (re)seed the readonly defaults that aren't present yet.
+      const userExisting = prev.filter((ind) => !ind.readonly);
+      const haveDefaults = new Set(prev.filter((i) => i.readonly).map((i) => i.id));
+      const seededDefaults = defaults.map((d) =>
+        haveDefaults.has(d.id) ? prev.find((p) => p.id === d.id) : d,
       );
-
-      // Custom indicators: fetch from backend.
-      let backendDocs = [];
-      try {
-        backendDocs = await listIndicators();
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('Failed to load indicators from backend:', err);
-        // Graceful degradation: page shows defaults only.
-      }
-      if (cancelled) return;
-
-      const userIndicators = (Array.isArray(backendDocs) ? backendDocs : [])
-        .map(unpackBackendIndicator);
-      const merged = [...defaults, ...userIndicators];
-      setIndicators(merged);
-      if (merged.length > 0) setSelectedId((curr) => curr || merged[0].id);
-      // Seed the last-hydrated ref so the autosave doesn't immediately
-      // PUT the freshly fetched content back.
-      const first = userIndicators.length > 0 ? userIndicators[0] : null;
-      if (first) {
-        lastHydratedPayloadRef.current = {
-          id: first.id,
-          payload: serializeForBackend(first),
-        };
-      }
-    }
-    hydrate();
-    return () => { cancelled = true; };
+      return [...seededDefaults, ...userExisting];
+    });
+    setSelectedId((curr) => curr || (defaults.length > 0 ? defaults[0].id : null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // (2) Merge BACKEND user-indicators when the query lands a snapshot. Runs on
+  // the first successful load AND on every mutation-triggered invalidation.
+  // Optimistic-edit preservation: a user indicator that is unsaved-dirty in
+  // local state (its serialized form differs from the server doc) keeps its
+  // LOCAL copy so a background refetch never clobbers an in-progress edit.
+  // New docs appear; archived docs drop. Defaults are left untouched here.
+  useEffect(() => {
+    const backendDocs = indicatorsQuery.data;
+    if (!backendDocs) return; // not yet loaded (or errored → defaults-only stands)
+
+    const serverUser = (Array.isArray(backendDocs) ? backendDocs : [])
+      .map(unpackBackendIndicator);
+
+    setIndicators((prev) => {
+      const localUserById = new Map(
+        prev.filter((ind) => !ind.readonly).map((ind) => [ind.id, ind]),
+      );
+      const userIndicators = serverUser.map((serverInd) => {
+        const local = localUserById.get(serverInd.id);
+        if (!local) return serverInd; // brand-new from server
+        const dirty = serializeForBackend(local) !== serializeForBackend(serverInd);
+        return dirty ? local : serverInd; // keep unsaved local edits
+      });
+      const defaults = prev.filter((ind) => ind.readonly);
+      return [...defaults, ...userIndicators];
+    });
+
+    // Select the first server indicator if nothing is selected yet (matches the
+    // original behaviour where the first user indicator could become current).
+    if (serverUser.length > 0) {
+      setSelectedId((curr) => curr || serverUser[0].id);
+      // Seed the last-hydrated ref so autosave doesn't immediately re-PUT.
+      lastHydratedPayloadRef.current = {
+        id: serverUser[0].id,
+        payload: serializeForBackend(serverUser[0]),
+      };
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [indicatorsQuery.data]);
 
   // --- Resolve default SPX-ish instrument once -------------------------
   useEffect(() => {
@@ -529,6 +570,10 @@ function IndicatorsPage() {
         name,
         definition: packDefinition(newInd),
       });
+      // Refresh the list from the server by invalidating the indicators query
+      // → background refetch → re-hydrate (the merge preserves this indicator's
+      // local copy if the user has already started editing it).
+      invalidate.indicators(id);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('createIndicator failed:', err);
@@ -537,7 +582,7 @@ function IndicatorsPage() {
       setSelectedId((sel) => sel === id ? null : sel);
       setCloudError(describePersistenceError(err));
     }
-  }, [defaultSeries]);
+  }, [defaultSeries, invalidate]);
 
   const handleDelete = useCallback((id) => {
     const target = indicatorsRef.current.find((i) => i.id === id);
@@ -564,6 +609,8 @@ function IndicatorsPage() {
 
     try {
       await archiveIndicator(id);
+      // Sync with server truth (the archived doc drops from the list).
+      invalidate.indicators(id);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('archiveIndicator failed:', err);
@@ -571,7 +618,7 @@ function IndicatorsPage() {
       setIndicators((prev) => [...prev, target]);
       setCloudError(describePersistenceError(err));
     }
-  }, [pendingDeleteId]);
+  }, [pendingDeleteId, invalidate]);
 
   const handleRename = useCallback((id, newName) => {
     setIndicators((prev) => prev.map((ind) => {
@@ -597,6 +644,12 @@ function IndicatorsPage() {
     setLocked: useCallback((id, next) => setIndicatorLocked(id, next), []),
     applyLocked: applyIndicatorLocked,
     optimistic: true,
+    onSuccess: useCallback((doc) => {
+      // applyLocked already patched the lock flag from the server doc; invalidate
+      // to keep the cached list coherent (refetch returns equal data → the merge
+      // takes the server copy with no visible change).
+      if (doc && doc.id) invalidate.indicators(doc.id);
+    }, [invalidate]),
     onError: useCallback((err) => {
       setCloudError(describePersistenceError(err));
       // eslint-disable-next-line no-console
