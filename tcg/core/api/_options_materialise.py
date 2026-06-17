@@ -165,6 +165,7 @@ async def materialise_option_streams(
             maturity=_maturity_pydantic_to_dataclass(ref.maturity),
             selection=_criterion_pydantic_to_dataclass(ref.selection),
             stream=ref.stream,
+            adjustment=ref.adjustment,
             chain_reader=chain_reader,
             maturity_resolver=mat_resolver,
             underlying_price_resolver=ul_resolver,

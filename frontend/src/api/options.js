@@ -191,7 +191,25 @@ export async function selectOption(selectQuery) {
 //   Returns: { done: number, total: number, fraction: number }
 // ---------------------------------------------------------------------------
 
+// Ensure each option_stream ref carries the additive ``adjustment`` field
+// (default "none") before it goes on the wire. The picker emits it, but
+// legacy / hand-built refs may omit it; the backend defaults it too, but we
+// send it explicitly so the request body is unambiguous (and testable).
+// ``adjustment`` is applied by the backend resolver only when stream==="mid";
+// it is harmlessly ignored for every other stream.
+function withAdjustment(streams) {
+  if (!Array.isArray(streams)) return streams;
+  return streams.map((entry) => {
+    const ref = entry && entry.ref;
+    if (ref && ref.type === 'option_stream' && ref.adjustment === undefined) {
+      return { ...entry, ref: { ...ref, adjustment: 'none' } };
+    }
+    return entry;
+  });
+}
+
 export async function resolveOptionStream(streams, start, end, { signal, onProgress } = {}) {
+  const normalizedStreams = withAdjustment(streams);
   const taskId = typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -211,7 +229,7 @@ export async function resolveOptionStream(streams, start, end, { signal, onProgr
   }
 
   try {
-    const body = { streams, start, end, task_id: taskId };
+    const body = { streams: normalizedStreams, start, end, task_id: taskId };
     const result = await fetchApi('/options/stream', {
       method: 'POST',
       body: JSON.stringify(body),

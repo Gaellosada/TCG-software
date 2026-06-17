@@ -108,6 +108,13 @@ class OptionStreamRef(BaseModel):
     type: Literal["option_stream"]
     collection: str
     option_type: Literal["C", "P"]
+    # Roll back-adjustment for the rolled MID stream, mirroring
+    # ``ContinuousInstrumentRef.adjustment`` (futures convention).  Additive
+    # field, default "none" → preserves the existing wire contract.  Applied
+    # by the engine resolver ONLY when ``stream == "mid"``; for every other
+    # stream (iv / greeks / volume / open_interest) it is ignored (raw series
+    # returned, no error).  See ``stream_resolver.resolve_option_stream``.
+    adjustment: Literal["none", "ratio", "difference"] = "none"
     # ``cycle`` filter — None means "no cycle filter applied" (caller's
     # intent for monthly is typically the explicit string "M" since some
     # roots — OPT_SP_500 — have weeklies named "W3 Friday" mixed in).

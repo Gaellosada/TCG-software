@@ -22,6 +22,7 @@ import {
   getOptionContract,
   selectOption,
   getChainSnapshot,
+  resolveOptionStream,
 } from './options';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -272,6 +273,62 @@ describe('getChainSnapshot', () => {
     expect(url).toContain('date=2024-03-15');
     expect(url).toContain('type=C');
     expect(url).toContain('field=delta');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. resolveOptionStream — POST /api/options/stream body shape
+// ---------------------------------------------------------------------------
+
+describe('resolveOptionStream', () => {
+  const RESOLVE_RESP = { dates: [], streams: {} };
+
+  function optionRef(overrides = {}) {
+    return {
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'C',
+      cycle: null,
+      maturity: { kind: 'next_third_friday', offset_months: 0 },
+      selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+      stream: 'mid',
+      ...overrides,
+    };
+  }
+
+  it('POSTs to /options/stream and forwards the ref adjustment field', async () => {
+    mockSuccess(RESOLVE_RESP);
+    const ref = optionRef({ adjustment: 'ratio' });
+    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
+
+    expect(fetchApi).toHaveBeenCalledWith('/options/stream', expect.objectContaining({
+      method: 'POST',
+    }));
+    const opts = vi.mocked(fetchApi).mock.calls[0][1];
+    const body = JSON.parse(opts.body);
+    expect(body.start).toBe('2024-01-01');
+    expect(body.end).toBe('2025-01-01');
+    expect(body.streams).toHaveLength(1);
+    expect(body.streams[0].ref.adjustment).toBe('ratio');
+  });
+
+  it('defaults adjustment to "none" when a ref omits it', async () => {
+    mockSuccess(RESOLVE_RESP);
+    const ref = optionRef();
+    delete ref.adjustment; // legacy / hand-built ref
+    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
+
+    const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
+    expect(body.streams[0].ref.adjustment).toBe('none');
+  });
+
+  it('preserves an explicit adjustment of "none"', async () => {
+    mockSuccess(RESOLVE_RESP);
+    const ref = optionRef({ adjustment: 'none' });
+    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
+
+    const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
+    expect(body.streams[0].ref.adjustment).toBe('none');
   });
 });
 

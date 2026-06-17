@@ -84,24 +84,13 @@
   font-size: 0.8rem;
 }
 
-/* Advanced disclosure wrapping the optional Stream override (ASK B). */
-.advanced {
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
-  background: var(--bg-primary);
-}
-
-.advancedSummary {
-  cursor: pointer;
-  font-size: 0.75rem;
-  font-weight: 600;
+/* Help glyph next to the "Series:" label carrying the Mid bid-ask tooltip. */
+.help {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.8rem;
   color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  user-select: none;
-}
-
-.advanced[open] .advancedSummary {
-  margin-bottom: 8px;
+  cursor: help;
+  /* The label is uppercased; keep the glyph upright and readable. */
+  text-transform: none;
 }

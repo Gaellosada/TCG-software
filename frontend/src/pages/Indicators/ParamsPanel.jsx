@@ -126,9 +126,8 @@ function formatSelection(s, optionType) {
  *   ownPanel                {boolean}      render indicator in a separate chart below
  *   onOwnPanelChange        {Function}     (nextBool) => void — noop when readonly
  *   showDateRange           {boolean}      whether to show the option date range control
- *   optionDateRange         {Object|null}  { start, end, preset }
+ *   optionDateRange         {Object|null}  { start, end }
  *   onOptionDateRangeChange {Function}     (value) => void
- *   optionAnchorEnd         {string|null}  ISO date to anchor preset buttons (last_trade_date)
  */
 function ParamsPanel({
   indicator,
@@ -145,7 +144,6 @@ function ParamsPanel({
   showDateRange,
   optionDateRange,
   onOptionDateRangeChange,
-  optionAnchorEnd,
 }) {
   // Per-input raw string drafts for numeric fields. Keyed by param name.
   const [numericDrafts, setNumericDrafts] = useState({});
@@ -415,7 +413,6 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
               value={optionDateRange}
               onChange={onOptionDateRangeChange}
               disabled={!indicator || running}
-              anchorEnd={optionAnchorEnd || undefined}
             />
           </div>
         )}

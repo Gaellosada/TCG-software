@@ -4,6 +4,7 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import OptionStreamForm, {
   buildDefaultOptionStream,
   validateOptionStream,
+  MID_TOOLTIP,
 } from './OptionStreamForm';
 
 afterEach(cleanup);
@@ -42,25 +43,42 @@ describe('<OptionStreamForm>', () => {
     expect(screen.getByLabelText('Cycle')).toBeTruthy();
     expect(screen.getByLabelText('Maturity rule')).toBeTruthy();
     expect(screen.getByLabelText('Selection criterion')).toBeTruthy();
-    expect(screen.getByLabelText('Stream')).toBeTruthy();
+    expect(screen.getByLabelText('Series')).toBeTruthy();
     // type radios
     expect(screen.getByRole('radio', { name: 'Call' })).toBeTruthy();
     expect(screen.getByRole('radio', { name: 'Put' })).toBeTruthy();
   });
 
-  // ASK B: the Stream picker must not be a required up-front choice — it is
-  // an advanced override collapsed behind a disclosure, with `mid` as the
-  // default. It must remain reachable (accessible by label) for power users.
-  it('presents Stream as a collapsed advanced control defaulting to mid', () => {
+  // The Series picker is a plainly-labelled control (no longer hidden behind
+  // an "Advanced" disclosure), defaulting to `mid`. The legacy disclosure
+  // wrapper is gone entirely.
+  it('presents Series as a plainly-labelled control defaulting to mid', () => {
     renderForm();
-    const adv = screen.getByTestId('stream-advanced');
-    // A <details> disclosure that is closed by default (not forcing a pick).
-    expect(adv.tagName.toLowerCase()).toBe('details');
-    expect(adv.open).toBe(false);
-    // The Stream select still exists and reflects the default `mid`.
-    const streamSelect = screen.getByLabelText('Stream');
-    expect(streamSelect).toBeTruthy();
-    expect(streamSelect.value).toBe('mid');
+    // No <details> disclosure remains.
+    expect(screen.queryByTestId('stream-advanced')).toBeNull();
+    const seriesSelect = screen.getByLabelText('Series');
+    expect(seriesSelect).toBeTruthy();
+    expect(seriesSelect.tagName.toLowerCase()).toBe('select');
+    expect(seriesSelect.value).toBe('mid');
+  });
+
+  it('labels mid as "Mid price" and iv as "Implied volatility" in the Series options', () => {
+    renderForm();
+    const seriesSelect = screen.getByLabelText('Series');
+    const labels = Array.from(seriesSelect.querySelectorAll('option')).map((o) => o.textContent);
+    expect(labels).toContain('Mid price');
+    expect(labels).toContain('Implied volatility');
+    expect(labels).toContain('Open interest');
+  });
+
+  it('exposes the exact Mid bid-ask tooltip on the Series control', () => {
+    renderForm();
+    const tip = screen.getByTestId('mid-tooltip');
+    const expected = 'Mid = (bid + ask) / 2 — the quote midpoint, NOT the daily high/low or last/close.';
+    expect(tip.getAttribute('title')).toBe(expected);
+    expect(tip.getAttribute('aria-label')).toBe(expected);
+    // Exported constant must match the locked copy exactly.
+    expect(MID_TOOLTIP).toBe(expected);
   });
 
   it('emits onChange with the correctly-shaped object on root change', () => {
@@ -76,9 +94,9 @@ describe('<OptionStreamForm>', () => {
     expect(next.stream).toBe('mid');
   });
 
-  it('emits onChange with full object shape on stream change', () => {
+  it('emits onChange with full object shape on series change', () => {
     const { onChange } = renderForm();
-    fireEvent.change(screen.getByLabelText('Stream'), { target: { value: 'iv' } });
+    fireEvent.change(screen.getByLabelText('Series'), { target: { value: 'iv' } });
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange.mock.calls[0][0]).toMatchObject({
       type: 'option_stream',
@@ -136,7 +154,7 @@ describe('<OptionStreamForm>', () => {
 
   it('respects allowedStreams', () => {
     renderForm({ allowedStreams: ['iv', 'mid'] });
-    const sel = screen.getByLabelText('Stream');
+    const sel = screen.getByLabelText('Series');
     const optionValues = Array.from(sel.querySelectorAll('option')).map((o) => o.value);
     expect(optionValues).toEqual(['iv', 'mid']);
   });
@@ -202,6 +220,57 @@ describe('<OptionStreamForm>', () => {
   });
 });
 
+describe('<OptionStreamForm> — Adjustment selector (MID only)', () => {
+  it('renders the Adjustment selector when Series is mid (the default)', () => {
+    renderForm();
+    const adj = screen.getByTestId('option-stream-adjustment');
+    expect(adj).toBeTruthy();
+    // none / ratio / difference — mirrors the futures continuous picker.
+    const optionValues = Array.from(adj.querySelectorAll('option')).map((o) => o.value);
+    expect(optionValues).toEqual(['none', 'ratio', 'difference']);
+    // Default value is "none".
+    expect(adj.value).toBe('none');
+  });
+
+  it('hides the Adjustment selector when Series is not mid', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.stream = 'iv';
+    renderForm({ value });
+    expect(screen.queryByTestId('option-stream-adjustment')).toBeNull();
+  });
+
+  it('emits the chosen adjustment when Series is mid', () => {
+    const { onChange } = renderForm();
+    fireEvent.change(screen.getByTestId('option-stream-adjustment'), {
+      target: { value: 'ratio' },
+    });
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange.mock.calls[0][0].adjustment).toBe('ratio');
+    expect(onChange.mock.calls[0][0].stream).toBe('mid');
+  });
+
+  it('resets adjustment to "none" when Series switches away from mid', () => {
+    // Start on mid with a non-default adjustment, then switch to iv.
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.adjustment = 'difference';
+    const { onChange } = renderForm({ value });
+    fireEvent.change(screen.getByLabelText('Series'), { target: { value: 'iv' } });
+    expect(onChange).toHaveBeenCalledOnce();
+    const next = onChange.mock.calls[0][0];
+    expect(next.stream).toBe('iv');
+    expect(next.adjustment).toBe('none');
+  });
+
+  it('keeps the current adjustment when staying on mid', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.adjustment = 'ratio';
+    renderForm({ value });
+    // Selecting mid again (the current value) must not be coerced; the
+    // rendered control still reflects ratio.
+    expect(screen.getByTestId('option-stream-adjustment').value).toBe('ratio');
+  });
+});
+
 describe('buildDefaultOptionStream', () => {
   it('builds a fully-shaped option_stream object', () => {
     const v = buildDefaultOptionStream({ availableRoots: ROOTS });
@@ -217,6 +286,7 @@ describe('buildDefaultOptionStream', () => {
     expect(v.maturity.kind).toBe('next_third_friday');
     expect(v.selection.kind).toBe('by_moneyness');
     expect(v.stream).toBe('mid');
+    expect(v.adjustment).toBe('none');
   });
 
   it("falls back to allowedCycles[0] when 'M' is not allowed", () => {

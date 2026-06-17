@@ -53,11 +53,8 @@ vi.mock('../../components/OptionDateRangeControl', () => {
   });
   return {
     default: mock,
-    computePresetRange: (preset) => {
-      const months = { '3m': 3, '6m': 6, '1y': 12, '2y': 24 }[preset] || 6;
-      return { start: `2025-${String(12 - months + 1).padStart(2, '0')}-01`, end: '2025-12-01' };
-    },
-    DEFAULT_PRESET: '6m',
+    // New contract (PR #58): a plain 1-year window ending today. No presets.
+    computeDefaultRange: () => ({ start: '2024-12-01', end: '2025-12-01' }),
   };
 });
 
@@ -481,25 +478,19 @@ describe('ContinuousOptionsChart — roll markers', () => {
   });
 });
 
-describe('ContinuousOptionsChart — anchorEnd prop', () => {
-  it('passes the selected root last_trade_date as anchorEnd to OptionDateRangeControl', async () => {
+describe('ContinuousOptionsChart — default date range', () => {
+  it('initialises the date range control with the default 1-year window', async () => {
     render(<ContinuousOptionsChart collection="OPT_SP_500" />);
 
     await waitFor(() => {
       expect(capturedDateRangeProps).not.toBeNull();
     });
 
-    // The selected root is OPT_SP_500 which has last_trade_date '2025-03-21'
-    expect(capturedDateRangeProps.anchorEnd).toBe('2025-03-21');
+    // computeDefaultRange() is mocked to return this window.
+    expect(capturedDateRangeProps.value).toEqual({ start: '2024-12-01', end: '2025-12-01' });
   });
 
-  it('passes undefined as anchorEnd when root has no last_trade_date', async () => {
-    mockGetOptionRoots.mockResolvedValueOnce({
-      roots: [
-        { collection: 'OPT_SP_500', root_label: 'S&P 500', has_greeks: true },
-      ],
-    });
-
+  it('no longer passes an anchorEnd prop (presets removed in PR #58)', async () => {
     render(<ContinuousOptionsChart collection="OPT_SP_500" />);
 
     await waitFor(() => {
