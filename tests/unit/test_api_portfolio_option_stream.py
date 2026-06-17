@@ -121,6 +121,9 @@ def mock_app(monkeypatch):
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.include_router(portfolio_router)
     app.state.market_data = svc
+    # app-data repo is resolved by get_write_repository but never
+    # invoked here (no signal legs / signal eval is patched).
+    app.state.app_db_repo = object()
     return app
 
 

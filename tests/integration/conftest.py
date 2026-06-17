@@ -6,7 +6,7 @@ def pytest_addoption(parser):
         "--run-integration",
         action="store_true",
         default=False,
-        help="Run integration tests (requires live MongoDB)",
+        help="Run integration tests (requires live PostgreSQL: dwh + app-data)",
     )
 
 
@@ -16,7 +16,7 @@ def pytest_collection_modifyitems(config, items):
         return
 
     skip_integration = pytest.mark.skip(
-        reason="needs --run-integration option or live MongoDB"
+        reason="needs --run-integration option (live PostgreSQL: dwh + app-data)"
     )
     for item in items:
         if "integration" in item.keywords:

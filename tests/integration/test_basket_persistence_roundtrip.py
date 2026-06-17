@@ -1,7 +1,8 @@
-"""Integration tests: full ``BasketDoc`` CRUD round-trip against Mongo.
+"""Integration tests: full ``BasketDoc`` CRUD round-trip against the REAL
+``tcg_app_data`` PostgreSQL schema.
 
-Mirrors :mod:`tests.integration.test_persistence_roundtrip`.  Skipped
-automatically when ``MONGO_APP_WRITE_URI`` is unset.
+Mirrors :mod:`tests.integration.test_persistence_roundtrip`. Skipped
+automatically when the app-data credentials are not configured.
 """
 
 from __future__ import annotations
@@ -14,34 +15,36 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 
-from tcg.core.config import load_config
-from tcg.persistence import WriteRepository, build_write_client
+from tcg.persistence import (
+    AppDbConnectionPool,
+    WriteRepository,
+    load_app_db_config,
+)
+from tcg.persistence._pg import DEFAULT_SCHEMA
 from tcg.types.persistence import BasketDoc, Category
 
 
-_WRITE_URI = os.environ.get("MONGO_APP_WRITE_URI") or dotenv_values(
-    Path(__file__).resolve().parents[2] / ".env"
-).get("MONGO_APP_WRITE_URI")
+def _app_db_creds_present() -> bool:
+    env = dotenv_values(Path(__file__).resolve().parents[2] / ".env")
+    user = os.environ.get("APP_DB_USER") or env.get("APP_DB_USER")
+    password = os.environ.get("APP_DB_PASSWORD") or env.get("APP_DB_PASSWORD")
+    return bool(user and password)
 
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not _WRITE_URI,
-        reason="MONGO_APP_WRITE_URI not configured",
+        not _app_db_creds_present(),
+        reason="APP_DB_USER / APP_DB_PASSWORD not configured",
     ),
 ]
 
 
 @pytest.fixture
 async def repo_with_cleanup():
-    cfg = load_config()
-    client = build_write_client()
-    repo = WriteRepository(
-        client,
-        db_name=cfg.app_write_db_name,
-        collection_name=cfg.app_write_collection,
-    )
+    pool = AppDbConnectionPool(**load_app_db_config())
+    await pool.connect()
+    repo = WriteRepository(pool)
     prefix = f"_test-basket-{uuid.uuid4().hex[:12]}"
     created_ids: list[str] = []
 
@@ -58,10 +61,16 @@ async def repo_with_cleanup():
     try:
         yield _Repo()
     finally:
-        coll = repo._coll
-        if created_ids:
-            await coll.delete_many({"_id": {"$in": created_ids}})
-        client.close()
+        try:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    for doc_id in created_ids:
+                        await cur.execute(
+                            f"DELETE FROM {DEFAULT_SCHEMA}.baskets WHERE id = %s",
+                            (doc_id,),
+                        )
+        finally:
+            await pool.close()
 
 
 def _now() -> datetime:
@@ -69,29 +78,17 @@ def _now() -> datetime:
 
 
 async def test_basket_roundtrip(repo_with_cleanup) -> None:
-    """Full create → get → list → update → archive cycle for BasketDoc.
-
-    Iter-3 polymorphic-leg shape: each leg carries an ``instrument``
-    sub-dict (spot / continuous / option_stream) and a flat ``weight``.
-    """
+    """Full create → get → list → update → archive cycle for BasketDoc."""
     repo = repo_with_cleanup.inner
     doc_id = repo_with_cleanup.id("basket")
     now = _now()
     legs = (
         {
-            "instrument": {
-                "type": "spot",
-                "collection": "ETF",
-                "instrument_id": "SPY",
-            },
+            "instrument": {"type": "spot", "collection": "ETF", "instrument_id": "SPY"},
             "weight": 0.6,
         },
         {
-            "instrument": {
-                "type": "spot",
-                "collection": "ETF",
-                "instrument_id": "QQQ",
-            },
+            "instrument": {"type": "spot", "collection": "ETF", "instrument_id": "QQQ"},
             "weight": 0.4,
         },
     )
@@ -115,16 +112,13 @@ async def test_basket_roundtrip(repo_with_cleanup) -> None:
 
     # 2. get_by_id
     fetched = await repo.get_by_id("basket", doc_id)
-    assert isinstance(fetched, BasketDoc)
     assert fetched == stored
 
     # 3. list_by_type_and_category
-    all_research = await repo.list_by_type_and_category(
-        "basket", Category.RESEARCH
-    )
+    all_research = await repo.list_by_type_and_category("basket", Category.RESEARCH)
     assert any(d.id == doc_id for d in all_research)
 
-    # 4. update — change name + legs to a continuous-future basket.
+    # 4. update — change name + legs to a continuous-future basket (CAS).
     new_legs = (
         {
             "instrument": {
@@ -148,15 +142,14 @@ async def test_basket_roundtrip(repo_with_cleanup) -> None:
         updated_at=stored.updated_at,
         legs=new_legs,
     )
-    after = await repo.update(updated_input)
-    assert isinstance(after, BasketDoc)
+    after = await repo.update(updated_input, expected_updated_at=stored.updated_at)
     assert after.name == "Updated Basket"
     assert after.category == Category.DEV
     assert after.asset_class == "future"
     assert after.legs == new_legs
 
-    # 5. archive — sets category=ARCHIVE.
+    # 5. archive — soft delete (category → 'DELETED'): hidden everywhere.
     await repo.archive("basket", doc_id)
-    archived = await repo.get_by_id("basket", doc_id)
-    assert isinstance(archived, BasketDoc)
-    assert archived.category == Category.ARCHIVE
+    for cat in Category:
+        lst = await repo.list_by_type_and_category("basket", cat)
+        assert all(d.id != doc_id for d in lst)

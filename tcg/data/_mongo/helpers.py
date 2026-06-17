@@ -2,6 +2,12 @@
 
 All data leaving ``_mongo/`` must be NaN-free. Sanitization happens here
 at the adapter boundary.
+
+Pure-Python: this module has NO Mongo/pymongo/bson dependency. The market
+read path is SQL now (``tcg.data._sql``); these helpers survive only as the
+pure parsing/serialization utilities still imported by tests. The legacy
+``_id`` candidate set covers strings, composite ``key=val|key=val`` keys,
+and integers — the shapes the SQL store actually carries.
 """
 
 from __future__ import annotations
@@ -11,8 +17,6 @@ import math
 from typing import Any
 
 import numpy as np
-from bson import ObjectId
-from bson.errors import InvalidId
 
 from tcg.types.market import AssetClass, InstrumentId, PriceSeries
 
@@ -23,13 +27,14 @@ logger = logging.getLogger(__name__)
 # ID serialization
 # ---------------------------------------------------------------------------
 
-def serialize_doc_id(doc_id: Any) -> str:
-    """Convert any MongoDB ``_id`` value to a string for external use.
 
-    Handles ObjectId, string, dict (composite keys), and other types.
+def serialize_doc_id(doc_id: Any) -> str:
+    """Convert a stored ``_id`` value to a string for external use.
+
+    Handles string, dict (composite keys), int, and any other type via
+    ``str()`` (an ObjectId-like object would stringify through the final
+    branch — no bson dependency required).
     """
-    if isinstance(doc_id, ObjectId):
-        return str(doc_id)
     if isinstance(doc_id, dict):
         # Composite key -- produce a stable string representation.
         # Sort keys for determinism.
@@ -41,10 +46,10 @@ def serialize_doc_id(doc_id: Any) -> str:
 def deserialize_doc_id(doc_id_str: str) -> list[Any]:
     """Return candidate ``_id`` values to try when querying.
 
-    The legacy Java platform stored ``_id`` as ObjectId, string, dict
-    (composite key), or int depending on the collection. We try
-    candidates in priority order: composite dict (if the string looks
-    like ``key=val|key=val``), ObjectId, then raw string.
+    Stored ``_id`` shapes are string, dict (composite ``key=val|key=val``),
+    or int. We try candidates in priority order: composite dict (if the
+    string looks like ``key=val|key=val``), then the raw string. (No
+    ObjectId candidate — the store is SQL now and never keys on ObjectId.)
     """
     candidates: list[Any] = []
 
@@ -60,10 +65,6 @@ def deserialize_doc_id(doc_id_str: str) -> list[Any]:
         except ValueError:
             pass  # Malformed — fall through to other candidates
 
-    try:
-        candidates.append(ObjectId(doc_id_str))
-    except (InvalidId, TypeError):
-        pass
     candidates.append(doc_id_str)
     return candidates
 
@@ -71,6 +72,7 @@ def deserialize_doc_id(doc_id_str: str) -> list[Any]:
 # ---------------------------------------------------------------------------
 # Price data extraction
 # ---------------------------------------------------------------------------
+
 
 def extract_price_data(
     doc: dict[str, Any],
@@ -189,6 +191,7 @@ def _sanitize_non_critical(value: float | None, default: float) -> float:
 # ---------------------------------------------------------------------------
 # Instrument ID parsing
 # ---------------------------------------------------------------------------
+
 
 def parse_instrument_id(doc: dict[str, Any], collection: str) -> InstrumentId:
     """Build an ``InstrumentId`` from a MongoDB document and its collection name.

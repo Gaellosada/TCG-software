@@ -8,10 +8,8 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.0",
-    "motor>=3.0",
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",
-    "typer>=0.9",
     "pandas_market_calendars>=4.0",
     "py_vollib>=1.0",
     "python-dotenv>=1.0",
@@ -34,7 +32,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
-    "integration: requires live MongoDB (deselect with -m 'not integration')",
+    "integration: requires live app-data PostgreSQL (deselect with -m 'not integration')",
 ]
 
 [tool.hatch.build.targets.wheel]

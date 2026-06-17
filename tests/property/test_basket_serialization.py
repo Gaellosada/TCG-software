@@ -11,8 +11,8 @@ from tcg.types.persistence import (
     BasketDoc,
     Category,
     DocType,
-    from_mongo_dict,
-    to_mongo_dict,
+    from_json_doc,
+    to_json_doc,
 )
 
 
@@ -79,8 +79,8 @@ def test_basket_doc_spot_legs_round_trip(doc_id, name, category, legs) -> None:
         updated_at=now,
         legs=tuple(legs),
     )
-    d = to_mongo_dict(doc)
-    reconstructed = from_mongo_dict(d)
+    d = to_json_doc(doc)
+    reconstructed = from_json_doc(d)
     assert reconstructed == doc
 
 
@@ -103,8 +103,8 @@ def test_basket_doc_continuous_legs_round_trip(doc_id, legs) -> None:
         updated_at=now,
         legs=tuple(legs),
     )
-    d = to_mongo_dict(doc)
-    reconstructed = from_mongo_dict(d)
+    d = to_json_doc(doc)
+    reconstructed = from_json_doc(d)
     assert reconstructed == doc
 
 
@@ -141,6 +141,6 @@ def test_basket_doc_signed_weights_round_trip(legs) -> None:
         updated_at=now,
         legs=tuple(legs),
     )
-    d = to_mongo_dict(doc)
-    reconstructed = from_mongo_dict(d)
+    d = to_json_doc(doc)
+    reconstructed = from_json_doc(d)
     assert reconstructed == doc

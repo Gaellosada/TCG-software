@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 
-import pymongo.errors
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,19 +20,22 @@ from tcg.core.api.persistence import router as persistence_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
 from tcg.core.api.statistics import router as statistics_router
-from tcg.core.config import load_tunnel_config
-from tcg.core.tunnel import SSMTunnel
 from tcg.data import create_services
 from tcg.data._sql.connection import DwhConnectionPool, load_dwh_config
+from tcg.persistence import (
+    AppDbConnectionPool,
+    WriteRepository,
+    load_app_db_config,
+)
 from tcg.types.errors import TCGError
 
 
-# Hard cap on inbound request body size. MongoDB rejects documents
-# larger than 16 MB with ``DocumentTooLarge``; we cut the request off
-# at 4 MB so a buggy or malicious client sees a clean 413 long before
-# the request reaches the persistence layer. The cap applies to the
-# whole application because the persistence router has no exclusive
-# host header — keeping it global is the safer default.
+# Hard cap on inbound request body size. We cut the request off at 4 MB
+# so a buggy or malicious client sees a clean 413 long before the request
+# reaches the persistence layer (and well below any practical JSONB
+# document size). The cap applies to the whole application because the
+# persistence router has no exclusive host header — keeping it global is
+# the safer default.
 _MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024  # 4 MB
 
 
@@ -51,57 +53,43 @@ def _cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: connect to dwh (PostgreSQL) + Mongo (persistence). Shutdown: cleanup."""
-    tunnel_config = load_tunnel_config()
-    tunnel: SSMTunnel | None = None
-    monitor_task: asyncio.Task[None] | None = None
-
-    if tunnel_config.enabled:
-        tunnel = SSMTunnel(tunnel_config)
-        try:
-            await tunnel.start()
-            await tunnel.wait_until_ready()
-        except Exception:
-            await tunnel.stop()
-            raise
-        monitor_task = asyncio.create_task(tunnel.monitor())
-
-    dwh_pool = None
+    """Startup: open both PostgreSQL pools — read-only dwh (market data)
+    and read-write tcg_app_data (app-data persistence). Shutdown: close
+    both. Both pools hit the same RDS / ``dwh`` database with different
+    roles + schemas; the connection is direct (no tunnel).
+    """
+    dwh_pool: DwhConnectionPool | None = None
+    app_db_pool: AppDbConnectionPool | None = None
     try:
-        # --- Connect to dwh (PostgreSQL) for ALL market-data reads ---
-        # The persistence layer (tcg-app-data on MongoDB) is NOT wired here:
-        # it lazy-inits its own scoped write client on first request via
-        # tcg.core.api._persistence_wiring.get_write_repository (reads
-        # MONGO_APP_WRITE_URI). Keeping it lazy preserves read-only-dev
-        # ergonomics and test isolation; the market cutover does not touch it.
+        # --- dwh (PostgreSQL, read-only) for ALL market-data reads ---
         dwh_pool = DwhConnectionPool(**load_dwh_config())
         await dwh_pool.connect()
-
         services = await create_services(dwh_pool)
         app.state.market_data = services["market_data"]
+
+        # --- tcg_app_data (PostgreSQL, read-write) for persistence ---
+        # Built here (not lazily) so startup fails fast and the pool gets
+        # a clean shutdown hook below. The single WriteRepository bound to
+        # it is handed to routes via _persistence_wiring.get_write_repository.
+        app_db_pool = AppDbConnectionPool(**load_app_db_config())
+        await app_db_pool.connect()
+        app.state.app_db_pool = app_db_pool
+        app.state.app_db_repo = WriteRepository(app_db_pool)
     except Exception:
-        # Cleanup on failure — stop the tunnel + pool so nothing is orphaned.
-        if monitor_task:
-            monitor_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await monitor_task
-        if tunnel:
-            await tunnel.stop()
+        # Cleanup on failure — close whatever opened so nothing is orphaned.
+        if app_db_pool:
+            await app_db_pool.close()
         if dwh_pool:
             await dwh_pool.close()
         raise
 
     yield
 
-    # Cleanup on shutdown
+    # Cleanup on shutdown (reverse order).
+    if app_db_pool:
+        await app_db_pool.close()
     if dwh_pool:
         await dwh_pool.close()
-    if monitor_task:
-        monitor_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await monitor_task
-    if tunnel:
-        await tunnel.stop()
 
 
 class BodySizeLimitMiddleware:
@@ -235,23 +223,23 @@ async def _send_too_large(send: Send, size: int) -> None:
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
-async def _pymongo_error_handler(
-    request: Request, exc: pymongo.errors.PyMongoError
+async def _persistence_error_handler(
+    request: Request, exc: psycopg.Error
 ) -> JSONResponse:
-    """Catch-all for unhandled PyMongo errors → 503.
+    """Catch-all for unhandled psycopg errors → 503.
 
-    Routes that care about specific PyMongo failure modes (e.g.
-    ``DuplicateKeyError`` → 409 on create) catch them locally and
-    raise ``HTTPException`` BEFORE the exception reaches this handler.
-    What's left here are the unexpected ones — network blips, replica-
-    set elections, auth/role errors, server-selection timeouts. None
-    of those is the caller's fault, so we surface them as 503 Service
-    Unavailable with a sanitized envelope (we deliberately do NOT
-    include the PyMongo exception message in the response body — it
-    can leak topology / IPs / credential hints).
+    Routes that care about specific failure modes (e.g.
+    ``DuplicateIdError`` → 409 on create, ``ConcurrentUpdateError`` → 409,
+    ``LockedError`` → 423) catch them locally and raise ``HTTPException``
+    BEFORE the exception reaches this handler. What's left are the
+    unexpected ones — connection drops, server-side errors, auth/role
+    failures, statement timeouts. None is the caller's fault, so we
+    surface them as 503 Service Unavailable with a sanitized envelope (we
+    deliberately do NOT include the psycopg message in the response body —
+    it can leak host / IP / credential hints).
     """
-    # Log the error type for ops — NOT the message, which can contain
-    # the Mongo URI (with embedded credentials) on connection failures.
+    # Log the error type for ops — NOT the message, which can contain the
+    # connection string (with embedded credentials) on connection failures.
     import logging
     import re
 
@@ -296,11 +284,12 @@ async def _request_validation_error_handler(
 
 async def _health(request: Request) -> JSONResponse:
     """Lightweight readiness probe — returns 200 only after the lifespan
-    has completed (services are wired up).  The launcher polls this
-    instead of a raw TCP check so it doesn't report "ready" before
-    MongoDB is actually connected.
+    has completed (both PostgreSQL pools are wired up).  The launcher polls
+    this instead of a raw TCP check so it doesn't report "ready" before the
+    market-data and app-data pools are actually connected.
     """
-    if not hasattr(request.app.state, "market_data"):
+    state = request.app.state
+    if not hasattr(state, "market_data") or not hasattr(state, "app_db_repo"):
         return JSONResponse(status_code=503, content={"status": "starting"})
     return JSONResponse(status_code=200, content={"status": "ok"})
 
@@ -324,11 +313,11 @@ def create_app() -> FastAPI:
     )
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.add_exception_handler(RequestValidationError, _request_validation_error_handler)
-    # Catch-all for unhandled PyMongo errors — see ``_pymongo_error_handler``.
+    # Catch-all for unhandled psycopg errors — see ``_persistence_error_handler``.
     # Routes that need a specific status (409 on duplicate, 413 on too-
-    # large, 409 on CAS miss) catch the relevant subclass locally and
-    # raise HTTPException, so those paths bypass this handler.
-    app.add_exception_handler(pymongo.errors.PyMongoError, _pymongo_error_handler)
+    # large, 409 on CAS miss, 423 on locked) catch the relevant exception
+    # locally and raise HTTPException, so those paths bypass this handler.
+    app.add_exception_handler(psycopg.Error, _persistence_error_handler)
     app.include_router(data_router)
     app.include_router(portfolio_router)
     app.include_router(indicators_router)

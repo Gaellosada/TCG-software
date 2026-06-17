@@ -5,7 +5,6 @@ Re-exports every public type for convenience:
 """
 
 from tcg.types.common import PaginatedResult
-from tcg.types.config import MongoConfig
 from tcg.types.errors import (
     DataAccessError,
     DataNotFoundError,
@@ -49,8 +48,6 @@ from tcg.types.strategy import StrategyDefinition, StrategyMeta, StrategyStage
 __all__ = [
     # common
     "PaginatedResult",
-    # config
-    "MongoConfig",
     # errors
     "DataAccessError",
     "DataNotFoundError",

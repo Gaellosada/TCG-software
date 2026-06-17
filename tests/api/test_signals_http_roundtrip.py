@@ -72,6 +72,9 @@ def mock_app():
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.include_router(signals_router)
     app.state.market_data = svc
+    # app-data repo is resolved by get_write_repository but never
+    # invoked here (no signal legs / signal eval is patched).
+    app.state.app_db_repo = object()
     return app
 
 
@@ -265,6 +268,9 @@ def latch_app():
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.include_router(signals_router)
     app.state.market_data = svc
+    # app-data repo is resolved by get_write_repository but never
+    # invoked here (no signal legs / signal eval is patched).
+    app.state.app_db_repo = object()
     return app
 
 

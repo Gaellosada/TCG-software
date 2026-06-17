@@ -59,9 +59,9 @@ class _LockFakeRepo:
     async def create(self, doc: Any) -> Any:
         key = (doc.type, doc.id)
         if key in self._store:
-            import pymongo.errors
+            from tcg.persistence.repository import DuplicateIdError
 
-            raise pymongo.errors.DuplicateKeyError(f"duplicate {key}")
+            raise DuplicateIdError(f"duplicate {key}")
         # Mirror the server-stamping contract: store as-is (the dataclass
         # already carries locked=False from its default on create).
         self._store[key] = doc
@@ -568,20 +568,20 @@ def test_out_models_expose_locked_field() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 12. ``locked`` round-trips through the Mongo serializer (contract #1), and
+# 12. ``locked`` round-trips through the JSONB serializer (contract #1), and
 #     a stored doc that PREDATES the field deserializes to locked=False
-#     (forward-compatibility — existing production docs have no ``locked``).
+#     (forward-compatibility — existing docs may have no ``locked``).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("locked_value", [True, False])
-def test_locked_round_trips_through_mongo_serializer(locked_value: bool) -> None:
+def test_locked_round_trips_through_json_serializer(locked_value: bool) -> None:
     from tcg.types.persistence import (
         IndicatorDoc,
         PortfolioDoc,
         SignalDoc,
-        from_mongo_dict,
-        to_mongo_dict,
+        from_json_doc,
+        to_json_doc,
     )
 
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -615,21 +615,21 @@ def test_locked_round_trips_through_mongo_serializer(locked_value: bool) -> None
         ),
     ]
     for doc in docs:
-        as_mongo = to_mongo_dict(doc)
-        assert as_mongo["locked"] is locked_value
-        restored = from_mongo_dict(as_mongo)
+        as_json = to_json_doc(doc)
+        assert as_json["locked"] is locked_value
+        restored = from_json_doc(as_json)
         assert restored == doc
         assert restored.locked is locked_value
 
 
 def test_legacy_doc_without_locked_field_defaults_to_false() -> None:
     """A stored doc predating the ``locked`` field deserializes with
-    locked=False (forward-compat for existing production data)."""
-    from tcg.types.persistence import from_mongo_dict
+    locked=False (forward-compat for existing data)."""
+    from tcg.types.persistence import from_json_doc
 
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     legacy_raw = {
-        "_id": "legacy-sig",
+        "id": "legacy-sig",
         "type": "signal",
         "name": "Legacy",
         "category": "DEV",
@@ -641,163 +641,215 @@ def test_legacy_doc_without_locked_field_defaults_to_false() -> None:
         "description": "",
         # NOTE: no ``locked`` key — simulates a pre-feature document.
     }
-    restored = from_mongo_dict(legacy_raw)
+    restored = from_json_doc(legacy_raw)
     assert restored.locked is False
 
 
 # ---------------------------------------------------------------------------
-# R2 — archive TOCTOU: the REAL WriteRepository.archive must fold
-# ``locked: {$ne: True}`` into its write filter so a /lock that lands in
-# the window between the pre-read and the write cannot archive a doc that
-# just locked. On a zero-match it disambiguates not-found (KeyError → 404)
-# from just-locked (LockedError → 423).
+# R2 — archive TOCTOU + soft-delete branching for the REAL PG repository.
 #
-# The fake-repo above is a behavioural replica and never runs the real
-# archive code, so these tests drive the REAL repository against a tiny
-# fake async Mongo collection. We bind it through ``object.__setattr__``
-# (the only legitimate way past the repo's immutability guard).
+# ``WriteRepository.archive`` folds ``locked = false`` into its UPDATE
+# WHERE clause so a /lock landing in the window between the (now in-SQL)
+# guard and the write cannot archive a doc that just locked. On a zero-row
+# UPDATE it disambiguates just-locked (LockedError → 423) from not-found
+# (KeyError → 404). Under the uniform soft-delete model the archive sets
+# the ``category`` projection column to ``'DELETED'`` for EVERY kind (and
+# flips ``payload.deleted = true`` for indicators).
+#
+# These drive the REAL repo against a minimal fake pool that INTERPRETS
+# the actual SQL the repo emits (a single stored row), so the branching is
+# exercised without a live database. We bind the fake pool through
+# ``object.__setattr__`` (the only legitimate way past the immutability
+# guard, exactly as __init__ does).
 # ---------------------------------------------------------------------------
 
+import re as _re
 
-class _UpdateResult:
-    def __init__(self, matched: int) -> None:
-        self.matched_count = matched
-
-
-def _matches(doc: dict, filt: dict) -> bool:
-    """Minimal Mongo-filter matcher: equality + the single ``$ne`` we use."""
-    for key, cond in filt.items():
-        actual = doc.get(key)
-        if isinstance(cond, dict) and "$ne" in cond:
-            if actual == cond["$ne"]:
-                return False
-        elif actual != cond:
-            return False
-    return True
+from tcg.types.persistence import DELETED_CATEGORY
 
 
-class _RaceColl:
-    """Fake async collection that simulates a concurrent /lock landing in
-    the archive TOCTOU window.
-
-    The stored doc starts unlocked. The FIRST ``find_one`` (the archive
-    pre-read in ``_raise_if_locked``) observes it unlocked AND flips it to
-    locked — modelling a ``set_locked(True)`` that commits right after the
-    pre-read returns. By the time ``update_one`` runs, the doc is locked,
-    so the ``locked: {$ne: True}`` write filter excludes it (matched 0).
-    The disambiguation re-read then sees it locked → LockedError.
+class _FakeCursor:
+    """Interprets the small, fixed set of SQL statements the repository
+    emits against ONE in-memory row. Enough to exercise archive / update
+    branching faithfully without a real database.
     """
 
-    def __init__(self, doc: dict | None) -> None:
-        self._doc = doc
-        self._find_one_calls = 0
-        self.update_one_calls = 0
+    def __init__(self, state: "_FakePoolState") -> None:
+        self._state = state
+        self.rowcount = 0
+        self._last: dict | None = None
 
-    async def find_one(self, filt: dict, projection: dict | None = None) -> dict | None:
-        self._find_one_calls += 1
-        doc = self._doc
-        if doc is None or not _matches(doc, filt):
-            return None
-        snapshot = dict(doc)
-        # Race injection: the concurrent lock commits right after this
-        # first (pre-read) observation returns the still-unlocked state.
-        if self._find_one_calls == 1:
-            self._doc = {**doc, "locked": True}
-        return snapshot
+    async def __aenter__(self) -> "_FakeCursor":
+        return self
 
-    async def update_one(self, filt: dict, update: dict) -> _UpdateResult:
-        self.update_one_calls += 1
-        if self._doc is not None and _matches(self._doc, filt):
-            self._doc = {**self._doc, **update.get("$set", {})}
-            return _UpdateResult(1)
-        return _UpdateResult(0)
-
-
-class _SimpleColl:
-    """Fake async collection with NO race — faithful equality/``$ne``
-    matching against a single stored doc (or none)."""
-
-    def __init__(self, doc: dict | None) -> None:
-        self._doc = doc
-        self.update_one_calls = 0
-
-    async def find_one(self, filt: dict, projection: dict | None = None) -> dict | None:
-        if self._doc is not None and _matches(self._doc, filt):
-            return dict(self._doc)
+    async def __aexit__(self, *exc) -> None:
         return None
 
-    async def update_one(self, filt: dict, update: dict) -> _UpdateResult:
-        self.update_one_calls += 1
-        if self._doc is not None and _matches(self._doc, filt):
-            self._doc = {**self._doc, **update.get("$set", {})}
-            return _UpdateResult(1)
-        return _UpdateResult(0)
+    async def execute(self, sql: str, params=()) -> None:
+        s = " ".join(sql.split())
+        row = self._state.row
+        self._last = None
+        self.rowcount = 0
+        if s.startswith("SELECT locked FROM"):
+            # _raise_if_locked re-read. params = (id, type)
+            if row is not None and row["id"] == params[0] and row["type"] == params[1]:
+                self._last = {"locked": row["locked"]}
+            return
+        if s.startswith("SELECT 1 FROM"):
+            if row is not None and row["id"] == params[0] and row["type"] == params[1]:
+                self._last = {"?column?": 1}
+            return
+        if s.startswith("UPDATE") and "SET category" in s and "RETURNING" not in s:
+            # archive(): params end with (DELETED, now, id, type)
+            new_cat, _now, doc_id, doc_type = (
+                params[0],
+                params[1],
+                params[-2],
+                params[-1],
+            )
+            locked_clause = "locked = false" in s
+            if (
+                row is not None
+                and row["id"] == doc_id
+                and row["type"] == doc_type
+                and (not locked_clause or row.get("locked") is False)
+            ):
+                row["category"] = new_cat
+                if "jsonb_set" in s:
+                    row.setdefault("payload", {})["deleted"] = True
+                self.rowcount = 1
+            return
+        raise AssertionError(f"unexpected SQL in fake cursor: {s!r}")
+
+    async def fetchone(self):
+        return self._last
+
+    def cursor(self) -> "_FakeCursor":
+        return self
+
+
+class _RaceCursor(_FakeCursor):
+    """Like ``_FakeCursor`` but injects a concurrent lock: the first
+    ``SELECT locked`` (pre-read inside the archive disambiguation) is not
+    used by the SQL archive path; instead the race is modelled by locking
+    the row the instant BEFORE the UPDATE runs, so the ``locked = false``
+    WHERE excludes it (rowcount 0) and the disambiguation re-read then sees
+    it locked → LockedError.
+    """
+
+    async def execute(self, sql: str, params=()) -> None:
+        s = " ".join(sql.split())
+        if s.startswith("UPDATE") and not self._state.race_fired:
+            # Concurrent set_locked(True) commits just before our write.
+            if self._state.row is not None:
+                self._state.row["locked"] = True
+            self._state.race_fired = True
+        await super().execute(sql, params)
+
+
+class _FakeConn:
+    def __init__(self, state: "_FakePoolState", race: bool) -> None:
+        self._state = state
+        self._race = race
+
+    async def __aenter__(self) -> "_FakeConn":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+    def cursor(self) -> _FakeCursor:
+        return (_RaceCursor if self._race else _FakeCursor)(self._state)
+
+
+class _FakePoolState:
+    def __init__(self, row: dict | None) -> None:
+        self.row = row
+        self.race_fired = False
+
+
+class _FakePool:
+    """Minimal AppDbConnectionPool stand-in for the archive branch tests."""
+
+    schema = "tcg_app_data"
+
+    def __init__(self, row: dict | None, race: bool = False) -> None:
+        self._state = _FakePoolState(row)
+        self._race = race
+
+    def connection(self):
+        return _FakeConn(self._state, self._race)
 
     @property
-    def doc(self) -> dict | None:
-        return self._doc
+    def row(self) -> dict | None:
+        return self._state.row
 
 
-def _repo_with_coll(coll: object):
-    """Build a real WriteRepository bound to ``coll`` (bypassing the
+def _repo_with_pool(pool: object):
+    """Build a real WriteRepository bound to ``pool`` (bypassing the
     immutability guard via ``object.__setattr__``, exactly as __init__
     does for the single legitimate construction write)."""
     from tcg.persistence.repository import WriteRepository
 
     repo = WriteRepository.__new__(WriteRepository)
-    object.__setattr__(repo, "_coll", coll)
+    object.__setattr__(repo, "_pool", pool)
     return repo
 
 
 @pytest.mark.asyncio
-async def test_archive_loses_toctou_race_raises_locked_not_archived() -> None:
-    """A /lock landing in the archive race window makes the write match
-    zero docs; the repo raises LockedError (423) — it does NOT archive a
-    locked doc, and the stored category stays unchanged."""
+async def test_archive_loses_toctou_race_raises_locked_not_deleted() -> None:
+    """A /lock landing in the archive race window makes the UPDATE match
+    zero rows; the repo raises LockedError (423) — it does NOT soft-delete
+    a locked doc, so the stored category stays unchanged (not 'DELETED')."""
     from tcg.persistence.repository import LockedError
 
-    coll = _RaceColl(
-        {"_id": "sig-1", "type": "signal", "category": "DEV", "locked": False}
+    pool = _FakePool(
+        {"id": "sig-1", "type": "signal", "category": "DEV", "locked": False},
+        race=True,
     )
-    repo = _repo_with_coll(coll)
+    repo = _repo_with_pool(pool)
     with pytest.raises(LockedError):
         await repo.archive("signal", "sig-1")
-    # The write was issued (proving we reached the filtered update) but it
-    # matched nothing, so the doc was NOT recategorized to ARCHIVE.
-    assert coll.update_one_calls == 1
-    assert coll._doc is not None and coll._doc["category"] == "DEV"
+    assert pool.row is not None and pool.row["category"] == "DEV"
 
 
 @pytest.mark.asyncio
 async def test_archive_missing_doc_still_raises_keyerror() -> None:
-    """No doc at all → the filtered write matches zero AND the
-    disambiguation re-read finds nothing → KeyError (404), unchanged."""
-    coll = _SimpleColl(None)
-    repo = _repo_with_coll(coll)
+    """No row at all → the filtered UPDATE matches zero AND the
+    disambiguation re-read finds nothing → KeyError (404)."""
+    pool = _FakePool(None)
+    repo = _repo_with_pool(pool)
     with pytest.raises(KeyError):
         await repo.archive("signal", "missing")
 
 
 @pytest.mark.asyncio
-async def test_archive_unlocked_doc_happy_path_unchanged() -> None:
-    """Normal path (no race, unlocked): the doc is recategorized to
-    ARCHIVE exactly as before the TOCTOU hardening."""
-    coll = _SimpleColl(
-        {"_id": "sig-1", "type": "signal", "category": "DEV", "locked": False}
+async def test_archive_unlocked_signal_sets_deleted_category() -> None:
+    """Uniform soft-delete: archiving an unlocked signal sets the category
+    projection column to the 'DELETED' sentinel (NOT 'ARCHIVE')."""
+    pool = _FakePool(
+        {"id": "sig-1", "type": "signal", "category": "DEV", "locked": False}
     )
-    repo = _repo_with_coll(coll)
+    repo = _repo_with_pool(pool)
     await repo.archive("signal", "sig-1")
-    assert coll.doc is not None
-    assert coll.doc["category"] == Category.ARCHIVE.value
-    assert coll.update_one_calls == 1
+    assert pool.row is not None
+    assert pool.row["category"] == DELETED_CATEGORY
 
 
 @pytest.mark.asyncio
-async def test_archive_indicator_unlocked_sets_deleted_unchanged() -> None:
-    """Indicator happy path: archive sets ``deleted = True`` (no race)."""
-    coll = _SimpleColl(
-        {"_id": "ind-1", "type": "indicator", "deleted": False, "locked": False}
+async def test_archive_indicator_sets_deleted_category_and_payload_flag() -> None:
+    """Indicator archive: category → 'DELETED' AND payload.deleted → true."""
+    pool = _FakePool(
+        {
+            "id": "ind-1",
+            "type": "indicator",
+            "category": None,
+            "locked": False,
+            "payload": {"deleted": False},
+        }
     )
-    repo = _repo_with_coll(coll)
+    repo = _repo_with_pool(pool)
     await repo.archive("indicator", "ind-1")
-    assert coll.doc is not None and coll.doc["deleted"] is True
+    assert pool.row is not None
+    assert pool.row["category"] == DELETED_CATEGORY
+    assert pool.row["payload"]["deleted"] is True

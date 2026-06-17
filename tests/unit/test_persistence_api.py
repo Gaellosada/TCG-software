@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-import pymongo.errors
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,6 +29,7 @@ from tcg.core.app import create_app
 from tcg.persistence.repository import (
     ConcurrentUpdateError,
     DocumentTooLargeError,
+    DuplicateIdError,
 )
 from tcg.types.persistence import (
     BasketDoc,
@@ -57,19 +58,19 @@ class _FakeRepo:
         self.raise_too_large_on_create: bool = False
         self.raise_too_large_on_update: bool = False
         self.raise_concurrent_on_update: bool = False
-        self.raise_generic_pymongo_on_create: Exception | None = None
-        self.raise_generic_pymongo_on_update: Exception | None = None
+        self.raise_generic_db_on_create: Exception | None = None
+        self.raise_generic_db_on_update: Exception | None = None
 
     async def create(self, doc: Any) -> Any:
-        if self.raise_generic_pymongo_on_create is not None:
-            raise self.raise_generic_pymongo_on_create
+        if self.raise_generic_db_on_create is not None:
+            raise self.raise_generic_db_on_create
         if self.raise_duplicate_on_create:
-            raise pymongo.errors.DuplicateKeyError("duplicate _id")
+            raise DuplicateIdError("duplicate id")
         if self.raise_too_large_on_create:
-            raise DocumentTooLargeError("doc exceeds 16 MB")
+            raise DocumentTooLargeError("doc too large")
         key = (doc.type, doc.id)
         if key in self._store:
-            raise pymongo.errors.DuplicateKeyError(f"duplicate {key}")
+            raise DuplicateIdError(f"duplicate {key}")
         self._store[key] = doc
         return doc
 
@@ -95,8 +96,8 @@ class _FakeRepo:
     async def update(
         self, doc: Any, *, expected_updated_at: datetime | None = None
     ) -> Any:
-        if self.raise_generic_pymongo_on_update is not None:
-            raise self.raise_generic_pymongo_on_update
+        if self.raise_generic_db_on_update is not None:
+            raise self.raise_generic_db_on_update
         if self.raise_too_large_on_update:
             raise DocumentTooLargeError("doc exceeds 16 MB")
         if self.raise_concurrent_on_update:
@@ -458,19 +459,19 @@ def test_concurrent_update_returns_409(
 
 
 # ---------------------------------------------------------------------------
-# NF2 — broader PyMongo errors → 503 (catch-all handler)
+# NF2 — broader psycopg errors → 503 (catch-all handler)
 # ---------------------------------------------------------------------------
 
 
-def test_generic_pymongo_error_on_create_returns_503(
+def test_generic_db_error_on_create_returns_503(
     client: TestClient, fake_repo: _FakeRepo
 ) -> None:
-    """A generic ``OperationFailure`` (e.g. role denial, replica-set
-    election, generic write error) must surface as 503, NOT 500.
-    Routes catch DuplicateKeyError / DocumentTooLarge specifically;
-    everything else falls through to the app-level handler."""
-    fake_repo.raise_generic_pymongo_on_create = pymongo.errors.OperationFailure(
-        "not authorized on tcg-app-data to execute command insert"
+    """A generic psycopg ``OperationalError`` (e.g. connection drop, role
+    denial, server-side failure) must surface as 503, NOT 500. Routes catch
+    DuplicateIdError / DocumentTooLarge specifically; everything else falls
+    through to the app-level handler."""
+    fake_repo.raise_generic_db_on_create = psycopg.OperationalError(
+        "FATAL: permission denied for schema tcg_app_data"
     )
     r = client.post(
         "/api/persistence/signals",
@@ -479,20 +480,18 @@ def test_generic_pymongo_error_on_create_returns_503(
     assert r.status_code == 503, r.text
     body = r.json()
     assert body["error_type"] == "persistence_unavailable"
-    # The handler must sanitize — do NOT leak the underlying Mongo
-    # error message (which could carry topology / credential hints).
-    assert "not authorized" not in body["message"].lower()
-    assert "tcg-app-data" not in body["message"].lower()
+    # The handler must sanitize — do NOT leak the underlying DB error
+    # message (which could carry topology / credential hints).
+    assert "permission denied" not in body["message"].lower()
+    assert "tcg_app_data" not in body["message"].lower()
 
 
-def test_server_selection_timeout_on_create_returns_503(
+def test_connection_failure_on_create_returns_503(
     client: TestClient, fake_repo: _FakeRepo
 ) -> None:
-    """Server-selection / network timeouts also map to 503."""
-    fake_repo.raise_generic_pymongo_on_create = (
-        pymongo.errors.ServerSelectionTimeoutError(
-            "127.0.0.1:27017: connection refused"
-        )
+    """Connection / network failures also map to 503."""
+    fake_repo.raise_generic_db_on_create = psycopg.OperationalError(
+        "connection failed: 127.0.0.1:5432: Connection refused"
     )
     r = client.post(
         "/api/persistence/portfolios",
@@ -505,7 +504,7 @@ def test_server_selection_timeout_on_create_returns_503(
     assert "127.0.0.1" not in body["message"]
 
 
-def test_generic_pymongo_error_on_update_returns_503(
+def test_generic_db_error_on_update_returns_503(
     client: TestClient, fake_repo: _FakeRepo
 ) -> None:
     """The update path is similarly covered by the catch-all handler."""
@@ -514,8 +513,8 @@ def test_generic_pymongo_error_on_update_returns_503(
         json={"id": "s-up", "name": "n", "category": "DEV"},
     )
     assert r0.status_code == 201
-    fake_repo.raise_generic_pymongo_on_update = pymongo.errors.OperationFailure(
-        "transient write error"
+    fake_repo.raise_generic_db_on_update = psycopg.OperationalError(
+        "server closed the connection unexpectedly"
     )
     r = client.put(
         "/api/persistence/signals/s-up",

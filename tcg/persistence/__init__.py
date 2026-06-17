@@ -1,20 +1,25 @@
-"""Scoped write layer for indicators / signals / portfolios.
+"""Scoped write layer for indicators / signals / portfolios / baskets.
 
-Only this package may construct the Motor client bound to
-``MONGO_APP_WRITE_URI`` or instantiate ``WriteRepository``. See
-``docs/persistence.md`` for the safety model.
+Only this package constructs the read-WRITE PostgreSQL pool bound to the
+``tcg_app_data`` schema (role ``tcg_app_rw``) or instantiates
+``WriteRepository``. See ``docs/persistence.md`` for the safety model.
 """
 
-from tcg.persistence._client import build_write_client
+from tcg.persistence._pg import AppDbConnectionPool, load_app_db_config
 from tcg.persistence.repository import (
     ConcurrentUpdateError,
     DocumentTooLargeError,
+    DuplicateIdError,
+    LockedError,
     WriteRepository,
 )
 
 __all__ = [
     "WriteRepository",
-    "build_write_client",
+    "AppDbConnectionPool",
+    "load_app_db_config",
     "ConcurrentUpdateError",
     "DocumentTooLargeError",
+    "DuplicateIdError",
+    "LockedError",
 ]

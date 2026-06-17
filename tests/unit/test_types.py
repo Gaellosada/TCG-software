@@ -21,7 +21,6 @@ from tcg.types import (
     ErrorResponse,
     InstrumentId,
     MetricsSuite,
-    MongoConfig,
     PaginatedResult,
     PortfolioResult,
     PortfolioSpec,
@@ -386,19 +385,6 @@ class TestStrategy:
             config={"fast_period": 10, "slow_period": 50},
         )
         assert defn.config["fast_period"] == 10
-
-
-# ── Config ───────────────────────────────────────────────────────────
-
-
-class TestConfig:
-    def test_mongo_config_construction(self):
-        cfg = MongoConfig(uri="mongodb://localhost:27017")
-        assert cfg.db_name == "tcg-instrument"
-
-    def test_mongo_config_custom_db(self):
-        cfg = MongoConfig(uri="mongodb://localhost:27017", db_name="custom")
-        assert cfg.db_name == "custom"
 
 
 # ── Errors ───────────────────────────────────────────────────────────

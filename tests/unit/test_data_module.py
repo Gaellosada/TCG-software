@@ -173,11 +173,15 @@ class TestDocIdSerialization:
     def test_string_id(self):
         assert serialize_doc_id("SPX") == "SPX"
 
-    def test_objectid(self):
-        from bson import ObjectId
+    def test_objectid_like_object_stringifies(self):
+        """An ObjectId-like object (anything with a meaningful ``__str__``)
+        serializes via the ``str()`` fallback — no bson dependency."""
 
-        oid = ObjectId("507f1f77bcf86cd799439011")
-        assert serialize_doc_id(oid) == "507f1f77bcf86cd799439011"
+        class _OidLike:
+            def __str__(self) -> str:
+                return "507f1f77bcf86cd799439011"
+
+        assert serialize_doc_id(_OidLike()) == "507f1f77bcf86cd799439011"
 
     def test_dict_id(self):
         result = serialize_doc_id({"symbol": "SPX", "exchange": "CBOE"})
@@ -187,17 +191,15 @@ class TestDocIdSerialization:
     def test_int_id(self):
         assert serialize_doc_id(42) == "42"
 
-    def test_deserialize_valid_objectid(self):
+    def test_deserialize_objectid_shaped_string_is_plain_candidate(self):
+        """An ObjectId-shaped hex string yields only the raw-string
+        candidate now (the SQL store never keys on ObjectId, so no
+        ObjectId candidate is produced and bson is not imported)."""
         candidates = deserialize_doc_id("507f1f77bcf86cd799439011")
-        from bson import ObjectId
-
-        assert len(candidates) == 2
-        assert isinstance(candidates[0], ObjectId)
-        assert candidates[1] == "507f1f77bcf86cd799439011"
+        assert candidates == ["507f1f77bcf86cd799439011"]
 
     def test_deserialize_plain_string(self):
         candidates = deserialize_doc_id("SPX")
-        # "SPX" is not a valid ObjectId, so only the string candidate
         assert len(candidates) == 1
         assert candidates[0] == "SPX"
 
@@ -250,8 +252,22 @@ class TestExtractPriceData:
 
     def test_basic_extraction(self):
         bars = [
-            {"date": 20240102, "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "volume": 1000.0},
-            {"date": 20240101, "open": 98.0, "high": 101.0, "low": 97.0, "close": 100.0, "volume": 800.0},
+            {
+                "date": 20240102,
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 103.0,
+                "volume": 1000.0,
+            },
+            {
+                "date": 20240101,
+                "open": 98.0,
+                "high": 101.0,
+                "low": 97.0,
+                "close": 100.0,
+                "volume": 800.0,
+            },
         ]
         doc = self._make_doc(bars)
         series = extract_price_data(doc)
@@ -268,8 +284,26 @@ class TestExtractPriceData:
         doc = {
             "_id": "SPX",
             "eodDatas": {
-                "yahoo": [{"date": 20240101, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 100.0}],
-                "iex": [{"date": 20240101, "open": 1.1, "high": 2.1, "low": 0.6, "close": 1.6, "volume": 200.0}],
+                "yahoo": [
+                    {
+                        "date": 20240101,
+                        "open": 1.0,
+                        "high": 2.0,
+                        "low": 0.5,
+                        "close": 1.5,
+                        "volume": 100.0,
+                    }
+                ],
+                "iex": [
+                    {
+                        "date": 20240101,
+                        "open": 1.1,
+                        "high": 2.1,
+                        "low": 0.6,
+                        "close": 1.6,
+                        "volume": 200.0,
+                    }
+                ],
             },
         }
         series = extract_price_data(doc, provider="iex")
@@ -278,7 +312,16 @@ class TestExtractPriceData:
 
     def test_missing_provider(self):
         doc = self._make_doc(
-            [{"date": 20240101, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 100.0}],
+            [
+                {
+                    "date": 20240101,
+                    "open": 1.0,
+                    "high": 2.0,
+                    "low": 0.5,
+                    "close": 1.5,
+                    "volume": 100.0,
+                }
+            ],
             provider="yahoo",
         )
         result = extract_price_data(doc, provider="nonexistent")
@@ -286,8 +329,22 @@ class TestExtractPriceData:
 
     def test_nan_close_drops_bar(self):
         bars = [
-            {"date": 20240101, "open": 100.0, "high": 105.0, "low": 99.0, "close": float("nan"), "volume": 1000.0},
-            {"date": 20240102, "open": 101.0, "high": 106.0, "low": 100.0, "close": 104.0, "volume": 1100.0},
+            {
+                "date": 20240101,
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": float("nan"),
+                "volume": 1000.0,
+            },
+            {
+                "date": 20240102,
+                "open": 101.0,
+                "high": 106.0,
+                "low": 100.0,
+                "close": 104.0,
+                "volume": 1100.0,
+            },
         ]
         doc = self._make_doc(bars)
         series = extract_price_data(doc)
@@ -298,7 +355,14 @@ class TestExtractPriceData:
 
     def test_nan_volume_replaced_with_zero(self):
         bars = [
-            {"date": 20240101, "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "volume": float("nan")},
+            {
+                "date": 20240101,
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 103.0,
+                "volume": float("nan"),
+            },
         ]
         doc = self._make_doc(bars)
         series = extract_price_data(doc)
@@ -308,7 +372,14 @@ class TestExtractPriceData:
 
     def test_nan_open_replaced_with_zero(self):
         bars = [
-            {"date": 20240101, "open": float("nan"), "high": 105.0, "low": 99.0, "close": 103.0, "volume": 1000.0},
+            {
+                "date": 20240101,
+                "open": float("nan"),
+                "high": 105.0,
+                "low": 99.0,
+                "close": 103.0,
+                "volume": 1000.0,
+            },
         ]
         doc = self._make_doc(bars)
         series = extract_price_data(doc)
@@ -330,16 +401,43 @@ class TestExtractPriceData:
 
     def test_all_bars_nan_close(self):
         bars = [
-            {"date": 20240101, "open": 100.0, "high": 105.0, "low": 99.0, "close": float("nan"), "volume": 1000.0},
-            {"date": 20240102, "open": 101.0, "high": 106.0, "low": 100.0, "close": float("nan"), "volume": 1100.0},
+            {
+                "date": 20240101,
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": float("nan"),
+                "volume": 1000.0,
+            },
+            {
+                "date": 20240102,
+                "open": 101.0,
+                "high": 106.0,
+                "low": 100.0,
+                "close": float("nan"),
+                "volume": 1100.0,
+            },
         ]
         doc = self._make_doc(bars)
         assert extract_price_data(doc) is None
 
     def test_missing_close_field_drops_bar(self):
         bars = [
-            {"date": 20240101, "open": 100.0, "high": 105.0, "low": 99.0, "volume": 1000.0},
-            {"date": 20240102, "open": 101.0, "high": 106.0, "low": 100.0, "close": 104.0, "volume": 1100.0},
+            {
+                "date": 20240101,
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "volume": 1000.0,
+            },
+            {
+                "date": 20240102,
+                "open": 101.0,
+                "high": 106.0,
+                "low": 100.0,
+                "close": 104.0,
+                "volume": 1100.0,
+            },
         ]
         doc = self._make_doc(bars)
         series = extract_price_data(doc)
@@ -351,7 +449,16 @@ class TestExtractPriceData:
         doc = {
             "_id": "SPX",
             "eodDatas": {
-                "alpha": [{"date": 20240101, "open": 1.0, "high": 2.0, "low": 0.5, "close": 999.0, "volume": 100.0}],
+                "alpha": [
+                    {
+                        "date": 20240101,
+                        "open": 1.0,
+                        "high": 2.0,
+                        "low": 0.5,
+                        "close": 999.0,
+                        "volume": 100.0,
+                    }
+                ],
             },
         }
         series = extract_price_data(doc)
@@ -360,7 +467,14 @@ class TestExtractPriceData:
 
     def test_result_is_price_series(self):
         bars = [
-            {"date": 20240101, "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "volume": 1000.0},
+            {
+                "date": 20240101,
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 103.0,
+                "volume": 1000.0,
+            },
         ]
         doc = self._make_doc(bars)
         series = extract_price_data(doc)
@@ -394,6 +508,7 @@ class TestParseInstrumentId:
         iid = parse_instrument_id(doc, "ETF")
         assert iid.symbol == "SPY"
         assert iid.asset_class == AssetClass.EQUITY
+
 
 # ===================================================================
 # NOTE: the former TestDefaultMarketDataService* classes (Mongo-backed
