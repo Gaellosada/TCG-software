@@ -48,6 +48,21 @@ describe('<OptionStreamForm>', () => {
     expect(screen.getByRole('radio', { name: 'Put' })).toBeTruthy();
   });
 
+  // ASK B: the Stream picker must not be a required up-front choice — it is
+  // an advanced override collapsed behind a disclosure, with `mid` as the
+  // default. It must remain reachable (accessible by label) for power users.
+  it('presents Stream as a collapsed advanced control defaulting to mid', () => {
+    renderForm();
+    const adv = screen.getByTestId('stream-advanced');
+    // A <details> disclosure that is closed by default (not forcing a pick).
+    expect(adv.tagName.toLowerCase()).toBe('details');
+    expect(adv.open).toBe(false);
+    // The Stream select still exists and reflects the default `mid`.
+    const streamSelect = screen.getByLabelText('Stream');
+    expect(streamSelect).toBeTruthy();
+    expect(streamSelect.value).toBe('mid');
+  });
+
   it('emits onChange with the correctly-shaped object on root change', () => {
     const { onChange } = renderForm();
     fireEvent.change(screen.getByLabelText('Root'), { target: { value: 'OPT_VIX' } });

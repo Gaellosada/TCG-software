@@ -509,21 +509,29 @@ export default function OptionStreamForm({
         </div>
       </div>
 
-      {/* Stream */}
-      <label className={styles.row}>
-        <span className={styles.label}>Stream</span>
-        <select
-          className={styles.input}
-          value={v.stream}
-          onChange={(e) => setStream(e.target.value)}
-          disabled={disabled}
-          aria-label="Stream"
-        >
-          {allowedStreams.map((s) => (
-            <option key={s} value={s}>{STREAM_LABELS[s] || s}</option>
-          ))}
-        </select>
-      </label>
+      {/* Stream — advanced override.  Defaults to `mid` (the option premium
+          mark); collapsed behind a disclosure so the user is not forced to
+          pick a series.  Power users expand "Advanced" to extract iv / a
+          greek / volume / open interest instead. */}
+      <details className={styles.advanced} data-testid="stream-advanced">
+        <summary className={styles.advancedSummary}>
+          Advanced — stream: {STREAM_LABELS[v.stream] || v.stream}
+        </summary>
+        <label className={styles.row}>
+          <span className={styles.label}>Stream</span>
+          <select
+            className={styles.input}
+            value={v.stream}
+            onChange={(e) => setStream(e.target.value)}
+            disabled={disabled}
+            aria-label="Stream"
+          >
+            {allowedStreams.map((s) => (
+              <option key={s} value={s}>{STREAM_LABELS[s] || s}</option>
+            ))}
+          </select>
+        </label>
+      </details>
 
       {validation && (
         <div

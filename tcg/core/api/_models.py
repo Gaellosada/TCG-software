@@ -116,7 +116,12 @@ class OptionStreamRef(BaseModel):
     cycle: str | None = None
     maturity: MaturityRule
     selection: SelectionCriterion
-    stream: OptionStreamLabel
+    # ASK B: default to ``mid`` so the roll/stream UX does not force the
+    # caller to choose which series to extract.  ``mid`` is the option
+    # premium mark — the natural default for a rolled options price series.
+    # An explicit value (iv / delta / greeks / volume / open_interest) still
+    # overrides; an out-of-enum value is still rejected by the Literal.
+    stream: OptionStreamLabel = "mid"
 
     @field_validator("cycle", mode="before")
     @classmethod

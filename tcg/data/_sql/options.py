@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from tcg.data._sql.connection import SCHEMA, DwhConnectionPool, to_float
 from tcg.data.options._provider import _SEED_RATIOS, has_greeks_for_root
@@ -305,6 +305,152 @@ class SqlOptionsDataReader:
         except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(
                 f"SQL error querying chain on '{root}' for {target_date}: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # query_chain_bulk
+    # ------------------------------------------------------------------
+    async def query_chain_bulk(
+        self,
+        root: str,
+        dates: Sequence[date],
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        expiration_cycle: str | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Multi-date chain in ONE query (drop-in for the roll resolver).
+
+        The options *rolling* path (``stream_resolver._fetch_exp``) needs the
+        same chain across many trade dates.  Querying ``query_chain`` per date
+        is the N+1 anti-pattern; this method fetches every date in a single
+        index-driven round-trip instead.
+
+        PUSHDOWN (mirrors :meth:`query_chain`): resolve the root's matching
+        option ``instrument_id``s via the INDEXED ``source_collection`` dim
+        lookup with ALL filters pushed (``option_type`` / strike /
+        expiration-range / cycle).  Then build a key-set of
+        ``(instrument_id, trade_date)`` from BOTH facts restricted to the
+        requested ``dates`` (``trade_date = ANY(%s)`` — the date list bound
+        ONCE as a ``date[]``), and LEFT JOIN ``fact_price_eod`` +
+        ``fact_option_greeks`` back on the composite PK ``(instrument_id,
+        trade_date)``.  The key-set UNION generalises ``query_chain``'s
+        ``WHERE p IS NOT NULL OR g IS NOT NULL`` (a contract surfaces on a
+        date if it has a price row OR a greeks row), so the same Gotcha-8
+        semantics hold across all dates.  EXPLAIN ANALYZE: ids via
+        ``ix_dim_expiration`` + indexed ``source_collection`` filter; the
+        facts via Index-Only Scans on their PKs with the year partition
+        pruned (``Heap Fetches: 0``).
+
+        Result semantics (PARITY with the removed Mongo reader): EVERY
+        requested date is a key in the returned dict — ``[]`` when no contract
+        traded that day.  ``_fetch_exp`` does ``chain_index.update(result)``
+        then ``chain_index.get(d, [])`` per date, so a present-but-empty list
+        and a missing key are equivalent downstream; pre-seeding every date
+        keeps the contract explicit and matches ``query_chain``'s per-date
+        empty-list behaviour.
+        """
+        # Pre-seed every requested date (parity with the Mongo reader's
+        # ``results = {d: [] for d in dates}``).  Empty input -> empty dict,
+        # no query.
+        results: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {
+            d: [] for d in dates
+        }
+        if not results:
+            return results
+
+        date_list = list(dict.fromkeys(dates))  # de-dupe, preserve order
+        try:
+            dim_where = [
+                "source_collection = %s",
+                "asset_class = 'option'",
+                "expiration BETWEEN %s AND %s",
+            ]
+            params: list[Any] = [root, expiration_min, expiration_max]
+            if type in ("C", "P"):
+                dim_where.append("option_type = %s")
+                params.append(type.upper())
+            if strike_min is not None:
+                dim_where.append("strike >= %s")
+                params.append(float(strike_min))
+            if strike_max is not None:
+                dim_where.append("strike <= %s")
+                params.append(float(strike_max))
+            if expiration_cycle is not None:
+                dim_where.append("expiration_cycle = %s")
+                params.append(expiration_cycle)
+
+            # The date list is bound twice (once per fact in the key-set
+            # UNION); both reference the same Python list object.
+            sql = f"""
+                WITH ids AS (
+                    SELECT instrument_id, symbol AS option_symbol, root_symbol,
+                           underlying_symbol, expiration, expiration_cycle,
+                           strike, option_type, contract_size, currency, provider
+                    FROM {SCHEMA}.dim_instrument
+                    WHERE {" AND ".join(dim_where)}
+                ),
+                keyset AS (
+                    SELECT instrument_id, trade_date
+                    FROM {SCHEMA}.fact_price_eod
+                    WHERE instrument_id IN (SELECT instrument_id FROM ids)
+                      AND trade_date = ANY(%s)
+                    UNION
+                    SELECT instrument_id, trade_date
+                    FROM {SCHEMA}.fact_option_greeks
+                    WHERE instrument_id IN (SELECT instrument_id FROM ids)
+                      AND trade_date = ANY(%s)
+                )
+                SELECT k.trade_date,
+                       i.instrument_id AS option_instrument_id, i.option_symbol,
+                       i.root_symbol, i.underlying_symbol,
+                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
+                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
+                       g.delta, g.gamma, g.vega, g.theta,
+                       g.implied_vol, g.underlying_price,
+                       i.contract_size, i.currency, i.provider
+                FROM keyset k
+                JOIN ids i ON i.instrument_id = k.instrument_id
+                LEFT JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = k.instrument_id
+                      AND p.trade_date = k.trade_date
+                LEFT JOIN {SCHEMA}.fact_option_greeks g
+                       ON g.instrument_id = k.instrument_id
+                      AND g.trade_date = k.trade_date
+                ORDER BY k.trade_date, i.instrument_id
+            """
+            params.extend([date_list, date_list])
+
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    raw = await cur.fetchall()
+
+                # [Gotcha 5] dollarize crypto: per-date coin/USD spot for all
+                # requested dates in one lookup (reused from query_chain).
+                spot_by_date = await self._coin_spot_map(conn, root, date_list)
+
+            for m in raw:
+                row_date: date = m["trade_date"]
+                contract = self._chain_meta_to_contract(root, m)
+                row = self._row_from_chain(
+                    m,
+                    target_date=row_date,
+                    coin_spot=spot_by_date.get(row_date),
+                )
+                # Defensive: a fact trade_date outside the requested set
+                # cannot occur (the key-set is filtered by ANY(dates)), but
+                # guard the dict access so a surprise never KeyErrors.
+                bucket = results.get(row_date)
+                if bucket is not None:
+                    bucket.append((contract, row))
+            return results
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error querying chain bulk on '{root}' for "
+                f"{len(date_list)} dates: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------
