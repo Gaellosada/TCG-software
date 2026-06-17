@@ -16,5 +16,8 @@ export default defineConfig({
     include: ['src/**/*.test.{js,jsx,ts,tsx}'],
     exclude: ['e2e/**', 'node_modules/**'],
     environment: 'jsdom',
+    // Auto-wraps every RTL render in a QueryClientProvider (see the file) so
+    // components migrated to TanStack Query render without per-test boilerplate.
+    setupFiles: ['./src/test/setup.js'],
   },
 });

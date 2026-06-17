@@ -1,6 +1,8 @@
 """DefaultMarketDataService -- concrete implementation of MarketDataService.
 
-Composes MongoInstrumentReader, CollectionRegistry, and LRUCache.
+Composes the dwh-backed ``SqlInstrumentReader`` + ``SqlOptionsDataReader``
+(PostgreSQL warehouse) and an ``LRUCache``. Continuous futures are built by the
+unchanged ``ContinuousSeriesBuilder`` fed SQL-sourced contracts.
 """
 
 from __future__ import annotations
@@ -10,8 +12,6 @@ from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
-
-from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from tcg.types.common import PaginatedResult
 from tcg.types.errors import DataNotFoundError, ValidationError
@@ -31,29 +31,27 @@ from tcg.types.options import (
 )
 
 from tcg.data._cache import LRUCache
-from tcg.data._mongo.instruments import MongoInstrumentReader
-from tcg.data._mongo.registry import CollectionRegistry
+from tcg.data._sql.connection import DwhConnectionPool
+from tcg.data._sql.instruments import SqlInstrumentReader
+from tcg.data._sql.options import SqlOptionsDataReader
 from tcg.data._rolling import ContinuousSeriesBuilder
 from tcg.data._utils import date_to_int, filter_date_range
 from tcg.data.options.protocol import OptionsDataReader
-from tcg.data.options.reader import MongoOptionsDataReader
 
 
 class DefaultMarketDataService:
-    """Read-only market data backed by MongoDB with LRU caching.
+    """Read-only market data backed by PostgreSQL dwh with LRU caching.
 
     Satisfies the ``MarketDataService`` protocol.
     """
 
     def __init__(
         self,
-        mongo_db: AsyncIOMotorDatabase,
-        registry: CollectionRegistry,
+        dwh_pool: DwhConnectionPool,
         cache_size: int = 200,
     ) -> None:
-        self._mongo = MongoInstrumentReader(mongo_db)
-        self._options = MongoOptionsDataReader(mongo_db, registry)
-        self._registry = registry
+        self._sql = SqlInstrumentReader(dwh_pool)
+        self._options = SqlOptionsDataReader(dwh_pool)
         self._cache = LRUCache(cache_size)
         self._roller = ContinuousSeriesBuilder()
 
@@ -63,13 +61,31 @@ class DefaultMarketDataService:
         self,
         asset_class: AssetClass | None = None,
     ) -> list[str]:
-        if asset_class is None:
-            return list(self._registry.all_active)
-        return [
-            c
-            for c in self._registry.all_active
-            if self._registry.asset_class_for(c) == asset_class
-        ]
+        """List all non-option collections (INDEX, ETF, FUND, FOREX, FUT_*).
+
+        Delegates to the reader, which maps dwh ``asset_class`` onto the
+        Mongo-era coarse ``AssetClass`` (ETF/FUND/FOREX → EQUITY, INDEX →
+        INDEX, FUT_* → FUTURE) and excludes OPT_*.
+        """
+        return await self._sql.list_collections(asset_class)
+
+    @staticmethod
+    def asset_class_for(collection: str) -> AssetClass | None:
+        """Classify a collection NAME into its coarse ``AssetClass``.
+
+        Pure name-prefix logic (no DB hit), preserving the old
+        ``CollectionRegistry.asset_class_for`` contract the portfolio router
+        relies on: ``FUT_*`` → FUTURE, ``INDEX`` → INDEX, ETF/FUND/FOREX →
+        EQUITY. Returns ``None`` for unknown / OPT_* names so callers raise a
+        clean validation error rather than guessing.
+        """
+        if collection.startswith("FUT_"):
+            return AssetClass.FUTURE
+        if collection == "INDEX":
+            return AssetClass.INDEX
+        if collection in ("ETF", "FUND", "FOREX"):
+            return AssetClass.EQUITY
+        return None
 
     async def list_instruments(
         self,
@@ -78,10 +94,14 @@ class DefaultMarketDataService:
         skip: int = 0,
         limit: int = 50,
     ) -> PaginatedResult[InstrumentId]:
-        if collection not in self._registry:
-            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
+        """List instruments in a collection by source_collection.
 
-        instruments, total = await self._mongo.list_instruments(
+        Rejects unknown collections up-front (clean 404) so unvalidated route
+        input can't silently return an empty page for a typo'd collection.
+        """
+        if not await self._sql.collection_exists(collection):
+            raise DataNotFoundError(f"Collection '{collection}' not found")
+        instruments, total = await self._sql.list_instruments(
             collection, skip=skip, limit=limit
         )
         return PaginatedResult(
@@ -102,16 +122,21 @@ class DefaultMarketDataService:
         end: date | None = None,
         provider: str | None = None,
     ) -> PriceSeries | None:
-        # Reject unknown collections up-front so unvalidated user input
-        # from API routes can't reach into Mongo system collections.
-        if collection not in self._registry:
-            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
+        """Fetch OHLCV prices for a single instrument.
+
+        Rejects unknown collections up-front (parity with the Mongo path) so
+        unvalidated route input can't probe arbitrary ``source_collection``
+        values; a genuine unknown instrument within a valid collection still
+        returns ``None`` (404 at the route).
+        """
+        if not await self._sql.collection_exists(collection):
+            raise DataNotFoundError(f"Collection '{collection}' not found")
         cache_key = self._make_key(collection, instrument_id, provider, start, end)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
 
-        result = await self._mongo.read_prices(
+        result = await self._sql.read_prices(
             collection,
             instrument_id,
             provider=provider,
@@ -123,7 +148,7 @@ class DefaultMarketDataService:
             self._cache.put(cache_key, result)
         return result
 
-    # --- Phase 2 / Phase 3 stubs ---
+    # --- Continuous futures series ---
 
     async def get_continuous(
         self,
@@ -136,11 +161,9 @@ class DefaultMarketDataService:
         """Build a continuous futures series from individual contracts.
 
         Validates that the collection is a futures collection (``FUT_`` prefix),
-        fetches contracts from MongoDB, builds the continuous series via the
-        rolling engine, and optionally filters by date range.
+        fetches contracts from SQL, builds the continuous series via the
+        rolling engine (unchanged), and optionally filters by date range.
         """
-        if collection not in self._registry:
-            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
         if not collection.startswith("FUT_"):
             raise DataNotFoundError(
                 f"Collection '{collection}' is not a futures collection"
@@ -151,7 +174,7 @@ class DefaultMarketDataService:
         if cached is not None:
             return cached
 
-        contracts = await self._mongo.fetch_futures_contracts(
+        contracts = await self._sql.fetch_futures_contracts(
             collection, cycle=roll_config.cycle
         )
         if not contracts:
@@ -188,9 +211,7 @@ class DefaultMarketDataService:
 
     async def get_available_cycles(self, collection: str) -> list[str]:
         """Return available expiration cycles for a futures collection."""
-        if collection not in self._registry:
-            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
-        return await self._mongo.fetch_available_cycles(collection)
+        return await self._sql.fetch_available_cycles(collection)
 
     async def get_aligned_prices(
         self,
@@ -338,18 +359,14 @@ class DefaultMarketDataService:
         collection: str,
         expiration_int: int,
     ) -> str | None:
-        """Return the ``_id`` string of the futures contract in *collection*
-        whose ``expiration`` field equals *expiration_int* (YYYYMMDD int).
+        """Return the symbol (contract _id) of the futures contract in *collection*
+        whose expiration field equals *expiration_int* (YYYYMMDD int).
 
-        Returns ``None`` when no contract matches. Raises
-        ``DataNotFoundError`` if *collection* is not in the registry.
+        Returns None when no contract matches.
         Used by the VIX greeks resolver (Phase 2) to map an OPT_VIX
-        expiration to the matching FUT_VIX contract without private-
-        attribute access.
+        expiration to the matching FUT_VIX contract.
         """
-        if collection not in self._registry:
-            raise DataNotFoundError(f"Collection '{collection}' not found in registry")
-        return await self._mongo.find_contract_by_expiration(collection, expiration_int)
+        return await self._sql.find_contract_by_expiration(collection, expiration_int)
 
     # --- Internal ---
 

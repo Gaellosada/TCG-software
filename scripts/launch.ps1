@@ -317,9 +317,28 @@ if (-not (Test-Path $venvPython)) {
 
 $depsMarker = Join-Path $venvDir ".deps-installed"
 
-if ($freshVenv -or -not (Test-Path $depsMarker)) {
+# Re-install only when the dependency manifests actually change (instead of
+# skipping forever once a .venv exists). Keeps normal launches fast while
+# auto-healing after a pyproject.toml / uv.lock change (e.g. a new dependency).
+$depFiles = @("pyproject.toml", "uv.lock") |
+    ForEach-Object { Join-Path $ProjectRoot $_ } |
+    Where-Object { Test-Path $_ } |
+    Sort-Object
+$depsHash = if ($depFiles) {
+    (($depFiles | ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash }) -join '-')
+} else { '' }
+$storedHash = if (Test-Path $depsMarker) {
+    $markerText = Get-Content $depsMarker -Raw -ErrorAction SilentlyContinue
+    if ($markerText) { $markerText.Trim() } else { '' }
+} else { '' }
+
+if ($freshVenv -or ($storedHash -ne $depsHash)) {
     Write-Section "Installing Python dependencies"
-    Write-Info "This may take a minute on first run..."
+    if ($freshVenv) {
+        Write-Info "This may take a minute on first run..."
+    } else {
+        Write-Info "Dependency manifest changed since last run -- reinstalling..."
+    }
 
     Push-Location $ProjectRoot
     try {
@@ -333,11 +352,11 @@ if ($freshVenv -or -not (Test-Path $depsMarker)) {
         Write-Fail "Failed to install Python dependencies. See the output above for details."
         exit 1
     }
-    New-Item -Path $depsMarker -ItemType File -Force | Out-Null
+    Set-Content -Path $depsMarker -Value $depsHash -NoNewline
     Write-Ok "Python dependencies installed"
 } else {
     Write-Section "Python dependencies"
-    Write-Ok "Already installed (delete .venv to force reinstall)"
+    Write-Ok "Already up to date (pyproject.toml/uv.lock unchanged)"
 }
 
 # ---------------------------------------------------------------------------
@@ -348,9 +367,30 @@ Write-Section "Checking frontend dependencies"
 
 $frontendDir = Join-Path $ProjectRoot "frontend"
 $nodeModules = Join-Path $frontendDir "node_modules"
+$npmMarker   = Join-Path $nodeModules ".deps-installed"
+$freshModules = -not (Test-Path $nodeModules)
 
-if (-not (Test-Path $nodeModules)) {
-    Write-Info "Installing npm packages (first run)..."
+# Re-install only when the dependency manifests actually change (instead of
+# skipping forever once node_modules exists). Mirrors the Python venv logic so a
+# new frontend dependency (e.g. @tanstack/react-query) self-heals on next launch.
+$npmDepFiles = @("package.json", "package-lock.json") |
+    ForEach-Object { Join-Path $frontendDir $_ } |
+    Where-Object { Test-Path $_ } |
+    Sort-Object
+$npmDepsHash = if ($npmDepFiles) {
+    (($npmDepFiles | ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash }) -join '-')
+} else { '' }
+$npmStoredHash = if (Test-Path $npmMarker) {
+    $m = Get-Content $npmMarker -Raw -ErrorAction SilentlyContinue
+    if ($m) { $m.Trim() } else { '' }
+} else { '' }
+
+if ($freshModules -or ($npmStoredHash -ne $npmDepsHash)) {
+    if ($freshModules) {
+        Write-Info "Installing npm packages (first run)..."
+    } else {
+        Write-Info "Dependency manifest changed since last run -- reinstalling..."
+    }
     Push-Location $frontendDir
     try {
         # Use cmd.exe /c -- PowerShell's npm.ps1 shim can mangle arguments.
@@ -365,9 +405,10 @@ if (-not (Test-Path $nodeModules)) {
         Write-Fail "npm install failed. Check the output above."
         exit 1
     }
+    Set-Content -Path $npmMarker -Value $npmDepsHash -NoNewline
     Write-Ok "Frontend dependencies installed"
 } else {
-    Write-Ok "Already installed (delete frontend/node_modules to force reinstall)"
+    Write-Ok "Already up to date (package.json/package-lock.json unchanged)"
 }
 
 # ---------------------------------------------------------------------------
@@ -531,7 +572,9 @@ try {
 Write-Info "Starting backend server (port $BackendPort)..."
 
 $backendLog = Join-Path $script:logsDir "backend.log"
-$backendArgs = "-m uvicorn tcg.core.app:app --port $BackendPort"
+# Launch via `python -m tcg.core` (not bare uvicorn): on Windows it installs the
+# SelectorEventLoop policy psycopg requires before uvicorn creates the loop.
+$backendArgs = "-m tcg.core --port $BackendPort"
 $env:TCG_CORS_ORIGINS = "http://localhost:$FrontendPort"
 try {
     $script:backendProcess = Start-Process -FilePath $venvPython `

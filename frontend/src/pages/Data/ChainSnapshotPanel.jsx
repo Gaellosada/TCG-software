@@ -1,7 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
-import useAsync from '../../hooks/useAsync';
+import { useChainSnapshot } from '../../hooks/marketQueries';
 import Chart from '../../components/Chart';
-import { getChainSnapshot } from '../../api/options';
 import { createVerticalLineTrace, hiddenOverlayAxis } from '../../utils/chartTheme';
 import styles from './ChainSnapshotPanel.module.css';
 
@@ -64,23 +63,18 @@ export default function ChainSnapshotPanel({
   const [field, setField] = useState('iv');
   const [xAxis, setXAxis] = useState('strike');
 
-  // Re-fetch whenever root / date / type / expiration / cycle / field
-  // changes. xAxis toggle is client-side only — no re-fetch needed.
-  const { data, loading, error } = useAsync(
-    () => getChainSnapshot(
-      root,
-      {
-        date,
-        type,
-        expirations: [expiration],
-        field,
-        // Pass through only when set — keeps the URL clean for the
-        // legacy "all cycles" behaviour.
-        ...(expiration_cycle ? { expiration_cycle } : {}),
-      },
-    ),
-    [root, date, type, expiration, expiration_cycle, field],
-  );
+  // SWR: keyed by root / date / type / expiration / cycle / field. The
+  // snapshot is cached, so revisiting the same expiration/field renders
+  // instantly; toggling field keeps the prior smile on screen while the new
+  // one loads (placeholderData: keepPreviousData). xAxis toggle is
+  // client-side only — no re-fetch (it's not part of the key).
+  const { data, loading, error } = useChainSnapshot(root, {
+    date,
+    type,
+    expiration,
+    field,
+    expiration_cycle,
+  });
 
   // Surface each successful response upward so the parent can extract
   // distinct cycles / auto-select the most-populated one. We pass the

@@ -9,7 +9,7 @@
 //                                  mocked — we let useAsync call the mocked api fn.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act, waitFor } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // Chart stub — captures props to chartCalls array
@@ -125,20 +125,17 @@ describe('<ChainSnapshotPanel> basic render', () => {
 
   it('shows error message on fetch failure', async () => {
     mockGetChainSnapshot.mockRejectedValue(new Error('network down'));
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
-    });
-    expect(screen.getByText(/failed to load snapshot/i)).toBeTruthy();
+    render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
+    // TanStack settles the error asynchronously — poll for the message.
+    expect(await screen.findByText(/failed to load snapshot/i)).toBeTruthy();
     expect(screen.getByText(/network down/)).toBeTruthy();
   });
 
   it('renders the Chart with the smile trace and an ATM marker', async () => {
     mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
-    });
+    render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
 
-    expect(chartCalls.length).toBeGreaterThan(0);
+    await waitFor(() => expect(chartCalls.length).toBeGreaterThan(0));
     const last = chartCalls[chartCalls.length - 1];
     expect(Array.isArray(last.traces)).toBe(true);
     // 1 smile trace + 1 ATM vertical-line trace.
@@ -149,9 +146,8 @@ describe('<ChainSnapshotPanel> basic render', () => {
 
   it('trace has mode lines+markers and connectgaps false', async () => {
     mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
-    });
+    render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
+    await waitFor(() => expect(chartCalls.length).toBeGreaterThan(0));
     const last = chartCalls[chartCalls.length - 1];
     const trace = last.traces[0];
     expect(trace.mode).toBe('lines+markers');
@@ -165,11 +161,9 @@ describe('<ChainSnapshotPanel> basic render', () => {
       underlying_price: cr(5500),
       series: [],
     });
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
-    });
+    render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
+    expect(await screen.findByText(/no data for this expiration/i)).toBeTruthy();
     expect(screen.queryByTestId('chart-stub')).toBeNull();
-    expect(screen.getByText(/no data for this expiration/i)).toBeTruthy();
   });
 });
 
@@ -223,10 +217,9 @@ describe('<ChainSnapshotPanel> field toggle (iv → delta)', () => {
 describe('<ChainSnapshotPanel> xAxis toggle (strike → K/S)', () => {
   it('uses strike values on x by default', async () => {
     mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
-    });
+    render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
 
+    await waitFor(() => expect(chartCalls.length).toBeGreaterThan(0));
     const last = chartCalls[chartCalls.length - 1];
     expect(last.traces[0].x).toEqual([4900, 5000, 5100]);
   });
@@ -252,9 +245,8 @@ describe('<ChainSnapshotPanel> xAxis toggle (strike → K/S)', () => {
 
   it('ATM marker tracks underlying price on Strike axis, snaps to 1 on K/S', async () => {
     mockGetChainSnapshot.mockResolvedValue(makeResponse(SAMPLE_PTS));
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
-    });
+    render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
+    await waitFor(() => expect(chartCalls.length).toBeGreaterThan(0));
 
     // Strike axis (default): ATM marker x sits at the underlying price.
     // makeResponse fixture sets underlying_price.value = 5500.
@@ -306,9 +298,8 @@ describe('<ChainSnapshotPanel> missing values (connectgaps)', () => {
       { strike: 5100, K_over_S: 0.93, value: 0.17 },
     ];
     mockGetChainSnapshot.mockResolvedValue(makeResponse(pts));
-    await act(async () => {
-      render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
-    });
+    render(<ChainSnapshotPanel {...DEFAULT_PROPS} />);
+    await waitFor(() => expect(chartCalls.length).toBeGreaterThan(0));
 
     const last = chartCalls[chartCalls.length - 1];
     const trace = last.traces[0];

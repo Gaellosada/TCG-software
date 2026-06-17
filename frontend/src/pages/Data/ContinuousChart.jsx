@@ -1,9 +1,8 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
-import useAsync from '../../hooks/useAsync';
+import { useState, useEffect, useMemo } from 'react';
+import { useContinuousSeries, useAvailableCycles } from '../../hooks/marketQueries';
 import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import Chart from '../../components/Chart';
-import { getContinuousSeries, getAvailableCycles } from '../../api/data';
 import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
 import { prepareChartData } from '../../utils/ohlcHelpers';
 import { formatDateInt } from '../../utils/format';
@@ -30,22 +29,18 @@ function ContinuousChart({ collection }) {
     setCycle('');
   }, [collection]);
 
-  const { data: cyclesData } = useAsync(
-    () => getAvailableCycles(collection),
-    [collection]
-  );
+  // SWR: cached cycles + rolled series render instantly on re-navigation.
+  // The continuous query keeps the previous series on screen while a new
+  // adjustment/cycle/roll-offset loads (placeholderData: keepPreviousData),
+  // so changing a control never flashes a loading state.
+  const { data: cyclesData } = useAvailableCycles(collection);
 
-  const fetchSeries = useCallback(
-    () => getContinuousSeries(collection, {
-      strategy: 'front_month',
-      adjustment,
-      cycle: cycle || undefined,
-      rollOffset,
-    }),
-    [collection, adjustment, cycle, rollOffset]
-  );
-
-  const { data, loading, error } = useAsync(fetchSeries, [collection, adjustment, cycle, rollOffset]);
+  const { data, loading, error } = useContinuousSeries(collection, {
+    strategy: 'front_month',
+    adjustment,
+    cycle,
+    rollOffset,
+  });
 
   const rollDates = (data && data.roll_dates) || [];
 

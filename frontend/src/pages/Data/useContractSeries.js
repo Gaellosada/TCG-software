@@ -1,11 +1,13 @@
-import useAsync from '../../hooks/useAsync';
-import { getOptionContract } from '../../api/options';
+import { useOptionContract } from '../../hooks/marketQueries';
 
 /**
  * Hook for fetching a single option contract's full time-series.
  *
- * Uses ``useAsync`` for simple fire-and-forget fetching; re-fetches
- * whenever any of the dependency arguments change.
+ * Backed by TanStack Query (stale-while-revalidate): the series for a given
+ * (collection, contractId, computeMissing, dateFrom, dateTo) tuple is cached,
+ * so re-selecting a contract renders instantly and revalidates in the
+ * background. Resolves to ``data: null`` when collection/contractId are absent
+ * (the query stays disabled), matching the previous fire-and-forget guard.
  *
  * Decision C: ``computeMissing`` is transient — not persisted to localStorage.
  *
@@ -22,11 +24,5 @@ export function useContractSeries(
   contractId,
   { computeMissing = true, dateFrom = null, dateTo = null } = {},
 ) {
-  return useAsync(
-    () =>
-      collection && contractId
-        ? getOptionContract(collection, contractId, { computeMissing, dateFrom, dateTo })
-        : Promise.resolve(null),
-    [collection, contractId, computeMissing, dateFrom, dateTo],
-  );
+  return useOptionContract(collection, contractId, { computeMissing, dateFrom, dateTo });
 }

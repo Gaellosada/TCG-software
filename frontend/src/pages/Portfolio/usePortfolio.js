@@ -1,6 +1,8 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
+import { queryKeys } from '../../queryKeys';
 import { formatDateInt } from '../../utils/format';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
@@ -26,6 +28,11 @@ function uniqueLegLabel(desired, existingLegs) {
  * and weights as a dict: { label: weight }.
  */
 export default function usePortfolio() {
+  // Leg-range reads share the app-wide market-data cache via fetchQuery —
+  // a leg whose price/continuous series was already loaded on the Data page
+  // resolves from cache (no refetch), and otherwise populates the same cache
+  // entry the Data page will later read. Same query keys as the Data hooks.
+  const queryClient = useQueryClient();
   const [legs, setLegs] = useState([]);
   const [rebalance, setRebalance] = useState('none');
   const [startDate, setStartDate] = useState('');
@@ -86,15 +93,22 @@ export default function usePortfolio() {
       try {
         let dates;
         if (leg.type === 'continuous') {
-          const res = await getContinuousSeries(leg.collection, {
+          const params = {
             strategy: leg.strategy || 'front_month',
             adjustment: leg.adjustment || 'none',
             cycle: leg.cycle || undefined,
             rollOffset: leg.rollOffset || 0,
+          };
+          const res = await queryClient.fetchQuery({
+            queryKey: queryKeys.market.continuous(leg.collection, params),
+            queryFn: () => getContinuousSeries(leg.collection, params),
           });
           dates = res?.dates;
         } else {
-          const res = await getInstrumentPrices(leg.collection, leg.symbol);
+          const res = await queryClient.fetchQuery({
+            queryKey: queryKeys.market.prices(leg.collection, leg.symbol),
+            queryFn: () => getInstrumentPrices(leg.collection, leg.symbol),
+          });
           dates = res?.dates;
         }
         if (dates && dates.length > 0) {

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { listCollections, listInstruments, getAvailableCycles } from '../../api/data';
 import { getOptionRoots } from '../../api/options';
-import { createBasket, listBaskets } from '../../api/persistence';
+import { createBasket } from '../../api/persistence';
+import { useBasketsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
 import OptionStreamForm, { buildDefaultOptionStream, validateOptionStream } from '../OptionStreamForm';
 import styles from './InstrumentPickerModal.module.css';
 
@@ -109,11 +110,10 @@ export default function InstrumentPickerModal({
 
   // Basket composer state — see Composer state machine below.
   const [inBasketComposer, setInBasketComposer] = useState(false);
-  const [basketList, setBasketList] = useState([]);
-  const [basketsLoading, setBasketsLoading] = useState(false);
-  const [basketsError, setBasketsError] = useState(null);
 
   const overlayRef = useRef(null);
+
+  const invalidate = useInvalidatePersistence();
 
   const visibleCategories = useMemo(
     () => CATEGORY_CONFIG.filter((c) => {
@@ -135,6 +135,34 @@ export default function InstrumentPickerModal({
     () => visibleCategories.some((c) => c.key === 'baskets'),
     [visibleCategories],
   );
+
+  /* ── Saved baskets — TanStack queries (one per category, concatenated) ──
+   *
+   * Replaces the old open-gated Promise.all([listBaskets×3]) effect. Each
+   * category list is its own cached query so invalidate.baskets() (fired after
+   * a basket is saved in the composer) refetches all three → the saved-baskets
+   * dropdown reflects the new basket without reopening the modal. Enabled only
+   * while the modal is open AND baskets are visible (matches the prior gate).
+   */
+  const basketsEnabled = isOpen && basketsVisible;
+  const basketsResearch = useBasketsList('RESEARCH', { enabled: basketsEnabled });
+  const basketsDev = useBasketsList('DEV', { enabled: basketsEnabled });
+  const basketsProd = useBasketsList('PROD', { enabled: basketsEnabled });
+  const basketList = useMemo(() => [
+    ...(Array.isArray(basketsResearch.data) ? basketsResearch.data : []),
+    ...(Array.isArray(basketsDev.data) ? basketsDev.data : []),
+    ...(Array.isArray(basketsProd.data) ? basketsProd.data : []),
+  ], [basketsResearch.data, basketsDev.data, basketsProd.data]);
+  // Loading only on the cold load (no cached data yet for any category).
+  const basketsLoading = basketsEnabled && (
+    (basketsResearch.isPending && basketsResearch.fetchStatus !== 'idle')
+    || (basketsDev.isPending && basketsDev.fetchStatus !== 'idle')
+    || (basketsProd.isPending && basketsProd.fetchStatus !== 'idle')
+  );
+  const basketsError = (basketsResearch.error || basketsDev.error || basketsProd.error)
+    ? (basketsResearch.error || basketsDev.error || basketsProd.error)?.message
+      || 'Failed to load baskets'
+    : null;
 
   /* ── Load collections + instruments when modal opens ── */
   useEffect(() => {
@@ -210,30 +238,7 @@ export default function InstrumentPickerModal({
     return () => { cancelled = true; };
   }, [isOpen, optionsVisible, basketsVisible]);
 
-  /* ── Load saved baskets when modal opens (only when baskets visible) ── */
-  useEffect(() => {
-    if (!isOpen || !basketsVisible) return;
-    let cancelled = false;
-    setBasketsLoading(true);
-    setBasketsError(null);
-    Promise.all([listBaskets('RESEARCH'), listBaskets('DEV'), listBaskets('PROD')])
-      .then(([research, dev, prod]) => {
-        if (cancelled) return;
-        setBasketList([
-          ...(Array.isArray(research) ? research : []),
-          ...(Array.isArray(dev) ? dev : []),
-          ...(Array.isArray(prod) ? prod : []),
-        ]);
-        setBasketsLoading(false);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setBasketsError(err?.message || 'Failed to load baskets');
-        setBasketList([]);
-        setBasketsLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [isOpen, basketsVisible]);
+  /* (Saved baskets are loaded by the useBasketsList queries declared above.) */
 
   /* ── Load available cycles for futures drill-down ── */
   useEffect(() => {
@@ -483,6 +488,7 @@ export default function InstrumentPickerModal({
               basketsError={basketsError}
               optionRoots={optionRoots}
               onEmit={handleEmitBasket}
+              onBasketSaved={() => invalidate.baskets()}
             />
           ) : (
             /* ── Main view: toggleable categories ── */
@@ -914,6 +920,7 @@ function BasketComposer({
   basketsError,
   optionRoots,
   onEmit,
+  onBasketSaved,
 }) {
   const [assetClass, setAssetClass] = useState('future');
   // Each leg is `{instrument: <discriminated>, weight}`.  See
@@ -1209,12 +1216,15 @@ function BasketComposer({
       setDirtySinceSave(false);
       setSaveInputOpen(false);
       setSaveName('');
+      // Invalidate the saved-baskets queries so the dropdown reflects the
+      // newly-saved basket (new RESEARCH-category doc) without reopening.
+      if (onBasketSaved) onBasketSaved();
     } catch (err) {
       setSaveError(err?.message || 'Save failed');
     } finally {
       setSaving(false);
     }
-  }, [hasConfiguredLeg, saveName, legs, assetClass]);
+  }, [hasConfiguredLeg, saveName, legs, assetClass, onBasketSaved]);
 
   const handleUnsave = useCallback(() => {
     setSavedBasket(null);

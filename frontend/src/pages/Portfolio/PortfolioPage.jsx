@@ -18,7 +18,6 @@ import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
 import {
-  listPortfolios,
   createPortfolio,
   updatePortfolio,
   archivePortfolio,
@@ -26,6 +25,7 @@ import {
   describePersistenceError,
   isLockedError,
 } from '../../api/persistence';
+import { usePortfoliosList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
 // Statistics endpoint expects YYYYMMDD integers (existing project
@@ -64,10 +64,14 @@ function PortfolioPage() {
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
 
   // --- Portfolio list (backend is the sole source of truth) ----------------
-  // The category filter for the panel comes from the hook (shared with
-  // autosave payload). The list itself is fetched into local page state.
+  // The category filter comes from the hook (shared with the autosave payload).
+  // The list is a TanStack query keyed by that category; ``portfolios`` (local
+  // state) is kept as the page's working copy (lock-flag patches, etc.) and is
+  // re-synced from the query whenever a fresh snapshot lands. A mutation calls
+  // invalidate.portfolios() → background refetch → re-sync.
+  const portfoliosQuery = usePortfoliosList(portfolio.persistedCategory);
+  const invalidate = useInvalidatePersistence();
   const [portfolios, setPortfolios] = useState([]);
-  const [portfoliosLoading, setPortfoliosLoading] = useState(false);
 
   // Separate status state for one-shot operations (save-current / archive /
   // category-change). Kept separate from the debounced autosave status so
@@ -79,26 +83,19 @@ function PortfolioPage() {
   // autosave failure. Cleared when a save succeeds.
   const [cloudError, setCloudError] = useState(null);
 
-  const [fetchError, setFetchError] = useState(null);
+  // Loading / error derived from the query. ``portfoliosLoading`` reflects
+  // only the first (cold) load — a background refetch with cached data must
+  // NOT flip the panel into a loading state (no-flicker, matches prior code).
+  const portfoliosLoading = portfoliosQuery.isPending && portfoliosQuery.fetchStatus !== 'idle';
+  const fetchError = portfoliosQuery.error
+    ? `Failed to load portfolios: ${portfoliosQuery.error.message || portfoliosQuery.error}`
+    : null;
 
-  const fetchPortfolios = useCallback(async (cat) => {
-    setPortfoliosLoading(true);
-    setFetchError(null);
-    try {
-      const docs = await listPortfolios(cat);
-      setPortfolios(docs);
-    } catch (err) {
-      setPortfolios([]);
-      setFetchError(`Failed to load portfolios: ${err.message || err}`);
-    } finally {
-      setPortfoliosLoading(false);
-    }
-  }, []);
-
-  // Re-fetch whenever the panel category changes.
+  // Re-sync the working list whenever the query lands a snapshot. (Category
+  // changes are automatic: the query is keyed by persistedCategory.)
   useEffect(() => {
-    fetchPortfolios(portfolio.persistedCategory);
-  }, [portfolio.persistedCategory, fetchPortfolios]);
+    if (portfoliosQuery.data) setPortfolios(portfoliosQuery.data);
+  }, [portfoliosQuery.data]);
 
   // Serialize the portfolio leg list into the wire shape — strip the
   // local-only ``id`` (which we assign on load and never persist) and
@@ -147,7 +144,7 @@ function PortfolioPage() {
       if (name !== portfolio.portfolioName) {
         portfolio.setPortfolioName(name);
       }
-      fetchPortfolios(category);
+      invalidate.portfolios(id);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
@@ -158,7 +155,7 @@ function PortfolioPage() {
     saveInput,
     portfolio.portfolioName, portfolio.persistedCategory, portfolio.legs, portfolio.rebalance,
     portfolio.setPersistedId, portfolio.setPersistedCategory, portfolio.setPortfolioName,
-    fetchPortfolios, legsToWire,
+    invalidate, legsToWire,
   ]);
 
   // Move a persisted portfolio to a different category. Preserves all
@@ -181,18 +178,18 @@ function PortfolioPage() {
       if (portfolio.persistedId === id) {
         portfolio.setPersistedCategory(newCat);
       }
-      // If the item moved is the currently loaded portfolio AND the new
-      // category differs from the panel filter, re-fetch with the new
-      // category so the list stays accurate. Otherwise re-fetch with
-      // the current panel filter.
-      fetchPortfolios(portfolio.persistedId === id ? newCat : portfolio.persistedCategory);
+      // The doc moved between categories — invalidate so BOTH the old and new
+      // category lists refetch (prefix match covers every category). If the
+      // loaded portfolio moved, setPersistedCategory above also re-keys the
+      // panel query to the new category.
+      invalidate.portfolios(id);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('updatePortfolio (category change) failed:', err);
     }
-  }, [portfolios, portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedCategory, fetchPortfolios]);
+  }, [portfolios, portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedCategory, invalidate]);
 
   // Archive (soft-delete) a persisted portfolio.
   const handleArchivePortfolio = useCallback(async (id) => {
@@ -206,14 +203,14 @@ function PortfolioPage() {
       if (portfolio.persistedId === id) {
         portfolio.clearAll();
       }
-      fetchPortfolios(portfolio.persistedCategory);
+      invalidate.portfolios(id);
     } catch (err) {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');
       // eslint-disable-next-line no-console
       console.error('archivePortfolio failed:', err);
     }
-  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.clearAll, fetchPortfolios]);
+  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.clearAll, invalidate]);
 
   // Set the locked state on a persisted portfolio. Calls the lock API,
   // then updates both the list state and (when it's the currently loaded
@@ -238,7 +235,13 @@ function PortfolioPage() {
     setLocked: useCallback((id, next) => setPortfolioLocked(id, next), []),
     applyLocked: applyPortfolioLocked,
     onStart: useCallback(() => setOneshotStatus('saving'), []),
-    onSuccess: useCallback(() => { setOneshotError(null); setOneshotStatus('saved'); }, []),
+    onSuccess: useCallback((doc) => {
+      setOneshotError(null);
+      setOneshotStatus('saved');
+      // applyLocked already patched the lock flag from the server doc; invalidate
+      // to keep the cached list coherent (refetch returns equal data → no flicker).
+      if (doc && doc.id) invalidate.portfolios(doc.id);
+    }, [invalidate]),
     onError: useCallback((err) => {
       setOneshotError(describePersistenceError(err));
       setOneshotStatus('error');

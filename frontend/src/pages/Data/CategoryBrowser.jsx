@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { listCollections, listInstruments } from '../../api/data';
 import { getOptionRoots } from '../../api/options';
+import { queryKeys } from '../../queryKeys';
 import styles from './CategoryBrowser.module.css';
 
 /**
@@ -68,14 +70,72 @@ function renderGreeksBadge(root) {
   return null;
 }
 
+/**
+ * Composite sidebar loader: collections + per-collection instruments +
+ * option roots, fanned out exactly as the old useEffect did. Pure data
+ * orchestration so it can back a single TanStack query (cached → instant
+ * re-render on navigation, silent background revalidate). The ``signal`` is
+ * threaded into every api call so a superseded load is cancelled.
+ */
+export async function loadCategories(signal) {
+  const collections = await listCollections(null, { signal });
+
+  return Promise.all(
+    CATEGORY_CONFIG.map(async (cat) => {
+      if (cat.dynamicFutures) {
+        const futCollections = collections.filter((c) => c.startsWith('FUT_'));
+        return { ...cat, futCollections, isFutures: true };
+      }
+
+      if (cat.dynamicOptions) {
+        const resp = await getOptionRoots({ signal });
+        return { ...cat, optionRoots: resp.roots || [], isOptions: true };
+      }
+
+      // Filter available collections for this category
+      const available = cat.collections.filter((c) => collections.includes(c));
+      const groups = await Promise.all(
+        available.map(async (collName) => {
+          const res = await listInstruments(collName, { signal });
+          return {
+            collection: collName,
+            instruments: (res.items || []).map((item) => ({
+              symbol: item.symbol,
+              collection: item.collection || collName,
+            })),
+          };
+        }),
+      );
+
+      return { ...cat, groups, isFutures: false };
+    }),
+  );
+}
+
 function CategoryBrowser({ selected, onSelect }) {
-  const [categories, setCategories] = useState([]);
   const [expanded, setExpanded] = useState({ indexes: false, assets: false, futures: false, options: false });
   const [expandedFutGroups, setExpandedFutGroups] = useState({});
   const [contractsExpanded, setContractsExpanded] = useState({});
   const [contractsData, setContractsData] = useState({});
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+
+  // SWR composite query: on first mount it loads (shows "Loading instruments…"
+  // once); on every re-navigation the cached category tree renders INSTANTLY
+  // with no loading flash, and a stale entry silently revalidates in the
+  // background. ``categories`` defaults to [] to match the old initial state.
+  const {
+    data: categories = [],
+    isPending,
+    fetchStatus,
+    error: queryError,
+  } = useQuery({
+    queryKey: queryKeys.market.categoryBrowser(),
+    queryFn: ({ signal }) => loadCategories(signal),
+  });
+  // Only the first-ever load (no cache) shows the spinner — a background
+  // revalidate must not (that is the no-spinner-on-navigation guarantee).
+  const loading = isPending && fetchStatus !== 'idle';
+  // Preserve the old string-message error shape (render used ``error`` directly).
+  const error = queryError ? (queryError.message || String(queryError)) : null;
 
   // Auto-collapse futures groups that don't own the current selection
   useEffect(() => {
@@ -103,63 +163,6 @@ function CategoryBrowser({ selected, onSelect }) {
       return next;
     });
   }, [selected]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const { signal } = controller;
-
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const collections = await listCollections(null, { signal });
-
-        const result = await Promise.all(
-          CATEGORY_CONFIG.map(async (cat) => {
-            if (cat.dynamicFutures) {
-              const futCollections = collections.filter((c) => c.startsWith('FUT_'));
-              return { ...cat, futCollections, isFutures: true };
-            }
-
-            if (cat.dynamicOptions) {
-              const resp = await getOptionRoots({ signal });
-              return { ...cat, optionRoots: resp.roots || [], isOptions: true };
-            }
-
-            // Filter available collections for this category
-            const available = cat.collections.filter((c) => collections.includes(c));
-            const groups = await Promise.all(
-              available.map(async (collName) => {
-                const res = await listInstruments(collName, { signal });
-                return {
-                  collection: collName,
-                  instruments: (res.items || []).map((item) => ({
-                    symbol: item.symbol,
-                    collection: item.collection || collName,
-                  })),
-                };
-              })
-            );
-
-            return { ...cat, groups, isFutures: false };
-          })
-        );
-
-        if (!signal.aborted) {
-          setCategories(result);
-          setLoading(false);
-        }
-      } catch (err) {
-        if (signal.aborted) return;
-        setError(err.message);
-        setLoading(false);
-      }
-    }
-
-    load();
-    return () => controller.abort();
-  }, []);
 
   function toggleCategory(key) {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -370,6 +373,26 @@ function CategoryBrowser({ selected, onSelect }) {
       ))}
     </div>
   );
+}
+
+/**
+ * Warm the CategoryBrowser composite cache entry ahead of first navigation.
+ *
+ * Called once on app startup so the FIRST visit to /data renders the sidebar
+ * instantly (no loading flash) — the data is already cached. Uses the EXACT
+ * same query key + queryFn as the component's ``useQuery`` so the warmed entry
+ * is the one CategoryBrowser reads on mount.
+ *
+ * ``prefetchQuery`` is fire-and-forget and swallows errors internally, so a
+ * backend hiccup at startup simply leaves the cache cold — the component then
+ * loads normally (its own error/loading handling stands). Returns the promise
+ * for callers/tests that want to await completion.
+ */
+export function prefetchCategoryBrowser(queryClient) {
+  return queryClient.prefetchQuery({
+    queryKey: queryKeys.market.categoryBrowser(),
+    queryFn: ({ signal }) => loadCategories(signal),
+  });
 }
 
 export default CategoryBrowser;

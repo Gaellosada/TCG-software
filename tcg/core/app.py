@@ -11,7 +11,6 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tcg.core.api.data import router as data_router
@@ -22,9 +21,10 @@ from tcg.core.api.persistence import router as persistence_router
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.core.api.signals import router as signals_router
 from tcg.core.api.statistics import router as statistics_router
-from tcg.core.config import load_config, load_tunnel_config
+from tcg.core.config import load_tunnel_config
 from tcg.core.tunnel import SSMTunnel
 from tcg.data import create_services
+from tcg.data._sql.connection import DwhConnectionPool, load_dwh_config
 from tcg.types.errors import TCGError
 
 
@@ -51,7 +51,7 @@ def _cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: connect to MongoDB, build services. Shutdown: close client."""
+    """Startup: connect to dwh (PostgreSQL) + Mongo (persistence). Shutdown: cleanup."""
     tunnel_config = load_tunnel_config()
     tunnel: SSMTunnel | None = None
     monitor_task: asyncio.Task[None] | None = None
@@ -66,34 +66,36 @@ async def lifespan(app: FastAPI):
             raise
         monitor_task = asyncio.create_task(tunnel.monitor())
 
+    dwh_pool = None
     try:
-        config = load_config()
-        # Pool sizes are modest — this is a single-user desktop app and all
-        # connections funnel through the same SSM tunnel (when enabled).
-        # Keeping the pool small avoids overwhelming the forwarded port.
-        client = AsyncIOMotorClient(
-            config.uri,
-            serverSelectionTimeoutMS=30_000,
-            connectTimeoutMS=60_000,
-            socketTimeoutMS=300_000,
-            maxPoolSize=5,
-        )
-        db = client[config.db_name]
-        services = await create_services(db)
+        # --- Connect to dwh (PostgreSQL) for ALL market-data reads ---
+        # The persistence layer (tcg-app-data on MongoDB) is NOT wired here:
+        # it lazy-inits its own scoped write client on first request via
+        # tcg.core.api._persistence_wiring.get_write_repository (reads
+        # MONGO_APP_WRITE_URI). Keeping it lazy preserves read-only-dev
+        # ergonomics and test isolation; the market cutover does not touch it.
+        dwh_pool = DwhConnectionPool(**load_dwh_config())
+        await dwh_pool.connect()
+
+        services = await create_services(dwh_pool)
+        app.state.market_data = services["market_data"]
     except Exception:
-        # Stop the tunnel if MongoDB setup fails — without this the SSM
-        # subprocess would be orphaned.
+        # Cleanup on failure — stop the tunnel + pool so nothing is orphaned.
         if monitor_task:
             monitor_task.cancel()
             with suppress(asyncio.CancelledError):
                 await monitor_task
         if tunnel:
             await tunnel.stop()
+        if dwh_pool:
+            await dwh_pool.close()
         raise
 
-    app.state.market_data = services["market_data"]
     yield
-    client.close()
+
+    # Cleanup on shutdown
+    if dwh_pool:
+        await dwh_pool.close()
     if monitor_task:
         monitor_task.cancel()
         with suppress(asyncio.CancelledError):

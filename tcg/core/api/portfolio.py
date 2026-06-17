@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass, replace
 from datetime import date
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -30,7 +30,6 @@ from tcg.core.api.signals import (
     make_signal_fetcher,
     parse_signal,
 )
-from tcg.data._mongo.registry import CollectionRegistry
 from tcg.data._utils import date_to_int, int_to_iso
 from tcg.data.protocols import MarketDataService
 from tcg.persistence import WriteRepository
@@ -49,6 +48,7 @@ from tcg.engine.signal_exec import (
 from tcg.types.errors import ValidationError
 from tcg.types.market import (
     AdjustmentMethod,
+    AssetClass,
     ContinuousLegSpec,
     ContinuousRollConfig,
     InstrumentId,
@@ -111,15 +111,15 @@ router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 # ---------------------------------------------------------------------------
 
 
-def get_registry(request: Request) -> CollectionRegistry:
-    """Dependency: retrieve the CollectionRegistry from the service.
+def get_collection_classifier(request: Request) -> Callable[[str], AssetClass | None]:
+    """Dependency: a function mapping a collection name → its ``AssetClass``.
 
-    The registry is an internal detail of DefaultMarketDataService, but we
-    need it to resolve asset_class from collection names.  Accessing
-    ``_registry`` is acceptable here -- the API layer is tightly coupled
-    to the concrete service by design.
+    Replaces the old ``CollectionRegistry`` injection. The dwh-backed service
+    exposes the same prefix-based classification via
+    ``DefaultMarketDataService.asset_class_for`` (pure, no DB hit); we hand the
+    bound method out so ``_parse_legs`` stays storage-agnostic.
     """
-    return request.app.state.market_data._registry
+    return request.app.state.market_data.asset_class_for
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ class PortfolioRequest(BaseModel):
 
 def _parse_legs(
     legs: dict[str, LegSpec],
-    registry: CollectionRegistry,
+    classify: Callable[[str], AssetClass | None],
 ) -> dict[str, InstrumentId | ContinuousLegSpec]:
     """Convert request leg specs to service-layer types with validation.
 
@@ -226,7 +226,7 @@ def _parse_legs(
                 raise ValidationError(
                     f"Leg '{label}': 'symbol' is required for instrument legs"
                 )
-            asset_class = registry.asset_class_for(leg.collection)
+            asset_class = classify(leg.collection)
             if asset_class is None:
                 raise ValidationError(
                     f"Leg '{label}': cannot determine asset class for "
@@ -533,7 +533,7 @@ async def _evaluate_option_stream_leg(
 async def compute_portfolio(
     body: PortfolioRequest,
     svc: MarketDataService = Depends(get_market_data),
-    registry: CollectionRegistry = Depends(get_registry),
+    classify: Callable[[str], AssetClass | None] = Depends(get_collection_classifier),
     repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
     """Compute a weighted portfolio with rebalancing and return full analytics."""
@@ -594,7 +594,7 @@ async def compute_portfolio(
     instrument_closes: dict[str, npt.NDArray[np.float64]] = {}
 
     if instrument_legs:
-        legs_spec = _parse_legs(body.legs, registry)
+        legs_spec = _parse_legs(body.legs, classify)
 
         # Fetch full overlapping date range for instrument legs.
         full_common_dates, full_aligned_series = await svc.get_aligned_prices(
