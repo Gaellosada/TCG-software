@@ -156,6 +156,9 @@ export function buildDefaultOptionStream({
     // Roll back-adjustment for the MID stream (futures convention). Default
     // "none"; the backend ignores it for every non-mid stream.
     adjustment: 'none',
+    // Roll offset in calendar days (mirrors futures rollOffset): roll this many
+    // days earlier. Default 0 = roll at the maturity rule's normal time.
+    roll_offset: 0,
   };
 }
 
@@ -266,6 +269,12 @@ export default function OptionStreamForm({
 
   const setAdjustment = useCallback((adjustment) => emit({ adjustment }), [emit]);
 
+  const setRollOffset = useCallback((raw) => {
+    const parsed = parseInt(raw, 10);
+    const clamped = Number.isNaN(parsed) ? 0 : Math.min(30, Math.max(0, parsed));
+    emit({ roll_offset: clamped });
+  }, [emit]);
+
   const setMaturityKind = useCallback((kind) => {
     emit({ maturity: defaultMaturity(kind) });
   }, [emit]);
@@ -301,6 +310,8 @@ export default function OptionStreamForm({
   // Legacy/absent adjustment → "none" (additive field; values created before
   // this change have no `adjustment` key).
   const adjustment = v.adjustment || 'none';
+  // Legacy/absent roll_offset → 0 (additive field).
+  const rollOffset = v.roll_offset ?? 0;
 
   return (
     <div className={styles.form} data-testid="option-stream-form" aria-disabled={disabled}>
@@ -445,6 +456,23 @@ export default function OptionStreamForm({
           )}
         </div>
       </div>
+
+      {/* Roll offset — roll N calendar days earlier (mirrors futures rollOffset) */}
+      <label className={styles.row}>
+        <span className={styles.label}>Roll offset (days)</span>
+        <input
+          type="number"
+          className={styles.input}
+          min={0}
+          max={30}
+          step={1}
+          value={rollOffset}
+          onChange={(e) => setRollOffset(e.target.value)}
+          disabled={disabled}
+          aria-label="Roll offset days"
+          title="Roll this many calendar days earlier — the maturity rule is resolved as of (date + roll offset). 0 = roll at the rule's normal time."
+        />
+      </label>
 
       {/* Selection criterion */}
       <div className={styles.row}>

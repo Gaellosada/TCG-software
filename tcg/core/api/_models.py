@@ -129,6 +129,12 @@ class OptionStreamRef(BaseModel):
     # An explicit value (iv / delta / greeks / volume / open_interest) still
     # overrides; an out-of-enum value is still rejected by the Literal.
     stream: OptionStreamLabel = "mid"
+    # Roll offset in calendar days, mirroring ``ContinuousInstrumentRef.rollOffset``
+    # (futures).  The engine resolves the maturity rule as of ``date + roll_offset``
+    # for each date, so every roll happens ``roll_offset`` days EARLIER.  Additive,
+    # default 0 → preserves the existing wire contract; range 0..30 (same bound as
+    # the futures roll offset).  No-op for ``fixed`` maturity (single expiration).
+    roll_offset: int = Field(default=0, ge=0, le=30)
 
     @field_validator("cycle", mode="before")
     @classmethod

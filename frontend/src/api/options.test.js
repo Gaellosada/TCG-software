@@ -330,6 +330,25 @@ describe('resolveOptionStream', () => {
     const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
     expect(body.streams[0].ref.adjustment).toBe('none');
   });
+
+  it('forwards the ref roll_offset field', async () => {
+    mockSuccess(RESOLVE_RESP);
+    const ref = optionRef({ roll_offset: 5 });
+    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
+
+    const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
+    expect(body.streams[0].ref.roll_offset).toBe(5);
+  });
+
+  it('defaults roll_offset to 0 when a ref omits it', async () => {
+    mockSuccess(RESOLVE_RESP);
+    const ref = optionRef();
+    delete ref.roll_offset; // legacy / hand-built ref
+    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
+
+    const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
+    expect(body.streams[0].ref.roll_offset).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

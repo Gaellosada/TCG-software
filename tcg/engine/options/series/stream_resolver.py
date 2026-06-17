@@ -504,6 +504,7 @@ async def _resolve_bulk(
     selection: SelectionCriterion,
     stream: StreamLabel,
     adjustment: Adjustment,
+    roll_offset: int = 0,
     chain_reader: _CycleAwareReader,
     bulk_chain_reader: _CycleAwareBulkReader,
     maturity_resolver: MaturityResolver,
@@ -595,14 +596,18 @@ async def _resolve_bulk(
                 if not available:
                     expirations[idx] = None
                 else:
+                    # roll_offset: resolve maturity as of (d + roll_offset) so
+                    # every roll happens roll_offset calendar days earlier.
                     expirations[idx] = maturity_resolver.resolve_with_chain(
-                        ref_date=d,
+                        ref_date=d + timedelta(days=roll_offset),
                         rule=maturity,
                         available_expirations=available,
                     )
     else:
         for idx, d in queryable:
-            expirations[idx] = maturity_resolver.resolve(ref_date=d, rule=maturity)
+            expirations[idx] = maturity_resolver.resolve(
+                ref_date=d + timedelta(days=roll_offset), rule=maturity
+            )
 
     # ── Phase B: Group by expiration and bulk fetch ─────────────────
 
@@ -916,6 +921,7 @@ async def resolve_option_stream(
     selection: SelectionCriterion,
     stream: StreamLabel,
     adjustment: Adjustment = "none",
+    roll_offset: int = 0,
     chain_reader: _CycleAwareReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
@@ -961,6 +967,13 @@ async def resolve_option_stream(
         ``bulk_chain_reader``) the off-expiration contract is not re-queried,
         so unresolvable seams are left unadjusted.  Production always wires the
         bulk reader.
+    roll_offset:
+        Calendar days to roll EARLY: the maturity rule is resolved as of
+        ``date + roll_offset`` for each date, so every roll happens
+        ``roll_offset`` days sooner (mirrors the futures roll offset).
+        ``0`` (default) = no shift.  Honored in the bulk path; the legacy
+        per-date fallback resolves maturity inside the selector and does
+        not apply the shift.
     chain_reader:
         Cycle-aware chain reader (any object satisfying
         :class:`_CycleAwareReader`).
@@ -1021,6 +1034,7 @@ async def resolve_option_stream(
             selection=selection,
             stream=stream,
             adjustment=adjustment,
+            roll_offset=roll_offset,
             chain_reader=chain_reader,
             bulk_chain_reader=bulk_chain_reader,
             maturity_resolver=maturity_resolver,

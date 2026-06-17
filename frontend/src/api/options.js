@@ -191,25 +191,37 @@ export async function selectOption(selectQuery) {
 //   Returns: { done: number, total: number, fraction: number }
 // ---------------------------------------------------------------------------
 
-// Ensure each option_stream ref carries the additive ``adjustment`` field
-// (default "none") before it goes on the wire. The picker emits it, but
-// legacy / hand-built refs may omit it; the backend defaults it too, but we
-// send it explicitly so the request body is unambiguous (and testable).
-// ``adjustment`` is applied by the backend resolver only when stream==="mid";
-// it is harmlessly ignored for every other stream.
-function withAdjustment(streams) {
+// Ensure each option_stream ref carries the additive ``adjustment`` (default
+// "none") and ``roll_offset`` (default 0) fields before it goes on the wire.
+// The picker emits them, but legacy / hand-built refs may omit them; the
+// backend defaults them too, but we send them explicitly so the request body
+// is unambiguous (and testable). ``adjustment`` is applied by the backend
+// resolver only when stream==="mid"; ``roll_offset`` rolls the maturity that
+// many calendar days earlier (0 = no shift).
+function withOptionStreamDefaults(streams) {
   if (!Array.isArray(streams)) return streams;
   return streams.map((entry) => {
     const ref = entry && entry.ref;
-    if (ref && ref.type === 'option_stream' && ref.adjustment === undefined) {
-      return { ...entry, ref: { ...ref, adjustment: 'none' } };
+    if (
+      ref
+      && ref.type === 'option_stream'
+      && (ref.adjustment === undefined || ref.roll_offset === undefined)
+    ) {
+      return {
+        ...entry,
+        ref: {
+          ...ref,
+          adjustment: ref.adjustment === undefined ? 'none' : ref.adjustment,
+          roll_offset: ref.roll_offset === undefined ? 0 : ref.roll_offset,
+        },
+      };
     }
     return entry;
   });
 }
 
 export async function resolveOptionStream(streams, start, end, { signal, onProgress } = {}) {
-  const normalizedStreams = withAdjustment(streams);
+  const normalizedStreams = withOptionStreamDefaults(streams);
   const taskId = typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;

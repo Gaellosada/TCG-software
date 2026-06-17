@@ -136,6 +136,23 @@ describe('<OptionStreamForm>', () => {
     expect(onChange.mock.calls[0][0].maturity).toEqual({ kind: 'plus_n_days', n: 30 });
   });
 
+  it('renders the Roll offset input defaulting to 0', () => {
+    renderForm();
+    const input = screen.getByLabelText('Roll offset days');
+    expect(input).toBeTruthy();
+    expect(input.value).toBe('0');
+  });
+
+  it('emits roll_offset on change, clamped to 0..30', () => {
+    const { onChange } = renderForm();
+    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '5' } });
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange.mock.calls[0][0]).toMatchObject({ roll_offset: 5 });
+    onChange.mockClear();
+    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '99' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toBe(30);
+  });
+
   it('respects allowedSelectionKinds — only by_moneyness rendered', () => {
     renderForm({ allowedSelectionKinds: ['by_moneyness'] });
     const sel = screen.getByLabelText('Selection criterion');
