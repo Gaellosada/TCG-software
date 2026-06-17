@@ -54,6 +54,10 @@ class _FakeRepo:
 
     def __init__(self) -> None:
         self._store: dict[tuple[str, str], Any] = {}
+        # Soft-deleted keys (the uniform DELETED/hidden state). Mirrors the
+        # real repo's ``category='DELETED'`` projection column: the doc still
+        # exists (get_by_id can return it) but is hidden from every list.
+        self._deleted: set[tuple[str, str]] = set()
         self.raise_duplicate_on_create: bool = False
         self.raise_too_large_on_create: bool = False
         self.raise_too_large_on_update: bool = False
@@ -78,19 +82,27 @@ class _FakeRepo:
         return self._store.get((doc_type, doc_id))
 
     async def list_by_type(self, doc_type: str) -> list:
+        # Active = not soft-deleted (and, defensively, not the indicator
+        # ``deleted`` flag) — uniform DELETED/hidden state.
         return [
             d
-            for (t, _), d in self._store.items()
-            if t == doc_type and not getattr(d, "deleted", False)
+            for (t, i), d in self._store.items()
+            if t == doc_type
+            and (t, i) not in self._deleted
+            and not getattr(d, "deleted", False)
         ]
 
     async def list_by_type_and_category(
         self, doc_type: str, category: Category
     ) -> list:
+        # Soft-deleted docs are hidden from EVERY category (including
+        # ARCHIVE) — they are NOT moved to a visible category on delete.
         return [
             d
-            for (t, _), d in self._store.items()
-            if t == doc_type and getattr(d, "category", None) == category
+            for (t, i), d in self._store.items()
+            if t == doc_type
+            and (t, i) not in self._deleted
+            and getattr(d, "category", None) == category
         ]
 
     async def update(
@@ -109,17 +121,18 @@ class _FakeRepo:
         return doc
 
     async def archive(self, doc_type: str, doc_id: str) -> None:
+        # Uniform soft-delete (matches the real repo): mark the doc as
+        # DELETED/hidden for ALL kinds — do NOT move it to a visible ARCHIVE
+        # category. Indicators additionally flip their derived ``deleted``
+        # flag so ``IndicatorOut.deleted`` reads True.
         key = (doc_type, doc_id)
         if key not in self._store:
             raise KeyError(f"no {doc_type} with id={doc_id!r}")
-        existing = self._store[key]
-        # Crude soft-delete — sufficient for the router tests.
-        from dataclasses import replace as _replace
-
+        self._deleted.add(key)
         if doc_type == "indicator":
-            self._store[key] = _replace(existing, deleted=True)
-        else:
-            self._store[key] = _replace(existing, category=Category.ARCHIVE)
+            from dataclasses import replace as _replace
+
+            self._store[key] = _replace(self._store[key], deleted=True)
 
 
 @pytest.fixture
@@ -1170,3 +1183,96 @@ def test_basket_leg_nan_weight_rejected_at_model_level() -> None:
             },
             weight=float("nan"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Uniform soft-delete contract (creds-free, via the in-memory fake + router).
+#
+# The NEW model: DELETE → the doc is HIDDEN from EVERY list for ALL kinds
+# (indicators via the active filter; signals/portfolios/baskets are no longer
+# moved to a visible ARCHIVE category). ARCHIVE remains an ordinary VISIBLE
+# user category. These assert the contract WITHOUT a live DB so it is verified
+# even when the real-PG integration tier is skipped (no APP_DB creds).
+# ---------------------------------------------------------------------------
+
+
+def test_delete_signal_hides_it_from_every_category_list(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/signals",
+        json={"id": "sig-del", "name": "S", "category": "DEV"},
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/signals/sig-del").status_code == 204
+    for cat in ("RESEARCH", "DEV", "PROD", "ARCHIVE"):
+        lst = client.get(f"/api/persistence/signals?category={cat}")
+        assert lst.status_code == 200, lst.text
+        assert all(d["id"] != "sig-del" for d in lst.json()), (
+            f"deleted signal still visible in category={cat}"
+        )
+
+
+def test_delete_portfolio_hides_it_from_every_category_list(
+    client: TestClient,
+) -> None:
+    r = client.post(
+        "/api/persistence/portfolios",
+        json={"id": "ptf-del", "name": "P", "category": "RESEARCH"},
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/portfolios/ptf-del").status_code == 204
+    for cat in ("RESEARCH", "DEV", "PROD", "ARCHIVE"):
+        lst = client.get(f"/api/persistence/portfolios?category={cat}")
+        assert lst.status_code == 200, lst.text
+        assert all(d["id"] != "ptf-del" for d in lst.json())
+
+
+def test_delete_basket_hides_it_from_every_category_list(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "bkt-del",
+            "name": "B",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/baskets/bkt-del").status_code == 204
+    for cat in ("RESEARCH", "DEV", "PROD", "ARCHIVE"):
+        lst = client.get(f"/api/persistence/baskets?category={cat}")
+        assert lst.status_code == 200, lst.text
+        assert all(d["id"] != "bkt-del" for d in lst.json())
+
+
+def test_delete_indicator_hides_it_from_active_list(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/indicators",
+        json={"id": "ind-del", "name": "I", "definition": {}},
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/indicators/ind-del").status_code == 204
+    lst = client.get("/api/persistence/indicators")
+    assert lst.status_code == 200, lst.text
+    assert all(d["id"] != "ind-del" for d in lst.json())
+
+
+def test_archive_category_stays_visible_after_assignment(client: TestClient) -> None:
+    """ARCHIVE is an ordinary VISIBLE category (NOT the soft-delete target):
+    a signal explicitly PUT to category=ARCHIVE still appears in the ARCHIVE
+    list — only DELETE hides a doc."""
+    r = client.post(
+        "/api/persistence/signals",
+        json={"id": "sig-arch", "name": "S", "category": "DEV"},
+    )
+    assert r.status_code == 201, r.text
+    upd = client.put(
+        "/api/persistence/signals/sig-arch",
+        json={"name": "S", "category": "ARCHIVE"},
+    )
+    assert upd.status_code == 200, upd.text
+    lst = client.get("/api/persistence/signals?category=ARCHIVE")
+    assert lst.status_code == 200, lst.text
+    assert any(d["id"] == "sig-arch" for d in lst.json()), (
+        "ARCHIVE must remain a visible category"
+    )

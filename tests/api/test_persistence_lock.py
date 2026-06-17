@@ -55,6 +55,9 @@ class _LockFakeRepo:
 
     def __init__(self) -> None:
         self._store: dict[tuple[str, str], Any] = {}
+        # Soft-deleted keys — the uniform DELETED/hidden state (mirrors the
+        # real repo's ``category='DELETED'`` projection column).
+        self._deleted: set[tuple[str, str]] = set()
 
     async def create(self, doc: Any) -> Any:
         key = (doc.type, doc.id)
@@ -73,17 +76,22 @@ class _LockFakeRepo:
     async def list_by_type(self, doc_type: str) -> list:
         return [
             d
-            for (t, _), d in self._store.items()
-            if t == doc_type and not getattr(d, "deleted", False)
+            for (t, i), d in self._store.items()
+            if t == doc_type
+            and (t, i) not in self._deleted
+            and not getattr(d, "deleted", False)
         ]
 
     async def list_by_type_and_category(
         self, doc_type: str, category: Category
     ) -> list:
+        # Soft-deleted docs are hidden from EVERY category (incl. ARCHIVE).
         return [
             d
-            for (t, _), d in self._store.items()
-            if t == doc_type and getattr(d, "category", None) == category
+            for (t, i), d in self._store.items()
+            if t == doc_type
+            and (t, i) not in self._deleted
+            and getattr(d, "category", None) == category
         ]
 
     def _raise_if_locked(self, doc_type: str, doc_id: str) -> None:
@@ -104,15 +112,16 @@ class _LockFakeRepo:
         return doc
 
     async def archive(self, doc_type: str, doc_id: str) -> None:
+        # Uniform soft-delete: lock-guarded, then mark DELETED/hidden for ALL
+        # kinds (NOT a move to a visible ARCHIVE category). Indicators also
+        # flip their derived ``deleted`` flag.
         self._raise_if_locked(doc_type, doc_id)
         key = (doc_type, doc_id)
         if key not in self._store:
             raise KeyError(f"no {doc_type} with id={doc_id!r}")
-        existing = self._store[key]
+        self._deleted.add(key)
         if doc_type == "indicator":
-            self._store[key] = _replace(existing, deleted=True)
-        else:
-            self._store[key] = _replace(existing, category=Category.ARCHIVE)
+            self._store[key] = _replace(self._store[key], deleted=True)
 
     async def set_locked(self, doc_type: str, doc_id: str, locked: bool) -> Any:
         """Bypass the guard; flip ONLY ``locked`` and return the doc."""
