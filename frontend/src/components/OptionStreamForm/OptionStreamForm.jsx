@@ -16,6 +16,14 @@ import styles from './OptionStreamForm.module.css';
  *     maturity: { kind, ... },           // discriminated union (kind field)
  *     selection: { kind, ... },          // discriminated union (kind field)
  *     stream: 'mid'|'iv'|'delta'|'gamma'|'vega'|'theta'|'open_interest'|'volume',
+ *     adjustment: 'none'|'ratio'|'difference',  // roll back-adjustment for the
+ *                                               // MID stream only (futures
+ *                                               // convention); ignored by the
+ *                                               // backend for every other stream
+ *     roll_offset: <int 0..30>,                 // roll the maturity this many
+ *                                               // calendar days earlier (mirrors
+ *                                               // futures rollOffset); 0 = roll at
+ *                                               // the maturity rule's normal time
  *   }
  *
  * Validation:
@@ -30,6 +38,14 @@ const ALL_OPTION_TYPES = ['C', 'P'];
 const ALL_CYCLES = [null, 'M', 'W3 Friday', 'W1 Friday', 'W2 Friday', 'W4 Friday', 'W', 'Q'];
 const ALL_STREAMS = ['mid', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
 const GREEK_STREAMS = new Set(['gamma', 'vega', 'theta']);
+// Roll back-adjustment options — mirror the futures continuous-series picker
+// (InstrumentPickerModal ``ContinuousSpecPicker``): none / ratio / difference.
+const ALL_ADJUSTMENTS = ['none', 'ratio', 'difference'];
+const ADJUSTMENT_LABELS = {
+  none: 'None',
+  ratio: 'Ratio',
+  difference: 'Difference',
+};
 const ALL_MATURITY_KINDS = ['next_third_friday', 'nearest_to_target', 'end_of_month', 'plus_n_days', 'fixed'];
 const ALL_SELECTION_KINDS = ['by_moneyness', 'by_delta', 'by_strike'];
 
@@ -48,15 +64,20 @@ const SELECTION_LABELS = {
 };
 
 const STREAM_LABELS = {
-  mid: 'Mid',
-  iv: 'IV',
+  mid: 'Mid price',
+  iv: 'Implied volatility',
   delta: 'Delta',
   gamma: 'Gamma',
   vega: 'Vega',
   theta: 'Theta',
-  open_interest: 'Open Interest',
+  open_interest: 'Open interest',
   volume: 'Volume',
 };
+
+// Tooltip clarifying that the ``mid`` series is the bid-ask midpoint — NOT a
+// daily OHLC field. Surfaced on the Series control whenever Mid is reachable.
+const MID_TOOLTIP =
+  'Mid = (bid + ask) / 2 — the quote midpoint, NOT the daily high/low or last/close.';
 
 const CYCLE_LABELS = {
   _any: 'Any',
@@ -136,6 +157,12 @@ export function buildDefaultOptionStream({
     maturity: defaultMaturity(allowedMaturityKinds[0] || 'next_third_friday'),
     selection: defaultSelection(allowedSelectionKinds[0] || 'by_moneyness', allowedOptionTypes[0] || 'C'),
     stream: allowedStreams[0] || 'mid',
+    // Roll back-adjustment for the MID stream (futures convention). Default
+    // "none"; the backend ignores it for every non-mid stream.
+    adjustment: 'none',
+    // Roll offset in calendar days (mirrors futures rollOffset): roll this many
+    // days earlier. Default 0 = roll at the maturity rule's normal time.
+    roll_offset: 0,
   };
 }
 
@@ -232,7 +259,25 @@ export default function OptionStreamForm({
     emit({ cycle });
   }, [emit]);
 
-  const setStream = useCallback((stream) => emit({ stream }), [emit]);
+  // Changing the Series resets adjustment to "none" whenever we leave the
+  // MID stream — adjustment is meaningful only for mid, and the backend
+  // ignores it elsewhere, so we keep the emitted value honest (and the
+  // hidden control's state from leaking a stale ratio/difference).
+  const setStream = useCallback((stream) => {
+    if (stream === 'mid') {
+      emit({ stream });
+    } else {
+      emit({ stream, adjustment: 'none' });
+    }
+  }, [emit]);
+
+  const setAdjustment = useCallback((adjustment) => emit({ adjustment }), [emit]);
+
+  const setRollOffset = useCallback((raw) => {
+    const parsed = parseInt(raw, 10);
+    const clamped = Number.isNaN(parsed) ? 0 : Math.min(30, Math.max(0, parsed));
+    emit({ roll_offset: clamped });
+  }, [emit]);
 
   const setMaturityKind = useCallback((kind) => {
     emit({ maturity: defaultMaturity(kind) });
@@ -266,6 +311,11 @@ export default function OptionStreamForm({
 
   const cycleSelectValue = v.cycle == null ? '_any' : v.cycle;
   const cycleAllowed = allowedCycles.map((c) => (c == null ? '_any' : c));
+  // Legacy/absent adjustment → "none" (additive field; values created before
+  // this change have no `adjustment` key).
+  const adjustment = v.adjustment || 'none';
+  // Legacy/absent roll_offset → 0 (additive field).
+  const rollOffset = v.roll_offset ?? 0;
 
   return (
     <div className={styles.form} data-testid="option-stream-form" aria-disabled={disabled}>
@@ -411,6 +461,23 @@ export default function OptionStreamForm({
         </div>
       </div>
 
+      {/* Roll offset — roll N calendar days earlier (mirrors futures rollOffset) */}
+      <label className={styles.row}>
+        <span className={styles.label}>Roll offset (days)</span>
+        <input
+          type="number"
+          className={styles.input}
+          min={0}
+          max={30}
+          step={1}
+          value={rollOffset}
+          onChange={(e) => setRollOffset(e.target.value)}
+          disabled={disabled}
+          aria-label="Roll offset days"
+          title="Roll this many calendar days earlier — the maturity rule is resolved as of (date + roll offset). 0 = roll at the rule's normal time."
+        />
+      </label>
+
       {/* Selection criterion */}
       <div className={styles.row}>
         <span className={styles.label}>Selection</span>
@@ -509,21 +576,60 @@ export default function OptionStreamForm({
         </div>
       </div>
 
-      {/* Stream */}
+      {/* Series — plainly labelled (no longer hidden behind a disclosure).
+          Defaults to `mid` (the bid-ask midpoint — the option premium mark);
+          the user can extract iv / a greek / volume / open interest instead.
+          "Mid price" is explicitly the BID-ASK MID (see the help glyph +
+          tooltip), NOT a daily OHLC field. */}
       <label className={styles.row}>
-        <span className={styles.label}>Stream</span>
+        <span className={styles.label}>
+          Series:
+          {/* Help glyph: always present so the Mid tooltip is discoverable
+              regardless of the current selection. */}
+          <span
+            className={styles.help}
+            data-testid="mid-tooltip"
+            role="img"
+            aria-label={MID_TOOLTIP}
+            title={MID_TOOLTIP}
+          >
+            ⓘ
+          </span>
+        </span>
         <select
           className={styles.input}
           value={v.stream}
           onChange={(e) => setStream(e.target.value)}
           disabled={disabled}
-          aria-label="Stream"
+          aria-label="Series"
         >
           {allowedStreams.map((s) => (
             <option key={s} value={s}>{STREAM_LABELS[s] || s}</option>
           ))}
         </select>
       </label>
+
+      {/* Adjustment — MID stream only.  Mirrors the futures continuous-series
+          adjustment selector (InstrumentPickerModal ContinuousSpecPicker:
+          None / Ratio / Difference).  Hidden for every non-mid series; the
+          emitted `adjustment` is held at 'none' while hidden (see setStream). */}
+      {v.stream === 'mid' && (
+        <label className={styles.row}>
+          <span className={styles.label}>Adjustment</span>
+          <select
+            className={styles.input}
+            value={adjustment}
+            onChange={(e) => setAdjustment(e.target.value)}
+            disabled={disabled}
+            aria-label="Adjustment"
+            data-testid="option-stream-adjustment"
+          >
+            {ALL_ADJUSTMENTS.map((a) => (
+              <option key={a} value={a}>{ADJUSTMENT_LABELS[a] || a}</option>
+            ))}
+          </select>
+        </label>
+      )}
 
       {validation && (
         <div
@@ -545,9 +651,11 @@ export {
   ALL_OPTION_TYPES,
   ALL_CYCLES,
   ALL_STREAMS,
+  ALL_ADJUSTMENTS,
   ALL_MATURITY_KINDS,
   ALL_SELECTION_KINDS,
   GREEK_STREAMS,
+  MID_TOOLTIP,
   defaultMaturity,
   defaultSelection,
 };

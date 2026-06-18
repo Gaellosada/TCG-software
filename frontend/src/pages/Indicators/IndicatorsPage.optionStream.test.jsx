@@ -77,6 +77,7 @@ vi.mock('./defaultIndicators', () => {
 });
 
 import IndicatorsPage from './IndicatorsPage';
+import { computeDefaultRange } from '../../components/OptionDateRangeControl';
 
 // Healthy option_stream ref — by_moneyness selection, iv stream.
 const HEALTHY_STREAM_REF = {
@@ -108,6 +109,7 @@ function seedDefaultState(defaultId, seriesMap, params = { target_days: 30 }) {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   computeIndicatorMock.mockReset();
   resolveDefaultIndexInstrumentMock.mockReset();
   getOptionRootsMock.mockReset();
@@ -115,6 +117,15 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  // Freeze the wall clock to a fixed instant so the default date window
+  // (computeDefaultRange → [today−1y, today]) is identical whether it is
+  // computed inside the component at mount or in the assertion below. Without
+  // this the test computed computeDefaultRange() twice against the real clock
+  // and was midnight-flaky (the two calls could straddle a day boundary).
+  // ``shouldAdvanceTime`` keeps real time progressing so Testing-Library's
+  // findBy*/waitFor polling still fires while Date.now() stays pinned.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date(2025, 5, 17, 12, 0, 0)); // 2025-06-17 12:00 local
   // No SPX default — option-stream tests never need it.
   resolveDefaultIndexInstrumentMock.mockResolvedValue({ ok: true, data: null });
   // Roots lookup yields a deterministic last_trade_date so the FE-derived
@@ -167,12 +178,15 @@ describe('option_stream — healthy dispatch', () => {
     // Asset-type metadata still flows even though the slot is option_stream-shaped.
     expect(body.asset_type).toBe('option');
     expect(body.compatible_asset_types).toEqual(['option']);
-    // ISO date range derived from the mocked root's last_trade_date
-    // (6-month lookback — keeps the per-date materialiser fast enough
-    // on remote Mongo for v1). Asserting the contract proves the
-    // option_stream resolver gets concrete dates instead of None.
-    expect(body.end).toBe('2024-12-20');
-    expect(body.start).toBe('2024-06-20');
+    // ISO date range: PR #58 removed the preset buttons + last_trade_date
+    // anchoring; runIndicator now forwards the OptionDateRangeControl value,
+    // which defaults to a 1-year window ending today (computeDefaultRange).
+    // Asserting concrete dates proves the option_stream resolver gets a real
+    // range instead of None. (The getOptionRoots mock is no longer consulted
+    // for the range.)
+    const expectedRange = computeDefaultRange();
+    expect(body.end).toBe(expectedRange.end);
+    expect(body.start).toBe(expectedRange.start);
     // The page forwards an ``onProgress`` callback so the
     // ``computeIndicator`` helper (mocked here) can poll
     // /api/indicators/progress/{task_id}. Task-id generation +

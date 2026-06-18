@@ -83,3 +83,14 @@
   padding: 6px 10px;
   font-size: 0.8rem;
 }
+
+/* Help glyph next to the "Series:" label carrying the Mid bid-ask tooltip. */
+.help {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  cursor: help;
+  /* The label is uppercased; keep the glyph upright and readable. */
+  text-transform: none;
+}

@@ -239,8 +239,9 @@ describe('<InstrumentPickerModal>', () => {
     await waitFor(() => expect(screen.getByTestId('option-stream-form')).toBeTruthy());
 
     // Pick OPT_VIX (no greeks) and stream=gamma
+    // (The OptionStreamForm "Stream" control was relabelled "Series" in PR #58.)
     fireEvent.change(screen.getByLabelText('Root'), { target: { value: 'OPT_VIX' } });
-    fireEvent.change(screen.getByLabelText('Stream'), { target: { value: 'gamma' } });
+    fireEvent.change(screen.getByLabelText('Series'), { target: { value: 'gamma' } });
 
     const confirm = screen.getByTestId('option-stream-confirm');
     expect(confirm.disabled).toBe(true);

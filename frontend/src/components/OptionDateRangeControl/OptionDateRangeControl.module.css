@@ -38,9 +38,3 @@
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
-
-.warning {
-  font-size: 0.7rem;
-  color: var(--accent-warm);
-  white-space: nowrap;
-}

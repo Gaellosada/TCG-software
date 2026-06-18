@@ -1,8 +1,9 @@
 """Frozen dataclasses for the persistence (write) layer.
 
-These three documents (``IndicatorDoc``, ``SignalDoc``, ``PortfolioDoc``)
-all live in the single MongoDB collection ``tcg-app-data.2026-app-data``
-and are distinguished by a ``type`` discriminator string. The collection
+These four documents (``IndicatorDoc``, ``SignalDoc``, ``PortfolioDoc``,
+``BasketDoc``) are persisted in the PostgreSQL ``tcg_app_data`` schema —
+one table per kind (``indicators`` / ``signals`` / ``portfolios`` /
+``baskets``) — and each carries a ``type`` discriminator string. Storage
 is treated as a flat, open-schema store: this module owns *structure*,
 not *interpretation* of the inner payloads.
 
@@ -26,20 +27,25 @@ For ``PortfolioDoc`` the editable content carried verbatim is:
 
 Frozen-dataclass immutability is preserved by using tuples for the
 list-typed fields (tuples are hashable / immutable). The serializer
-converts tuples ↔ JSON arrays at the Mongo boundary.
+converts tuples ↔ JSON arrays at the JSONB boundary.
 
 Category semantics
 ------------------
-``Category`` applies to *signals and portfolios only*. Indicators have
-no category and use a separate ``deleted: bool`` flag for soft-delete.
+``Category`` applies to *signals, portfolios and baskets*. Indicators
+have no user category and use a separate ``deleted: bool`` flag for
+soft-delete. The uniform soft-delete sentinel ``'DELETED'`` is set
+server-side on the ``category`` projection column (see ``to_pg_row``);
+it is NOT a user-facing ``Category`` member.
 
 Serialization
 -------------
-The Mongo ``_id`` field maps to the dataclass ``id`` field on read; the
-serializer emits ``_id`` on write. Tuples are converted to / from
-lists at the Mongo boundary. All other fields round-trip verbatim
-(datetimes stay as ``datetime`` objects — Mongo handles the BSON
-encoding).
+``to_json_doc`` / ``from_json_doc`` map a dataclass ↔ a plain JSON-able
+dict (the JSONB ``payload``). The dataclass ``id`` field stays ``id``
+(the PostgreSQL primary-key column is ``id``). Tuples are converted to /
+from lists. ``to_pg_row`` / ``from_pg_row`` wrap those to produce / read
+the full table row: the ``payload`` JSONB is the single source of truth
+and the top-level ``id`` / ``type`` / ``category`` / ``locked`` columns
+are indexable projections used only by SQL filters.
 """
 
 from __future__ import annotations
@@ -185,7 +191,7 @@ class BasketDoc:
 
 PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc | BasketDoc
 
-# Internal map: discriminator string → dataclass. Used by ``from_mongo_dict``.
+# Internal map: discriminator string → dataclass. Used by ``from_json_doc``.
 _TYPE_TO_CLASS: dict[str, type] = {
     DocType.INDICATOR.value: IndicatorDoc,
     DocType.SIGNAL.value: SignalDoc,
@@ -194,7 +200,7 @@ _TYPE_TO_CLASS: dict[str, type] = {
 }
 
 # Fields that store a sequence on the dataclass as a tuple but must be
-# emitted as a JSON list at the Mongo boundary. Keep this list explicit
+# emitted as a JSON list at the JSONB boundary. Keep this list explicit
 # so accidental tuple-typed fields don't get auto-converted.
 _TUPLE_FIELDS_BY_TYPE: dict[str, frozenset[str]] = {
     DocType.INDICATOR.value: frozenset(),
@@ -203,22 +209,27 @@ _TUPLE_FIELDS_BY_TYPE: dict[str, frozenset[str]] = {
     DocType.BASKET.value: frozenset({"legs"}),
 }
 
+# Soft-delete sentinel stored in the ``category`` projection column for a
+# deleted document of ANY kind. NOT a user-facing ``Category`` member —
+# it is set server-side by ``WriteRepository.archive`` and excluded from
+# every list query. ``from_pg_row`` tolerates it on read.
+DELETED_CATEGORY = "DELETED"
 
-def to_mongo_dict(doc: PersistenceDoc) -> dict[str, Any]:
-    """Serialize a persistence dataclass to a Mongo-ready dict.
 
-    The dataclass ``id`` field is renamed to ``_id`` (Mongo's primary
-    key). ``Category`` is unwrapped to its string value so Mongo stores
-    a plain string rather than a Python enum. Tuple-typed fields are
-    converted to JSON-compatible lists.
+def to_json_doc(doc: PersistenceDoc) -> dict[str, Any]:
+    """Serialize a persistence dataclass to a plain JSON-able dict.
+
+    This is the JSONB ``payload`` form. The dataclass ``id`` field stays
+    ``id`` (the PostgreSQL primary-key column is ``id``). ``Category`` is
+    unwrapped to its string value so the payload stores a plain string
+    rather than a Python enum. Tuple-typed fields are converted to
+    JSON-compatible lists.
     """
     tuple_fields = _TUPLE_FIELDS_BY_TYPE.get(doc.type, frozenset())
     out: dict[str, Any] = {}
     for f in fields(doc):
         value = getattr(doc, f.name)
-        if f.name == "id":
-            out["_id"] = value
-        elif isinstance(value, Category):
+        if isinstance(value, Category):
             out[f.name] = value.value
         elif f.name in tuple_fields and isinstance(value, tuple):
             out[f.name] = list(value)
@@ -227,14 +238,14 @@ def to_mongo_dict(doc: PersistenceDoc) -> dict[str, Any]:
     return out
 
 
-def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
-    """Reconstruct a persistence dataclass from a Mongo document.
+def from_json_doc(d: dict[str, Any]) -> PersistenceDoc:
+    """Reconstruct a persistence dataclass from a JSON-able dict.
 
-    Uses the ``type`` field as the discriminator. ``_id`` maps back to
-    ``id``. ``category`` strings are re-wrapped into the ``Category``
-    enum. List-typed payload fields that map to tuple-typed dataclass
-    fields are coerced to tuples. Raises ``ValueError`` if ``type`` is
-    missing or unknown.
+    Uses the ``type`` field as the discriminator. ``category`` strings are
+    re-wrapped into the ``Category`` enum. List-typed payload fields that
+    map to tuple-typed dataclass fields are coerced to tuples. Raises
+    ``ValueError`` if ``type`` is missing/unknown or a required field is
+    absent.
     """
     doc_type = d.get("type")
     if doc_type not in _TYPE_TO_CLASS:
@@ -246,11 +257,11 @@ def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
     kwargs: dict[str, Any] = {}
     for f in fields(cls):
         if f.name == "id":
-            if "_id" not in d:
+            if "id" not in d:
                 raise ValueError(
-                    f"persistence: document missing '_id' for type={doc_type!r}"
+                    f"persistence: document missing 'id' for type={doc_type!r}"
                 )
-            kwargs["id"] = d["_id"]
+            kwargs["id"] = d["id"]
         elif f.name == "category":
             kwargs["category"] = Category(d["category"])
         else:
@@ -277,14 +288,104 @@ def from_mongo_dict(d: dict[str, Any]) -> PersistenceDoc:
     return cls(**kwargs)  # type: ignore[no-any-return]
 
 
+def _category_projection(doc: PersistenceDoc) -> str | None:
+    """Derive the value for the ``category`` projection column.
+
+    - Indicators have no user category: ``'DELETED'`` when ``deleted`` is
+      set, else ``None`` (active).
+    - Signals / portfolios / baskets project their ``Category`` value.
+
+    The ``'DELETED'`` sentinel on non-indicator kinds is written by
+    ``WriteRepository.archive`` directly (not through this helper), so a
+    normal ``create`` / ``update`` only ever projects a real category
+    here.
+    """
+    if isinstance(doc, IndicatorDoc):
+        return DELETED_CATEGORY if doc.deleted else None
+    category = getattr(doc, "category", None)
+    if isinstance(category, Category):
+        return category.value
+    return category
+
+
+def _locked_projection(doc: PersistenceDoc) -> bool | None:
+    """Derive the value for the ``locked`` projection column.
+
+    Baskets have no ``locked`` column (not lockable) → ``None``. The
+    three lockable kinds project their stored ``locked`` flag.
+    """
+    return getattr(doc, "locked", None)
+
+
+# Timestamp fields kept in the dedicated ``timestamptz`` columns rather
+# than inside the JSONB payload — JSON has no native datetime, and the
+# columns are the authoritative source for CAS + ordering. ``to_pg_row``
+# strips them from the stored payload; ``from_pg_row`` re-injects the
+# column values before reconstructing the dataclass.
+_TIMESTAMP_FIELDS = ("created_at", "updated_at")
+
+
+def to_pg_row(
+    doc: PersistenceDoc,
+) -> tuple[str, str, str | None, bool | None, dict[str, Any], datetime, datetime]:
+    """Project a persistence dataclass into a ``tcg_app_data`` table row.
+
+    Returns ``(id, type, category, locked, payload, created_at, updated_at)``.
+    ``payload`` is the full document MINUS the two timestamp fields (those
+    live in the dedicated ``timestamptz`` columns, since JSON has no
+    datetime type); it remains the source of truth for all other content.
+    The scalar columns are indexable projections used by SQL filters:
+    ``category`` is ``None`` for an active indicator and ``locked`` is
+    ``None`` for a basket (no such column).
+    """
+    payload = to_json_doc(doc)
+    for ts in _TIMESTAMP_FIELDS:
+        payload.pop(ts, None)
+    return (
+        doc.id,
+        doc.type,
+        _category_projection(doc),
+        _locked_projection(doc),
+        payload,
+        doc.created_at,
+        doc.updated_at,
+    )
+
+
+def from_pg_row(row: dict[str, Any]) -> PersistenceDoc:
+    """Reconstruct a persistence dataclass from a ``tcg_app_data`` row.
+
+    The ``payload`` JSONB is authoritative for content; the ``created_at``
+    / ``updated_at`` columns supply the timestamps (stripped from the
+    payload on write). The other scalar projection columns (``category`` /
+    ``locked`` / ``id`` / ``type``) are deliberately NOT used to populate
+    content — they exist only for SQL filtering. psycopg returns JSONB as
+    a parsed ``dict`` and ``timestamptz`` as a tz-aware ``datetime``.
+    """
+    payload = row["payload"]
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"persistence: row id={row.get('id')!r} has a non-dict payload"
+        )
+    # Re-inject the authoritative timestamp columns so the full document
+    # is reconstructed. Copy so we don't mutate the caller's row dict.
+    full = dict(payload)
+    full["created_at"] = row["created_at"]
+    full["updated_at"] = row["updated_at"]
+    return from_json_doc(full)
+
+
 __all__ = [
     "Category",
     "DocType",
+    "DELETED_CATEGORY",
     "IndicatorDoc",
     "SignalDoc",
     "PortfolioDoc",
     "BasketDoc",
     "PersistenceDoc",
-    "to_mongo_dict",
-    "from_mongo_dict",
+    "to_json_doc",
+    "from_json_doc",
+    "to_pg_row",
+    "from_pg_row",
 ]

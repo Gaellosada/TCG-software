@@ -3,13 +3,17 @@
 // Tests for the option date range integration in the Indicators page:
 //   - hasOptionStreamRef utility
 //   - OptionDateRangeControl visibility toggle in ParamsPanel
-//   - localStorage persistence of optionDateRange
-//   - computePresetRange with anchorEnd
+//   - localStorage persistence of optionDateRange (now {start, end})
+//   - computeDefaultRange
+//
+// PR #58 removed the preset buttons (3M/6M/1Y/2Y) and the ">1yr" warning from
+// the shared OptionDateRangeControl; the value shape is now {start, end} and
+// the default is a 1-year window ending today.
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { hasOptionStreamRef } from './IndicatorsPage';
-import { computePresetRange, DEFAULT_PRESET, PRESETS } from '../../components/OptionDateRangeControl';
+import { computeDefaultRange } from '../../components/OptionDateRangeControl';
 import ParamsPanel from './ParamsPanel';
 import { OPTION_DATE_RANGE_KEY } from './storageKeys';
 
@@ -81,47 +85,18 @@ describe('hasOptionStreamRef', () => {
 });
 
 // ---------------------------------------------------------------------------
-// computePresetRange — anchorEnd tests
+// computeDefaultRange
 // ---------------------------------------------------------------------------
-describe('computePresetRange — anchorEnd', () => {
+describe('computeDefaultRange', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2025, 6, 15)); // July 15 2025
   });
 
-  it('uses anchorEnd when provided', () => {
-    const { start, end } = computePresetRange('6m', '2024-12-31');
-    expect(end).toBe('2024-12-31');
-    expect(start).toBe('2024-06-30'); // 6 months before Dec 31
-  });
-
-  it('uses today when anchorEnd is omitted', () => {
-    const { start, end } = computePresetRange('6m');
+  it('returns a 1-year window ending today', () => {
+    const { start, end } = computeDefaultRange();
     expect(end).toBe('2025-07-15');
-    expect(start).toBe('2025-01-15');
-  });
-
-  it('3m preset anchored to a specific date', () => {
-    const { start, end } = computePresetRange('3m', '2025-03-15');
-    expect(end).toBe('2025-03-15');
-    expect(start).toBe('2024-12-15');
-  });
-
-  it('1y preset anchored to a specific date', () => {
-    const { start, end } = computePresetRange('1y', '2025-06-01');
-    expect(end).toBe('2025-06-01');
-    expect(start).toBe('2024-06-01');
-  });
-
-  it('clamps day for short months with anchorEnd', () => {
-    // Aug 31 - 6 months = Feb 28 (non-leap 2025)
-    const { start, end } = computePresetRange('6m', '2025-08-31');
-    expect(end).toBe('2025-08-31');
-    expect(start).toBe('2025-02-28');
-  });
-
-  it('throws for invalid anchorEnd', () => {
-    expect(() => computePresetRange('6m', 'not-a-date')).toThrow('Invalid anchorEnd date');
+    expect(start).toBe('2024-07-15');
   });
 });
 
@@ -168,71 +143,42 @@ describe('<ParamsPanel> — option date range control', () => {
   });
 
   it('renders date range control when showDateRange is true and optionDateRange is set', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2025, 6, 1)); // July 1 2025
     render(<ParamsPanel {...baseProps({
       showDateRange: true,
-      optionDateRange: { start: '2025-01-01', end: '2025-07-01', preset: '6m' },
+      optionDateRange: { start: '2024-07-01', end: '2025-07-01' },
     })} />);
     expect(screen.getByTestId('option-date-range-row')).toBeTruthy();
     expect(screen.getByTestId('option-date-range-control')).toBeTruthy();
     expect(screen.getByText('Option date range')).toBeTruthy();
   });
 
-  it('renders preset buttons inside the date range control', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2025, 6, 1));
+  it('does NOT render preset buttons inside the date range control', () => {
     render(<ParamsPanel {...baseProps({
       showDateRange: true,
-      optionDateRange: { start: '2025-01-01', end: '2025-07-01', preset: '6m' },
+      optionDateRange: { start: '2024-07-01', end: '2025-07-01' },
     })} />);
-    expect(screen.getByText('3M')).toBeTruthy();
-    expect(screen.getByText('6M')).toBeTruthy();
-    expect(screen.getByText('1Y')).toBeTruthy();
-    expect(screen.getByText('2Y')).toBeTruthy();
+    expect(screen.queryByText('3M')).toBeNull();
+    expect(screen.queryByText('6M')).toBeNull();
+    expect(screen.queryByText('1Y')).toBeNull();
+    expect(screen.queryByText('2Y')).toBeNull();
   });
 
-  it('calls onOptionDateRangeChange when a preset button is clicked', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2025, 6, 1));
+  it('calls onOptionDateRangeChange with {start, end} when start date is changed', () => {
     const onChange = vi.fn();
     render(<ParamsPanel {...baseProps({
       showDateRange: true,
-      optionDateRange: { start: '2025-01-01', end: '2025-07-01', preset: '6m' },
-      onOptionDateRangeChange: onChange,
-    })} />);
-    fireEvent.click(screen.getByText('3M'));
-    expect(onChange).toHaveBeenCalledOnce();
-    const arg = onChange.mock.calls[0][0];
-    expect(arg.preset).toBe('3m');
-    expect(arg.end).toBe('2025-07-01');
-    expect(arg.start).toBe('2025-04-01');
-  });
-
-  it('calls onOptionDateRangeChange with preset=null when start date is manually changed', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2025, 6, 1));
-    const onChange = vi.fn();
-    render(<ParamsPanel {...baseProps({
-      showDateRange: true,
-      optionDateRange: { start: '2025-01-01', end: '2025-07-01', preset: '6m' },
+      optionDateRange: { start: '2024-07-01', end: '2025-07-01' },
       onOptionDateRangeChange: onChange,
     })} />);
     const startInput = screen.getByLabelText('Start date');
     fireEvent.change(startInput, { target: { value: '2024-06-01' } });
-    expect(onChange).toHaveBeenCalledWith({
-      start: '2024-06-01',
-      end: '2025-07-01',
-      preset: null,
-    });
+    expect(onChange).toHaveBeenCalledWith({ start: '2024-06-01', end: '2025-07-01' });
   });
 
   it('disables the control when running is true', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2025, 6, 1));
     render(<ParamsPanel {...baseProps({
       showDateRange: true,
-      optionDateRange: { start: '2025-01-01', end: '2025-07-01', preset: '6m' },
+      optionDateRange: { start: '2024-07-01', end: '2025-07-01' },
       running: true,
     })} />);
     const fieldset = screen.getByTestId('option-date-range-control');
@@ -246,18 +192,5 @@ describe('<ParamsPanel> — option date range control', () => {
 describe('OPTION_DATE_RANGE_KEY', () => {
   it('follows the tcg.indicators namespace', () => {
     expect(OPTION_DATE_RANGE_KEY).toBe('tcg.indicators.optionDateRange');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Exports from OptionDateRangeControl
-// ---------------------------------------------------------------------------
-describe('OptionDateRangeControl exports', () => {
-  it('DEFAULT_PRESET is 6m', () => {
-    expect(DEFAULT_PRESET).toBe('6m');
-  });
-
-  it('PRESETS is ordered correctly', () => {
-    expect(PRESETS).toEqual(['3m', '6m', '1y', '2y']);
   });
 });

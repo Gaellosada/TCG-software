@@ -4,6 +4,7 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import OptionStreamForm, {
   buildDefaultOptionStream,
   validateOptionStream,
+  MID_TOOLTIP,
 } from './OptionStreamForm';
 
 afterEach(cleanup);
@@ -42,10 +43,42 @@ describe('<OptionStreamForm>', () => {
     expect(screen.getByLabelText('Cycle')).toBeTruthy();
     expect(screen.getByLabelText('Maturity rule')).toBeTruthy();
     expect(screen.getByLabelText('Selection criterion')).toBeTruthy();
-    expect(screen.getByLabelText('Stream')).toBeTruthy();
+    expect(screen.getByLabelText('Series')).toBeTruthy();
     // type radios
     expect(screen.getByRole('radio', { name: 'Call' })).toBeTruthy();
     expect(screen.getByRole('radio', { name: 'Put' })).toBeTruthy();
+  });
+
+  // The Series picker is a plainly-labelled control (no longer hidden behind
+  // an "Advanced" disclosure), defaulting to `mid`. The legacy disclosure
+  // wrapper is gone entirely.
+  it('presents Series as a plainly-labelled control defaulting to mid', () => {
+    renderForm();
+    // No <details> disclosure remains.
+    expect(screen.queryByTestId('stream-advanced')).toBeNull();
+    const seriesSelect = screen.getByLabelText('Series');
+    expect(seriesSelect).toBeTruthy();
+    expect(seriesSelect.tagName.toLowerCase()).toBe('select');
+    expect(seriesSelect.value).toBe('mid');
+  });
+
+  it('labels mid as "Mid price" and iv as "Implied volatility" in the Series options', () => {
+    renderForm();
+    const seriesSelect = screen.getByLabelText('Series');
+    const labels = Array.from(seriesSelect.querySelectorAll('option')).map((o) => o.textContent);
+    expect(labels).toContain('Mid price');
+    expect(labels).toContain('Implied volatility');
+    expect(labels).toContain('Open interest');
+  });
+
+  it('exposes the exact Mid bid-ask tooltip on the Series control', () => {
+    renderForm();
+    const tip = screen.getByTestId('mid-tooltip');
+    const expected = 'Mid = (bid + ask) / 2 — the quote midpoint, NOT the daily high/low or last/close.';
+    expect(tip.getAttribute('title')).toBe(expected);
+    expect(tip.getAttribute('aria-label')).toBe(expected);
+    // Exported constant must match the locked copy exactly.
+    expect(MID_TOOLTIP).toBe(expected);
   });
 
   it('emits onChange with the correctly-shaped object on root change', () => {
@@ -61,9 +94,9 @@ describe('<OptionStreamForm>', () => {
     expect(next.stream).toBe('mid');
   });
 
-  it('emits onChange with full object shape on stream change', () => {
+  it('emits onChange with full object shape on series change', () => {
     const { onChange } = renderForm();
-    fireEvent.change(screen.getByLabelText('Stream'), { target: { value: 'iv' } });
+    fireEvent.change(screen.getByLabelText('Series'), { target: { value: 'iv' } });
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange.mock.calls[0][0]).toMatchObject({
       type: 'option_stream',
@@ -103,6 +136,48 @@ describe('<OptionStreamForm>', () => {
     expect(onChange.mock.calls[0][0].maturity).toEqual({ kind: 'plus_n_days', n: 30 });
   });
 
+  it('renders the Roll offset input defaulting to 0', () => {
+    renderForm();
+    const input = screen.getByLabelText('Roll offset days');
+    expect(input).toBeTruthy();
+    expect(input.value).toBe('0');
+  });
+
+  it('emits roll_offset on change, clamped to 0..30', () => {
+    const { onChange } = renderForm();
+    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '5' } });
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange.mock.calls[0][0]).toMatchObject({ roll_offset: 5 });
+    onChange.mockClear();
+    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '99' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toBe(30);
+  });
+
+  // Clamp every malformed / out-of-range input into the integer range 0..30.
+  // The setRollOffset handler does parseInt → NaN?0 → clamp(0,30). Each case
+  // must emit an integer roll_offset (never a string / float / negative).
+  // Note: the input defaults to 0, so a change event whose target value is
+  // '0' is a no-op for the controlled input and fires no onChange — it would
+  // test nothing about clamping, so it is intentionally excluded. The cases
+  // below all change the rendered string value, so onChange always fires.
+  it.each([
+    ['empty string', '', 0],
+    ['negative', '-5', 0],
+    ['non-numeric', 'abc', 0],
+    ['above max', '99', 30],
+    ['exactly max', '30', 30],
+    ['in range', '7', 7],
+  ])('clamps Roll offset input (%s) into 0..30 as an int', (_label, raw, expected) => {
+    const { onChange } = renderForm();
+    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: raw } });
+    expect(onChange).toHaveBeenCalledOnce();
+    const emitted = onChange.mock.calls[0][0].roll_offset;
+    expect(emitted).toBe(expected);
+    // Emitted as a real integer (parseInt result), not a string or float.
+    expect(typeof emitted).toBe('number');
+    expect(Number.isInteger(emitted)).toBe(true);
+  });
+
   it('respects allowedSelectionKinds — only by_moneyness rendered', () => {
     renderForm({ allowedSelectionKinds: ['by_moneyness'] });
     const sel = screen.getByLabelText('Selection criterion');
@@ -121,7 +196,7 @@ describe('<OptionStreamForm>', () => {
 
   it('respects allowedStreams', () => {
     renderForm({ allowedStreams: ['iv', 'mid'] });
-    const sel = screen.getByLabelText('Stream');
+    const sel = screen.getByLabelText('Series');
     const optionValues = Array.from(sel.querySelectorAll('option')).map((o) => o.value);
     expect(optionValues).toEqual(['iv', 'mid']);
   });
@@ -187,6 +262,57 @@ describe('<OptionStreamForm>', () => {
   });
 });
 
+describe('<OptionStreamForm> — Adjustment selector (MID only)', () => {
+  it('renders the Adjustment selector when Series is mid (the default)', () => {
+    renderForm();
+    const adj = screen.getByTestId('option-stream-adjustment');
+    expect(adj).toBeTruthy();
+    // none / ratio / difference — mirrors the futures continuous picker.
+    const optionValues = Array.from(adj.querySelectorAll('option')).map((o) => o.value);
+    expect(optionValues).toEqual(['none', 'ratio', 'difference']);
+    // Default value is "none".
+    expect(adj.value).toBe('none');
+  });
+
+  it('hides the Adjustment selector when Series is not mid', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.stream = 'iv';
+    renderForm({ value });
+    expect(screen.queryByTestId('option-stream-adjustment')).toBeNull();
+  });
+
+  it('emits the chosen adjustment when Series is mid', () => {
+    const { onChange } = renderForm();
+    fireEvent.change(screen.getByTestId('option-stream-adjustment'), {
+      target: { value: 'ratio' },
+    });
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange.mock.calls[0][0].adjustment).toBe('ratio');
+    expect(onChange.mock.calls[0][0].stream).toBe('mid');
+  });
+
+  it('resets adjustment to "none" when Series switches away from mid', () => {
+    // Start on mid with a non-default adjustment, then switch to iv.
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.adjustment = 'difference';
+    const { onChange } = renderForm({ value });
+    fireEvent.change(screen.getByLabelText('Series'), { target: { value: 'iv' } });
+    expect(onChange).toHaveBeenCalledOnce();
+    const next = onChange.mock.calls[0][0];
+    expect(next.stream).toBe('iv');
+    expect(next.adjustment).toBe('none');
+  });
+
+  it('keeps the current adjustment when staying on mid', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.adjustment = 'ratio';
+    renderForm({ value });
+    // Selecting mid again (the current value) must not be coerced; the
+    // rendered control still reflects ratio.
+    expect(screen.getByTestId('option-stream-adjustment').value).toBe('ratio');
+  });
+});
+
 describe('buildDefaultOptionStream', () => {
   it('builds a fully-shaped option_stream object', () => {
     const v = buildDefaultOptionStream({ availableRoots: ROOTS });
@@ -202,6 +328,7 @@ describe('buildDefaultOptionStream', () => {
     expect(v.maturity.kind).toBe('next_third_friday');
     expect(v.selection.kind).toBe('by_moneyness');
     expect(v.stream).toBe('mid');
+    expect(v.adjustment).toBe('none');
   });
 
   it("falls back to allowedCycles[0] when 'M' is not allowed", () => {

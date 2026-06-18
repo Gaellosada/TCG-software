@@ -10,8 +10,8 @@ from tcg.types.persistence import (
     BasketDoc,
     Category,
     DocType,
-    from_mongo_dict,
-    to_mongo_dict,
+    from_json_doc,
+    to_json_doc,
 )
 
 
@@ -74,8 +74,8 @@ def test_basket_doctype_value() -> None:
 
 def test_basket_doc_polymorphic_spot_legs_round_trip() -> None:
     doc = _make_basket()
-    d = to_mongo_dict(doc)
-    assert d["_id"] == "b1"
+    d = to_json_doc(doc)
+    assert d["id"] == "b1"
     assert d["type"] == "basket"
     assert d["asset_class"] == "equity"
     assert isinstance(d["legs"], list)
@@ -83,7 +83,7 @@ def test_basket_doc_polymorphic_spot_legs_round_trip() -> None:
     assert d["legs"][0]["instrument"]["type"] == "spot"
     assert d["legs"][0]["instrument"]["instrument_id"] == "SPY"
     assert d["legs"][0]["weight"] == 0.6
-    reconstructed = from_mongo_dict(d)
+    reconstructed = from_json_doc(d)
     assert reconstructed == doc
 
 
@@ -95,30 +95,30 @@ def test_basket_doc_continuous_legs_round_trip() -> None:
             _continuous_leg("FUT_ES", weight=0.5, adjustment="none"),
         ),
     )
-    d = to_mongo_dict(doc)
-    reconstructed = from_mongo_dict(d)
+    d = to_json_doc(doc)
+    reconstructed = from_json_doc(d)
     assert reconstructed == doc
 
 
 def test_basket_doc_empty_legs_round_trip() -> None:
     doc = _make_basket(legs=())
-    d = to_mongo_dict(doc)
+    d = to_json_doc(doc)
     assert d["legs"] == []
-    reconstructed = from_mongo_dict(d)
+    reconstructed = from_json_doc(d)
     assert isinstance(reconstructed, BasketDoc)
     assert reconstructed.legs == ()
 
 
 def test_basket_doc_category_serialised_as_string() -> None:
     doc = _make_basket(category=Category.PROD)
-    d = to_mongo_dict(doc)
+    d = to_json_doc(doc)
     assert d["category"] == "PROD"
     assert isinstance(d["category"], str)
 
 
 def test_basket_doc_asset_class_present_on_mongo_dict() -> None:
     doc = _make_basket(asset_class="future")
-    d = to_mongo_dict(doc)
+    d = to_json_doc(doc)
     assert d["asset_class"] == "future"
 
 
@@ -126,7 +126,7 @@ def test_basket_doc_asset_class_defaults_when_absent_in_stored_doc() -> None:
     """Forward-compat: a doc missing ``asset_class`` (predates iter 3)
     reconstructs with the default ``"equity"`` rather than raising."""
     d = {
-        "_id": "legacy",
+        "id": "legacy",
         "type": "basket",
         "name": "Legacy",
         "category": "RESEARCH",
@@ -134,19 +134,19 @@ def test_basket_doc_asset_class_defaults_when_absent_in_stored_doc() -> None:
         "updated_at": NOW,
         "legs": [],
     }
-    reconstructed = from_mongo_dict(d)
+    reconstructed = from_json_doc(d)
     assert isinstance(reconstructed, BasketDoc)
     assert reconstructed.asset_class == "equity"
 
 
-def test_from_mongo_dict_rejects_unknown_type() -> None:
+def test_from_json_doc_rejects_unknown_type() -> None:
     with pytest.raises(ValueError, match="unknown or missing"):
-        from_mongo_dict({"type": "unknown_type", "_id": "x"})
+        from_json_doc({"type": "unknown_type", "_id": "x"})
 
 
-def test_from_mongo_dict_missing_id_raises() -> None:
-    with pytest.raises(ValueError, match="missing '_id'"):
-        from_mongo_dict(
+def test_from_json_doc_missing_id_raises() -> None:
+    with pytest.raises(ValueError, match="missing 'id'"):
+        from_json_doc(
             {
                 "type": "basket",
                 "name": "X",
@@ -164,6 +164,6 @@ def test_basket_doc_negative_weight_round_trip() -> None:
             _spot_leg("QQQ", weight=-0.5),
         )
     )
-    d = to_mongo_dict(doc)
-    reconstructed = from_mongo_dict(d)
+    d = to_json_doc(doc)
+    reconstructed = from_json_doc(d)
     assert reconstructed == doc

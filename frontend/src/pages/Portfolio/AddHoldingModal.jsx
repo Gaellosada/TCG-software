@@ -24,6 +24,11 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
           maturity: instrument.maturity,
           selection: instrument.selection,
           stream: instrument.stream,
+          // Roll fields from OptionStreamForm — adjustment (MID-stream
+          // back-adjustment) + roll_offset (roll N days earlier). Mirror the
+          // continuous leg below. BE defaults none/0 if absent.
+          adjustment: instrument.adjustment,
+          roll_offset: instrument.roll_offset,
           weight: 100,
         });
       } else if (instrument.type === 'continuous') {

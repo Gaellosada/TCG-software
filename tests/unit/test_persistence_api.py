@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-import pymongo.errors
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,6 +29,7 @@ from tcg.core.app import create_app
 from tcg.persistence.repository import (
     ConcurrentUpdateError,
     DocumentTooLargeError,
+    DuplicateIdError,
 )
 from tcg.types.persistence import (
     BasketDoc,
@@ -53,23 +54,27 @@ class _FakeRepo:
 
     def __init__(self) -> None:
         self._store: dict[tuple[str, str], Any] = {}
+        # Soft-deleted keys (the uniform DELETED/hidden state). Mirrors the
+        # real repo's ``category='DELETED'`` projection column: the doc still
+        # exists (get_by_id can return it) but is hidden from every list.
+        self._deleted: set[tuple[str, str]] = set()
         self.raise_duplicate_on_create: bool = False
         self.raise_too_large_on_create: bool = False
         self.raise_too_large_on_update: bool = False
         self.raise_concurrent_on_update: bool = False
-        self.raise_generic_pymongo_on_create: Exception | None = None
-        self.raise_generic_pymongo_on_update: Exception | None = None
+        self.raise_generic_db_on_create: Exception | None = None
+        self.raise_generic_db_on_update: Exception | None = None
 
     async def create(self, doc: Any) -> Any:
-        if self.raise_generic_pymongo_on_create is not None:
-            raise self.raise_generic_pymongo_on_create
+        if self.raise_generic_db_on_create is not None:
+            raise self.raise_generic_db_on_create
         if self.raise_duplicate_on_create:
-            raise pymongo.errors.DuplicateKeyError("duplicate _id")
+            raise DuplicateIdError("duplicate id")
         if self.raise_too_large_on_create:
-            raise DocumentTooLargeError("doc exceeds 16 MB")
+            raise DocumentTooLargeError("doc too large")
         key = (doc.type, doc.id)
         if key in self._store:
-            raise pymongo.errors.DuplicateKeyError(f"duplicate {key}")
+            raise DuplicateIdError(f"duplicate {key}")
         self._store[key] = doc
         return doc
 
@@ -77,26 +82,34 @@ class _FakeRepo:
         return self._store.get((doc_type, doc_id))
 
     async def list_by_type(self, doc_type: str) -> list:
+        # Active = not soft-deleted (and, defensively, not the indicator
+        # ``deleted`` flag) — uniform DELETED/hidden state.
         return [
             d
-            for (t, _), d in self._store.items()
-            if t == doc_type and not getattr(d, "deleted", False)
+            for (t, i), d in self._store.items()
+            if t == doc_type
+            and (t, i) not in self._deleted
+            and not getattr(d, "deleted", False)
         ]
 
     async def list_by_type_and_category(
         self, doc_type: str, category: Category
     ) -> list:
+        # Soft-deleted docs are hidden from EVERY category (including
+        # ARCHIVE) — they are NOT moved to a visible category on delete.
         return [
             d
-            for (t, _), d in self._store.items()
-            if t == doc_type and getattr(d, "category", None) == category
+            for (t, i), d in self._store.items()
+            if t == doc_type
+            and (t, i) not in self._deleted
+            and getattr(d, "category", None) == category
         ]
 
     async def update(
         self, doc: Any, *, expected_updated_at: datetime | None = None
     ) -> Any:
-        if self.raise_generic_pymongo_on_update is not None:
-            raise self.raise_generic_pymongo_on_update
+        if self.raise_generic_db_on_update is not None:
+            raise self.raise_generic_db_on_update
         if self.raise_too_large_on_update:
             raise DocumentTooLargeError("doc exceeds 16 MB")
         if self.raise_concurrent_on_update:
@@ -108,17 +121,18 @@ class _FakeRepo:
         return doc
 
     async def archive(self, doc_type: str, doc_id: str) -> None:
+        # Uniform soft-delete (matches the real repo): mark the doc as
+        # DELETED/hidden for ALL kinds — do NOT move it to a visible ARCHIVE
+        # category. Indicators additionally flip their derived ``deleted``
+        # flag so ``IndicatorOut.deleted`` reads True.
         key = (doc_type, doc_id)
         if key not in self._store:
             raise KeyError(f"no {doc_type} with id={doc_id!r}")
-        existing = self._store[key]
-        # Crude soft-delete — sufficient for the router tests.
-        from dataclasses import replace as _replace
-
+        self._deleted.add(key)
         if doc_type == "indicator":
-            self._store[key] = _replace(existing, deleted=True)
-        else:
-            self._store[key] = _replace(existing, category=Category.ARCHIVE)
+            from dataclasses import replace as _replace
+
+            self._store[key] = _replace(self._store[key], deleted=True)
 
 
 @pytest.fixture
@@ -135,6 +149,36 @@ def client(fake_repo: _FakeRepo) -> TestClient:
 
 def _now_dict() -> dict:
     return {}  # endpoints don't take timestamps
+
+
+def test_saved_basket_option_ref_accepts_adjustment_and_roll_offset() -> None:
+    """The saved-basket option_stream leg model (``_OptionStreamRefLocal``)
+    must accept the additive ``adjustment``/``roll_offset`` (mirrors the
+    continuous local model + the real ``OptionStreamRef``).  Without them,
+    ``extra='forbid'`` 422-rejects a saved basket whose option leg carries
+    these fields — even though the Data page / inline baskets honor them."""
+    from pydantic import ValidationError
+
+    from tcg.core.api.persistence import _OptionStreamRefLocal
+
+    common = dict(
+        type="option_stream",
+        collection="OPT_SP_500",
+        option_type="C",
+        maturity={"kind": "fixed", "date": "2024-06-21"},
+        selection={"kind": "by_strike", "strike": 4500.0},
+        stream="mid",
+    )
+    m = _OptionStreamRefLocal(**common, adjustment="ratio", roll_offset=5)
+    assert m.adjustment == "ratio"
+    assert m.roll_offset == 5
+    # Absent → defaults (additive, contract-preserving).
+    d = _OptionStreamRefLocal(**common)
+    assert d.adjustment == "none"
+    assert d.roll_offset == 0
+    # roll_offset bounded 0..30, mirroring OptionStreamRef.
+    with pytest.raises(ValidationError):
+        _OptionStreamRefLocal(**common, roll_offset=40)
 
 
 # ---------------------------------------------------------------------------
@@ -458,19 +502,19 @@ def test_concurrent_update_returns_409(
 
 
 # ---------------------------------------------------------------------------
-# NF2 — broader PyMongo errors → 503 (catch-all handler)
+# NF2 — broader psycopg errors → 503 (catch-all handler)
 # ---------------------------------------------------------------------------
 
 
-def test_generic_pymongo_error_on_create_returns_503(
+def test_generic_db_error_on_create_returns_503(
     client: TestClient, fake_repo: _FakeRepo
 ) -> None:
-    """A generic ``OperationFailure`` (e.g. role denial, replica-set
-    election, generic write error) must surface as 503, NOT 500.
-    Routes catch DuplicateKeyError / DocumentTooLarge specifically;
-    everything else falls through to the app-level handler."""
-    fake_repo.raise_generic_pymongo_on_create = pymongo.errors.OperationFailure(
-        "not authorized on tcg-app-data to execute command insert"
+    """A generic psycopg ``OperationalError`` (e.g. connection drop, role
+    denial, server-side failure) must surface as 503, NOT 500. Routes catch
+    DuplicateIdError / DocumentTooLarge specifically; everything else falls
+    through to the app-level handler."""
+    fake_repo.raise_generic_db_on_create = psycopg.OperationalError(
+        "FATAL: permission denied for schema tcg_app_data"
     )
     r = client.post(
         "/api/persistence/signals",
@@ -479,20 +523,18 @@ def test_generic_pymongo_error_on_create_returns_503(
     assert r.status_code == 503, r.text
     body = r.json()
     assert body["error_type"] == "persistence_unavailable"
-    # The handler must sanitize — do NOT leak the underlying Mongo
-    # error message (which could carry topology / credential hints).
-    assert "not authorized" not in body["message"].lower()
-    assert "tcg-app-data" not in body["message"].lower()
+    # The handler must sanitize — do NOT leak the underlying DB error
+    # message (which could carry topology / credential hints).
+    assert "permission denied" not in body["message"].lower()
+    assert "tcg_app_data" not in body["message"].lower()
 
 
-def test_server_selection_timeout_on_create_returns_503(
+def test_connection_failure_on_create_returns_503(
     client: TestClient, fake_repo: _FakeRepo
 ) -> None:
-    """Server-selection / network timeouts also map to 503."""
-    fake_repo.raise_generic_pymongo_on_create = (
-        pymongo.errors.ServerSelectionTimeoutError(
-            "127.0.0.1:27017: connection refused"
-        )
+    """Connection / network failures also map to 503."""
+    fake_repo.raise_generic_db_on_create = psycopg.OperationalError(
+        "connection failed: 127.0.0.1:5432: Connection refused"
     )
     r = client.post(
         "/api/persistence/portfolios",
@@ -505,7 +547,7 @@ def test_server_selection_timeout_on_create_returns_503(
     assert "127.0.0.1" not in body["message"]
 
 
-def test_generic_pymongo_error_on_update_returns_503(
+def test_generic_db_error_on_update_returns_503(
     client: TestClient, fake_repo: _FakeRepo
 ) -> None:
     """The update path is similarly covered by the catch-all handler."""
@@ -514,8 +556,8 @@ def test_generic_pymongo_error_on_update_returns_503(
         json={"id": "s-up", "name": "n", "category": "DEV"},
     )
     assert r0.status_code == 201
-    fake_repo.raise_generic_pymongo_on_update = pymongo.errors.OperationFailure(
-        "transient write error"
+    fake_repo.raise_generic_db_on_update = psycopg.OperationalError(
+        "server closed the connection unexpectedly"
     )
     r = client.put(
         "/api/persistence/signals/s-up",
@@ -1171,3 +1213,96 @@ def test_basket_leg_nan_weight_rejected_at_model_level() -> None:
             },
             weight=float("nan"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Uniform soft-delete contract (creds-free, via the in-memory fake + router).
+#
+# The NEW model: DELETE → the doc is HIDDEN from EVERY list for ALL kinds
+# (indicators via the active filter; signals/portfolios/baskets are no longer
+# moved to a visible ARCHIVE category). ARCHIVE remains an ordinary VISIBLE
+# user category. These assert the contract WITHOUT a live DB so it is verified
+# even when the real-PG integration tier is skipped (no APP_DB creds).
+# ---------------------------------------------------------------------------
+
+
+def test_delete_signal_hides_it_from_every_category_list(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/signals",
+        json={"id": "sig-del", "name": "S", "category": "DEV"},
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/signals/sig-del").status_code == 204
+    for cat in ("RESEARCH", "DEV", "PROD", "ARCHIVE"):
+        lst = client.get(f"/api/persistence/signals?category={cat}")
+        assert lst.status_code == 200, lst.text
+        assert all(d["id"] != "sig-del" for d in lst.json()), (
+            f"deleted signal still visible in category={cat}"
+        )
+
+
+def test_delete_portfolio_hides_it_from_every_category_list(
+    client: TestClient,
+) -> None:
+    r = client.post(
+        "/api/persistence/portfolios",
+        json={"id": "ptf-del", "name": "P", "category": "RESEARCH"},
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/portfolios/ptf-del").status_code == 204
+    for cat in ("RESEARCH", "DEV", "PROD", "ARCHIVE"):
+        lst = client.get(f"/api/persistence/portfolios?category={cat}")
+        assert lst.status_code == 200, lst.text
+        assert all(d["id"] != "ptf-del" for d in lst.json())
+
+
+def test_delete_basket_hides_it_from_every_category_list(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/baskets",
+        json={
+            "id": "bkt-del",
+            "name": "B",
+            "category": "RESEARCH",
+            "asset_class": "equity",
+            "legs": [],
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/baskets/bkt-del").status_code == 204
+    for cat in ("RESEARCH", "DEV", "PROD", "ARCHIVE"):
+        lst = client.get(f"/api/persistence/baskets?category={cat}")
+        assert lst.status_code == 200, lst.text
+        assert all(d["id"] != "bkt-del" for d in lst.json())
+
+
+def test_delete_indicator_hides_it_from_active_list(client: TestClient) -> None:
+    r = client.post(
+        "/api/persistence/indicators",
+        json={"id": "ind-del", "name": "I", "definition": {}},
+    )
+    assert r.status_code == 201, r.text
+    assert client.delete("/api/persistence/indicators/ind-del").status_code == 204
+    lst = client.get("/api/persistence/indicators")
+    assert lst.status_code == 200, lst.text
+    assert all(d["id"] != "ind-del" for d in lst.json())
+
+
+def test_archive_category_stays_visible_after_assignment(client: TestClient) -> None:
+    """ARCHIVE is an ordinary VISIBLE category (NOT the soft-delete target):
+    a signal explicitly PUT to category=ARCHIVE still appears in the ARCHIVE
+    list — only DELETE hides a doc."""
+    r = client.post(
+        "/api/persistence/signals",
+        json={"id": "sig-arch", "name": "S", "category": "DEV"},
+    )
+    assert r.status_code == 201, r.text
+    upd = client.put(
+        "/api/persistence/signals/sig-arch",
+        json={"name": "S", "category": "ARCHIVE"},
+    )
+    assert upd.status_code == 200, upd.text
+    lst = client.get("/api/persistence/signals?category=ARCHIVE")
+    assert lst.status_code == 200, lst.text
+    assert any(d["id"] == "sig-arch" for d in lst.json()), (
+        "ARCHIVE must remain a visible category"
+    )

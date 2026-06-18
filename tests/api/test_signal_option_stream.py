@@ -158,6 +158,9 @@ def mock_app(monkeypatch):
     app.add_exception_handler(TCGError, tcg_error_handler)
     app.include_router(signals_router)
     app.state.market_data = svc
+    # app-data repo is resolved by get_write_repository but never
+    # invoked here (no signal legs / signal eval is patched).
+    app.state.app_db_repo = object()
     return app
 
 
@@ -239,3 +242,130 @@ class TestSignalOptionStream:
         assert inst["stream"] == "mid"
         assert "maturity" in inst
         assert "selection" in inst
+        # adjustment / roll_offset emitted (default none/0 when absent on input)
+        assert inst["adjustment"] == "none"
+        assert inst["roll_offset"] == 0
+
+
+# ── adjustment / roll_offset threading (the MAJOR review finding) ────────
+
+
+def _opt_input(adjustment=None, roll_offset=None):
+    inst = {
+        "type": "option_stream",
+        "collection": "OPT_SP_500",
+        "option_type": "C",
+        "cycle": None,
+        "maturity": {"kind": "next_third_friday", "offset_months": 0},
+        "selection": {
+            "kind": "by_delta",
+            "target": 0.25,
+            "tolerance": 0.1,
+            "strict": False,
+        },
+        "stream": "mid",
+    }
+    if adjustment is not None:
+        inst["adjustment"] = adjustment
+    if roll_offset is not None:
+        inst["roll_offset"] = roll_offset
+    return {"id": "Y", "instrument": inst}
+
+
+@pytest.fixture
+def capture_app(monkeypatch):
+    """Like ``mock_app`` but the resolver records the kwargs it received
+    so the test can prove ``adjustment`` / ``roll_offset`` were threaded
+    all the way into ``resolve_option_stream`` (not just constructed)."""
+    captured: dict = {}
+
+    svc = MagicMock()
+    svc.get_prices = AsyncMock(return_value=_price_series())
+    svc.list_option_expirations_filtered = AsyncMock(return_value=AVAILABLE_EXPIRATIONS)
+
+    mock_wiring = (MagicMock(), MagicMock(), MagicMock(), MagicMock())
+    monkeypatch.setattr(
+        "tcg.core.api._options_wiring.build_stream_resolver_wiring",
+        lambda svc: mock_wiring,
+    )
+
+    async def recording_resolve(**kwargs):
+        captured.update(kwargs)
+        n = len(OPTION_VALUES)
+        # Encode adjustment in the returned level so a difference is
+        # observable end-to-end if a downstream test wants it.
+        bump = 0.0 if kwargs.get("adjustment") == "none" else 1.0
+        return (OPTION_VALUES.copy() + bump, list(OPTION_DIAGNOSTICS), [None] * n)
+
+    monkeypatch.setattr(
+        "tcg.engine.options.series.stream_resolver.resolve_option_stream",
+        recording_resolve,
+    )
+    monkeypatch.setattr(
+        "tcg.core.api._options_materialise._business_dates_in_range",
+        lambda start, end: OPTION_DATES_PY if start and end else None,
+    )
+
+    app = FastAPI()
+    app.add_exception_handler(TCGError, tcg_error_handler)
+    app.include_router(signals_router)
+    app.state.market_data = svc
+    app.state.app_db_repo = object()
+    return app, captured
+
+
+@pytest.fixture
+async def capture_client(capture_app):
+    app, captured = capture_app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac, captured
+
+
+class TestSignalOptionStreamRollFields:
+    async def _run(self, client, opt_input):
+        body = _simple_signal([opt_input], input_id="Y")
+        body["start"] = "2024-01-01"
+        body["end"] = "2024-03-31"
+        return await client.post("/api/signals/compute", json=body)
+
+    async def test_adjustment_threaded_into_resolver(self, capture_client):
+        client, captured = capture_client
+        resp = await self._run(client, _opt_input(adjustment="ratio"))
+        assert resp.status_code == 200, resp.text
+        assert captured["adjustment"] == "ratio"
+        assert captured["roll_offset"] == 0
+
+    async def test_roll_offset_threaded_into_resolver(self, capture_client):
+        client, captured = capture_client
+        resp = await self._run(client, _opt_input(roll_offset=5))
+        assert resp.status_code == 200, resp.text
+        assert captured["roll_offset"] == 5
+        assert captured["adjustment"] == "none"
+
+    async def test_defaults_when_absent(self, capture_client):
+        client, captured = capture_client
+        resp = await self._run(client, _opt_input())
+        assert resp.status_code == 200, resp.text
+        assert captured["adjustment"] == "none"
+        assert captured["roll_offset"] == 0
+
+    async def test_response_payload_round_trips_fields(self, capture_client):
+        """The option_stream instrument echoed in the response carries the
+        same adjustment / roll_offset the request supplied."""
+        client, _captured = capture_client
+        resp = await self._run(client, _opt_input(adjustment="ratio", roll_offset=3))
+        assert resp.status_code == 200, resp.text
+        inst = resp.json()["positions"][0]["instrument"]
+        assert inst["adjustment"] == "ratio"
+        assert inst["roll_offset"] == 3
+
+    async def test_roll_offset_out_of_range_rejected(self, capture_client):
+        client, _captured = capture_client
+        resp = await self._run(client, _opt_input(roll_offset=31))
+        assert resp.status_code in (400, 422), resp.text
+
+    async def test_negative_roll_offset_rejected(self, capture_client):
+        client, _captured = capture_client
+        resp = await self._run(client, _opt_input(roll_offset=-1))
+        assert resp.status_code in (400, 422), resp.text

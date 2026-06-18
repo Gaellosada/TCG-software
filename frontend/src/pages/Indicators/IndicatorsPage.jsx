@@ -4,7 +4,6 @@ import EditorPanel from './EditorPanel';
 import ParamsPanel from './ParamsPanel';
 import IndicatorChart from './IndicatorChart';
 import { resolveDefaultIndexInstrument, computeIndicator } from '../../api/indicators';
-import { getOptionRoots } from '../../api/options';
 import { parseIndicatorSpec, reconcileParams, reconcileSeriesMap } from './paramParser';
 import { DEFAULT_INDICATORS } from './defaultIndicators';
 // saveState no longer called — backend is primary store for custom indicators.
@@ -12,7 +11,7 @@ import { DEFAULT_INDICATORS } from './defaultIndicators';
 // eslint-disable-next-line no-unused-vars
 import { loadState, saveState } from './storage';
 import { AUTOSAVE_KEY, OPTION_DATE_RANGE_KEY } from './storageKeys';
-import { computePresetRange, DEFAULT_PRESET } from '../../components/OptionDateRangeControl';
+import { computeDefaultRange } from '../../components/OptionDateRangeControl';
 import { hydrateDefault, applyDefaultSeries } from './hydrateDefault';
 // eslint-disable-next-line no-unused-vars
 import { buildPersistablePayload, serializePersistablePayload } from './persistablePayload';
@@ -51,58 +50,23 @@ const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
     out[window-1:] = np.convolve(s, np.ones(window)/window, mode='valid')
     return out`;
 
-// Module-level cache of /api/options/roots so runIndicator doesn't re-fetch
-// on every Run click. Cleared on full page reload (no invalidation otherwise
-// — option roots' last_trade_date moves slowly enough that staleness within
-// a session is acceptable).
-let _optionRootsPromise = null;
-async function getOptionRootsCached() {
-  if (!_optionRootsPromise) {
-    _optionRootsPromise = getOptionRoots().then(
-      (resp) => Array.isArray(resp?.roots) ? resp.roots : [],
-    );
-  }
-  return _optionRootsPromise;
-}
-
 /**
  * Resolve the effective date range for an option_stream compute.
  *
- * When `optionDateRange.preset` is non-null, the range is anchored to the
- * root's `last_trade_date` (falling back to today if unknown) via
- * `computePresetRange(preset, anchorEnd)`. This reuses the same
- * day-clamping arithmetic the UI component uses, avoiding a mismatch
- * between the displayed dates and the dates sent to the backend.
+ * The date-range control now exposes a plain ``{ start, end }`` window (the
+ * preset buttons were removed in PR #58), so the user's explicit start/end is
+ * sent to the backend as-is. The option_stream materialiser walks business
+ * days across this range; spot/continuous resolvers ignore it.
  *
- * When `optionDateRange.preset` is null (custom dates), the user's explicit
- * `start` and `end` are used directly.
- *
- * Returns null when no option_stream refs are present in `seriesPayload`.
+ * Returns null when no option_stream refs are present in `seriesPayload`
+ * (so the caller omits start/end from the request entirely).
  */
-async function resolveOptionDateRange(seriesPayload, optionDateRange) {
-  const collections = new Set();
-  for (const ref of Object.values(seriesPayload || {})) {
-    if (ref && ref.type === 'option_stream' && ref.collection) {
-      collections.add(ref.collection);
-    }
-  }
-  if (collections.size === 0) return null;
-
-  if (optionDateRange.preset === null) {
-    // Custom dates — use as-is.
-    return { start: optionDateRange.start, end: optionDateRange.end };
-  }
-
-  // Preset mode: anchor to the root's last_trade_date using
-  // computePresetRange so day-clamping is consistent with the UI.
-  const roots = await getOptionRootsCached();
-  let earliest = null;
-  for (const coll of collections) {
-    const root = roots.find((r) => r.collection === coll);
-    const ltd = root?.last_trade_date ?? null;
-    if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
-  }
-  return computePresetRange(optionDateRange.preset, earliest || undefined);
+function resolveOptionDateRange(seriesPayload, optionDateRange) {
+  const hasOptionStream = Object.values(seriesPayload || {}).some(
+    (ref) => ref && ref.type === 'option_stream' && ref.collection,
+  );
+  if (!hasOptionStream) return null;
+  return { start: optionDateRange.start, end: optionDateRange.end };
 }
 
 /**
@@ -117,6 +81,11 @@ export function hasOptionStreamRef(indicator) {
 
 /**
  * Load persisted option date range from localStorage, or return a default.
+ *
+ * The stored shape is now ``{ start, end }``. A legacy value may also carry a
+ * ``preset`` key (from before PR #58 removed the preset buttons) — we simply
+ * read start/end and ignore ``preset``. Any corrupt / missing / non-string
+ * start|end falls back to the default 1-year window.
  */
 function loadOptionDateRange() {
   try {
@@ -124,26 +93,24 @@ function loadOptionDateRange() {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed.start === 'string' && typeof parsed.end === 'string') {
-        return {
-          start: parsed.start,
-          end: parsed.end,
-          preset: typeof parsed.preset === 'string' ? parsed.preset : null,
-        };
+        return { start: parsed.start, end: parsed.end };
       }
     }
   } catch {
     // Corrupt / inaccessible — use default.
   }
-  const range = computePresetRange(DEFAULT_PRESET);
-  return { ...range, preset: DEFAULT_PRESET };
+  return computeDefaultRange();
 }
 
 /**
- * Persist option date range to localStorage.
+ * Persist option date range to localStorage. Stores only ``{ start, end }``.
  */
 function saveOptionDateRange(value) {
   try {
-    localStorage.setItem(OPTION_DATE_RANGE_KEY, JSON.stringify(value));
+    localStorage.setItem(
+      OPTION_DATE_RANGE_KEY,
+      JSON.stringify({ start: value.start, end: value.end }),
+    );
   } catch {
     // Quota — ignore.
   }
@@ -237,13 +204,9 @@ function IndicatorsPage() {
   const [defaultAutoFilled, setDefaultAutoFilled] = useState(false);
   // User-configurable option date range — replaces the hardcoded 6-month
   // lookback. Persisted in localStorage via a separate key so it survives
-  // across sessions without bumping the indicators schema version.
+  // across sessions without bumping the indicators schema version. Default is
+  // a 1-year window ending today (the preset buttons were removed in PR #58).
   const [optionDateRange, setOptionDateRange] = useState(loadOptionDateRange);
-  // anchorEnd for the OptionDateRangeControl preset buttons: the earliest
-  // last_trade_date across all option_stream collections in the selected
-  // indicator's seriesMap. Derived asynchronously from getOptionRootsCached().
-  // null means "use today" (safe fallback — roots not loaded yet or no option_stream).
-  const [optionAnchorEnd, setOptionAnchorEnd] = useState(null);
   const handleOptionDateRangeChange = useCallback((newRange) => {
     setOptionDateRange(newRange);
     saveOptionDateRange(newRange);
@@ -758,6 +721,10 @@ function IndicatorsPage() {
           // /api/indicators/compute accepts:
           //   { type: 'spot', collection, instrument_id }
           //   { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+          //   { type: 'option_stream', collection, option_type, cycle,
+          //     maturity, selection, stream, adjustment, roll_offset }
+          // The picked ref is forwarded verbatim, so option_stream's
+          // adjustment/roll_offset (when set) ride along unchanged.
           // Legacy entries without a type field (stored before this change)
           // are treated as spot — add the type defensively.
           seriesPayload[label] = picked.type
@@ -766,26 +733,14 @@ function IndicatorsPage() {
         }
       }
       // Option-stream materialiser walks dates per business day, so it
-      // needs an explicit ISO date range. When the user has configured a
-      // range via the OptionDateRangeControl, use that (preset mode
-      // anchors to last_trade_date; custom mode passes dates through).
-      // Spot/continuous resolvers ignore start/end so adding them is
-      // safe, but we only attach when needed to keep request shape minimal.
-      let dateRange = null;
-      try {
-        dateRange = await resolveOptionDateRange(seriesPayload, optionDateRange);
-      } catch (e) {
-        // Surface a typed error rather than swallowing — Sign 10 (no
-        // silent failures). The user gets a clear message if the
-        // /options/roots lookup itself fails.
-        if (signal.aborted) return;
-        setError({
-          error_type: 'data',
-          message: `Could not resolve option-stream date range: ${e?.message || e}`,
-        });
-        setLastResult(null);
-        return;
-      }
+      // needs an explicit ISO date range. We forward the user's configured
+      // OptionDateRangeControl window verbatim ({ start, end }); spot/
+      // continuous resolvers ignore start/end so attaching them is safe, but
+      // we only do so when an option_stream ref is present to keep the
+      // request shape minimal. ``resolveOptionDateRange`` is a pure, local,
+      // synchronous selector (no network call) — it returns null when no
+      // option_stream ref is present, so the caller omits start/end entirely.
+      const dateRange = resolveOptionDateRange(seriesPayload, optionDateRange);
 
       // Reset any prior progress so the spinner starts fresh; the
       // poll loop will update it the moment the backend reports.
@@ -870,45 +825,6 @@ function IndicatorsPage() {
   useEffect(() => {
     return () => abortRun();
   }, [selectedId, abortRun]);
-
-  // Stable string key for the option_stream collections in the selected
-  // indicator — avoids re-running the anchorEnd effect on every render
-  // (selectedIndicator?.seriesMap is an unstable object reference).
-  const optionStreamCollsKey = useMemo(() => {
-    const sm = selectedIndicator?.seriesMap;
-    if (!sm) return '';
-    return Object.values(sm)
-      .filter((ref) => ref?.type === 'option_stream' && ref?.collection)
-      .map((ref) => ref.collection)
-      .sort()
-      .join(',');
-  }, [selectedIndicator]);
-
-  // Derive anchorEnd for the OptionDateRangeControl: the earliest
-  // last_trade_date across the option_stream collections referenced in the
-  // selected indicator's seriesMap. Uses the same cached roots as
-  // resolveOptionDateRange so no extra network round-trip.
-  useEffect(() => {
-    if (!optionStreamCollsKey) {
-      setOptionAnchorEnd(null);
-      return;
-    }
-    let cancelled = false;
-    const collections = optionStreamCollsKey.split(',');
-    getOptionRootsCached().then((roots) => {
-      if (cancelled) return;
-      let earliest = null;
-      for (const coll of collections) {
-        const root = roots.find((r) => r.collection === coll);
-        const ltd = root?.last_trade_date ?? null;
-        if (ltd && (earliest === null || ltd < earliest)) earliest = ltd;
-      }
-      setOptionAnchorEnd(earliest || null);
-    }).catch(() => {
-      if (!cancelled) setOptionAnchorEnd(null);
-    });
-    return () => { cancelled = true; };
-  }, [optionStreamCollsKey]);
 
   const seriesLabels = parsedSpec.seriesLabels;
   const allSlotsFilled = areAllSlotsFilled(selectedIndicator, seriesLabels);
@@ -1057,7 +973,6 @@ function IndicatorsPage() {
           showDateRange={showDateRange}
           optionDateRange={optionDateRange}
           onOptionDateRangeChange={handleOptionDateRangeChange}
-          optionAnchorEnd={optionAnchorEnd}
         />
       </div>
       <div className={styles.chartPanel}>

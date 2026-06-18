@@ -173,7 +173,7 @@ describe('Signals storage (v6)', () => {
     expect(loaded).toEqual(state);
   });
 
-  it('round-trips an option_stream instrument through save/load', () => {
+  it('round-trips an option_stream instrument through save/load (legacy entry gains adjustment/roll_offset defaults)', () => {
     const state = {
       signals: [
         {
@@ -201,7 +201,87 @@ describe('Signals storage (v6)', () => {
     };
     saveState(state);
     const loaded = loadState();
+    // The additive roll fields default to none/0 for a legacy entry that
+    // predates them — the sanitiser stamps them on every option_stream.
+    const inst = loaded.signals[0].inputs[0].instrument;
+    expect(inst.adjustment).toBe('none');
+    expect(inst.roll_offset).toBe(0);
+    // Everything else is preserved verbatim.
+    expect(inst).toMatchObject({
+      type: 'option_stream',
+      collection: 'OPT_SPX',
+      option_type: 'C',
+      cycle: 'W3_FRI',
+      maturity: { kind: 'fixed', value: '2025-06-20' },
+      selection: { kind: 'delta', value: 0.3 },
+      stream: 'iv',
+    });
+  });
+
+  it('round-trips explicit option_stream adjustment + roll_offset through save/load', () => {
+    const state = {
+      signals: [
+        {
+          id: 's2b',
+          name: 'Options Signal With Roll',
+          doc: '',
+          inputs: [
+            {
+              id: 'O',
+              instrument: {
+                type: 'option_stream',
+                collection: 'OPT_SPX',
+                option_type: 'P',
+                cycle: null,
+                maturity: { kind: 'nearest_to_target', target_days: 30 },
+                selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+                stream: 'mid',
+                adjustment: 'ratio',
+                roll_offset: 5,
+              },
+            },
+          ],
+          rules: emptyRules(),
+          settings: { dont_repeat: true },
+        },
+      ],
+    };
+    saveState(state);
+    const loaded = loadState();
+    // Whole-state deep equality — the explicit values survive untouched.
     expect(loaded).toEqual(state);
+  });
+
+  it('sanitiser clamps a malformed option_stream roll_offset / bad adjustment', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [
+        {
+          id: 's2c',
+          name: 'Opt Clamp',
+          inputs: [
+            {
+              id: 'O',
+              instrument: {
+                type: 'option_stream',
+                collection: 'OPT_SPX',
+                option_type: 'C',
+                cycle: null,
+                maturity: { kind: 'fixed', value: '2025-06-20' },
+                selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+                stream: 'iv',
+                adjustment: 'bogus',     // invalid → 'none'
+                roll_offset: 99.7,       // out-of-range float → trunc + clamp to 30
+              },
+            },
+          ],
+          rules: emptyRules(),
+        },
+      ],
+    }));
+    const inst = loadState().signals[0].inputs[0].instrument;
+    expect(inst.adjustment).toBe('none');
+    expect(inst.roll_offset).toBe(30);
   });
 
   it('sanitiser rejects an option_stream with missing fields', () => {

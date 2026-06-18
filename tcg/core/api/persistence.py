@@ -45,7 +45,6 @@ from typing import Annotated, Any, Literal, TypeVar, Union
 
 _log = logging.getLogger(__name__)
 
-import pymongo.errors
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -54,9 +53,10 @@ from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.persistence import (
     ConcurrentUpdateError,
     DocumentTooLargeError,
+    DuplicateIdError,
+    LockedError,
     WriteRepository,
 )
-from tcg.persistence.repository import LockedError
 from tcg.types.persistence import (
     BasketDoc,
     Category,
@@ -444,6 +444,8 @@ class _OptionStreamRefLocal(BaseModel):
     maturity: MaturityRule
     selection: SelectionCriterion
     stream: _OptionStreamLabel
+    adjustment: Literal["none", "ratio", "difference"] = "none"
+    roll_offset: int = Field(default=0, ge=0, le=30)
 
     @field_validator("cycle", mode="before")
     @classmethod
@@ -635,14 +637,14 @@ def _basket_to_out(doc: BasketDoc) -> BasketOut:
     )
 
 
-def _legs_to_mongo(legs: list[BasketLegIn]) -> tuple[dict, ...]:
-    """Serialise wire-shape basket legs into the Mongo-bound dict form.
+def _legs_to_json(legs: list[BasketLegIn]) -> tuple[dict, ...]:
+    """Serialise wire-shape basket legs into the stored dict form.
 
     Each leg dict is ``{"instrument": <polymorphic-sub-dict>,
     "weight": float}``.  ``model_dump(mode="json")`` collapses any
     nested Pydantic models on ``instrument`` into plain JSON-compatible
     dicts so the dataclass ``BasketDoc.legs`` (opaque tuples of dicts)
-    can round-trip through ``to_mongo_dict`` / ``from_mongo_dict``.
+    can round-trip through ``to_json_doc`` / ``from_json_doc``.
     """
     return tuple(
         {
@@ -707,7 +709,7 @@ async def create_indicator(body: IndicatorCreateIn, repo: RepoDep) -> IndicatorO
     )
     try:
         stored = await repo.create(doc)
-    except pymongo.errors.DuplicateKeyError as exc:
+    except DuplicateIdError as exc:
         # Map the unique-index violation to 409 so retries / React 18
         # StrictMode double-mounts / racing clients see a structured
         # error rather than an unhandled 500.
@@ -840,7 +842,7 @@ async def create_signal(body: SignalCreateIn, repo: RepoDep) -> SignalOut:
     )
     try:
         stored = await repo.create(doc)
-    except pymongo.errors.DuplicateKeyError as exc:
+    except DuplicateIdError as exc:
         raise HTTPException(
             status_code=409, detail=f"signal with id={body.id!r} already exists"
         ) from exc
@@ -965,7 +967,7 @@ async def create_portfolio(body: PortfolioCreateIn, repo: RepoDep) -> PortfolioO
     )
     try:
         stored = await repo.create(doc)
-    except pymongo.errors.DuplicateKeyError as exc:
+    except DuplicateIdError as exc:
         raise HTTPException(
             status_code=409, detail=f"portfolio with id={body.id!r} already exists"
         ) from exc
@@ -1078,7 +1080,7 @@ async def create_basket(body: BasketIn, repo: RepoDep) -> BasketOut:
     _check_basket_homogeneity(body.asset_class, body.legs)
     _check_basket_no_duplicates(body.legs)
     now = _now()
-    raw_legs = _legs_to_mongo(body.legs)
+    raw_legs = _legs_to_json(body.legs)
     doc = BasketDoc(
         id=body.id,
         type=DocType.BASKET.value,
@@ -1091,7 +1093,7 @@ async def create_basket(body: BasketIn, repo: RepoDep) -> BasketOut:
     )
     try:
         stored = await repo.create(doc)
-    except pymongo.errors.DuplicateKeyError as exc:
+    except DuplicateIdError as exc:
         raise HTTPException(
             status_code=409, detail=f"basket with id={body.id!r} already exists"
         ) from exc
@@ -1144,7 +1146,7 @@ async def update_basket(
         doc_id,
     )
     existing = _checked(existing, BasketDoc)
-    raw_legs = _legs_to_mongo(body.legs)
+    raw_legs = _legs_to_json(body.legs)
     updated = BasketDoc(
         id=doc_id,
         type=DocType.BASKET.value,

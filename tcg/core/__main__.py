@@ -1,13 +1,9 @@
 """Backend entry point: ``python -m tcg.core``.
 
-Launches the FastAPI app under uvicorn, forcing a SelectorEventLoop via a custom
-``loop`` factory. This is required on Windows: psycopg's async driver cannot run
-on the default ProactorEventLoop, and uvicorn >= 0.36 picks the loop through a
-``loop_factory`` that overrides asyncio's event-loop policy — so the loop must be
-chosen via ``Config.loop`` (see ``tcg.core._eventloop``), not a policy call.
-
-On Windows the backend MUST be started this way (the launcher does), not via a
-bare ``uvicorn tcg.core.app:app`` (which would use the default Proactor loop).
+Launches the FastAPI app under uvicorn. On Linux/WSL the default uvicorn
+event loop is a ``SelectorEventLoop``, which psycopg's async driver
+requires — so no custom loop factory is needed. Starts ONLY the backend;
+the Vite frontend is a separate ``npm run dev`` process (see ``start.sh``).
 """
 
 from __future__ import annotations
@@ -29,10 +25,6 @@ def main() -> None:
         host=args.host,
         port=args.port,
         log_level=args.log_level,
-        # Force a SelectorEventLoop (psycopg async is incompatible with Windows'
-        # default ProactorEventLoop). uvicorn imports this factory for any
-        # non-builtin loop value.
-        loop="tcg.core._eventloop:loop_factory",
     )
 
 

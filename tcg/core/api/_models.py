@@ -108,6 +108,13 @@ class OptionStreamRef(BaseModel):
     type: Literal["option_stream"]
     collection: str
     option_type: Literal["C", "P"]
+    # Roll back-adjustment for the rolled MID stream, mirroring
+    # ``ContinuousInstrumentRef.adjustment`` (futures convention).  Additive
+    # field, default "none" → preserves the existing wire contract.  Applied
+    # by the engine resolver ONLY when ``stream == "mid"``; for every other
+    # stream (iv / greeks / volume / open_interest) it is ignored (raw series
+    # returned, no error).  See ``stream_resolver.resolve_option_stream``.
+    adjustment: Literal["none", "ratio", "difference"] = "none"
     # ``cycle`` filter — None means "no cycle filter applied" (caller's
     # intent for monthly is typically the explicit string "M" since some
     # roots — OPT_SP_500 — have weeklies named "W3 Friday" mixed in).
@@ -116,7 +123,18 @@ class OptionStreamRef(BaseModel):
     cycle: str | None = None
     maturity: MaturityRule
     selection: SelectionCriterion
-    stream: OptionStreamLabel
+    # ASK B: default to ``mid`` so the roll/stream UX does not force the
+    # caller to choose which series to extract.  ``mid`` is the option
+    # premium mark — the natural default for a rolled options price series.
+    # An explicit value (iv / delta / greeks / volume / open_interest) still
+    # overrides; an out-of-enum value is still rejected by the Literal.
+    stream: OptionStreamLabel = "mid"
+    # Roll offset in calendar days, mirroring ``ContinuousInstrumentRef.rollOffset``
+    # (futures).  The engine resolves the maturity rule as of ``date + roll_offset``
+    # for each date, so every roll happens ``roll_offset`` days EARLIER.  Additive,
+    # default 0 → preserves the existing wire contract; range 0..30 (same bound as
+    # the futures roll offset).  No-op for ``fixed`` maturity (single expiration).
+    roll_offset: int = Field(default=0, ge=0, le=30)
 
     @field_validator("cycle", mode="before")
     @classmethod

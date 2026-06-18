@@ -117,6 +117,10 @@ function PortfolioPage() {
     maturity: l.maturity || null,
     selection: l.selection || null,
     stream: l.stream || null,
+    // option_stream roll offset (snake_case — distinct from the futures
+    // leg's `rollOffset` above; matches OptionStreamForm + the wire field).
+    // `adjustment` rides the shared field at line above. null for non-option.
+    roll_offset: l.roll_offset ?? null,
   })), []);
 
   // Save current portfolio state to backend in the selected category.

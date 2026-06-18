@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useOptionRoots } from '../../hooks/marketQueries';
 import Chart from '../../components/Chart';
 import OptionStreamForm, { buildDefaultOptionStream } from '../../components/OptionStreamForm';
-import OptionDateRangeControl, { computePresetRange, DEFAULT_PRESET } from '../../components/OptionDateRangeControl';
+import OptionDateRangeControl, { computeDefaultRange } from '../../components/OptionDateRangeControl';
 import { resolveOptionStream } from '../../api/options';
 import { TRACE_COLORS } from '../../utils/chartTheme';
 import styles from './ChartBase.module.css';
@@ -49,19 +49,8 @@ function ContinuousOptionsChart({ collection }) {
     });
   }, [availableRoots, collection]);
 
-  // ── Date range state ──
-  const [dateRange, setDateRange] = useState(() => {
-    const range = computePresetRange(DEFAULT_PRESET);
-    return { ...range, preset: DEFAULT_PRESET };
-  });
-
-  // Derive anchorEnd from the selected root's last_trade_date so preset
-  // buttons anchor to actual data coverage rather than today.
-  const anchorEnd = useMemo(() => {
-    if (!streamRef || !streamRef.collection) return undefined;
-    const root = availableRoots.find((r) => r.collection === streamRef.collection);
-    return root?.last_trade_date || undefined;
-  }, [streamRef, availableRoots]);
+  // ── Date range state — default 1-year lookback ending today. ──
+  const [dateRange, setDateRange] = useState(() => computeDefaultRange());
 
   // ── Resolution state ──
   const [result, setResult] = useState(null);
@@ -233,7 +222,6 @@ function ContinuousOptionsChart({ collection }) {
           value={dateRange}
           onChange={setDateRange}
           disabled={loading}
-          anchorEnd={anchorEnd}
         />
         <button
           type="button"

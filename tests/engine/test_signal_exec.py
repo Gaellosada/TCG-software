@@ -53,6 +53,36 @@ def _make_fetcher(
     return fetch
 
 
+def test_instrument_identity_distinguishes_option_adjustment_and_roll_offset():
+    """Option-stream operand identity must include adjustment + roll_offset
+    (mirrors the continuous identity) so two option inputs differing ONLY in
+    those fields don't collapse to a single cached operand fetch."""
+    from tcg.engine.signal_exec import _instrument_identity
+    from tcg.types.options import ByStrike, NearestToTarget
+    from tcg.types.signal import InstrumentOptionStream
+
+    def _opt(**over):
+        base = dict(
+            collection="OPT_SP_500",
+            option_type="C",
+            cycle=None,
+            maturity=NearestToTarget(target_dte_days=30),
+            selection=ByStrike(strike=4500.0),
+            stream="mid",
+        )
+        base.update(over)
+        return InstrumentOptionStream(**base)
+
+    base_id = _instrument_identity(_opt())
+    assert _instrument_identity(_opt()) == base_id  # identical specs → same identity
+    assert _instrument_identity(_opt(adjustment="ratio")) != base_id
+    assert _instrument_identity(_opt(roll_offset=5)) != base_id
+    # adjustment is an independent discriminator from roll_offset
+    assert _instrument_identity(_opt(adjustment="ratio")) != _instrument_identity(
+        _opt(adjustment="difference")
+    )
+
+
 INPUT_X = Input(
     id="X",
     instrument=InstrumentSpot(collection="INDEX", instrument_id="SPX"),

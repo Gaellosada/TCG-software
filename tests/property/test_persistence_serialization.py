@@ -2,7 +2,7 @@
 
 For arbitrary indicator / signal / portfolio docs we want:
 
-    from_mongo_dict(to_mongo_dict(doc)) == doc
+    from_json_doc(to_json_doc(doc)) == doc
 
 This catches any subtle drift in the serializer (e.g. forgetting to
 rename id↔_id, mishandling Category, dropping a field).
@@ -34,8 +34,8 @@ from tcg.types.persistence import (
     IndicatorDoc,
     PortfolioDoc,
     SignalDoc,
-    from_mongo_dict,
-    to_mongo_dict,
+    from_json_doc,
+    to_json_doc,
 )
 
 
@@ -139,17 +139,13 @@ _ID_STRATEGY = st.text(
 )
 # Names can be any non-empty BMP string up to 100 chars.
 _NAME_STRATEGY = st.text(
-    alphabet=st.characters(
-        max_codepoint=0xFFFF, blacklist_categories=("Cc", "Cs")
-    ),
+    alphabet=st.characters(max_codepoint=0xFFFF, blacklist_categories=("Cc", "Cs")),
     min_size=0,
     max_size=100,
 )
 # Descriptions can be empty.
 _DESCRIPTION_STRATEGY = st.text(
-    alphabet=st.characters(
-        max_codepoint=0xFFFF, blacklist_categories=("Cc", "Cs")
-    ),
+    alphabet=st.characters(max_codepoint=0xFFFF, blacklist_categories=("Cc", "Cs")),
     min_size=0,
     max_size=200,
 )
@@ -203,7 +199,11 @@ def _portfolio_docs(draw) -> PortfolioDoc:
         created_at=draw(_utc_datetimes()),
         updated_at=draw(_utc_datetimes()),
         legs=tuple(draw(_payload_list())),
-        rebalance=draw(st.sampled_from(["none", "daily", "weekly", "monthly", "quarterly", "annually"])),
+        rebalance=draw(
+            st.sampled_from(
+                ["none", "daily", "weekly", "monthly", "quarterly", "annually"]
+            )
+        ),
     )
 
 
@@ -242,11 +242,7 @@ _EDGE_DT = datetime(2025, 6, 15, 12, 30, 45, tzinfo=timezone.utc)
         name=" ",  # single space
         definition={
             "lvl1": {
-                "lvl2": {
-                    "lvl3": {
-                        "lvl4": {"lvl5": None, "u": "ｆｕｌｌ-ｗｉｄｔｈ"}
-                    }
-                }
+                "lvl2": {"lvl3": {"lvl4": {"lvl5": None, "u": "ｆｕｌｌ-ｗｉｄｔｈ"}}}
             }
         },
         created_at=_EDGE_DT,
@@ -255,7 +251,7 @@ _EDGE_DT = datetime(2025, 6, 15, 12, 30, 45, tzinfo=timezone.utc)
 )
 @settings(max_examples=50, deadline=None)
 def test_indicator_roundtrip(doc: IndicatorDoc) -> None:
-    assert from_mongo_dict(to_mongo_dict(doc)) == doc
+    assert from_json_doc(to_json_doc(doc)) == doc
 
 
 @given(doc=_signal_docs())
@@ -291,7 +287,7 @@ def test_indicator_roundtrip(doc: IndicatorDoc) -> None:
 )
 @settings(max_examples=50, deadline=None)
 def test_signal_roundtrip(doc: SignalDoc) -> None:
-    assert from_mongo_dict(to_mongo_dict(doc)) == doc
+    assert from_json_doc(to_json_doc(doc)) == doc
 
 
 @given(doc=_portfolio_docs())
@@ -326,12 +322,12 @@ def test_signal_roundtrip(doc: SignalDoc) -> None:
 )
 @settings(max_examples=50, deadline=None)
 def test_portfolio_roundtrip(doc: PortfolioDoc) -> None:
-    assert from_mongo_dict(to_mongo_dict(doc)) == doc
+    assert from_json_doc(to_json_doc(doc)) == doc
 
 
-def test_to_mongo_dict_emits_underscore_id_key() -> None:
-    """Sanity assertion — the serializer must rename id → _id; no
-    Mongo doc should contain a literal ``id`` field."""
+def test_to_json_doc_emits_plain_id_key() -> None:
+    """Sanity assertion — the JSONB payload keeps the ``id`` field (the
+    PostgreSQL primary-key column is ``id``); no legacy ``_id`` key."""
     doc = IndicatorDoc(
         id="foo",
         type="indicator",
@@ -340,25 +336,25 @@ def test_to_mongo_dict_emits_underscore_id_key() -> None:
         created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
         updated_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
     )
-    out = to_mongo_dict(doc)
-    assert "_id" in out
-    assert "id" not in out
-    assert out["_id"] == "foo"
+    out = to_json_doc(doc)
+    assert "id" in out
+    assert "_id" not in out
+    assert out["id"] == "foo"
 
 
-def test_from_mongo_dict_rejects_unknown_type() -> None:
+def test_from_json_doc_rejects_unknown_type() -> None:
     """The discriminator gate must reject foreign documents loudly."""
     import pytest
 
     with pytest.raises(ValueError, match="unknown or missing 'type'"):
-        from_mongo_dict({"_id": "x", "type": "unicorn"})
+        from_json_doc({"_id": "x", "type": "unicorn"})
 
 
-def test_from_mongo_dict_rejects_missing_id() -> None:
+def test_from_json_doc_rejects_missing_id() -> None:
     import pytest
 
-    with pytest.raises(ValueError, match="missing '_id'"):
-        from_mongo_dict(
+    with pytest.raises(ValueError, match="missing 'id'"):
+        from_json_doc(
             {
                 "type": "indicator",
                 "name": "x",
