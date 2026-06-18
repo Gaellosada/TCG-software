@@ -20,6 +20,10 @@ import styles from './OptionStreamForm.module.css';
  *                                               // MID stream only (futures
  *                                               // convention); ignored by the
  *                                               // backend for every other stream
+ *     roll_offset: <int 0..30>,                 // roll the maturity this many
+ *                                               // calendar days earlier (mirrors
+ *                                               // futures rollOffset); 0 = roll at
+ *                                               // the maturity rule's normal time
  *   }
  *
  * Validation:

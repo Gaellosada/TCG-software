@@ -97,6 +97,16 @@ class InstrumentOptionStream:
     maturity: MaturitySpec
     selection: SelectionCriterion
     stream: OptionStreamLabel
+    # Roll back-adjustment + roll offset for the rolled stream, mirroring
+    # :class:`InstrumentContinuous` (futures convention).  Additive, defaults
+    # ``"none"`` / ``0`` so existing specs are unchanged.  ``adjustment`` is
+    # applied by the engine resolver ONLY when ``stream == "mid"`` (ignored,
+    # raw series, for iv / greeks / volume / open_interest); ``roll_offset``
+    # resolves the maturity rule as of ``date + roll_offset`` so every roll
+    # happens that many calendar days earlier.  See
+    # ``stream_resolver.resolve_option_stream``.
+    adjustment: Literal["none", "ratio", "difference"] = "none"
+    roll_offset: int = 0
     kind: Literal["option_stream"] = "option_stream"
 
 

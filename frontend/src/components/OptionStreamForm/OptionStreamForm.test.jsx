@@ -153,6 +153,31 @@ describe('<OptionStreamForm>', () => {
     expect(onChange.mock.calls[0][0].roll_offset).toBe(30);
   });
 
+  // Clamp every malformed / out-of-range input into the integer range 0..30.
+  // The setRollOffset handler does parseInt → NaN?0 → clamp(0,30). Each case
+  // must emit an integer roll_offset (never a string / float / negative).
+  // Note: the input defaults to 0, so a change event whose target value is
+  // '0' is a no-op for the controlled input and fires no onChange — it would
+  // test nothing about clamping, so it is intentionally excluded. The cases
+  // below all change the rendered string value, so onChange always fires.
+  it.each([
+    ['empty string', '', 0],
+    ['negative', '-5', 0],
+    ['non-numeric', 'abc', 0],
+    ['above max', '99', 30],
+    ['exactly max', '30', 30],
+    ['in range', '7', 7],
+  ])('clamps Roll offset input (%s) into 0..30 as an int', (_label, raw, expected) => {
+    const { onChange } = renderForm();
+    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: raw } });
+    expect(onChange).toHaveBeenCalledOnce();
+    const emitted = onChange.mock.calls[0][0].roll_offset;
+    expect(emitted).toBe(expected);
+    // Emitted as a real integer (parseInt result), not a string or float.
+    expect(typeof emitted).toBe('number');
+    expect(Number.isInteger(emitted)).toBe(true);
+  });
+
   it('respects allowedSelectionKinds — only by_moneyness rendered', () => {
     renderForm({ allowedSelectionKinds: ['by_moneyness'] });
     const sel = screen.getByLabelText('Selection criterion');

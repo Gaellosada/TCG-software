@@ -13,13 +13,14 @@ on a boundary date.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Sequence
 
 import numpy as np
+import pytest
 
 from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
 from tcg.types.options import (
+    ByDelta,
     ByStrike,
     FixedDate,
     NearestToTarget,
@@ -27,123 +28,11 @@ from tcg.types.options import (
     OptionDailyRow,
 )
 
+from _stream_fakes import FakeBulkChainReader, FakeChainReader, _contract, _row
+
 # Two monthly expirations standing in for a roll: APR (old) → MAY (new).
 _APR = date(2024, 4, 19)
 _MAY = date(2024, 5, 17)
-
-
-def _contract(
-    *,
-    strike: float,
-    expiration: date,
-    type_: Literal["C", "P"] = "C",
-    cycle: str = "M",
-    collection: str = "OPT_SP_500",
-) -> OptionContractDoc:
-    cid = f"{collection}_K{int(strike)}_{type_}_{expiration.isoformat()}_{cycle}"
-    return OptionContractDoc(
-        collection=collection,
-        contract_id=cid,
-        root_underlying="IND_SP_500",
-        underlying_ref="FUT_SP_500_EMINI",
-        underlying_symbol=None,
-        expiration=expiration,
-        expiration_cycle=cycle,
-        strike=float(strike),
-        type=type_,
-        contract_size=None,
-        currency="USD",
-        provider="IVOLATILITY",
-        strike_factor_verified=True,
-    )
-
-
-def _row(*, row_date: date, mid: float = 10.0) -> OptionDailyRow:
-    return OptionDailyRow(
-        date=row_date,
-        open=None,
-        high=None,
-        low=None,
-        close=None,
-        bid=mid - 0.05,
-        ask=mid + 0.05,
-        bid_size=None,
-        ask_size=None,
-        volume=None,
-        open_interest=None,
-        mid=mid,
-        iv_stored=0.20,
-        delta_stored=0.50,
-        gamma_stored=None,
-        theta_stored=None,
-        vega_stored=None,
-        underlying_price_stored=None,
-    )
-
-
-class FakeBulkChainReader:
-    """Bulk chain reader returning synthetic chains keyed by date."""
-
-    def __init__(
-        self,
-        chains_by_date: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]],
-    ) -> None:
-        self._chains = chains_by_date
-
-    async def query_chain_bulk(
-        self,
-        *,
-        root: str,
-        dates: Sequence[date],
-        type: Literal["C", "P", "both"],
-        expiration_min: date,
-        expiration_max: date,
-        strike_min: float | None = None,
-        strike_max: float | None = None,
-        expiration_cycle: str | None = None,
-    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        result: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
-        for d in dates:
-            filtered = [
-                (c, r)
-                for (c, r) in self._chains.get(d, [])
-                if (c.type == type or type == "both")
-                and expiration_min <= c.expiration <= expiration_max
-                and (expiration_cycle is None or c.expiration_cycle == expiration_cycle)
-            ]
-            if filtered:
-                result[d] = filtered
-        return result
-
-
-class FakeChainReader:
-    """Per-date chain reader — also serves the NearestToTarget probe query."""
-
-    def __init__(
-        self,
-        chains_by_date: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]],
-    ) -> None:
-        self._chains = chains_by_date
-
-    async def query_chain(
-        self,
-        *,
-        root: str,
-        date: date,
-        type: Literal["C", "P", "both"],
-        expiration_min: date,
-        expiration_max: date,
-        strike_min: float | None = None,
-        strike_max: float | None = None,
-        expiration_cycle: str | None = None,
-    ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
-        return [
-            (c, r)
-            for (c, r) in self._chains.get(date, [])
-            if (c.type == type or type == "both")
-            and expiration_min <= c.expiration <= expiration_max
-            and (expiration_cycle is None or c.expiration_cycle == expiration_cycle)
-        ]
 
 
 # K4500 present in BOTH expirations on every date (APR mid 10, MAY mid 20 — so
@@ -164,14 +53,14 @@ def _both_exp_chains(
     }
 
 
-async def _resolve(dates, chains, *, roll_offset, maturity=None):
+async def _resolve(dates, chains, *, roll_offset, maturity=None, selection=None):
     return await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
         option_type="C",
         cycle=None,
         maturity=maturity or NearestToTarget(target_dte_days=30),
-        selection=ByStrike(strike=4500.0),
+        selection=selection or ByStrike(strike=4500.0),
         stream="mid",
         adjustment="none",
         roll_offset=roll_offset,
@@ -260,3 +149,145 @@ async def test_roll_offset_noop_for_fixed_date():
 
     assert all(c.expiration == _MAY for c in c0)
     assert all(c.expiration == _MAY for c in c20)
+
+
+# ── roll_offset touches the EXPIRATION only, never the STRIKE ────────────
+
+
+# A symmetric delta surface present in BOTH expirations: K4500 is the ATM
+# (delta 0.50) leg in each.  ByDelta(0.50) therefore selects K4500 regardless
+# of which expiration the maturity rule lands on — so if roll_offset shifts the
+# strike (a bug) the selected strike would move off 4500.  Distinct mids per
+# (expiration, strike) make the selected contract unambiguous.
+_DELTA_BY_STRIKE = {4400: 0.62, 4500: 0.50, 4600: 0.38}
+
+
+def _multi_strike_both_exp_chains(
+    dates,
+) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+    """Each date carries all three strikes in BOTH APR and MAY.
+
+    Mid encodes (expiration, strike) so the chosen contract is identifiable:
+    APR strikes get mid = strike/100 (44/45/46), MAY strikes get that + 100
+    (144/145/146).  The delta of a given strike is identical across
+    expirations, so ByDelta's strike pick must NOT depend on the expiration.
+    """
+    chains: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+    for d in dates:
+        rows: list[tuple[OptionContractDoc, OptionDailyRow]] = []
+        for strike, delta in _DELTA_BY_STRIKE.items():
+            for exp, mid_base in ((_APR, strike / 100.0), (_MAY, strike / 100.0 + 100)):
+                rows.append(
+                    (
+                        _contract(strike=strike, expiration=exp),
+                        _row(row_date=d, mid=mid_base, delta=delta),
+                    )
+                )
+        chains[d] = rows
+    return chains
+
+
+async def test_roll_offset_shifts_expiration_not_strike_under_by_delta():
+    """On the boundary date, roll_offset flips the selected EXPIRATION
+    (APR→MAY) while ByDelta keeps the SAME selected STRIKE (4500).
+
+    The existing ByStrike tests pin the strike by construction (it is the
+    selection criterion), so they cannot show that the offset leaves a
+    *selection-derived* strike untouched.  ByDelta derives the strike from the
+    chain, so an offset that leaked into strike selection would surface here.
+    """
+    dates = [date(2024, 3, 28), date(2024, 4, 1), date(2024, 4, 8)]
+    chains = _multi_strike_both_exp_chains(dates)
+    by_delta = ByDelta(target_delta=0.50, tolerance=0.05, strict=False)
+
+    _v0, e0, c0 = await _resolve(dates, chains, roll_offset=0, selection=by_delta)
+    _v5, e5, c5 = await _resolve(dates, chains, roll_offset=5, selection=by_delta)
+
+    assert all(e is None for e in e0) and all(e is None for e in e5)
+
+    # 2024-04-01 is the discriminating date (APR with offset 0, MAY with 5).
+    sel0, sel5 = c0[1], c5[1]
+    # The EXPIRATION moved with the offset ...
+    assert sel0.expiration == _APR
+    assert sel5.expiration == _MAY
+    assert sel0.expiration != sel5.expiration
+    # ... but the STRIKE selected by delta did NOT (0.50 → 4500 in both).
+    assert sel0.strike == 4500.0
+    assert sel5.strike == 4500.0
+    assert sel0.strike == sel5.strike
+
+    # Endpoints: same strike on both ends too (only the expiration ever moves).
+    assert c0[0].strike == 4500.0 and c5[0].strike == 4500.0
+    assert c0[2].strike == 4500.0 and c5[2].strike == 4500.0
+
+
+# ── Guard: roll_offset / adjustment require the bulk chain reader ────────
+
+
+async def test_roll_offset_without_bulk_reader_raises():
+    """The legacy per-date path (no bulk reader) cannot apply roll_offset, so
+    requesting it raises rather than silently returning an unshifted series."""
+    dates = [date(2024, 3, 28), date(2024, 4, 1)]
+    chains = _both_exp_chains(dates)
+    with pytest.raises(ValueError, match="require the bulk chain reader"):
+        await resolve_option_stream(
+            dates=dates,
+            collection="OPT_SP_500",
+            option_type="C",
+            cycle=None,
+            maturity=NearestToTarget(target_dte_days=30),
+            selection=ByStrike(strike=4500.0),
+            stream="mid",
+            adjustment="none",
+            roll_offset=5,  # non-zero offset with NO bulk reader → must raise.
+            chain_reader=FakeChainReader(chains),
+            maturity_resolver=DefaultMaturityResolver(),
+            underlying_price_resolver=None,
+            bulk_chain_reader=None,
+        )
+
+
+async def test_adjustment_without_bulk_reader_raises():
+    """The legacy per-date path cannot back-adjust mids, so a non-'none'
+    adjustment without a bulk reader raises (same guard, adjustment arm)."""
+    dates = [date(2024, 3, 28), date(2024, 4, 1)]
+    chains = _both_exp_chains(dates)
+    with pytest.raises(ValueError, match="require the bulk chain reader"):
+        await resolve_option_stream(
+            dates=dates,
+            collection="OPT_SP_500",
+            option_type="C",
+            cycle=None,
+            maturity=NearestToTarget(target_dte_days=30),
+            selection=ByStrike(strike=4500.0),
+            stream="mid",
+            adjustment="ratio",  # real adjustment with NO bulk reader → raise.
+            roll_offset=0,
+            chain_reader=FakeChainReader(chains),
+            maturity_resolver=DefaultMaturityResolver(),
+            underlying_price_resolver=None,
+            bulk_chain_reader=None,
+        )
+
+
+async def test_legacy_path_ok_without_bulk_reader_when_defaults():
+    """Sanity: the legacy path still WORKS with default roll_offset/adjustment
+    and no bulk reader — the guard does not break the supported fallback."""
+    dates = [date(2024, 3, 28), date(2024, 4, 1)]
+    chains = _both_exp_chains(dates)
+    values, errors, contracts = await resolve_option_stream(
+        dates=dates,
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=30),
+        selection=ByStrike(strike=4500.0),
+        stream="mid",
+        chain_reader=FakeChainReader(chains),
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=None,  # legacy path, defaults → no raise.
+    )
+    assert all(e is None for e in errors)
+    assert all(c is not None for c in contracts)
+    np.testing.assert_array_equal(values, [10.0, 10.0])

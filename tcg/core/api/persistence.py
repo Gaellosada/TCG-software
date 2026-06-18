@@ -444,6 +444,8 @@ class _OptionStreamRefLocal(BaseModel):
     maturity: MaturityRule
     selection: SelectionCriterion
     stream: _OptionStreamLabel
+    adjustment: Literal["none", "ratio", "difference"] = "none"
+    roll_offset: int = Field(default=0, ge=0, le=30)
 
     @field_validator("cycle", mode="before")
     @classmethod

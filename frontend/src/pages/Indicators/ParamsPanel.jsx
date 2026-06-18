@@ -12,7 +12,8 @@ import styles from './ParamsPanel.module.css';
  * Spot:          { type: 'spot', collection, instrument_id }
  * Continuous:    { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
  * Option stream: { type: 'option_stream', collection, option_type, cycle,
- *                  maturity: MaturityRule, selection: SelectionCriterion, stream }
+ *                  maturity: MaturityRule, selection: SelectionCriterion, stream,
+ *                  adjustment, roll_offset }
  *
  * Extensibility: any future pickerValue.type passes through unchanged —
  * add explicit handling only when special-casing is needed.

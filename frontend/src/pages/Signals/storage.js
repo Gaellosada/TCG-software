@@ -43,7 +43,8 @@
 //   - Continuous:    { type: 'continuous',    collection, adjustment, cycle,
 //                      rollOffset, strategy }
 //   - OptionStream:  { type: 'option_stream', collection, option_type,
-//                      cycle, maturity, selection, stream }
+//                      cycle, maturity, selection, stream,
+//                      adjustment, roll_offset }
 //
 // Operand shapes (stored verbatim):
 //   - indicator:   { kind:'indicator', indicator_id, input_id, output,
@@ -168,7 +169,16 @@ function sanitiseOptionStreamInstrument(raw) {
   const stream = VALID_STREAMS.includes(raw.stream) ? raw.stream : null;
   if (!stream) return null;
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
-  return { type: 'option_stream', collection, option_type, cycle, maturity, selection, stream };
+  // Additive roll fields (mirror the futures continuous leg): adjustment is
+  // the MID-stream back-adjustment (none/ratio/difference; the BE ignores it
+  // for every non-mid stream); roll_offset rolls the maturity that many
+  // calendar days earlier (clamped 0..30). Legacy payloads lack these keys —
+  // default none/0. Both have BE-side defaults too, so absence is harmless.
+  const adjustment = ['none', 'ratio', 'difference'].includes(raw.adjustment)
+    ? raw.adjustment : 'none';
+  const roll_offset = Number.isFinite(raw.roll_offset)
+    ? Math.min(30, Math.max(0, Math.trunc(raw.roll_offset))) : 0;
+  return { type: 'option_stream', collection, option_type, cycle, maturity, selection, stream, adjustment, roll_offset };
 }
 
 function sanitiseInstrument(raw) {

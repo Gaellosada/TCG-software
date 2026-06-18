@@ -151,6 +151,36 @@ def _now_dict() -> dict:
     return {}  # endpoints don't take timestamps
 
 
+def test_saved_basket_option_ref_accepts_adjustment_and_roll_offset() -> None:
+    """The saved-basket option_stream leg model (``_OptionStreamRefLocal``)
+    must accept the additive ``adjustment``/``roll_offset`` (mirrors the
+    continuous local model + the real ``OptionStreamRef``).  Without them,
+    ``extra='forbid'`` 422-rejects a saved basket whose option leg carries
+    these fields — even though the Data page / inline baskets honor them."""
+    from pydantic import ValidationError
+
+    from tcg.core.api.persistence import _OptionStreamRefLocal
+
+    common = dict(
+        type="option_stream",
+        collection="OPT_SP_500",
+        option_type="C",
+        maturity={"kind": "fixed", "date": "2024-06-21"},
+        selection={"kind": "by_strike", "strike": 4500.0},
+        stream="mid",
+    )
+    m = _OptionStreamRefLocal(**common, adjustment="ratio", roll_offset=5)
+    assert m.adjustment == "ratio"
+    assert m.roll_offset == 5
+    # Absent → defaults (additive, contract-preserving).
+    d = _OptionStreamRefLocal(**common)
+    assert d.adjustment == "none"
+    assert d.roll_offset == 0
+    # roll_offset bounded 0..30, mirroring OptionStreamRef.
+    with pytest.raises(ValidationError):
+        _OptionStreamRefLocal(**common, roll_offset=40)
+
+
 # ---------------------------------------------------------------------------
 # B1 — DuplicateKeyError → 409
 # ---------------------------------------------------------------------------

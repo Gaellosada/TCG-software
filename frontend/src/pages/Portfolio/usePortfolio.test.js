@@ -178,6 +178,85 @@ describe('usePortfolio — signal leg support', () => {
     expect(range.start).toBeTruthy();
     expect(range.end).toBeTruthy();
   });
+
+  it('handleCalculate forwards option_stream adjustment + roll_offset to the API', async () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg({
+        label: 'OPT_SP_500 C mid',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'nearest_to_target', target_days: 30 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'mid',
+        adjustment: 'ratio',
+        roll_offset: 5,
+        weight: 100,
+      });
+    });
+
+    // Option-stream legs require explicit dates (the BE can't infer range).
+    act(() => {
+      result.current.setStartDate('2024-01-01');
+      result.current.setEndDate('2024-12-31');
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const call = computePortfolio.mock.calls[0][0];
+    const legLabel = result.current.legs[0].label;
+    expect(call.legs[legLabel]).toEqual({
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'C',
+      cycle: null,
+      maturity: { kind: 'nearest_to_target', target_days: 30 },
+      selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+      stream: 'mid',
+      adjustment: 'ratio',
+      roll_offset: 5,
+    });
+  });
+
+  it('handleCalculate omits option_stream roll fields when at defaults (none/0)', async () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg({
+        label: 'OPT_SP_500 C iv',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'nearest_to_target', target_days: 30 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'iv',
+        adjustment: 'none',
+        roll_offset: 0,
+        weight: 100,
+      });
+    });
+    act(() => {
+      result.current.setStartDate('2024-01-01');
+      result.current.setEndDate('2024-12-31');
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    const call = computePortfolio.mock.calls[0][0];
+    const leg = call.legs[result.current.legs[0].label];
+    // Minimal request body — defaults are omitted (BE defaults them).
+    expect(leg).not.toHaveProperty('adjustment');
+    expect(leg).not.toHaveProperty('roll_offset');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -47,6 +47,9 @@ export function savePortfolio(name, { legs, rebalance }) {
       maturity: l.maturity || null,
       selection: l.selection || null,
       stream: l.stream || null,
+      // ``?? null`` (not ``|| null``) so a valid roll_offset of 0 survives the
+      // round-trip. Snake-case: option legs use roll_offset (futures: rollOffset).
+      roll_offset: l.roll_offset ?? null,
     })),
     weights: weightsDict,
     rebalance,

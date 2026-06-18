@@ -963,17 +963,19 @@ async def resolve_option_stream(
 
         NOTE: the seam-gap lookup needs the rolled-out / rolled-in contract's
         mid on the boundary day, which is only present in the **bulk** path's
-        pre-fetched chain.  In the legacy per-date fallback (no
-        ``bulk_chain_reader``) the off-expiration contract is not re-queried,
-        so unresolvable seams are left unadjusted.  Production always wires the
+        pre-fetched chain.  The legacy per-date fallback (no
+        ``bulk_chain_reader``) cannot resolve those seams, so a non-``"none"``
+        ``adjustment`` without a bulk reader raises ``ValueError`` rather than
+        silently returning an unadjusted series.  Production always wires the
         bulk reader.
     roll_offset:
         Calendar days to roll EARLY: the maturity rule is resolved as of
         ``date + roll_offset`` for each date, so every roll happens
         ``roll_offset`` days sooner (mirrors the futures roll offset).
         ``0`` (default) = no shift.  Honored in the bulk path; the legacy
-        per-date fallback resolves maturity inside the selector and does
-        not apply the shift.
+        per-date fallback resolves maturity inside the selector and cannot
+        apply the shift, so a non-zero ``roll_offset`` without a bulk reader
+        raises ``ValueError``.
     chain_reader:
         Cycle-aware chain reader (any object satisfying
         :class:`_CycleAwareReader`).
@@ -1046,6 +1048,19 @@ async def resolve_option_stream(
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
 
+    # The legacy per-date path resolves maturity inside the selector and never
+    # re-queries the off-expiration contract, so it can honor NEITHER an early
+    # roll (``roll_offset``) NOR a MID back-adjustment (``adjustment``).  The
+    # bulk path supports both.  Rather than silently diverge (apply neither and
+    # return a series that looks like the bulk result but is not), fail loudly:
+    # production always wires the bulk reader, so this only fires on a
+    # misconfigured caller.
+    if roll_offset != 0 or adjustment != "none":
+        raise ValueError(
+            "roll_offset / adjustment require the bulk chain reader; the "
+            "legacy per-date path does not support them"
+        )
+
     # Wrap the reader so every selector-emitted query carries the cycle.
     cycle_reader = _CycleInjectingReader(chain_reader, cycle)
     selector = DefaultOptionsSelector(
@@ -1061,10 +1076,10 @@ async def resolve_option_stream(
     contracts: list[OptionContractDoc | None] = [None] * n
     attr_name = _STREAM_TO_ATTR[stream]
 
-    # (contract_id, date) → mid, accumulated for MID back-adjustment.  Only
-    # populated for stream == "mid" with a real adjustment; captures every row
-    # the per-date query returned (the selected expiration's chain).  asyncio
-    # is single-threaded so distinct-key writes from disjoint dates are safe.
+    # (contract_id, date) → mid, kept for the (now no-op) MID back-adjustment
+    # call below.  The guard above rejects any non-"none" ``adjustment`` on this
+    # path, so ``_capture_mids`` is always False here and the map stays empty;
+    # the structure is retained so the legacy and bulk paths read alike.
     mid_by_cid_date: dict[tuple[str, date], float] = {}
     _capture_mids = stream == "mid" and adjustment != "none"
 
@@ -1151,10 +1166,11 @@ async def resolve_option_stream(
 
     await asyncio.gather(*(_resolve_one(i, d) for i, d in enumerate(dates)))
 
-    # MID back-adjustment (no-op unless stream == "mid" and adjustment !=
-    # "none").  Legacy path: the off-expiration contract is not re-queried, so
-    # seams the mid-map cannot resolve are left unadjusted (warned) rather than
-    # corrupted.  See the ``adjustment`` parameter note.
+    # MID back-adjustment.  Always a no-op on this path: the guard above
+    # rejects any non-"none" ``adjustment`` before we get here, so this only
+    # ever runs with ``adjustment == "none"`` (which short-circuits inside).
+    # Kept for structural parity with the bulk path.  See the ``adjustment``
+    # parameter note.
     values = _apply_mid_adjustment(
         values=values,
         contracts=contracts,

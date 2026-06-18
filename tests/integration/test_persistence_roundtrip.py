@@ -19,13 +19,13 @@ EVERY kind. After archiving:
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
-from dotenv import dotenv_values
+
+# Shared across the four persistence integration modules — see conftest.
+from conftest import _app_db_creds_present
 
 from tcg.persistence import (
     AppDbConnectionPool,
@@ -41,13 +41,6 @@ from tcg.types.persistence import (
     PortfolioDoc,
     SignalDoc,
 )
-
-
-def _app_db_creds_present() -> bool:
-    env = dotenv_values(Path(__file__).resolve().parents[2] / ".env")
-    user = os.environ.get("APP_DB_USER") or env.get("APP_DB_USER")
-    password = os.environ.get("APP_DB_PASSWORD") or env.get("APP_DB_PASSWORD")
-    return bool(user and password)
 
 
 pytestmark = [

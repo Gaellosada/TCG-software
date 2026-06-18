@@ -109,6 +109,7 @@ function seedDefaultState(defaultId, seriesMap, params = { target_days: 30 }) {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   computeIndicatorMock.mockReset();
   resolveDefaultIndexInstrumentMock.mockReset();
   getOptionRootsMock.mockReset();
@@ -116,6 +117,15 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  // Freeze the wall clock to a fixed instant so the default date window
+  // (computeDefaultRange → [today−1y, today]) is identical whether it is
+  // computed inside the component at mount or in the assertion below. Without
+  // this the test computed computeDefaultRange() twice against the real clock
+  // and was midnight-flaky (the two calls could straddle a day boundary).
+  // ``shouldAdvanceTime`` keeps real time progressing so Testing-Library's
+  // findBy*/waitFor polling still fires while Date.now() stays pinned.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date(2025, 5, 17, 12, 0, 0)); // 2025-06-17 12:00 local
   // No SPX default — option-stream tests never need it.
   resolveDefaultIndexInstrumentMock.mockResolvedValue({ ok: true, data: null });
   // Roots lookup yields a deterministic last_trade_date so the FE-derived

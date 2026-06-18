@@ -20,8 +20,8 @@ unadjusted; non-price streams ignore ``adjustment`` entirely.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
-from typing import Literal, Sequence
 
 import numpy as np
 import pytest
@@ -40,142 +40,7 @@ from tcg.types.options import (
     OptionDailyRow,
 )
 
-
-# ── Synthetic helpers (faithful to test_stream_resolver.py) ─────────────
-
-
-def _contract(
-    *,
-    strike: float,
-    expiration: date,
-    type_: Literal["C", "P"] = "C",
-    cycle: str = "M",
-    collection: str = "OPT_SP_500",
-) -> OptionContractDoc:
-    cid = f"{collection}_K{int(strike)}_{type_}_{expiration.isoformat()}_{cycle}"
-    return OptionContractDoc(
-        collection=collection,
-        contract_id=cid,
-        root_underlying="IND_SP_500",
-        underlying_ref="FUT_SP_500_EMINI",
-        underlying_symbol=None,
-        expiration=expiration,
-        expiration_cycle=cycle,
-        strike=float(strike),
-        type=type_,
-        contract_size=None,
-        currency="USD",
-        provider="IVOLATILITY",
-        strike_factor_verified=True,
-    )
-
-
-def _row(
-    *,
-    row_date: date,
-    mid: float | None = 1.05,
-    iv: float | None = 0.20,
-    delta: float | None = 0.50,
-) -> OptionDailyRow:
-    return OptionDailyRow(
-        date=row_date,
-        open=None,
-        high=None,
-        low=None,
-        close=None,
-        bid=mid - 0.05 if mid is not None else None,
-        ask=mid + 0.05 if mid is not None else None,
-        bid_size=None,
-        ask_size=None,
-        volume=None,
-        open_interest=None,
-        mid=mid,
-        iv_stored=iv,
-        delta_stored=delta,
-        gamma_stored=None,
-        theta_stored=None,
-        vega_stored=None,
-        underlying_price_stored=None,
-    )
-
-
-class FakeBulkChainReader:
-    """Bulk chain reader returning synthetic chains keyed by date.
-
-    Mirrors the ``FakeBulkChainReader`` in ``test_stream_resolver.py``: filters
-    each date's full chain by type / expiration window / cycle and returns the
-    matching rows for every requested date in one call.
-    """
-
-    def __init__(
-        self,
-        chains_by_date: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]],
-    ) -> None:
-        self._chains = chains_by_date
-        self.bulk_calls: list[dict] = []
-
-    async def query_chain_bulk(
-        self,
-        *,
-        root: str,
-        dates: Sequence[date],
-        type: Literal["C", "P", "both"],
-        expiration_min: date,
-        expiration_max: date,
-        strike_min: float | None = None,
-        strike_max: float | None = None,
-        expiration_cycle: str | None = None,
-    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        self.bulk_calls.append(
-            {"expiration_min": expiration_min, "expiration_max": expiration_max}
-        )
-        result: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
-        for d in dates:
-            chain = self._chains.get(d, [])
-            filtered = [
-                (c, r)
-                for (c, r) in chain
-                if (c.type == type or type == "both")
-                and expiration_min <= c.expiration <= expiration_max
-                and (expiration_cycle is None or c.expiration_cycle == expiration_cycle)
-            ]
-            if filtered:
-                result[d] = filtered
-        return result
-
-
-class FakeChainReader:
-    """Per-date chain reader (only used to satisfy the resolver signature;
-    the bulk path does not call it for ByStrike)."""
-
-    def __init__(
-        self,
-        chains_by_date: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]],
-    ) -> None:
-        self._chains = chains_by_date
-        self.calls: list[dict] = []
-
-    async def query_chain(
-        self,
-        *,
-        root: str,
-        date: date,
-        type: Literal["C", "P", "both"],
-        expiration_min: date,
-        expiration_max: date,
-        strike_min: float | None = None,
-        strike_max: float | None = None,
-        expiration_cycle: str | None = None,
-    ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
-        self.calls.append({"date": date})
-        chain = self._chains.get(date, [])
-        return [
-            (c, r)
-            for (c, r) in chain
-            if (c.type == type or type == "both")
-            and expiration_min <= c.expiration <= expiration_max
-            and (expiration_cycle is None or c.expiration_cycle == expiration_cycle)
-        ]
+from _stream_fakes import FakeBulkChainReader, FakeChainReader, _contract, _row
 
 
 # Two contracts standing in for a roll: April (old) → May (new).
@@ -538,6 +403,53 @@ async def test_e2e_nan_mid_at_seam_leaves_gap_no_crash():
     assert errors[0] == "missing_mid" and errors[1] == "missing_mid"
     assert values[2] == pytest.approx(13.0)
     assert values[3] == pytest.approx(14.0)
+
+
+async def test_e2e_skipped_seam_emits_warning(caplog):
+    """When a seam is skipped (no finite, non-zero reference mid), the resolver
+    emits a WARNING naming the skip and the unadjusted gap — the operator's
+    only signal that a roll was left uncorrected.  Same zero-mid scenario as
+    ``test_e2e_zero_mid_at_seam_leaves_gap_no_crash``, here asserting the log.
+    """
+    _resolver_logger = "tcg.engine.options.series.stream_resolver"
+    dates, chains = _rolled_mid_chains(
+        old_mid=0.0, new_mid_first=13.0, new_mid_second=14.0
+    )
+    with caplog.at_level(logging.WARNING, logger=_resolver_logger):
+        values, errors, _c = await _resolve(dates, chains, adjustment="ratio")
+
+    # The series is intact (seam left unadjusted), as the sibling test pins.
+    assert all(e is None for e in errors)
+    np.testing.assert_allclose(values, [0.0, 0.0, 13.0, 14.0])
+
+    # Exactly the seam-skip WARNING fired, from the resolver's logger, carrying
+    # the two diagnostic substrings the brief calls out.
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == _resolver_logger
+    ]
+    assert len(warnings) == 1, f"expected one seam-skip warning, got {warnings!r}"
+    msg = warnings[0].getMessage()
+    assert "roll skipped" in msg
+    assert "Unadjusted gap remains" in msg
+
+
+async def test_e2e_clean_roll_emits_no_warning(caplog):
+    """Negative control: a roll whose seam IS resolvable adjusts silently — no
+    seam-skip WARNING — so the warning above is specific to the skip path."""
+    _resolver_logger = "tcg.engine.options.series.stream_resolver"
+    dates, chains = _rolled_mid_chains(
+        old_mid=10.0, new_mid_first=13.0, new_mid_second=14.0
+    )
+    with caplog.at_level(logging.WARNING, logger=_resolver_logger):
+        _values, errors, _c = await _resolve(dates, chains, adjustment="ratio")
+    assert all(e is None for e in errors)
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == _resolver_logger
+    ]
 
 
 async def test_e2e_same_expiration_strike_shift_uses_same_day_mid():

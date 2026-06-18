@@ -111,4 +111,38 @@ describe('legsToRangesKey', () => {
     const putKey = legsToRangesKey([{ ...base, option_type: 'P' }]);
     expect(callKey).not.toBe(putKey);
   });
+
+  it('different roll_offset produces different keys (it shifts contract selection)', () => {
+    const base = {
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C', cycle: null,
+      maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
+      stream: 'mid', adjustment: 'none',
+    };
+    const k0 = legsToRangesKey([{ ...base, roll_offset: 0 }]);
+    const k5 = legsToRangesKey([{ ...base, roll_offset: 5 }]);
+    expect(k0).not.toBe(k5);
+  });
+
+  it('different adjustment produces different keys for option_stream', () => {
+    const base = {
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C', cycle: null,
+      maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
+      stream: 'mid', roll_offset: 0,
+    };
+    const none = legsToRangesKey([{ ...base, adjustment: 'none' }]);
+    const ratio = legsToRangesKey([{ ...base, adjustment: 'ratio' }]);
+    expect(none).not.toBe(ratio);
+  });
+
+  it('missing roll_offset / adjustment default to 0 / none in the key (legacy legs)', () => {
+    const legacy = {
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C', cycle: null,
+      maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
+      stream: 'mid',
+    };
+    const explicit = { ...legacy, adjustment: 'none', roll_offset: 0 };
+    // A legacy leg (no roll fields) keys identically to one with the defaults
+    // — so loading old state doesn't spuriously invalidate the range cache.
+    expect(legsToRangesKey([legacy])).toBe(legsToRangesKey([explicit]));
+  });
 });

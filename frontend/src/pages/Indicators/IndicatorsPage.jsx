@@ -721,6 +721,10 @@ function IndicatorsPage() {
           // /api/indicators/compute accepts:
           //   { type: 'spot', collection, instrument_id }
           //   { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
+          //   { type: 'option_stream', collection, option_type, cycle,
+          //     maturity, selection, stream, adjustment, roll_offset }
+          // The picked ref is forwarded verbatim, so option_stream's
+          // adjustment/roll_offset (when set) ride along unchanged.
           // Legacy entries without a type field (stored before this change)
           // are treated as spot — add the type defensively.
           seriesPayload[label] = picked.type
@@ -729,26 +733,14 @@ function IndicatorsPage() {
         }
       }
       // Option-stream materialiser walks dates per business day, so it
-      // needs an explicit ISO date range. When the user has configured a
-      // range via the OptionDateRangeControl, use that (preset mode
-      // anchors to last_trade_date; custom mode passes dates through).
-      // Spot/continuous resolvers ignore start/end so adding them is
-      // safe, but we only attach when needed to keep request shape minimal.
-      let dateRange = null;
-      try {
-        dateRange = await resolveOptionDateRange(seriesPayload, optionDateRange);
-      } catch (e) {
-        // Surface a typed error rather than swallowing — Sign 10 (no
-        // silent failures). The user gets a clear message if the
-        // /options/roots lookup itself fails.
-        if (signal.aborted) return;
-        setError({
-          error_type: 'data',
-          message: `Could not resolve option-stream date range: ${e?.message || e}`,
-        });
-        setLastResult(null);
-        return;
-      }
+      // needs an explicit ISO date range. We forward the user's configured
+      // OptionDateRangeControl window verbatim ({ start, end }); spot/
+      // continuous resolvers ignore start/end so attaching them is safe, but
+      // we only do so when an option_stream ref is present to keep the
+      // request shape minimal. ``resolveOptionDateRange`` is a pure, local,
+      // synchronous selector (no network call) — it returns null when no
+      // option_stream ref is present, so the caller omits start/end entirely.
+      const dateRange = resolveOptionDateRange(seriesPayload, optionDateRange);
 
       // Reset any prior progress so the spinner starts fresh; the
       // poll loop will update it the moment the backend reports.

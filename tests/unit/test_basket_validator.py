@@ -54,9 +54,7 @@ def _continuous_leg(
     )
 
 
-def _option_stream_leg(
-    collection: str = "OPT_VIX", weight: float = 0.5
-) -> BasketLegIn:
+def _option_stream_leg(collection: str = "OPT_VIX", weight: float = 0.5) -> BasketLegIn:
     return BasketLegIn(
         instrument={
             "type": "option_stream",
@@ -193,12 +191,8 @@ def test_continuous_legs_same_full_spec_and_weight_rejected() -> None:
     """Two continuous legs with identical adjustment/cycle/rollOffset
     AND the same weight ARE duplicates."""
     legs = [
-        _continuous_leg(
-            "FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5
-        ),
-        _continuous_leg(
-            "FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5
-        ),
+        _continuous_leg("FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5),
+        _continuous_leg("FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5),
     ]
     with pytest.raises(HTTPException) as exc_info:
         _check_basket_no_duplicates(legs)
@@ -254,4 +248,77 @@ def test_basket_leg_extra_field_on_leg_rejected() -> None:
             },
             weight=1.0,
             junk="x",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Inline-basket option_stream leg carries adjustment / roll_offset
+# (the MAJOR review finding — wire model parity with continuous legs)
+# ---------------------------------------------------------------------------
+
+
+def test_inline_option_stream_leg_carries_adjustment_and_roll_offset() -> None:
+    """The inline-basket wire model (``_models.BasketLeg``) threads
+    ``adjustment`` / ``roll_offset`` on an option_stream leg, mirroring the
+    continuous-leg fields."""
+    from tcg.core.api._models import BasketLeg
+
+    leg = BasketLeg(
+        instrument={
+            "type": "option_stream",
+            "collection": "OPT_VIX",
+            "option_type": "C",
+            "cycle": None,
+            "maturity": {"kind": "next_third_friday", "offset_months": 0},
+            "selection": {"kind": "by_moneyness", "target": 1.0, "tolerance": 0.01},
+            "stream": "mid",
+            "adjustment": "ratio",
+            "roll_offset": 5,
+        },
+        weight=0.5,
+    )
+    assert leg.instrument.adjustment == "ratio"
+    assert leg.instrument.roll_offset == 5
+
+
+def test_inline_option_stream_leg_defaults_when_absent() -> None:
+    """Absent adjustment / roll_offset default to none / 0 (additive — old
+    inline baskets unchanged)."""
+    from tcg.core.api._models import BasketLeg
+
+    leg = BasketLeg(
+        instrument={
+            "type": "option_stream",
+            "collection": "OPT_VIX",
+            "option_type": "C",
+            "cycle": None,
+            "maturity": {"kind": "next_third_friday", "offset_months": 0},
+            "selection": {"kind": "by_moneyness", "target": 1.0, "tolerance": 0.01},
+            "stream": "mid",
+        },
+        weight=0.5,
+    )
+    assert leg.instrument.adjustment == "none"
+    assert leg.instrument.roll_offset == 0
+
+
+def test_inline_option_stream_leg_roll_offset_out_of_range_rejected() -> None:
+    """``OptionStreamRef`` bounds roll_offset to 0..30 on the inline path."""
+    from pydantic import ValidationError
+
+    from tcg.core.api._models import BasketLeg
+
+    with pytest.raises(ValidationError):
+        BasketLeg(
+            instrument={
+                "type": "option_stream",
+                "collection": "OPT_VIX",
+                "option_type": "C",
+                "cycle": None,
+                "maturity": {"kind": "next_third_friday", "offset_months": 0},
+                "selection": {"kind": "by_moneyness", "target": 1.0, "tolerance": 0.01},
+                "stream": "mid",
+                "roll_offset": 31,
+            },
+            weight=0.5,
         )
