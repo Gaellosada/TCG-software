@@ -33,35 +33,61 @@ const SIDECAR_CORS_ORIGINS: &str =
 /// `CommandChild::kill` consumes the handle, hence `Option` + `take()`.
 struct SidecarProcess(Mutex<Option<CommandChild>>);
 
-/// Resolve the absolute path to the repo checkout's gitignored `.env`.
+/// Resolve the `.env` the sidecar should read, searching (first hit wins):
+///   1. `TCG_ENV_FILE` env var — explicit override (escape hatch).
+///   2. `<exe-dir>/.env` — the `.env` sitting in the SAME FOLDER as the running
+///      executable (the install dir for the packaged app). This is the place to
+///      drop credentials for the desktop build.
+///   3. Dev fallback: `<crate-dir>/../../.env` (the repo root), so `tauri dev`
+///      / running from a checkout keeps working.
 ///
-/// Order:
-///   1. `TCG_ENV_FILE` if already set in this process's environment (operator
-///      override; passed straight through to the sidecar).
-///   2. `<crate-dir>/../../.env` — i.e. the `TCG-software/.env` repo root,
-///      canonicalized. `CARGO_MANIFEST_DIR` is baked in at compile time and
-///      points at `desktop/src-tauri`, so this is stable regardless of the
-///      runtime working directory.
-///
-/// We never read or log the file's *contents* — only its path is handled here.
+/// Only the PATH is handled here — the file's contents are never read or logged.
+/// Returns the first EXISTING candidate, or None (the sidecar then fails fast
+/// with a clear "DWH_* not set" error; the caller logs where to drop the file).
 fn resolve_env_file() -> Option<String> {
+    fn abs(p: std::path::PathBuf) -> Option<String> {
+        Some(
+            std::fs::canonicalize(&p)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
     if let Ok(explicit) = std::env::var("TCG_ENV_FILE") {
         if !explicit.trim().is_empty() {
             return Some(explicit);
         }
     }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let candidate = std::path::Path::new(manifest_dir)
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let cand = dir.join(".env");
+            if cand.is_file() {
+                return abs(cand);
+            }
+        }
+    }
+
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join(".env");
-    // Canonicalize so the sidecar gets an absolute path it can resolve from any
-    // cwd. If the file is absent we still return the (lexical) path so the
-    // failure is visible in logs rather than silently swallowed.
-    match std::fs::canonicalize(&candidate) {
-        Ok(abs) => Some(abs.to_string_lossy().into_owned()),
-        Err(_) => Some(candidate.to_string_lossy().into_owned()),
+    if dev.is_file() {
+        return abs(dev);
     }
+
+    None
+}
+
+/// The directory of the running executable (the install dir for a packaged
+/// build) — i.e. where the user should drop their `.env`. Used only for a
+/// helpful log line when no `.env` is found.
+fn exe_dir_hint() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(".env").to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "<folder of the app .exe>/.env".into())
 }
 
 /// Spawn the bundled backend sidecar, wiring args + the CORS/.env environment,
@@ -87,13 +113,17 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error
         // Critical: let the packaged webview origin through the backend's CORS.
         .env("TCG_CORS_ORIGINS", SIDECAR_CORS_ORIGINS);
 
-    // Point the sidecar at the repo `.env` regardless of its working directory
-    // so DWH_*/APP_DB_* creds resolve. (Contents never read here.)
+    // Give the sidecar the resolved .env path (next to the exe, or an explicit
+    // override / dev fallback). The file's contents are never read here.
     if let Some(env_file) = resolve_env_file() {
         eprintln!("[tcg-desktop] sidecar .env file: {env_file}");
         command = command.env("TCG_ENV_FILE", env_file);
     } else {
-        eprintln!("[tcg-desktop] WARNING: could not resolve a .env path for the sidecar");
+        eprintln!(
+            "[tcg-desktop] WARNING: no .env found — drop one at {} (next to the app \
+             executable). The backend will not start until then.",
+            exe_dir_hint()
+        );
     }
 
     let (mut rx, child) = command.spawn()?;
