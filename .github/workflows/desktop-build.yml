@@ -78,7 +78,17 @@ jobs:
 
       - name: Build desktop bundles (tauri build)
         working-directory: desktop
-        run: npm run build
+        shell: bash
+        run: |
+          # tauri.conf.json's bundle.targets is Linux-only (deb/appimage); pick
+          # OS-appropriate bundles here so the Windows/macOS legs don't fail.
+          case "${{ runner.os }}" in
+            Linux)   BUNDLES=deb,appimage ;;
+            Windows) BUNDLES=nsis ;;
+            macOS)   BUNDLES=app ;;
+          esac
+          echo "Building bundles for ${{ runner.os }}: $BUNDLES"
+          npx tauri build --bundles "$BUNDLES"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
