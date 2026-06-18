@@ -1,4 +1,4 @@
-const API_BASE = '/api';
+import { API_BASE } from './base';
 
 class ApiError extends Error {
   constructor(errorType, message, details = null) {

@@ -1,0 +1,14 @@
+{
+  "name": "tcg-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri v2 desktop wrapper for Trajectoire CAP. Additive: consumes the existing frontend build + spawns the PyInstaller backend sidecar. The pure-web path (../start.sh) is unaffected.",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

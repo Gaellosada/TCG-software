@@ -28,7 +28,9 @@
  * /api/portfolio/compute). Those handle computation; this handles persistence.
  */
 
-const BASE = '/api/persistence';
+import { API_BASE } from './base';
+
+const BASE = `${API_BASE}/persistence`;
 
 /** Valid category values. */
 export const CATEGORIES = /** @type {const} */ (['RESEARCH', 'DEV', 'PROD', 'ARCHIVE']);

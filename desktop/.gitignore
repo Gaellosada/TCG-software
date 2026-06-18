@@ -1,0 +1,11 @@
+# npm deps for the Tauri CLI wrapper.
+node_modules/
+
+# The staged sidecar binary is a build artifact (89 MB); rebuild via
+# sidecar/build_sidecar.sh. Keep the directory shape but not the binary.
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+
+# PyInstaller intermediate output.
+sidecar/build/
+sidecar/dist/

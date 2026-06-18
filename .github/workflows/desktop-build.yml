@@ -1,0 +1,91 @@
+# Build native desktop bundles (Windows / macOS / Linux) for the Tauri wrapper.
+#
+# AUTHORED but on-demand: the team builds the Linux bundle locally; this produces
+# the Windows/macOS artifacts (which need their own OS) when triggered. It does
+# NOT run on ordinary pushes — start it from the Actions tab (workflow_dispatch)
+# or by pushing a `desktop-v*` tag.
+#
+# Per OS it: builds the PyInstaller backend sidecar, stages it under the name
+# Tauri's externalBin expects (binaries/tcg-backend-<target-triple>[.exe]), then
+# runs `tauri build` (which builds the existing frontend via beforeBuildCommand).
+# Code signing / notarization for macOS & Windows is intentionally out of scope
+# here (needs certs/secrets) — these are unsigned artifacts.
+name: desktop-build
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.triple }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install uv (Python)
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync Python deps (with desktop extra → PyInstaller)
+        run: uv sync --extra desktop
+
+      - name: Build + stage the backend sidecar (PyInstaller)
+        shell: bash
+        run: |
+          uv run pyinstaller --noconfirm --clean desktop/sidecar/tcg-backend.spec \
+            --distpath desktop/sidecar/dist --workpath desktop/sidecar/build
+          mkdir -p desktop/src-tauri/binaries
+          EXT=""; [ "${{ runner.os }}" = "Windows" ] && EXT=".exe"
+          cp "desktop/sidecar/dist/tcg-backend$EXT" \
+             "desktop/src-tauri/binaries/tcg-backend-${{ matrix.triple }}$EXT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install desktop npm deps (Tauri CLI)
+        working-directory: desktop
+        run: npm install
+
+      - name: Build desktop bundles (tauri build)
+        working-directory: desktop
+        run: npm run build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcg-desktop-${{ matrix.triple }}
+          if-no-files-found: warn
+          path: |
+            desktop/src-tauri/target/release/bundle/**
+            desktop/src-tauri/target/release/tcg-desktop
+            desktop/src-tauri/target/release/tcg-desktop.exe

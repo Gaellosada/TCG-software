@@ -5,6 +5,7 @@
 // backend resolver here. If the set of supported index symbols ever
 // widens, update the matcher below, not the backend.
 
+import { API_BASE } from './base';
 import { listCollections, listInstruments } from './data';
 
 /**
@@ -66,7 +67,7 @@ export async function computeIndicator(
     body.task_id = makeTaskId();
     const pollOnce = async () => {
       try {
-        const r = await fetch(`/api/indicators/progress/${body.task_id}`, { signal });
+        const r = await fetch(`${API_BASE}/indicators/progress/${body.task_id}`, { signal });
         if (!r.ok) return;
         const data = await r.json();
         const frac = typeof data.fraction === 'number' ? data.fraction : 0;
@@ -84,7 +85,7 @@ export async function computeIndicator(
   }
 
   try {
-    const res = await fetch('/api/indicators/compute', {
+    const res = await fetch(`${API_BASE}/indicators/compute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
