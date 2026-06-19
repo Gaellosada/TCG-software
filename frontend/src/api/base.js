@@ -12,3 +12,13 @@ export function resolveApiBase(w = (typeof window !== 'undefined' ? window : und
 }
 
 export const API_BASE = resolveApiBase();
+
+// True only inside the Tauri desktop webview. Tauri v2 injects
+// window.__TAURI_INTERNALS__ before app JS runs, so this is reliable at any
+// time after load. Pure (takes the window) so it is unit-testable for both
+// environments without touching the real global. Used to gate desktop-only UI
+// (the DB-credentials Settings section and the backend-down banner); in a
+// normal browser it is false and web mode is byte-for-byte unchanged.
+export function isTauri(w = (typeof window !== 'undefined' ? window : undefined)) {
+  return Boolean(w && w.__TAURI_INTERNALS__);
+}

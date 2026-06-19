@@ -105,7 +105,10 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    # No console window: on Windows a console=True sidecar pops a black terminal
+    # alongside the Tauri window. lib.rs forwards the sidecar's stdout/stderr to
+    # the app log (CommandEvent::Stdout/Stderr), so diagnostics are preserved.
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

@@ -59,3 +59,90 @@
   color: var(--text-tertiary, var(--text-secondary));
   margin-top: 4px;
 }
+
+/* -------- Desktop-only "Database connection" section -------- */
+
+.dbSection {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-primary);
+}
+
+.sectionTitle {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+}
+
+.sectionHint {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+}
+
+.dbGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.fieldLabel {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.input {
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dbActions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.saveBtn {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.saveBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.dbStatus {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.dbStatusOk {
+  color: var(--positive, #16a34a);
+}
+
+.dbStatusError {
+  color: var(--negative, #dc2626);
+}

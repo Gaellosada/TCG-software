@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { resolveApiBase, API_BASE } from './base';
+import { resolveApiBase, API_BASE, isTauri } from './base';
 
 // API_BASE is computed once at import time, so we test the pure resolver
 // (resolveApiBase) for both environments and assert the import-time default
@@ -31,5 +31,25 @@ describe('resolveApiBase', () => {
     // no Tauri global, so the resolved constant stays relative and all the
     // existing '/api/...' fetch mocks remain valid.
     expect(API_BASE).toBe('/api');
+  });
+});
+
+describe('isTauri', () => {
+  it('is false in a normal browser (no __TAURI_INTERNALS__)', () => {
+    // Gates the desktop-only creds UI + banner off in the web build.
+    expect(isTauri({})).toBe(false);
+  });
+
+  it('is true inside the Tauri webview', () => {
+    expect(isTauri({ __TAURI_INTERNALS__: {} })).toBe(true);
+  });
+
+  it('treats a missing window as not-Tauri', () => {
+    expect(isTauri(undefined)).toBe(false);
+  });
+
+  it('returns false in the jsdom test environment (no Tauri global)', () => {
+    // The whole point: tests run as web mode, so the creds section never mounts.
+    expect(isTauri()).toBe(false);
   });
 });

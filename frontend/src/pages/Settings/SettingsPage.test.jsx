@@ -77,3 +77,14 @@ describe('<SettingsPage> — risk-free rate row', () => {
     expect(screen.getByText(/sharpe, sortino/i)).toBeTruthy();
   });
 });
+
+describe('<SettingsPage> — desktop-only DB credentials section', () => {
+  it('does NOT render the Database connection section in web mode (no Tauri global)', () => {
+    // isTauri() is false under jsdom, so the desktop-only credentials editor
+    // must not mount — guaranteeing the web build stays unchanged and the real
+    // Tauri `invoke` is never called from these tests.
+    render(<SettingsPage />);
+    expect(screen.queryByTestId('db-settings')).toBeNull();
+    expect(screen.queryByText('Database connection')).toBeNull();
+  });
+});

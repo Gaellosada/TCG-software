@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import Icon from '../../components/Icon';
 import RiskFreeRateInput from '../../components/RiskFreeRateInput';
+import DatabaseSettings from './DatabaseSettings';
+import { isTauri } from '../../api/base';
 import styles from './SettingsPage.module.css';
 import { DEFAULT_RISK_FREE_RATE_PCT } from '../../lib/userSettings';
 
@@ -143,6 +145,10 @@ function SettingsPage() {
           <div className={styles.settingHint}>Used for Sharpe, Sortino, and Calmar ratios.</div>
         </div>
       </div>
+
+      {/* Desktop-only: the web build connects via the server-side .env, so the
+          credentials editor is shown only inside the Tauri webview. */}
+      {isTauri() ? <DatabaseSettings /> : null}
     </div>
   );
 }

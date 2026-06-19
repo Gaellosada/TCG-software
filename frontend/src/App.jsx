@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/layout/Sidebar';
 import PageContainer from './components/layout/PageContainer';
 import ErrorBoundary from './components/ErrorBoundary';
+import BackendBanner from './components/BackendBanner';
 import HelpPage from './pages/Help/HelpPage';
 import DataPage from './pages/Data/DataPage';
 import IndicatorsPage from './pages/Indicators/IndicatorsPage';
@@ -34,6 +35,9 @@ function App() {
         className="app-content"
         style={{ marginLeft: sidebarCollapsed ? 'var(--sidebar-width-collapsed)' : undefined }}
       >
+        {/* Desktop-only: warns when the auto-spawned backend is unreachable and
+            links to Settings. No-op (renders null) in the web build. */}
+        <BackendBanner />
         <ErrorBoundary>
           <Routes>
             <Route path="/" element={<Navigate to="/data" replace />} />

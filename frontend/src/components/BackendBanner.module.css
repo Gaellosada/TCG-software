@@ -1,0 +1,13 @@
+.banner {
+  background: var(--negative, #dc2626);
+  color: #fff;
+  font-size: 0.82rem;
+  padding: 8px 16px;
+  text-align: center;
+}
+
+.link {
+  color: #fff;
+  font-weight: 600;
+  text-decoration: underline;
+}
