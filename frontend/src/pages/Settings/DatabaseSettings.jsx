@@ -1,11 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { HEALTH_URL } from '../../api/base';
 import styles from './SettingsPage.module.css';
-
-// Health endpoint of the auto-spawned sidecar. NOTE: /health is mounted at the
-// ROOT of the backend, not under /api, so we hardcode the sidecar origin here
-// (under Tauri the API base is http://127.0.0.1:8000/api — same host:port).
-const HEALTH_URL = 'http://127.0.0.1:8000/health';
 
 // The eight fields written to <app_config_dir>/.env by the Rust
 // save_db_credentials command. Field names match the Rust DbCredentials struct
@@ -27,8 +23,9 @@ const EMPTY_CREDS = {
 // 40s) deliberately exceeds the Rust-side readiness probe (~30s) plus margin
 // for the one-file sidecar's first-run unpack, so a slow cold start doesn't
 // falsely report failure before the backend is actually up.
-async function waitForHealth({ attempts = 80, intervalMs = 500 } = {}) {
+async function waitForHealth({ attempts = 80, intervalMs = 500, isCancelled } = {}) {
   for (let i = 0; i < attempts; i += 1) {
+    if (isCancelled && isCancelled()) return false;
     try {
       const res = await fetch(HEALTH_URL, { cache: 'no-store' });
       if (res.ok) return true;
@@ -53,6 +50,16 @@ function DatabaseSettings() {
   // open it when a connection fails — the sidecar now runs with the console
   // hidden, so this file is where its dwh errors/tracebacks land.
   const [logPath, setLogPath] = useState('');
+  // Tracks mount state so async handlers (the up-to-40s save/health poll) don't
+  // setState after the user navigates away — the backend-down banner actively
+  // invites leaving Settings mid-reconnect.
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -96,8 +103,10 @@ function DatabaseSettings() {
     setStatus({ kind: 'saving', message: 'Saving…' });
     try {
       await invoke('save_db_credentials', { creds });
+      if (!mountedRef.current) return;
       setStatus({ kind: 'reconnecting', message: 'Saved — reconnecting…' });
-      const ok = await waitForHealth();
+      const ok = await waitForHealth({ isCancelled: () => !mountedRef.current });
+      if (!mountedRef.current) return;
       setStatus(
         ok
           ? { kind: 'connected', message: 'Connected' }
@@ -107,6 +116,7 @@ function DatabaseSettings() {
             },
       );
     } catch (err) {
+      if (!mountedRef.current) return;
       // The Rust command returns Err(String) on any failure — surface it.
       setStatus({ kind: 'error', message: String(err) });
     }

@@ -35,7 +35,7 @@ From the repo root — nothing here affects it:
 ## Run the DESKTOP app (dev)
 Prerequisites (one-time):
 - **Rust** (`https://rustup.rs`).
-- **Linux system deps** (Ubuntu 24.04):
+- **Linux system deps** (Ubuntu 22.04, matching CI):
   ```bash
   sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
     libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
@@ -65,7 +65,9 @@ cd desktop && npm run build                  # → src-tauri/target/release/bund
 Actions matrix at `.github/workflows/desktop-build.yml` (run it from the Actions
 tab / `workflow_dispatch`, or push a `desktop-v*` tag). It builds the per-OS
 sidecar, stages it, and runs `tauri build`, uploading the artifacts. The produced
-macOS/Windows binaries are **unsigned** (code signing/notarization needs certs).
+macOS/Windows binaries are **unsigned** (code signing/notarization needs certs);
+on macOS, clear the quarantine flag after download with
+`xattr -d com.apple.quarantine "Trajectoire CAP.app"` if Gatekeeper blocks it.
 
 ## How it fits together
 - **Backend = sidecar.** `tcg.core` is frozen by PyInstaller into a single
@@ -73,16 +75,34 @@ macOS/Windows binaries are **unsigned** (code signing/notarization needs certs).
   (`externalBin`), so no Python/uv is needed at runtime.
 - **Frontend = the existing build.** `frontendDist` points at `../../frontend/dist`;
   in dev the window uses the Vite dev server. The frontend is never forked.
-- **CORS.** A packaged webview's origin is `tauri://localhost` (or
-  `https://tauri.localhost`), not `:5173`. `src/lib.rs` spawns the sidecar with
-  `TCG_CORS_ORIGINS=tauri://localhost,https://tauri.localhost,http://localhost:5173`
-  so the backend accepts the webview's requests.
+- **CORS.** A packaged webview's origin is `tauri://localhost` on Linux/macOS
+  and `http://tauri.localhost` on Windows (WebView2), not `:5173`. `src/lib.rs`
+  spawns the sidecar with
+  `TCG_CORS_ORIGINS=tauri://localhost,https://tauri.localhost,http://tauri.localhost,http://localhost:5173`
+  so the backend accepts the webview's requests on every OS. (Omitting the
+  Windows `http://tauri.localhost` is what made packaged Windows fail every
+  fetch with "Backend unreachable".)
+
+## Releasing / versioning
+The shipped bundle version comes from **`src-tauri/tauri.conf.json`** and
+**`src-tauri/Cargo.toml`** — bump BOTH (keep them equal) for a release, then push
+a `desktop-v<version>` tag to trigger the cross-OS build. `package.json`'s
+version is unused by the bundle (it is only the npm project for the Tauri CLI)
+and is intentionally left at its initial value.
 
 ## Data / credentials
-The sidecar reads `DWH_*` / `APP_DB_*` from the repo's gitignored **`.env`**
-(same mechanism as the web path). `src/lib.rs` passes its absolute path to the
-sidecar via `TCG_ENV_FILE` (default: the repo-root `.env`; override the env var
-to point elsewhere). **No secrets are bundled or committed.** The backend fails
+The sidecar reads `DWH_*` / `APP_DB_*` from a `.env` (same keys as the web path).
+`src/lib.rs` resolves which `.env` to use and passes its absolute path to the
+sidecar via `TCG_ENV_FILE`, searching (first hit wins): `TCG_ENV_FILE` if already
+set → `<app config dir>/.env` (where the in-app **Settings → Database
+connection** form writes them) → a `.env` next to the executable → the repo-root
+`.env` (dev). The Rust layer never reads or logs the file's contents.
+
+Credentials entered in Settings are stored **plaintext** in
+`<app config dir>/.env` — the standard trade-off for a local desktop app with no
+bundled secret store. They are user-scoped and, on Unix, written `0600`
+(owner-only; the directory `0700`), so they are not world-readable on a shared
+host. **No secrets are bundled into the binary or committed.** The backend fails
 fast if dwh is unreachable, so the host must be on the dwh IP allowlist.
 
 ## Module boundaries

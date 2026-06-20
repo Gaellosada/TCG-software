@@ -62,17 +62,19 @@ hiddenimports += [
     "uvicorn.protocols.http.h11_impl",
     "uvicorn.protocols.websockets",
     "uvicorn.protocols.websockets.auto",
-    "uvicorn.protocols.websockets.wsproto_impl",
+    # Only the impls that are actually installed: wsproto is absent, and the app
+    # exposes no WS endpoints, but "auto" still imports websockets_impl.
     "uvicorn.protocols.websockets.websockets_impl",
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
     "uvicorn.lifespan.off",
-    # scipy.special's Fortran cdf lib is referenced indirectly by the
-    # implied-vol path; name it so it is never tree-shaken out.
-    "scipy.special._cdflib",
     # The whole tcg package is imported by the entry script; collect every
     # submodule so the routers/services wired in create_app() are present.
     "tcg",
+    # psutil powers the sidecar's parent-death watchdog (tcg_backend.py) so a
+    # killed bootloader never orphans this uvicorn child holding the port. It
+    # ships a compiled extension, so name it explicitly to guarantee bundling.
+    "psutil",
 ]
 
 

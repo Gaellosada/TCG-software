@@ -22,6 +22,10 @@ jobs:
   build:
     name: ${{ matrix.os }} (${{ matrix.triple }})
     runs-on: ${{ matrix.os }}
+    # Pin the Python that builds the sidecar so all three OS legs freeze on the
+    # same interpreter -> reproducible bundles (uv auto-downloads it).
+    env:
+      UV_PYTHON: "3.12"
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +51,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Sync Python deps (with desktop extra → PyInstaller)
-        run: uv sync --extra desktop
+        run: uv sync --locked --extra desktop
 
       - name: Build + stage the backend sidecar (PyInstaller)
         shell: bash
@@ -82,6 +86,59 @@ jobs:
           if ($out -notmatch "error connecting|PoolTimeout|Application startup|Uvicorn") { Write-Error "FAIL: no backend connect-attempt output captured — smoke inconclusive."; exit 1 }
           Write-Host "OK: sidecar reached a normal connect attempt with NO ProactorEventLoop error (Windows event-loop fix verified)."
 
+      - name: Smoke — no orphaned backend on kill (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # The one-file sidecar is a bootloader that forks the real uvicorn
+          # CHILD. Tauri kills only the bootloader, so without the parent-death
+          # watchdog the child is ORPHANED and keeps holding the port (blocking
+          # the next launch/restart). Verify the watchdog: start it, SIGKILL the
+          # bootloader (exactly what Tauri does on Unix), assert the child dies.
+          # Port 8011 avoids colliding with anything else; dummy creds keep the
+          # child alive (blocked on an unreachable dwh) long enough to kill.
+          export DWH_HOST=10.255.255.1 DWH_PORT=5432 DWH_DB=dwh DWH_USER=ci DWH_PASSWORD=ci APP_DB_USER=ci APP_DB_PASSWORD=ci
+          ./desktop/sidecar/dist/tcg-backend --host 127.0.0.1 --port 8011 --log-level info > orphan.log 2>&1 &
+          BOOT=$!
+          sleep 6
+          CHILD=$(pgrep -P "$BOOT" | head -1 || true)
+          echo "bootloader=$BOOT child=$CHILD"
+          if [ -z "$CHILD" ]; then echo "FAIL: bootloader forked no child"; kill -9 "$BOOT" 2>/dev/null || true; exit 1; fi
+          kill -9 "$BOOT"
+          sleep 6
+          if kill -0 "$CHILD" 2>/dev/null; then
+            echo "FAIL: uvicorn child $CHILD ORPHANED after bootloader SIGKILL — watchdog did not fire"
+            kill -9 "$CHILD" 2>/dev/null || true; exit 1
+          fi
+          grep -q "watchdog armed" orphan.log && echo "watchdog: armed line present" || echo "NOTE: 'watchdog armed' line not in output"
+          echo "OK: no orphan — the parent-death watchdog released the backend child."
+
+      - name: Smoke — no orphaned backend on kill (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Same orphan check on Windows, where Tauri kills via TerminateProcess
+          # (uncatchable, NOT forwarded by the bootloader) — the watchdog must
+          # still release the uvicorn child. Port 8011; dummy unreachable creds.
+          $env:DWH_HOST="10.255.255.1"; $env:DWH_PORT="5432"; $env:DWH_DB="dwh"
+          $env:DWH_USER="ci"; $env:DWH_PASSWORD="ci"; $env:APP_DB_USER="ci"; $env:APP_DB_PASSWORD="ci"
+          $sargs = @("--host","127.0.0.1","--port","8011","--log-level","info")
+          $p = Start-Process -FilePath "desktop\sidecar\dist\tcg-backend.exe" -ArgumentList $sargs -RedirectStandardError "orphan_se.log" -RedirectStandardOutput "orphan_so.log" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 6
+          $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)")
+          Write-Host "bootloader PID=$($p.Id), child count=$($kids.Count)"
+          if ($kids.Count -lt 1) { if (-not $p.HasExited) { $p.Kill() }; Write-Error "FAIL: bootloader forked no child process"; exit 1 }
+          $childId = $kids[0].ProcessId
+          Write-Host "child PID=$childId"
+          Stop-Process -Id $p.Id -Force
+          Start-Sleep -Seconds 6
+          $childAlive = $null -ne (Get-Process -Id $childId -ErrorAction SilentlyContinue)
+          Write-Host "after kill: child alive? $childAlive"
+          if ($childAlive) { Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue; Write-Error "FAIL: uvicorn child ORPHANED after bootloader kill — parent-death watchdog did NOT fire on Windows."; exit 1 }
+          $w = (Get-Content orphan_se.log -Raw -EA SilentlyContinue) + (Get-Content orphan_so.log -Raw -EA SilentlyContinue)
+          if ($w -match "watchdog armed") { Write-Host "watchdog: armed line present" } else { Write-Host "NOTE: 'watchdog armed' line not found in output" }
+          Write-Host "OK: no orphan — the parent-death watchdog released the backend child on Windows."
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -97,7 +154,7 @@ jobs:
 
       - name: Install desktop npm deps (Tauri CLI)
         working-directory: desktop
-        run: npm install
+        run: npm ci
 
       - name: Build desktop bundles (tauri build)
         working-directory: desktop
@@ -117,7 +174,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tcg-desktop-${{ matrix.triple }}
-          if-no-files-found: warn
+          if-no-files-found: error
           path: |
             desktop/src-tauri/target/release/bundle/**
             desktop/src-tauri/target/release/tcg-desktop

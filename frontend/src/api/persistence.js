@@ -1,6 +1,6 @@
 /**
  * Persistence API client — CRUD for signals, portfolios, and indicators
- * stored in MongoDB via the backend persistence layer.
+ * stored in PostgreSQL (the tcg_app_data schema) via the backend persistence layer.
  *
  * Endpoint base: /api/persistence/
  *   POST   /signals                  create signal

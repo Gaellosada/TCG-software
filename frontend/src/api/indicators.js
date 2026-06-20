@@ -118,7 +118,7 @@ function makeTaskId() {
 // Case-insensitive loose matcher for S&P 500 spot-index symbols across
 // vendors. Known variants seen in the wild / in our own DB:
 //   ^GSPC, .GSPC, GSPC, SPX, .SPX, SP500, S&P500, S&P 500, SP_500,
-//   IND_SP_500 (our own MongoDB deployment uses this prefix form).
+//   IND_SP_500 (our own data warehouse uses this prefix form).
 // We normalise by uppercasing and stripping whitespace + underscores,
 // then check for ``SP500`` / ``GSPC`` / ``SPX`` / literal ``S&P500``.
 // Intentionally permissive — being overly strict is what caused the
@@ -180,7 +180,7 @@ export async function resolveDefaultIndexInstrument() {
   for (const collection of indexCollections) {
     let page;
     try {
-      // 500 is the MongoDB-side cap; a single page is enough in practice.
+      // 500 is the backend-side page cap; a single page is enough in practice.
       page = await listInstruments(collection, { skip: 0, limit: 500 });
     } catch (err) {
       // Don't hard-fail the whole resolve if a single collection errors —

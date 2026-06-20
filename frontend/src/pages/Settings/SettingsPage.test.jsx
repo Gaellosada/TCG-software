@@ -8,11 +8,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 // Mock the Tauri app namespace so the desktop-only version row is testable
-// without a real webview. `getVersion` resolves to a fixed string; `invoke`
-// (used by the DatabaseSettings child once it mounts under Tauri) is stubbed so
-// it never hits the real bridge. These mocks are inert in web-mode tests, which
-// never set window.__TAURI_INTERNALS__, so isTauri() stays false there.
-const getVersion = vi.fn(() => Promise.resolve('0.1.3'));
+// without a real webview. `getVersion` resolves to a fixed SENTINEL string
+// (deliberately NOT the real app version — this proves the row renders whatever
+// getVersion returns instead of a hardcoded value); `invoke` (used by the
+// DatabaseSettings child once it mounts under Tauri) is stubbed so it never
+// hits the real bridge. These mocks are inert in web-mode tests, which never
+// set window.__TAURI_INTERNALS__, so isTauri() stays false there.
+const getVersion = vi.fn(() => Promise.resolve('9.9.9-test'));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: (...a) => getVersion(...a) }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: () => Promise.resolve(undefined) }));
 
@@ -115,6 +117,6 @@ describe('<SettingsPage> — desktop-only app version footer', () => {
       expect(screen.getByTestId('app-version')).toBeDefined();
     });
     expect(getVersion).toHaveBeenCalled();
-    expect(screen.getByTestId('app-version').textContent).toBe('Version 0.1.3');
+    expect(screen.getByTestId('app-version').textContent).toBe('Version 9.9.9-test');
   });
 });

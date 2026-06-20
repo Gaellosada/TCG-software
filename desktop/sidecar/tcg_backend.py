@@ -6,24 +6,105 @@ one-file binary built from this script and waits on ``/health``.
 
 Why a dedicated entry instead of freezing ``tcg.core.__main__``?
 ---------------------------------------------------------------
-PyInstaller freezes a *script*, not a ``python -m pkg`` invocation. We also
-pass the **app object** to ``uvicorn.run`` rather than the import string
-``"tcg.core.app:app"``: in a frozen build the string form forces uvicorn to
-re-import the module by name at runtime, which is fragile inside the
-PyInstaller bootloader. Importing ``app`` here means the bundler sees the
-dependency statically and uvicorn gets a ready object. ``reload`` is off in
-both paths, so single-process ``run(app, ...)`` is behaviour-identical to
-the dev path.
+PyInstaller freezes a *script*, not a ``python -m pkg`` invocation. We import
+the FastAPI ``app`` object directly (not the ``"tcg.core.app:app"`` string) so
+the bundler sees the dependency statically and uvicorn gets a ready object —
+the string form would force a fragile by-name re-import inside the PyInstaller
+bootloader.
 
-Secrets: the FastAPI app loads its DWH_*/APP_DB_* config via python-dotenv
-from the process working directory (the repo checkout's gitignored ``.env``),
-exactly as the web path does. Nothing is bundled into the binary — launch the
-sidecar from a directory where ``.env`` is resolvable.
+Serving: we deliberately do NOT call ``uvicorn.run()``. uvicorn 0.44's loop
+factory returns Windows' ProactorEventLoop for a single-process server (which
+psycopg's async driver rejects), and it hands that factory straight to asyncio,
+bypassing the global event-loop *policy*. So we build ``uvicorn.Config`` /
+``Server`` ourselves and drive ``Server.serve()`` on an explicit
+``asyncio.SelectorEventLoop`` — one cross-platform code path (Linux/macOS
+already default to Selector). ``reload``/``workers`` are off, so this is
+behaviour-identical to the previous single-process ``run()``.
+
+Config / secrets: tcg's loaders derive their ``.env`` path from ``__file__``,
+which in a frozen build points *inside* the unpacked bundle, so they find
+nothing on their own. They consult ``os.environ`` first, so this entry loads
+the real ``.env`` into the environment — path from ``TCG_ENV_FILE`` (Tauri sets
+it) or ``<cwd>/.env`` — before importing the app, with ``override=False`` so
+any credentials already injected into the spawned process environment win.
+Nothing is baked into the binary.
+
+Lifecycle: in a one-file build this script runs in a CHILD process forked by
+the PyInstaller bootloader; the *bootloader* is the process Tauri spawns and
+kills. Killing it (SIGKILL on Unix / TerminateProcess on Windows — both
+uncatchable, so the bootloader can't forward them) would otherwise ORPHAN this
+uvicorn child, which keeps holding port 8000 and blocks the next launch /
+backend restart from binding (verified on Linux). ``_install_parent_death_watchdog``
+watches the bootloader and exits this child the moment it dies, releasing the
+port.
 """
 
 from __future__ import annotations
 
 import argparse
+
+
+def _install_parent_death_watchdog() -> None:
+    """Exit this process when its parent (the PyInstaller bootloader) dies.
+
+    Best-effort and self-contained: if the parent can't be determined (e.g.
+    psutil is unavailable in a non-frozen run) the watchdog simply does not arm
+    — it must never terminate a healthy server spuriously. Runs a daemon thread
+    that blocks on the parent and calls ``os._exit`` (hard exit from a thread)
+    when it goes away, so the OS releases the listening socket.
+    """
+    import os
+    import sys
+    import threading
+
+    try:
+        import psutil
+    except Exception as exc:  # pragma: no cover - only in a build missing psutil
+        print(
+            f"[tcg-backend] WARNING: psutil unavailable; parent-death watchdog "
+            f"disabled (orphan-on-kill possible): {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
+    try:
+        # os.getppid() is the bootloader. psutil.Process pins its identity by
+        # creation time, so .wait() still resolves correctly even if the PID is
+        # later reused by an unrelated process.
+        parent = psutil.Process(os.getppid())
+    except Exception as exc:  # pragma: no cover - parent already gone, etc.
+        print(
+            f"[tcg-backend] WARNING: could not resolve parent process; "
+            f"watchdog disabled: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
+    parent_pid = parent.pid
+
+    def _wait_then_exit() -> None:
+        try:
+            parent.wait()  # blocks until the bootloader terminates
+        except Exception:
+            return  # don't kill the server on a watchdog error
+        print(
+            f"[tcg-backend] parent {parent_pid} exited; shutting down sidecar "
+            f"to release the port",
+            file=sys.stderr,
+            flush=True,
+        )
+        os._exit(0)
+
+    threading.Thread(
+        target=_wait_then_exit, name="parent-death-watchdog", daemon=True
+    ).start()
+    print(
+        f"[tcg-backend] parent-death watchdog armed (parent pid {parent_pid})",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def main() -> None:
@@ -54,6 +135,11 @@ def main() -> None:
     parser.add_argument("--log-level", default="info")
     args = parser.parse_args()
 
+    # Don't outlive the Tauri app: with a one-file build, the process Tauri kills
+    # is the bootloader, not this uvicorn child. Arm the watchdog before serving
+    # so a killed bootloader can never leave us orphaned holding the port.
+    _install_parent_death_watchdog()
+
     # In a frozen (PyInstaller) build, tcg's config loaders derive their
     # ``.env`` path from ``__file__`` -> which points INSIDE the unpacked
     # bundle, not the repo, so ``dotenv_values(_ENV_PATH)`` finds nothing.
@@ -65,7 +151,10 @@ def main() -> None:
     # already injected into the spawned process environment.
     from dotenv import load_dotenv
 
-    load_dotenv(os.environ.get("TCG_ENV_FILE") or os.path.join(os.getcwd(), ".env"))
+    load_dotenv(
+        os.environ.get("TCG_ENV_FILE") or os.path.join(os.getcwd(), ".env"),
+        override=False,
+    )
 
     import asyncio
 

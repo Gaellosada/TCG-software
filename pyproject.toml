@@ -31,6 +31,10 @@ dev = [
 # and lifecycle-manages. Not needed for the web (./start.sh) path.
 desktop = [
     "pyinstaller>=6.0",
+    # Bundled into the sidecar for the parent-death watchdog (tcg_backend.py):
+    # lets the uvicorn child detect the Tauri-killed bootloader and exit so it
+    # never orphans, holding port 8000 against the next launch/restart.
+    "psutil>=5.9",
 ]
 
 [tool.pytest.ini_options]

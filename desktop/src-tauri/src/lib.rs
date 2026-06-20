@@ -16,7 +16,9 @@
 //! via the `save_db_credentials` command, then asks for a backend restart so
 //! the freshly-spawned sidecar reads the new values.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, RunEvent};
@@ -43,6 +45,66 @@ const SIDECAR_CORS_ORIGINS: &str =
 /// Holds the spawned sidecar's child handle so we can terminate it on exit.
 /// `CommandChild::kill` consumes the handle, hence `Option` + `take()`.
 struct SidecarProcess(Mutex<Option<CommandChild>>);
+
+/// Serializes the whole kill→spawn restart sequence. `SidecarProcess` only
+/// guards the handle *slot*; this guards the operation, so two concurrent
+/// commands (a double-clicked Save, or Save racing a manual restart) can't both
+/// spawn a sidecar and leak/orphan one. Held for the duration of `spawn_sidecar`.
+struct RestartLock(Mutex<()>);
+
+/// Block until nothing is accepting connections on `port`, or `timeout` elapses
+/// (returns whether the port became free). Used after killing the old sidecar
+/// so a fast restart doesn't try to bind 8000 before the previous process has
+/// released it. Returns `true` as soon as a connect attempt is refused.
+fn wait_for_port_free(host: &str, port: u16, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if std::net::TcpStream::connect((host, port)).is_err() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// One-shot `GET /health`, true only on an HTTP `200`. A real health check (not
+/// a bare TCP connect, which would also succeed against a stale process holding
+/// the port) without pulling in an HTTP client crate.
+fn health_ok(host: &str, port: u16) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut stream) = std::net::TcpStream::connect((host, port)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+    let req =
+        format!("GET /health HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => {
+            let head = String::from_utf8_lossy(&buf[..n]);
+            head.starts_with("HTTP/1.") && head.contains(" 200 ")
+        }
+        _ => false,
+    }
+}
+
+/// Write a secrets-bearing file owner-only (0600 on Unix), tightening perms even
+/// if it pre-existed with a looser mode.
+fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Database credentials (in-app Settings <-> `<app_config_dir>/.env`)
@@ -148,8 +210,15 @@ fn resolve_env_file(app: &AppHandle) -> Option<String> {
     }
 
     if let Ok(explicit) = std::env::var("TCG_ENV_FILE") {
-        if !explicit.trim().is_empty() {
-            return Some(explicit);
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            if std::path::Path::new(trimmed).is_file() {
+                return Some(explicit);
+            }
+            eprintln!(
+                "[tcg-desktop] WARNING: TCG_ENV_FILE='{explicit}' is not a file; \
+                 ignoring it and searching the default locations"
+            );
         }
     }
 
@@ -186,9 +255,28 @@ fn resolve_env_file(app: &AppHandle) -> Option<String> {
 /// stdout/stderr to this process's log so backend errors are visible, and polls
 /// the port in the background, logging once it is open.
 fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    // Serialize the whole kill→spawn so concurrent restart commands can't
+    // double-spawn. Bound to a named State so the guard outlives the statement;
+    // held until this function returns.
+    let restart_lock = app.state::<RestartLock>();
+    let _restart_guard = restart_lock
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     // Restartable: terminate any existing child before launching a new one so
     // we never leave an orphan holding port 8000.
     kill_sidecar(app);
+
+    // Wait for the old sidecar to release the port before binding it. The
+    // sidecar's parent-death watchdog exits it promptly once we kill the
+    // bootloader; without this, a fast restart could hit "address in use".
+    if !wait_for_port_free(SIDECAR_HOST, SIDECAR_PORT, Duration::from_secs(5)) {
+        eprintln!(
+            "[tcg-desktop] WARNING: port {SIDECAR_PORT} still in use 5s after \
+             kill; spawning anyway (a stale process may be holding it)"
+        );
+    }
 
     let port = SIDECAR_PORT.to_string();
 
@@ -242,6 +330,15 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             {
                 Ok(mut f) => {
                     use std::io::Write as _;
+                    // backend.log can surface dwh errors; keep it owner-only.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &path,
+                            std::fs::Permissions::from_mode(0o600),
+                        );
+                    }
                     let _ = writeln!(
                         f,
                         "\n===== tcg-backend session {} =====",
@@ -273,7 +370,7 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     app.state::<SidecarProcess>()
         .0
         .lock()
-        .expect("sidecar mutex poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .replace(child);
 
     // Forward sidecar output to our stderr for diagnostics AND tee it to the log
@@ -281,6 +378,11 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     // — so teeing its output is safe). `log_file` is moved into the task and the
     // writes are best-effort (`let _ =`): a logging failure must never take down
     // the backend stream.
+    // Shared flag the output task flips if the sidecar dies, so the readiness
+    // probe can stop waiting instead of burning the full 30s.
+    let died = Arc::new(AtomicBool::new(false));
+    let died_tee = died.clone();
+
     tauri::async_runtime::spawn(async move {
         let mut log_file = log_file;
         let mut tee = |line: &str| {
@@ -305,35 +407,46 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     let line = format!("[sidecar] process error: {err}\n");
                     eprint!("{line}");
                     tee(&line);
+                    died_tee.store(true, Ordering::SeqCst);
                 }
                 CommandEvent::Terminated(payload) => {
                     let line = format!("[sidecar] terminated: {payload:?}\n");
                     eprint!("{line}");
                     tee(&line);
+                    died_tee.store(true, Ordering::SeqCst);
                 }
                 _ => {}
             }
         }
     });
 
-    // Best-effort readiness probe so the log shows when the port is up. The
-    // webview can load immediately; the frontend's own retry/SWR handles the
+    // Best-effort readiness probe so the log shows when the backend is healthy.
+    // The webview can load immediately; the frontend's own retry/SWR handles the
     // brief window before the backend answers. Runs on a plain OS thread (not
-    // the async runtime) since it only blocks on a short TCP connect loop.
+    // the async runtime) since it only blocks on a short poll loop. It issues a
+    // real GET /health (not a bare TCP connect, which would also "succeed"
+    // against a stale holder of the port) and short-circuits if the sidecar dies.
     std::thread::spawn(move || {
         let health_url = format!("http://{SIDECAR_HOST}:{SIDECAR_PORT}/health");
         for attempt in 1..=60u32 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if std::net::TcpStream::connect((SIDECAR_HOST, SIDECAR_PORT)).is_ok() {
+            std::thread::sleep(Duration::from_millis(500));
+            if died.load(Ordering::SeqCst) {
                 eprintln!(
-                    "[tcg-desktop] backend port open after ~{} ms ({})",
+                    "[tcg-desktop] backend sidecar exited before becoming healthy \
+                     — see backend.log ({health_url})"
+                );
+                return;
+            }
+            if health_ok(SIDECAR_HOST, SIDECAR_PORT) {
+                eprintln!(
+                    "[tcg-desktop] backend healthy after ~{} ms ({})",
                     attempt * 500,
                     health_url
                 );
                 return;
             }
         }
-        eprintln!("[tcg-desktop] WARNING: backend port not open after 30s ({health_url})");
+        eprintln!("[tcg-desktop] WARNING: backend not healthy after 30s ({health_url})");
     });
 
     Ok(())
@@ -343,7 +456,9 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 /// respawn and on exit.
 fn kill_sidecar(app: &AppHandle) {
     if let Some(state) = app.try_state::<SidecarProcess>() {
-        if let Some(child) = state.0.lock().expect("sidecar mutex poisoned").take() {
+        if let Some(child) =
+            state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+        {
             let pid = child.pid();
             match child.kill() {
                 Ok(()) => eprintln!("[tcg-desktop] killed backend sidecar (pid {pid})"),
@@ -463,12 +578,36 @@ fn get_db_credentials(app: AppHandle) -> DbCredentials {
 /// any failure. Never logs credential VALUES — only the file path.
 #[tauri::command]
 fn save_db_credentials(app: AppHandle, creds: DbCredentials) -> Result<(), String> {
+    // The webview is the trust boundary (not the React form): reject control
+    // characters so a value can't inject or override another .env key.
+    for (name, val) in [
+        ("DWH_HOST", &creds.host),
+        ("DWH_PORT", &creds.port),
+        ("DWH_DB", &creds.db),
+        ("DWH_SSLMODE", &creds.sslmode),
+        ("DWH_USER", &creds.dwh_user),
+        ("DWH_PASSWORD", &creds.dwh_password),
+        ("APP_DB_USER", &creds.app_db_user),
+        ("APP_DB_PASSWORD", &creds.app_db_password),
+    ] {
+        if val.contains('\n') || val.contains('\r') {
+            return Err(format!("{name} must not contain a newline"));
+        }
+    }
+
     let path = app_config_env_path(&app)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create config dir {}: {e}", parent.display()))?;
+        // The config dir holds plaintext DB credentials -> make it user-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
-    std::fs::write(&path, credentials_to_env(&creds))
+    // 0600 on Unix: plaintext creds must not be world-readable on a shared host.
+    write_private(&path, &credentials_to_env(&creds))
         .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     eprintln!("[tcg-desktop] saved DB credentials to {}", path.display());
 
@@ -497,6 +636,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(SidecarProcess(Mutex::new(None)))
+        .manage(RestartLock(Mutex::new(())))
         .invoke_handler(tauri::generate_handler![
             get_db_credentials,
             save_db_credentials,

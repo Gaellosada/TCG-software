@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { resolveApiBase, API_BASE, isTauri } from './base';
+import { resolveApiBase, API_BASE, isTauri, HEALTH_URL } from './base';
 
 // API_BASE is computed once at import time, so we test the pure resolver
 // (resolveApiBase) for both environments and assert the import-time default
@@ -51,5 +51,19 @@ describe('isTauri', () => {
   it('returns false in the jsdom test environment (no Tauri global)', () => {
     // The whole point: tests run as web mode, so the creds section never mounts.
     expect(isTauri()).toBe(false);
+  });
+});
+
+describe('HEALTH_URL', () => {
+  it('points at the sidecar /health (root, NOT under /api)', () => {
+    expect(HEALTH_URL).toBe('http://127.0.0.1:8000/health');
+  });
+
+  it('shares the sidecar host:port with the Tauri API base (single source of truth)', () => {
+    // Both derive from SIDECAR_ORIGIN, so a port change moves them together —
+    // this is the drift the dedup (Settings + banner no longer hardcode it)
+    // prevents.
+    const apiOrigin = resolveApiBase({ __TAURI_INTERNALS__: {} }).replace(/\/api$/, '');
+    expect(HEALTH_URL.startsWith(apiOrigin)).toBe(true);
   });
 });

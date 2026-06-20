@@ -1,11 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { isTauri } from '../api/base';
+import { HEALTH_URL, isTauri } from '../api/base';
 import styles from './BackendBanner.module.css';
 
-// Same root-level /health endpoint the sidecar exposes (NOT under /api). Under
-// Tauri the backend always lives at 127.0.0.1:8000.
-const HEALTH_URL = 'http://127.0.0.1:8000/health';
 const POLL_MS = 4000;
 
 // App-wide affordance shown ONLY under Tauri when the auto-spawned backend is
