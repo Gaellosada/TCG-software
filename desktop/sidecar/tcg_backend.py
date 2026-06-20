@@ -48,6 +48,19 @@ def main() -> None:
             except OSError:
                 setattr(sys, _name, open(os.devnull, "w"))
 
+    # psycopg's async driver cannot run on Windows' DEFAULT ProactorEventLoop
+    # ("Psycopg cannot use the 'ProactorEventLoop' to run in async mode"): the
+    # dwh/app pools then fail to connect and the backend exits. This app is built
+    # WSL/Linux-native, where the default loop is ALREADY a SelectorEventLoop, so
+    # it never surfaced in dev. Force the SelectorEventLoop policy on Windows
+    # BEFORE uvicorn creates its loop (psycopg's own recommended fix). No-op off
+    # Windows (the policy class only exists there). Lives here in the desktop
+    # sidecar entry, NOT in shared tcg/ code, so the backend stays platform-clean.
+    if sys.platform == "win32":
+        import asyncio
+
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     parser = argparse.ArgumentParser(prog="tcg-backend")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)

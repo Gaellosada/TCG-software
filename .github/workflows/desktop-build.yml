@@ -59,6 +59,29 @@ jobs:
           cp "desktop/sidecar/dist/tcg-backend$EXT" \
              "desktop/src-tauri/binaries/tcg-backend-${{ matrix.triple }}$EXT"
 
+      - name: Smoke the sidecar on Windows (verify the event-loop fix)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Real Windows-runtime check that the psycopg ProactorEventLoop fix
+          # engaged. Run the built sidecar with DUMMY unreachable creds: it must
+          # reach a normal connection attempt and time out (dwh is unreachable
+          # from the runner) WITHOUT the "ProactorEventLoop" error. No real dwh
+          # needed. This also confirms the console=False stdout guard works
+          # (output is only captured if sys.stderr was reattached).
+          $env:DWH_HOST="10.255.255.1"; $env:DWH_PORT="5432"; $env:DWH_DB="dwh"
+          $env:DWH_USER="ci"; $env:DWH_PASSWORD="ci"
+          $env:APP_DB_USER="ci"; $env:APP_DB_PASSWORD="ci"
+          $sargs = @("--host","127.0.0.1","--port","8000","--log-level","info")
+          $p = Start-Process -FilePath "desktop\sidecar\dist\tcg-backend.exe" -ArgumentList $sargs -RedirectStandardError "se.log" -RedirectStandardOutput "so.log" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 30
+          if (-not $p.HasExited) { $p.Kill(); $p.WaitForExit() }
+          $out = ((Get-Content se.log -Raw -EA SilentlyContinue) + "`n" + (Get-Content so.log -Raw -EA SilentlyContinue))
+          Write-Host "----- sidecar output -----"; Write-Host $out; Write-Host "--------------------------"
+          if ($out -match "ProactorEventLoop") { Write-Error "FAIL: 'ProactorEventLoop' present — the Windows event-loop fix did NOT engage."; exit 1 }
+          if ($out -notmatch "error connecting|PoolTimeout|Application startup|Uvicorn") { Write-Error "FAIL: no backend connect-attempt output captured — smoke inconclusive."; exit 1 }
+          Write-Host "OK: sidecar reached a normal connect attempt with NO ProactorEventLoop error (Windows event-loop fix verified)."
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
