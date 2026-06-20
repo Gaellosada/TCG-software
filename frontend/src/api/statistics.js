@@ -19,6 +19,8 @@
 // Error envelope mirrors signals.js: parsed JSON body is rethrown with
 // ``.body``/``.status`` attached.
 
+import { API_BASE } from './base';
+
 /**
  * POST a statistics request and return the parsed response.
  *
@@ -31,7 +33,7 @@
  * @returns {Promise<Object>}               the statistics suite, shape above
  */
 export async function fetchStatistics({ dates, equity, riskFreeRate }, { signal } = {}) {
-  const res = await fetch('/api/statistics', {
+  const res = await fetch(`${API_BASE}/statistics`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

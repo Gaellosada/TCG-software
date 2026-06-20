@@ -5,15 +5,29 @@
 // on the new number input and its localStorage interaction.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+
+// Mock the Tauri app namespace so the desktop-only version row is testable
+// without a real webview. `getVersion` resolves to a fixed SENTINEL string
+// (deliberately NOT the real app version — this proves the row renders whatever
+// getVersion returns instead of a hardcoded value); `invoke` (used by the
+// DatabaseSettings child once it mounts under Tauri) is stubbed so it never
+// hits the real bridge. These mocks are inert in web-mode tests, which never
+// set window.__TAURI_INTERNALS__, so isTauri() stays false there.
+const getVersion = vi.fn(() => Promise.resolve('9.9.9-test'));
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: (...a) => getVersion(...a) }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: () => Promise.resolve(undefined) }));
+
 import SettingsPage from './SettingsPage';
 
 beforeEach(() => {
   localStorage.clear();
+  getVersion.mockClear();
 });
 
 afterEach(() => {
   cleanup();
+  delete window.__TAURI_INTERNALS__;
 });
 
 describe('<SettingsPage> — risk-free rate row', () => {
@@ -75,5 +89,34 @@ describe('<SettingsPage> — risk-free rate row', () => {
   it('renders the hint text about ratios', () => {
     render(<SettingsPage />);
     expect(screen.getByText(/sharpe, sortino/i)).toBeTruthy();
+  });
+});
+
+describe('<SettingsPage> — desktop-only DB credentials section', () => {
+  it('does NOT render the Database connection section in web mode (no Tauri global)', () => {
+    // isTauri() is false under jsdom, so the desktop-only credentials editor
+    // must not mount — guaranteeing the web build stays unchanged and the real
+    // Tauri `invoke` is never called from these tests.
+    render(<SettingsPage />);
+    expect(screen.queryByTestId('db-settings')).toBeNull();
+    expect(screen.queryByText('Database connection')).toBeNull();
+  });
+});
+
+describe('<SettingsPage> — desktop-only app version footer', () => {
+  it('does NOT render the version footer in web mode and never calls getVersion', () => {
+    render(<SettingsPage />);
+    expect(screen.queryByTestId('app-version')).toBeNull();
+    expect(getVersion).not.toHaveBeenCalled();
+  });
+
+  it('under Tauri, shows "Version <x>" from getVersion()', async () => {
+    window.__TAURI_INTERNALS__ = {};
+    render(<SettingsPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('app-version')).toBeDefined();
+    });
+    expect(getVersion).toHaveBeenCalled();
+    expect(screen.getByTestId('app-version').textContent).toBe('Version 9.9.9-test');
   });
 });

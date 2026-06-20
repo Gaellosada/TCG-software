@@ -1,0 +1,5 @@
+# Rust / Cargo build output — never commit compiled artifacts.
+/target/
+
+# Tauri-generated schemas + bundle output.
+/gen/schemas/

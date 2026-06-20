@@ -1,0 +1,213 @@
+# Build native desktop bundles (Windows / macOS / Linux) for the Tauri wrapper.
+#
+# AUTHORED but on-demand: the team builds the Linux bundle locally; this produces
+# the Windows/macOS artifacts (which need their own OS) when triggered. It does
+# NOT run on ordinary pushes — start it from the Actions tab (workflow_dispatch)
+# or by pushing a `desktop-v*` tag.
+#
+# Per OS it: builds the PyInstaller backend sidecar, stages it under the name
+# Tauri's externalBin expects (binaries/tcg-backend-<target-triple>[.exe]), then
+# runs `tauri build` (which builds the existing frontend via beforeBuildCommand).
+# Code signing / notarization for macOS & Windows is intentionally out of scope
+# here (needs certs/secrets) — these are unsigned artifacts.
+name: desktop-build
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.triple }})
+    runs-on: ${{ matrix.os }}
+    # Pin the Python that builds the sidecar so all three OS legs freeze on the
+    # same interpreter -> reproducible bundles (uv auto-downloads it).
+    env:
+      UV_PYTHON: "3.12"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install uv (Python)
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync Python deps (with desktop extra → PyInstaller)
+        run: uv sync --locked --extra desktop
+
+      - name: Build + stage the backend sidecar (PyInstaller)
+        shell: bash
+        run: |
+          uv run pyinstaller --noconfirm --clean desktop/sidecar/tcg-backend.spec \
+            --distpath desktop/sidecar/dist --workpath desktop/sidecar/build
+          mkdir -p desktop/src-tauri/binaries
+          EXT=""; [ "${{ runner.os }}" = "Windows" ] && EXT=".exe"
+          cp "desktop/sidecar/dist/tcg-backend$EXT" \
+             "desktop/src-tauri/binaries/tcg-backend-${{ matrix.triple }}$EXT"
+
+      - name: Smoke the sidecar on Windows (verify the event-loop fix)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Real Windows-runtime check that the psycopg ProactorEventLoop fix
+          # engaged. Run the built sidecar with DUMMY unreachable creds: it must
+          # reach a normal connection attempt and time out (dwh is unreachable
+          # from the runner) WITHOUT the "ProactorEventLoop" error. No real dwh
+          # needed. This also confirms the console=False stdout guard works
+          # (output is only captured if sys.stderr was reattached).
+          $env:DWH_HOST="10.255.255.1"; $env:DWH_PORT="5432"; $env:DWH_DB="dwh"
+          $env:DWH_USER="ci"; $env:DWH_PASSWORD="ci"
+          $env:APP_DB_USER="ci"; $env:APP_DB_PASSWORD="ci"
+          $sargs = @("--host","127.0.0.1","--port","8000","--log-level","info")
+          $p = Start-Process -FilePath "desktop\sidecar\dist\tcg-backend.exe" -ArgumentList $sargs -RedirectStandardError "se.log" -RedirectStandardOutput "so.log" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 30
+          if (-not $p.HasExited) { $p.Kill(); $p.WaitForExit() }
+          $out = ((Get-Content se.log -Raw -EA SilentlyContinue) + "`n" + (Get-Content so.log -Raw -EA SilentlyContinue))
+          Write-Host "----- sidecar output -----"; Write-Host $out; Write-Host "--------------------------"
+          if ($out -match "ProactorEventLoop") { Write-Error "FAIL: 'ProactorEventLoop' present — the Windows event-loop fix did NOT engage."; exit 1 }
+          if ($out -notmatch "error connecting|PoolTimeout|Application startup|Uvicorn") { Write-Error "FAIL: no backend connect-attempt output captured — smoke inconclusive."; exit 1 }
+          Write-Host "OK: sidecar reached a normal connect attempt with NO ProactorEventLoop error (Windows event-loop fix verified)."
+
+      - name: Smoke — no orphaned backend on kill (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # The one-file sidecar is a bootloader that forks the real uvicorn
+          # CHILD. Tauri kills only the bootloader, so without the parent-death
+          # watchdog the child is ORPHANED and keeps holding the port (blocking
+          # the next launch/restart). Verify the watchdog: start it, wait until
+          # the watchdog ARMS — it logs that BEFORE any dwh attempt, so the child
+          # is provably alive and the watchdog active no matter how fast the dummy
+          # dwh fails (that timing is what made a fixed sleep flaky). Then SIGKILL
+          # the bootloader (exactly what Tauri does on Unix) and assert NO
+          # tcg-backend process survives. Port 8011 avoids collisions.
+          export DWH_HOST=10.255.255.1 DWH_PORT=5432 DWH_DB=dwh DWH_USER=ci DWH_PASSWORD=ci APP_DB_USER=ci APP_DB_PASSWORD=ci
+          ./desktop/sidecar/dist/tcg-backend --host 127.0.0.1 --port 8011 --log-level info > orphan.log 2>&1 &
+          BOOT=$!
+          armed=0
+          for i in $(seq 1 120); do
+            if grep -q "watchdog armed" orphan.log 2>/dev/null; then armed=1; break; fi
+            if ! kill -0 "$BOOT" 2>/dev/null; then echo "FAIL: bootloader exited before arming"; cat orphan.log || true; exit 1; fi
+            sleep 0.25
+          done
+          if [ "$armed" != 1 ]; then echo "FAIL: watchdog never armed in ~30s (psutil not bundled?)"; cat orphan.log || true; kill -9 "$BOOT" 2>/dev/null || true; exit 1; fi
+          echo "watchdog armed; bootloader=$BOOT; live tcg-backend procs:"; pgrep -af tcg-backend || true
+          kill -9 "$BOOT" || true
+          # Attributable: the watchdog logs its OWN shutdown line right before
+          # os._exit, so requiring it proves the WATCHDOG fired — not the dummy
+          # dwh self-exit (PoolTimeout) coincidentally masking a broken watchdog.
+          fired=0
+          for i in $(seq 1 50); do
+            if grep -q "shutting down sidecar" orphan.log 2>/dev/null; then fired=1; break; fi
+            sleep 0.2
+          done
+          if [ "$fired" != 1 ]; then echo "FAIL: watchdog did not log its shutdown after the bootloader kill — a gone child would NOT be attributable to the watchdog (could be a dwh self-exit hiding a broken watchdog):"; cat orphan.log || true; pkill -9 -f tcg-backend || true; exit 1; fi
+          gone=0
+          for i in $(seq 1 50); do
+            if ! pgrep -f tcg-backend >/dev/null 2>&1; then gone=1; break; fi
+            sleep 0.2
+          done
+          if [ "$gone" != 1 ]; then echo "FAIL: a tcg-backend process survived the bootloader kill — ORPHANED:"; pgrep -af tcg-backend || true; pkill -9 -f tcg-backend || true; exit 1; fi
+          echo "OK: watchdog fired (logged its shutdown) and released the backend — no orphan."
+
+      - name: Smoke — no orphaned backend on kill (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Same orphan check on Windows, where Tauri kills via TerminateProcess
+          # (uncatchable, NOT forwarded by the bootloader) — the watchdog must
+          # still release the uvicorn child. Wait until the watchdog ARMS (logged
+          # before any dwh attempt → child provably alive + watchdog active),
+          # then kill ONLY the bootloader and assert no tcg-backend process
+          # survives. Port 8011; dummy unreachable creds.
+          $env:DWH_HOST="10.255.255.1"; $env:DWH_PORT="5432"; $env:DWH_DB="dwh"
+          $env:DWH_USER="ci"; $env:DWH_PASSWORD="ci"; $env:APP_DB_USER="ci"; $env:APP_DB_PASSWORD="ci"
+          $sargs = @("--host","127.0.0.1","--port","8011","--log-level","info")
+          $p = Start-Process -FilePath "desktop\sidecar\dist\tcg-backend.exe" -ArgumentList $sargs -RedirectStandardError "orphan_se.log" -RedirectStandardOutput "orphan_so.log" -PassThru -NoNewWindow
+          $armed = $false
+          for ($i=0; $i -lt 120; $i++) {
+            $log = (Get-Content orphan_se.log -Raw -EA SilentlyContinue) + (Get-Content orphan_so.log -Raw -EA SilentlyContinue)
+            if ($log -match "watchdog armed") { $armed = $true; break }
+            if ($p.HasExited) { Write-Host $log; Write-Error "FAIL: bootloader exited before arming"; exit 1 }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $armed) { Write-Host ((Get-Content orphan_se.log -Raw -EA SilentlyContinue) + (Get-Content orphan_so.log -Raw -EA SilentlyContinue)); if (-not $p.HasExited) { $p.Kill() }; Write-Error "FAIL: watchdog never armed (~30s) — psutil not bundled?"; exit 1 }
+          Write-Host "watchdog armed; bootloader PID=$($p.Id)"
+          Stop-Process -Id $p.Id -Force
+          # Attributable: require the watchdog's own shutdown line (logged right
+          # before os._exit) so a green result proves the WATCHDOG fired, not a
+          # dwh self-exit masking a broken watchdog.
+          $fired = $false
+          for ($i=0; $i -lt 50; $i++) {
+            $log = (Get-Content orphan_se.log -Raw -EA SilentlyContinue) + (Get-Content orphan_so.log -Raw -EA SilentlyContinue)
+            if ($log -match "shutting down sidecar") { $fired = $true; break }
+            Start-Sleep -Milliseconds 200
+          }
+          if (-not $fired) { Write-Host ((Get-Content orphan_se.log -Raw -EA SilentlyContinue) + (Get-Content orphan_so.log -Raw -EA SilentlyContinue)); Get-Process -Name "tcg-backend" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; Write-Error "FAIL: watchdog did not log its shutdown after the bootloader kill — not attributable to the watchdog."; exit 1 }
+          $gone = $false
+          for ($i=0; $i -lt 50; $i++) {
+            $procs = @(Get-Process -Name "tcg-backend" -ErrorAction SilentlyContinue)
+            if ($procs.Count -eq 0) { $gone = $true; break }
+            Start-Sleep -Milliseconds 200
+          }
+          if (-not $gone) { Get-Process -Name "tcg-backend" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; Write-Error "FAIL: a tcg-backend process survived the bootloader kill — ORPHANED on Windows."; exit 1 }
+          Write-Host "OK: watchdog fired (logged its shutdown) and released the backend on Windows."
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install desktop npm deps (Tauri CLI)
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build desktop bundles (tauri build)
+        working-directory: desktop
+        shell: bash
+        run: |
+          # tauri.conf.json's bundle.targets is Linux-only (deb/appimage); pick
+          # OS-appropriate bundles here so the Windows/macOS legs don't fail.
+          case "${{ runner.os }}" in
+            Linux)   BUNDLES=deb,appimage ;;
+            Windows) BUNDLES=nsis ;;
+            macOS)   BUNDLES=app ;;
+          esac
+          echo "Building bundles for ${{ runner.os }}: $BUNDLES"
+          npx tauri build --bundles "$BUNDLES"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcg-desktop-${{ matrix.triple }}
+          if-no-files-found: error
+          path: |
+            desktop/src-tauri/target/release/bundle/**
+            desktop/src-tauri/target/release/tcg-desktop
+            desktop/src-tauri/target/release/tcg-desktop.exe

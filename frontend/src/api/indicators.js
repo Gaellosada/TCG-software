@@ -5,6 +5,7 @@
 // backend resolver here. If the set of supported index symbols ever
 // widens, update the matcher below, not the backend.
 
+import { API_BASE } from './base';
 import { listCollections, listInstruments } from './data';
 
 /**
@@ -66,7 +67,7 @@ export async function computeIndicator(
     body.task_id = makeTaskId();
     const pollOnce = async () => {
       try {
-        const r = await fetch(`/api/indicators/progress/${body.task_id}`, { signal });
+        const r = await fetch(`${API_BASE}/indicators/progress/${body.task_id}`, { signal });
         if (!r.ok) return;
         const data = await r.json();
         const frac = typeof data.fraction === 'number' ? data.fraction : 0;
@@ -84,7 +85,7 @@ export async function computeIndicator(
   }
 
   try {
-    const res = await fetch('/api/indicators/compute', {
+    const res = await fetch(`${API_BASE}/indicators/compute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -117,7 +118,7 @@ function makeTaskId() {
 // Case-insensitive loose matcher for S&P 500 spot-index symbols across
 // vendors. Known variants seen in the wild / in our own DB:
 //   ^GSPC, .GSPC, GSPC, SPX, .SPX, SP500, S&P500, S&P 500, SP_500,
-//   IND_SP_500 (our own MongoDB deployment uses this prefix form).
+//   IND_SP_500 (our own data warehouse uses this prefix form).
 // We normalise by uppercasing and stripping whitespace + underscores,
 // then check for ``SP500`` / ``GSPC`` / ``SPX`` / literal ``S&P500``.
 // Intentionally permissive — being overly strict is what caused the
@@ -179,7 +180,7 @@ export async function resolveDefaultIndexInstrument() {
   for (const collection of indexCollections) {
     let page;
     try {
-      // 500 is the MongoDB-side cap; a single page is enough in practice.
+      // 500 is the backend-side page cap; a single page is enough in practice.
       page = await listInstruments(collection, { skip: 0, limit: 500 });
     } catch (err) {
       // Don't hard-fail the whole resolve if a single collection errors —

@@ -1,6 +1,6 @@
 /**
  * Persistence API client — CRUD for signals, portfolios, and indicators
- * stored in MongoDB via the backend persistence layer.
+ * stored in PostgreSQL (the tcg_app_data schema) via the backend persistence layer.
  *
  * Endpoint base: /api/persistence/
  *   POST   /signals                  create signal
@@ -28,7 +28,9 @@
  * /api/portfolio/compute). Those handle computation; this handles persistence.
  */
 
-const BASE = '/api/persistence';
+import { API_BASE } from './base';
+
+const BASE = `${API_BASE}/persistence`;
 
 /** Valid category values. */
 export const CATEGORIES = /** @type {const} */ (['RESEARCH', 'DEV', 'PROD', 'ARCHIVE']);

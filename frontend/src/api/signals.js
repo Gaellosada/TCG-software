@@ -20,6 +20,8 @@
 //   }
 // Error envelope unchanged: {error_type, message, traceback?}.
 
+import { API_BASE } from './base';
+
 /**
  * POST a signal-compute request and return the parsed response.
  *
@@ -41,7 +43,7 @@
  *   the compute response with shape documented in the file header.
  */
 export async function computeSignal(spec, indicators, { signal } = {}) {
-  const res = await fetch('/api/signals/compute', {
+  const res = await fetch(`${API_BASE}/signals/compute`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
