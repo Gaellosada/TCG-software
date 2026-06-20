@@ -146,3 +146,26 @@
 .dbStatusError {
   color: var(--negative, #dc2626);
 }
+
+.logHint {
+  font-size: 0.75rem;
+  color: var(--text-tertiary, var(--text-secondary));
+  margin: 12px 0 0;
+}
+
+.logPath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+/* -------- Desktop-only app version footer -------- */
+
+.versionFooter {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-primary);
+  font-size: 0.72rem;
+  color: var(--text-tertiary, var(--text-secondary));
+}

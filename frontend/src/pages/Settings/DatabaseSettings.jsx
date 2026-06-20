@@ -49,6 +49,10 @@ function DatabaseSettings() {
   const [creds, setCreds] = useState(EMPTY_CREDS);
   const [status, setStatus] = useState({ kind: 'idle', message: '' });
   const [loaded, setLoaded] = useState(false);
+  // Path to the sidecar's tee'd log file (backend.log). Shown so the user can
+  // open it when a connection fails — the sidecar now runs with the console
+  // hidden, so this file is where its dwh errors/tracebacks land.
+  const [logPath, setLogPath] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +68,20 @@ function DatabaseSettings() {
       })
       .finally(() => {
         if (!cancelled) setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke('get_backend_log_path')
+      .then((path) => {
+        if (!cancelled && path) setLogPath(String(path));
+      })
+      .catch(() => {
+        // Non-fatal — just omit the log-path hint if it can't be resolved.
       });
     return () => {
       cancelled = true;
@@ -227,6 +245,12 @@ function DatabaseSettings() {
           </span>
         ) : null}
       </div>
+
+      {logPath ? (
+        <p className={styles.logHint} data-testid="db-log-path">
+          Backend log: <code className={styles.logPath}>{logPath}</code>
+        </p>
+      ) : null}
     </section>
   );
 }

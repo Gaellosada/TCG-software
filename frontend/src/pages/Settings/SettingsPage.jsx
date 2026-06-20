@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 import Icon from '../../components/Icon';
 import RiskFreeRateInput from '../../components/RiskFreeRateInput';
 import DatabaseSettings from './DatabaseSettings';
@@ -42,6 +43,24 @@ function SettingsPage() {
   const [theme, setTheme] = useState(getStoredTheme);
   const [chartType, setChartType] = useState(getStoredChartType);
   const [rfPct, setRfPct] = useState(getStoredRiskFreeRate);
+  // Desktop-only: the app version (from tauri.conf.json) shown in a small
+  // footer. Empty in web mode so nothing renders there.
+  const [appVersion, setAppVersion] = useState('');
+
+  useEffect(() => {
+    if (!isTauri()) return undefined;
+    let cancelled = false;
+    getVersion()
+      .then((v) => {
+        if (!cancelled) setAppVersion(v);
+      })
+      .catch(() => {
+        // Version is purely informational — ignore failures.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     applyTheme(theme);
@@ -149,6 +168,13 @@ function SettingsPage() {
       {/* Desktop-only: the web build connects via the server-side .env, so the
           credentials editor is shown only inside the Tauri webview. */}
       {isTauri() ? <DatabaseSettings /> : null}
+
+      {/* Desktop-only app version footer (from tauri.conf.json via getVersion). */}
+      {appVersion ? (
+        <div className={styles.versionFooter} data-testid="app-version">
+          Version {appVersion}
+        </div>
+      ) : null}
     </div>
   );
 }

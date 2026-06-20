@@ -27,6 +27,27 @@ import argparse
 
 
 def main() -> None:
+    import os
+    import sys
+
+    # PyInstaller's WINDOWED build (console=False, which the Tauri sidecar uses)
+    # leaves ``sys.stdout`` / ``sys.stderr`` set to ``None`` on Windows. uvicorn
+    # configures logging at import/startup and calls ``sys.stdout.isatty()``,
+    # which then raises ``AttributeError: 'NoneType' object has no attribute
+    # 'isatty'`` -> "Unable to configure formatter 'default'" -> the sidecar
+    # crashes before it ever binds the port (surfacing as "Backend unreachable").
+    # Reattach the std streams to the inherited OS pipes (fd 1/2 — Tauri captures
+    # these into backend.log), falling back to devnull, BEFORE importing or
+    # running uvicorn. This runs before any uvicorn import below. On Linux/macOS
+    # the streams are not ``None`` (console builds keep real streams), so the
+    # guard is a no-op there.
+    for _fd, _name in ((1, "stdout"), (2, "stderr")):
+        if getattr(sys, _name, None) is None:
+            try:
+                setattr(sys, _name, os.fdopen(_fd, "w", buffering=1))
+            except OSError:
+                setattr(sys, _name, open(os.devnull, "w"))
+
     parser = argparse.ArgumentParser(prog="tcg-backend")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -42,8 +63,6 @@ def main() -> None:
     # ``TCG_ENV_FILE`` (Tauri sets this); otherwise the ``.env`` in the working
     # directory (the repo checkout). ``override=False`` keeps any creds Tauri
     # already injected into the spawned process environment.
-    import os
-
     from dotenv import load_dotenv
 
     load_dotenv(os.environ.get("TCG_ENV_FILE") or os.path.join(os.getcwd(), ".env"))

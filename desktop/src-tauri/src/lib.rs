@@ -28,14 +28,17 @@ use tauri_plugin_shell::ShellExt;
 const SIDECAR_HOST: &str = "127.0.0.1";
 const SIDECAR_PORT: u16 = 8000;
 
-/// CORS origins the bundled webview is served from. In a packaged Tauri app the
-/// document origin is `tauri://localhost` (Linux/Windows) or
-/// `https://tauri.localhost`, NOT `http://localhost:5173`. The backend defaults
-/// to allowing only the Vite dev origin, so without this the production webview's
-/// fetches are blocked by CORS. We include the dev origin too so the same value
-/// works under `tauri dev`.
+/// CORS origins the bundled webview is served from. The packaged document origin
+/// differs by platform: Linux/macOS use the custom `tauri://localhost` scheme,
+/// while Windows' WebView2 serves over HTTP — `http://tauri.localhost` (Tauri v2
+/// moved the Windows origin from `https://` to `http://`, see the v2 migration
+/// docs). We list ALL of them (plus `https://tauri.localhost` for safety and the
+/// Vite dev origin so the same value works under `tauri dev`). Omitting the
+/// Windows `http://tauri.localhost` here is what made the packaged Windows build
+/// fail every fetch with "Failed to fetch" / "Backend unreachable". The backend
+/// otherwise defaults to allowing only the Vite dev origin.
 const SIDECAR_CORS_ORIGINS: &str =
-    "tauri://localhost,https://tauri.localhost,http://localhost:5173";
+    "tauri://localhost,https://tauri.localhost,http://tauri.localhost,http://localhost:5173";
 
 /// Holds the spawned sidecar's child handle so we can terminate it on exit.
 /// `CommandChild::kill` consumes the handle, hence `Option` + `take()`.
@@ -92,6 +95,32 @@ fn app_config_env_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .app_config_dir()
         .map(|dir| dir.join(".env"))
         .map_err(|e| format!("could not resolve app config dir: {e}"))
+}
+
+/// A dependency-free session marker for the log header: seconds since the Unix
+/// epoch. We don't pull in `chrono` just to stamp a delimiter — the epoch second
+/// is enough to tell sessions apart and to correlate with other timestamps.
+fn chrono_like_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Path to the backend sidecar's log file: `<app_log_dir>/backend.log`. The
+/// sidecar runs with `console=False`, so its stderr (dwh connection errors,
+/// tracebacks) is otherwise invisible once the window hides the console — we tee
+/// it here so the user can open this file when a connection fails. `app_log_dir`
+/// resolves to (Linux/Windows) `<local_data_dir>/<bundle id>/logs`, (macOS)
+/// `~/Library/Logs/<bundle id>`. Falls back to `<app_config_dir>` (where the
+/// `.env` lives) if the log dir can't be resolved, so we always have a path.
+fn backend_log_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_log_dir()
+        .or_else(|_| app.path().app_config_dir())
+        .map_err(|e| format!("could not resolve a log dir: {e}"))?;
+    Ok(dir.join("backend.log"))
 }
 
 /// Resolve the `.env` the sidecar should read, searching (first hit wins):
@@ -193,6 +222,45 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Open the backend log file in APPEND mode and write a session header. We
+    // append (rather than truncate) on purpose: `spawn_sidecar` is also the
+    // *restart* primitive, and truncating on every restart would erase the very
+    // error the user is trying to read after a failed reconnect. The header
+    // delimits each spawn so the latest session is easy to find. The path is
+    // logged so it shows up in the (dev) console too. Best-effort: if the file
+    // can't be opened we still forward to stderr and the app keeps working.
+    let log_file = match backend_log_path(app) {
+        Ok(path) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            eprintln!("[tcg-desktop] backend log file: {}", path.display());
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write as _;
+                    let _ = writeln!(
+                        f,
+                        "\n===== tcg-backend session {} =====",
+                        chrono_like_timestamp()
+                    );
+                    Some(f)
+                }
+                Err(e) => {
+                    eprintln!("[tcg-desktop] could not open backend log {}: {e}", path.display());
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[tcg-desktop] no backend log path: {e}");
+            None
+        }
+    };
+
     let (mut rx, child) = command.spawn()?;
     eprintln!(
         "[tcg-desktop] spawned backend sidecar (pid {}) on http://{}:{}",
@@ -208,21 +276,40 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .expect("sidecar mutex poisoned")
         .replace(child);
 
-    // Forward sidecar output to our stderr for diagnostics.
+    // Forward sidecar output to our stderr for diagnostics AND tee it to the log
+    // file (the sidecar never logs credential VALUES — it only echoes keys/paths
+    // — so teeing its output is safe). `log_file` is moved into the task and the
+    // writes are best-effort (`let _ =`): a logging failure must never take down
+    // the backend stream.
     tauri::async_runtime::spawn(async move {
+        let mut log_file = log_file;
+        let mut tee = |line: &str| {
+            if let Some(f) = log_file.as_mut() {
+                use std::io::Write as _;
+                let _ = f.write_all(line.as_bytes());
+            }
+        };
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(bytes) => {
-                    eprint!("[sidecar] {}", String::from_utf8_lossy(&bytes));
+                    let s = String::from_utf8_lossy(&bytes);
+                    eprint!("[sidecar] {s}");
+                    tee(&s);
                 }
                 CommandEvent::Stderr(bytes) => {
-                    eprint!("[sidecar] {}", String::from_utf8_lossy(&bytes));
+                    let s = String::from_utf8_lossy(&bytes);
+                    eprint!("[sidecar] {s}");
+                    tee(&s);
                 }
                 CommandEvent::Error(err) => {
-                    eprintln!("[sidecar] process error: {err}");
+                    let line = format!("[sidecar] process error: {err}\n");
+                    eprint!("{line}");
+                    tee(&line);
                 }
                 CommandEvent::Terminated(payload) => {
-                    eprintln!("[sidecar] terminated: {payload:?}");
+                    let line = format!("[sidecar] terminated: {payload:?}\n");
+                    eprint!("{line}");
+                    tee(&line);
                 }
                 _ => {}
             }
@@ -396,6 +483,15 @@ fn restart_backend(app: AppHandle) -> Result<(), String> {
     spawn_sidecar(&app).map_err(|e| format!("backend restart failed: {e}"))
 }
 
+/// Resolve the backend log-file path so the Settings page can show the user
+/// where to look when a connection fails. Returns the path string (the file may
+/// not exist yet if the sidecar has not written anything). Never reads the
+/// file's contents.
+#[tauri::command]
+fn get_backend_log_path(app: AppHandle) -> Result<String, String> {
+    backend_log_path(&app).map(|p| p.to_string_lossy().into_owned())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -404,7 +500,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_db_credentials,
             save_db_credentials,
-            restart_backend
+            restart_backend,
+            get_backend_log_path
         ])
         .setup(|app| {
             if let Err(err) = spawn_sidecar(&app.handle().clone()) {
