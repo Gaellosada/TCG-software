@@ -27,6 +27,12 @@
 .editorWrapper :global(.cm-editor) {
   width: 100%;
   height: 100%;
+  /* The editor is a flex item of .editorWrapper; without min-width:0 it keeps
+   * min-width:auto (its longest line) and refuses to shrink, so .cm-scroller
+   * never gets a bounded viewport and a long line overflows outward instead of
+   * scrolling. min-width:0 lets it shrink to the wrapper -> the internal
+   * horizontal scroller engages. */
+  min-width: 0;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 0.82rem;
   line-height: 1.6;

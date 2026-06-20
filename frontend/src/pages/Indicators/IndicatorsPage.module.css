@@ -70,6 +70,12 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The center column is the `1fr` grid track. A grid item defaults to
+   * min-width:auto (its content's min size), so a long unwrapped line in the
+   * code editor would grow this track and shove the whole page sideways.
+   * min-width:0 lets the track shrink below content width, so the editor's own
+   * scroller handles the long line instead of the page overflowing. */
+  min-width: 0;
 }
 
 .nameInput {

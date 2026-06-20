@@ -211,3 +211,52 @@ jobs:
             desktop/src-tauri/target/release/bundle/**
             desktop/src-tauri/target/release/tcg-desktop
             desktop/src-tauri/target/release/tcg-desktop.exe
+
+  # Publish the per-OS installers to a GitHub Release so each tagged build is a
+  # one-click, permanent download instead of a zipped Actions artifact (which
+  # expires and must be unzipped). Runs ONLY for a `desktop-v*` tag (not
+  # workflow_dispatch) and ONLY if every build leg passed (needs: build).
+  release:
+    name: Publish installers to a GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          REL="$PWD/release-files"
+          mkdir -p "$REL"
+          # Windows NSIS setup installer (the primary deliverable).
+          for f in dist-artifacts/**/nsis/*-setup.exe; do cp "$f" "$REL/"; done
+          # Linux.
+          for f in dist-artifacts/**/deb/*.deb; do cp "$f" "$REL/"; done
+          for f in dist-artifacts/**/appimage/*.AppImage; do cp "$f" "$REL/"; done
+          # macOS: the bundle is a .app DIRECTORY -> zip it into a single asset
+          # (-y keeps the internal symlinks so it restores on macOS).
+          for appdir in dist-artifacts/**/macos/*.app; do
+            [ -d "$appdir" ] || continue
+            base="$(basename "$appdir")"
+            ( cd "$(dirname "$appdir")" && zip -qry "$REL/${base}.zip" "$base" )
+          done
+          echo "collected installers:"; ls -la "$REL"
+          # The Windows setup is the must-have deliverable; fail loudly if absent.
+          ls "$REL"/*-setup.exe >/dev/null 2>&1 || { echo "ERROR: no Windows *-setup.exe found in artifacts"; exit 1; }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: release-files/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
