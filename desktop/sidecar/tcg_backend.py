@@ -48,19 +48,6 @@ def main() -> None:
             except OSError:
                 setattr(sys, _name, open(os.devnull, "w"))
 
-    # psycopg's async driver cannot run on Windows' DEFAULT ProactorEventLoop
-    # ("Psycopg cannot use the 'ProactorEventLoop' to run in async mode"): the
-    # dwh/app pools then fail to connect and the backend exits. This app is built
-    # WSL/Linux-native, where the default loop is ALREADY a SelectorEventLoop, so
-    # it never surfaced in dev. Force the SelectorEventLoop policy on Windows
-    # BEFORE uvicorn creates its loop (psycopg's own recommended fix). No-op off
-    # Windows (the policy class only exists there). Lives here in the desktop
-    # sidecar entry, NOT in shared tcg/ code, so the backend stays platform-clean.
-    if sys.platform == "win32":
-        import asyncio
-
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
     parser = argparse.ArgumentParser(prog="tcg-backend")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -80,19 +67,35 @@ def main() -> None:
 
     load_dotenv(os.environ.get("TCG_ENV_FILE") or os.path.join(os.getcwd(), ".env"))
 
+    import asyncio
+
     import uvicorn
 
     # Import the app object directly (not the "module:attr" string form) so the
-    # frozen binary resolves it without a runtime re-import. Matches the web
-    # path's single-process, no-reload uvicorn.run().
+    # frozen binary resolves it without a runtime re-import.
     from tcg.core.app import app
 
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level=args.log_level,
+    # Run uvicorn on an explicit SelectorEventLoop. uvicorn 0.44's loop_factory
+    # returns Windows' ProactorEventLoop for a single-process server, which
+    # psycopg's async driver refuses ("Psycopg cannot use the
+    # 'ProactorEventLoop'") -> the dwh/app pools fail and the backend exits.
+    # uvicorn passes that factory straight to asyncio, so setting the global
+    # event-loop POLICY does NOT override it; instead bypass uvicorn.run()'s loop
+    # management and drive Server.serve() on a loop we create. SelectorEventLoop
+    # is cross-platform (Linux/macOS already default to it) -> one code path
+    # everywhere. reload/workers are off, so single-process serve() is
+    # behaviour-identical to the previous uvicorn.run().
+    config = uvicorn.Config(
+        app, host=args.host, port=args.port, log_level=args.log_level
     )
+    server = uvicorn.Server(config)
+    loop = asyncio.SelectorEventLoop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(server.serve())
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 if __name__ == "__main__":
