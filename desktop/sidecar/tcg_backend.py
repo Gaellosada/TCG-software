@@ -69,9 +69,10 @@ def _install_parent_death_watchdog() -> None:
         return
 
     try:
-        # os.getppid() is the bootloader. psutil.Process pins its identity by
-        # creation time, so .wait() still resolves correctly even if the PID is
-        # later reused by an unrelated process.
+        # os.getppid() is the bootloader. parent.wait() below uses
+        # os.pidfd_open() (Linux >= 5.3) / kqueue NOTE_EXIT (macOS) — kernel
+        # handles bound to this specific process instance — so a later reuse of
+        # the PID can't fool it. (Old kernels fall back to a poll; harmless.)
         parent = psutil.Process(os.getppid())
     except Exception as exc:  # pragma: no cover - parent already gone, etc.
         print(
