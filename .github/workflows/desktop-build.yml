@@ -221,6 +221,11 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: ubuntu-22.04
+    # Serialize releases for the same tag so a re-run / re-pushed tag can't race
+    # the asset upload and leave the release partial. Queue, don't cancel.
+    concurrency:
+      group: desktop-release-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -249,8 +254,16 @@ jobs:
             ( cd "$(dirname "$appdir")" && zip -qry "$REL/${base}.zip" "$base" )
           done
           echo "collected installers:"; ls -la "$REL"
-          # The Windows setup is the must-have deliverable; fail loudly if absent.
-          ls "$REL"/*-setup.exe >/dev/null 2>&1 || { echo "ERROR: no Windows *-setup.exe found in artifacts"; exit 1; }
+          # Fail loudly if ANY expected installer is missing. A silently-empty
+          # artifact (or the matrix "re-run one failed leg" quirk that can flip
+          # needs:build green) must NOT publish a PARTIAL release. Asserting all
+          # four categories — not just the Windows setup — closes that gap.
+          miss=0
+          ls "$REL"/*-setup.exe >/dev/null 2>&1 || { echo "MISSING: Windows *-setup.exe"; miss=1; }
+          ls "$REL"/*.deb       >/dev/null 2>&1 || { echo "MISSING: Linux *.deb"; miss=1; }
+          ls "$REL"/*.AppImage  >/dev/null 2>&1 || { echo "MISSING: Linux *.AppImage"; miss=1; }
+          ls "$REL"/*.app.zip   >/dev/null 2>&1 || { echo "MISSING: macOS *.app.zip"; miss=1; }
+          [ "$miss" -eq 0 ] || { echo "ERROR: expected installer(s) missing — refusing to publish a partial release"; exit 1; }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
