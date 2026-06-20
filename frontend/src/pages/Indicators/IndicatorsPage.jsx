@@ -44,10 +44,39 @@ import { ABORTED, fetchKindToErrorType } from './errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import styles from './IndicatorsPage.module.css';
 
-const NEW_CODE_TEMPLATE = `def compute(series, window: int = 20):
-    s = series['price']
-    out = np.full_like(s, np.nan, dtype=float)
-    out[window-1:] = np.convolve(s, np.ones(window)/window, mode='valid')
+// Seed for "new custom indicator". Written as a self-contained brief the user
+// can paste into an AI chat to get a correct indicator on the first try: the
+// header states the execution contract enforced by ``tcg/engine/indicator_exec.py``
+// (the sandbox is the source of truth — keep this comment in sync with it), and
+// the body is a runnable example. Exported so tests can assert its content; the
+// backend ``test_new_indicator_template_*`` extracts it from this file verbatim
+// and runs it through the real sandbox, so an invalid template can never ship.
+//
+// MUST contain no backtick (`) and no ``${`` — it lives in a JS template literal.
+export const NEW_CODE_TEMPLATE = `# CUSTOM INDICATOR - paste this whole file into an AI and ask it to write compute().
+# The sandbox enforces these rules; code that breaks them is rejected before it runs:
+#  - Signature: def compute(series, NAME: int|float|bool = LITERAL, ...). First arg is
+#    'series' (no default); every other arg MUST be int/float/bool with a literal
+#    default, e.g. window: int = 20. The Parameters panel is built from this signature.
+#  - series is a dict of label -> 1-D NumPy float64 array, e.g. series['close']; all
+#    arrays share one length N. Return a 1-D float64 array of that same length N
+#    (use np.nan for warm-up positions).
+#  - Allowed: np (a CURATED numpy subset/facade, NOT the real module - no np.random /
+#    np.linalg / np.fft) and the math module. Do NOT import anything (no pandas, no
+#    scipy, no os) - there is nothing to import.
+#  - Forbidden (line error): imports; eval/exec/compile/open/format; f-strings;
+#    global/nonlocal; any name/attribute/string starting with '_'. (File/network/OS
+#    access isn't a separate check - it's simply unreachable: nothing to import, and
+#    open/eval/exec are rejected here.) Each run is killed after a 5-second limit.
+#
+# Example body: a simple moving average. Replace it with your indicator.
+def compute(series, window: int = 20):
+    close = series['close']
+    n = close.shape[0]
+    out = np.full(n, np.nan, dtype=float)
+    if n >= window:
+        weights = np.ones(window) / window
+        out[window - 1:] = np.convolve(close, weights, mode='valid')
     return out`;
 
 /**
