@@ -56,7 +56,13 @@ function CodeEditor({ value, onChange, readOnly, placeholder }) {
           extensions={extensions}
           placeholder={effectivePlaceholder}
           height="100%"
-          style={{ height: '100%', minHeight: 0, flex: 1 }}
+          // minWidth:0 is essential: @uiw/react-codemirror applies this style to
+          // the wrapper <div> around .cm-editor. As a flex item it otherwise
+          // keeps min-width:auto (its longest line) and balloons to the line
+          // width, so .cm-scroller never gets a bounded viewport and a long line
+          // is clipped instead of scrollable. min-width:0 lets it shrink to the
+          // column so the editor's own horizontal scroll engages.
+          style={{ height: '100%', minHeight: 0, minWidth: 0, flex: 1 }}
           basicSetup={{
             lineNumbers: true,
             highlightActiveLine: !readOnly,
