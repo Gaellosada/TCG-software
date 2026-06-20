@@ -70,6 +70,7 @@ vi.mock('../../api/persistence', () => ({
 // Import AFTER the mocks so wiring is in place. NEW_CODE_TEMPLATE is the
 // exported seed constant.
 import IndicatorsPage, { NEW_CODE_TEMPLATE } from './IndicatorsPage';
+import { parseIndicatorSpec } from './paramParser';
 
 beforeEach(() => {
   listProps = {};
@@ -89,6 +90,15 @@ describe('NEW_CODE_TEMPLATE — constraint phrases (a)', () => {
     expect(NEW_CODE_TEMPLATE).toContain('np');
     expect(NEW_CODE_TEMPLATE).toContain('math');
     expect(NEW_CODE_TEMPLATE).toContain('f-strings');
+  });
+
+  it("parses to exactly the ['close'] series label (cross-language seed coupling)", () => {
+    // parseIndicatorSpec drives the seriesMap from the body's series['...']
+    // accesses; the backend anti-drift test seeds {"close": ...}. Pin that the
+    // example body uses exactly that one label so the two sides can't silently
+    // drift apart (e.g. someone renaming it to series['price'] would break the
+    // backend seed — this fails first, here, with a clear message).
+    expect(parseIndicatorSpec(NEW_CODE_TEMPLATE).seriesLabels).toEqual(['close']);
   });
 
   it('stays a valid JS template literal (no backtick / interpolation)', () => {

@@ -64,9 +64,10 @@ export const NEW_CODE_TEMPLATE = `# CUSTOM INDICATOR - paste this whole file int
 #  - Allowed: np (a CURATED numpy subset/facade, NOT the real module - no np.random /
 #    np.linalg / np.fft) and the math module. Do NOT import anything (no pandas, no
 #    scipy, no os) - there is nothing to import.
-#  - Forbidden (line error): imports; file/network/OS access; eval/exec/compile/open/
-#    format; f-strings; global/nonlocal; any name/attribute/string starting with '_'.
-#    Each run is killed after a 5-second limit.
+#  - Forbidden (line error): imports; eval/exec/compile/open/format; f-strings;
+#    global/nonlocal; any name/attribute/string starting with '_'. (File/network/OS
+#    access isn't a separate check - it's simply unreachable: nothing to import, and
+#    open/eval/exec are rejected here.) Each run is killed after a 5-second limit.
 #
 # Example body: a simple moving average. Replace it with your indicator.
 def compute(series, window: int = 20):
