@@ -55,6 +55,7 @@ Method contract
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -68,6 +69,7 @@ from tcg.types.persistence import (
     DocType,
     IndicatorDoc,
     PersistenceDoc,
+    TicketDoc,
     from_pg_row,
     to_pg_row,
 )
@@ -553,6 +555,95 @@ class WriteRepository:
             (doc_id, doc_type),
         )
         return (await cur.fetchone()) is not None
+
+    # ------------------------------------------------------------------ #
+    # Tickets — SELF-CONTAINED path (NOT the uniform 7-column machinery)
+    # ------------------------------------------------------------------ #
+    #
+    # A ticket is a single free-text note. Its table has exactly three
+    # columns (``id text PK``, ``text text NOT NULL``, ``created_at
+    # timestamptz NOT NULL``) — no ``type``/``category``/``locked``/JSONB/
+    # ``updated_at``. So these four methods deliberately bypass
+    # ``_TABLE_BY_TYPE`` / ``to_pg_row`` / ``from_pg_row`` and write their
+    # own 3-column SQL. The table name is a fixed literal here (it never
+    # comes from a caller, preserving the "no public method takes a table
+    # name" safety property); the schema is still ``self._pool.schema``.
+    #
+    # Delete is a HARD ``DELETE FROM`` — an INTENTIONAL exception to the
+    # project's uniform ``category='DELETED'`` soft-delete. Do NOT convert
+    # it to a soft-delete.
+    _TICKETS_TABLE = "tickets"
+
+    async def create_ticket(self, text: str) -> TicketDoc:
+        """Insert a new ticket and return the stored row.
+
+        ``id`` is a server-generated ``uuid4().hex``; ``created_at`` is
+        the current UTC instant (both server-set — callers supply only
+        the text). The caller (API layer) is responsible for validating /
+        trimming ``text`` before calling this.
+        """
+        ticket_id = uuid.uuid4().hex
+        created_at = _utcnow()
+        sql = (
+            f"INSERT INTO {self._pool.schema}.{self._TICKETS_TABLE} "
+            "(id, text, created_at) VALUES (%s, %s, %s)"
+        )
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (ticket_id, text, created_at))
+        return TicketDoc(id=ticket_id, text=text, created_at=created_at)
+
+    async def list_tickets(self) -> list[TicketDoc]:
+        """Return every ticket, newest first (``created_at`` DESC)."""
+        sql = (
+            f"SELECT id, text, created_at "
+            f"FROM {self._pool.schema}.{self._TICKETS_TABLE} "
+            "ORDER BY created_at DESC"
+        )
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql)
+                rows = await cur.fetchall()
+        return [
+            TicketDoc(id=r["id"], text=r["text"], created_at=r["created_at"])
+            for r in rows
+        ]
+
+    async def update_ticket(self, ticket_id: str, text: str) -> TicketDoc:
+        """In-place UPDATE of a ticket's ``text``; return the stored row.
+
+        ``created_at`` is preserved (there is no ``updated_at`` column —
+        an edit is a plain text replacement). Raises ``KeyError`` when no
+        ticket with ``ticket_id`` exists (the API maps this to 404); we
+        detect the miss via ``RETURNING`` yielding no row.
+        """
+        sql = (
+            f"UPDATE {self._pool.schema}.{self._TICKETS_TABLE} "
+            "SET text = %s WHERE id = %s RETURNING id, text, created_at"
+        )
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (text, ticket_id))
+                row = await cur.fetchone()
+        if row is None:
+            raise KeyError(f"persistence: no ticket with id={ticket_id!r} to update")
+        return TicketDoc(id=row["id"], text=row["text"], created_at=row["created_at"])
+
+    async def delete_ticket(self, ticket_id: str) -> None:
+        """HARD-delete a ticket (real ``DELETE FROM``).
+
+        INTENTIONAL divergence from the uniform soft-delete: the row is
+        physically removed. Raises ``KeyError`` (→ 404) when no row
+        matched, detected via ``cur.rowcount == 0``.
+        """
+        sql = f"DELETE FROM {self._pool.schema}.{self._TICKETS_TABLE} WHERE id = %s"
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (ticket_id,))
+                if cur.rowcount == 0:
+                    raise KeyError(
+                        f"persistence: no ticket with id={ticket_id!r} to delete"
+                    )
 
 
 __all__ = [

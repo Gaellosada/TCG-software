@@ -65,6 +65,7 @@ from tcg.types.persistence import (
     PersistenceDoc,
     PortfolioDoc,
     SignalDoc,
+    TicketDoc,
 )
 
 
@@ -379,6 +380,84 @@ class LockIn(_BaseWriteModel):
     """
 
     locked: bool
+
+
+# ---------------------------------------------------------------------------
+# Ticket wire models (SELF-CONTAINED — not the uniform doc machinery)
+# ---------------------------------------------------------------------------
+#
+# A ticket is a single free-text note a user records when they hit an
+# issue. It has its own 3-column table and bypasses the uniform
+# doc/payload models entirely (no id/type/category/locked on the wire —
+# id + created_at are server-generated). ``text`` is bounded 1..10000
+# and must be non-empty after trimming; the shared ``min_length`` /
+# ``max_length`` + a strip validator enforce that, surfacing as the
+# project's 400 ``validation_error`` envelope (see
+# ``tcg.core.app._request_validation_error_handler``, which maps every
+# Pydantic body-validation failure to 400).
+
+# Max ticket text length. A ticket is a short free-text note; 10000 is a
+# generous cap that still stops a pathological multi-megabyte body.
+_TICKET_TEXT_MAX = 10_000
+
+
+def _validate_ticket_text(v: str) -> str:
+    """Trim and reject whitespace-only ticket text.
+
+    ``min_length=1`` alone accepts ``"   "`` (3 chars). We additionally
+    strip and require non-empty so a blank note can't be stored, and we
+    return the trimmed value so storage never keeps leading/trailing
+    whitespace. Raises ``ValueError`` (→ Pydantic 422 → project 400) when
+    blank.
+    """
+    stripped = v.strip()
+    if not stripped:
+        raise ValueError("text must not be empty or whitespace-only")
+    return stripped
+
+
+class TicketCreateIn(_BaseWriteModel):
+    """Create-payload for a ticket — the body carries ONLY ``text``.
+
+    ``id`` (uuid4 hex) and ``created_at`` (UTC now) are generated
+    server-side. ``extra='forbid'`` (inherited) rejects any other field.
+    """
+
+    text: str = Field(..., min_length=1, max_length=_TICKET_TEXT_MAX)
+
+    @field_validator("text")
+    @classmethod
+    def _check_text(cls, v: str) -> str:
+        return _validate_ticket_text(v)
+
+
+class TicketUpdateIn(_BaseWriteModel):
+    """Update-payload — same single ``text`` field as create.
+
+    ``id`` comes from the URL path; editing a ticket is an in-place
+    replacement of ``text`` (there is no ``updated_at``).
+    """
+
+    text: str = Field(..., min_length=1, max_length=_TICKET_TEXT_MAX)
+
+    @field_validator("text")
+    @classmethod
+    def _check_text(cls, v: str) -> str:
+        return _validate_ticket_text(v)
+
+
+class TicketOut(BaseModel):
+    """Wire-out shape for a ticket: ``{id, text, created_at}``."""
+
+    model_config = {"extra": "forbid"}
+
+    id: str
+    text: str
+    created_at: datetime
+
+
+def _ticket_to_out(doc: TicketDoc) -> TicketOut:
+    return TicketOut(id=doc.id, text=doc.text, created_at=doc.created_at)
 
 
 # ---------------------------------------------------------------------------
@@ -1186,5 +1265,59 @@ async def update_basket(
 async def archive_basket(doc_id: DocId, repo: RepoDep) -> None:
     try:
         await repo.archive(DocType.BASKET.value, doc_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Ticket endpoints (SELF-CONTAINED path — own repo methods, HARD delete)
+# ---------------------------------------------------------------------------
+#
+# POST   /api/persistence/tickets        create → 201 {id, text, created_at}
+# GET    /api/persistence/tickets        list   → 200 [...] newest-first
+# PUT    /api/persistence/tickets/{id}   update → 200 {...} · 404 if missing
+# DELETE /api/persistence/tickets/{id}   HARD delete → 204 · 404 if missing
+#
+# These deliberately do NOT reuse the indicator/signal/portfolio CRUD
+# helpers (``_checked`` / ``_expect`` / the doc dataclasses): a ticket is
+# a 3-column row with its own dataclass and repository methods. Missing
+# rows raise ``KeyError`` in the repo, mapped to 404 here.
+
+
+@router.post("/tickets", response_model=TicketOut, status_code=201)
+async def create_ticket(body: TicketCreateIn, repo: RepoDep) -> TicketOut:
+    """Create a ticket. ``id`` + ``created_at`` are server-generated."""
+    stored = await repo.create_ticket(body.text)
+    return _ticket_to_out(stored)
+
+
+@router.get("/tickets", response_model=list[TicketOut])
+async def list_tickets(repo: RepoDep) -> list[TicketOut]:
+    """List all tickets, newest first (``created_at`` DESC)."""
+    docs = await repo.list_tickets()
+    return [_ticket_to_out(d) for d in docs]
+
+
+@router.put("/tickets/{ticket_id}", response_model=TicketOut)
+async def update_ticket(
+    ticket_id: DocId, body: TicketUpdateIn, repo: RepoDep
+) -> TicketOut:
+    """In-place edit of a ticket's ``text``. 404 when the id is unknown."""
+    try:
+        stored = await repo.update_ticket(ticket_id, body.text)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _ticket_to_out(stored)
+
+
+@router.delete("/tickets/{ticket_id}", status_code=204)
+async def delete_ticket(ticket_id: DocId, repo: RepoDep) -> None:
+    """HARD-delete a ticket (real ``DELETE FROM``). 404 when missing.
+
+    Intentional divergence from the uniform soft-delete — the row is
+    physically removed.
+    """
+    try:
+        await repo.delete_ticket(ticket_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

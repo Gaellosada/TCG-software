@@ -119,6 +119,12 @@ export const queryKeys = {
       list: (category) => ['persistence', 'baskets', 'list', category],
       detail: (id) => ['persistence', 'baskets', 'detail', id],
     },
+    tickets: {
+      // Tickets use a flat list (no category) — a ticket is a single
+      // free-text note (see api/tickets.js). The self-contained backend
+      // path means there is no per-id detail query; only the list.
+      list: () => ['persistence', 'tickets', 'list'],
+    },
   },
 };
 

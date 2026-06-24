@@ -26,6 +26,7 @@ import {
   listIndicators,
   listBaskets,
 } from '../api/persistence';
+import { listTickets } from '../api/tickets';
 
 const LIST_STALE_TIME = 10 * 1000; // 10s — user-mutable, revalidate promptly
 
@@ -72,6 +73,16 @@ export function useBasketsList(category, options = {}) {
   });
 }
 
+/** All tickets (flat list, no category), newest-first. */
+export function useTicketsList(options = {}) {
+  return useQuery({
+    queryKey: queryKeys.persistence.tickets.list(),
+    queryFn: () => listTickets(),
+    staleTime: LIST_STALE_TIME,
+    ...options,
+  });
+}
+
 /**
  * Resource-scoped invalidators for persistence queries.
  *
@@ -88,6 +99,7 @@ export function useBasketsList(category, options = {}) {
  *   portfolios: (id?: string) => Promise<void>,
  *   indicators: (id?: string) => Promise<void>,
  *   baskets:    (id?: string) => Promise<void>,
+ *   tickets:    () => Promise<void>,
  *   all:        () => Promise<void>,
  * }}
  */
@@ -111,6 +123,14 @@ export function useInvalidatePersistence() {
     portfolios: (id) => invalidateResource('portfolios', queryKeys.persistence.portfolios, id),
     indicators: (id) => invalidateResource('indicators', queryKeys.persistence.indicators, id),
     baskets: (id) => invalidateResource('baskets', queryKeys.persistence.baskets, id),
+    /**
+     * Tickets have a flat list and no per-id detail query, so this just
+     * revalidates the single tickets list (no id argument). A prefix match on
+     * ``['persistence','tickets','list']`` hits it exactly.
+     */
+    tickets: () => queryClient.invalidateQueries({
+      queryKey: queryKeys.persistence.tickets.list(),
+    }),
     /** Coarse: invalidate every persistence query. */
     all: () => queryClient.invalidateQueries({ queryKey: queryKeys.persistence.all() }),
   };
