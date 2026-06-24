@@ -614,16 +614,15 @@
   min-height: var(--signal-control-height);
 }
 
-/* Each operand occupies a flexible cell. ``flex-basis: 150px`` is the
-   PREFERRED width — wide enough that a single <select> reads clearly — and the
-   row's ``flex-wrap: wrap`` drops an operand that can't fit onto the next line.
-   ``min-width: 0`` (the PR #61 precedent) lets the cell shrink below that basis
-   when the editor column itself is narrower than 150px (an off-spec sub-1024
-   window), so it reflows / the panel scrolls instead of overflowing the
-   column. At the Tauri floor (1024px window → ~264px editor) one readable
-   operand per line fits comfortably. */
+/* Each operand occupies a compact cell. ``flex-basis: 100px`` is the PREFERRED
+   width (≈⅓ narrower than the former 150px) and ``flex-grow: 0`` keeps the
+   dropdown at that width instead of stretching to fill the column — a
+   deliberately narrow control. The row's ``flex-wrap: wrap`` still drops an
+   operand that can't fit onto the next line, and ``min-width: 0`` (the PR #61
+   precedent) lets the cell shrink below the basis at sub-floor widths so it
+   reflows / the panel scrolls instead of overflowing the column. */
 .conditionOperandCell {
-  flex: 1 1 150px;
+  flex: 0 1 100px;
   min-width: 0;
   display: flex;
 }
@@ -838,11 +837,13 @@
   min-width: 0;
 }
 
-/* ``flex-basis: 110px`` = preferred per-select width; with the wrap above, two
-   selects that can't share a line stack one-per-line (readable). ``min-width:
-   0`` lets them shrink at sub-floor widths instead of overflowing the cell. */
+/* ``flex-basis: 73px`` = preferred per-select width (≈⅓ narrower than the
+   former 110px); ``flex-grow: 0`` keeps each select compact rather than
+   stretching, and the wrap above stacks two that can't share a line
+   one-per-line. ``min-width: 0`` lets them shrink at sub-floor widths instead
+   of overflowing the cell. */
 .operandIndicator > select {
-  flex: 1 1 110px;
+  flex: 0 1 73px;
   min-width: 0;
 }
 
@@ -1004,12 +1005,14 @@
   position: relative;
 }
 
-/* ``flex-basis: 130px`` = preferred width for the input/target select;
-   ``min-width: 0`` lets it shrink (and the header wrap) at sub-floor widths
-   instead of pushing the weight/badge off the panel edge. */
+/* ``flex-basis: 87px`` = preferred width for the input / require-reset / target
+   select (≈⅓ narrower than the former 130px); ``flex-grow: 0`` keeps the
+   dropdown compact instead of absorbing the row's free space. ``min-width: 0``
+   lets it shrink (and the header wrap) at sub-floor widths instead of pushing
+   the weight/badge off the panel edge. */
 .blockInstrumentCell {
   position: relative;
-  flex: 1 1 130px;
+  flex: 0 1 87px;
   min-width: 0;
 }
 
