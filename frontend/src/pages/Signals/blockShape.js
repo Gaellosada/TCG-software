@@ -88,7 +88,8 @@ export function defaultBlock(section = 'entries') {
  *   - spot:          requires collection + instrument_id.
  *   - continuous:    requires collection + adjustment + cycle + rollOffset + strategy.
  *   - option_stream: requires collection + option_type + maturity + selection + stream
- *                    (adjustment + roll_offset are optional — BE-side defaults none/0).
+ *                    (roll_offset is optional — BE-side default 0; option streams
+ *                    carry no back-adjustment, so there is no adjustment field).
  *   - basket:        two shapes (locked descriptor; see InstrumentPickerModal):
  *                    - {kind:'saved',   basket_id}                  → non-empty basket_id.
  *                    - {kind:'inline',  asset_class, legs}          → non-empty legs array;

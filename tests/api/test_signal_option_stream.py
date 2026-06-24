@@ -242,12 +242,13 @@ class TestSignalOptionStream:
         assert inst["stream"] == "mid"
         assert "maturity" in inst
         assert "selection" in inst
-        # adjustment / roll_offset emitted (default none/0 when absent on input)
-        assert inst["adjustment"] == "none"
+        # roll_offset emitted (default 0 when absent on input).  Option streams
+        # carry NO back-adjustment, so no ``adjustment`` key is emitted.
+        assert "adjustment" not in inst
         assert inst["roll_offset"] == 0
 
 
-# ── adjustment / roll_offset threading (the MAJOR review finding) ────────
+# ── roll_offset threading + adjustment-removal (the MAJOR review finding) ─
 
 
 def _opt_input(adjustment=None, roll_offset=None):
@@ -265,6 +266,9 @@ def _opt_input(adjustment=None, roll_offset=None):
         },
         "stream": "mid",
     }
+    # A stray ``adjustment`` key (e.g. a legacy persisted leg) is tolerated and
+    # ignored — option streams carry no back-adjustment.  We still allow tests
+    # to send it to prove it has no effect.
     if adjustment is not None:
         inst["adjustment"] = adjustment
     if roll_offset is not None:
@@ -275,8 +279,9 @@ def _opt_input(adjustment=None, roll_offset=None):
 @pytest.fixture
 def capture_app(monkeypatch):
     """Like ``mock_app`` but the resolver records the kwargs it received
-    so the test can prove ``adjustment`` / ``roll_offset`` were threaded
-    all the way into ``resolve_option_stream`` (not just constructed)."""
+    so the test can prove ``roll_offset`` was threaded all the way into
+    ``resolve_option_stream`` and that ``adjustment`` is NOT passed (option
+    streams carry no back-adjustment)."""
     captured: dict = {}
 
     svc = MagicMock()
@@ -292,10 +297,8 @@ def capture_app(monkeypatch):
     async def recording_resolve(**kwargs):
         captured.update(kwargs)
         n = len(OPTION_VALUES)
-        # Encode adjustment in the returned level so a difference is
-        # observable end-to-end if a downstream test wants it.
-        bump = 0.0 if kwargs.get("adjustment") == "none" else 1.0
-        return (OPTION_VALUES.copy() + bump, list(OPTION_DIAGNOSTICS), [None] * n)
+        # Option streams are raw stitched mids — no adjustment bump.
+        return (OPTION_VALUES.copy(), list(OPTION_DIAGNOSTICS), [None] * n)
 
     monkeypatch.setattr(
         "tcg.engine.options.series.stream_resolver.resolve_option_stream",
@@ -329,11 +332,14 @@ class TestSignalOptionStreamRollFields:
         body["end"] = "2024-03-31"
         return await client.post("/api/signals/compute", json=body)
 
-    async def test_adjustment_threaded_into_resolver(self, capture_client):
+    async def test_adjustment_not_threaded_into_resolver(self, capture_client):
+        """A stray ``adjustment`` key on an option leg is ignored: it is never
+        passed to ``resolve_option_stream`` (option streams carry no
+        back-adjustment)."""
         client, captured = capture_client
         resp = await self._run(client, _opt_input(adjustment="ratio"))
         assert resp.status_code == 200, resp.text
-        assert captured["adjustment"] == "ratio"
+        assert "adjustment" not in captured
         assert captured["roll_offset"] == 0
 
     async def test_roll_offset_threaded_into_resolver(self, capture_client):
@@ -341,23 +347,24 @@ class TestSignalOptionStreamRollFields:
         resp = await self._run(client, _opt_input(roll_offset=5))
         assert resp.status_code == 200, resp.text
         assert captured["roll_offset"] == 5
-        assert captured["adjustment"] == "none"
+        assert "adjustment" not in captured
 
     async def test_defaults_when_absent(self, capture_client):
         client, captured = capture_client
         resp = await self._run(client, _opt_input())
         assert resp.status_code == 200, resp.text
-        assert captured["adjustment"] == "none"
+        assert "adjustment" not in captured
         assert captured["roll_offset"] == 0
 
     async def test_response_payload_round_trips_fields(self, capture_client):
         """The option_stream instrument echoed in the response carries the
-        same adjustment / roll_offset the request supplied."""
+        same roll_offset the request supplied, and no ``adjustment`` key (a
+        stray request ``adjustment`` is ignored end-to-end)."""
         client, _captured = capture_client
         resp = await self._run(client, _opt_input(adjustment="ratio", roll_offset=3))
         assert resp.status_code == 200, resp.text
         inst = resp.json()["positions"][0]["instrument"]
-        assert inst["adjustment"] == "ratio"
+        assert "adjustment" not in inst
         assert inst["roll_offset"] == 3
 
     async def test_roll_offset_out_of_range_rejected(self, capture_client):

@@ -25,8 +25,13 @@ import styles from './Signals.module.css';
  *   indicators   {Array}     available indicator specs (for indicator kind)
  *   inputs       {Array}     the signal's declared inputs (for input-id refs)
  *   slotLabel    {string?}   aria hint, shown in the confirm dialog
+ *   readOnly     {boolean?}  VIEW-only: the filled editor still renders so the
+ *                            user can SEE the operand, but every control (the
+ *                            empty-slot add menu, kind/input/field selects,
+ *                            the constant input, the param overrides, and the
+ *                            clear button) is disabled.
  */
-function OperandSlot({ operand, onChange, indicators, inputs, slotLabel }) {
+function OperandSlot({ operand, onChange, indicators, inputs, slotLabel, readOnly = false }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const rootRef = useRef(null);
@@ -70,6 +75,7 @@ function OperandSlot({ operand, onChange, indicators, inputs, slotLabel }) {
           aria-expanded={menuOpen}
           aria-label={slotLabel ? `Add operand for ${slotLabel}` : 'Add operand'}
           data-testid="operand-add-btn"
+          disabled={readOnly}
         >
           +
         </button>
@@ -118,13 +124,14 @@ function OperandSlot({ operand, onChange, indicators, inputs, slotLabel }) {
             indicators={indicators}
             inputs={inputs}
             onChange={onChange}
+            readOnly={readOnly}
           />
         )}
         {operand.kind === 'instrument' && (
-          <InstrumentEditor operand={operand} inputs={inputs} onChange={onChange} />
+          <InstrumentEditor operand={operand} inputs={inputs} onChange={onChange} readOnly={readOnly} />
         )}
         {operand.kind === 'constant' && (
-          <ConstantEditor operand={operand} onChange={onChange} />
+          <ConstantEditor operand={operand} onChange={onChange} readOnly={readOnly} />
         )}
       </div>
       <button
@@ -134,6 +141,7 @@ function OperandSlot({ operand, onChange, indicators, inputs, slotLabel }) {
         title="Clear operand"
         aria-label={slotLabel ? `Clear operand ${slotLabel}` : 'Clear operand'}
         data-testid="operand-clear-btn"
+        disabled={readOnly}
       >
         ×
       </button>
@@ -156,7 +164,7 @@ function OperandSlot({ operand, onChange, indicators, inputs, slotLabel }) {
  * input ids. Shows " (needs instrument)" next to ids that aren't fully
  * configured so the user knows they still have work to do.
  */
-function InputIdSelect({ value, inputs, onChange, ariaLabel, testId }) {
+function InputIdSelect({ value, inputs, onChange, ariaLabel, testId, readOnly = false }) {
   const list = Array.isArray(inputs) ? inputs : [];
   return (
     <select
@@ -165,6 +173,7 @@ function InputIdSelect({ value, inputs, onChange, ariaLabel, testId }) {
       onChange={(e) => onChange(e.target.value)}
       aria-label={ariaLabel || 'Input'}
       data-testid={testId}
+      disabled={readOnly}
     >
       <option value="">Pick input…</option>
       {list.map((input) => {
@@ -179,7 +188,7 @@ function InputIdSelect({ value, inputs, onChange, ariaLabel, testId }) {
   );
 }
 
-function IndicatorEditor({ operand, indicators, inputs, onChange }) {
+function IndicatorEditor({ operand, indicators, inputs, onChange, readOnly = false }) {
   const list = Array.isArray(indicators) ? indicators : [];
   const selectedId = operand.indicator_id || '';
   const selectedInd = list.find((i) => i.id === selectedId) || null;
@@ -208,6 +217,7 @@ function IndicatorEditor({ operand, indicators, inputs, onChange }) {
         })}
         aria-label="Pick indicator"
         data-testid="operand-indicator-select"
+        disabled={readOnly}
       >
         <option value="" disabled>Select indicator…</option>
         {list.map((ind) => (
@@ -220,6 +230,7 @@ function IndicatorEditor({ operand, indicators, inputs, onChange }) {
         onChange={(id) => onChange({ ...operand, input_id: id })}
         ariaLabel="Indicator input binding"
         testId="operand-indicator-input"
+        readOnly={readOnly}
       />
       {selectedInd && (
         <IndicatorParamsOverride
@@ -227,13 +238,14 @@ function IndicatorEditor({ operand, indicators, inputs, onChange }) {
           operand={operand}
           inputs={inputs}
           onOperandChange={onChange}
+          readOnly={readOnly}
         />
       )}
     </div>
   );
 }
 
-function InstrumentEditor({ operand, inputs, onChange }) {
+function InstrumentEditor({ operand, inputs, onChange, readOnly = false }) {
   const list = Array.isArray(inputs) ? inputs : [];
   const boundInput = list.find((i) => i.id === operand.input_id);
   const isOptionStream = boundInput?.instrument?.type === 'option_stream';
@@ -258,6 +270,7 @@ function InstrumentEditor({ operand, inputs, onChange }) {
         })}
         ariaLabel="Instrument input"
         testId="operand-instrument-input"
+        readOnly={readOnly}
       />
       <select
         className={styles.operandSelect}
@@ -265,6 +278,7 @@ function InstrumentEditor({ operand, inputs, onChange }) {
         onChange={(e) => onChange({ ...operand, field: e.target.value })}
         aria-label="Instrument field"
         data-testid="operand-instrument-field"
+        disabled={readOnly}
       >
         {fieldOptions.map((opt) => (
           <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -274,7 +288,7 @@ function InstrumentEditor({ operand, inputs, onChange }) {
   );
 }
 
-function ConstantEditor({ operand, onChange }) {
+function ConstantEditor({ operand, onChange, readOnly = false }) {
   const current = Number.isFinite(operand.value) ? operand.value : 0;
   const [draft, setDraft] = useState(String(current));
   // Sync draft when the underlying operand value changes (e.g. parent
@@ -304,6 +318,7 @@ function ConstantEditor({ operand, onChange }) {
       }}
       aria-label="Constant value"
       data-testid="operand-constant-input"
+      readOnly={readOnly}
     />
   );
 }

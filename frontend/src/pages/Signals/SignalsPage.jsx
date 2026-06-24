@@ -627,19 +627,25 @@ function SignalsPage() {
             {selectedLocked && (
               <LockBanner entityLabel="signal" testId="signal-lock-banner" />
             )}
-            {/* When locked, the native disabled <fieldset> makes every nested
-                form control non-interactive (mirrors the Indicators editor's
-                readOnly behaviour). Read-only viewing — scrolling, switching
-                BlockEditor tabs — still works; the unlock control lives in the
-                list, so disabling editor controls never traps the user. */}
-            <fieldset
-              className={styles.editorFieldset}
-              disabled={selectedLocked}
-              data-testid="signal-editor-fieldset"
+            {/* When locked the editor is READ-ONLY but still fully viewable and
+                navigable: we thread an explicit ``readOnly`` prop into the
+                editor (mirroring the Indicators page, which threads ``readOnly``
+                to EditorPanel) instead of a blunt ``<fieldset disabled>``. A
+                disabled fieldset disables EVERY nested control — including the
+                Inputs expand/collapse toggle and the BlockEditor tab buttons —
+                so the user could only see whatever happened to be expanded.
+                With ``readOnly`` each component disables only its EDIT controls
+                while expand/collapse, tab switching, popovers and scrolling
+                keep working. (Writes are also server-guarded with HTTP 423 and
+                autosave is suspended when locked — see ``selectedLocked``.) */}
+            <div
+              className={styles.editorBody}
+              data-testid="signal-editor-body"
             >
               <InputsPanel
                 inputs={selectedSignal.inputs || []}
                 onChange={handleInputsChange}
+                readOnly={selectedLocked}
               />
               <BlockEditor
                 rules={selectedSignal.rules}
@@ -648,8 +654,9 @@ function SignalsPage() {
                 indicators={availableIndicators}
                 doc={selectedSignal.doc || ''}
                 onDocChange={handleDocChange}
+                readOnly={selectedLocked}
               />
-            </fieldset>
+            </div>
           </>
         ) : (
           <div className={styles.editorEmpty}>
@@ -668,7 +675,13 @@ function SignalsPage() {
             leftSlot={
               <>
                 <InlineNameInput
-                  entity={selectedSignal}
+                  /* When locked, hint InlineNameInput to render read-only via a
+                     fresh object — do NOT mutate the stored signal. */
+                  entity={
+                    selectedLocked && selectedSignal
+                      ? { ...selectedSignal, readonly: true }
+                      : selectedSignal
+                  }
                   onRename={handleRename}
                   className={styles.nameInput}
                   placeholder="Select a signal"

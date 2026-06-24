@@ -179,7 +179,7 @@ describe('usePortfolio — signal leg support', () => {
     expect(range.end).toBeTruthy();
   });
 
-  it('handleCalculate forwards option_stream adjustment + roll_offset to the API', async () => {
+  it('handleCalculate forwards option_stream roll_offset (no adjustment) to the API', async () => {
     const { result } = renderHook(() => usePortfolio());
 
     act(() => {
@@ -192,6 +192,7 @@ describe('usePortfolio — signal leg support', () => {
         maturity: { kind: 'nearest_to_target', target_days: 30 },
         selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
         stream: 'mid',
+        // A stray adjustment must NOT be forwarded — option streams have none.
         adjustment: 'ratio',
         roll_offset: 5,
         weight: 100,
@@ -211,7 +212,8 @@ describe('usePortfolio — signal leg support', () => {
     expect(computePortfolio).toHaveBeenCalledTimes(1);
     const call = computePortfolio.mock.calls[0][0];
     const legLabel = result.current.legs[0].label;
-    expect(call.legs[legLabel]).toEqual({
+    const leg = call.legs[legLabel];
+    expect(leg).toEqual({
       type: 'option_stream',
       collection: 'OPT_SP_500',
       option_type: 'C',
@@ -219,9 +221,10 @@ describe('usePortfolio — signal leg support', () => {
       maturity: { kind: 'nearest_to_target', target_days: 30 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'mid',
-      adjustment: 'ratio',
       roll_offset: 5,
     });
+    // The stray adjustment was dropped — option streams carry no back-adjustment.
+    expect('adjustment' in leg).toBe(false);
   });
 
   it('handleCalculate omits option_stream roll fields when at defaults (none/0)', async () => {

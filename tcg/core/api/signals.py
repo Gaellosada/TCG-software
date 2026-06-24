@@ -361,7 +361,6 @@ def _materialise_leg_instrument(
             maturity=maturity,
             selection=selection,
             stream=instrument_ref.stream,
-            adjustment=instrument_ref.adjustment,
             roll_offset=int(instrument_ref.roll_offset),
         )
     raise SignalValidationError(
@@ -588,7 +587,6 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             maturity=maturity,
             selection=selection,
             stream=inst_in.stream,
-            adjustment=inst_in.adjustment,
             roll_offset=int(inst_in.roll_offset),
         )
     else:
@@ -1246,7 +1244,6 @@ def make_signal_fetcher(
                 maturity=instrument.maturity,
                 selection=instrument.selection,
                 stream=instrument.stream,
-                adjustment=instrument.adjustment,
                 roll_offset=instrument.roll_offset,
                 chain_reader=chain_reader,
                 maturity_resolver=mat_resolver,
@@ -1392,12 +1389,12 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             "maturity": asdict(inst.maturity),
             "selection": asdict(inst.selection),
             "stream": inst.stream,
-            # Snake_case keys mirror the inbound ``OptionStreamRef`` wire model
-            # (which uses ``adjustment`` / ``roll_offset``) so the emitted
-            # payload round-trips through ``OptionStreamRef.model_validate``.
-            # NOTE: continuous emits ``rollOffset`` (camel) — option_stream
-            # deliberately differs because its inbound model reads snake_case.
-            "adjustment": inst.adjustment,
+            # Snake_case ``roll_offset`` mirrors the inbound ``OptionStreamRef``
+            # wire model so the emitted payload round-trips through
+            # ``OptionStreamRef.model_validate``.  NOTE: continuous emits
+            # ``rollOffset`` (camel) — option_stream deliberately differs because
+            # its inbound model reads snake_case.  No ``adjustment`` key: option
+            # streams carry no back-adjustment (raw stitched series).
             "roll_offset": int(inst.roll_offset),
         }
     return {

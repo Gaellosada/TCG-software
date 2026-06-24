@@ -296,9 +296,11 @@ describe('resolveOptionStream', () => {
     };
   }
 
-  it('POSTs to /options/stream and forwards the ref adjustment field', async () => {
+  it('POSTs to /options/stream and never injects an adjustment field', async () => {
+    // Option streams carry NO back-adjustment, so the API helper must not add
+    // an `adjustment` field to the ref it sends.
     mockSuccess(RESOLVE_RESP);
-    const ref = optionRef({ adjustment: 'ratio' });
+    const ref = optionRef();
     await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
 
     expect(fetchApi).toHaveBeenCalledWith('/options/stream', expect.objectContaining({
@@ -309,26 +311,21 @@ describe('resolveOptionStream', () => {
     expect(body.start).toBe('2024-01-01');
     expect(body.end).toBe('2025-01-01');
     expect(body.streams).toHaveLength(1);
+    expect('adjustment' in body.streams[0].ref).toBe(false);
+  });
+
+  it('forwards a stray adjustment key untouched (backend ignores it)', async () => {
+    // A legacy / hand-built ref may still carry `adjustment`. The helper does
+    // not strip it (the backend ignores unknown fields), but it also does not
+    // depend on it — it is simply passed through.
+    mockSuccess(RESOLVE_RESP);
+    const ref = optionRef({ adjustment: 'ratio' });
+    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
+
+    const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
     expect(body.streams[0].ref.adjustment).toBe('ratio');
-  });
-
-  it('defaults adjustment to "none" when a ref omits it', async () => {
-    mockSuccess(RESOLVE_RESP);
-    const ref = optionRef();
-    delete ref.adjustment; // legacy / hand-built ref
-    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
-
-    const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
-    expect(body.streams[0].ref.adjustment).toBe('none');
-  });
-
-  it('preserves an explicit adjustment of "none"', async () => {
-    mockSuccess(RESOLVE_RESP);
-    const ref = optionRef({ adjustment: 'none' });
-    await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
-
-    const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
-    expect(body.streams[0].ref.adjustment).toBe('none');
+    // roll_offset is the field the helper defaults.
+    expect(body.streams[0].ref.roll_offset).toBe(0);
   });
 
   it('forwards the ref roll_offset field', async () => {

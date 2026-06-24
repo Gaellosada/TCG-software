@@ -317,6 +317,7 @@
 */
 .sectionTabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   border-bottom: 1px solid var(--border-primary);
   padding-bottom: 6px;
@@ -580,13 +581,21 @@
  * Iter-2: each condition row is HORIZONTAL —
  *   <cond-label>  <operand1>  <op-select>  <operand2>  <remove-btn>
  * with ``in_range`` and ``rolling_*`` variants following the same
- * left-to-right pattern. Flex-wrap lets very narrow viewports break
- * the row gracefully rather than clipping.
+ * left-to-right pattern.
+ *
+ * BUG #4 fix: the row was ``flex-wrap: nowrap`` with a 96px operand floor,
+ * so at constrained widths (Tauri webview / narrow desktop) the operand
+ * cells could neither shrink-wrap nor wrap — they overflowed the editor
+ * panel and the indicator dropdowns were crushed below readable width.
+ * ``flex-wrap: wrap`` (the behaviour the iter-2 comment always intended)
+ * plus a readable per-operand floor lets a wide condition break onto extra
+ * lines gracefully instead of clipping. align-items:flex-start keeps the
+ * label/op aligned to the top of a wrapped, taller operand cell.
  */
 .conditionRow {
   display: flex;
-  align-items: center;
-  flex-wrap: nowrap;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 2px;
   min-width: 0;
@@ -600,11 +609,21 @@
   min-width: 42px;
   display: flex;
   align-items: center;
+  /* Match the control height so the label baseline lines up with the
+     selects/inputs on the first row even though the row aligns flex-start. */
+  min-height: var(--signal-control-height);
 }
 
+/* Each operand occupies a compact cell. ``flex-basis: 100px`` is the PREFERRED
+   width (≈⅓ narrower than the former 150px) and ``flex-grow: 0`` keeps the
+   dropdown at that width instead of stretching to fill the column — a
+   deliberately narrow control. The row's ``flex-wrap: wrap`` still drops an
+   operand that can't fit onto the next line, and ``min-width: 0`` (the PR #61
+   precedent) lets the cell shrink below the basis at sub-floor widths so it
+   reflows / the panel scrolls instead of overflowing the column. */
 .conditionOperandCell {
-  flex: 1 1 0;
-  min-width: 96px;
+  flex: 0 1 100px;
+  min-width: 0;
   display: flex;
 }
 
@@ -617,6 +636,10 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
+  /* Row aligns flex-start (so wrapped operand cells grow downward); pin these
+     fixed-size cells to the control height so they stay centred against the
+     first line of operands. */
+  min-height: var(--signal-control-height);
 }
 
 .conditionRangeSep {
@@ -625,6 +648,7 @@
   color: var(--text-secondary);
   font-size: 0.82rem;
   padding: 0 2px;
+  min-height: var(--signal-control-height);
 }
 
 .conditionLookbackCell {
@@ -632,6 +656,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  min-height: var(--signal-control-height);
 }
 
 /* Small (i) info button shown next to the op selector for rolling ops.
@@ -802,13 +827,23 @@
   display: flex;
   flex-direction: row;
   align-items: center;
+  /* BUG #4: an indicator operand packs THREE controls (indicator select |
+     input-id select | params-override) into one operand cell. Let them wrap
+     onto a second line inside the cell when it is narrow, instead of crushing
+     each select to an unreadable sliver. */
+  flex-wrap: wrap;
   gap: 4px;
   flex: 1;
   min-width: 0;
 }
 
+/* ``flex-basis: 73px`` = preferred per-select width (≈⅓ narrower than the
+   former 110px); ``flex-grow: 0`` keeps each select compact rather than
+   stretching, and the wrap above stacks two that can't share a line
+   one-per-line. ``min-width: 0`` lets them shrink at sub-floor widths instead
+   of overflowing the cell. */
 .operandIndicator > select {
-  flex: 0 1 auto;
+  flex: 0 1 73px;
   min-width: 0;
 }
 
@@ -954,18 +989,30 @@
 
 /* ---------- BlockHeader (iter-3) ---------- */
 
+/* BUG #4: an entry header packs many controls (name + ✎ + enable + "entry on"
+   + input select + require-reset select + weight + badge + delete) on one row.
+   At constrained widths (Tauri webview / narrow desktop) a ``nowrap`` row
+   forced the panel to overflow horizontally and clipped the trailing controls.
+   ``flex-wrap: wrap`` lets the header reflow onto extra lines. row-gap keeps
+   wrapped lines from touching. */
 .blockHeaderRow {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 4px 6px;
   min-height: var(--signal-control-height);
   margin-bottom: 4px;
   position: relative;
 }
 
+/* ``flex-basis: 87px`` = preferred width for the input / require-reset / target
+   select (≈⅓ narrower than the former 130px); ``flex-grow: 0`` keeps the
+   dropdown compact instead of absorbing the row's free space. ``min-width: 0``
+   lets it shrink (and the header wrap) at sub-floor widths instead of pushing
+   the weight/badge off the panel edge. */
 .blockInstrumentCell {
   position: relative;
-  flex: 1 1 auto;
+  flex: 0 1 87px;
   min-width: 0;
 }
 

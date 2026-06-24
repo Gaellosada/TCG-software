@@ -48,6 +48,13 @@ const ADD_BLOCK_LABELS = {
  *   onDocChange        {Function}
  *   section?           {'entries'|'exits'|'resets'} — if provided, parent controls the tab
  *   onSectionChange?   {Function}   — parent-controlled tab setter
+ *   readOnly?          {boolean}    — VIEW-only mode (locked signal). Tab
+ *                                     switching + block/description expand stay
+ *                                     interactive; every EDIT control (add
+ *                                     block/condition, operands, weights, names,
+ *                                     enable toggle, delete, doc edit) is
+ *                                     disabled. Threaded into Block / Condition /
+ *                                     BlockHeader / OperandSlot / DocView.
  */
 function BlockEditor({
   rules,
@@ -58,6 +65,7 @@ function BlockEditor({
   onDocChange,
   section: sectionProp,
   onSectionChange,
+  readOnly = false,
 }) {
   // Internal tab state is used when the parent does NOT control section.
   // Supports 'entries' | 'exits' | 'resets' | 'doc'.
@@ -198,7 +206,7 @@ function BlockEditor({
           <DocView
             value={doc}
             onChange={onDocChange}
-            readOnly={false}
+            readOnly={readOnly}
             placeholder="No documentation yet. Click Edit to add some."
           />
         </div>
@@ -246,6 +254,7 @@ function BlockEditor({
                   onRemoveBlock={() => handleRemoveBlock(blockIdx)}
                   inputs={inputs}
                   indicators={indicators}
+                  readOnly={readOnly}
                 />
               ))
             )}
@@ -254,6 +263,7 @@ function BlockEditor({
               className={styles.addBlockBtn}
               onClick={handleAddBlock}
               data-testid="add-block-btn"
+              disabled={readOnly}
             >
               {ADD_BLOCK_LABELS[section] || '+ Add block (OR)'}
             </button>
@@ -279,6 +289,7 @@ function Block({
   onRemoveBlock,
   inputs,
   indicators,
+  readOnly = false,
 }) {
   const [descOpen, setDescOpen] = useState(false);
   const conditions = block.conditions || [];
@@ -323,6 +334,7 @@ function Block({
         blockIdx={blockIdx}
         enabled={enabled}
         onToggleEnabled={handleToggleEnabled}
+        readOnly={readOnly}
       />
       {conditions.length === 0 ? (
         <div className={styles.blockEmpty}>
@@ -340,6 +352,7 @@ function Block({
             onRemove={() => onRemoveCondition(condIdx)}
             inputs={inputs}
             indicators={indicators}
+            readOnly={readOnly}
           />
         ))
       )}
@@ -349,6 +362,7 @@ function Block({
           className={styles.addCondBtn}
           onClick={onAddCondition}
           data-testid={`add-condition-${blockIdx}`}
+          disabled={readOnly}
         >
           + Add condition (AND)
         </button>
@@ -370,9 +384,10 @@ function Block({
           className={styles.blockDescriptionTextarea}
           value={block.description || ''}
           onChange={handleDescriptionChange}
-          placeholder="Optional block description…"
+          placeholder={readOnly ? 'No block description.' : 'Optional block description…'}
           aria-label="Block description"
           data-testid={`block-desc-textarea-${blockIdx}`}
+          readOnly={readOnly}
         />
       )}
     </div>
@@ -388,6 +403,7 @@ function Condition({
   onRemove,
   inputs,
   indicators,
+  readOnly = false,
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const shape = conditionShape(condition.op);
@@ -412,6 +428,7 @@ function Condition({
       onChange={(e) => updateOp(e.target.value)}
       aria-label="Operator"
       data-testid={`op-select-${blockIdx}-${condIdx}`}
+      disabled={readOnly}
     >
       {ALL_OPS.map((op) => (
         <option key={op} value={op}>{OP_LABELS[op] || op}</option>
@@ -433,6 +450,7 @@ function Condition({
                 inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} lhs`}
+                readOnly={readOnly}
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
@@ -443,6 +461,7 @@ function Condition({
                 inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} rhs`}
+                readOnly={readOnly}
               />
             </div>
           </>
@@ -456,6 +475,7 @@ function Condition({
                 inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} operand`}
+                readOnly={readOnly}
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
@@ -466,6 +486,7 @@ function Condition({
                 inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} min`}
+                readOnly={readOnly}
               />
             </div>
             <span className={styles.conditionRangeSep}>..</span>
@@ -476,6 +497,7 @@ function Condition({
                 inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} max`}
+                readOnly={readOnly}
               />
             </div>
           </>
@@ -489,6 +511,7 @@ function Condition({
                 inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} operand`}
+                readOnly={readOnly}
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
@@ -514,6 +537,7 @@ function Condition({
                 value={condition.lookback ?? 1}
                 onChange={(e) => updateLookback(e.target.value)}
                 aria-label="Lookback (int)"
+                readOnly={readOnly}
               />
             </div>
           </>
@@ -525,6 +549,7 @@ function Condition({
           title="Remove condition"
           aria-label={`Remove condition ${condIdx + 1} of block ${blockIdx + 1}`}
           data-testid={`remove-condition-${blockIdx}-${condIdx}`}
+          disabled={readOnly}
         >
           ×
         </button>

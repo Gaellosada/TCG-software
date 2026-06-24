@@ -25,7 +25,7 @@ import styles from './Signals.module.css';
  *   status      {string}   'ok' | 'warn' (optional)
  *   blockIdx    {number}   0-based index for data-testid (optional)
  */
-function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChange, onDelete, blockIndex, status, blockIdx, enabled, onToggleEnabled }) {
+function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChange, onDelete, blockIndex, status, blockIdx, enabled, onToggleEnabled, readOnly = false }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
   // Local draft for the weight input so the user can type freely before blur
@@ -163,16 +163,20 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
       ) : (
         <>
           <span className={styles.blockLabel}>{displayName}</span>
-          <button
-            type="button"
-            className={styles.blockEditNameBtn}
-            onClick={() => setEditing(true)}
-            title="Rename block"
-            aria-label={`Rename block ${blockIndex}`}
-            data-testid={`block-edit-name-${blockIndex - 1}`}
-          >
-            ✎
-          </button>
+          {/* Read-only: the rename pencil is hidden (the name stays visible as
+              text) so the user can't enter inline-edit mode. */}
+          {!readOnly && (
+            <button
+              type="button"
+              className={styles.blockEditNameBtn}
+              onClick={() => setEditing(true)}
+              title="Rename block"
+              aria-label={`Rename block ${blockIndex}`}
+              data-testid={`block-edit-name-${blockIndex - 1}`}
+            >
+              ✎
+            </button>
+          )}
         </>
       )}
 
@@ -184,6 +188,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
           onChange={onToggleEnabled}
           aria-label="Enable block"
           data-testid={`block-enable-${blockIdx}`}
+          disabled={readOnly}
         />
       )}
 
@@ -200,6 +205,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
             onChange={(e) => setInputId(e.target.value)}
             aria-label={`Input for block ${blockIndex}`}
             data-testid={`block-input-select-${blockIndex - 1}`}
+            disabled={readOnly}
           >
             <option value="">…</option>
             {list.map((input) => {
@@ -224,6 +230,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
           entryBlocks={entryBlocks}
           onChange={onChange}
           blockIndex={blockIndex}
+          readOnly={readOnly}
         />
       )}
 
@@ -243,6 +250,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
               })}
               aria-label={`Require reset for block ${blockIndex}`}
               data-testid={`require-reset-select-${blockIndex - 1}`}
+              disabled={readOnly}
             >
               <option value="">None</option>
               {(Array.isArray(resetBlocks) ? resetBlocks : []).map((r, i) => (
@@ -270,6 +278,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
                   aria-label={`Reset count for block ${blockIndex}`}
                   title="Number of times the bound reset must fire before this block re-arms"
                   data-testid={`reset-count-input-${blockIndex - 1}`}
+                  readOnly={readOnly}
                 />
                 <span className={styles.weightSuffix} aria-hidden="true">×</span>
               </div>
@@ -295,6 +304,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
               onKeyDown={(e) => { if (e.key === 'Enter') commitWeight(e.target.value); }}
               aria-label={`Weight for block ${blockIndex}`}
               data-testid={`block-weight-${blockIndex - 1}`}
+              readOnly={readOnly}
             />
             <span className={styles.weightSuffix} aria-hidden="true">%</span>
           </div>
@@ -317,6 +327,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
         title={`Remove block ${blockIndex}`}
         aria-label={`Remove block ${blockIndex}`}
         data-testid={`remove-block-${blockIndex - 1}`}
+        disabled={readOnly}
       >
         ×
       </button>
@@ -352,7 +363,7 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
  * "+ Add block" is disabled when every selectable entry is already chosen
  * or there are no entries at all.
  */
-function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
+function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex, readOnly = false }) {
   // Number of *extra* empty rows the user has opened beyond the stored
   // names (so "+ Add block" can reveal a fresh dropdown before a value is
   // picked). Declared first — hooks must run unconditionally.
@@ -486,7 +497,7 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
               <select
                 className={styles.blockInputSelect}
                 value={current || ''}
-                disabled={empty}
+                disabled={empty || readOnly}
                 onChange={(e) => setRow(rowIdx, e.target.value)}
                 aria-label={`Target entry ${rowIdx + 1} for exit block ${blockIndex}`}
                 data-testid={`target-entry-select-${blockIndex - 1}-${rowIdx}`}
@@ -530,7 +541,7 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
               )}
             </div>
             {/* Remove control on every row EXCEPT a lone implicit empty row
-                (nothing to remove there). */}
+                (nothing to remove there). Disabled (kept visible) when locked. */}
             {!(renderRows.length === 1 && !current) && (
               <button
                 type="button"
@@ -539,6 +550,7 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
                 title="Remove this target"
                 aria-label={`Remove target ${rowIdx + 1} from exit block ${blockIndex}`}
                 data-testid={`remove-target-${blockIndex - 1}-${rowIdx}`}
+                disabled={readOnly}
               >
                 ×
               </button>
@@ -548,7 +560,7 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex }) {
                 type="button"
                 className={styles.exitTargetAddBtn}
                 onClick={addRow}
-                disabled={addDisabled}
+                disabled={addDisabled || readOnly}
                 title={addDisabled
                   ? 'No more entries available to target'
                   : 'Target another entry block'}

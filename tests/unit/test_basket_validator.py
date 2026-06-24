@@ -257,10 +257,11 @@ def test_basket_leg_extra_field_on_leg_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_inline_option_stream_leg_carries_adjustment_and_roll_offset() -> None:
+def test_inline_option_stream_leg_threads_roll_offset_and_ignores_adjustment() -> None:
     """The inline-basket wire model (``_models.BasketLeg``) threads
-    ``adjustment`` / ``roll_offset`` on an option_stream leg, mirroring the
-    continuous-leg fields."""
+    ``roll_offset`` on an option_stream leg, mirroring the continuous-leg field.
+    Option streams carry no back-adjustment, so a stray ``adjustment`` key is
+    ignored (extra fields are dropped on ``OptionStreamRef``)."""
     from tcg.core.api._models import BasketLeg
 
     leg = BasketLeg(
@@ -277,13 +278,13 @@ def test_inline_option_stream_leg_carries_adjustment_and_roll_offset() -> None:
         },
         weight=0.5,
     )
-    assert leg.instrument.adjustment == "ratio"
+    assert not hasattr(leg.instrument, "adjustment")
     assert leg.instrument.roll_offset == 5
 
 
 def test_inline_option_stream_leg_defaults_when_absent() -> None:
-    """Absent adjustment / roll_offset default to none / 0 (additive — old
-    inline baskets unchanged)."""
+    """Absent roll_offset defaults to 0 (additive — old inline baskets
+    unchanged); option_stream legs never carry an ``adjustment``."""
     from tcg.core.api._models import BasketLeg
 
     leg = BasketLeg(
@@ -298,7 +299,7 @@ def test_inline_option_stream_leg_defaults_when_absent() -> None:
         },
         weight=0.5,
     )
-    assert leg.instrument.adjustment == "none"
+    assert not hasattr(leg.instrument, "adjustment")
     assert leg.instrument.roll_offset == 0
 
 

@@ -208,7 +208,7 @@ function ContinuousOptionsChart({ collection }) {
         )}
       </div>
 
-      <div className={styles.controls}>
+      <div className={`${styles.controls} ${styles.controlsCapped}`}>
         <OptionStreamForm
           value={streamRef}
           onChange={setStreamRef}

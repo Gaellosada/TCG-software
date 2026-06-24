@@ -68,8 +68,13 @@ function instrumentLabel(instrument) {
  * Props:
  *   inputs    {Array}     [{id, instrument}]
  *   onChange  {Function}  (nextInputs) => void
+ *   readOnly  {boolean}   when true the panel is VIEW-only: the expand/collapse
+ *                         toggle and the instrument-picker open trigger still
+ *                         work (so the user can inspect ids + instruments), but
+ *                         every EDIT control (id text, add, delete, and picking
+ *                         a new instrument) is disabled.
  */
-function InputsPanel({ inputs, onChange }) {
+function InputsPanel({ inputs, onChange, readOnly = false }) {
   const list = Array.isArray(inputs) ? inputs : [];
   const [open, setOpen] = useState(list.length === 0);
   const [pendingDeleteIdx, setPendingDeleteIdx] = useState(null);
@@ -188,16 +193,24 @@ function InputsPanel({ inputs, onChange }) {
                       data-testid={`input-id-${idx}`}
                       spellCheck={false}
                       maxLength={16}
+                      readOnly={readOnly}
                     />
                   );
                 })()}
                 <div className={styles.pickerCell}>
+                  {/* Read-only: the button keeps showing the chosen instrument
+                      (so the user can SEE it) but is disabled — the picker
+                      modal only EDITS, so opening it under a lock would let the
+                      user change the instrument. The label is the read-only
+                      view of the value. */}
                   <button
                     type="button"
                     className={styles.pickBtn}
                     onClick={() => setPickerIdx(idx)}
                     aria-label={`Instrument for input ${input.id || idx + 1}`}
                     data-testid={`input-picker-${idx}`}
+                    disabled={readOnly}
+                    title={readOnly ? (label || 'No instrument') : undefined}
                   >
                     {label || 'Select instrument'}
                   </button>
@@ -209,6 +222,7 @@ function InputsPanel({ inputs, onChange }) {
                   title={`Remove input ${input.id || idx + 1}`}
                   aria-label={`Remove input ${input.id || idx + 1}`}
                   data-testid={`input-delete-${idx}`}
+                  disabled={readOnly}
                 >
                   ×
                 </button>
@@ -220,6 +234,7 @@ function InputsPanel({ inputs, onChange }) {
             className={styles.addBtn}
             onClick={handleAdd}
             data-testid="inputs-add-btn"
+            disabled={readOnly}
           >
             + Add input
           </button>

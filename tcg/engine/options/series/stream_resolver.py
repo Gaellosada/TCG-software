@@ -72,7 +72,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Awaitable, Callable, Literal, Protocol, Sequence, runtime_checkable
+from typing import Callable, Literal, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -84,7 +84,6 @@ from tcg.engine.options.selection._match import (
     match_by_strike,
 )
 from tcg.engine.options.selection._ports import (
-    ChainReaderPort,
     UnderlyingPriceResolver,
 )
 from tcg.engine.options.selection.selector import DefaultOptionsSelector
@@ -287,209 +286,6 @@ def _row_for_contract(
 
 
 # ---------------------------------------------------------------------------
-# Roll back-adjustment for the MID stream (futures convention)
-# ---------------------------------------------------------------------------
-#
-# Mirrors ``tcg/data/_rolling/adjustment.py`` (continuous-futures
-# back-adjustment) but operates on the per-date *selected-contract* mid
-# series the resolver already produces, rather than on raw concatenated
-# contracts.  The engine-data isolation contract forbids importing the
-# data-layer helper, so the math is re-implemented here as an engine-local
-# pure function (no I/O, no library deps beyond NumPy).
-#
-# Convention (identical to the futures oracle):
-#   * Process roll seams BACKWARD (latest first) so factors/offsets cascade
-#     — the most-recent segment stays unadjusted ("truth").
-#   * A seam is an index ``i`` where the selected ``contract_id`` changes
-#     (contracts[i-1] = rolled-OUT/old, contracts[i] = rolled-IN/new).
-#   * The gap is taken from the same calendar day for BOTH contracts when the
-#     pre-fetched chain has them, mirroring ``_shared_close_at_roll`` (no
-#     residual artificial jump).  Preference order:
-#       1. SEAM DAY i: old = old-contract mid on day i (looked up via
-#          ``mid_at``), new = values[i] (= new-contract mid on day i).
-#       2. PRIOR DAY i-1: old = values[i-1] (= old-contract mid on day i-1),
-#          new = new-contract mid on day i-1 (looked up via ``mid_at``).
-#       3. ADJACENT OBSERVED MARKS (always available; the per-date resolver
-#          only fetches the *currently-selected* expiration's chain, so the
-#          off-expiration contract is usually absent from ``mid_at`` and the
-#          same-day candidates miss): old = values[i-1] (OLD's last selected
-#          mark), new = values[i] (NEW's first selected mark).  This is the
-#          observed roll P&L gap and, for ratio, makes the adjusted last-old
-#          value EXACTLY equal the first-new value (seam continuous by
-#          construction).  It mirrors ``_shared_close_at_roll``'s nearest-date
-#          fallback (closes on different days) — the unavoidable analogue when
-#          no shared chain day exists.
-#   * ratio:     factor = new / old; multiply all earlier (pre-seam) mids.
-#   * difference: offset = new − old; add to all earlier (pre-seam) mids.
-#   * Zero/NaN guard (SYMMETRIC for both modes): if either reference mid is 0
-#     or non-finite on BOTH candidate days, skip the seam — leave the gap,
-#     warn ("unadjusted gap remains").  Never zero-out or NaN-poison history.
-#   * NaNs in the series are preserved: a NaN earlier value stays NaN after a
-#     multiply/add (missing stream values are not fabricated).
-
-Adjustment = Literal["none", "ratio", "difference"]
-
-
-def _seam_gap(
-    *,
-    seam_idx: int,
-    old_cid: str,
-    new_cid: str,
-    values: NDArray[np.float64],
-    mid_at: Callable[[str, int], float | None],
-) -> tuple[float, float] | None:
-    """Resolve the ``(old_mid, new_mid)`` gap for one roll seam.
-
-    Returns the ``(old, new)`` pair on a single shared trading day when the
-    chain has both contracts, else the adjacent observed marks, else ``None``
-    (caller skips the seam and warns).  See the module convention block above
-    for the full preference order.
-    """
-    prev = seam_idx - 1
-
-    def _finite_pair(
-        old: float | None, new: float | None
-    ) -> tuple[float, float] | None:
-        if old is None or new is None:
-            return None
-        if old == 0.0 or new == 0.0:
-            return None
-        if not np.isfinite(old) or not np.isfinite(new):
-            return None
-        return float(old), float(new)
-
-    # Candidate 1 (same calendar day): seam date i.
-    #   old = old-contract mid looked up on day i; new = values[i] (= NEW@i).
-    pair = _finite_pair(mid_at(old_cid, seam_idx), float(values[seam_idx]))
-    if pair is not None:
-        return pair
-
-    # Candidate 2 (same calendar day): prior day i-1.
-    #   old = values[i-1] (= OLD@i-1); new = new-contract mid looked up on i-1.
-    pair = _finite_pair(float(values[prev]), mid_at(new_cid, prev))
-    if pair is not None:
-        return pair
-
-    # Candidate 3 (adjacent observed marks — different days): OLD's last
-    # selected mark vs NEW's first selected mark.  Always tried last; this is
-    # the only data available when the chain holds a single expiration per
-    # date (the production bulk path).
-    pair = _finite_pair(float(values[prev]), float(values[seam_idx]))
-    if pair is not None:
-        return pair
-
-    return None
-
-
-def _back_adjust_mid(
-    *,
-    values: NDArray[np.float64],
-    contracts: Sequence[OptionContractDoc | None],
-    mid_at: Callable[[str, int], float | None],
-    mode: Adjustment,
-) -> NDArray[np.float64]:
-    """Back-adjust a per-date selected-contract mid series at roll seams.
-
-    Pure function — no I/O.  ``mid_at(contract_id, date_idx)`` returns the mid
-    of ANY contract on the given date index (backed by the resolver's
-    pre-fetched chain), or ``None`` when that contract has no quoted mid on
-    that date.  ``mode`` is ``"ratio"`` or ``"difference"`` (callers must not
-    pass ``"none"`` — that path returns the raw series without calling this).
-
-    Returns a NEW array; the input is not mutated.  The most-recent segment is
-    left unchanged; earlier segments accumulate every subsequent seam's
-    factor/offset (backward cascade).
-    """
-    n = len(values)
-    if n == 0:
-        return values.copy()
-
-    # Identify seam indices (selected contract_id changes; both sides known).
-    seams: list[int] = []
-    for i in range(1, n):
-        prev = contracts[i - 1]
-        curr = contracts[i]
-        if prev is None or curr is None:
-            continue
-        if prev.contract_id != curr.contract_id:
-            seams.append(i)
-
-    if not seams:
-        return values.copy()
-
-    adj = values.copy()
-
-    # Process BACKWARD (latest seam first) so factors/offsets cascade onto all
-    # earlier history exactly once per seam.
-    for seam_idx in reversed(seams):
-        old_cid = contracts[seam_idx - 1].contract_id  # type: ignore[union-attr]
-        new_cid = contracts[seam_idx].contract_id  # type: ignore[union-attr]
-
-        gap = _seam_gap(
-            seam_idx=seam_idx,
-            old_cid=old_cid,
-            new_cid=new_cid,
-            values=values,
-            mid_at=mid_at,
-        )
-        if gap is None:
-            _log.warning(
-                "Mid %s roll skipped at index %d (%s -> %s): no finite, "
-                "non-zero shared mid on the seam or prior day. Unadjusted "
-                "gap remains.",
-                mode,
-                seam_idx,
-                old_cid,
-                new_cid,
-            )
-            continue
-
-        old_mid, new_mid = gap
-        # Apply to every date BEFORE the seam (the old segment and all earlier
-        # ones).  NaN entries stay NaN under both * and +.
-        pre = slice(0, seam_idx)
-        if mode == "ratio":
-            adj[pre] *= new_mid / old_mid
-        else:  # "difference"
-            adj[pre] += new_mid - old_mid
-
-    return adj
-
-
-def _apply_mid_adjustment(
-    *,
-    values: NDArray[np.float64],
-    contracts: Sequence[OptionContractDoc | None],
-    dates: Sequence[date],
-    mid_by_cid_date: dict[tuple[str, date], float],
-    stream: StreamLabel,
-    adjustment: Adjustment,
-) -> NDArray[np.float64]:
-    """Apply MID back-adjustment iff ``stream == "mid"`` and ``adjustment`` is
-    not ``"none"``; otherwise return ``values`` unchanged (raw).
-
-    ``mid_by_cid_date`` maps ``(contract_id, date)`` → mid for every contract
-    the resolver observed in any chain query — the source for the seam gap
-    lookup.  The non-price streams (iv / greeks / volume / open_interest) and
-    ``adjustment == "none"`` short-circuit to the raw series with no warning
-    (an adjustment request on a non-price stream is silently ignored, per the
-    locked design).
-    """
-    if stream != "mid" or adjustment == "none":
-        return values
-
-    def mid_at(contract_id: str, date_idx: int) -> float | None:
-        return mid_by_cid_date.get((contract_id, dates[date_idx]))
-
-    return _back_adjust_mid(
-        values=values,
-        contracts=contracts,
-        mid_at=mid_at,
-        mode=adjustment,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Bulk pre-fetch path (Phase A → B → C)
 # ---------------------------------------------------------------------------
 
@@ -503,7 +299,6 @@ async def _resolve_bulk(
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
-    adjustment: Adjustment,
     roll_offset: int = 0,
     chain_reader: _CycleAwareReader,
     bulk_chain_reader: _CycleAwareBulkReader,
@@ -881,27 +676,11 @@ async def _resolve_bulk(
                 except Exception:  # pragma: no cover (defensive)
                     pass
 
-    # MID back-adjustment (futures convention).  No-op unless stream == "mid"
-    # and adjustment != "none".  ``_seam_gap`` reads contract mids from the
-    # already-fetched ``chain_index`` (no extra I/O).  A shared-day gap is
-    # available only for same-expiration strike re-selections (both contracts
-    # sit in that date's chain); a maturity roll has one expiration per date,
-    # so the rolled-out contract is absent and ``_seam_gap`` falls back to the
-    # adjacent observed marks (see its candidate order).
-    if stream == "mid" and adjustment != "none":
-        mid_by_cid_date: dict[tuple[str, date], float] = {}
-        for d, rows in chain_index.items():
-            for c, r in rows:
-                if r.mid is not None:
-                    mid_by_cid_date[(c.contract_id, d)] = float(r.mid)
-        values = _apply_mid_adjustment(
-            values=values,
-            contracts=contracts,
-            dates=dates,
-            mid_by_cid_date=mid_by_cid_date,
-            stream=stream,
-            adjustment=adjustment,
-        )
+    # Option continuous series are RAW stitched mids: no back-adjustment.  A
+    # back-adjusted option-premium series represents no tradable instrument
+    # (theta decays premia toward 0, so a ratio factor diverges and an additive
+    # offset swamps the premium), so ratio/difference are not offered for
+    # options — only for continuous FUTURES (see ``tcg/data/_rolling``).
 
     return values, error_codes, contracts
 
@@ -920,7 +699,6 @@ async def resolve_option_stream(
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
-    adjustment: Adjustment = "none",
     roll_offset: int = 0,
     chain_reader: _CycleAwareReader,
     maturity_resolver: MaturityResolver,
@@ -950,24 +728,11 @@ async def resolve_option_stream(
     selection:
         Dataclass ``SelectionCriterion``.
     stream:
-        One of the labels in :data:`_STREAM_TO_ATTR`.
-    adjustment:
-        Roll back-adjustment for the rolled series, mirroring the
-        continuous-futures convention (``"none"`` | ``"ratio"`` |
-        ``"difference"``).  Applied ONLY when ``stream == "mid"``; for every
-        other stream it is ignored and the raw series is returned (no error).
-        ``"ratio"`` multiplies pre-seam mids by ``new/old`` at each roll;
-        ``"difference"`` adds ``new-old``; processed backward so the most
-        recent segment is unadjusted.  A zero/NaN reference mid at a seam
-        leaves that gap unadjusted (warned).  Default ``"none"``.
-
-        NOTE: the seam-gap lookup needs the rolled-out / rolled-in contract's
-        mid on the boundary day, which is only present in the **bulk** path's
-        pre-fetched chain.  The legacy per-date fallback (no
-        ``bulk_chain_reader``) cannot resolve those seams, so a non-``"none"``
-        ``adjustment`` without a bulk reader raises ``ValueError`` rather than
-        silently returning an unadjusted series.  Production always wires the
-        bulk reader.
+        One of the labels in :data:`_STREAM_TO_ATTR`.  The option
+        continuous series is always the RAW stitched stream — no
+        back-adjustment is applied (ratio/difference are conceptually
+        ill-posed for option premia and are offered only for continuous
+        FUTURES; see ``tcg/data/_rolling``).
     roll_offset:
         Calendar days to roll EARLY: the maturity rule is resolved as of
         ``date + roll_offset`` for each date, so every roll happens
@@ -1035,7 +800,6 @@ async def resolve_option_stream(
             maturity=maturity,
             selection=selection,
             stream=stream,
-            adjustment=adjustment,
             roll_offset=roll_offset,
             chain_reader=chain_reader,
             bulk_chain_reader=bulk_chain_reader,
@@ -1048,17 +812,16 @@ async def resolve_option_stream(
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
 
-    # The legacy per-date path resolves maturity inside the selector and never
-    # re-queries the off-expiration contract, so it can honor NEITHER an early
-    # roll (``roll_offset``) NOR a MID back-adjustment (``adjustment``).  The
-    # bulk path supports both.  Rather than silently diverge (apply neither and
-    # return a series that looks like the bulk result but is not), fail loudly:
-    # production always wires the bulk reader, so this only fires on a
+    # The legacy per-date path resolves maturity inside the selector, so it
+    # cannot honor an early roll (``roll_offset``) — that needs the bulk path's
+    # pre-resolved expirations.  Rather than silently diverge (ignore the shift
+    # and return a series that looks like the bulk result but is not), fail
+    # loudly: production always wires the bulk reader, so this only fires on a
     # misconfigured caller.
-    if roll_offset != 0 or adjustment != "none":
+    if roll_offset != 0:
         raise ValueError(
-            "roll_offset / adjustment require the bulk chain reader; the "
-            "legacy per-date path does not support them"
+            "roll_offset requires the bulk chain reader; the legacy per-date "
+            "path does not support it"
         )
 
     # Wrap the reader so every selector-emitted query carries the cycle.
@@ -1075,13 +838,6 @@ async def resolve_option_stream(
     error_codes: list[str | None] = [None] * n
     contracts: list[OptionContractDoc | None] = [None] * n
     attr_name = _STREAM_TO_ATTR[stream]
-
-    # (contract_id, date) → mid, kept for the (now no-op) MID back-adjustment
-    # call below.  The guard above rejects any non-"none" ``adjustment`` on this
-    # path, so ``_capture_mids`` is always False here and the map stays empty;
-    # the structure is retained so the legacy and bulk paths read alike.
-    mid_by_cid_date: dict[tuple[str, date], float] = {}
-    _capture_mids = stream == "mid" and adjustment != "none"
 
     # Bounded concurrency: every per-date task takes the semaphore for
     # the full chain-query block.  asyncio is single-threaded so direct
@@ -1126,12 +882,6 @@ async def resolve_option_stream(
                     expiration_min=result.contract.expiration,
                     expiration_max=result.contract.expiration,
                 )
-                # Capture mids from the queried chain for MID back-adjustment
-                # (best-effort; only the selected expiration's rows are here).
-                if _capture_mids:
-                    for c, r in rows:
-                        if r.mid is not None:
-                            mid_by_cid_date[(c.contract_id, d)] = float(r.mid)
 
                 row = _row_for_contract(rows, result.contract)
                 if row is None:  # pragma: no cover (defensive)
@@ -1166,19 +916,9 @@ async def resolve_option_stream(
 
     await asyncio.gather(*(_resolve_one(i, d) for i, d in enumerate(dates)))
 
-    # MID back-adjustment.  Always a no-op on this path: the guard above
-    # rejects any non-"none" ``adjustment`` before we get here, so this only
-    # ever runs with ``adjustment == "none"`` (which short-circuits inside).
-    # Kept for structural parity with the bulk path.  See the ``adjustment``
-    # parameter note.
-    values = _apply_mid_adjustment(
-        values=values,
-        contracts=contracts,
-        dates=dates,
-        mid_by_cid_date=mid_by_cid_date,
-        stream=stream,
-        adjustment=adjustment,
-    )
+    # Option continuous series are RAW stitched values: no back-adjustment is
+    # applied on either path (ratio/difference are offered only for continuous
+    # FUTURES — see ``tcg/data/_rolling``).
 
     return values, error_codes, contracts
 

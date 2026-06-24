@@ -173,7 +173,7 @@ describe('Signals storage (v6)', () => {
     expect(loaded).toEqual(state);
   });
 
-  it('round-trips an option_stream instrument through save/load (legacy entry gains adjustment/roll_offset defaults)', () => {
+  it('round-trips an option_stream instrument through save/load (legacy entry gains roll_offset default, no adjustment)', () => {
     const state = {
       signals: [
         {
@@ -201,10 +201,11 @@ describe('Signals storage (v6)', () => {
     };
     saveState(state);
     const loaded = loadState();
-    // The additive roll fields default to none/0 for a legacy entry that
-    // predates them — the sanitiser stamps them on every option_stream.
+    // roll_offset defaults to 0 for a legacy entry that predates it — the
+    // sanitiser stamps it on every option_stream.  Option streams carry no
+    // back-adjustment, so the loaded instrument has no `adjustment` field.
     const inst = loaded.signals[0].inputs[0].instrument;
-    expect(inst.adjustment).toBe('none');
+    expect('adjustment' in inst).toBe(false);
     expect(inst.roll_offset).toBe(0);
     // Everything else is preserved verbatim.
     expect(inst).toMatchObject({
@@ -218,7 +219,7 @@ describe('Signals storage (v6)', () => {
     });
   });
 
-  it('round-trips explicit option_stream adjustment + roll_offset through save/load', () => {
+  it('round-trips explicit option_stream roll_offset and drops a stray adjustment', () => {
     const state = {
       signals: [
         {
@@ -236,6 +237,8 @@ describe('Signals storage (v6)', () => {
                 maturity: { kind: 'nearest_to_target', target_days: 30 },
                 selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
                 stream: 'mid',
+                // A stray adjustment must be dropped on load — option streams
+                // carry no back-adjustment.
                 adjustment: 'ratio',
                 roll_offset: 5,
               },
@@ -248,11 +251,18 @@ describe('Signals storage (v6)', () => {
     };
     saveState(state);
     const loaded = loadState();
-    // Whole-state deep equality — the explicit values survive untouched.
-    expect(loaded).toEqual(state);
+    const inst = loaded.signals[0].inputs[0].instrument;
+    expect('adjustment' in inst).toBe(false);
+    expect(inst.roll_offset).toBe(5);
+    expect(inst).toMatchObject({
+      type: 'option_stream',
+      collection: 'OPT_SPX',
+      option_type: 'P',
+      stream: 'mid',
+    });
   });
 
-  it('sanitiser clamps a malformed option_stream roll_offset / bad adjustment', () => {
+  it('sanitiser clamps a malformed option_stream roll_offset and drops a stray adjustment', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,
       signals: [
@@ -270,7 +280,7 @@ describe('Signals storage (v6)', () => {
                 maturity: { kind: 'fixed', value: '2025-06-20' },
                 selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
                 stream: 'iv',
-                adjustment: 'bogus',     // invalid → 'none'
+                adjustment: 'bogus',     // stray key → dropped (no adjustment)
                 roll_offset: 99.7,       // out-of-range float → trunc + clamp to 30
               },
             },
@@ -280,7 +290,7 @@ describe('Signals storage (v6)', () => {
       ],
     }));
     const inst = loadState().signals[0].inputs[0].instrument;
-    expect(inst.adjustment).toBe('none');
+    expect('adjustment' in inst).toBe(false);
     expect(inst.roll_offset).toBe(30);
   });
 

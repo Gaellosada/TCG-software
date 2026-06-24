@@ -262,54 +262,30 @@ describe('<OptionStreamForm>', () => {
   });
 });
 
-describe('<OptionStreamForm> — Adjustment selector (MID only)', () => {
-  it('renders the Adjustment selector when Series is mid (the default)', () => {
+describe('<OptionStreamForm> — no Adjustment control', () => {
+  // Option continuous series carry NO back-adjustment (ratio/difference are
+  // ill-posed for option premia), so the form must NOT render an adjustment
+  // selector — for any Series, including mid.
+  it('never renders an Adjustment selector (mid)', () => {
     renderForm();
-    const adj = screen.getByTestId('option-stream-adjustment');
-    expect(adj).toBeTruthy();
-    // none / ratio / difference — mirrors the futures continuous picker.
-    const optionValues = Array.from(adj.querySelectorAll('option')).map((o) => o.value);
-    expect(optionValues).toEqual(['none', 'ratio', 'difference']);
-    // Default value is "none".
-    expect(adj.value).toBe('none');
+    expect(screen.queryByTestId('option-stream-adjustment')).toBeNull();
+    expect(screen.queryByLabelText('Adjustment')).toBeNull();
   });
 
-  it('hides the Adjustment selector when Series is not mid', () => {
+  it('never renders an Adjustment selector (non-mid)', () => {
     const value = buildDefaultOptionStream({ availableRoots: ROOTS });
     value.stream = 'iv';
     renderForm({ value });
     expect(screen.queryByTestId('option-stream-adjustment')).toBeNull();
   });
 
-  it('emits the chosen adjustment when Series is mid', () => {
+  it('does not add an adjustment field when changing Series', () => {
     const { onChange } = renderForm();
-    fireEvent.change(screen.getByTestId('option-stream-adjustment'), {
-      target: { value: 'ratio' },
-    });
-    expect(onChange).toHaveBeenCalledOnce();
-    expect(onChange.mock.calls[0][0].adjustment).toBe('ratio');
-    expect(onChange.mock.calls[0][0].stream).toBe('mid');
-  });
-
-  it('resets adjustment to "none" when Series switches away from mid', () => {
-    // Start on mid with a non-default adjustment, then switch to iv.
-    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
-    value.adjustment = 'difference';
-    const { onChange } = renderForm({ value });
     fireEvent.change(screen.getByLabelText('Series'), { target: { value: 'iv' } });
     expect(onChange).toHaveBeenCalledOnce();
     const next = onChange.mock.calls[0][0];
     expect(next.stream).toBe('iv');
-    expect(next.adjustment).toBe('none');
-  });
-
-  it('keeps the current adjustment when staying on mid', () => {
-    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
-    value.adjustment = 'ratio';
-    renderForm({ value });
-    // Selecting mid again (the current value) must not be coerced; the
-    // rendered control still reflects ratio.
-    expect(screen.getByTestId('option-stream-adjustment').value).toBe('ratio');
+    expect('adjustment' in next).toBe(false);
   });
 });
 
@@ -328,7 +304,8 @@ describe('buildDefaultOptionStream', () => {
     expect(v.maturity.kind).toBe('next_third_friday');
     expect(v.selection.kind).toBe('by_moneyness');
     expect(v.stream).toBe('mid');
-    expect(v.adjustment).toBe('none');
+    // Option streams carry no back-adjustment, so no `adjustment` field.
+    expect('adjustment' in v).toBe(false);
   });
 
   it("falls back to allowedCycles[0] when 'M' is not allowed", () => {
