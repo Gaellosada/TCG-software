@@ -116,7 +116,14 @@ class TestTrimOverlaps:
         np.testing.assert_array_equal(trimmed[1].prices.dates, [20240116, 20240117])
 
     def test_overlap_trimmed(self):
-        """When contracts have overlapping date ranges, trim at roll boundary."""
+        """When contracts have overlapping date ranges, trim to front-month windows.
+
+        FRONT-MONTH-WINDOW FIX (#2): the last contract is now bounded BELOW by
+        the previous roll date (inclusive seam day), so it no longer keeps its
+        back-month history from BEFORE the roll. Previously the assertion below
+        expected c2 to keep 20240113 — a day on which c1 was still the front
+        month — which encoded the deferred-riding bug.
+        """
         # c1 has data through 20240120 but should be trimmed at expiration 20240115
         c1 = _make_contract(
             "VXF24",
@@ -137,9 +144,10 @@ class TestTrimOverlaps:
         np.testing.assert_array_equal(
             trimmed[0].prices.dates, [20240110, 20240112, 20240115]
         )
-        # c2 is last, keeps all
+        # c2 (last) keeps only its front-month window dates >= 20240115 (the
+        # inclusive seam day); its pre-roll back-month day 20240113 is dropped.
         np.testing.assert_array_equal(
-            trimmed[1].prices.dates, [20240113, 20240115, 20240117, 20240120]
+            trimmed[1].prices.dates, [20240115, 20240117, 20240120]
         )
 
     def test_zero_close_stripped(self):
@@ -556,7 +564,15 @@ class TestContinuousSeriesBuilder:
         assert len(result.prices) == 0
 
     def test_overlap_trimmed_correctly(self):
-        """Overlapping date ranges handled: earlier contract trimmed at roll."""
+        """Overlapping date ranges handled: each contract owns its front window.
+
+        FRONT-MONTH-WINDOW FIX (#2): on dates BEFORE the roll (20240115) the
+        front contract c1 owns the date, not the deferred c2. The old assertion
+        expected c2 to win the pre-roll day 20240113 ("later contract wins"),
+        which encoded the deferred-riding bug. Correct behavior: c1 owns its
+        pre-roll days (incl. 20240113); only the inclusive seam day 20240115 and
+        later belong to c2.
+        """
         # Both contracts have data on 20240113-20240115
         c1 = _make_contract(
             "VXF24",
@@ -576,18 +592,17 @@ class TestContinuousSeriesBuilder:
         )
         result = self.builder.build([c1, c2], config)
 
-        # c1 trimmed to dates <= 20240115
-        # c2 keeps all dates
-        # Overlap dates (20240113-20240115): c2 (later contract) wins in dedup
-        # Final: c1's unique dates + all of c2
+        # c1 owns its front-month window dates <= 20240115 (incl. 20240113/14);
+        # c2 owns the inclusive seam day 20240115 (dedup, later wins) and later.
         dates = list(result.prices.dates)
-        # c1 unique: 20240110, 20240112 (20240113-20240115 overlap with c2, c2 wins)
-        # c2: 20240113, 20240114, 20240115, 20240116, 20240117, 20240120
         assert 20240110 in dates
         assert 20240112 in dates
-        # On overlap dates, c2's prices should be used
+        # On the pre-roll day 20240113 the FRONT contract c1 owns the bar.
         idx_113 = dates.index(20240113)
-        assert result.prices.close[idx_113] == 22.0  # c2's price, not c1's 19.5
+        assert result.prices.close[idx_113] == 19.5  # c1 (front), NOT c2's 22.0
+        # The shared seam day 20240115 goes to c2 (later wins on the lone overlap).
+        idx_115 = dates.index(20240115)
+        assert result.prices.close[idx_115] == 23.0  # c2's price on the seam day
 
     def test_ratio_cascading_three_rolls(self):
         """Verify backward cascading: adjustment at roll 1 includes roll 2's factor."""
@@ -726,13 +741,15 @@ class TestContinuousSeriesBuilder:
         assert result.roll_config == config
 
     def test_dedup_subsumes_entire_contract(self):
-        """When dedup eliminates all rows from a contract, adjustment still works.
+        """Front-month windows: the deferred contract no longer subsumes the front.
 
-        Contract A: dates [10, 15], expires 15
-        Contract B: dates [10, 15, 20], expires 20
-        After trim: A keeps [10, 15], B keeps all.
-        After dedup (later contract wins): B's data for [10, 15, 20].
-        Contract A is fully subsumed — 0 roll transitions for that boundary.
+        Contract A: dates [10, 15], expires 15 (front through its expiry 15).
+        Contract B: dates [10, 15, 20], expires 20.
+        FRONT-MONTH-WINDOW FIX (#2): B's lower bound is the roll date 20240115
+        (inclusive seam), so B drops its pre-roll back-month day 20240110. A
+        therefore OWNS 20240110 as the front month and is NOT subsumed. The old
+        assertion (A fully subsumed, only B survives) encoded the deferred-riding
+        bug — it let B win 20240110, a day A was the front contract.
         """
         c1 = _make_contract("VXF24", 20240115, [20240110, 20240115], [20.0, 21.0])
         c2 = _make_contract(
@@ -744,17 +761,28 @@ class TestContinuousSeriesBuilder:
         )
         result = self.builder.build([c1, c2], config)
 
-        # c1 is entirely subsumed by c2 in dedup — only c2 survives
-        assert result.contracts == ("VXG24",)
-        assert len(result.roll_dates) == 0
+        # Both contracts survive: A owns its front day 20240110, B owns the
+        # inclusive seam day 20240115 (dedup) and 20240120. One real roll.
+        assert result.contracts == ("VXF24", "VXG24")
+        assert len(result.roll_dates) == 1
         assert len(result.prices) == 3
-        # Should be c2's raw prices (no adjustment needed, no rolls)
-        np.testing.assert_array_equal(result.prices.close, [22.0, 23.0, 24.0])
+        # Series rides the front then rolls; closes finite, no NaN/negatives.
+        assert np.all(np.isfinite(result.prices.close))
+        assert np.all(result.prices.close > 0)
+        # The seam day 20240115 and 20240120 carry c2's raw prices (unadjusted —
+        # they are the anchor/newest segment); the c1 day is ratio-adjusted up.
+        np.testing.assert_array_equal(result.prices.close[1:], [23.0, 24.0])
 
     def test_dedup_subsumes_middle_contract(self):
-        """Middle contract subsumed, only first and last survive."""
+        """Front-month windows: the middle contract is its own front month.
+
+        FRONT-MONTH-WINDOW FIX (#2): c2 (expires 20240115) is the front contract
+        between c1's expiry (20240110) and its own, so it owns its window
+        [20240110, 20240115] and is NOT subsumed by the deferred c3. The old
+        assertion (c2 subsumed, only c1/c3 survive) encoded the deferred-riding
+        bug — it let c3 win c2's front-month days.
+        """
         c1 = _make_contract("VXF24", 20240110, [20240101, 20240105], [10.0, 11.0])
-        # c2's dates are all within c3's range, and c3 is later → c2 subsumed
         c2 = _make_contract("VXG24", 20240115, [20240110, 20240115], [20.0, 21.0])
         c3 = _make_contract(
             "VXH24", 20240120, [20240110, 20240115, 20240120], [30.0, 31.0, 32.0]
@@ -765,11 +793,12 @@ class TestContinuousSeriesBuilder:
         )
         result = self.builder.build([c1, c2, c3], config)
 
-        # c2 subsumed by c3 → surviving are c1 and c3
-        assert result.contracts == ("VXF24", "VXH24")
-        assert len(result.roll_dates) == 1
-        # Prices should be finite (no assertion crash)
+        # All three survive (c2 is the front between the c1 and c3 expiries).
+        assert result.contracts == ("VXF24", "VXG24", "VXH24")
+        assert len(result.roll_dates) == 2
+        # Prices should be finite & positive (no assertion crash, no NaN).
         assert np.all(np.isfinite(result.prices.close))
+        assert np.all(result.prices.close > 0)
 
 
 class TestFindClosestDateIdx:
@@ -1335,11 +1364,23 @@ class TestSeamContinuityEndToEnd:
         closes = result.prices.close
         # Segment c1 (dates < rd1) carries f1*f2; segment c2 (rd1<=d<rd2) carries
         # f2; segment c3 (d>=rd2) carries 1.0. Compare each adjusted close to the
-        # raw contract close times its expected cumulative factor.
-        raw_by_date = {}
-        for c in (c1, c2, c3):
-            for d, cl in zip(c.prices.dates.tolist(), c.prices.close.tolist()):
-                raw_by_date[d] = cl  # later contract overwrites on shared days
+        # RAW (NONE-adjustment) close times its expected cumulative factor.
+        # FRONT-MONTH-WINDOW FIX (#2): the reference now takes ownership from the
+        # NONE-adjustment build (the authoritative front-month series) instead of
+        # "later contract overwrites on shared days" — the old dict assigned a
+        # deferred contract's price to a pre-roll day it never owned (bug-encoded).
+        none_result = self.builder.build(
+            [c1, c2, c3],
+            ContinuousRollConfig(
+                strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.NONE
+            ),
+        )
+        raw_by_date = dict(
+            zip(
+                none_result.prices.dates.tolist(),
+                none_result.prices.close.tolist(),
+            )
+        )
         for d, adj in zip(dates.tolist(), closes.tolist()):
             if d < rd1:
                 factor = f1 * f2
@@ -1364,10 +1405,20 @@ class TestSeamContinuityEndToEnd:
 
         dates = result.prices.dates
         closes = result.prices.close
-        raw_by_date = {}
-        for c in (c1, c2, c3):
-            for d, cl in zip(c.prices.dates.tolist(), c.prices.close.tolist()):
-                raw_by_date[d] = cl
+        # FRONT-MONTH-WINDOW FIX (#2): ownership from the NONE-adjustment build
+        # (authoritative front-month series), not "later contract overwrites".
+        none_result = self.builder.build(
+            [c1, c2, c3],
+            ContinuousRollConfig(
+                strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.NONE
+            ),
+        )
+        raw_by_date = dict(
+            zip(
+                none_result.prices.dates.tolist(),
+                none_result.prices.close.tolist(),
+            )
+        )
         for d, adj in zip(dates.tolist(), closes.tolist()):
             if d < rd1:
                 shift = d1 + d2
@@ -1475,11 +1526,18 @@ class TestMonotonicOwnership:
     def test_repro_interleaving_is_monotonic(self):
         """The brief's repro: old contract retains a post-roll overlapping day.
 
-        c1 expires 20240118 with dates [110,112,115,118]; c2 starts on the
-        shared day 20240115 (front/next trade together). Before the fix this
-        produced surviving=('A','B','A','B') with 3 roll dates and c1's price
-        re-appearing at 20240118 between c2's days. After the fix: c1 owns dates
-        before the transition (110,112), c2 owns from 20240115 onward, ONE roll.
+        c1 expires 20240118 with dates [110,112,115,118]; c2 (next month) also
+        quotes 20240115/20240117 (front/next trade together). Before the
+        interleaving fix this produced surviving=('A','B','A','B') with phantom
+        rolls. Ownership must be MONOTONE (no flip-flop).
+
+        FRONT-MONTH-WINDOW FIX (#2): with FRONT_MONTH + roll_offset=0 the roll
+        date is c1's expiry 20240118, so c1 is the front month right up to its
+        expiry (owns 110,112,115,118) and c2 takes over AFTER — c2's pre-expiry
+        days 20240115/20240117 are back-month and dropped. The earlier assertion
+        rolled to c2 at 20240115 (3 days before c1 expired), encoding a premature
+        roll — the same family of bug (#2). The monotonicity guarantees below are
+        unchanged and still hold.
         """
         c1 = _make_contract(
             "A",
@@ -1501,15 +1559,15 @@ class TestMonotonicOwnership:
         # Exactly ONE roll, no repeated contract.
         assert result.contracts == ("A", "B")
         assert len(result.roll_dates) == 1
-        # The phantom 20240118 (c1 re-appearing after c2 took over) is gone.
+        # c1 holds as front THROUGH its expiry 20240118 (front-month rule);
+        # c2 takes over after, contributing only its post-expiry day 20240120.
         dates = result.prices.dates.tolist()
-        assert dates == [20240110, 20240112, 20240115, 20240117, 20240120]
-        # c1 owns its pre-transition days (raw 10, 11); c2 owns from 20240115
-        # (raw 20, 21, 22). No stale c1 price (13.0) anywhere in the output.
+        assert dates == [20240110, 20240112, 20240115, 20240118, 20240120]
+        # 13.0 here is c1's legitimate LAST front bar (at its expiry), not a
+        # stale post-roll re-insertion — ownership is still monotone (A then B).
         np.testing.assert_array_equal(
-            result.prices.close, [10.0, 11.0, 20.0, 21.0, 22.0]
+            result.prices.close, [10.0, 11.0, 12.0, 13.0, 22.0]
         )
-        assert 13.0 not in result.prices.close.tolist()
 
     def test_repro_concatenate_directly(self):
         """Brief-literal framing fed straight to ``_concatenate``.
@@ -1629,3 +1687,209 @@ class TestZeroNaNGuardSymmetry:
         prices = self._series([100.0, 110.0, 50.0])
         result = adjust_ratio(prices, [20240110], [old, new])
         np.testing.assert_array_equal(result.close, [100.0, 110.0, 50.0])
+
+
+class TestFullCurveFrontMonthSelection:
+    """Regression for the front-month SELECTION bug (#2).
+
+    Real futures (e.g. ES) quote the WHOLE forward curve every day: a deferred
+    contract is listed and trades (nonzero close) for ~1-2 years before it
+    becomes the front month. The buggy ``trim_overlaps`` capped each contract
+    only at its OWN expiration (an upper bound, ``dates <= roll_dates[i]``, with
+    NO lower bound), so a deferred contract kept ALL of its early back-month
+    history. ``_concatenate``'s high-water dedup ("later/higher-index contract
+    wins on a shared day") then awarded every shared date to the MOST DEFERRED
+    contract — so the continuous series rode the deferred contract instead of
+    the liquid front, rolls fired ~a year before expiry, ``roll_offset`` was a
+    no-op, and back-adjustment differenced two near-flat deferred contracts
+    (systematic under-adjustment).
+
+    The fix gives ``trim_overlaps`` a LOWER bound so each contract owns only its
+    FRONT-MONTH window ``(roll_dates[i-1], roll_dates[i]]``. Each date is then
+    owned by exactly one (front) contract, rolls land at expiry(−offset), and
+    ``roll_offset`` becomes meaningful.
+
+    These tests are written to FAIL on the pre-fix code (series rides the
+    deferred contract) and PASS after the lower bound is added.
+    """
+
+    def setup_method(self):
+        self.builder = ContinuousSeriesBuilder()
+
+    @staticmethod
+    def _full_curve():
+        """Three contracts that ALL trade across the same heavily-overlapping
+        window, at distinct price levels, sorted ascending by expiration.
+
+        Common trading calendar: every contract quotes on all six sampling days
+        20240105..20240325 (monthly). Expirations: F=20240131, G=20240229,
+        H=20240331. So on e.g. 20240105 the front (F), the mid (G) AND the
+        deferred (H) are ALL quoted simultaneously — exactly the real ES curve.
+
+        Price levels are deliberately separated by a large constant so the
+        identity of the contract the series rides is unambiguous:
+          - Front  F: ~100  (close = 100 + day_index)
+          - Mid    G: ~200
+          - Deferred H: ~300
+        and the LAST common close of each contract before its successor's
+        front-month window equals the successor's close on that same day, so the
+        front-roll back-adjustment gap is exactly the +100 inter-contract step.
+        """
+        dates = [20240105, 20240125, 20240205, 20240225, 20240305, 20240325]
+        # Front contract F (expires 20240131): owns 20240105, 20240125 as front.
+        f = _make_contract(
+            "F", 20240131, dates, [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+        )
+        # Mid contract G (expires 20240229): owns 20240205, 20240225 as front.
+        g = _make_contract(
+            "G", 20240229, dates, [200.0, 201.0, 202.0, 203.0, 204.0, 205.0]
+        )
+        # Deferred contract H (expires 20240331): owns 20240305, 20240325 as front.
+        h = _make_contract(
+            "H", 20240331, dates, [300.0, 301.0, 302.0, 303.0, 304.0, 305.0]
+        )
+        return f, g, h
+
+    def test_series_rides_front_not_deferred(self):
+        """NONE adjustment: each date must take the FRONT-month contract's close.
+
+        Roll dates = [20240131, 20240229]. Front-month ownership:
+          20240105, 20240125 -> F (front; the only contract with dates<=20240131)
+          20240205, 20240225 -> G (front in (20240131, 20240229])
+          20240305, 20240325 -> H (front, the last contract)
+        Pre-fix the series rides H (the deferred) on every date because dedup
+        keeps the highest index on each shared day -> closes would be H's
+        [300..305]. The fix makes it the front ladder below.
+        """
+        f, g, h = self._full_curve()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.NONE
+        )
+        result = self.builder.build([f, g, h], config)
+
+        assert result.contracts == ("F", "G", "H")
+        assert result.prices.dates.tolist() == [
+            20240105,
+            20240125,
+            20240205,
+            20240225,
+            20240305,
+            20240325,
+        ]
+        # Front ladder: F's first two, G's middle two, H's last two — NOT H's
+        # 300-level series across the board.
+        np.testing.assert_array_equal(
+            result.prices.close, [100.0, 101.0, 202.0, 203.0, 304.0, 305.0]
+        )
+        # Explicitly assert the deferred contract does NOT own the early dates.
+        assert result.prices.close[0] == 100.0  # not 300.0 (deferred)
+
+    def test_rolls_land_at_expiration(self):
+        """Rolls must occur at each contract's expiration-ish boundary (first
+        date of the next front segment), NOT ~a year early.
+
+        With the fix the roll dates are the first dates of the G and H
+        front-month windows: 20240205 and 20240305.
+        """
+        f, g, h = self._full_curve()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.NONE
+        )
+        result = self.builder.build([f, g, h], config)
+        assert result.roll_dates == (20240205, 20240305)
+
+    def test_roll_offset_shifts_rolls(self):
+        """A nonzero roll_offset must visibly move the roll boundaries earlier.
+
+        Pre-fix, roll_offset was a no-op (dedup overrode the shifted schedule),
+        so offset=0 and offset>0 produced byte-identical output. With the fix,
+        rolling 8 calendar days early moves F's cutoff from 20240131 to
+        20240123: that is still >= F's last front day (20240125)? No —
+        20240123 < 20240125, so F's 20240125 bar now falls in G's window and G
+        takes 20240125. The output must therefore DIFFER from the offset=0 case.
+        """
+        f, g, h = self._full_curve()
+        cfg0 = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            roll_offset_days=0,
+        )
+        cfg8 = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            roll_offset_days=8,
+        )
+        r0 = self.builder.build([f, g, h], cfg0)
+        r8 = self.builder.build([f, g, h], cfg8)
+
+        # offset=0: F owns 20240105 & 20240125 (close 100,101).
+        assert r0.prices.close[:2].tolist() == [100.0, 101.0]
+        # offset=8: F's expiry cutoff 20240131-8d=20240123, so 20240125 now
+        # belongs to G's front window -> G's close (201.0) on that date.
+        assert r8.roll_dates != r0.roll_dates, (
+            "roll_offset must change the roll schedule (was a no-op pre-fix)"
+        )
+        idx_125 = r8.prices.dates.tolist().index(20240125)
+        assert r8.prices.close[idx_125] == 201.0, (
+            "with offset=8, 20240125 should be owned by G (front), not F"
+        )
+
+    def test_ratio_adjustment_reaches_front_roll_magnitude(self):
+        """The cumulative OLDEST-bar ratio must reflect the FRONT inter-contract
+        gaps (~+100 per roll), not a near-flat deferred-vs-deferred spread.
+
+        After the fix the front-month windows ABUT (each contract owns a
+        disjoint window), so the two contracts at a seam share no common trading
+        day and the back-adjustment uses the documented nearest-date fallback:
+        old = the outgoing front's LAST bar, new = the incoming front's FIRST
+        bar (a benign APPROXIMATE warning is logged — see the captured log).
+          roll 1 @ 20240205: G_first / F_last = 202 / 101
+          roll 2 @ 20240305: H_first / G_last = 304 / 203
+        Oldest bar (20240105, raw close 100 from F) carries the product:
+          100 * (202/101) * (304/203) ≈ 299.51
+        i.e. the oldest bar is pulled up to ~the deferred 300-level — a LARGE,
+        correctly-signed adjustment. Pre-fix the series is already all H
+        (300-level) so ratio/difference barely move it (the spread between two
+        H-derived seam closes is ~0): the cumulative factor stays ~1.0.
+        """
+        f, g, h = self._full_curve()
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH, adjustment=AdjustmentMethod.RATIO
+        )
+        result = self.builder.build([f, g, h], config)
+
+        raw_oldest = 100.0  # F's close on 20240105 (front, NONE adjustment)
+        f1 = 202.0 / 101.0  # G_first(20240205) / F_last(20240125), nearest-date
+        f2 = 304.0 / 203.0  # H_first(20240305) / G_last(20240225), nearest-date
+        expected_oldest = raw_oldest * f1 * f2
+        cumulative_ratio = result.prices.close[0] / raw_oldest
+
+        # The cumulative oldest-bar ratio is far from 1.0 (a real front roll),
+        # NOT the ~1.0 the deferred-riding bug produced.
+        assert cumulative_ratio > 2.5, (
+            f"cumulative oldest-bar ratio {cumulative_ratio:.4f} is too small; "
+            f"the series is not riding the front month"
+        )
+        np.testing.assert_allclose(result.prices.close[0], expected_oldest, rtol=1e-9)
+
+    def test_three_modes_diverge(self):
+        """none / ratio / difference must visibly differ once the series rides
+        the front (each roll has a real ~+100 gap to adjust away)."""
+        f, g, h = self._full_curve()
+        outs = {}
+        for m in (
+            AdjustmentMethod.NONE,
+            AdjustmentMethod.RATIO,
+            AdjustmentMethod.DIFFERENCE,
+        ):
+            cfg = ContinuousRollConfig(strategy=RollStrategy.FRONT_MONTH, adjustment=m)
+            outs[m] = self.builder.build([f, g, h], cfg)
+        none_c = outs[AdjustmentMethod.NONE].prices.close
+        ratio_c = outs[AdjustmentMethod.RATIO].prices.close
+        diff_c = outs[AdjustmentMethod.DIFFERENCE].prices.close
+        assert not np.array_equal(none_c, ratio_c)
+        assert not np.array_equal(none_c, diff_c)
+        assert not np.array_equal(ratio_c, diff_c)
+        # The oldest-bar adjustment is sizeable under both methods (front roll).
+        assert abs(ratio_c[0] - none_c[0]) > 100.0
+        assert abs(diff_c[0] - none_c[0]) > 100.0
