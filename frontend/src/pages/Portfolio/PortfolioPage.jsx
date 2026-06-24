@@ -119,7 +119,8 @@ function PortfolioPage() {
     stream: l.stream || null,
     // option_stream roll offset (snake_case — distinct from the futures
     // leg's `rollOffset` above; matches OptionStreamForm + the wire field).
-    // `adjustment` rides the shared field at line above. null for non-option.
+    // The shared `adjustment` field above applies to continuous (futures) legs
+    // only; option streams carry no back-adjustment, so it stays null for them.
     roll_offset: l.roll_offset ?? null,
   })), []);
 

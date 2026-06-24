@@ -151,12 +151,15 @@ def _now_dict() -> dict:
     return {}  # endpoints don't take timestamps
 
 
-def test_saved_basket_option_ref_accepts_adjustment_and_roll_offset() -> None:
+def test_saved_basket_option_ref_threads_roll_offset_and_tolerates_legacy_adjustment() -> (
+    None
+):
     """The saved-basket option_stream leg model (``_OptionStreamRefLocal``)
-    must accept the additive ``adjustment``/``roll_offset`` (mirrors the
-    continuous local model + the real ``OptionStreamRef``).  Without them,
-    ``extra='forbid'`` 422-rejects a saved basket whose option leg carries
-    these fields — even though the Data page / inline baskets honor them."""
+    threads ``roll_offset`` (mirrors the continuous local model + the real
+    ``OptionStreamRef``).  Option streams carry NO back-adjustment, so there is
+    no ``adjustment`` field; a legacy ``adjustment`` key on a persisted leg is
+    tolerated (stripped before validation) so ``extra='forbid'`` does not
+    422-reject an old saved basket."""
     from pydantic import ValidationError
 
     from tcg.core.api.persistence import _OptionStreamRefLocal
@@ -169,12 +172,13 @@ def test_saved_basket_option_ref_accepts_adjustment_and_roll_offset() -> None:
         selection={"kind": "by_strike", "strike": 4500.0},
         stream="mid",
     )
+    # A legacy ``adjustment`` key is accepted and discarded (no attribute set).
     m = _OptionStreamRefLocal(**common, adjustment="ratio", roll_offset=5)
-    assert m.adjustment == "ratio"
+    assert not hasattr(m, "adjustment")
     assert m.roll_offset == 5
     # Absent → defaults (additive, contract-preserving).
     d = _OptionStreamRefLocal(**common)
-    assert d.adjustment == "none"
+    assert not hasattr(d, "adjustment")
     assert d.roll_offset == 0
     # roll_offset bounded 0..30, mirroring OptionStreamRef.
     with pytest.raises(ValidationError):

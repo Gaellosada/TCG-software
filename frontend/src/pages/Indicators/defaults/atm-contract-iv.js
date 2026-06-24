@@ -54,7 +54,6 @@ export default {
       maturity: { kind: 'next_third_friday', offset_months: 0 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
-      adjustment: 'none',
       roll_offset: 0,
     },
   },

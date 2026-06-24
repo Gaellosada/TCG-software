@@ -4,8 +4,8 @@ import styles from './OptionStreamForm.module.css';
 /**
  * Standalone, side-effect-free form for picking every field needed to
  * construct an OptionStreamRef request. Designed for cross-page reuse — the
- * future Continuous tab composes this form by wrapping it with extra
- * RollRule + adjustment fields, so the prop shape below is locked.
+ * Continuous tab composes this form by wrapping it with an extra RollRule
+ * field, so the prop shape below is locked.
  *
  * Output object emitted via onChange (and read from `value`):
  *   {
@@ -16,15 +16,16 @@ import styles from './OptionStreamForm.module.css';
  *     maturity: { kind, ... },           // discriminated union (kind field)
  *     selection: { kind, ... },          // discriminated union (kind field)
  *     stream: 'mid'|'iv'|'delta'|'gamma'|'vega'|'theta'|'open_interest'|'volume',
- *     adjustment: 'none'|'ratio'|'difference',  // roll back-adjustment for the
- *                                               // MID stream only (futures
- *                                               // convention); ignored by the
- *                                               // backend for every other stream
  *     roll_offset: <int 0..30>,                 // roll the maturity this many
  *                                               // calendar days earlier (mirrors
  *                                               // futures rollOffset); 0 = roll at
  *                                               // the maturity rule's normal time
  *   }
+ *
+ * NOTE: option continuous series carry NO back-adjustment — ratio/difference
+ * are conceptually ill-posed for option premia, so (unlike the futures
+ * continuous-series picker) there is no `adjustment` field or control here. The
+ * emitted series is always the raw stitched stream.
  *
  * Validation:
  *   - greek streams (gamma/vega/theta) require root.has_greeks === true;
@@ -38,14 +39,11 @@ const ALL_OPTION_TYPES = ['C', 'P'];
 const ALL_CYCLES = [null, 'M', 'W3 Friday', 'W1 Friday', 'W2 Friday', 'W4 Friday', 'W', 'Q'];
 const ALL_STREAMS = ['mid', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
 const GREEK_STREAMS = new Set(['gamma', 'vega', 'theta']);
-// Roll back-adjustment options — mirror the futures continuous-series picker
-// (InstrumentPickerModal ``ContinuousSpecPicker``): none / ratio / difference.
-const ALL_ADJUSTMENTS = ['none', 'ratio', 'difference'];
-const ADJUSTMENT_LABELS = {
-  none: 'None',
-  ratio: 'Ratio',
-  difference: 'Difference',
-};
+// NOTE: option continuous series carry NO back-adjustment.  Ratio/difference are
+// conceptually ill-posed for option premia (a back-adjusted premium represents
+// no tradable instrument), so — unlike the futures continuous-series picker —
+// this form has no adjustment control.  The series is always the raw stitched
+// stream.
 const ALL_MATURITY_KINDS = ['next_third_friday', 'nearest_to_target', 'end_of_month', 'plus_n_days', 'fixed'];
 const ALL_SELECTION_KINDS = ['by_moneyness', 'by_delta', 'by_strike'];
 
@@ -157,11 +155,10 @@ export function buildDefaultOptionStream({
     maturity: defaultMaturity(allowedMaturityKinds[0] || 'next_third_friday'),
     selection: defaultSelection(allowedSelectionKinds[0] || 'by_moneyness', allowedOptionTypes[0] || 'C'),
     stream: allowedStreams[0] || 'mid',
-    // Roll back-adjustment for the MID stream (futures convention). Default
-    // "none"; the backend ignores it for every non-mid stream.
-    adjustment: 'none',
     // Roll offset in calendar days (mirrors futures rollOffset): roll this many
     // days earlier. Default 0 = roll at the maturity rule's normal time.
+    // NOTE: option streams carry no back-adjustment, so there is no
+    // `adjustment` field — the series is always the raw stitched stream.
     roll_offset: 0,
   };
 }
@@ -259,19 +256,7 @@ export default function OptionStreamForm({
     emit({ cycle });
   }, [emit]);
 
-  // Changing the Series resets adjustment to "none" whenever we leave the
-  // MID stream — adjustment is meaningful only for mid, and the backend
-  // ignores it elsewhere, so we keep the emitted value honest (and the
-  // hidden control's state from leaking a stale ratio/difference).
-  const setStream = useCallback((stream) => {
-    if (stream === 'mid') {
-      emit({ stream });
-    } else {
-      emit({ stream, adjustment: 'none' });
-    }
-  }, [emit]);
-
-  const setAdjustment = useCallback((adjustment) => emit({ adjustment }), [emit]);
+  const setStream = useCallback((stream) => emit({ stream }), [emit]);
 
   const setRollOffset = useCallback((raw) => {
     const parsed = parseInt(raw, 10);
@@ -311,9 +296,6 @@ export default function OptionStreamForm({
 
   const cycleSelectValue = v.cycle == null ? '_any' : v.cycle;
   const cycleAllowed = allowedCycles.map((c) => (c == null ? '_any' : c));
-  // Legacy/absent adjustment → "none" (additive field; values created before
-  // this change have no `adjustment` key).
-  const adjustment = v.adjustment || 'none';
   // Legacy/absent roll_offset → 0 (additive field).
   const rollOffset = v.roll_offset ?? 0;
 
@@ -609,27 +591,9 @@ export default function OptionStreamForm({
         </select>
       </label>
 
-      {/* Adjustment — MID stream only.  Mirrors the futures continuous-series
-          adjustment selector (InstrumentPickerModal ContinuousSpecPicker:
-          None / Ratio / Difference).  Hidden for every non-mid series; the
-          emitted `adjustment` is held at 'none' while hidden (see setStream). */}
-      {v.stream === 'mid' && (
-        <label className={styles.row}>
-          <span className={styles.label}>Adjustment</span>
-          <select
-            className={styles.input}
-            value={adjustment}
-            onChange={(e) => setAdjustment(e.target.value)}
-            disabled={disabled}
-            aria-label="Adjustment"
-            data-testid="option-stream-adjustment"
-          >
-            {ALL_ADJUSTMENTS.map((a) => (
-              <option key={a} value={a}>{ADJUSTMENT_LABELS[a] || a}</option>
-            ))}
-          </select>
-        </label>
-      )}
+      {/* No adjustment control: option continuous series carry no
+          back-adjustment (ratio/difference are ill-posed for option premia).
+          The series is always the raw stitched stream. */}
 
       {validation && (
         <div
@@ -645,13 +609,12 @@ export default function OptionStreamForm({
   );
 }
 
-// Public helpers — used by composing components (the future Continuous tab
-// reuses these when it builds its own initial value).
+// Public helpers — used by composing components (the Continuous tab reuses
+// these when it builds its own initial value).
 export {
   ALL_OPTION_TYPES,
   ALL_CYCLES,
   ALL_STREAMS,
-  ALL_ADJUSTMENTS,
   ALL_MATURITY_KINDS,
   ALL_SELECTION_KINDS,
   GREEK_STREAMS,

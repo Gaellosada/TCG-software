@@ -127,8 +127,8 @@ _OPTION_STREAM_LEG = st.fixed_dictionaries(
                     }
                 ),
                 "stream": st.sampled_from(["mid", "iv", "delta"]),
-                # The two threaded fields — must survive serde unchanged.
-                "adjustment": st.sampled_from(["none", "ratio", "difference"]),
+                # roll_offset is threaded and must survive serde unchanged.
+                # Option streams carry NO back-adjustment (no ``adjustment`` key).
                 "roll_offset": st.integers(min_value=0, max_value=30),
             }
         ),
@@ -143,9 +143,9 @@ _OPTION_STREAM_LEG = st.fixed_dictionaries(
 )
 @settings(max_examples=100, deadline=None)
 def test_basket_doc_option_stream_legs_round_trip(doc_id, legs) -> None:
-    """Option-stream legs serde — adjustment + roll_offset preserved
-    alongside the maturity / selection / stream spec (the MAJOR review
-    finding: these were dropped on the option leg before the fix)."""
+    """Option-stream legs serde — roll_offset preserved alongside the
+    maturity / selection / stream spec.  Option streams carry no
+    back-adjustment, so there is no ``adjustment`` field to preserve."""
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     doc = BasketDoc(
         id=doc_id,
@@ -160,10 +160,11 @@ def test_basket_doc_option_stream_legs_round_trip(doc_id, legs) -> None:
     d = to_json_doc(doc)
     reconstructed = from_json_doc(d)
     assert reconstructed == doc
-    # Explicitly assert the two threaded fields survive on each leg.
+    # Explicitly assert the threaded roll_offset survives on each leg, and that
+    # no ``adjustment`` key leaks onto an option leg.
     for orig, rt in zip(legs, reconstructed.legs):
-        assert rt["instrument"]["adjustment"] == orig["instrument"]["adjustment"]
         assert rt["instrument"]["roll_offset"] == orig["instrument"]["roll_offset"]
+        assert "adjustment" not in rt["instrument"]
 
 
 @given(

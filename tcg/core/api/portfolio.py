@@ -141,9 +141,10 @@ class LegSpec(BaseModel):
     )
     symbol: str | None = None  # Required for "instrument"
     strategy: str | None = None  # Required for "continuous"
-    # Optional for "continuous" AND "option_stream" (roll back-adjustment of
-    # the rolled MID stream; default "none").  For option_stream it is applied
-    # by the engine resolver only when stream == "mid".
+    # Roll back-adjustment of the rolled series — "continuous" (futures) ONLY;
+    # default "none".  Option streams carry no back-adjustment (ratio/difference
+    # are ill-posed for option premia), so this is ignored for "option_stream";
+    # a legacy value on a persisted option leg is accepted and has no effect.
     adjustment: str | None = None
     cycle: str | None = None  # Optional for "continuous" and "option_stream"
     # Optional for "continuous" AND "option_stream" (days before expiration to
@@ -486,12 +487,15 @@ async def _evaluate_option_stream_leg(
     Returns:
         Tuple of (YYYYMMDD int dates, values array, stream_mode).
     """
-    # 1. Build an OptionStreamRef from the leg's fields.  ``adjustment`` /
-    #    ``roll_offset`` mirror the continuous-leg precedent in ``_parse_legs``:
-    #    validate the roll offset range here so the error carries leg context
-    #    (the OptionStreamRef Field bound would otherwise raise a bare 422),
-    #    and default a missing value to the no-op (none / 0).
-    adjustment = leg.adjustment if leg.adjustment is not None else "none"
+    # 1. Build an OptionStreamRef from the leg's fields.  ``roll_offset``
+    #    mirrors the continuous-leg precedent in ``_parse_legs``: validate the
+    #    range here so the error carries leg context (the OptionStreamRef Field
+    #    bound would otherwise raise a bare 422), and default a missing value to
+    #    the no-op (0).
+    #
+    #    Option streams carry NO back-adjustment (ratio/difference are ill-posed
+    #    for option premia), so ``leg.adjustment`` is ignored on this path — the
+    #    shared ``LegSpec.adjustment`` field applies only to continuous legs.
     roll_offset = 0
     if leg.roll_offset is not None:
         if not (0 <= leg.roll_offset <= 30):
@@ -499,11 +503,6 @@ async def _evaluate_option_stream_leg(
                 f"Leg '{label}': roll_offset must be between 0 and 30"
             )
         roll_offset = leg.roll_offset
-    if adjustment not in ("none", "ratio", "difference"):
-        raise ValidationError(
-            f"Leg '{label}': invalid adjustment '{adjustment}'. "
-            f"Must be one of: none, ratio, difference"
-        )
     ref = OptionStreamRef(
         type="option_stream",
         collection=leg.collection,
@@ -512,7 +511,6 @@ async def _evaluate_option_stream_leg(
         maturity=leg.maturity,
         selection=leg.selection,
         stream=leg.stream,
-        adjustment=adjustment,
         roll_offset=roll_offset,
     )
 

@@ -305,21 +305,22 @@ class TestPortfolioOptionStream:
         assert expected_keys <= set(metrics.keys())
 
 
-# ── adjustment / roll_offset threading (the MAJOR review finding) ────────
+# ── roll_offset threading + adjustment-removal (the MAJOR review finding) ─
 
 
 class TestPortfolioOptionStreamRollFields:
-    """A portfolio option leg must thread ``adjustment`` / ``roll_offset``
-    into the ``OptionStreamRef`` it builds (mirroring the continuous-leg
-    precedent).  These were silently dropped before the fix.
+    """A portfolio option leg threads ``roll_offset`` into the
+    ``OptionStreamRef`` it builds (mirroring the continuous-leg precedent).
+    Unlike futures, option streams carry NO back-adjustment: a stray ``adjustment``
+    leg key is ignored (never reaches the ref, never changes the curve).
     """
 
     @pytest.fixture
     def capture_app(self, mock_app, monkeypatch):
         """Patch materialise to (a) record the ref it received and
-        (b) return a series whose level encodes ``adjustment`` — so an
-        equity-curve difference proves the field reached the resolver,
-        not just the constructor."""
+        (b) return a series whose level encodes ``roll_offset`` — so an
+        equity-curve difference proves that field reached the resolver, not
+        just the constructor.  The ref has no ``adjustment`` attribute."""
         captured: dict = {}
 
         async def recording_materialise(
@@ -327,11 +328,9 @@ class TestPortfolioOptionStreamRollFields:
         ):
             label, ref = refs_with_labels[0]
             captured["ref"] = ref
-            # Base 5.0; a non-"none" adjustment shifts the level so the
-            # resulting equity curve is provably different from default.
-            base = 5.0 if ref.adjustment == "none" else 7.0
-            # roll_offset nudges the level too (proves it is carried).
-            base += 0.1 * ref.roll_offset
+            # Base 5.0; roll_offset nudges the level (proves it is carried).
+            # Option streams have no adjustment, so the level never depends on it.
+            base = 5.0 + 0.1 * ref.roll_offset
             v = np.array([base + 0.1 * i for i in range(len(DATES))], dtype=np.float64)
             d = np.array(DATES, dtype=np.int64)
             return {label: (d, v, [None] * len(DATES), [None] * len(DATES))}
@@ -362,11 +361,14 @@ class TestPortfolioOptionStreamRollFields:
         assert resp.status_code == 200, resp.text
         return resp.json()["portfolio_equity"]
 
-    async def test_adjustment_threaded_into_ref(self, capture_client):
+    async def test_adjustment_not_threaded_into_ref(self, capture_client):
+        """A stray ``adjustment`` leg key is ignored: the built OptionStreamRef
+        has no ``adjustment`` attribute (option streams carry no
+        back-adjustment)."""
         client, captured = capture_client
         leg = {**OPT_MID_LEG, "adjustment": "ratio"}
         await self._equity(client, leg)
-        assert captured["ref"].adjustment == "ratio"
+        assert not hasattr(captured["ref"], "adjustment")
         assert captured["ref"].roll_offset == 0
 
     async def test_roll_offset_threaded_into_ref(self, capture_client):
@@ -374,21 +376,21 @@ class TestPortfolioOptionStreamRollFields:
         leg = {**OPT_MID_LEG, "roll_offset": 5}
         await self._equity(client, leg)
         assert captured["ref"].roll_offset == 5
-        assert captured["ref"].adjustment == "none"
+        assert not hasattr(captured["ref"], "adjustment")
 
     async def test_defaults_when_absent(self, capture_client):
         client, captured = capture_client
         await self._equity(client, OPT_MID_LEG)
-        assert captured["ref"].adjustment == "none"
+        assert not hasattr(captured["ref"], "adjustment")
         assert captured["ref"].roll_offset == 0
 
-    async def test_adjusted_series_differs_from_default(self, capture_client):
-        """A back-adjusted leg must produce a DIFFERENT equity curve than the
-        default (raw) leg — proving the field is consumed, not dropped."""
+    async def test_stray_adjustment_does_not_change_series(self, capture_client):
+        """A stray ``adjustment`` leg key must NOT change the equity curve —
+        option streams are raw stitched mids, so the field is inert."""
         client, _captured = capture_client
         eq_default = await self._equity(client, OPT_MID_LEG)
-        eq_ratio = await self._equity(client, {**OPT_MID_LEG, "adjustment": "ratio"})
-        assert eq_default != eq_ratio
+        eq_stray = await self._equity(client, {**OPT_MID_LEG, "adjustment": "ratio"})
+        assert eq_default == eq_stray
 
     async def test_roll_offset_series_differs_from_default(self, capture_client):
         client, _captured = capture_client
@@ -409,7 +411,9 @@ class TestPortfolioOptionStreamRollFields:
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code in (400, 422), resp.text
 
-    async def test_invalid_adjustment_rejected(self, capture_client):
+    async def test_stray_adjustment_ignored_not_rejected(self, capture_client):
+        """An option leg carrying any ``adjustment`` value (even a bogus one) is
+        accepted and ignored — adjustment is not part of the option path."""
         client, _captured = capture_client
         body = {
             "legs": {
@@ -423,4 +427,4 @@ class TestPortfolioOptionStreamRollFields:
             "end": "2024-12-31",
         }
         resp = await client.post("/api/portfolio/compute", json=body)
-        assert resp.status_code in (400, 422), resp.text
+        assert resp.status_code == 200, resp.text

@@ -1,8 +1,8 @@
 """Shared synthetic fakes for ``resolve_option_stream`` bulk-path tests.
 
 Lifted verbatim (as a superset) from the per-file copies that previously
-lived in ``test_stream_mid_adjustment.py`` and ``test_stream_roll_offset.py``
-so the two suites build chains the same way.
+lived in the resolver test suites (``test_stream_roll_offset.py`` and the
+former mid-adjustment suite) so they build chains the same way.
 
 * :func:`_contract` / :func:`_row` — build an ``OptionContractDoc`` /
   ``OptionDailyRow`` with sensible defaults; ``_row`` accepts an optional

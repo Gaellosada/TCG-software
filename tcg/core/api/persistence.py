@@ -444,8 +444,21 @@ class _OptionStreamRefLocal(BaseModel):
     maturity: MaturityRule
     selection: SelectionCriterion
     stream: _OptionStreamLabel
-    adjustment: Literal["none", "ratio", "difference"] = "none"
+    # NOTE: option streams carry NO back-adjustment (ratio/difference are
+    # ill-posed for option premia), so — unlike the continuous mirror — there is
+    # no ``adjustment`` field.  Baskets persisted before this change still carry
+    # an ``adjustment`` key in their JSONB; ``_drop_legacy_adjustment`` strips it
+    # before validation so ``extra="forbid"`` does not reject those reads.
     roll_offset: int = Field(default=0, ge=0, le=30)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_adjustment(cls, data: object) -> object:
+        # Tolerate (and discard) a legacy ``adjustment`` key on persisted
+        # option legs without weakening ``extra="forbid"`` for any other field.
+        if isinstance(data, dict) and "adjustment" in data:
+            data = {k: v for k, v in data.items() if k != "adjustment"}
+        return data
 
     @field_validator("cycle", mode="before")
     @classmethod

@@ -62,7 +62,6 @@ async def _resolve(dates, chains, *, roll_offset, maturity=None, selection=None)
         maturity=maturity or NearestToTarget(target_dte_days=30),
         selection=selection or ByStrike(strike=4500.0),
         stream="mid",
-        adjustment="none",
         roll_offset=roll_offset,
         chain_reader=FakeChainReader(chains),
         maturity_resolver=DefaultMaturityResolver(),
@@ -128,7 +127,6 @@ async def test_roll_offset_zero_is_baseline():
         maturity=NearestToTarget(target_dte_days=30),
         selection=ByStrike(strike=4500.0),
         stream="mid",
-        adjustment="none",
         chain_reader=FakeChainReader(chains),
         maturity_resolver=DefaultMaturityResolver(),
         underlying_price_resolver=None,
@@ -221,7 +219,7 @@ async def test_roll_offset_shifts_expiration_not_strike_under_by_delta():
     assert c0[2].strike == 4500.0 and c5[2].strike == 4500.0
 
 
-# ── Guard: roll_offset / adjustment require the bulk chain reader ────────
+# ── Guard: roll_offset requires the bulk chain reader ────────────────────
 
 
 async def test_roll_offset_without_bulk_reader_raises():
@@ -229,7 +227,7 @@ async def test_roll_offset_without_bulk_reader_raises():
     requesting it raises rather than silently returning an unshifted series."""
     dates = [date(2024, 3, 28), date(2024, 4, 1)]
     chains = _both_exp_chains(dates)
-    with pytest.raises(ValueError, match="require the bulk chain reader"):
+    with pytest.raises(ValueError, match="requires the bulk chain reader"):
         await resolve_option_stream(
             dates=dates,
             collection="OPT_SP_500",
@@ -238,7 +236,6 @@ async def test_roll_offset_without_bulk_reader_raises():
             maturity=NearestToTarget(target_dte_days=30),
             selection=ByStrike(strike=4500.0),
             stream="mid",
-            adjustment="none",
             roll_offset=5,  # non-zero offset with NO bulk reader → must raise.
             chain_reader=FakeChainReader(chains),
             maturity_resolver=DefaultMaturityResolver(),
@@ -247,32 +244,9 @@ async def test_roll_offset_without_bulk_reader_raises():
         )
 
 
-async def test_adjustment_without_bulk_reader_raises():
-    """The legacy per-date path cannot back-adjust mids, so a non-'none'
-    adjustment without a bulk reader raises (same guard, adjustment arm)."""
-    dates = [date(2024, 3, 28), date(2024, 4, 1)]
-    chains = _both_exp_chains(dates)
-    with pytest.raises(ValueError, match="require the bulk chain reader"):
-        await resolve_option_stream(
-            dates=dates,
-            collection="OPT_SP_500",
-            option_type="C",
-            cycle=None,
-            maturity=NearestToTarget(target_dte_days=30),
-            selection=ByStrike(strike=4500.0),
-            stream="mid",
-            adjustment="ratio",  # real adjustment with NO bulk reader → raise.
-            roll_offset=0,
-            chain_reader=FakeChainReader(chains),
-            maturity_resolver=DefaultMaturityResolver(),
-            underlying_price_resolver=None,
-            bulk_chain_reader=None,
-        )
-
-
 async def test_legacy_path_ok_without_bulk_reader_when_defaults():
-    """Sanity: the legacy path still WORKS with default roll_offset/adjustment
-    and no bulk reader — the guard does not break the supported fallback."""
+    """Sanity: the legacy path still WORKS with the default roll_offset and no
+    bulk reader — the guard does not break the supported fallback."""
     dates = [date(2024, 3, 28), date(2024, 4, 1)]
     chains = _both_exp_chains(dates)
     values, errors, contracts = await resolve_option_stream(

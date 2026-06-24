@@ -751,9 +751,10 @@ function IndicatorsPage() {
           //   { type: 'spot', collection, instrument_id }
           //   { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy }
           //   { type: 'option_stream', collection, option_type, cycle,
-          //     maturity, selection, stream, adjustment, roll_offset }
-          // The picked ref is forwarded verbatim, so option_stream's
-          // adjustment/roll_offset (when set) ride along unchanged.
+          //     maturity, selection, stream, roll_offset }
+          // The picked ref is forwarded verbatim, so option_stream's roll_offset
+          // (when set) rides along unchanged. Option streams carry no
+          // back-adjustment, so there is no adjustment field on that variant.
           // Legacy entries without a type field (stored before this change)
           // are treated as spot — add the type defensively.
           seriesPayload[label] = picked.type

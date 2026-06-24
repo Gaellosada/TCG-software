@@ -332,13 +332,10 @@ export default function usePortfolio() {
           selection: leg.selection,
           stream: leg.stream,
         };
-        // Additive roll fields — mirror the continuous leg below (omit when
-        // at their defaults to keep the request body minimal; the BE
-        // defaults adjustment="none" / roll_offset=0). adjustment is applied
-        // by the resolver only when stream==="mid".
-        if (leg.adjustment && leg.adjustment !== 'none') {
-          apiLegs[leg.label].adjustment = leg.adjustment;
-        }
+        // Additive roll_offset — omit when at its default (0) to keep the
+        // request body minimal (the BE defaults roll_offset=0).  Option streams
+        // carry NO back-adjustment, so no `adjustment` is sent (unlike the
+        // continuous leg below).
         if (leg.roll_offset > 0) {
           apiLegs[leg.label].roll_offset = leg.roll_offset;
         }

@@ -191,13 +191,15 @@ export async function selectOption(selectQuery) {
 //   Returns: { done: number, total: number, fraction: number }
 // ---------------------------------------------------------------------------
 
-// Ensure each option_stream ref carries the additive ``adjustment`` (default
-// "none") and ``roll_offset`` (default 0) fields before it goes on the wire.
-// The picker emits them, but legacy / hand-built refs may omit them; the
-// backend defaults them too, but we send them explicitly so the request body
-// is unambiguous (and testable). ``adjustment`` is applied by the backend
-// resolver only when stream==="mid"; ``roll_offset`` rolls the maturity that
-// many calendar days earlier (0 = no shift).
+// Ensure each option_stream ref carries the additive ``roll_offset`` (default
+// 0) field before it goes on the wire. The picker emits it, but legacy /
+// hand-built refs may omit it; the backend defaults it too, but we send it
+// explicitly so the request body is unambiguous (and testable). ``roll_offset``
+// rolls the maturity that many calendar days earlier (0 = no shift).
+//
+// NOTE: option streams carry NO back-adjustment (ratio/difference are ill-posed
+// for option premia), so there is no ``adjustment`` field. A stray ``adjustment``
+// key on a legacy ref is harmless — the backend ignores unknown fields.
 function withOptionStreamDefaults(streams) {
   if (!Array.isArray(streams)) return streams;
   return streams.map((entry) => {
@@ -205,14 +207,13 @@ function withOptionStreamDefaults(streams) {
     if (
       ref
       && ref.type === 'option_stream'
-      && (ref.adjustment === undefined || ref.roll_offset === undefined)
+      && ref.roll_offset === undefined
     ) {
       return {
         ...entry,
         ref: {
           ...ref,
-          adjustment: ref.adjustment === undefined ? 'none' : ref.adjustment,
-          roll_offset: ref.roll_offset === undefined ? 0 : ref.roll_offset,
+          roll_offset: 0,
         },
       };
     }

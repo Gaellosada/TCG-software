@@ -192,7 +192,6 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
             repr(inst.maturity),
             repr(inst.selection),
             inst.stream,
-            inst.adjustment,
             int(inst.roll_offset),
         )
     if isinstance(inst, InstrumentBasket):

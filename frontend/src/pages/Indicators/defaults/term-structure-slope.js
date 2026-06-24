@@ -45,7 +45,6 @@ export default {
       maturity: { kind: 'nearest_to_target', target_days: 30 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
-      adjustment: 'none',
       roll_offset: 0,
     },
     back_atm_iv: {
@@ -57,7 +56,6 @@ export default {
       maturity: { kind: 'nearest_to_target', target_days: 90 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
-      adjustment: 'none',
       roll_offset: 0,
     },
   },
