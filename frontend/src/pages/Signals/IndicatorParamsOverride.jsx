@@ -26,6 +26,10 @@ import styles from './Signals.module.css';
  *   operand           {Object}       the indicator operand (kind='indicator')
  *   inputs            {Array}        the signal's declared inputs
  *   onOperandChange   {Function}     (nextOperand) => void
+ *   readOnly          {boolean?}     VIEW-only: the "Parameters" dropdown still
+ *                                    expands so the user can SEE the override
+ *                                    values, but the param inputs, series
+ *                                    selects and reset buttons are disabled.
  */
 
 /**
@@ -68,7 +72,7 @@ export function coerceParamInput(type, rawValue) {
   return rawValue;
 }
 
-function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }) {
+function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange, readOnly = false }) {
   const [expanded, setExpanded] = useState(false);
 
   const spec = useMemo(() => {
@@ -162,6 +166,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
             onChange={(e) => setParam(p.name, p.type, e.target.checked)}
             aria-label={`${p.name} override`}
             data-testid={`indicator-override-inline-${p.name}`}
+            disabled={readOnly}
           />
         ) : (
           <input
@@ -172,9 +177,10 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
             onChange={(e) => setParam(p.name, p.type, e.target.value)}
             aria-label={`${p.name} override`}
             data-testid={`indicator-override-inline-${p.name}`}
+            readOnly={readOnly}
           />
         )}
-        {isOverridden && (
+        {isOverridden && !readOnly && (
           <button
             type="button"
             className={styles.indicatorOverrideReset}
@@ -231,6 +237,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
                     checked={!!displayV}
                     onChange={(e) => setParam(p.name, p.type, e.target.checked)}
                     aria-label={`${p.name} override`}
+                    disabled={readOnly}
                   />
                 ) : (
                   <input
@@ -241,9 +248,10 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
                     onChange={(e) => setParam(p.name, p.type, e.target.value)}
                     aria-label={`${p.name} override`}
                     data-testid={`override-param-${p.name}`}
+                    readOnly={readOnly}
                   />
                 )}
-                {isOverridden && (
+                {isOverridden && !readOnly && (
                   <button
                     type="button"
                     className={styles.indicatorOverrideReset}
@@ -281,6 +289,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
                     onChange={(e) => setSeries(label, e.target.value || null)}
                     aria-label={`${label} series override`}
                     data-testid={`override-series-${label}`}
+                    disabled={readOnly}
                   >
                     <option value="">default ({baseStr})</option>
                     {inputList.map((input) => {
@@ -293,7 +302,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
                     })}
                   </select>
                 )}
-                {!isPrimary && isOverridden && (
+                {!isPrimary && isOverridden && !readOnly && (
                   <button
                     type="button"
                     className={styles.indicatorOverrideReset}
@@ -307,7 +316,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange }
               </div>
             );
           })}
-          {hasAnyOverride && (
+          {hasAnyOverride && !readOnly && (
             <button
               type="button"
               className={styles.indicatorOverrideResetAll}

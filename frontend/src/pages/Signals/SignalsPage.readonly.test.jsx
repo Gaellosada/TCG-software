@@ -5,7 +5,14 @@
 // where `readOnly` is threaded to EditorPanel). We render the REAL InputsPanel
 // (only the heavy non-form children are stubbed) and assert a representative
 // control — the "+ Add input" button — is disabled while locked and enabled
-// while unlocked. The native `<fieldset disabled>` wrapper drives this.
+// while unlocked.
+//
+// signals-locked-view (iter-1): the blunt `<fieldset disabled>` was replaced
+// by an explicit `readOnly` prop threaded into InputsPanel + BlockEditor so a
+// locked signal stays VIEWABLE/NAVIGABLE (expand/collapse, tab switching) while
+// only EDIT controls are disabled. The third test below now asserts the editor
+// body is a plain wrapper (no disabled fieldset) — see
+// SignalsPage.lockedView.test.jsx for the full view-vs-edit gating coverage.
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -56,30 +63,32 @@ describe('SignalsPage — read-only editor inputs when locked', () => {
     mockListSignals.mockResolvedValue([persisted({ id: 's1', locked: true })]);
     render(<SignalsPage />);
     await screen.findByTestId('signal-lock-banner');
-    // The real InputsPanel renders its "+ Add input" button. A native disabled
-    // <fieldset> ancestor disables it in real browsers; in jsdom the IDL
-    // `.disabled` flag on the descendant stays false, but the effective
-    // disabled state IS reflected by the `:disabled` pseudo-class — which is
-    // exactly what gates pointer/keyboard interaction.
+    // The real InputsPanel renders its "+ Add input" button. It is gated with
+    // an explicit `disabled={readOnly}` (the readOnly prop is true when the
+    // signal is locked), so the IDL `.disabled` flag is set directly — no
+    // reliance on an ancestor fieldset.
     const addBtn = await screen.findByTestId('inputs-add-btn');
-    expect(addBtn.matches(':disabled')).toBe(true);
+    expect(addBtn.disabled).toBe(true);
   });
 
   it('leaves the InputsPanel "+ Add input" control enabled when the loaded signal is unlocked', async () => {
     mockListSignals.mockResolvedValue([persisted({ id: 's1', locked: false })]);
     render(<SignalsPage />);
     const addBtn = await screen.findByTestId('inputs-add-btn');
-    expect(addBtn.matches(':disabled')).toBe(false);
+    expect(addBtn.disabled).toBe(false);
     expect(screen.queryByTestId('signal-lock-banner')).toBeNull();
   });
 
-  it('wraps the editor body in a disabled fieldset only when locked', async () => {
+  it('renders the editor body as a plain (non-fieldset) wrapper — readOnly is threaded, not a disabled fieldset', async () => {
     mockListSignals.mockResolvedValue([persisted({ id: 's1', locked: true })]);
     const { unmount } = render(<SignalsPage />);
     await screen.findByTestId('signal-lock-banner');
-    const fs = screen.getByTestId('signal-editor-fieldset');
-    expect(fs.tagName).toBe('FIELDSET');
-    expect(fs.disabled).toBe(true);
+    // The old blunt <fieldset disabled> is gone — it disabled view-navigation
+    // affordances too. The editor body is now a plain div; read-only is driven
+    // by the `readOnly` prop on InputsPanel/BlockEditor.
+    expect(screen.queryByTestId('signal-editor-fieldset')).toBeNull();
+    const body = screen.getByTestId('signal-editor-body');
+    expect(body.tagName).toBe('DIV');
     unmount();
   });
 });
