@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS tcg_app_data.tickets (
   created_at timestamptz NOT NULL
 );
 
--- Grant the runtime app role the DML it needs on the new table. (Adjust
--- the role name if your deployment uses a different read-write role.)
+-- Grants. Confirmed role names (adjust if your deployment differs):
+--   read-write app role = tcg_app_rw  (APP_DB_USER — the role the backend
+--                                       connects as; REQUIRED for the feature)
+--   read-only role      = tcg_read    (DWH_USER)
+-- USAGE on the schema is required before the table-level grants take effect
+-- (tcg_read, the market-data role, normally lacks USAGE on tcg_app_data).
+GRANT USAGE ON SCHEMA tcg_app_data TO tcg_app_rw;
 GRANT SELECT, INSERT, UPDATE, DELETE ON tcg_app_data.tickets TO tcg_app_rw;
+
+GRANT USAGE ON SCHEMA tcg_app_data TO tcg_read;
+GRANT SELECT ON tcg_app_data.tickets TO tcg_read;
