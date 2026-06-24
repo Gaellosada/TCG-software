@@ -1,0 +1,222 @@
+/*
+ * Tickets page — a centred, document-style page (same header treatment as the
+ * Help/Settings pages) with a simple add form and a list of notes. Reuses the
+ * shared CSS custom properties (--bg-*, --border-*, --text-*, --accent,
+ * --error-text, --radius-sm) so it inherits the app theme like every other
+ * page; no page-specific colour values.
+ */
+
+.page {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px 24px 64px;
+}
+
+.label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.subtitle {
+  font-size: 15px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 28px;
+}
+
+/* ---------- Add form ---------- */
+
+.addRow {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.addInput {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  padding: 8px 10px;
+  box-sizing: border-box;
+  resize: vertical;
+  outline: none;
+}
+
+.addInput:focus {
+  border-color: var(--accent, #2563eb);
+}
+
+.addBtn {
+  flex-shrink: 0;
+  background: var(--accent, #2563eb);
+  border: 1px solid var(--accent, #2563eb);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 8px 18px;
+  transition: opacity 0.15s;
+}
+
+.addBtn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.addBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------- Error banner ---------- */
+
+.errorBanner {
+  background: var(--error-bg, rgba(239, 68, 68, 0.1));
+  border: 1px solid var(--error-text, #ef4444);
+  border-radius: var(--radius-sm);
+  color: var(--error-text, #ef4444);
+  font-size: 0.82rem;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+
+/* ---------- List ---------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.empty {
+  padding: 24px 4px;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  font-style: italic;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-secondary, var(--bg-tertiary));
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s;
+}
+
+.row:hover {
+  border-color: var(--border-accent, var(--accent));
+}
+
+.rowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rowText {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  /* Preserve newlines/spacing the user typed and wrap long text safely. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+
+.rowDate {
+  font-size: 0.72rem;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.editInput {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-accent, var(--accent, #2563eb));
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  padding: 6px 8px;
+  box-sizing: border-box;
+  resize: vertical;
+  outline: none;
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.iconBtn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 2px 6px;
+  border-radius: 2px;
+  transition: color 0.15s;
+}
+
+.iconBtn:hover {
+  color: var(--accent);
+}
+
+.iconBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.deleteBtn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.deleteBtn:hover {
+  color: var(--error-text, #ef4444);
+  border-color: var(--error-text, #ef4444);
+}
+
+.deleteBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

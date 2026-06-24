@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import styles from './HelpPage.module.css';
 
-const SECTIONS = ['overview', 'data', 'portfolio', 'indicators', 'signals', 'settings'];
+const SECTIONS = ['overview', 'data', 'options', 'portfolio', 'indicators', 'signals', 'tickets', 'settings'];
 
 const SECTION_LABELS = {
   overview: 'Overview',
   data: 'Data',
+  options: 'Options',
   portfolio: 'Portfolio',
   indicators: 'Indicators',
   signals: 'Signals',
+  tickets: 'Tickets',
   settings: 'Settings',
 };
 
@@ -66,9 +68,10 @@ function HelpPage() {
         </div>
 
         <p className={styles.conceptText}>
-          Indicators, Signals, and Portfolio pages autosave to your browser&apos;s
-          localStorage. All preferences and saved work persist across sessions on the
-          same browser.
+          Indicators, Signals, and Portfolios autosave to the backend, so your saved
+          work follows you across reloads and machines. A &ldquo;Cloud&rdquo; status
+          shows when a save is in flight. Lightweight UI preferences (chart type, the
+          autosave toggle) stay in your browser&apos;s localStorage.
         </p>
 
         <h3 className={styles.conceptTitle}>Worth knowing</h3>
@@ -110,6 +113,74 @@ function HelpPage() {
           Roll dates appear as gray dotted vertical lines. Toggle them via the
           &ldquo;Roll Dates&rdquo; entry in the chart legend.
         </p>
+      </section>
+
+      {/* ── Options ── */}
+      <section id="help-options" className={styles.section}>
+        <h2 className={styles.sectionHeading}>Options</h2>
+
+        <p className={styles.conceptText}>
+          Option chains live on the <strong>Data</strong> page. Pick an option
+          root in the left browser to open its chain. Three views are available
+          for an option root.
+        </p>
+
+        <h3 className={styles.conceptTitle}>Chain table</h3>
+        <p className={styles.conceptText}>
+          For a chosen expiration, the table lists every strike (calls and puts)
+          with bid / ask / mid and, where available, the Greeks. Values that
+          come straight from the warehouse are shown plain; values the platform
+          computed on the fly are italic with a{' '}
+          <span className={styles.kbd}>&#9426;</span> badge, and a missing value
+          shows an em-dash with the reason on hover.
+        </p>
+
+        <h3 className={styles.conceptTitle}>Per-contract history</h3>
+        <p className={styles.conceptText}>
+          Selecting a contract charts its history over time: price (mid) plus
+          IV, delta (&Delta;), gamma (&Gamma;), theta (&Theta;) and vega
+          (&nu;). Reference markers show the contract&apos;s first trade,
+          expiration, the ATM cross, and the dates where &#124;&Delta;&#124;
+          first reaches 0.30, 0.50 and 0.70.
+        </p>
+
+        <h3 className={styles.conceptTitle}>Smile snapshot</h3>
+        <p className={styles.conceptText}>
+          The snapshot view plots IV (or delta) across strikes for a single date
+          and expiration &mdash; the volatility smile. Toggle calls vs puts, the
+          plotted field (IV or delta), and the x-axis between raw strike and
+          moneyness (K/S).
+        </p>
+
+        <h3 className={styles.conceptTitle}>Greeks coverage</h3>
+        <p className={styles.conceptText}>
+          Greeks are not stored for every root or every date. When a root has no
+          Greeks, the Greek series (gamma, vega, theta) are unavailable and the
+          relevant controls are disabled.
+        </p>
+
+        <Details title="Option streams (for indicators)">
+          <p>
+            An option indicator does not read one fixed contract &mdash; it reads
+            a <strong>stream</strong>: on each date the engine reselects the
+            contract matching your rule, so the series follows, say, &ldquo;the
+            ~30-day, ~0.25-delta call&rdquo; as the chain rolls. You choose the
+            option type (call/put), the expiration cycle, a maturity rule and a
+            selection criterion (see <strong>Indicators</strong> &rsaquo; option
+            stream inputs for what each cycle / maturity / selection means), and
+            which series to read: mid price, IV, delta, gamma, vega, theta, open
+            interest, or volume.
+          </p>
+          <p>
+            <strong>Roll offset</strong> rolls to the next contract a chosen
+            number of calendar days early (0 = roll at the rule&apos;s normal
+            time). <strong>Back-adjustment</strong> (None / Ratio / Difference,
+            the same methods as continuous futures) smooths the jump at each roll
+            and applies to the <strong>mid-price</strong> stream only &mdash; it
+            is ignored for IV, the Greeks, and the volume/open-interest streams,
+            where a roll jump is not meaningful.
+          </p>
+        </Details>
       </section>
 
       {/* ── Portfolio ── */}
@@ -272,6 +343,41 @@ function HelpPage() {
           The risk-free rate used by Sharpe and Sortino metrics is configured globally
           in Settings, not per signal.
         </p>
+      </section>
+
+      {/* ── Tickets ── */}
+      <section id="help-tickets" className={styles.section}>
+        <h2 className={styles.sectionHeading}>Tickets</h2>
+
+        <p className={styles.conceptText}>
+          A ticket is a free-text note you jot down whenever you hit an issue —
+          a confusing result, a bug, or anything worth coming back to. The
+          Tickets page is a simple running list, newest first.
+        </p>
+
+        <h3 className={styles.conceptTitle}>Add, edit, delete</h3>
+        <ul className={styles.tips}>
+          <li>
+            <strong>Add</strong> &mdash; type in the box at the top and click
+            <strong> Add</strong> (or press{' '}
+            <span className={styles.kbd}>Ctrl</span>/<span className={styles.kbd}>Cmd</span>
+            +<span className={styles.kbd}>Enter</span>). The button stays
+            disabled until you type something.
+          </li>
+          <li>
+            <strong>Edit</strong> &mdash; click the pencil (or double-click the
+            text) to edit in place;{' '}
+            <span className={styles.kbd}>Ctrl</span>/<span className={styles.kbd}>Cmd</span>
+            +<span className={styles.kbd}>Enter</span> saves,{' '}
+            <span className={styles.kbd}>Esc</span> cancels.
+          </li>
+          <li>
+            <strong>Delete</strong> &mdash; the &times; asks for confirmation
+            first. Unlike archiving a signal or indicator, deleting a ticket is
+            <strong> permanent</strong> &mdash; the note is removed for good and
+            cannot be recovered.
+          </li>
+        </ul>
       </section>
 
       {/* ── Settings ── */}

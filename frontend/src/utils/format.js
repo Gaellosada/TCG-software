@@ -14,6 +14,25 @@ export function formatDate(date) {
 }
 
 /**
+ * Format a Date object or ISO timestamp string as "YYYY-MM-DD HH:MM" in local
+ * time. Used where a bare date is ambiguous — e.g. tickets created the same
+ * day need a time to order/disambiguate them. Returns '--' for an unparseable
+ * input so the UI never shows "Invalid Date".
+ * @param {Date | string} value
+ * @returns {string}
+ */
+export function formatDateTime(value) {
+  const d = typeof value === 'string' ? new Date(value) : value;
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '--';
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${mo}-${day} ${hh}:${mm}`;
+}
+
+/**
  * Format a YYYYMMDD integer as YYYY-MM-DD string.
  * @param {number} dateInt
  * @returns {string}

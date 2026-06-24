@@ -189,6 +189,32 @@ class BasketDoc:
     asset_class: str = "equity"
 
 
+@dataclass(frozen=True, slots=True)
+class TicketDoc:
+    """A user-noted issue ticket — deliberately OUTSIDE the uniform store.
+
+    A ticket is a single free-text note a user jots when they hit an
+    issue. It is intentionally NOT part of the uniform 7-column
+    (``id``/``type``/``category``/``locked``/``payload``/``created_at``/
+    ``updated_at``) machinery: there is no ``type`` discriminator, no
+    soft-delete ``category``, no ``locked`` flag, no JSONB payload, and
+    no ``updated_at``. The backing table ``tcg_app_data.tickets`` has
+    exactly three columns (``id text PK``, ``text text NOT NULL``,
+    ``created_at timestamptz NOT NULL``).
+
+    Consequently this type is excluded from :data:`PersistenceDoc`,
+    ``_TYPE_TO_CLASS`` and the ``to_pg_row`` / ``from_pg_row`` helpers —
+    tickets travel a self-contained code path (own dataclass, own
+    repository methods, own SQL). Editing a ticket is an in-place
+    ``UPDATE`` of ``text``; deletion is a HARD ``DELETE`` (it does NOT
+    follow the uniform ``category='DELETED'`` soft-delete convention).
+    """
+
+    id: str
+    text: str
+    created_at: datetime
+
+
 PersistenceDoc = IndicatorDoc | SignalDoc | PortfolioDoc | BasketDoc
 
 # Internal map: discriminator string → dataclass. Used by ``from_json_doc``.
@@ -383,6 +409,7 @@ __all__ = [
     "SignalDoc",
     "PortfolioDoc",
     "BasketDoc",
+    "TicketDoc",
     "PersistenceDoc",
     "to_json_doc",
     "from_json_doc",
