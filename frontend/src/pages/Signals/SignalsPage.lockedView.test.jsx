@@ -10,13 +10,14 @@
 //
 // We render the REAL InputsPanel + BlockEditor (only the heavy network-backed
 // InstrumentPickerModal and the side panels are stubbed). The TRUE gate a real
-// user hits is the `:disabled` pseudo-class — a control under a disabled
-// <fieldset> matches `:disabled` (jsdom reflects this) so the user cannot
-// click it. (jsdom does NOT suppress a synthetic fireEvent.click on such a
-// descendant, so we assert `:disabled`, not click side effects, to detect the
-// bug.) These assertions FAIL on the fieldset-disabled implementation — the
-// VIEW toggle/tab buttons match `:disabled` — and PASS once `readOnly` is
-// threaded so ONLY edit controls are disabled.
+// user hits is the `:disabled` pseudo-class (jsdom reflects it, and does NOT
+// suppress a synthetic fireEvent.click on a disabled descendant — so we assert
+// the pseudo-class, not click side effects). These assertions FAIL on the old
+// `<fieldset disabled>` implementation — the VIEW toggle/tab buttons match
+// `:disabled` — and PASS once `readOnly` is threaded so ONLY edit controls are
+// disabled. Text inputs use `readOnly` (matches `:read-only`, NOT `:disabled`)
+// so their value stays selectable in view mode; the signal-name field is the
+// same — read-only when locked, not disabled.
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
@@ -94,11 +95,29 @@ describe('SignalsPage — locked signal stays VIEWABLE and NAVIGABLE', () => {
     const toggle = await screen.findByTestId('inputs-panel-toggle');
     expect(toggle.matches(':disabled')).toBe(false);
 
-    // And expanding it reveals the configured input id, read-only.
+    // And expanding it reveals the configured input id, read-only. The text
+    // input uses readOnly (not disabled) so the value stays SELECTABLE in view
+    // mode — a read-only input must NOT match `:disabled`, but must match
+    // `:read-only`.
     fireEvent.click(toggle);
     const idField = await screen.findByTestId('input-id-0');
     expect(idField.value).toBe('px');
-    expect(idField.matches(':disabled')).toBe(true);
+    expect(idField.matches(':disabled')).toBe(false);
+    expect(idField.matches(':read-only')).toBe(true);
+  });
+
+  it('renders the signal-name field read-only (value visible, not editable) while locked', async () => {
+    mockListSignals.mockResolvedValue([lockedSignal()]);
+    render(<SignalsPage />);
+    await screen.findByTestId('signal-lock-banner');
+
+    // The params-panel name field shows the locked signal's name but must not
+    // be editable. It is hinted read-only via a fresh {...signal, readonly:true}
+    // object (InlineNameInput keys off `entity.readonly`) — the stored signal is
+    // NOT mutated. Read-only (selectable) rather than disabled.
+    const nameField = await screen.findByLabelText('Signal name');
+    expect(nameField.value).toBe('Sig 1');
+    expect(nameField.matches(':read-only')).toBe(true);
   });
 
   it('keeps the section tab buttons (Exits/Resets) usable (NOT disabled) while locked', async () => {

@@ -766,12 +766,16 @@ class TestContinuousSeriesBuilder:
         assert result.contracts == ("VXF24", "VXG24")
         assert len(result.roll_dates) == 1
         assert len(result.prices) == 3
-        # Series rides the front then rolls; closes finite, no NaN/negatives.
-        assert np.all(np.isfinite(result.prices.close))
-        assert np.all(result.prices.close > 0)
         # The seam day 20240115 and 20240120 carry c2's raw prices (unadjusted —
-        # they are the anchor/newest segment); the c1 day is ratio-adjusted up.
-        np.testing.assert_array_equal(result.prices.close[1:], [23.0, 24.0])
+        # they are the anchor/newest segment). c1's front day 20240110 (raw 20.0)
+        # is ratio-adjusted up by the seam gap c2@15 / c1@15 = 23.0 / 21.0, giving
+        # 20.0 * 23.0 / 21.0 = 21.9047…. Pinned exactly so the adjusted magnitude
+        # — the whole point of the front contract surviving — is under test.
+        np.testing.assert_allclose(
+            result.prices.close,
+            [20.0 * 23.0 / 21.0, 23.0, 24.0],
+            rtol=1e-10,
+        )
 
     def test_dedup_subsumes_middle_contract(self):
         """Front-month windows: the middle contract is its own front month.

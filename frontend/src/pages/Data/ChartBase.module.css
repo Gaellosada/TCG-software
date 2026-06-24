@@ -35,6 +35,20 @@
   flex-shrink: 0;
 }
 
+/*
+ * Modifier for the options-stream controls row only. The stream form can
+ * grow tall (root + selection criterion + maturity + roll fields), so cap
+ * its height and scroll inside it. ``align-items: flex-start`` overrides
+ * the base ``center`` so the form pins to the top of the scroll area.
+ * Applied alongside ``.controls`` on ContinuousOptionsChart; the shared
+ * ``.controls`` (PriceChart, ContinuousChart) is intentionally untouched.
+ */
+.controlsCapped {
+  max-height: 220px;
+  overflow-y: auto;
+  align-items: flex-start;
+}
+
 .controlLabel {
   display: flex;
   align-items: center;

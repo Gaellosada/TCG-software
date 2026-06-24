@@ -72,7 +72,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Awaitable, Callable, Literal, Protocol, Sequence, runtime_checkable
+from typing import Callable, Literal, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -84,7 +84,6 @@ from tcg.engine.options.selection._match import (
     match_by_strike,
 )
 from tcg.engine.options.selection._ports import (
-    ChainReaderPort,
     UnderlyingPriceResolver,
 )
 from tcg.engine.options.selection.selector import DefaultOptionsSelector

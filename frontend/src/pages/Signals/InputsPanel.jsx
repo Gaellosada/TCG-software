@@ -193,7 +193,7 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
                       data-testid={`input-id-${idx}`}
                       spellCheck={false}
                       maxLength={16}
-                      disabled={readOnly}
+                      readOnly={readOnly}
                     />
                   );
                 })()}

@@ -639,7 +639,7 @@ function SignalsPage() {
                 keep working. (Writes are also server-guarded with HTTP 423 and
                 autosave is suspended when locked — see ``selectedLocked``.) */}
             <div
-              className={styles.editorFieldset}
+              className={styles.editorBody}
               data-testid="signal-editor-body"
             >
               <InputsPanel
@@ -675,7 +675,13 @@ function SignalsPage() {
             leftSlot={
               <>
                 <InlineNameInput
-                  entity={selectedSignal}
+                  /* When locked, hint InlineNameInput to render read-only via a
+                     fresh object — do NOT mutate the stored signal. */
+                  entity={
+                    selectedLocked && selectedSignal
+                      ? { ...selectedSignal, readonly: true }
+                      : selectedSignal
+                  }
                   onRename={handleRename}
                   className={styles.nameInput}
                   placeholder="Select a signal"

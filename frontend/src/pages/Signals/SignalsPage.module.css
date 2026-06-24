@@ -47,22 +47,19 @@
 }
 
 /*
- * Wrapper around the editor body (InputsPanel + BlockEditor). It is a native
- * <fieldset disabled> when the signal is locked, which makes every nested form
- * control non-interactive. Reset the browser's default fieldset chrome (border,
- * margin, padding) and the implicit ``min-inline-size: min-content`` so the
- * children flow exactly as they did before, and behave as a flex column to
- * preserve the vertical stack inside the scrollable editor panel.
+ * Wrapper around the editor body (InputsPanel + BlockEditor). A plain <div>
+ * — when the signal is locked we do NOT freeze it with a <fieldset disabled>
+ * (that also blocked view-only navigation); instead a ``readOnly`` prop is
+ * threaded into the children so edit controls disable while view controls
+ * stay live. Behaves as a flex column to preserve the vertical stack inside
+ * the scrollable editor panel; ``min-width: 0`` lets it shrink rather than
+ * force horizontal overflow on its content.
  */
-.editorFieldset {
+.editorBody {
   display: flex;
   flex-direction: column;
   gap: 0;
-  border: 0;
-  margin: 0;
-  padding: 0;
   min-width: 0;
-  min-inline-size: 0;
 }
 
 .nameInput {

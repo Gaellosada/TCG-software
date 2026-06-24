@@ -208,7 +208,7 @@ function ContinuousOptionsChart({ collection }) {
         )}
       </div>
 
-      <div className={styles.controls} style={{ maxHeight: '220px', overflowY: 'auto', alignItems: 'flex-start' }}>
+      <div className={`${styles.controls} ${styles.controlsCapped}`}>
         <OptionStreamForm
           value={streamRef}
           onChange={setStreamRef}
