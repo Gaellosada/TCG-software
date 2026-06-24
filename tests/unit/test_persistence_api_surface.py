@@ -29,6 +29,17 @@ _EXPECTED_PUBLIC_METHODS = frozenset(
         # collection/db handle — so the escape-hatch guarantees below
         # still hold. Registered here as an intentional surface addition.
         "set_locked",
+        # Ticket methods — the SELF-CONTAINED path for the 3-column
+        # ``tcg_app_data.tickets`` table (not the uniform doc machinery).
+        # They take only ``text`` / ``ticket_id`` — no collection/db
+        # handle — so the escape-hatch guarantees below still hold. The
+        # table name is a fixed private constant, never a parameter.
+        # ``delete_ticket`` is a HARD delete (intentional divergence from
+        # the uniform soft-delete). Registered as an intentional addition.
+        "create_ticket",
+        "list_tickets",
+        "update_ticket",
+        "delete_ticket",
     }
 )
 
