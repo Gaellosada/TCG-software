@@ -221,6 +221,11 @@ def derive_rolls(
     maturity discriminator.  Same-expiration strike re-selection (the
     daily strike churn produced by delta/moneyness tracking) is NOT a
     roll and emits no marker.  Missing chain on either side ⇒ no roll.
+    (With no ``cycle`` filter the chain may mix cycles — e.g. a weekly and
+    a monthly contract sharing a settlement Friday; two consecutive
+    selections on the SAME ``expiration`` date are treated as the same
+    maturity and emit no marker even if their ``contract_id``/cycle
+    differ, since a roll tracks maturity, not contract identity.)
 
     The roll cadence is governed by the maturity target (and
     ``roll_offset``), which is what changes the selected expiration; it
