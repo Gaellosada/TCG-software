@@ -543,6 +543,45 @@ describe('BlockHeader — exit multi-target picker', () => {
     expect(screen.getByTestId('add-target-0').disabled).toBe(true);
   });
 
+  // Wave-1b: equalize multi-target dropdown widths. Every NON-last row reserves
+  // the "+ Add block" column with an inert clone so all .blockInstrumentCell
+  // dropdowns shrink to the same (bottom-row) width. The clone must be
+  // aria-hidden, disabled, non-focusable, and carry NO add-target testid (so
+  // getByTestId('add-target-0') stays unique to the real last-row button).
+  it('non-last rows reserve the add-block column with an inert clone; only the last row has the interactive add button', () => {
+    renderExit(['Alpha', 'Beta']); // two rows: row 0 (non-last), row 1 (last)
+
+    // The real interactive add button is unique and lives in the LAST row.
+    const realAdd = screen.getByTestId('add-target-0'); // throws if not unique
+    const lastRow = screen.getByTestId('exit-target-row-0-1');
+    const firstRow = screen.getByTestId('exit-target-row-0-0');
+    expect(lastRow.contains(realAdd)).toBe(true);
+    expect(realAdd.getAttribute('aria-hidden')).toBeNull();
+
+    // The non-last row has an "+ Add block" element too (the reserved column),
+    // but it is an inert clone: aria-hidden, disabled, non-focusable, no testid.
+    const firstRowAddTexts = Array.from(firstRow.querySelectorAll('button'))
+      .filter((b) => b.textContent.trim() === '+ Add block');
+    expect(firstRowAddTexts).toHaveLength(1);
+    const clone = firstRowAddTexts[0];
+    expect(clone.getAttribute('aria-hidden')).toBe('true');
+    expect(clone.disabled).toBe(true);
+    expect(clone.getAttribute('tabindex')).toBe('-1');
+    expect(clone.getAttribute('data-testid')).toBeNull();
+    // The clone reuses the SAME box class as the real button (pixel-identical).
+    expect(clone.className).toBe(realAdd.className);
+  });
+
+  it('a lone implicit empty row has the add button but no reserved clone (single dropdown, trivially uniform)', () => {
+    renderExit([]); // one implicit empty row
+    // The single row IS the last row → it carries the real add button…
+    expect(screen.getByTestId('add-target-0')).toBeDefined();
+    // …and there is no second, aria-hidden clone anywhere.
+    const clones = Array.from(document.querySelectorAll('button[aria-hidden="true"]'))
+      .filter((b) => b.textContent.trim() === '+ Add block');
+    expect(clones).toHaveLength(0);
+  });
+
   it('picking a value in row 0 commits a one-element array', () => {
     const { onChange } = renderExit([]);
     fireEvent.change(screen.getByTestId('target-entry-select-0-0'), { target: { value: 'Beta' } });

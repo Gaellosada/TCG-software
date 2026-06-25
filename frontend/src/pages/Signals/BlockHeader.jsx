@@ -555,7 +555,7 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex, readOnly =
                 ×
               </button>
             )}
-            {isLastRow && (
+            {isLastRow ? (
               <button
                 type="button"
                 className={styles.exitTargetAddBtn}
@@ -566,6 +566,27 @@ function ExitTargetPicker({ block, entryBlocks, onChange, blockIndex, readOnly =
                   : 'Target another entry block'}
                 aria-label={`Add another target to exit block ${blockIndex}`}
                 data-testid={`add-target-${blockIndex - 1}`}
+              >
+                + Add block
+              </button>
+            ) : (
+              /* Inert clone reserving the "+ Add block" column on every
+                 non-last row, so all rows expose the SAME trailing width and
+                 every .blockInstrumentCell (the only shrinkable item) shrinks
+                 to the bottom row's width → uniform dropdowns, button kept to
+                 the right of the bottom row. A real <button> (not a <span>) so
+                 it is byte-for-byte the same box as the live add button — same
+                 UA font metrics, pixel-identical width (no magic numbers). It
+                 is disabled + tabIndex=-1 + aria-hidden + visibility:hidden +
+                 carries NO add-target testid, so it never receives focus, AT,
+                 clicks, or collides with getByTestId. */
+              <button
+                type="button"
+                className={styles.exitTargetAddBtn}
+                style={{ visibility: 'hidden' }}
+                disabled
+                tabIndex={-1}
+                aria-hidden="true"
               >
                 + Add block
               </button>

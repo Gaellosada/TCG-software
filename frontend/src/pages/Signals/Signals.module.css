@@ -1512,7 +1512,12 @@
    Exit-block multi-target picker (v6). A vertical list of target-entry
    dropdowns sitting in the same flexible slot the single dropdown used to
    occupy. Each row stacks a dropdown + a remove (x) control; the last row
-   also carries the "+ Add block" button.
+   carries the real "+ Add block" button, and every NON-last row reserves the
+   same trailing column via an inert, visibility:hidden clone of that button
+   (rendered in BlockHeader.jsx). That equal trailing column makes every
+   .blockInstrumentCell (flex:0 1 87px — the only shrinkable item) shrink to
+   the SAME width as the bottom row → uniform dropdown widths, with the add
+   button still to the right of the bottom dropdown.
    --------------------------------------------------------------------------- */
 .exitTargetList {
   flex: 1 1 auto;
