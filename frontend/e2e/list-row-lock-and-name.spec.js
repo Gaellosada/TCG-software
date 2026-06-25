@@ -149,8 +149,8 @@ test.describe('Signals list — lock-left + full name', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Indicators list — custom indicators come from localStorage tcg.indicators.v1
-// (+ a mocked empty backend list). DEFAULT built-ins load from code on mount.
+// Indicators list — CUSTOM rows come from the backend persisted-indicators list
+// (GET /api/persistence/indicators, mocked below). DEFAULT built-ins load from code on mount.
 // ---------------------------------------------------------------------------
 test.describe('Indicators list — lock-left + full name', () => {
   test.beforeEach(async ({ page }) => {
