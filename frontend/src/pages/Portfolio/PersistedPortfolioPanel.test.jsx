@@ -10,8 +10,9 @@
 //   - archive button fires onArchive
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import PersistedPortfolioPanel from './PersistedPortfolioPanel';
+import styles from './PersistedPortfolioPanel.module.css';
 
 afterEach(cleanup);
 
@@ -149,5 +150,30 @@ describe('<PersistedPortfolioPanel>', () => {
     const lockBtn = screen.getByTestId('lock-toggle-btn');
     fireEvent.click(lockBtn);
     expect(props.onSetPortfolioLocked).toHaveBeenCalledWith('p1', true);
+  });
+
+  // Lock-on-left: the LockToggle is the row's first child, before the name.
+  it('LockToggle is the first child of the row, before the name button', () => {
+    render(<PersistedPortfolioPanel {...defaultProps()} />);
+    const row = screen.getByTestId('persisted-portfolio-row-p1');
+    const lockBtn = within(row).getByTestId('lock-toggle-btn');
+    const nameBtn = within(row).getByTestId('load-portfolio-p1');
+    const order = lockBtn.compareDocumentPosition(nameBtn);
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(row.firstElementChild.contains(lockBtn)).toBe(true);
+  });
+
+  // Category chip + archive × live inside a single .rowActions wrapper (which
+  // owns the collapse/hover-reveal) nested within the row.
+  it('category select and archive button live inside a .rowActions wrapper within the row', () => {
+    render(<PersistedPortfolioPanel {...defaultProps()} />);
+    const catSelect = screen.getByTestId('portfolio-cat-select-p1');
+    const archiveBtn = screen.getByTestId('archive-portfolio-p1');
+    const wrapper = catSelect.closest(`.${styles.rowActions}`);
+    expect(wrapper).not.toBeNull();
+    expect(wrapper.contains(catSelect)).toBe(true);
+    expect(wrapper.contains(archiveBtn)).toBe(true);
+    const row = screen.getByTestId('persisted-portfolio-row-p1');
+    expect(row.contains(wrapper)).toBe(true);
   });
 });

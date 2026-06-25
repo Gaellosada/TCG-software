@@ -89,7 +89,9 @@
   border-color: var(--border-accent, var(--accent, #2563eb));
 }
 
-/* Per-row category chip — shown on hover/focus like the rename button. */
+/* Per-row category chip. Lives inside .rowActions (which owns the hover/focus
+ * reveal), so it is always visible WHEN the wrapper is expanded — no per-chip
+ * opacity gate of its own. */
 .categoryChipSelect {
   background: var(--bg-tertiary);
   border: 1px solid var(--border-primary);
@@ -100,39 +102,24 @@
   padding: 0 4px;
   height: 18px;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s;
   cursor: pointer;
   outline: none;
 }
 
-.row:hover .categoryChipSelect,
-.row:focus-within .categoryChipSelect {
-  opacity: 1;
-}
-
 .categoryChipSelect:focus-visible {
-  opacity: 1;
   border-color: var(--accent, #2563eb);
 }
 
 /* Locked-row disabled controls (shared treatment — see IndicatorsList /
  * PersistedPortfolioPanel for the identical idiom). background:none kills the
  * UA grey-out, so without this a disabled control reads as fully enabled
- * (opacity 1, accent-on-hover, pointer cursor). Dim + not-allowed + dim text
- * so a locked row's controls clearly READ as disabled. The opacity rule is
- * repeated under the hover/focus-within reveal selectors so it wins over the
- * `.row:hover .iconBtn { opacity: 1 }` reveal (equal specificity → later
- * source order wins). */
+ * (accent-on-hover, pointer cursor). Dim + not-allowed + dim text so a locked
+ * row's controls clearly READ as disabled when the .rowActions wrapper reveals
+ * them on hover. */
 .categoryChipSelect:disabled {
   opacity: 0.4;
   cursor: not-allowed;
   color: var(--text-dim);
-}
-
-.row:hover .categoryChipSelect:disabled,
-.row:focus-within .categoryChipSelect:disabled {
-  opacity: 0.4;
 }
 
 .listSearchRow {
@@ -194,6 +181,29 @@
   white-space: nowrap;
 }
 
+/* Hover/focus action cluster (rename ✎ + category chip + delete ×). Collapsed
+ * to ZERO width at rest so the name flexes to the full row width (no premature
+ * ellipsis); expands on :hover / :focus-within (keyboard) so the actions
+ * appear and the name then flex-shrinks/crops. The wrapper — not the
+ * individual buttons — owns the reveal, so it is genuinely zero-size at rest
+ * (Playwright toBeHidden()/getBoundingClientRect().width===0 hold). */
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width 0.15s ease, opacity 0.15s ease;
+}
+
+.row:hover .rowActions,
+.row:focus-within .rowActions {
+  max-width: 240px;
+  opacity: 1;
+}
+
 .renameInput {
   flex: 1;
   background: var(--bg-tertiary);
@@ -206,6 +216,8 @@
   outline: none;
 }
 
+/* .iconBtn lives only inside .rowActions (SignalsList), which owns the
+ * hover/focus reveal — so it carries no opacity gate of its own. */
 .iconBtn {
   background: none;
   border: none;
@@ -213,14 +225,8 @@
   cursor: pointer;
   font-size: 0.85rem;
   padding: 2px 4px;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
+  transition: color 0.15s;
   flex-shrink: 0;
-}
-
-.row:hover .iconBtn,
-.row:focus-within .iconBtn {
-  opacity: 1;
 }
 
 .iconBtn:hover {
@@ -286,8 +292,12 @@
   border-color: transparent;
 }
 
-.row:hover .iconBtn:disabled,
-.row:focus-within .iconBtn:disabled,
+/* .deleteBtn keeps its base opacity:0 + .row:hover reveal (it is SHARED with
+ * BlockEditor's .conditionRow delete and InputsPanel's input-row delete, which
+ * still rely on per-button hover-reveal). So a locked SignalsList delete must
+ * re-assert 0.4 under the reveal selector (more specific than
+ * `.row:hover .deleteBtn { opacity:1 }`) to stay dimmed when revealed. .iconBtn
+ * no longer has an opacity gate, so it needs no such override. */
 .row:hover .deleteBtn:disabled,
 .row:focus-within .deleteBtn:disabled {
   opacity: 0.4;

@@ -163,6 +163,18 @@ function IndicatorsList({
         aria-disabled={isIncompat ? 'true' : undefined}
         onKeyDown={(e) => e.key === 'Enter' && !isRenaming && onSelect(ind.id)}
       >
+        {/* Lock toggle is the FIRST child so the padlock sits at the row's left
+          * edge — custom indicators only. Readonly built-ins get a same-width
+          * empty spacer so their names line up column-wise with custom rows. */}
+        {!ind.readonly && !isRenaming && onSetIndicatorLocked ? (
+          <LockToggle
+            locked={locked}
+            onSetLocked={(next) => onSetIndicatorLocked(ind.id, next)}
+            entityLabel="indicator"
+          />
+        ) : (
+          !isRenaming && <span className={styles.lockSlot} aria-hidden="true" />
+        )}
         {isRenaming ? (
           <input
             ref={inputRef}
@@ -183,40 +195,37 @@ function IndicatorsList({
         {/* Show a "default" badge on readonly indicators only in search-flat
           * mode — section headers ("DEFAULT / CUSTOM") disappear during search,
           * so the badge is the only visual cue distinguishing built-ins from
-          * user customs in search results. */}
+          * user customs in search results. Kept OUTSIDE .rowActions — it is
+          * always visible, not a hover action. */}
         {ind.readonly && hasSearch && !isRenaming && (
           <span className={styles.defaultBadge} aria-label="default indicator">
             default
           </span>
         )}
+        {/* Hover/focus action cluster (custom indicators only). Wrapped in
+          * .rowActions which collapses to zero width at rest so the name spans
+          * the full row (no premature ellipsis) and expands on hover/focus. */}
         {!ind.readonly && !isRenaming && (
-          <button
-            className={styles.iconBtn}
-            onClick={(e) => { e.stopPropagation(); if (!locked) startRename(ind); }}
-            title={locked ? 'Locked — unlock to rename' : 'Rename'}
-            aria-label={`Rename ${ind.name}`}
-            disabled={locked}
-          >
-            ✎
-          </button>
-        )}
-        {!ind.readonly && !isRenaming && (
-          <button
-            className={styles.deleteBtn}
-            onClick={(e) => { e.stopPropagation(); if (!locked) onDelete(ind.id); }}
-            title={locked ? 'Locked — unlock to delete' : 'Delete'}
-            aria-label={`Delete ${ind.name}`}
-            disabled={locked}
-          >
-            ×
-          </button>
-        )}
-        {!ind.readonly && !isRenaming && onSetIndicatorLocked && (
-          <LockToggle
-            locked={locked}
-            onSetLocked={(next) => onSetIndicatorLocked(ind.id, next)}
-            entityLabel="indicator"
-          />
+          <div className={styles.rowActions}>
+            <button
+              className={styles.iconBtn}
+              onClick={(e) => { e.stopPropagation(); if (!locked) startRename(ind); }}
+              title={locked ? 'Locked — unlock to rename' : 'Rename'}
+              aria-label={`Rename ${ind.name}`}
+              disabled={locked}
+            >
+              ✎
+            </button>
+            <button
+              className={styles.deleteBtn}
+              onClick={(e) => { e.stopPropagation(); if (!locked) onDelete(ind.id); }}
+              title={locked ? 'Locked — unlock to delete' : 'Delete'}
+              aria-label={`Delete ${ind.name}`}
+              disabled={locked}
+            >
+              ×
+            </button>
+          </div>
         )}
       </div>
     );

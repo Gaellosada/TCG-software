@@ -125,8 +125,30 @@
   color: var(--accent);
 }
 
-/* Category chip select — hover-reveal, matches SignalsList pattern */
+/* Hover/focus action cluster (category chip + archive ×). Collapsed to ZERO
+ * width at rest so the name flexes to the full row width (no premature
+ * ellipsis); expands on :hover / :focus-within (keyboard). The wrapper — not
+ * the individual controls — owns the reveal, so they are genuinely zero-size
+ * at rest. */
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width 0.15s ease, opacity 0.15s ease;
+}
 
+.row:hover .rowActions,
+.row:focus-within .rowActions {
+  max-width: 240px;
+  opacity: 1;
+}
+
+/* Category chip select — lives inside .rowActions (which owns the reveal), so
+ * no per-chip opacity gate. */
 .rowCatSelect {
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
@@ -137,15 +159,8 @@
   padding: 1px 4px;
   height: 20px;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s;
   cursor: pointer;
   outline: none;
-}
-
-.row:hover .rowCatSelect,
-.row:focus-within .rowCatSelect {
-  opacity: 1;
 }
 
 /* Archive (delete) button — matches removeBtn from HoldingsList */
@@ -165,13 +180,7 @@
   line-height: 1;
   padding: 0;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s, border-color 0.15s, background 0.15s;
-}
-
-.row:hover .rowDeleteBtn,
-.row:focus-within .rowDeleteBtn {
-  opacity: 1;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
 .rowDeleteBtn:hover {
@@ -183,10 +192,9 @@
 /* Locked-row disabled controls — shared dim+not-allowed treatment, identical
  * to SignalsList / IndicatorsList (consistency rule). background:none kills the
  * UA grey-out, so without this the disabled category <select> and archive ×
- * read as fully enabled (accent/error on hover, pointer cursor). The opacity
- * rule is repeated under the hover/focus-within reveal selectors so it wins
- * over the `.row:hover … { opacity: 1 }` reveal (equal specificity → later
- * source order wins). The disabled hover colour neutralises the error glow. */
+ * read as fully enabled (accent/error on hover, pointer cursor) when the
+ * .rowActions wrapper reveals them. The disabled hover colour neutralises the
+ * error glow. */
 .rowCatSelect:disabled,
 .rowDeleteBtn:disabled {
   opacity: 0.4;
@@ -198,11 +206,4 @@
   color: var(--text-dim);
   border-color: transparent;
   background: none;
-}
-
-.row:hover .rowCatSelect:disabled,
-.row:focus-within .rowCatSelect:disabled,
-.row:hover .rowDeleteBtn:disabled,
-.row:focus-within .rowDeleteBtn:disabled {
-  opacity: 0.4;
 }

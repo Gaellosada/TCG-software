@@ -86,6 +86,16 @@ function SignalsList({
         data-testid={`signal-row-${sig.id}`}
         data-locked={locked ? 'true' : 'false'}
       >
+        {/* Lock toggle is the FIRST child so the padlock sits at the row's
+            left edge. It stays interactive even when locked — it's the only
+            way back to an editable state. Shared component (UI consistency). */}
+        {!isRenaming && onSetSignalLocked && (
+          <LockToggle
+            locked={locked}
+            entityLabel="signal"
+            onSetLocked={(next) => onSetSignalLocked(sig.id, next)}
+          />
+        )}
         {isRenaming ? (
           <input
             ref={inputRef}
@@ -103,57 +113,51 @@ function SignalsList({
         ) : (
           <span className={styles.rowName}>{sig.name}</span>
         )}
-        {/* Lock toggle stays interactive even when locked — it's the only
-            way back to an editable state. Shared component (UI consistency). */}
-        {!isRenaming && onSetSignalLocked && (
-          <LockToggle
-            locked={locked}
-            entityLabel="signal"
-            onSetLocked={(next) => onSetSignalLocked(sig.id, next)}
-          />
-        )}
+        {/* Hover/focus action cluster. Wrapped in .rowActions which collapses
+            to zero width at rest (so the name spans the full row, no premature
+            ellipsis) and expands on :hover / :focus-within. */}
         {!isRenaming && (
-          <button
-            type="button"
-            className={styles.iconBtn}
-            onClick={(e) => { e.stopPropagation(); if (!locked) startRename(sig); }}
-            title={locked ? 'Locked — unlock to rename' : 'Rename'}
-            aria-label={`Rename ${sig.name}`}
-            disabled={locked}
-          >
-            ✎
-          </button>
-        )}
-        {!isRenaming && onChangeItemCat && (
-          <select
-            className={styles.categoryChipSelect}
-            value={sig.category || category || 'RESEARCH'}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => {
-              e.stopPropagation();
-              onChangeItemCat(sig.id, e.target.value);
-            }}
-            aria-label={`Category for ${sig.name}`}
-            data-testid={`signal-cat-select-${sig.id}`}
-            title={locked ? 'Locked — unlock to move' : 'Move to category'}
-            disabled={locked}
-          >
-            {CATEGORIES.map((cat) => (
-              <option key={cat} value={cat}>{cat}</option>
-            ))}
-          </select>
-        )}
-        {!isRenaming && (
-          <button
-            type="button"
-            className={styles.deleteBtn}
-            onClick={(e) => { e.stopPropagation(); if (!locked) onDelete(sig.id); }}
-            title={locked ? 'Locked — unlock to delete' : 'Delete'}
-            aria-label={`Delete ${sig.name}`}
-            disabled={locked}
-          >
-            ×
-          </button>
+          <div className={styles.rowActions}>
+            <button
+              type="button"
+              className={styles.iconBtn}
+              onClick={(e) => { e.stopPropagation(); if (!locked) startRename(sig); }}
+              title={locked ? 'Locked — unlock to rename' : 'Rename'}
+              aria-label={`Rename ${sig.name}`}
+              disabled={locked}
+            >
+              ✎
+            </button>
+            {onChangeItemCat && (
+              <select
+                className={styles.categoryChipSelect}
+                value={sig.category || category || 'RESEARCH'}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => {
+                  e.stopPropagation();
+                  onChangeItemCat(sig.id, e.target.value);
+                }}
+                aria-label={`Category for ${sig.name}`}
+                data-testid={`signal-cat-select-${sig.id}`}
+                title={locked ? 'Locked — unlock to move' : 'Move to category'}
+                disabled={locked}
+              >
+                {CATEGORIES.map((cat) => (
+                  <option key={cat} value={cat}>{cat}</option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              className={styles.deleteBtn}
+              onClick={(e) => { e.stopPropagation(); if (!locked) onDelete(sig.id); }}
+              title={locked ? 'Locked — unlock to delete' : 'Delete'}
+              aria-label={`Delete ${sig.name}`}
+              disabled={locked}
+            >
+              ×
+            </button>
+          </div>
         )}
       </div>
     );

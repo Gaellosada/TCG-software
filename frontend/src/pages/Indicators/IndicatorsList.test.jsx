@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import IndicatorsList from './IndicatorsList';
+import styles from './IndicatorsList.module.css';
 
 afterEach(() => {
   cleanup();
@@ -375,6 +376,45 @@ describe('<IndicatorsList>', () => {
       // First lock button corresponds to u1 (unlocked), second to u2 (locked).
       fireEvent.click(lockBtns[0]);
       expect(onSetIndicatorLocked).toHaveBeenCalledWith('u1', true);
+    });
+
+    // Lock-on-left: for a custom indicator the LockToggle is the row's first
+    // child, appearing before the name in DOM order.
+    it('LockToggle is the first child of a custom indicator row, before the name', () => {
+      render(<IndicatorsList {...defaultProps({ indicators: LOCK_INDS })} />);
+      const row = screen.getByText('My RSI').closest('[role="button"]');
+      const lockBtn = within(row).getByTestId('lock-toggle-btn');
+      const name = within(row).getByText('My RSI');
+      const order = lockBtn.compareDocumentPosition(name);
+      expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(row.firstElementChild.contains(lockBtn)).toBe(true);
+    });
+
+    // The rename ✎ and delete × controls live inside a single .rowActions
+    // wrapper (which owns the collapse/hover-reveal) nested within the row.
+    it('rename and delete controls live inside a .rowActions wrapper within the row', () => {
+      render(<IndicatorsList {...defaultProps({ indicators: LOCK_INDS })} />);
+      const renameBtn = screen.getByLabelText('Rename My RSI');
+      const deleteBtn = screen.getByLabelText('Delete My RSI');
+      const wrapper = renameBtn.closest(`.${styles.rowActions}`);
+      expect(wrapper).not.toBeNull();
+      expect(wrapper.contains(renameBtn)).toBe(true);
+      expect(wrapper.contains(deleteBtn)).toBe(true);
+      const row = screen.getByText('My RSI').closest('[role="button"]');
+      expect(row.contains(wrapper)).toBe(true);
+    });
+
+    // Readonly (default-library) rows have NO lock and NO actions — just an
+    // empty left spacer so their names align column-wise with custom rows.
+    it('readonly indicator rows render a left spacer (no lock, no actions)', () => {
+      render(<IndicatorsList {...defaultProps({ indicators: LOCK_INDS })} />);
+      const row = screen.getByText('SMA').closest('[role="button"]');
+      // No lock toggle and no action buttons on a readonly row.
+      expect(within(row).queryByTestId('lock-toggle-btn')).toBeNull();
+      expect(within(row).queryByLabelText(/rename/i)).toBeNull();
+      expect(within(row).queryByLabelText(/delete/i)).toBeNull();
+      // The first child is the empty lock-slot spacer.
+      expect(row.firstElementChild.className).toContain(styles.lockSlot);
     });
   });
 });

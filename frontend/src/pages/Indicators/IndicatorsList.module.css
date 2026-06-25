@@ -204,6 +204,38 @@
   color: var(--accent);
 }
 
+/* Hover/focus action cluster (rename ✎ + delete ×) for custom indicators.
+ * Collapsed to ZERO width at rest so the name flexes to the full row width
+ * (no premature ellipsis); expands on :hover / :focus-within (keyboard). The
+ * wrapper — not the individual buttons — owns the reveal, so the buttons are
+ * genuinely zero-size at rest. */
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width 0.15s ease, opacity 0.15s ease;
+}
+
+.row:hover .rowActions,
+.row:focus-within .rowActions {
+  max-width: 240px;
+  opacity: 1;
+}
+
+/* Empty left spacer for readonly (default-library) rows that have no lock
+ * toggle — keeps custom and default row names aligned in the same left column.
+ * Width matches the LockToggle button (13px glyph + 2×2px padding). */
+.lockSlot {
+  flex-shrink: 0;
+  width: 17px;
+}
+
+/* .deleteBtn / .iconBtn live only inside .rowActions, which owns the reveal —
+ * so they carry no opacity gate of their own. */
 .deleteBtn {
   background: none;
   border: none;
@@ -212,14 +244,8 @@
   font-size: 0.95rem;
   line-height: 1;
   padding: 0 2px;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
+  transition: color 0.15s;
   flex-shrink: 0;
-}
-
-.row:hover .deleteBtn,
-.row:focus-within .deleteBtn {
-  opacity: 1;
 }
 
 .deleteBtn:hover {
@@ -227,7 +253,6 @@
 }
 
 .deleteBtn:focus-visible {
-  opacity: 1;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
   border-radius: 2px;
@@ -241,14 +266,8 @@
   font-size: 0.85rem;
   line-height: 1;
   padding: 0 2px;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
+  transition: color 0.15s;
   flex-shrink: 0;
-}
-
-.row:hover .iconBtn,
-.row:focus-within .iconBtn {
-  opacity: 1;
 }
 
 .iconBtn:hover {
@@ -256,7 +275,6 @@
 }
 
 .iconBtn:focus-visible {
-  opacity: 1;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
   border-radius: 2px;
@@ -265,10 +283,9 @@
 /* Locked-row disabled rename/delete controls — shared dim+not-allowed
  * treatment, identical to SignalsList / PersistedPortfolioPanel (consistency
  * rule). background:none kills the UA grey-out, so without this a disabled ✎/×
- * reads as fully enabled (accent/error on hover, pointer cursor). The opacity
- * rule is repeated under the hover/focus-within reveal selectors so it wins
- * over `.row:hover .iconBtn { opacity: 1 }` (equal specificity → later source
- * order wins). The disabled hover colour neutralises the accent/error glow. */
+ * reads as fully enabled (accent/error on hover, pointer cursor) when the
+ * .rowActions wrapper reveals it. The disabled hover colour neutralises the
+ * accent/error glow. */
 .iconBtn:disabled,
 .deleteBtn:disabled {
   opacity: 0.4;
@@ -279,13 +296,6 @@
 .iconBtn:disabled:hover,
 .deleteBtn:disabled:hover {
   color: var(--text-dim);
-}
-
-.row:hover .iconBtn:disabled,
-.row:focus-within .iconBtn:disabled,
-.row:hover .deleteBtn:disabled,
-.row:focus-within .deleteBtn:disabled {
-  opacity: 0.4;
 }
 
 .defaultBadge {
