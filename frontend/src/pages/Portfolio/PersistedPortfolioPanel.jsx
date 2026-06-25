@@ -92,6 +92,17 @@ function PersistedPortfolioPanel({
                 data-testid={`persisted-portfolio-row-${p.id}`}
                 data-selected={isSelected ? 'true' : 'false'}
               >
+                {/* Lock toggle is the FIRST child so the padlock sits at the
+                    row's left edge — same idiom as the Signals and Indicators
+                    lists. Rendered for every persisted portfolio when a lock
+                    handler is provided (portfolios have no readonly rows). */}
+                {onSetPortfolioLocked && (
+                  <LockToggle
+                    entityLabel="portfolio"
+                    locked={isLocked}
+                    onSetLocked={(next) => onSetPortfolioLocked(p.id, next)}
+                  />
+                )}
                 <button
                   type="button"
                   className={styles.rowName}
@@ -101,41 +112,36 @@ function PersistedPortfolioPanel({
                 >
                   {p.name}
                 </button>
-                {/* Render the shared LockToggle for every persisted portfolio
-                    when a lock handler is provided — same idiom as the Signals
-                    and Indicators lists (Indicators additionally excludes
-                    built-in/readonly rows, which portfolios don't have). */}
-                {onSetPortfolioLocked && (
-                  <LockToggle
-                    entityLabel="portfolio"
-                    locked={isLocked}
-                    onSetLocked={(next) => onSetPortfolioLocked(p.id, next)}
-                  />
-                )}
-                <select
-                  className={styles.rowCatSelect}
-                  value={p.category}
-                  onChange={(e) => onChangeItemCat(p.id, e.target.value)}
-                  aria-label={`Category for ${p.name}`}
-                  data-testid={`portfolio-cat-select-${p.id}`}
-                  title={isLocked ? 'Locked — unlock to move' : 'Move to category'}
-                  disabled={isLocked}
-                >
-                  {CATEGORIES.map((cat) => (
-                    <option key={cat} value={cat}>{cat}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className={styles.rowDeleteBtn}
-                  onClick={() => onArchive(p.id)}
-                  title={isLocked ? 'Locked — unlock to archive' : 'Archive portfolio'}
-                  aria-label={`Archive ${p.name}`}
-                  data-testid={`archive-portfolio-${p.id}`}
-                  disabled={isLocked}
-                >
-                  ×
-                </button>
+                {/* Hover/focus action cluster (category chip + archive ×).
+                    Wrapped in .rowActions which collapses to zero width at rest
+                    so the name spans the full row (no premature ellipsis) and
+                    expands on hover/focus. */}
+                <div className={styles.rowActions}>
+                  <select
+                    className={styles.rowCatSelect}
+                    value={p.category}
+                    onChange={(e) => onChangeItemCat(p.id, e.target.value)}
+                    aria-label={`Category for ${p.name}`}
+                    data-testid={`portfolio-cat-select-${p.id}`}
+                    title={isLocked ? 'Locked — unlock to move' : 'Move to category'}
+                    disabled={isLocked}
+                  >
+                    {CATEGORIES.map((cat) => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className={styles.rowDeleteBtn}
+                    onClick={() => onArchive(p.id)}
+                    title={isLocked ? 'Locked — unlock to archive' : 'Archive portfolio'}
+                    aria-label={`Archive ${p.name}`}
+                    data-testid={`archive-portfolio-${p.id}`}
+                    disabled={isLocked}
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
             );
           })

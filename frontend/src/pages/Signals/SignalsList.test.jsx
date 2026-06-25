@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import SignalsList from './SignalsList';
 import styles from './Signals.module.css';
 
@@ -81,14 +81,43 @@ describe('<SignalsList>', () => {
     expect(deleteBtn.className).toContain(styles.deleteBtn);
   });
 
-  it('iconBtn and deleteBtn are children of a .row element (enabling :focus-within)', () => {
+  // The action buttons now live inside a single .rowActions wrapper (which
+  // owns the collapse/hover-reveal) nested within .row. Assert that structure:
+  // the wrapper exists, carries the .rowActions class, contains the rename ✎,
+  // category chip and delete ×, and is itself a descendant of .row — preserving
+  // the :focus-within reveal contract (the wrapper expands on row focus-within).
+  it('action controls live inside a .rowActions wrapper within .row (focus-within reveal)', () => {
     render(<SignalsList {...defaultProps()} />);
     const renameBtn = screen.getByRole('button', { name: /rename signal alpha/i });
     const deleteBtn = screen.getByRole('button', { name: /delete signal alpha/i });
+    const catSelect = screen.getByTestId('signal-cat-select-s1');
     const row = screen.getByTestId('signal-row-s1');
     expect(row.className).toContain(styles.row);
-    expect(row.contains(renameBtn)).toBe(true);
-    expect(row.contains(deleteBtn)).toBe(true);
+
+    // The shared .rowActions wrapper is present and wraps all three actions.
+    const wrapper = renameBtn.closest(`.${styles.rowActions}`);
+    expect(wrapper).not.toBeNull();
+    expect(wrapper.className).toContain(styles.rowActions);
+    expect(wrapper.contains(renameBtn)).toBe(true);
+    expect(wrapper.contains(deleteBtn)).toBe(true);
+    expect(wrapper.contains(catSelect)).toBe(true);
+
+    // Wrapper is nested inside the row (so .row:focus-within reveals it).
+    expect(row.contains(wrapper)).toBe(true);
+  });
+
+  // Lock-on-left: the LockToggle padlock must be the FIRST child of the row,
+  // appearing in DOM order before the name span.
+  it('LockToggle is the first child of the row, before the name', () => {
+    render(<SignalsList {...defaultProps()} />);
+    const row = screen.getByTestId('signal-row-s1');
+    const lockBtn = within(row).getByTestId('lock-toggle-btn');
+    const name = within(row).getByText('Signal Alpha');
+    // Lock toggle precedes the name in document order.
+    const order = lockBtn.compareDocumentPosition(name);
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // And the lock's button is the row's first element child.
+    expect(row.firstElementChild.contains(lockBtn)).toBe(true);
   });
 
   it('double-clicking a row enters rename mode (input replaces iconBtn)', () => {
