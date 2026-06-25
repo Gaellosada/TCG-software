@@ -4,11 +4,12 @@ Covers CONTRACT.md §A.7:
 
 1. Shape — every key in ``response["streams"]`` has a matching key in
    ``response["rolls"]``; each value is a list.
-2. No roll when contract is stable (3-day window, same contract every
-   day) → ``rolls[label] == []``.
-3. Roll detected at ``contract_id`` transition — 3-day window where day
-   3 picks a new contract → exactly one roll event with correct
-   ``sold`` / ``bought`` metadata.
+2. No roll when the expiration is stable (3-day window, same expiration
+   every day) → ``rolls[label] == []`` — even if the strike churns from
+   delta/moneyness tracking (maturity-only roll semantics).
+3. Roll detected at an *expiration* change — 3-day window where day 3
+   picks a contract with a new expiration → exactly one roll event with
+   correct ``sold`` / ``bought`` metadata.
 4. Skip roll on missing chain — day 2 has no chain → no roll emitted.
 5. ``value`` field carries the plotted value (``values[i-1]`` for sold,
    ``values[i]`` for bought).
@@ -226,14 +227,89 @@ class TestDeriveRollsUnit:
         )
         assert rolls == []
 
+    # ── Maturity-only roll semantics (the fix) ─────────────────────────
+    #
+    # A roll marker fires ONLY when the selected contract's EXPIRATION
+    # changes (a true maturity roll). Same-expiration strike churn from
+    # delta/moneyness tracking is NOT a roll. See ``derive_rolls`` docstring.
+
+    def test_same_expiration_different_strike_no_roll(self):
+        """Delta/moneyness tracking re-picks a different strike on the same
+        expiration → that is NOT a roll (no maturity change)."""
+        exp = date(2024, 5, 17)
+        c_lo = _contract(strike=4500, expiration=exp)
+        c_hi = _contract(strike=4520, expiration=exp)  # strike moved, exp same
+        assert c_lo.contract_id != c_hi.contract_id  # ids differ ...
+        rolls = derive_rolls(
+            ["2024-04-01", "2024-04-02"],
+            [1.0, 1.1],
+            [c_lo, c_hi],
+        )
+        assert rolls == []  # ... but expiration is identical → no roll
+
+    def test_expiration_change_emits_exactly_one_roll(self):
+        """A genuine maturity change (different expiration) → exactly one
+        roll, regardless of whether the strike also changed."""
+        c_old = _contract(strike=4500, expiration=date(2024, 4, 19))
+        c_new = _contract(strike=4500, expiration=date(2024, 5, 17))
+        rolls = derive_rolls(
+            ["2024-04-18", "2024-04-19"],
+            [1.0, 5.0],
+            [c_old, c_new],
+        )
+        assert len(rolls) == 1
+        assert rolls[0]["sold"]["expiration"] == "2024-04-19"
+        assert rolls[0]["bought"]["expiration"] == "2024-05-17"
+
+    def test_hold_one_expiration_across_strike_churn_then_roll(self):
+        """Realistic sequence: hold one expiration across several daily
+        strike re-selections, then roll to the next expiration → exactly
+        ONE roll, fired at the expiration change (NOT one per strike move)."""
+        exp1 = date(2024, 5, 17)
+        exp2 = date(2024, 6, 21)
+        # Days 1-4: same expiration, strike drifts each day (delta tracking).
+        d1 = _contract(strike=4500, expiration=exp1)
+        d2 = _contract(strike=4510, expiration=exp1)
+        d3 = _contract(strike=4495, expiration=exp1)
+        d4 = _contract(strike=4525, expiration=exp1)
+        # Day 5: rolled to the next expiration.
+        d5 = _contract(strike=4525, expiration=exp2)
+        dates = [
+            "2024-04-01",
+            "2024-04-02",
+            "2024-04-03",
+            "2024-04-04",
+            "2024-04-05",
+        ]
+        values = [1.0, 1.1, 1.05, 1.2, 6.0]
+        contracts = [d1, d2, d3, d4, d5]
+        rolls = derive_rolls(dates, values, contracts)
+        assert len(rolls) == 1, (
+            "exactly one roll at the expiration change, not one per "
+            f"strike re-selection (got {len(rolls)})"
+        )
+        ev = rolls[0]
+        assert ev["date"] == "2024-04-05"
+        assert ev["sold"]["expiration"] == exp1.isoformat()
+        assert ev["bought"]["expiration"] == exp2.isoformat()
+        # contract_id of each side is still carried for display.
+        assert ev["sold"]["contract_id"] == d4.contract_id
+        assert ev["bought"]["contract_id"] == d5.contract_id
+
+    def test_none_either_side_still_skips_roll_under_new_semantics(self):
+        """The None-on-either-side skip is preserved by the fix."""
+        c1 = _contract(strike=4500, expiration=date(2024, 4, 19))
+        c2 = _contract(strike=4500, expiration=date(2024, 5, 17))
+        assert derive_rolls(["d0", "d1"], [1.0, 5.0], [None, c2]) == []
+        assert derive_rolls(["d0", "d1"], [1.0, 5.0], [c1, None]) == []
+        assert derive_rolls(["d0", "d1"], [1.0, 5.0], [None, None]) == []
+
     def test_root_is_root_underlying_not_collection(self):
         """``root`` is ``OptionContractDoc.root_underlying``
         (``"IND_SP_500"``), NOT ``collection`` (``"OPT_SP_500"``)."""
         c1 = _contract(strike=4500, expiration=date(2024, 4, 19))
         c2 = _contract(strike=4500, expiration=date(2024, 5, 17))
-        rolls = derive_rolls(
-            ["2024-04-18", "2024-04-19"], [1.0, 5.0], [c1, c2]
-        )
+        rolls = derive_rolls(["2024-04-18", "2024-04-19"], [1.0, 5.0], [c1, c2])
         assert rolls[0]["sold"]["root"] == "IND_SP_500"
         assert rolls[0]["bought"]["root"] == "IND_SP_500"
 
@@ -444,9 +520,7 @@ def app_with_materialise_stub(monkeypatch):
         labels = [label for label, _ref in refs_with_labels]
         result: dict = {}
         for label in labels:
-            dates_arr = np.array(
-                [20240417, 20240418, 20240419], dtype=np.int64
-            )
+            dates_arr = np.array([20240417, 20240418, 20240419], dtype=np.int64)
             values = np.array(state.get("values", [1.0, 1.1, 5.0]), dtype=np.float64)
             diagnostics = state.get("diagnostics", [None, None, None])
             contracts = state.get("contracts", [None, None, None])
@@ -549,6 +623,22 @@ class TestEndpointRollsShape:
                 "value",
             }
 
+    async def test_no_roll_on_same_expiration_strike_change(self, stub_client):
+        """End-to-end: same expiration, strike re-selected each day
+        (delta/moneyness tracking) → NO roll in the response. The marker
+        cadence tracks maturity rolls only, not daily strike churn."""
+        client, state = stub_client
+        exp = date(2024, 5, 17)
+        c1 = _contract(strike=4500, expiration=exp)
+        c2 = _contract(strike=4515, expiration=exp)  # strike moved, exp same
+        c3 = _contract(strike=4490, expiration=exp)  # strike moved again
+        state["contracts"] = [c1, c2, c3]
+        state["values"] = [1.0, 1.1, 1.05]
+        body = _request_body([_stream_entry("my_mid")])
+        resp = await client.post("/api/options/stream", json=body)
+        data = resp.json()
+        assert data["rolls"]["my_mid"] == []
+
     async def test_skip_roll_on_missing_chain(self, stub_client):
         """Day 2 has no contract (None) → no roll emitted on day 2 nor
         day 3 (day 3 transitions from None which is not a roll)."""
@@ -633,9 +723,7 @@ class TestBulkAndLegacyPathSymmetry:
         )
         # Convert NaN → None for parity with ``nan_safe_floats`` at the
         # API boundary.
-        plotted = [
-            float(v) if not np.isnan(v) else None for v in values.tolist()
-        ]
+        plotted = [float(v) if not np.isnan(v) else None for v in values.tolist()]
         return derive_rolls(
             [d1.isoformat(), d2.isoformat()],
             plotted,
@@ -643,9 +731,7 @@ class TestBulkAndLegacyPathSymmetry:
         )
 
     async def test_bulk_strike_emits_roll(self):
-        rolls = await self._drive(
-            selection=ByStrike(strike=4500.0), use_bulk=True
-        )
+        rolls = await self._drive(selection=ByStrike(strike=4500.0), use_bulk=True)
         assert len(rolls) == 1
         self._expected_roll_shape(rolls[0])
         assert rolls[0]["sold"]["value"] == pytest.approx(1.1)
@@ -662,9 +748,7 @@ class TestBulkAndLegacyPathSymmetry:
         assert rolls[0]["bought"]["value"] == pytest.approx(5.0)
 
     async def test_legacy_path_emits_roll(self):
-        rolls = await self._drive(
-            selection=ByStrike(strike=4500.0), use_bulk=False
-        )
+        rolls = await self._drive(selection=ByStrike(strike=4500.0), use_bulk=False)
         assert len(rolls) == 1
         self._expected_roll_shape(rolls[0])
         assert rolls[0]["sold"]["value"] == pytest.approx(1.1)
@@ -673,16 +757,12 @@ class TestBulkAndLegacyPathSymmetry:
     async def test_all_three_paths_produce_identical_structure(self):
         """All three paths produce the same number of rolls and the same
         keys on each side."""
-        rolls_a = await self._drive(
-            selection=ByStrike(strike=4500.0), use_bulk=True
-        )
+        rolls_a = await self._drive(selection=ByStrike(strike=4500.0), use_bulk=True)
         rolls_b = await self._drive(
             selection=ByMoneyness(target_K_over_S=1.0, tolerance=0.05),
             use_bulk=True,
         )
-        rolls_c = await self._drive(
-            selection=ByStrike(strike=4500.0), use_bulk=False
-        )
+        rolls_c = await self._drive(selection=ByStrike(strike=4500.0), use_bulk=False)
         assert len(rolls_a) == len(rolls_b) == len(rolls_c) == 1
         for r in (rolls_a[0], rolls_b[0], rolls_c[0]):
             assert set(r.keys()) == {"date", "sold", "bought"}

@@ -941,8 +941,10 @@ async def materialise_streams(
         }
         # ``rolls`` is ALWAYS present in the response — every key in
         # ``streams`` has a corresponding key in ``rolls`` (possibly
-        # an empty list).  Derived from the per-date contract identity
-        # via ``derive_rolls``; see CONTRACT.md §A.3.
+        # an empty list).  A roll marker is emitted only when the
+        # selected contract's *expiration* changes (a true maturity
+        # roll) — NOT on same-expiration strike re-selection — via
+        # ``derive_rolls``; see CONTRACT.md §A.3.
         rolls_payload[label] = derive_rolls(dates_iso, nan_safe_values, contracts)
 
     return {
