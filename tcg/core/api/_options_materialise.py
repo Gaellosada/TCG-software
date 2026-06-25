@@ -212,12 +212,27 @@ def derive_rolls(
     values: list[float | None],
     contracts: list[OptionContractDoc | None],
 ) -> list[dict[str, Any]]:
-    """Derive roll events from a per-date contract-identity array.
+    """Derive roll events from a per-date contract array.
 
     A roll event is emitted on date ``dates[i]`` when both
     ``contracts[i-1]`` and ``contracts[i]`` are non-None AND their
-    ``contract_id`` differs.  This is the canonical guard: same
-    contract_id ⇒ no roll; missing chain on either side ⇒ no roll.
+    ``expiration`` differs — i.e. a true *maturity* roll.  Within one
+    stream the root/type/cycle are fixed, so ``expiration`` is the
+    maturity discriminator.  Same-expiration strike re-selection (the
+    daily strike churn produced by delta/moneyness tracking) is NOT a
+    roll and emits no marker.  Missing chain on either side ⇒ no roll.
+    (With no ``cycle`` filter the chain may mix cycles — e.g. a weekly and
+    a monthly contract sharing a settlement Friday; two consecutive
+    selections on the SAME ``expiration`` date are treated as the same
+    maturity and emit no marker even if their ``contract_id``/cycle
+    differ, since a roll tracks maturity, not contract identity.)
+
+    The roll cadence is governed by the maturity target (and
+    ``roll_offset``), which is what changes the selected expiration; it
+    is no longer driven by per-date strike identity.  For ByStrike this
+    is unchanged behaviour (a fixed strike only changes ``contract_id``
+    when the expiration rolls anyway).  Each event's ``sold``/``bought``
+    payload still carries the per-side ``contract_id`` for display.
 
     Parameters
     ----------
@@ -248,7 +263,11 @@ def derive_rolls(
         curr = contracts[i]
         if prev is None or curr is None:
             continue
-        if prev.contract_id == curr.contract_id:
+        # Maturity-only roll: a marker fires only when the *expiration*
+        # changes, not on same-expiration strike re-selection (delta/
+        # moneyness tracking churns the strike — hence contract_id —
+        # nearly every trading day, which is not a roll).
+        if prev.expiration == curr.expiration:
             continue
         out.append(
             {
