@@ -13,6 +13,12 @@ applies the exact synthetic-price conversion used by
     aggregated_pnl = Σ_positions pos.realized_pnl
     synthetic      = 100.0 * (1.0 + aggregated_pnl)
 
+The signal backtest COMPOUNDS (Issue #4): per-input ``realized_pnl`` are
+cumulative contributions whose sum is ``equity_ratio - 1``, so this
+transform yields the compounded equity ``100 · equity_ratio``. The
+expectations below therefore compound bar-to-bar (``Π(1 + pos·r)``), not
+the old additive ``Σ pos·r``.
+
 If anyone reintroduces the pre-v4 100× scaling (where ``weight=100``
 over-amplified the underlying return by a factor of 100), these
 assertions fail. That was the B3 review's concrete request: pin the
@@ -41,13 +47,11 @@ from tcg.types.signal import (
 
 
 # Five consecutive business days — the same grid used across engine tests.
-DATES = np.array(
-    [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
-)
+DATES = np.array([20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64)
 
 
 def _make_fetcher(
-    by_key: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]]
+    by_key: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]],
 ) -> Callable:
     async def fetch(instrument, field):
         if isinstance(instrument, InstrumentSpot):
@@ -144,20 +148,11 @@ async def test_weight_100_full_long_synthetic_mirrors_underlying_return():
     # synthetic[0] == 100.0 by construction.
     assert synthetic[0] == pytest.approx(100.0)
 
-    # Underlying cumulative simple return from bar 0 to bar t:
-    #   u(t) = (closes[t] - closes[0]) / closes[0]
-    # Engine realized_pnl is a cumulative sum of per-step returns
-    #   step(t) = position[t-1] * (closes[t] - closes[t-1]) / closes[t-1]
-    # For position==1.0 this is the log-of-product-ish sum-of-simple-returns
-    # which equals Σ_{k=1..t} (closes[k]-closes[k-1])/closes[k-1]. We
-    # compare against that expected cumulative-sum explicitly.
-    expected_cum_simple = np.zeros_like(closes)
-    for t in range(1, len(closes)):
-        expected_cum_simple[t] = expected_cum_simple[t - 1] + (
-            closes[t] - closes[t - 1]
-        ) / closes[t - 1]
-    expected_synthetic = 100.0 * (1.0 + expected_cum_simple)
-
+    # The signal backtest COMPOUNDS (Issue #4): for a fully-long single
+    # input the synthetic equity is the underlying COMPOUNDED bar-to-bar:
+    #   equity(t) = 100 · Π_{k=1..t} (1 + (closes[k]-closes[k-1])/closes[k-1])
+    # i.e. it tracks the underlying's own price ratio (100·closes[t]/closes[0]).
+    expected_synthetic = 100.0 * (closes / closes[0])
     np.testing.assert_allclose(synthetic, expected_synthetic, rtol=1e-12, atol=1e-12)
 
     # Critical regression pin: the one-bar-move case. A +1% move on
@@ -185,13 +180,13 @@ async def test_weight_minus_100_full_short_synthetic_inverts_underlying_return()
 
     synthetic = _synthetic_from_result(result)
 
-    # Expected: sign-flipped cumulative simple return.
-    expected_cum_simple = np.zeros_like(closes)
+    # Compounded (Issue #4): each bar multiplies equity by (1 + pos·r) =
+    # (1 - r) for a full short. Expected = 100·Π(1 - r_k).
+    expected_synthetic = np.empty_like(closes)
+    expected_synthetic[0] = 100.0
     for t in range(1, len(closes)):
-        expected_cum_simple[t] = expected_cum_simple[t - 1] - (
-            closes[t] - closes[t - 1]
-        ) / closes[t - 1]
-    expected_synthetic = 100.0 * (1.0 + expected_cum_simple)
+        r = (closes[t] - closes[t - 1]) / closes[t - 1]
+        expected_synthetic[t] = expected_synthetic[t - 1] * (1.0 - r)
 
     np.testing.assert_allclose(synthetic, expected_synthetic, rtol=1e-12, atol=1e-12)
 
@@ -216,14 +211,75 @@ async def test_weight_50_half_long_synthetic_is_half_the_return():
 
     synthetic = _synthetic_from_result(result)
 
-    expected_cum_simple = np.zeros_like(closes)
+    # Compounded (Issue #4): each bar multiplies equity by (1 + 0.5·r).
+    # Expected = 100·Π(1 + 0.5·r_k).
+    expected_synthetic = np.empty_like(closes)
+    expected_synthetic[0] = 100.0
     for t in range(1, len(closes)):
-        expected_cum_simple[t] = expected_cum_simple[t - 1] + 0.5 * (
-            closes[t] - closes[t - 1]
-        ) / closes[t - 1]
-    expected_synthetic = 100.0 * (1.0 + expected_cum_simple)
+        r = (closes[t] - closes[t - 1]) / closes[t - 1]
+        expected_synthetic[t] = expected_synthetic[t - 1] * (1.0 + 0.5 * r)
 
     np.testing.assert_allclose(synthetic, expected_synthetic, rtol=1e-12, atol=1e-12)
 
     # One-bar pin.
     assert synthetic[1] == pytest.approx(100.5, abs=1e-10)
+
+
+@pytest.mark.asyncio
+async def test_signal_leg_synthetic_equals_signal_compounded_equity():
+    """Parity (Issue #4): the portfolio signal-leg synthetic (start 100) must
+    equal the signal's OWN compounded equity ``100 · equity_ratio``.
+
+    This locks the ``core/api/portfolio._evaluate_signal_leg`` consumption to
+    the engine's compounded curve: a portfolio holding a signal sees exactly
+    the equity the Signals page shows. Uses a re-entry path (enter, double,
+    exit, re-enter) so a non-compounding regression would diverge.
+    """
+    # 100 → 200 (double) → 150 → 200 (re-enter, +33%) → 400.
+    closes = np.array([100.0, 200.0, 150.0, 200.0, 400.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    enter = CompareCondition(
+        op="lt",
+        lhs=InstrumentOperand(input_id="X", field="close"),
+        rhs=ConstantOperand(value=160.0),
+    )
+    exit_c = CompareCondition(
+        op="ge",
+        lhs=InstrumentOperand(input_id="X", field="close"),
+        rhs=ConstantOperand(value=200.0),
+    )
+    signal = Signal(
+        id="s_parity",
+        name="parity",
+        inputs=(INPUT_X,),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="E",
+                    name="Entry",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(enter,),
+                ),
+            ),
+            exits=(
+                Block(
+                    id="X1",
+                    input_id="X",
+                    weight=0.0,
+                    conditions=(exit_c,),
+                    target_entry_block_names=("Entry",),
+                ),
+            ),
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+
+    synthetic = _synthetic_from_result(result)
+    # Portfolio leg synthetic (start 100) == signal's compounded equity.
+    np.testing.assert_allclose(
+        synthetic, 100.0 * result.equity_ratio, rtol=1e-12, atol=1e-12
+    )
+    # And it matches the worked numbers: re-entry redeploys accrued $200.
+    assert synthetic[-1] == pytest.approx(266.6666666, rel=1e-9)

@@ -219,10 +219,18 @@ def _derive_returns_from_equity(
     n = len(equity)
     returns = np.full(n, np.nan, dtype=np.float64)
     if n > 1:
-        if return_type == "normal":
-            returns[1:] = (equity[1:] - equity[:-1]) / equity[:-1]
-        else:  # log
-            returns[1:] = np.log(equity[1:] / equity[:-1])
+        # A zero equity bar (a fully-wiped leg / wiped portfolio, now more
+        # reachable via the signal-backtest wipeout clamp) makes a single
+        # return non-finite (``0/0`` → NaN, or ``ln(0/0)``). The NaN is
+        # tolerated and sanitized downstream; silence the expected
+        # divide/invalid warning rather than spam logs — matches
+        # ``compute_daily_returns`` above. Values are UNCHANGED (errstate
+        # only suppresses the warning, not the IEEE-754 result).
+        with np.errstate(invalid="ignore", divide="ignore"):
+            if return_type == "normal":
+                returns[1:] = (equity[1:] - equity[:-1]) / equity[:-1]
+            else:  # log
+                returns[1:] = np.log(equity[1:] / equity[:-1])
     return returns
 
 

@@ -1495,3 +1495,343 @@ async def test_multi_target_exit_closes_two_entries_cross_input():
     x = ev[("XALL", "exit")]
     assert x.input_id == "X"
     assert set(x.target_entry_block_names) == {"EntryX", "EntryY"}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Issue #4 — the signal backtest must COMPOUND (reinvest accrued equity),
+# not sum position-weighted simple returns.
+#
+# Both consumers turn the engine's per-input ``realized_pnl`` into an equity
+# curve the same way:
+#   * frontend  ``signalStatsInputs.js``      → equity = capital * (1 + pnl)
+#   * portfolio ``api/portfolio.py`` leg path → synthetic = 100 * (1 + pnl)
+# where ``pnl`` is the SUM across inputs of each input's ``realized_pnl``
+# (``aggregateRealizedPnl`` / the ``aggregated_pnl`` loop). This helper
+# reproduces that exact transform so the assertion targets the curve the
+# user actually sees, and is what ``statistics.py`` derives every stat from.
+# ──────────────────────────────────────────────────────────────────────────
+def _consumer_equity(result, capital: float) -> list[float]:
+    """Equity curve as the FE / portfolio-leg build it: capital*(1 + Σ pnl)."""
+    T = len(result.index)
+    agg = np.zeros(T, dtype=np.float64)
+    for p in result.positions:
+        agg += p.realized_pnl
+    return [float(capital * (1.0 + v)) for v in agg]
+
+
+@pytest.mark.asyncio
+async def test_signal_backtest_compounds_single_long_hold():
+    """A single 100%-long hold whose underlying DOUBLES over the window must
+    end at 2x initial equity (the hold compounds bar-to-bar).
+
+    Underlying 100 → 150 → 200 (a clean doubling, two steps of +50% then
+    +33.33%). Fully long and latched from bar 0 (always-true entry), so the
+    position is 1.0 on every bar.
+
+      * compounded:  100 * 1.50 * 1.3333…       = 200.00  (price doubled)
+      * current cumsum bug: 100 * (1 + 0.50 + 0.3333…) = 183.33
+
+    FAILS today because ``signal_exec`` builds ``cumsum`` of per-bar
+    position-weighted simple returns instead of compounding them.
+    """
+    closes = np.array([100.0, 150.0, 200.0])
+    dates = DATES[:3]
+    fetcher = _make_fetcher({("INDEX", "SPX"): (dates, closes)})
+
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="E",
+                    name="Entry",
+                    input_id="X",
+                    weight=100.0,  # full long
+                    conditions=(
+                        CompareCondition(
+                            op="gt",
+                            lhs=InstrumentOperand(input_id="X", field="close"),
+                            rhs=ConstantOperand(value=0.0),  # always true
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # Sanity: fully long the whole window.
+    assert list(result.positions[0].values) == pytest.approx([1.0, 1.0, 1.0])
+
+    equity = _consumer_equity(result, capital=100.0)
+    # The underlying doubled → equity must double.
+    assert equity[-1] == pytest.approx(200.0), (
+        f"single long hold did not compound: got {equity[-1]:.4f}, "
+        f"expected 200.0 (the additive-cumsum bug yields 183.33)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_backtest_compounds_reentry_redeploys_equity():
+    """Enter 100% long, let it DOUBLE, exit, then RE-ENTER 100% long: the
+    re-entry must deploy the ACCRUED equity (~$200), not a fixed $100 notional.
+
+    Prices 100 → 200 → 150 → 200 → 400 with an always-on entry (close<160)
+    and a targeted exit (close>=200) produce the position timeline
+    [1, 0, 1, 0, 0]:
+      * bar 0→1: long, +100%  → equity doubles 100 → 200
+      * exit; flat over 1→2
+      * bar 2→3: RE-ENTER long, +33.33%
+      * exit
+
+    Reinvesting the accrued $200 at +33.33% gives 200 * 1.3333… = $266.67.
+    The current cumsum bug adds +33.33% of the INITIAL $100 (= +$33.33),
+    yielding $233.33 — exactly Gael's report ("re-enters with $100 not $200").
+    """
+    closes = np.array([100.0, 200.0, 150.0, 200.0, 400.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (DATES, closes)})
+
+    enter = CompareCondition(
+        op="lt",
+        lhs=InstrumentOperand(input_id="X", field="close"),
+        rhs=ConstantOperand(value=160.0),  # true at bars 0 (100) and 2 (150)
+    )
+    exit_c = CompareCondition(
+        op="ge",
+        lhs=InstrumentOperand(input_id="X", field="close"),
+        rhs=ConstantOperand(value=200.0),  # clears the latch at bars 1 and 3
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="E",
+                    name="Entry",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(enter,),
+                ),
+            ),
+            exits=(
+                Block(
+                    id="X1",
+                    input_id="X",
+                    weight=0.0,
+                    conditions=(exit_c,),
+                    target_entry_block_names=("Entry",),
+                ),
+            ),
+        ),
+    )
+
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # Sanity: genuine exit-then-reenter timeline (flat in the middle).
+    assert list(result.positions[0].values) == pytest.approx([1.0, 0.0, 1.0, 0.0, 0.0])
+
+    equity = _consumer_equity(result, capital=100.0)
+    # After the first leg the curve has doubled to $200.
+    assert equity[1] == pytest.approx(200.0)
+    # The re-entry must compound off $200, not $100.
+    assert equity[-1] == pytest.approx(266.6666666, rel=1e-6), (
+        f"re-entry did not redeploy accrued equity: got {equity[-1]:.4f}, "
+        f"expected 266.67 (the cumsum bug yields 233.33)"
+    )
+
+
+def _always_long(input_id: str, weight: float = 100.0) -> Block:
+    """Entry that latches on bar 0 and stays open (cond ``close > 0``)."""
+    return Block(
+        id=f"E_{input_id}",
+        name=f"Entry_{input_id}",
+        input_id=input_id,
+        weight=weight,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id=input_id, field="close"),
+                rhs=ConstantOperand(value=0.0),
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_backtest_compounds_multi_input_net_exposure():
+    """Two inputs BOTH fully long (net exposure 2.0) must compound as ONE
+    account on the NETTED per-bar return — never cumprod-per-input-then-sum.
+
+    X: 100→110→121 (+10%/+10%), Y: 50→60→72 (+20%/+20%); both latched bar 0.
+      net_return = [0, 0.10+0.20, 0.10+0.20] = [0, 0.30, 0.30]
+      equity     = 100 · 1.30 · 1.30 = 169.00
+    The (wrong) per-input-cumprod-then-sum would give 165.00 — the test pins
+    169 AND asserts it differs from 165, locking the single-account invariant.
+    """
+    dates = DATES[:3]
+    spx = np.array([100.0, 110.0, 121.0])
+    ndx = np.array([50.0, 60.0, 72.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (dates, spx), ("INDEX", "NDX"): (dates, ndx)}
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(entries=(_always_long("X"), _always_long("Y"))),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    assert list(result.positions[0].values) == pytest.approx([1.0, 1.0, 1.0])
+    assert list(result.positions[1].values) == pytest.approx([1.0, 1.0, 1.0])
+
+    equity = _consumer_equity(result, capital=100.0)
+    assert equity[-1] == pytest.approx(169.0), (
+        f"net-exposure compounding wrong: got {equity[-1]:.4f}, expected 169.0"
+    )
+    # Lock the invariant: must NOT equal the per-input-cumprod-then-sum form.
+    assert equity[-1] != pytest.approx(165.0), (
+        "equity matches cumprod-per-input-then-sum (165.0) — the engine must "
+        "net per-bar returns into ONE account, not compound inputs separately"
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_backtest_compounds_single_short():
+    """A 100% short whose underlying RISES +10%/+10% must DECAY multiplicatively
+    to 100·0.9·0.9 = 81.0 (signed position, no separate short branch)."""
+    dates = DATES[:3]
+    closes = np.array([100.0, 110.0, 121.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (dates, closes)})
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(_always_long("X", weight=-100.0),)),  # full short
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    assert list(result.positions[0].values) == pytest.approx([-1.0, -1.0, -1.0])
+
+    equity = _consumer_equity(result, capital=100.0)
+    assert equity[-1] == pytest.approx(81.0), (
+        f"short did not compound (1 + pos·r): got {equity[-1]:.4f}, expected 81.0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_backtest_compounds_mixed_long_short():
+    """50% long X + 50% short Y, compounding via signed net exposure.
+
+    X: 100→120→120 (+20%, flat); Y: 100→100→80 (flat, −20%).
+      net_return = [0, 0.5·0.20 + (−0.5)·0, 0.5·0 + (−0.5)·(−0.20)] = [0, 0.10, 0.10]
+      equity     = 100 · 1.10 · 1.10 = 121.00
+    """
+    dates = DATES[:3]
+    spx = np.array([100.0, 120.0, 120.0])
+    ndx = np.array([100.0, 100.0, 80.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (dates, spx), ("INDEX", "NDX"): (dates, ndx)}
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(
+            entries=(_always_long("X", weight=50.0), _always_long("Y", weight=-50.0))
+        ),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    equity = _consumer_equity(result, capital=100.0)
+    assert equity[-1] == pytest.approx(121.0), (
+        f"mixed long/short compounding wrong: got {equity[-1]:.4f}, expected 121.0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_backtest_wipeout_clamps_at_zero():
+    """A leveraged short whose bar return makes ``1 + net_return ≤ 0`` must
+    clamp equity to 0 and KEEP it at 0 (ruin), never go negative or NaN.
+
+    200% short (two −100% blocks on X), X jumps 100→160→200.
+      bar 1: net_return = −2·0.60 = −1.20 → 1 + net = −0.20 → wiped → equity 0
+      bar 2: stays 0
+    """
+    dates = DATES[:3]
+    closes = np.array([100.0, 160.0, 200.0])
+    fetcher = _make_fetcher({("INDEX", "SPX"): (dates, closes)})
+    # Two independent −100% short entries on X → net position −2.0.
+    short_a = Block(
+        id="SA",
+        name="ShortA",
+        input_id="X",
+        weight=-100.0,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id="X", field="close"),
+                rhs=ConstantOperand(value=0.0),
+            ),
+        ),
+    )
+    short_b = Block(
+        id="SB",
+        name="ShortB",
+        input_id="X",
+        weight=-100.0,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id="X", field="close"),
+                rhs=ConstantOperand(value=0.0),
+            ),
+        ),
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X,),
+        rules=SignalRules(entries=(short_a, short_b)),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    assert list(result.positions[0].values) == pytest.approx([-2.0, -2.0, -2.0])
+
+    equity = _consumer_equity(result, capital=100.0)
+    assert all(np.isfinite(equity)), f"equity went non-finite on wipeout: {equity}"
+    assert equity[1] == pytest.approx(0.0), (
+        f"equity should wipe to 0 at bar 1, got {equity[1]}"
+    )
+    assert equity[2] == pytest.approx(0.0), (
+        f"equity must STAY 0 after ruin, got {equity[2]}"
+    )
+    assert min(equity) >= 0.0, f"equity went negative: {equity}"
+
+
+@pytest.mark.asyncio
+async def test_signal_backtest_equity_ratio_reconciles_with_contributions():
+    """The engine exposes a capital-free ``equity_ratio`` (starts at 1.0) and
+    per-input ``realized_pnl`` are cumulative CONTRIBUTIONS whose sum reconciles
+    EXACTLY to ``equity_ratio − 1`` (decision #5 invariant)."""
+    dates = DATES[:3]
+    spx = np.array([100.0, 110.0, 121.0])
+    ndx = np.array([50.0, 60.0, 72.0])
+    fetcher = _make_fetcher(
+        {("INDEX", "SPX"): (dates, spx), ("INDEX", "NDX"): (dates, ndx)}
+    )
+    signal = Signal(
+        id="s",
+        name="s",
+        inputs=(INPUT_X, INPUT_Y),
+        rules=SignalRules(entries=(_always_long("X"), _always_long("Y"))),
+    )
+    result = await evaluate_signal(signal, indicators={}, fetcher=fetcher)
+    # New field present and capital-free (starts at 1.0).
+    assert result.equity_ratio[0] == pytest.approx(1.0)
+    assert result.equity_ratio[-1] == pytest.approx(1.69)
+    # Reconciliation: Σ_i realized_pnl_i[t] == equity_ratio[t] − 1 at every bar.
+    T = len(result.index)
+    agg = np.zeros(T)
+    for p in result.positions:
+        agg += p.realized_pnl
+    np.testing.assert_allclose(agg, result.equity_ratio - 1.0, rtol=1e-12, atol=1e-12)

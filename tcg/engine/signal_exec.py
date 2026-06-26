@@ -54,7 +54,7 @@ label, optional label → input_id overrides, params_override merge).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Literal
 
 import numpy as np
@@ -715,6 +715,56 @@ def _eval_block_activity(
     return active, any_nan
 
 
+def _compound_clamped(
+    net_step: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Compound a per-step net return into a wipeout-clamped equity ratio.
+
+    Given ``net_step`` of length ``T-1`` (the netted per-bar return over each
+    step), return ``(equity_ratio, step_scale)`` where:
+
+    * ``equity_ratio`` (length ``T``) starts at 1.0 and multiplies by
+      ``1 + net_step[s]`` each step. Ruin is ABSORBING: as soon as a step's
+      growth factor is ``<= 0`` (a leveraged/short bar that would take equity
+      to zero or below), the ratio is pinned to ``0.0`` for that bar and every
+      bar after — it never goes negative and never recovers. NaN/inf factors
+      (should not occur — steps are guarded upstream) are treated the same as
+      ``<= 0`` so the curve stays finite.
+    * ``step_scale`` (length ``T-1``) is the per-step weight in ``[0, 1]`` that
+      caps the loss on the wiping bar so per-input cumulative CONTRIBUTIONS
+      (built as ``Σ step_scale[s]·equity_ratio[s]·contrib_step_i[s]``)
+      reconcile to ``equity_ratio - 1`` (to floating-point tolerance). It is
+      1.0 before any wipeout, ``-1/net_step[s*]`` on the wiping step ``s*`` (so
+      the whole-account loss is the remaining equity, i.e. -100% of it), and
+      0.0 afterwards.
+
+    See section 6 of :func:`evaluate_signal` for how the two are consumed.
+    """
+    n = net_step.size
+    T = n + 1
+    ratio = np.ones(T, dtype=np.float64)
+    step_scale = np.ones(n, dtype=np.float64)
+    factors = 1.0 + net_step
+    wiped = False
+    for s in range(n):
+        if wiped:
+            ratio[s + 1] = 0.0
+            step_scale[s] = 0.0
+            continue
+        f = factors[s]
+        if not np.isfinite(f) or f <= 0.0:
+            # The bar's full netted loss would overshoot ruin; cap it so the
+            # account loses exactly its remaining equity (factor → 0). When
+            # ``net_step[s] == 0`` the factor can only be ``<= 0`` via a
+            # non-finite value; treat that as a full wipe (scale 0).
+            ratio[s + 1] = 0.0
+            step_scale[s] = (-1.0 / net_step[s]) if net_step[s] != 0.0 else 0.0
+            wiped = True
+        else:
+            ratio[s + 1] = ratio[s] * f
+    return ratio, step_scale
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -792,6 +842,16 @@ class SignalEvalResult:
     indicator_series: tuple[IndicatorSeriesResult, ...]
     diagnostics: dict[str, object]
     trades: tuple[Trade, ...] = ()
+    # Capital-free compounded equity curve for the whole signal, treated as
+    # ONE account on the net per-bar exposure: ``equity_ratio[0] == 1.0`` and
+    # ``equity_ratio[t] = Π_{s<=t}(1 + Σ_i pos_i[s-1]·r_i[s])`` clamped at 0
+    # (ruin is absorbing). Multiply by a starting capital to get the equity
+    # curve. ``Σ_i positions[i].realized_pnl[t] == equity_ratio[t] - 1`` to
+    # floating-point tolerance (per-input realized_pnl are cumulative
+    # contributions to this one curve).
+    equity_ratio: npt.NDArray[np.float64] = field(
+        default_factory=lambda: np.array([], dtype=np.float64)
+    )
 
 
 async def evaluate_signal(
@@ -891,6 +951,7 @@ async def evaluate_signal(
             clipped=False,
             events=(),
             indicator_series=(),
+            equity_ratio=np.array([], dtype=np.float64),
             diagnostics={"T": 0, "inputs": len(referenced_ids)},
         )
 
@@ -1110,15 +1171,44 @@ async def evaluate_signal(
                     entry_active[bid].append(t)
             position[rid][t] = acc
 
-    # ── 6. Assemble per-input results (prices, pnl, clipped mask) ──
-    results: list[InstrumentPositionResult] = []
+    # ── 6. Assemble per-input results + the compounded net-exposure curve ──
+    #
+    # The signal is ONE account. Each input contributes a per-bar
+    # position-weighted simple return ``contrib_step_i[t] = pos_i[t-1]·r_i[t]``
+    # (``r_i`` is the guarded close-to-close return; the SAME finite /
+    # prev!=0 / nan-poison guards as before — invalid bars contribute 0).
+    # The net per-bar return is the SUM across inputs, and the equity curve
+    # compounds that single netted return:
+    #
+    #     net_step[t]     = Σ_i contrib_step_i[t]
+    #     equity_ratio[t] = Π_{s<=t}(1 + net_step[s])          (clamped at 0)
+    #
+    # Per-input ``realized_pnl`` is then the cumulative CONTRIBUTION (as a
+    # fraction of starting capital) to that one curve, using the equity at
+    # the START of each bar as the capital actually deployed:
+    #
+    #     realized_pnl_i[t] = Σ_{s<=t} equity_ratio[s-1]·contrib_step_i[s]
+    #
+    # which reconciles to floating-point tolerance:
+    #     Σ_i realized_pnl_i[t] == equity_ratio[t] - 1.
+    # NEVER cumprod per input then sum — that double-counts cross-exposure.
+
+    # 6a. Per-input metadata + guarded per-bar contribution steps.
+    @dataclass
+    class _InputAccum:
+        ref_id: str
+        instrument: InputInstrument
+        pos: npt.NDArray[np.float64]
+        price_label: str | None
+        price_values: npt.NDArray[np.float64] | None
+        contrib_step: npt.NDArray[np.float64]  # length T-1 (0 when T<2)
+
+    accums: list[_InputAccum] = []
     for ref_id in referenced_ids:
         inp = inputs[ref_id]
 
         pos = position[ref_id]
         pos = np.where(nan_poison[ref_id], 0.0, pos)
-
-        clipped_mask = np.zeros(T, dtype=np.bool_)
 
         price_label: str | None = None
         price_values: npt.NDArray[np.float64] | None = None
@@ -1144,28 +1234,59 @@ async def evaluate_signal(
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]
 
-        realized_pnl = np.zeros(T, dtype=np.float64)
+        contrib_step = np.zeros(max(T - 1, 0), dtype=np.float64)
         if price_values is not None and T >= 2:
             prev_price = price_values[:-1]
             cur_price = price_values[1:]
             valid = (
                 np.isfinite(prev_price) & np.isfinite(cur_price) & (prev_price != 0.0)
             )
-            step = np.zeros(T - 1, dtype=np.float64)
             with np.errstate(invalid="ignore", divide="ignore"):
                 raw = pos[:-1] * (cur_price - prev_price) / prev_price
-            step[valid] = raw[valid]
-            realized_pnl[1:] = np.cumsum(step)
+            contrib_step[valid] = raw[valid]
 
-        results.append(
-            InstrumentPositionResult(
-                input_id=ref_id,
+        accums.append(
+            _InputAccum(
+                ref_id=ref_id,
                 instrument=inp.instrument,
-                values=pos,
-                clipped_mask=clipped_mask,
-                realized_pnl=realized_pnl,
+                pos=pos,
                 price_label=price_label,
                 price_values=price_values,
+                contrib_step=contrib_step,
+            )
+        )
+
+    # 6b. Net per-bar return → compounded, wipeout-clamped equity ratio.
+    #     ``step_scale`` caps the loss on a wiping bar so the per-input
+    #     contributions below reconcile to ``equity_ratio - 1`` through ruin.
+    equity_ratio = np.ones(T, dtype=np.float64)
+    step_scale = np.ones(max(T - 1, 0), dtype=np.float64)
+    if T >= 2:
+        net_step = np.zeros(T - 1, dtype=np.float64)
+        for acc in accums:
+            net_step += acc.contrib_step
+        equity_ratio, step_scale = _compound_clamped(net_step)
+
+    # 6c. Per-input cumulative contributions (deploy prior-bar equity, with
+    #     the wipeout loss-cap applied uniformly across inputs on the wiping
+    #     bar). ``Σ_i realized_pnl_i == equity_ratio - 1`` to fp tolerance.
+    results: list[InstrumentPositionResult] = []
+    for acc in accums:
+        realized_pnl = np.zeros(T, dtype=np.float64)
+        if T >= 2:
+            # capital deployed over step s→s+1 is equity_ratio[s] (start of bar).
+            realized_pnl[1:] = np.cumsum(
+                step_scale * equity_ratio[:-1] * acc.contrib_step
+            )
+        results.append(
+            InstrumentPositionResult(
+                input_id=acc.ref_id,
+                instrument=acc.instrument,
+                values=acc.pos,
+                clipped_mask=np.zeros(T, dtype=np.bool_),
+                realized_pnl=realized_pnl,
+                price_label=acc.price_label,
+                price_values=acc.price_values,
             )
         )
 
@@ -1297,6 +1418,7 @@ async def evaluate_signal(
         indicator_series=tuple(indicator_series),
         diagnostics=diagnostics,
         trades=tuple(trades),
+        equity_ratio=equity_ratio,
     )
 
 

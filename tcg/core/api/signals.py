@@ -46,7 +46,15 @@ Response — per-input positions + per-block events::
           "price":         {label, values} | null
         }
       ],
-      "realized_pnl": float[][],              // per-input cumulative pct return
+      "realized_pnl": float[][],              // per-input cumulative CONTRIBUTION
+                                              //   (fraction of starting capital) to
+                                              //   the one compounded account; Σ over
+                                              //   inputs == equity_ratio - 1 (to
+                                              //   floating-point tolerance)
+      "equity_ratio": float[],                // capital-free compounded equity curve,
+                                              //   starts 1.0, = Π(1 + Σ_i pos_i·r_i),
+                                              //   clamped at 0 on wipeout (one account,
+                                              //   net exposure). equity = capital·ratio
       "events": [
         {
           "input_id":     str,
@@ -1469,7 +1477,7 @@ async def compute_signal(
     timestamps = [_int_yyyymmdd_to_unix_ms(int(d)) for d in result.index.tolist()]
 
     positions_out: list[dict] = []
-    realized_pnl_out: list[list[float]] = []
+    realized_pnl_out: list[list[float | None]] = []
     for p in result.positions:
         if p.price_label is None or p.price_values is None:
             price_payload: dict | None = None
@@ -1487,8 +1495,10 @@ async def compute_signal(
                 "price": price_payload,
             }
         )
-        # realized_pnl is nan-safe by construction (0 on nan steps).
-        realized_pnl_out.append([float(v) for v in p.realized_pnl.tolist()])
+        # Per-input cumulative contribution to the compounded account
+        # (Σ over inputs == equity_ratio - 1). Serialize NaN→null like the
+        # rest of the response for consistency/robustness.
+        realized_pnl_out.append(nan_safe_floats(p.realized_pnl))
 
     events_out: list[dict] = []
     for ev in result.events:
@@ -1538,6 +1548,7 @@ async def compute_signal(
         "timestamps": timestamps,
         "positions": positions_out,
         "realized_pnl": realized_pnl_out,
+        "equity_ratio": nan_safe_floats(result.equity_ratio),
         "events": events_out,
         "indicators": indicators_out,
         "trades": trades_out,

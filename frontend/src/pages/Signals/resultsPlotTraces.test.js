@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildInputTraces,
   aggregateRealizedPnl,
+  signalEquityRatio,
   buildResultsPlot,
   computeSubplotDomains,
   countOwnPanelIndicators,
@@ -76,6 +77,60 @@ describe('aggregateRealizedPnl', () => {
     expect(aggregateRealizedPnl(undefined, 3)).toBeNull();
     expect(aggregateRealizedPnl([], 3)).toBeNull();
     expect(aggregateRealizedPnl([[NaN, NaN]], 2)).toBeNull();
+  });
+});
+
+describe('signalEquityRatio (Issue #4 — compounded, single source)', () => {
+  it('uses the engine equity_ratio verbatim when present', () => {
+    // Doubling hold: ratio 1 → 1.5 → 2.0. (Additive Σ pnl would give 1.8333.)
+    const result = { equity_ratio: [1.0, 1.5, 2.0], realized_pnl: [[0, 0.5, 0.8333]] };
+    expect(signalEquityRatio(result, 3)).toEqual([1.0, 1.5, 2.0]);
+  });
+
+  it('falls back to 1 + Σ realized_pnl when equity_ratio is absent', () => {
+    const result = { realized_pnl: [[0, 0.1, 0.2], [0, 0.05, 0.1]] };
+    // reconciliation fallback: 1 + (0.1+0.05), 1 + (0.2+0.1)
+    expect(signalEquityRatio(result, 3)).toEqual([1, 1.15, 1.3]);
+  });
+
+  it('returns null when neither equity_ratio nor realized_pnl is usable', () => {
+    expect(signalEquityRatio({}, 3)).toBeNull();
+    expect(signalEquityRatio(null, 3)).toBeNull();
+  });
+
+  it('ignores a ragged equity_ratio and falls back', () => {
+    const result = { equity_ratio: [1.0, 1.5], realized_pnl: [[0, 0.1, 0.2]] };
+    // length mismatch (2 vs 3) → fallback path.
+    expect(signalEquityRatio(result, 3)).toEqual([1, 1.1, 1.2]);
+  });
+});
+
+describe('buildResultsPlot — compounded equity line (Issue #4)', () => {
+  // Single doubling hold; engine sends the compounded ratio.
+  const compoundedResult = {
+    timestamps: ts,
+    positions: [positionWithPrice('X', [100, 150, 200])],
+    realized_pnl: [[0, 0.5, 0.8333333333]], // cumulative CONTRIBUTION (=ratio-1)
+    equity_ratio: [1.0, 1.5, 2.0],
+    indicators: [],
+    events: [],
+  };
+
+  it('pins the capital line to capital · equity_ratio (compounded, not additive)', () => {
+    const { traces } = buildResultsPlot(compoundedResult, { capital: 100 });
+    const cap = traces.find((t) => t.name === 'capital');
+    expect(cap).toBeDefined();
+    // Compounded: [100, 150, 200]. Additive Σ-pnl bug would give 183.33 at end.
+    expect(cap.y).toEqual([100, 150, 200]);
+    expect(cap.y[2]).not.toBeCloseTo(183.333, 2);
+  });
+
+  it('realized P&L line equals equity − capital (reconciles with the equity line)', () => {
+    const { traces } = buildResultsPlot(compoundedResult, { capital: 100 });
+    const pnl = traces.find((t) => t.name === 'realized P&L');
+    const cap = traces.find((t) => t.name === 'capital');
+    expect(pnl.y).toEqual(cap.y.map((v) => v - 100));
+    expect(pnl.y).toEqual([0, 50, 100]);
   });
 });
 

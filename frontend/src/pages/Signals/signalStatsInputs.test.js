@@ -72,4 +72,19 @@ describe('buildSignalStatsInputs', () => {
     );
     expect(out).toBeNull();
   });
+
+  it('uses the compounded equity_ratio when present (Issue #4)', () => {
+    // ratio doubles 1 → 2; equity = capital · ratio = [1000, 2000].
+    // The additive (1 + Σ pnl) path would also give 2000 here for a single
+    // step, so use a multi-step ratio to distinguish: 1 → 1.5 → 2.0.
+    const result = {
+      timestamps: [TS[0], TS[1], 1704240000000],
+      realized_pnl: [[0.0, 0.5, 0.8333333]], // additive Σ → 1833.3 at end
+      equity_ratio: [1.0, 1.5, 2.0],
+    };
+    const out = buildSignalStatsInputs(result, 1000);
+    expect(out).not.toBeNull();
+    // Compounded equity, NOT the additive 1833.3.
+    expect(out.equity).toEqual([1000, 1500, 2000]);
+  });
 });
