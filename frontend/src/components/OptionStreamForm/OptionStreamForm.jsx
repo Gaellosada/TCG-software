@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useId } from 'react';
+import { useMemo, useCallback, useId, useEffect } from 'react';
 import styles from './OptionStreamForm.module.css';
 
 /**
@@ -236,6 +236,20 @@ export default function OptionStreamForm({
   const emit = useCallback((patch) => {
     onChange({ ...v, ...patch });
   }, [v, onChange]);
+
+  // When the consumer restricts the form to a single stream (the portfolio
+  // add-holding flow pins option legs to the option PRICE = 'mid'; iv/greeks/
+  // volume are SIGNAL-level operands, not a portfolio concern), there is no
+  // stream choice to make: coerce a stale/mismatched value back to the only
+  // allowed stream so the emitted ref is always correct, and the selector is
+  // hidden below.
+  const singleStream = allowedStreams.length === 1;
+  useEffect(() => {
+    if (singleStream && v.stream !== allowedStreams[0]) {
+      onChange({ ...v, stream: allowedStreams[0] });
+    }
+    // Re-run when the restriction or current stream changes.
+  }, [singleStream, allowedStreams, v, onChange]);
 
   const setRoot = useCallback((collection) => emit({ collection }), [emit]);
 
@@ -562,34 +576,41 @@ export default function OptionStreamForm({
           Defaults to `mid` (the bid-ask midpoint — the option premium mark);
           the user can extract iv / a greek / volume / open interest instead.
           "Mid price" is explicitly the BID-ASK MID (see the help glyph +
-          tooltip), NOT a daily OHLC field. */}
-      <label className={styles.row}>
-        <span className={styles.label}>
-          Series:
-          {/* Help glyph: always present so the Mid tooltip is discoverable
-              regardless of the current selection. */}
-          <span
-            className={styles.help}
-            data-testid="mid-tooltip"
-            role="img"
-            aria-label={MID_TOOLTIP}
-            title={MID_TOOLTIP}
-          >
-            ⓘ
+          tooltip), NOT a daily OHLC field.
+
+          Hidden entirely when the form is restricted to a single stream (the
+          portfolio price-only flow): there is no choice to surface, so a
+          1-item dropdown would be pointless noise. The stream is pinned by the
+          coercion effect above. */}
+      {!singleStream && (
+        <label className={styles.row}>
+          <span className={styles.label}>
+            Series:
+            {/* Help glyph: always present so the Mid tooltip is discoverable
+                regardless of the current selection. */}
+            <span
+              className={styles.help}
+              data-testid="mid-tooltip"
+              role="img"
+              aria-label={MID_TOOLTIP}
+              title={MID_TOOLTIP}
+            >
+              ⓘ
+            </span>
           </span>
-        </span>
-        <select
-          className={styles.input}
-          value={v.stream}
-          onChange={(e) => setStream(e.target.value)}
-          disabled={disabled}
-          aria-label="Series"
-        >
-          {allowedStreams.map((s) => (
-            <option key={s} value={s}>{STREAM_LABELS[s] || s}</option>
-          ))}
-        </select>
-      </label>
+          <select
+            className={styles.input}
+            value={v.stream}
+            onChange={(e) => setStream(e.target.value)}
+            disabled={disabled}
+            aria-label="Series"
+          >
+            {allowedStreams.map((s) => (
+              <option key={s} value={s}>{STREAM_LABELS[s] || s}</option>
+            ))}
+          </select>
+        </label>
+      )}
 
       {/* No adjustment control: option continuous series carry no
           back-adjustment (ratio/difference are ill-posed for option premia).

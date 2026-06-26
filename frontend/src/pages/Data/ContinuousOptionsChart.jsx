@@ -175,6 +175,29 @@ function ContinuousOptionsChart({ collection }) {
     return out;
   }, [result]);
 
+  // ── Snap notice (Issue #2 D2) ──
+  //
+  // A non-NearestToTarget maturity rule whose arithmetic expiration is not
+  // listed is snapped to the nearest listed expiration; the resolver records a
+  // per-date `snapped_to:<iso>` diagnostic. Surface a small notice so the user
+  // knows the maturity they picked was substituted (reuses the diagnostics
+  // already in the response — no per-date diagnostics renderer).
+  const snappedExpirations = useMemo(() => {
+    const streams = result?.streams;
+    if (!streams) return [];
+    const seen = new Set();
+    for (const stream of Object.values(streams)) {
+      const diags = stream?.diagnostics;
+      if (!Array.isArray(diags)) continue;
+      for (const d of diags) {
+        if (typeof d === 'string' && d.startsWith('snapped_to:')) {
+          seen.add(d.slice('snapped_to:'.length));
+        }
+      }
+    }
+    return Array.from(seen).sort();
+  }, [result]);
+
   // ── Render ──
 
   if (rootsLoading) {
@@ -241,6 +264,14 @@ function ContinuousOptionsChart({ collection }) {
       {error && (
         <div className={styles.error} data-testid="resolve-error">
           {error.message || 'An error occurred during resolution.'}
+        </div>
+      )}
+
+      {snappedExpirations.length > 0 && (
+        <div className={styles.snapNotice} data-testid="snap-notice" role="status">
+          Maturity expiration snapped to nearest listed:{' '}
+          {snappedExpirations.join(', ')}
+          {' '}(the rule&apos;s computed expiration was not listed for this root).
         </div>
       )}
 

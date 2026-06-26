@@ -128,6 +128,35 @@ describe('<InstrumentPickerModal>', () => {
     expect(screen.getByTestId('option-stream-confirm')).toBeTruthy();
   });
 
+  it('optionStreamAllowedStreams=[mid] hides the Series selector in the drill-down', async () => {
+    // Issue #2 (D1): a PORTFOLIO option leg is the option PRICE only — the
+    // picker pins the stream to mid and hides the (pointless) Series selector.
+    render(
+      <InstrumentPickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        onSelect={vi.fn()}
+        optionStreamAllowedStreams={['mid']}
+      />,
+    );
+    await flushAsync();
+    await waitFor(() => expect(screen.getByText('Options')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('picker-options-toggle'));
+    await waitFor(() => expect(screen.getByTestId('option-stream-form')).toBeTruthy());
+    // Rest of the form present, but NO Series selector.
+    expect(screen.getByLabelText('Root')).toBeTruthy();
+    expect(screen.queryByLabelText('Series')).toBeNull();
+  });
+
+  it('without optionStreamAllowedStreams the Series selector is shown (default)', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />);
+    await flushAsync();
+    await waitFor(() => expect(screen.getByText('Options')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('picker-options-toggle'));
+    await waitFor(() => expect(screen.getByTestId('option-stream-form')).toBeTruthy());
+    expect(screen.getByLabelText('Series')).toBeTruthy();
+  });
+
   it('confirming emits an option_stream-shaped object via onSelect and closes', async () => {
     const onSelect = vi.fn();
     const onClose = vi.fn();

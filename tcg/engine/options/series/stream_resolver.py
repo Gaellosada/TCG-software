@@ -149,6 +149,26 @@ def _missing_code_for(stream: str) -> str:
     return f"missing_{stream}"
 
 
+def _snap_to_listed(target: date, listed: Sequence[date]) -> date | None:
+    """Snap an arithmetic-maturity *target* to the nearest LISTED expiration.
+
+    Mirrors ``NearestToTarget`` (no distance cap, decision D2): the
+    arithmetic-maturity rules compute a target date that may not correspond to
+    any real contract; this snaps it to the closest expiration the root
+    actually lists.  Tie-break: the EARLIER expiration wins (parity with the
+    ``(delta, dte)`` tie-break in ``resolve_with_chain`` — a smaller-DTE / earlier
+    contract is preferred when equidistant).
+
+    Returns the snapped expiration, or ``None`` when *listed* is empty (caller
+    then keeps the raw arithmetic target / its existing fallback).
+    """
+    if not listed:
+        return None
+    # listed is pre-sorted ascending by the caller; min() with a stable key
+    # therefore returns the earliest on a tie.
+    return min(listed, key=lambda e: (abs((e - target).days), e))
+
+
 @runtime_checkable
 class _CycleAwareReader(Protocol):
     """Structural shape of a chain reader that accepts ``expiration_cycle``.
@@ -352,6 +372,11 @@ async def _resolve_bulk(
     # enumerate available expirations; for other rules it is pure date
     # arithmetic with no I/O.
     expirations: dict[int, date | None] = {}  # index → resolved expiration
+    # index → "snapped_to:<iso>" note for arithmetic targets that were snapped
+    # to a listed expiration.  Folded into ``error_codes`` AFTER Phase C, only
+    # for dates that resolved to a real value (a success-side diagnostic; the
+    # failure channel must stay clean so Phase C still runs selection).
+    snap_notes: dict[int, str] = {}
 
     if isinstance(maturity, NearestToTarget):
         if queryable:
@@ -399,10 +424,45 @@ async def _resolve_bulk(
                         available_expirations=available,
                     )
     else:
+        # Pure date-arithmetic rules (EndOfMonth / PlusNDays / FixedDate /
+        # NextThirdFriday) compute a target expiration with no chain-existence
+        # check.  When the caller supplied the root's listed expirations, SNAP
+        # the arithmetic target to the nearest listed one (decision D2:
+        # unconditional, like NearestToTarget which has no distance cap) so a
+        # target that no contract matches (daily-expiry roots, sparse listings)
+        # no longer produces a silent all-NaN ``no_chain_for_date`` series.  A
+        # per-date ``snapped_to:<iso>`` diagnostic records the substitution.
+        listed = sorted(available_expirations) if available_expirations else []
         for idx, d in queryable:
-            expirations[idx] = maturity_resolver.resolve(
-                ref_date=d + timedelta(days=roll_offset), rule=maturity
-            )
+            # Keep the resolve() call structure clean — Issue #3 wraps this
+            # exact branch in a per-month roll sweep.  Guard it (hardening
+            # finding D): a non-TCGError from the resolver (e.g. a calendar
+            # month with zero business days) must become a per-date NaN, not a
+            # 500 that escapes the API handlers.
+            try:
+                target = maturity_resolver.resolve(
+                    ref_date=d + timedelta(days=roll_offset), rule=maturity
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Dedicated code (distinct from ``no_chain_for_date``): the
+                # maturity RULE itself could not be resolved, not "the chain has
+                # no contract on the computed date".  Phase B preserves an
+                # already-set code, so this survives the ``exp is None`` branch.
+                expirations[idx] = None
+                error_codes[idx] = "maturity_resolution_failed"
+                _log.debug("maturity resolve failed date=%s: %s", d, exc)
+                continue
+            snapped = _snap_to_listed(target, listed)
+            if snapped is not None and snapped != target:
+                # Defer the diagnostic: ``error_codes`` is the per-date FAILURE
+                # channel and Phase C skips any date whose code is already set,
+                # so recording it here would suppress selection.  Stash the note
+                # and fold it in AFTER Phase C, only on dates that resolved to a
+                # real value (see "snap diagnostics" merge below).
+                snap_notes[idx] = f"snapped_to:{snapped.isoformat()}"
+                expirations[idx] = snapped
+            else:
+                expirations[idx] = target
 
     # ── Phase B: Group by expiration and bulk fetch ─────────────────
 
@@ -411,7 +471,10 @@ async def _resolve_bulk(
     for idx, d in queryable:
         exp = expirations.get(idx)
         if exp is None:
-            error_codes[idx] = "no_chain_for_date"
+            # Preserve a more specific code already set in Phase A (e.g.
+            # ``maturity_resolution_failed``); default to ``no_chain_for_date``.
+            if error_codes[idx] is None:
+                error_codes[idx] = "no_chain_for_date"
         else:
             exp_groups[exp].append((idx, d))
 
@@ -676,6 +739,15 @@ async def _resolve_bulk(
                 except Exception:  # pragma: no cover (defensive)
                     pass
 
+    # Fold snap diagnostics in AFTER selection: a ``snapped_to:<iso>`` note is a
+    # success-side annotation, so it is recorded only where the date resolved to
+    # a real value (``error_codes[idx]`` still None).  Dates where the snapped
+    # expiration itself failed selection keep their real failure code (e.g.
+    # ``no_match_within_tolerance``) — the snap note must not mask a failure.
+    for idx, note in snap_notes.items():
+        if error_codes[idx] is None:
+            error_codes[idx] = note
+
     # Option continuous series are RAW stitched mids: no back-adjustment.  A
     # back-adjusted option-premium series represents no tradable instrument
     # (theta decays premia toward 0, so a ratio factor diverges and an additive
@@ -773,11 +845,21 @@ async def resolve_option_stream(
         Shape ``(len(dates),)`` ``float64`` array.  NaN where the stream
         value is missing or the selection failed.
     error_codes:
-        Parallel list, one entry per date.  ``None`` when the value is
-        real; otherwise a string diagnostic — propagated verbatim from
+        Parallel list, one entry per date.  Usually ``None`` when the value
+        is real; otherwise a string diagnostic — propagated verbatim from
         ``SelectionResult.error_code`` when selection fails, or
         ``f"missing_{stream}"`` when selection succeeded but the row's
         stream field was ``None``.
+
+        One entry is NON-None yet coexists with a REAL value:
+        ``f"snapped_to:{iso}"`` is a SUCCESS-side annotation, set when a
+        non-NearestToTarget maturity rule's arithmetic expiration was not
+        listed and was snapped to the nearest listed expiration (``iso``).
+        It is recorded only on dates that resolved to a real value (folded in
+        after selection), so a ``snapped_to:`` entry never implies NaN.
+        Consumers that treat "error_code present ⇒ failure/NaN" must therefore
+        exclude the ``snapped_to:`` prefix (the value array is the source of
+        truth for NaN-ness).
     contracts:
         Parallel list of ``OptionContractDoc | None``, one entry per
         date.  ``None`` when chain was missing or the selection match

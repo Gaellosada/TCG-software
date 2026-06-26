@@ -1,6 +1,12 @@
 import { useCallback } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 
+// A portfolio option leg is the option PRICE only (Issue #2 D1): pin the
+// option-stream picker to mid and hide the Series selector. iv/greeks/volume
+// are signal-level operands, not portfolio legs. Module-level const so the
+// array identity is stable across renders (not recreated each render).
+const PORTFOLIO_OPTION_STREAMS = ['mid'];
+
 /**
  * Portfolio-specific wrapper around InstrumentPickerModal.
  * Translates the generic instrument selection into the portfolio leg format
@@ -61,6 +67,7 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
       onClose={onClose}
       onSelect={handleSelect}
       title="Add Holding"
+      optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
     />
   );
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from typing import Callable, Literal
@@ -472,6 +473,60 @@ def _compute_level_metrics(values: npt.NDArray[np.float64]) -> dict:
     }
 
 
+# Actionable hint per dominant per-date diagnostic code, appended to the
+# all-NaN option-leg error so the user learns WHY and what to change.
+_DIAGNOSTIC_HINTS: dict[str, str] = {
+    "missing_delta_no_compute": (
+        "no stored greeks/deltas over this range — By Delta needs stored deltas; "
+        "use By Moneyness or By Strike, or pick a date range that has greeks"
+    ),
+    "missing_mid": (
+        "no valid bid/ask quotes (mid needs both bid and ask > 0) on these dates — "
+        "quotes may be too sparse for this contract"
+    ),
+    "no_chain_for_date": (
+        "the targeted expiration is not listed for this root on these dates"
+    ),
+    "maturity_resolution_failed": (
+        "the maturity rule could not be resolved on these dates "
+        "(check the rule's parameters)"
+    ),
+    "no_match_within_tolerance": (
+        "no contract within the delta tolerance — widen the tolerance or "
+        "disable strict matching"
+    ),
+    "past_last_trade_date": (
+        "the requested dates are past this root's last trade date"
+    ),
+    "missing_underlying_price": (
+        "no underlying price available to evaluate moneyness on these dates"
+    ),
+}
+
+
+def _diagnostic_hint(diagnostics: list[str | None] | None) -> str:
+    """Summarise the per-date ``error_codes`` into an actionable suffix.
+
+    Returns a string beginning with ``"; "`` (so it appends cleanly to the
+    base all-NaN message) naming the dominant failure code and an actionable
+    hint, or ``""`` when there is nothing useful to add.  ``snapped_to:*``
+    notes are informational (a successful substitution), not failures, so they
+    are excluded from the cause tally.
+    """
+    if not diagnostics:
+        return ""
+    causes = Counter(
+        c for c in diagnostics if c is not None and not c.startswith("snapped_to:")
+    )
+    if not causes:
+        return ""
+    dominant, count = causes.most_common(1)[0]
+    total = sum(causes.values())
+    hint = _DIAGNOSTIC_HINTS.get(dominant)
+    detail = f" — {hint}" if hint else ""
+    return f"; dominant cause: {dominant} ({count}/{total} dates){detail}"
+
+
 async def _evaluate_option_stream_leg(
     label: str,
     leg: LegSpec,
@@ -524,7 +579,7 @@ async def _evaluate_option_stream_leg(
     if isinstance(result, str):
         raise ValidationError(f"Leg '{label}': {result}")
 
-    dates_arr, values, _diagnostics, _contracts = result["_leg"]
+    dates_arr, values, diagnostics, _contracts = result["_leg"]
 
     # 3. Determine stream mode
     stream_mode = "price" if leg.stream in PRICE_LIKE_STREAMS else "level"
@@ -533,7 +588,14 @@ async def _evaluate_option_stream_leg(
     if stream_mode == "price":
         nan_mask = np.isnan(values)
         if nan_mask.all():
-            raise ValidationError(f"Leg '{label}': all option stream values are NaN")
+            # Fold the per-date diagnostics (the resolver's ``error_codes``)
+            # into the message so the all-NaN failure is actionable instead of
+            # blunt.  ``snapped_to:*`` notes are informational, not failures —
+            # exclude them from the cause tally.
+            raise ValidationError(
+                f"Leg '{label}': all option stream values are NaN"
+                f"{_diagnostic_hint(diagnostics)}"
+            )
         # Forward fill
         for i in range(1, len(values)):
             if nan_mask[i]:
@@ -724,8 +786,9 @@ async def compute_portfolio(
 
     if len(common_dates) == 0:
         raise ValidationError(
-            "No overlapping dates across all legs — "
-            "instrument and signal date ranges are disjoint"
+            "No overlapping dates across all legs — the instrument, signal, "
+            "and option date ranges are disjoint (an option leg's available "
+            "dates often differ from the spot/continuous legs')"
         )
 
     # Slice instrument closes to common dates

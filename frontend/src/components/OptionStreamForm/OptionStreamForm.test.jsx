@@ -71,6 +71,40 @@ describe('<OptionStreamForm>', () => {
     expect(labels).toContain('Open interest');
   });
 
+  // Issue #2 (D1): in the PORTFOLIO add-holding flow an option leg is just the
+  // option's PRICE (mid). The stream concept (iv/delta/greeks/volume) is a
+  // SIGNAL-level operand, not a portfolio concern — so when restricted to a
+  // single stream the form must NOT render a (pointless 1-item) Series
+  // selector at all.
+  describe('single-stream restriction (portfolio price-only)', () => {
+    it('renders NO Series selector when allowedStreams is just [mid]', () => {
+      renderForm({ allowedStreams: ['mid'] });
+      // No Series <select> / control, and no advanced disclosure.
+      expect(screen.queryByLabelText('Series')).toBeNull();
+      expect(screen.queryByTestId('stream-advanced')).toBeNull();
+      // The rest of the form is intact.
+      expect(screen.getByLabelText('Root')).toBeTruthy();
+      expect(screen.getByLabelText('Maturity rule')).toBeTruthy();
+      expect(screen.getByLabelText('Selection criterion')).toBeTruthy();
+    });
+
+    it('forces the value stream to the single allowed stream', () => {
+      // Parent passes a stale value with stream='iv'; the restricted form must
+      // coerce it back to the only allowed stream (mid) via onChange.
+      const onChange = vi.fn();
+      const stale = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'iv' };
+      renderForm({ value: stale, allowedStreams: ['mid'], onChange });
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ stream: 'mid' }),
+      );
+    });
+
+    it('still renders the Series selector for the default (all streams)', () => {
+      renderForm();
+      expect(screen.getByLabelText('Series')).toBeTruthy();
+    });
+  });
+
   it('exposes the exact Mid bid-ask tooltip on the Series control', () => {
     renderForm();
     const tip = screen.getByTestId('mid-tooltip');

@@ -100,3 +100,15 @@
   padding: 24px;
   text-align: center;
 }
+
+/* Small inline info notice (e.g. maturity-expiration snap) — sits above the
+   chart, muted and unobtrusive (the values are correct; this is informational). */
+.snapNotice {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border-left: 3px solid var(--accent, #6aa0ff);
+  border-radius: 3px;
+}

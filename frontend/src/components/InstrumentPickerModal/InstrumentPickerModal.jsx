@@ -84,6 +84,13 @@ export default function InstrumentPickerModal({
   title,
   hiddenCategories = [],
   allowBaskets = false,
+  // Restrict the option-stream picker (the direct Options drill-down) to a
+  // subset of streams.  The Portfolio add-holding flow passes ['mid'] so an
+  // option leg is the option PRICE only — iv/greeks/volume are SIGNAL-level
+  // operands, not a portfolio concern (Issue #2 D1).  ``null`` (default) = no
+  // restriction (Data-page chart / signals keep the full stream choice).  Does
+  // NOT affect the basket-leg sub-picker (that path is Signals-only).
+  optionStreamAllowedStreams = null,
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -422,6 +429,9 @@ export default function InstrumentPickerModal({
                     value={optionStreamValue}
                     onChange={setOptionStreamValue}
                     availableRoots={optionRoots}
+                    {...(optionStreamAllowedStreams
+                      ? { allowedStreams: optionStreamAllowedStreams }
+                      : {})}
                   />
                   <button
                     className={styles.selectContinuousBtn}
