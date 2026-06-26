@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { listCollections, listInstruments } from '../../api/data';
 import { getOptionRoots } from '../../api/options';
 import { queryKeys } from '../../queryKeys';
+import BasketsSection from './BasketsSection';
 import styles from './CategoryBrowser.module.css';
 
 /**
@@ -371,6 +372,11 @@ function CategoryBrowser({ selected, onSelect }) {
           )}
         </div>
       ))}
+
+      {/* Baskets — sourced from app-data (not market collections), so it is a
+          separate section below the market categories. Browse + explore +
+          create + CRUD, reusing the shared basket composer + persistence client. */}
+      <BasketsSection selected={selected} onSelect={onSelect} />
     </div>
   );
 }

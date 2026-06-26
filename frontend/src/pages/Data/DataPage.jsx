@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import CategoryBrowser from './CategoryBrowser';
 import PriceChart from './PriceChart';
 import ContinuousChart from './ContinuousChart';
+import BasketChart from './BasketChart';
 import ContinuousOptionsChart from './ContinuousOptionsChart';
 import OptionChainTable from './OptionChainTable';
 import ContractDetailPanel from './ContractDetailPanel';
@@ -345,6 +346,20 @@ function DataPage() {
 
     if (selected.type === 'continuous') {
       return <ContinuousChart collection={selected.collection} />;
+    }
+
+    if (selected.type === 'basket') {
+      return (
+        <BasketChart
+          // Remount on basket identity so switching baskets wipes the
+          // previous range/legs state.
+          key={selected.basket_id || selected.name || 'basket'}
+          basket={selected.basket}
+          name={selected.name}
+          assetClass={selected.asset_class}
+          legs={selected.legs}
+        />
+      );
     }
 
     return (
