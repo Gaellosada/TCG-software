@@ -71,7 +71,9 @@ class ContinuousInstrumentRef(BaseModel):
     cycle: str | None = None
     # Accept camelCase from the frontend.
     rollOffset: int = 0
-    strategy: Literal["front_month"] = "front_month"
+    # Issue #3: ``end_of_month`` rolls on the last trading day of each month
+    # regardless of expiry; default ``front_month`` keeps existing refs valid.
+    strategy: Literal["front_month", "end_of_month"] = "front_month"
 
 
 # Streams readable off a single option contract row.  Listed verbatim
@@ -136,6 +138,11 @@ class OptionStreamRef(BaseModel):
     # default 0 → preserves the existing wire contract; range 0..30 (same bound as
     # the futures roll offset).  No-op for ``fixed`` maturity (single expiration).
     roll_offset: int = Field(default=0, ge=0, le=30)
+    # Issue #3 roll SCHEDULE — ``"end_of_month"`` re-selects the held contract
+    # only on each month's last trading day (and holds it between), instead of
+    # re-resolving the maturity per trade date.  ``None`` (default) preserves the
+    # existing per-date behaviour + wire contract.  Orthogonal to ``maturity``.
+    roll_schedule: Literal["end_of_month"] | None = None
 
     @field_validator("cycle", mode="before")
     @classmethod

@@ -262,6 +262,125 @@ describe('Signals storage (v6)', () => {
     });
   });
 
+  // ── Issue #3: roll strategy / roll schedule survive save→load ──────────
+
+  it('round-trips continuous strategy=end_of_month (not silently stripped)', () => {
+    const state = {
+      signals: [
+        {
+          id: 's-eom',
+          name: 'EOM futures',
+          inputs: [
+            {
+              id: 'Y',
+              instrument: {
+                type: 'continuous',
+                collection: 'FUT_ES',
+                adjustment: 'ratio',
+                cycle: 'HMUZ',
+                rollOffset: 2,
+                strategy: 'end_of_month',
+              },
+            },
+          ],
+          rules: emptyRules(),
+        },
+      ],
+    };
+    saveState(state);
+    const inst = loadState().signals[0].inputs[0].instrument;
+    expect(inst.strategy).toBe('end_of_month');
+  });
+
+  it('coerces a rogue continuous strategy back to front_month', () => {
+    const state = {
+      signals: [
+        {
+          id: 's-rogue',
+          name: 'Rogue strat',
+          inputs: [
+            {
+              id: 'Y',
+              instrument: {
+                type: 'continuous',
+                collection: 'FUT_ES',
+                adjustment: 'none',
+                cycle: null,
+                rollOffset: 0,
+                strategy: 'weekly_voodoo',
+              },
+            },
+          ],
+          rules: emptyRules(),
+        },
+      ],
+    };
+    saveState(state);
+    const inst = loadState().signals[0].inputs[0].instrument;
+    expect(inst.strategy).toBe('front_month');
+  });
+
+  it('round-trips option_stream roll_schedule=end_of_month; coerces others to null', () => {
+    const mk = (rollSchedule) => ({
+      signals: [
+        {
+          id: `s-rs-${rollSchedule}`,
+          name: 'Opt RS',
+          inputs: [
+            {
+              id: 'O',
+              instrument: {
+                type: 'option_stream',
+                collection: 'OPT_SPX',
+                option_type: 'C',
+                cycle: null,
+                maturity: { kind: 'end_of_month', offset_months: 1 },
+                selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+                stream: 'mid',
+                roll_schedule: rollSchedule,
+              },
+            },
+          ],
+          rules: emptyRules(),
+        },
+      ],
+    });
+    saveState(mk('end_of_month'));
+    expect(loadState().signals[0].inputs[0].instrument.roll_schedule).toBe('end_of_month');
+    // A bogus value collapses to null (per-date default).
+    saveState(mk('biweekly'));
+    expect(loadState().signals[0].inputs[0].instrument.roll_schedule).toBeNull();
+  });
+
+  it('defaults a legacy option_stream (no roll_schedule key) to null', () => {
+    const state = {
+      signals: [
+        {
+          id: 's-legacy-rs',
+          name: 'Legacy opt',
+          inputs: [
+            {
+              id: 'O',
+              instrument: {
+                type: 'option_stream',
+                collection: 'OPT_SPX',
+                option_type: 'C',
+                cycle: null,
+                maturity: { kind: 'next_third_friday', offset_months: 0 },
+                selection: { kind: 'by_strike', strike: 4500 },
+                stream: 'mid',
+                // no roll_schedule key (predates Issue #3)
+              },
+            },
+          ],
+          rules: emptyRules(),
+        },
+      ],
+    };
+    saveState(state);
+    expect(loadState().signals[0].inputs[0].instrument.roll_schedule).toBeNull();
+  });
+
   it('sanitiser clamps a malformed option_stream roll_offset and drops a stray adjustment', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: SCHEMA_VERSION,

@@ -2,12 +2,62 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+import functools
+import logging
+from calendar import monthrange
+from datetime import date, timedelta
 
 import numpy as np
+import pandas_market_calendars as mcal
 
 from tcg.data._utils import date_to_int, int_to_date
 from tcg.types.market import ContractPriceData, PriceSeries, RollStrategy
+
+_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Last-trading-day-of-month helper
+# ---------------------------------------------------------------------------
+#
+# INTENTIONAL DUPLICATION.  This is a ~12-line copy of
+# ``tcg.engine.options.maturity.resolver._last_business_day_of_month`` (+ its
+# cached "CME"→"CME_TradeDate" calendar plumbing).  The engine helper is NOT
+# imported here on purpose: the import-linter ``engine-data-isolation`` contract
+# declares ``tcg.engine`` and ``tcg.data`` mutually independent, so importing
+# the engine copy would break the gate.  Duplicating a leaf helper is the
+# correct call (vs coupling two sibling layers or polluting the dep-free
+# ``tcg.types`` with a calendar dependency).  ``test_rolling_eom.py``'s
+# ``test_matches_engine_helper`` pins the two copies to stay identical.
+#
+# This is also the first ``pandas_market_calendars`` use inside ``tcg.data``;
+# every other calendar-aware path lives in ``tcg.engine`` / ``tcg.core``.
+
+
+@functools.lru_cache(maxsize=1)
+def _cme_calendar():  # type: ignore[return]
+    """Return the cached CME trade-date calendar.
+
+    "CME" is the spec-level name; "CME_TradeDate" is the registered
+    pandas_market_calendars key (mirrors the engine resolver's alias).
+    """
+    return mcal.get_calendar("CME_TradeDate")
+
+
+def _last_trading_day_of_month(year: int, month: int) -> date:
+    """Return the last trading day of the given (year, month) on the CME
+    trade-date calendar.
+
+    Uses the trading calendar (not the naive calendar last day) so a month-end
+    weekend/holiday rolls back to the prior trading day — e.g. 2024-03 returns
+    the 28th because the 29th (Good Friday) is a CME holiday.
+    """
+    last_day = date(year, month, monthrange(year, month)[1])
+    first_day = date(year, month, 1)
+    vd = _cme_calendar().valid_days(start_date=first_day, end_date=last_day)
+    if len(vd) == 0:
+        raise ValueError(f"No valid trading days in {year}-{month:02d} for calendar")
+    return vd[-1].date()
 
 
 def compute_roll_dates(
@@ -15,18 +65,58 @@ def compute_roll_dates(
     strategy: RollStrategy,
     roll_offset_days: int = 0,
 ) -> list[int]:
-    """Compute YYYYMMDD roll dates for FRONT_MONTH strategy.
+    """Compute YYYYMMDD roll dates for the chosen roll strategy.
 
-    For FRONT_MONTH: roll happens at expiration of each contract,
-    shifted earlier by ``roll_offset_days`` calendar days.
-    The roll date is the (possibly shifted) expiration date of the
-    outgoing contract.
-    Returns one date per roll boundary (len = len(contracts) - 1).
+    FRONT_MONTH
+        Roll at expiration of each outgoing contract, shifted earlier by
+        ``roll_offset_days`` calendar days.
+
+    END_OF_MONTH (Issue #3)
+        Roll on the last TRADING day of each outgoing contract's expiration
+        month, regardless of the contract's actual expiry, then shifted earlier
+        by ``roll_offset_days`` (composes exactly as for FRONT_MONTH).  This is
+        the only behavioural change vs FRONT_MONTH — it re-times *where* each
+        boundary lands (month-end instead of expiry-day) while keeping the 1:1
+        contract↔boundary mapping that ``trim_overlaps`` / ``_concatenate`` /
+        adjustment depend on, so those stages are untouched.
+
+    Returns one date per roll boundary (len = len(contracts) - 1) for
+    FRONT_MONTH; END_OF_MONTH may return FEWER when two consecutive contracts
+    resolve to the same month-end (cycle=None edge — see the duplicate guard).
 
     Contracts must be sorted by expiration (ascending).
     """
     if len(contracts) <= 1:
         return []
+
+    if strategy == RollStrategy.END_OF_MONTH:
+        offset = timedelta(days=roll_offset_days) if roll_offset_days else None
+        rolls: list[int] = []
+        for c in contracts[:-1]:
+            exp = int_to_date(c.expiration)
+            eom = _last_trading_day_of_month(exp.year, exp.month)
+            if offset is not None:
+                eom = eom - offset
+            eom_int = date_to_int(eom)
+            # cycle=None edge: two consecutive contracts expiring in the SAME
+            # month resolve to the same month-end roll date → the boundaries
+            # collapse and ``trim_overlaps`` would get a degenerate zero-width
+            # window.  Drop the duplicate (non-increasing) boundary and warn;
+            # the contract whose boundary we skip is subsumed by its neighbour's
+            # window.  Harmless with a proper monthly/quarterly cycle filter.
+            if rolls and eom_int <= rolls[-1]:
+                _log.warning(
+                    "END_OF_MONTH: contract %s resolves to a non-increasing "
+                    "month-end roll date %d (<= previous %d) — dropping the "
+                    "duplicate boundary (use a cycle filter to avoid same-month "
+                    "contracts)",
+                    c.contract_id,
+                    eom_int,
+                    rolls[-1],
+                )
+                continue
+            rolls.append(eom_int)
+        return rolls
 
     if strategy != RollStrategy.FRONT_MONTH:
         raise ValueError(f"Unsupported roll strategy: {strategy}")

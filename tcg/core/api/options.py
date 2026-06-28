@@ -691,6 +691,22 @@ def _maturity_pydantic_to_dataclass(maturity: Any) -> Any:
     raise OptionsValidationError(f"Unknown maturity kind {kind!r}")
 
 
+def _roll_schedule_pydantic_to_dataclass(value: Any) -> Any:
+    """Convert the wire ``roll_schedule`` value to its dataclass twin (Issue #3).
+
+    The wire value is a bare ``Literal["end_of_month"] | None`` (not a
+    discriminated union), so this is a trivial map — kept co-located with the
+    maturity / selection converters to match the established pattern.
+    """
+    from tcg.types.options import EndOfMonthRoll
+
+    if value is None:
+        return None
+    if value == "end_of_month":
+        return EndOfMonthRoll()
+    raise OptionsValidationError(f"Unknown roll_schedule {value!r}")
+
+
 # ---------------------------------------------------------------------------
 # Endpoint 5 — GET /api/options/chain-snapshot
 # ---------------------------------------------------------------------------

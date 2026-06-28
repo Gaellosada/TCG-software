@@ -157,6 +157,9 @@ class LegSpec(BaseModel):
     maturity: MaturityRule | None = None
     selection: SelectionCriterion | None = None
     stream: OptionStreamLabel | None = None
+    # Optional for "option_stream" (Issue #3): "end_of_month" holds the selected
+    # contract between month-end rolls.  Ignored for other leg types.
+    roll_schedule: Literal["end_of_month"] | None = None
 
     @field_validator("type")
     @classmethod
@@ -567,6 +570,7 @@ async def _evaluate_option_stream_leg(
         selection=leg.selection,
         stream=leg.stream,
         roll_offset=roll_offset,
+        roll_schedule=leg.roll_schedule,
     )
 
     # 2. Materialise via shared infrastructure

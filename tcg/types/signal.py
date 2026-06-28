@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from tcg.types.options import MaturitySpec, SelectionCriterion
+from tcg.types.options import MaturitySpec, RollSchedule, SelectionCriterion
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +61,9 @@ class InstrumentContinuous:
     adjustment: Literal["none", "ratio", "difference"] = "none"
     cycle: str | None = None  # e.g. "HMUZ" quarterly
     roll_offset: int = 0
-    strategy: Literal["front_month"] = "front_month"
+    # Issue #3: ``end_of_month`` rolls on the last trading day of each month
+    # regardless of expiry; default ``front_month`` keeps existing specs valid.
+    strategy: Literal["front_month", "end_of_month"] = "front_month"
     kind: Literal["continuous"] = "continuous"
 
 
@@ -107,6 +109,11 @@ class InstrumentOptionStream:
     # NO back-adjustment — ratio/difference are conceptually ill-posed for option
     # premia, so the series is always the raw stitched stream.
     roll_offset: int = 0
+    # Issue #3 roll SCHEDULE — orthogonal to ``maturity``.  ``None`` (default)
+    # re-resolves the maturity per trade date; ``EndOfMonthRoll`` re-resolves
+    # only on each month's last trading day and holds the resolved expiration
+    # between rolls.  See ``stream_resolver.resolve_option_stream``.
+    roll_schedule: RollSchedule = None
     kind: Literal["option_stream"] = "option_stream"
 
 

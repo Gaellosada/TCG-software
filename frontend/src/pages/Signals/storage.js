@@ -148,9 +148,12 @@ function sanitiseContinuousInstrument(raw) {
     ? raw.adjustment : 'none';
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
   const rollOffset = Number.isFinite(raw.rollOffset) ? raw.rollOffset : 0;
-  // Only one strategy is supported today — the sanitiser hard-codes it so
-  // a tampered payload can't smuggle in a rogue value.
-  return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy: 'front_month' };
+  // Issue #3: two roll strategies are supported. Validate against the known set
+  // (a rogue value still collapses to the default) and PRESERVE end_of_month so
+  // a saved signal doesn't silently lose it on load.
+  const strategy = ['front_month', 'end_of_month'].includes(raw.strategy)
+    ? raw.strategy : 'front_month';
+  return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy };
 }
 
 function sanitiseOptionStreamInstrument(raw) {
@@ -175,7 +178,13 @@ function sanitiseOptionStreamInstrument(raw) {
   // ill-posed for option premia), so any legacy `adjustment` key is dropped.
   const roll_offset = Number.isFinite(raw.roll_offset)
     ? Math.min(30, Math.max(0, Math.trunc(raw.roll_offset))) : 0;
-  return { type: 'option_stream', collection, option_type, cycle, maturity, selection, stream, roll_offset };
+  // Issue #3 roll schedule: only 'end_of_month' is a valid non-null value; any
+  // other value (incl. legacy/absent) collapses to null (per-date default).
+  const roll_schedule = raw.roll_schedule === 'end_of_month' ? 'end_of_month' : null;
+  return {
+    type: 'option_stream', collection, option_type, cycle, maturity, selection,
+    stream, roll_offset, roll_schedule,
+  };
 }
 
 function sanitiseInstrument(raw) {

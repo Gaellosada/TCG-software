@@ -122,6 +122,8 @@ function PortfolioPage() {
     // The shared `adjustment` field above applies to continuous (futures) legs
     // only; option streams carry no back-adjustment, so it stays null for them.
     roll_offset: l.roll_offset ?? null,
+    // Issue #3 roll schedule for option legs — sits beside roll_offset.
+    roll_schedule: l.roll_schedule ?? null,
   })), []);
 
   // Save current portfolio state to backend in the selected category.

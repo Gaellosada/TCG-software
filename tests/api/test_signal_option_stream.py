@@ -251,7 +251,7 @@ class TestSignalOptionStream:
 # ── roll_offset threading + adjustment-removal (the MAJOR review finding) ─
 
 
-def _opt_input(adjustment=None, roll_offset=None):
+def _opt_input(adjustment=None, roll_offset=None, roll_schedule=None):
     inst = {
         "type": "option_stream",
         "collection": "OPT_SP_500",
@@ -273,6 +273,8 @@ def _opt_input(adjustment=None, roll_offset=None):
         inst["adjustment"] = adjustment
     if roll_offset is not None:
         inst["roll_offset"] = roll_offset
+    if roll_schedule is not None:
+        inst["roll_schedule"] = roll_schedule
     return {"id": "Y", "instrument": inst}
 
 
@@ -375,4 +377,46 @@ class TestSignalOptionStreamRollFields:
     async def test_negative_roll_offset_rejected(self, capture_client):
         client, _captured = capture_client
         resp = await self._run(client, _opt_input(roll_offset=-1))
+        assert resp.status_code in (400, 422), resp.text
+
+    # ── Issue #3: roll_schedule threading through the SIGNALS path ──────────
+
+    async def test_roll_schedule_threaded_into_resolver(self, capture_client):
+        """roll_schedule='end_of_month' must reach resolve_option_stream as the
+        EndOfMonthRoll dataclass (converted from the wire Literal in signals.py).
+        """
+        from tcg.types.options import EndOfMonthRoll
+
+        client, captured = capture_client
+        resp = await self._run(client, _opt_input(roll_schedule="end_of_month"))
+        assert resp.status_code == 200, resp.text
+        assert captured["roll_schedule"] == EndOfMonthRoll()
+
+    async def test_roll_schedule_defaults_to_none(self, capture_client):
+        """Absent roll_schedule → None reaches the resolver (per-date baseline)."""
+        client, captured = capture_client
+        resp = await self._run(client, _opt_input())
+        assert resp.status_code == 200, resp.text
+        assert captured["roll_schedule"] is None
+
+    async def test_roll_schedule_round_trips_in_response(self, capture_client):
+        """The echoed option_stream instrument carries the roll_schedule the
+        request supplied (so a saved signal round-trips it)."""
+        client, _captured = capture_client
+        resp = await self._run(client, _opt_input(roll_schedule="end_of_month"))
+        assert resp.status_code == 200, resp.text
+        inst = resp.json()["positions"][0]["instrument"]
+        assert inst["roll_schedule"] == "end_of_month"
+
+    async def test_roll_schedule_none_round_trips_in_response(self, capture_client):
+        client, _captured = capture_client
+        resp = await self._run(client, _opt_input())
+        assert resp.status_code == 200, resp.text
+        inst = resp.json()["positions"][0]["instrument"]
+        assert inst["roll_schedule"] is None
+
+    async def test_invalid_roll_schedule_rejected(self, capture_client):
+        """Out-of-enum roll_schedule is rejected by the Literal at the boundary."""
+        client, _captured = capture_client
+        resp = await self._run(client, _opt_input(roll_schedule="weekly"))
         assert resp.status_code in (400, 422), resp.text

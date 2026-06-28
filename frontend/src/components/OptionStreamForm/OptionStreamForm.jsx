@@ -160,6 +160,11 @@ export function buildDefaultOptionStream({
     // NOTE: option streams carry no back-adjustment, so there is no
     // `adjustment` field — the series is always the raw stitched stream.
     roll_offset: 0,
+    // Roll schedule (Issue #3): null = re-select per trade date (default);
+    // 'end_of_month' = hold the selected contract, re-selecting only on each
+    // month's last trading day. Pair with a maturity that targets >= 1 month
+    // out, else the held contract expires mid-month (gap).
+    roll_schedule: null,
   };
 }
 
@@ -272,6 +277,12 @@ export default function OptionStreamForm({
 
   const setStream = useCallback((stream) => emit({ stream }), [emit]);
 
+  const setRollSchedule = useCallback((raw) => {
+    // '' (the "At expiration / per-date" option) maps to null so the wire
+    // payload omits the schedule (default per-date behaviour).
+    emit({ roll_schedule: raw === 'end_of_month' ? 'end_of_month' : null });
+  }, [emit]);
+
   const setRollOffset = useCallback((raw) => {
     const parsed = parseInt(raw, 10);
     const clamped = Number.isNaN(parsed) ? 0 : Math.min(30, Math.max(0, parsed));
@@ -312,6 +323,8 @@ export default function OptionStreamForm({
   const cycleAllowed = allowedCycles.map((c) => (c == null ? '_any' : c));
   // Legacy/absent roll_offset → 0 (additive field).
   const rollOffset = v.roll_offset ?? 0;
+  // Legacy/absent roll_schedule → '' (per-date default).
+  const rollSchedule = v.roll_schedule ?? '';
 
   return (
     <div className={styles.form} data-testid="option-stream-form" aria-disabled={disabled}>
@@ -472,6 +485,22 @@ export default function OptionStreamForm({
           aria-label="Roll offset days"
           title="Roll this many calendar days earlier — the maturity rule is resolved as of (date + roll offset). 0 = roll at the rule's normal time."
         />
+      </label>
+
+      {/* Roll schedule (Issue #3) — when to re-select the held contract */}
+      <label className={styles.row}>
+        <span className={styles.label}>Roll schedule</span>
+        <select
+          className={styles.input}
+          value={rollSchedule}
+          onChange={(e) => setRollSchedule(e.target.value)}
+          disabled={disabled}
+          aria-label="Roll schedule"
+          title="When to re-select the held contract. 'At expiration (per date)' resolves the maturity rule every trade date. 'End of month' holds the selected contract and rolls only on each month's last trading day — pair with a maturity targeting >= 1 month out."
+        >
+          <option value="">At expiration (per date)</option>
+          <option value="end_of_month">End of month</option>
+        </select>
       </label>
 
       {/* Selection criterion */}

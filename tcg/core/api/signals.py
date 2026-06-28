@@ -430,6 +430,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
         from tcg.core.api.options import (
             _criterion_pydantic_to_dataclass,
             _maturity_pydantic_to_dataclass,
+            _roll_schedule_pydantic_to_dataclass,
         )
 
         # Reject tautological: by_delta selection + delta stream
@@ -452,6 +453,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             selection=selection,
             stream=inst_in.stream,
             roll_offset=int(inst_in.roll_offset),
+            roll_schedule=_roll_schedule_pydantic_to_dataclass(inst_in.roll_schedule),
         )
     else:
         if not inst_in.collection:
@@ -940,6 +942,8 @@ def _instrument_payload(inst: InputInstrument) -> dict:
     if isinstance(inst, InstrumentOptionStream):
         from dataclasses import asdict
 
+        from tcg.types.options import EndOfMonthRoll
+
         return {
             "type": "option_stream",
             "collection": inst.collection,
@@ -955,6 +959,13 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             # its inbound model reads snake_case.  No ``adjustment`` key: option
             # streams carry no back-adjustment (raw stitched series).
             "roll_offset": int(inst.roll_offset),
+            # Issue #3 roll schedule, emitted as the wire Literal so a saved
+            # signal round-trips it through ``OptionStreamRef.model_validate``.
+            "roll_schedule": (
+                "end_of_month"
+                if isinstance(inst.roll_schedule, EndOfMonthRoll)
+                else None
+            ),
         }
     return {
         "type": "continuous",

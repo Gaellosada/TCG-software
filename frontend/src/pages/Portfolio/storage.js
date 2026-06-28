@@ -50,6 +50,8 @@ export function savePortfolio(name, { legs, rebalance }) {
       // ``?? null`` (not ``|| null``) so a valid roll_offset of 0 survives the
       // round-trip. Snake-case: option legs use roll_offset (futures: rollOffset).
       roll_offset: l.roll_offset ?? null,
+      // Issue #3 roll schedule for option legs — persisted beside roll_offset.
+      roll_schedule: l.roll_schedule ?? null,
     })),
     weights: weightsDict,
     rebalance,

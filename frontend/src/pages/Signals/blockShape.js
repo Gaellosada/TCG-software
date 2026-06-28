@@ -166,7 +166,9 @@ export function isInputConfigured(input) {
         && ['none', 'ratio', 'difference'].includes(inst.adjustment)
         && (inst.cycle == null || typeof inst.cycle === 'string')
         && Number.isFinite(inst.rollOffset)
-        && inst.strategy === 'front_month';
+        // Issue #3: accept both roll strategies (was front_month-only, which
+        // would mark an end_of_month leg as not-configured / not runnable).
+        && ['front_month', 'end_of_month'].includes(inst.strategy);
     }
     // option_stream:
     return isInstrumentRefConfigured(inst);

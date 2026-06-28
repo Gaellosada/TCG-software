@@ -259,6 +259,106 @@ describe('usePortfolio — signal leg support', () => {
     // Minimal request body — defaults are omitted (BE defaults them).
     expect(leg).not.toHaveProperty('adjustment');
     expect(leg).not.toHaveProperty('roll_offset');
+    // Issue #3: roll_schedule also omitted at its default (null → per-date).
+    expect(leg).not.toHaveProperty('roll_schedule');
+  });
+
+  // ── Issue #3 (review r2 MAJOR): roll_schedule on a direct portfolio OPTION
+  // leg must reach the compute wire (it was dropped by the enumerate-and-rebuild
+  // apiLegs path even though OptionStreamForm emitted it).
+  it('handleCalculate forwards option_stream roll_schedule=end_of_month to the API', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => {
+      result.current.addLeg({
+        label: 'OPT_SP_500 C mid',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'end_of_month', offset_months: 1 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'mid',
+        roll_offset: 0,
+        roll_schedule: 'end_of_month',
+        weight: 100,
+      });
+    });
+    act(() => {
+      result.current.setStartDate('2024-01-01');
+      result.current.setEndDate('2024-12-31');
+    });
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    const leg = computePortfolio.mock.calls[0][0].legs[result.current.legs[0].label];
+    expect(leg.roll_schedule).toBe('end_of_month');
+  });
+
+  // ── Issue #3: roll_schedule must SURVIVE the localStorage persist round-trip
+  // for a direct portfolio option leg (savePortfolio → loadPortfolio).
+  it('roll_schedule survives the portfolio persist round-trip (option leg)', async () => {
+    const { savePortfolio, loadPortfolio } = await import('./storage');
+    const legs = [
+      {
+        label: 'OPT',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'end_of_month', offset_months: 1 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'mid',
+        roll_offset: 0,
+        roll_schedule: 'end_of_month',
+        weight: 100,
+      },
+    ];
+    savePortfolio('rt-opt', { legs, rebalance: 'none' });
+    const loaded = loadPortfolio('rt-opt');
+    expect(loaded.legs[0].roll_schedule).toBe('end_of_month');
+  });
+
+  // ── Issue #3: a direct portfolio CONTINUOUS leg's strategy must reach the
+  // compute wire AND survive persistence.
+  it('handleCalculate forwards continuous strategy=end_of_month to the API', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => {
+      result.current.addLeg({
+        label: 'FUT_ES',
+        type: 'continuous',
+        collection: 'FUT_ES',
+        strategy: 'end_of_month',
+        adjustment: 'ratio',
+        cycle: 'HMUZ',
+        rollOffset: 0,
+        weight: 100,
+      });
+    });
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+    const leg = computePortfolio.mock.calls[0][0].legs[result.current.legs[0].label];
+    expect(leg.strategy).toBe('end_of_month');
+  });
+
+  it('continuous strategy survives the portfolio persist round-trip', async () => {
+    const { savePortfolio, loadPortfolio } = await import('./storage');
+    const legs = [
+      {
+        label: 'FUT',
+        type: 'continuous',
+        collection: 'FUT_ES',
+        strategy: 'end_of_month',
+        adjustment: 'none',
+        cycle: null,
+        rollOffset: 0,
+        weight: 100,
+      },
+    ];
+    savePortfolio('rt-fut', { legs, rebalance: 'none' });
+    const loaded = loadPortfolio('rt-fut');
+    expect(loaded.legs[0].strategy).toBe('end_of_month');
   });
 });
 

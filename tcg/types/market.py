@@ -16,31 +16,39 @@ class AssetClass(StrEnum):
 
 class RollStrategy(StrEnum):
     FRONT_MONTH = "front_month"
+    # Roll on the last TRADING day of each contract's expiration month,
+    # regardless of the contract's actual expiry (Issue #3).  Pairs naturally
+    # with a cycle whose contracts live past month-end; a contract that expires
+    # before its month-end roll leaves a mid-month-expiry seam (WARN, not block).
+    END_OF_MONTH = "end_of_month"
 
 
 class AdjustmentMethod(StrEnum):
     """Back-adjustment method for continuous futures series."""
-    NONE = "none"                  # Raw concatenation (prototype default)
-    RATIO = "ratio"               # Ratio adjustment at roll points
-    DIFFERENCE = "difference"      # Additive adjustment at roll points
+
+    NONE = "none"  # Raw concatenation (prototype default)
+    RATIO = "ratio"  # Ratio adjustment at roll points
+    DIFFERENCE = "difference"  # Additive adjustment at roll points
 
 
 @dataclass(frozen=True)
 class InstrumentId:
     """Unique identifier for any tradeable instrument."""
+
     symbol: str
     asset_class: AssetClass
-    collection: str              # MongoDB collection or logical grouping
+    collection: str  # MongoDB collection or logical grouping
     exchange: str | None = None
 
 
 @dataclass(frozen=True)
 class ContractSpec:
     """Contract specification for futures."""
+
     instrument_id: InstrumentId
     expiration: date | None = None
     expiration_cycle: str | None = None  # "monthly", "weekly", "quarterly"
-    multiplier: float = 1.0              # e.g. 1000 for VIX futures
+    multiplier: float = 1.0  # e.g. 1000 for VIX futures
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,7 @@ class PriceSeries:
     All arrays have identical length. Dates are YYYYMMDD integers
     for fast comparison; conversion to ISO strings is a display concern.
     """
+
     dates: npt.NDArray[np.int64]
     open: npt.NDArray[np.float64]
     high: npt.NDArray[np.float64]
@@ -76,6 +85,7 @@ class PriceSeries:
 @dataclass(frozen=True)
 class ContractPriceData:
     """Price data for a single futures contract, used for rolling."""
+
     contract_id: str
     expiration: int  # YYYYMMDD integer (consistent with PriceSeries.dates)
     prices: PriceSeries
@@ -90,6 +100,7 @@ class ContinuousRollConfig:
     for monthly). Used to filter and order contracts for rolling.
     If None, all contracts in the collection are used.
     """
+
     strategy: RollStrategy
     adjustment: AdjustmentMethod = AdjustmentMethod.NONE
     cycle: str | None = None
@@ -104,6 +115,7 @@ class ContinuousLegSpec:
     since ``ContinuousRollConfig`` is a pure configuration object that
     does not carry storage location.
     """
+
     collection: str
     roll_config: ContinuousRollConfig
 
@@ -111,8 +123,9 @@ class ContinuousLegSpec:
 @dataclass(frozen=True)
 class ContinuousSeries:
     """Stitched price series from rolling multiple contracts."""
+
     collection: str
     roll_config: ContinuousRollConfig
     prices: PriceSeries
-    roll_dates: tuple[int, ...]     # YYYYMMDD at each roll boundary
-    contracts: tuple[str, ...]      # Ordered contract IDs used
+    roll_dates: tuple[int, ...]  # YYYYMMDD at each roll boundary
+    contracts: tuple[str, ...]  # Ordered contract IDs used

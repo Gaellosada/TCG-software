@@ -187,6 +187,32 @@ describe('<OptionStreamForm>', () => {
     expect(onChange.mock.calls[0][0].roll_offset).toBe(30);
   });
 
+  // ── Issue #3: roll schedule select ─────────────────────────────────────
+
+  it('renders the Roll schedule select defaulting to per-date (empty)', () => {
+    renderForm();
+    const sel = screen.getByLabelText('Roll schedule');
+    expect(sel).toBeTruthy();
+    expect(sel.value).toBe('');  // "" = At expiration (per date)
+  });
+
+  it('emits roll_schedule=end_of_month when selected', () => {
+    const { onChange } = renderForm();
+    fireEvent.change(screen.getByLabelText('Roll schedule'), {
+      target: { value: 'end_of_month' },
+    });
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange.mock.calls[0][0]).toMatchObject({ roll_schedule: 'end_of_month' });
+  });
+
+  it('emits roll_schedule=null when reset to per-date', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.roll_schedule = 'end_of_month';
+    const { onChange } = renderForm({ value });
+    fireEvent.change(screen.getByLabelText('Roll schedule'), { target: { value: '' } });
+    expect(onChange.mock.calls[0][0].roll_schedule).toBeNull();
+  });
+
   // Clamp every malformed / out-of-range input into the integer range 0..30.
   // The setRollOffset handler does parseInt → NaN?0 → clamp(0,30). Each case
   // must emit an integer roll_offset (never a string / float / negative).

@@ -34,6 +34,10 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
           // streams carry no back-adjustment, so there is no adjustment field
           // (unlike the continuous leg below). BE defaults roll_offset to 0.
           roll_offset: instrument.roll_offset,
+          // Issue #3 roll schedule — sits beside roll_offset (whenever one is
+          // threaded, so is the other). Dropping it would no-op EOM for direct
+          // portfolio option legs.
+          roll_schedule: instrument.roll_schedule ?? null,
           weight: 100,
         });
       } else if (instrument.type === 'continuous') {

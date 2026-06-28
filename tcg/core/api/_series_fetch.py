@@ -94,6 +94,7 @@ def _materialise_leg_instrument(
         from tcg.core.api.options import (
             _criterion_pydantic_to_dataclass,
             _maturity_pydantic_to_dataclass,
+            _roll_schedule_pydantic_to_dataclass,
         )
 
         maturity = _maturity_pydantic_to_dataclass(instrument_ref.maturity)
@@ -106,6 +107,9 @@ def _materialise_leg_instrument(
             selection=selection,
             stream=instrument_ref.stream,
             roll_offset=int(instrument_ref.roll_offset),
+            roll_schedule=_roll_schedule_pydantic_to_dataclass(
+                instrument_ref.roll_schedule
+            ),
         )
     raise SignalValidationError(
         f"input {input_id!r}: basket leg {leg_index} has unsupported "
@@ -234,7 +238,7 @@ async def _date_array_for_leaf_instrument(
     if isinstance(inst, InstrumentContinuous):
         try:
             roll_config = build_roll_config(
-                inst.adjustment, inst.cycle, inst.roll_offset
+                inst.adjustment, inst.cycle, inst.roll_offset, strategy=inst.strategy
             )
         except ValueError as exc:
             raise SignalDataError(f"{err_prefix}: {exc}") from exc
@@ -436,6 +440,7 @@ def make_signal_fetcher(
                 selection=instrument.selection,
                 stream=instrument.stream,
                 roll_offset=instrument.roll_offset,
+                roll_schedule=instrument.roll_schedule,
                 chain_reader=chain_reader,
                 maturity_resolver=mat_resolver,
                 underlying_price_resolver=ul_resolver,
@@ -505,6 +510,7 @@ def make_signal_fetcher(
                 instrument.adjustment,
                 instrument.cycle,
                 instrument.roll_offset,
+                strategy=instrument.strategy,
             )
         except ValueError as exc:
             raise SignalValidationError(f"continuous input: {exc}") from exc

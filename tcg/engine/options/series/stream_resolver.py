@@ -78,6 +78,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from tcg.engine.options.maturity.protocol import MaturityResolver
+from tcg.engine.options.maturity.resolver import last_trading_day_of_month
 from tcg.engine.options.selection._match import (
     match_by_delta,
     match_by_moneyness,
@@ -91,10 +92,12 @@ from tcg.types.options import (
     ByDelta,
     ByMoneyness,
     ByStrike,
+    EndOfMonthRoll,
     MaturitySpec,
     NearestToTarget,
     OptionContractDoc,
     OptionDailyRow,
+    RollSchedule,
     SelectionCriterion,
     SelectionResult,
 )
@@ -320,6 +323,7 @@ async def _resolve_bulk(
     selection: SelectionCriterion,
     stream: StreamLabel,
     roll_offset: int = 0,
+    roll_schedule: RollSchedule = None,
     chain_reader: _CycleAwareReader,
     bulk_chain_reader: _CycleAwareBulkReader,
     maturity_resolver: MaturityResolver,
@@ -433,12 +437,17 @@ async def _resolve_bulk(
         # no longer produces a silent all-NaN ``no_chain_for_date`` series.  A
         # per-date ``snapped_to:<iso>`` diagnostic records the substitution.
         listed = sorted(available_expirations) if available_expirations else []
-        for idx, d in queryable:
-            # Keep the resolve() call structure clean — Issue #3 wraps this
-            # exact branch in a per-month roll sweep.  Guard it (hardening
-            # finding D): a non-TCGError from the resolver (e.g. a calendar
-            # month with zero business days) must become a per-date NaN, not a
-            # 500 that escapes the API handlers.
+
+        def _resolve_arith(idx: int, d: date) -> tuple[date | None, str | None]:
+            """Resolve the arithmetic maturity for one ref date ``d``.
+
+            Returns ``(expiration_or_None, snap_note_or_None)``.  On a resolver
+            failure it sets ``error_codes[idx] = "maturity_resolution_failed"``
+            (hardening finding D — a non-TCGError, e.g. a calendar month with
+            zero business days, must become a per-date NaN, not a 500) and
+            returns ``(None, None)``.  Issue #2's snap-to-listed is applied here
+            so it is preserved on BOTH the per-date and the EOM-roll (held) path.
+            """
             try:
                 target = maturity_resolver.resolve(
                     ref_date=d + timedelta(days=roll_offset), rule=maturity
@@ -448,21 +457,71 @@ async def _resolve_bulk(
                 # maturity RULE itself could not be resolved, not "the chain has
                 # no contract on the computed date".  Phase B preserves an
                 # already-set code, so this survives the ``exp is None`` branch.
-                expirations[idx] = None
                 error_codes[idx] = "maturity_resolution_failed"
                 _log.debug("maturity resolve failed date=%s: %s", d, exc)
-                continue
+                return None, None
             snapped = _snap_to_listed(target, listed)
             if snapped is not None and snapped != target:
-                # Defer the diagnostic: ``error_codes`` is the per-date FAILURE
-                # channel and Phase C skips any date whose code is already set,
-                # so recording it here would suppress selection.  Stash the note
-                # and fold it in AFTER Phase C, only on dates that resolved to a
-                # real value (see "snap diagnostics" merge below).
-                snap_notes[idx] = f"snapped_to:{snapped.isoformat()}"
-                expirations[idx] = snapped
-            else:
-                expirations[idx] = target
+                # ``snapped_to:`` is a SUCCESS-side note (the value array is the
+                # source of truth for NaN-ness); it is folded into ``error_codes``
+                # AFTER Phase C only on dates that still resolved to a real value.
+                return snapped, f"snapped_to:{snapped.isoformat()}"
+            return target, None
+
+        if isinstance(roll_schedule, EndOfMonthRoll):
+            # Issue #3 — END-OF-MONTH roll: re-resolve the maturity rule only on
+            # the last TRADING day of each month (and unconditionally on the
+            # FIRST queryable date), and HOLD the resolved expiration across all
+            # dates until the next month-end roll.  A single forward pass is
+            # correct because ``queryable`` is sorted ascending (CME valid_days).
+            #
+            # This wraps the SAME ``_resolve_arith`` call (so Issue #2's snap is
+            # preserved); it just changes the CADENCE from per-date to per-month.
+            # The held contract may expire mid-month — that is the WARN-don't-block
+            # edge: Phases B/C then naturally produce ``no_chain_for_date`` for
+            # the tail of the month (a gap), never a crash.
+            held_exp: date | None = None
+            held_note: str | None = None
+            # (year, month) whose month-end triggered the last SUCCESSFUL resolve
+            # — guards against re-resolving more than once per month.
+            held_roll_month: tuple[int, int] | None = None
+            # Memoise the month-end per (year, month): the sweep visits every
+            # trade date but there are only ~N_months distinct month-ends, so
+            # this avoids a redundant valid_days() scan on each held date.
+            eom_cache: dict[tuple[int, int], date] = {}
+            for idx, d in queryable:
+                ym = (d.year, d.month)
+                cur_eom = eom_cache.get(ym)
+                if cur_eom is None:
+                    cur_eom = last_trading_day_of_month(d)
+                    eom_cache[ym] = cur_eom
+                # Init guard keys on ``held_exp is None`` (per the diagnosis), NOT
+                # ``held_roll_month is None``: if the FIRST roll-date resolve fails
+                # (held_exp stays None while held_roll_month got set), we keep
+                # re-trying on each subsequent date until a contract resolves —
+                # rather than blanking the whole month. On the success path the two
+                # guards are identical (held_exp is non-None after the first
+                # resolve, so the cadence is governed by the d >= cur_eom term).
+                is_roll_date = held_exp is None or (
+                    d >= cur_eom and ym != held_roll_month
+                )
+                if is_roll_date:
+                    held_exp, held_note = _resolve_arith(idx, d)
+                    held_roll_month = (d.year, d.month)
+                expirations[idx] = held_exp
+                # The snap note is a property of the HELD contract, so it travels
+                # to every held date (not only the roll date).  Skip dates whose
+                # roll-date resolve failed — they already carry the failure code.
+                if held_note is not None and error_codes[idx] is None:
+                    snap_notes[idx] = held_note
+        else:
+            # Default (roll_schedule is None): stateless per-date resolution —
+            # the maturity rule is re-resolved for every trade date (unchanged).
+            for idx, d in queryable:
+                exp, note = _resolve_arith(idx, d)
+                expirations[idx] = exp
+                if note is not None:
+                    snap_notes[idx] = note
 
     # ── Phase B: Group by expiration and bulk fetch ─────────────────
 
@@ -772,6 +831,7 @@ async def resolve_option_stream(
     selection: SelectionCriterion,
     stream: StreamLabel,
     roll_offset: int = 0,
+    roll_schedule: RollSchedule = None,
     chain_reader: _CycleAwareReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
@@ -883,6 +943,7 @@ async def resolve_option_stream(
             selection=selection,
             stream=stream,
             roll_offset=roll_offset,
+            roll_schedule=roll_schedule,
             chain_reader=chain_reader,
             bulk_chain_reader=bulk_chain_reader,
             maturity_resolver=maturity_resolver,
@@ -903,6 +964,13 @@ async def resolve_option_stream(
     if roll_offset != 0:
         raise ValueError(
             "roll_offset requires the bulk chain reader; the legacy per-date "
+            "path does not support it"
+        )
+    # Symmetric guard: the EOM-roll sweep lives in the bulk Phase A, so the
+    # legacy per-date path cannot honour a roll schedule either.
+    if roll_schedule is not None:
+        raise ValueError(
+            "roll_schedule requires the bulk chain reader; the legacy per-date "
             "path does not support it"
         )
 

@@ -564,3 +564,34 @@ class TestPortfolioOptionStreamRollFields:
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200, resp.text
+
+    # ── Issue #3: roll_schedule threading through the PORTFOLIO leg path ────
+
+    async def test_roll_schedule_threaded_into_ref(self, capture_client):
+        """A portfolio option leg threads roll_schedule into the built
+        OptionStreamRef (the LegSpec → OptionStreamRef hand-off)."""
+        client, captured = capture_client
+        leg = {**OPT_MID_LEG, "roll_schedule": "end_of_month"}
+        await self._equity(client, leg)
+        assert captured["ref"].roll_schedule == "end_of_month"
+
+    async def test_roll_schedule_defaults_to_none(self, capture_client):
+        client, captured = capture_client
+        await self._equity(client, OPT_MID_LEG)
+        assert captured["ref"].roll_schedule is None
+
+    async def test_invalid_roll_schedule_rejected(self, capture_client):
+        client, _captured = capture_client
+        body = {
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT": {**OPT_MID_LEG, "roll_schedule": "weekly"},
+            },
+            "weights": {"SPX": 50, "OPT": 50},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code in (400, 422), resp.text

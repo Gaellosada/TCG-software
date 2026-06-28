@@ -191,6 +191,8 @@ export default function usePortfolio() {
           // futures leg's camelCase `rollOffset` above). null for non-option
           // legs. `adjustment` above is shared with the continuous leg.
           roll_offset: leg.roll_offset ?? null,
+          // Issue #3 roll schedule for option legs — sits beside roll_offset.
+          roll_schedule: leg.roll_schedule ?? null,
         },
       ];
     });
@@ -338,6 +340,11 @@ export default function usePortfolio() {
         // continuous leg below).
         if (leg.roll_offset > 0) {
           apiLegs[leg.label].roll_offset = leg.roll_offset;
+        }
+        // Issue #3 roll schedule — send only the non-default ('end_of_month');
+        // null/absent means the BE per-date default. Sits beside roll_offset.
+        if (leg.roll_schedule) {
+          apiLegs[leg.label].roll_schedule = leg.roll_schedule;
         }
       } else if (leg.type === 'continuous') {
         apiLegs[leg.label] = {
