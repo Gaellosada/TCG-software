@@ -122,14 +122,11 @@ def validate_code(source: str) -> ast.Module:
 
         # 3. Block dunder / leading-underscore access.
         if isinstance(node, ast.Name) and node.id.startswith("_"):
-            raise _reject(
-                node, f"names starting with '_' are not allowed: {node.id!r}"
-            )
+            raise _reject(node, f"names starting with '_' are not allowed: {node.id!r}")
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             raise _reject(
                 node,
-                f"attribute access starting with '_' is not allowed: "
-                f".{node.attr}",
+                f"attribute access starting with '_' is not allowed: .{node.attr}",
             )
 
         # 4. Reject f-strings outright. Users writing indicator math don't
@@ -156,8 +153,7 @@ def validate_code(source: str) -> ast.Module:
             if node.value.startswith("_"):
                 raise _reject(
                     node,
-                    "Underscore/dunder references are not allowed in "
-                    "indicator code",
+                    "Underscore/dunder references are not allowed in indicator code",
                 )
             if _FORMAT_ATTR_RE.search(node.value):
                 raise _reject(
@@ -252,8 +248,7 @@ def _validate_compute_signature(func: ast.FunctionDef) -> dict[str, type]:
         )
     if first.annotation is not None:
         if not (
-            isinstance(first.annotation, ast.Name)
-            and first.annotation.id == "dict"
+            isinstance(first.annotation, ast.Name) and first.annotation.id == "dict"
         ):
             raise _reject(
                 func,
@@ -284,8 +279,7 @@ def _validate_compute_signature(func: ast.FunctionDef) -> dict[str, type]:
         if name.startswith("_"):
             raise _reject(
                 func,
-                f"compute() parameter names must not start with '_': "
-                f"{name!r}",
+                f"compute() parameter names must not start with '_': {name!r}",
             )
 
         if arg.annotation is None:
@@ -337,9 +331,7 @@ def _validate_compute_signature(func: ast.FunctionDef) -> dict[str, type]:
                     f"bool default (True/False)",
                 )
         elif ann_id == "int":
-            if isinstance(default_value, bool) or not isinstance(
-                default_value, int
-            ):
+            if isinstance(default_value, bool) or not isinstance(default_value, int):
                 raise _reject(
                     func,
                     f"compute() parameter {name!r} annotated int must have an "
@@ -389,8 +381,7 @@ def _coerce_param_value(
         if isinstance(value, float):
             if not value.is_integer():
                 raise IndicatorValidationError(
-                    f"param {name!r} expects int, got non-integer float "
-                    f"{value!r}"
+                    f"param {name!r} expects int, got non-integer float {value!r}"
                 )
             return int(value)
         raise IndicatorValidationError(
@@ -478,71 +469,242 @@ class _NumpyFacade:
 #   seterr, geterr, seterrcall, setbufsize.
 _NUMPY_FACADE_NAMES: tuple[str, ...] = (
     # Array creation
-    "array", "asarray", "asanyarray", "copy",
-    "zeros", "ones", "full", "empty",
-    "zeros_like", "ones_like", "full_like", "empty_like",
-    "arange", "linspace", "logspace", "geomspace",
-    "eye", "identity", "diag", "tri", "tril", "triu",
+    "array",
+    "asarray",
+    "asanyarray",
+    "copy",
+    "zeros",
+    "ones",
+    "full",
+    "empty",
+    "zeros_like",
+    "ones_like",
+    "full_like",
+    "empty_like",
+    "arange",
+    "linspace",
+    "logspace",
+    "geomspace",
+    "eye",
+    "identity",
+    "diag",
+    "tri",
+    "tril",
+    "triu",
     # Constants
-    "nan", "inf", "pi", "e", "euler_gamma", "newaxis",
+    "nan",
+    "inf",
+    "pi",
+    "e",
+    "euler_gamma",
+    "newaxis",
     # Dtypes
-    "float64", "float32", "float16",
-    "int64", "int32", "int16", "int8",
-    "uint64", "uint32", "uint16", "uint8",
-    "bool_", "dtype", "integer", "floating", "number",
+    "float64",
+    "float32",
+    "float16",
+    "int64",
+    "int32",
+    "int16",
+    "int8",
+    "uint64",
+    "uint32",
+    "uint16",
+    "uint8",
+    "bool_",
+    "dtype",
+    "integer",
+    "floating",
+    "number",
     # Shape / layout
     # Note: `flatten` is an ndarray method, not a numpy top-level
     # attribute — listing it would leave a dead entry that the facade
     # silently skips. Users call `arr.flatten()` directly.
-    "reshape", "ravel", "transpose", "swapaxes",
-    "expand_dims", "squeeze", "broadcast_to", "broadcast_arrays",
-    "concatenate", "stack", "vstack", "hstack", "dstack", "column_stack",
-    "split", "array_split", "hsplit", "vsplit",
-    "tile", "repeat", "flip", "fliplr", "flipud", "roll",
-    "atleast_1d", "atleast_2d", "atleast_3d",
+    "reshape",
+    "ravel",
+    "transpose",
+    "swapaxes",
+    "expand_dims",
+    "squeeze",
+    "broadcast_to",
+    "broadcast_arrays",
+    "concatenate",
+    "stack",
+    "vstack",
+    "hstack",
+    "dstack",
+    "column_stack",
+    "split",
+    "array_split",
+    "hsplit",
+    "vsplit",
+    "tile",
+    "repeat",
+    "flip",
+    "fliplr",
+    "flipud",
+    "roll",
+    "atleast_1d",
+    "atleast_2d",
+    "atleast_3d",
     # Element-wise math
-    "add", "subtract", "multiply", "divide", "true_divide", "floor_divide",
-    "mod", "remainder", "power", "negative", "positive",
-    "abs", "absolute", "fabs", "sign", "reciprocal",
-    "sqrt", "cbrt", "square", "exp", "exp2", "expm1",
-    "log", "log2", "log10", "log1p",
-    "sin", "cos", "tan", "arcsin", "arccos", "arctan", "arctan2",
-    "sinh", "cosh", "tanh", "arcsinh", "arccosh", "arctanh",
-    "degrees", "radians", "deg2rad", "rad2deg",
-    "floor", "ceil", "trunc", "rint", "round", "around",
-    "clip", "maximum", "minimum", "fmax", "fmin",
-    "hypot", "copysign",
+    "add",
+    "subtract",
+    "multiply",
+    "divide",
+    "true_divide",
+    "floor_divide",
+    "mod",
+    "remainder",
+    "power",
+    "negative",
+    "positive",
+    "abs",
+    "absolute",
+    "fabs",
+    "sign",
+    "reciprocal",
+    "sqrt",
+    "cbrt",
+    "square",
+    "exp",
+    "exp2",
+    "expm1",
+    "log",
+    "log2",
+    "log10",
+    "log1p",
+    "sin",
+    "cos",
+    "tan",
+    "arcsin",
+    "arccos",
+    "arctan",
+    "arctan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "arcsinh",
+    "arccosh",
+    "arctanh",
+    "degrees",
+    "radians",
+    "deg2rad",
+    "rad2deg",
+    "floor",
+    "ceil",
+    "trunc",
+    "rint",
+    "round",
+    "around",
+    "clip",
+    "maximum",
+    "minimum",
+    "fmax",
+    "fmin",
+    "hypot",
+    "copysign",
     # Logical / comparison
-    "where", "select", "piecewise",
-    "isnan", "isinf", "isfinite", "isneginf", "isposinf",
-    "isclose", "allclose", "array_equal", "array_equiv",
-    "equal", "not_equal", "less", "less_equal", "greater", "greater_equal",
-    "logical_and", "logical_or", "logical_not", "logical_xor",
-    "any", "all",
+    "where",
+    "select",
+    "piecewise",
+    "isnan",
+    "isinf",
+    "isfinite",
+    "isneginf",
+    "isposinf",
+    "isclose",
+    "allclose",
+    "array_equal",
+    "array_equiv",
+    "equal",
+    "not_equal",
+    "less",
+    "less_equal",
+    "greater",
+    "greater_equal",
+    "logical_and",
+    "logical_or",
+    "logical_not",
+    "logical_xor",
+    "any",
+    "all",
     # Reductions / statistics
-    "sum", "prod", "cumsum", "cumprod",
-    "mean", "std", "var", "median", "average",
-    "min", "max", "amin", "amax", "ptp",
-    "argmin", "argmax", "argsort", "sort", "lexsort", "partition",
-    "percentile", "quantile",
-    "nansum", "nanprod", "nancumsum", "nancumprod",
-    "nanmean", "nanstd", "nanvar", "nanmedian",
-    "nanmin", "nanmax", "nanargmin", "nanargmax", "nanpercentile",
+    "sum",
+    "prod",
+    "cumsum",
+    "cumprod",
+    "mean",
+    "std",
+    "var",
+    "median",
+    "average",
+    "min",
+    "max",
+    "amin",
+    "amax",
+    "ptp",
+    "argmin",
+    "argmax",
+    "argsort",
+    "sort",
+    "lexsort",
+    "partition",
+    "percentile",
+    "quantile",
+    "nansum",
+    "nanprod",
+    "nancumsum",
+    "nancumprod",
+    "nanmean",
+    "nanstd",
+    "nanvar",
+    "nanmedian",
+    "nanmin",
+    "nanmax",
+    "nanargmin",
+    "nanargmax",
+    "nanpercentile",
     "nanquantile",
-    "count_nonzero", "nonzero",
-    "unique", "searchsorted",
+    "count_nonzero",
+    "nonzero",
+    "unique",
+    "searchsorted",
     # Indexing helpers
-    "take", "put", "choose", "compress",
-    "indices", "ix_", "r_", "c_", "meshgrid",
+    "take",
+    "put",
+    "choose",
+    "compress",
+    "indices",
+    "ix_",
+    "r_",
+    "c_",
+    "meshgrid",
     # Sliding / signal
-    "diff", "ediff1d", "gradient", "convolve", "correlate",
-    "pad", "interp",
+    "diff",
+    "ediff1d",
+    "gradient",
+    "convolve",
+    "correlate",
+    "pad",
+    "interp",
     # Dot / reductions-over-axes
-    "dot", "vdot", "inner", "outer", "matmul", "tensordot", "einsum",
-    "cross", "trace",
+    "dot",
+    "vdot",
+    "inner",
+    "outer",
+    "matmul",
+    "tensordot",
+    "einsum",
+    "cross",
+    "trace",
     # Type-checks / casting
-    "isscalar", "ndim", "shape", "size",
-    "result_type", "can_cast", "promote_types",
+    "isscalar",
+    "ndim",
+    "shape",
+    "size",
+    "result_type",
+    "can_cast",
+    "promote_types",
 )
 
 
@@ -564,6 +726,79 @@ def _build_numpy_facade() -> _NumpyFacade:
             continue
         allowed[name] = value
     return _NumpyFacade(allowed)
+
+
+# --- ``ta`` facade: curated path-dependence combinators ----------------------
+#
+# Mirrors the ``_NumpyFacade`` fail-closed discipline EXACTLY: a __slots__
+# object whose __getattr__ resolves only an explicit allow-list and raises
+# AttributeError for everything else, with __setattr__/__delattr__ raising.
+# Whitelisted names are the pure helper functions from
+# ``tcg.engine.indicator_helpers`` — nothing else (no module, no __dict__,
+# no _allowed). Indicator code calls e.g. ``ta.crossed_down(ma, 90)``.
+
+
+class _TaFacade:
+    """Read-only proxy exposing ONLY the curated indicator-helper functions.
+
+    Same fail-closed contract as :class:`_NumpyFacade`: every attribute that
+    is not an explicitly whitelisted helper raises :class:`AttributeError`,
+    so dunders (``__class__``, ``__globals__``), the backing module, the
+    private ``_allowed`` dict, etc. are all unreachable. Mutation
+    (``ta.x = 1`` / ``del ta.x``) raises.
+    """
+
+    __slots__ = ("_allowed",)
+
+    def __init__(self, allowed: dict[str, Any]) -> None:
+        object.__setattr__(self, "_allowed", allowed)
+
+    def __getattr__(self, name: str) -> Any:  # noqa: D401 — proxy
+        allowed = object.__getattribute__(self, "_allowed")
+        if name in allowed:
+            return allowed[name]
+        raise AttributeError(
+            f"'ta' facade has no attribute {name!r} — the indicator sandbox "
+            f"exposes only a curated set of path-dependence helpers"
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("'ta' facade is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("'ta' facade is read-only")
+
+    def __repr__(self) -> str:
+        return "<ta facade (sandboxed)>"
+
+
+# Allow-list = exactly the public helper verbs. Every entry is a pure,
+# single-pass, side-effect-free function (numpy + stdlib only). Do NOT add
+# anything that touches the filesystem / subprocess / dynamic import here.
+_TA_FACADE_NAMES: tuple[str, ...] = (
+    "crossed_up",
+    "crossed_down",
+    "bars_since",
+    "count_in_window",
+    "sequence_within",
+    "nth_event",
+    "regime_gate",
+)
+
+
+def _build_ta_facade() -> _TaFacade:
+    """Materialise the ``ta`` facade from the allow-list.
+
+    Resolved against :mod:`tcg.engine.indicator_helpers`. A missing name is a
+    programming error (the allow-list must track the module), so we fail
+    loudly at import rather than skip silently.
+    """
+    from tcg.engine import indicator_helpers as _ta_module
+
+    allowed: dict[str, Any] = {}
+    for name in _TA_FACADE_NAMES:
+        allowed[name] = getattr(_ta_module, name)
+    return _TaFacade(allowed)
 
 
 _SAFE_BUILTIN_NAMES: tuple[str, ...] = (
@@ -619,19 +854,23 @@ def _build_safe_builtins() -> dict[str, Any]:
 
 
 def _build_safe_globals() -> dict[str, Any]:
-    """Sandbox globals: restricted builtins + numpy facade + math.
+    """Sandbox globals: restricted builtins + numpy facade + math + ta.
 
-    Only three names enter the sandbox namespace: ``__builtins__`` (a
-    curated dict), ``np`` (the facade — NOT the real numpy module), and
+    Only four names enter the sandbox namespace: ``__builtins__`` (a
+    curated dict), ``np`` (the facade — NOT the real numpy module),
     ``math`` (the stdlib math module, which is pure array-math with no
-    filesystem / subprocess / ctypes surface). ``pandas``, ``scipy``,
-    ``ctypes``, ``os``, ``sys``, ``subprocess``, etc. are never placed
-    here regardless of what the parent process has imported elsewhere.
+    filesystem / subprocess / ctypes surface), and ``ta`` (the
+    path-dependence helper facade — NOT the real ``indicator_helpers``
+    module; same fail-closed allow-list discipline as ``np``).
+    ``pandas``, ``scipy``, ``ctypes``, ``os``, ``sys``, ``subprocess``,
+    etc. are never placed here regardless of what the parent process has
+    imported elsewhere.
     """
     return {
         "__builtins__": _build_safe_builtins(),
         "np": _build_numpy_facade(),
         "math": math,
+        "ta": _build_ta_facade(),
     }
 
 
@@ -676,9 +915,7 @@ class _TimeoutContext:
 # --- Result coercion ---------------------------------------------------------
 
 
-def _coerce_to_float_array(
-    value: Any, expected_length: int
-) -> npt.NDArray[np.float64]:
+def _coerce_to_float_array(value: Any, expected_length: int) -> npt.NDArray[np.float64]:
     """Validate and coerce *value* to a float numpy array of the right length.
 
     Accepts ``np.ndarray`` of numeric dtype or a list/tuple of numbers.
@@ -697,8 +934,7 @@ def _coerce_to_float_array(
             arr = np.asarray(value, dtype=np.float64)
         except (TypeError, ValueError) as exc:
             raise IndicatorRuntimeError(
-                f"indicator return value could not be converted to a "
-                f"float array: {exc}"
+                f"indicator return value could not be converted to a float array: {exc}"
             ) from exc
     else:
         raise IndicatorRuntimeError(
@@ -712,15 +948,13 @@ def _coerce_to_float_array(
         )
     if arr.shape[0] != expected_length:
         raise IndicatorRuntimeError(
-            f"indicator returned length {arr.shape[0]}; expected "
-            f"{expected_length}"
+            f"indicator returned length {arr.shape[0]}; expected {expected_length}"
         )
 
     if arr.dtype.kind not in ("f", "i", "u", "b"):
         # object / complex / string dtypes → reject
         raise IndicatorRuntimeError(
-            f"indicator returned array of dtype {arr.dtype}; expected a "
-            f"numeric dtype"
+            f"indicator returned array of dtype {arr.dtype}; expected a numeric dtype"
         )
     if arr.dtype != np.float64:
         arr = arr.astype(np.float64)
@@ -743,9 +977,7 @@ _USER_FILENAME = "<indicator>"
 #     punctuation (comma, semicolon) stops the match cleanly.
 # Relative paths ("../foo", "./foo") are preserved by design — they are
 # not absolute filesystem paths and typically don't leak install layout.
-_ABS_PATH_RE: re.Pattern[str] = re.compile(
-    r"(?<![:/\w.])/(?:[\w.-]+/)+[\w.-]+"
-)
+_ABS_PATH_RE: re.Pattern[str] = re.compile(r"(?<![:/\w.])/(?:[\w.-]+/)+[\w.-]+")
 
 
 def _sanitize_message(message: str) -> str:
@@ -872,9 +1104,7 @@ def run_indicator(
     try:
         compiled = compile(tree, filename="<indicator>", mode="exec")
     except (SyntaxError, ValueError) as exc:
-        raise IndicatorValidationError(
-            f"failed to compile indicator: {exc}"
-        ) from exc
+        raise IndicatorValidationError(f"failed to compile indicator: {exc}") from exc
 
     safe_globals = _build_safe_globals()
     safe_locals: dict[str, Any] = {}
@@ -918,8 +1148,7 @@ def run_indicator(
             # surface as a structured runtime error with the sanitized
             # traceback.  MemoryError is re-raised above.
             raise IndicatorRuntimeError(
-                f"indicator raised {type(exc).__name__}: "
-                f"{_sanitize_message(str(exc))}",
+                f"indicator raised {type(exc).__name__}: {_sanitize_message(str(exc))}",
                 user_traceback=_sanitize_traceback(exc),
             ) from exc
 

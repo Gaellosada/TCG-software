@@ -72,6 +72,8 @@ import termStructureSlope from './defaults/term-structure-slope';
 
 // --- Pattern ----------------------------------------------------------
 import swingPivots from './defaults/swing-pivots';
+import exhaustion from './defaults/exhaustion';
+import nthtap from './defaults/nthtap';
 
 // --- Statistical ------------------------------------------------------
 import percentileFilteredReturn from './defaults/percentile-filtered-return';
@@ -91,6 +93,8 @@ export const DEFAULT_INDICATORS = [
   termStructureSlope,
   // Pattern
   swingPivots,
+  exhaustion,
+  nthtap,
   // Statistical
   percentileFilteredReturn,
 ];

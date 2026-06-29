@@ -37,6 +37,8 @@ const EXPECTATIONS = {
   'macd-histogram':             { params: [{ name: 'fast', type: 'int', default: 12 }, { name: 'slow', type: 'int', default: 26 }, { name: 'signal', type: 'int', default: 9 }],                          seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
   'historical-vol':             { params: [{ name: 'window', type: 'int', default: 20 }],                                                                                                                seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
   'swing-pivots':               { params: [{ name: 'total_periods', type: 'int', default: 20 }, { name: 'inflection_periods', type: 'int', default: 5 }],                                                 seriesLabels: ['close'], ownPanel: false, compatibleAssetTypes: DEFAULT_COMPAT },
+  exhaustion:                   { params: [{ name: 'upper', type: 'float', default: 70.0 }, { name: 'lower', type: 'float', default: 30.0 }, { name: 'window', type: 'int', default: 10 }, { name: 'ma_window', type: 'int', default: 20 }], seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
+  nthtap:                       { params: [{ name: 'level', type: 'float', default: 100.0 }, { name: 'window', type: 'int', default: 20 }, { name: 'ma_window', type: 'int', default: 20 }],                seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
   'percentile-filtered-return': { params: [{ name: 'window', type: 'int', default: 252 }, { name: 'filter_window', type: 'int', default: 50 }, { name: 'percentile', type: 'float', default: 95.0 }],     seriesLabels: ['close'], ownPanel: true , compatibleAssetTypes: DEFAULT_COMPAT },
   // Wave 2c: option-native defaults. compatibleAssetTypes pins to
   // ['option'] only — these consume option-derived semantic series labels
@@ -54,8 +56,8 @@ const KEBAB_CASE_RE = /^[a-z][a-z0-9-]*$/;
 const CATEGORIES = ['trend', 'momentum', 'volatility', 'pattern', 'statistical'];
 
 describe('DEFAULT_INDICATORS — library invariants', () => {
-  it('contains exactly 11 entries', () => {
-    expect(DEFAULT_INDICATORS).toHaveLength(11);
+  it('contains exactly 13 entries', () => {
+    expect(DEFAULT_INDICATORS).toHaveLength(13);
   });
 
   it('has unique ids', () => {

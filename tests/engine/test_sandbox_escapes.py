@@ -40,31 +40,22 @@ BAD_CODE: dict[str, str] = {
     ),
     # type(...).__globals__ — rejected because .__globals__ starts with "_".
     "type_globals_attr": (
-        "def compute(series):\n"
-        "    return type(lambda: 0).__globals__\n"
+        "def compute(series):\n    return type(lambda: 0).__globals__\n"
     ),
     # ().__class__.__bases__ — rejected on the .__class__ attribute.
     "empty_tuple_class_bases": (
-        "def compute(series):\n"
-        "    return ().__class__.__bases__\n"
+        "def compute(series):\n    return ().__class__.__bases__\n"
     ),
     # str.format attribute-traversal — the format spec "{0.__class__}"
     # matches the _FORMAT_ATTR_RE string-literal rejection.
     "format_attr_traversal": (
-        "def compute(series):\n"
-        "    return '{0.__class__}'.format(1)\n"
+        "def compute(series):\n    return '{0.__class__}'.format(1)\n"
     ),
     # f-string attribute access — rejected because JoinedStr nodes
     # are forbidden outright.
-    "fstring_attribute": (
-        "def compute(series):\n"
-        "    return f'{(1).__class__}'\n"
-    ),
+    "fstring_attribute": ("def compute(series):\n    return f'{(1).__class__}'\n"),
     # eval / exec / open / __import__ — historical direct-call blocks.
-    "eval_call": (
-        "def compute(series):\n"
-        "    return eval('1+1')\n"
-    ),
+    "eval_call": ("def compute(series):\n    return eval('1+1')\n"),
     "import_call_name": (
         "def compute(series):\n"
         "    __import__('os')\n"
@@ -128,6 +119,36 @@ BAD_CODE: dict[str, str] = {
         "    cls = series.__class__\n"
         "    return next(iter(series.values()))\n"
     ),
+    # ---- ``ta`` facade escapes (Wave 1) -------------------------------------
+    # The ``ta`` facade clones the ``np`` facade fail-closed discipline.
+    # Dunder access is rejected statically by the AST walker (any attribute
+    # starting with "_").
+    "ta_class_attr": ("def compute(series):\n    return ta.__class__\n"),
+    "ta_getattribute_attr": (
+        "def compute(series):\n    return ta.__getattribute__('_allowed')\n"
+    ),
+    # ``ta._allowed`` — the private backing dict. Starts with "_" → rejected
+    # statically by the underscore-attribute walker.
+    "ta_allowed_attr": ("def compute(series):\n    return ta._allowed\n"),
+    # ``ta.os`` — not a dunder, passes the static walker, but the facade
+    # __getattr__ raises AttributeError at runtime (not whitelisted).
+    "ta_os_attr": ("def compute(series):\n    return ta.os\n"),
+    # ``ta.__globals__`` — dunder, rejected statically.
+    "ta_globals_attr": ("def compute(series):\n    return ta.__globals__\n"),
+    # Mutation: assignment to a facade attribute. The facade __setattr__
+    # raises AttributeError at runtime (the static walker allows plain
+    # ``ta.x = 1`` since ``x`` has no underscore).
+    "ta_setattr_mutation": (
+        "def compute(series):\n    ta.x = 1\n    return next(iter(series.values()))\n"
+    ),
+    # ``del ta.crossed_up`` — facade __delattr__ raises at runtime.
+    "ta_delattr_mutation": (
+        "def compute(series):\n"
+        "    del ta.crossed_up\n"
+        "    return next(iter(series.values()))\n"
+    ),
+    # Reaching the backing module via a non-whitelisted name.
+    "ta_module_attr": ("def compute(series):\n    return ta.indicator_helpers\n"),
 }
 
 
@@ -141,9 +162,7 @@ def test_escape_is_rejected(label: str, code: str) -> None:
 
 
 @pytest.mark.parametrize("label,code", sorted(BAD_CODE.items()))
-def test_escape_rejected_by_validate_code_directly(
-    label: str, code: str
-) -> None:
+def test_escape_rejected_by_validate_code_directly(label: str, code: str) -> None:
     """Prefer static rejection — keeps the exec path from running at all.
 
     A couple of vectors (e.g. ``getattr`` with a non-underscore string)
@@ -157,13 +176,21 @@ def test_escape_rejected_by_validate_code_directly(
     # ``typed_sig_annotation_not_whitelisted`` passes the static AST walker
     # (no forbidden node shapes) but is rejected by the compute() signature
     # validator, which runs inside ``run_indicator`` after ``validate_code``.
-    runtime_only = {"typed_sig_annotation_not_whitelisted"}
+    runtime_only = {
+        "typed_sig_annotation_not_whitelisted",
+        # ``ta`` facade vectors that pass the static walker (no forbidden
+        # node shapes — no underscore attribute, plain assignment/delete)
+        # but are blocked at runtime by the facade's allow-list __getattr__
+        # / raising __setattr__ / __delattr__.
+        "ta_os_attr",
+        "ta_setattr_mutation",
+        "ta_delattr_mutation",
+        "ta_module_attr",
+    }
 
     if label in runtime_only:
         # Either is acceptable for these — just confirm end-to-end block.
-        with pytest.raises(
-            (IndicatorValidationError, IndicatorRuntimeError)
-        ):
+        with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
             run_indicator(code, {}, _series())
     else:
         with pytest.raises(IndicatorValidationError):
@@ -190,6 +217,28 @@ def test_default_sma_still_runs_after_hardening() -> None:
     assert np.isnan(result[0])
     assert np.isnan(result[1])
     np.testing.assert_allclose(result[2:], [2.0, 3.0, 4.0])
+
+
+# --------------------------------------------------------------------------
+# Positive: a benign ``ta`` helper call runs through run_indicator and
+# returns a valid array. Proves the facade is actually bound + usable.
+# --------------------------------------------------------------------------
+
+_TA_CROSS_CODE = (
+    "def compute(series, level: float = 3.0):\n"
+    "    s = next(iter(series.values()))\n"
+    "    return ta.crossed_up(s, level)\n"
+)
+
+
+def test_ta_crossed_up_runs_through_sandbox() -> None:
+    """The ``ta`` facade is bound and a benign call returns a valid array."""
+    # series = [1,2,3,4,5]; crosses up through 3.0 at index 2 (2 -> 3).
+    result = run_indicator(_TA_CROSS_CODE, {"level": 3.0}, _series())
+    assert result.shape == (5,)
+    assert result.dtype == np.float64
+    assert np.isnan(result[0])  # bar 0 has no predecessor -> NaN
+    np.testing.assert_array_equal(result[1:], [0.0, 1.0, 0.0, 0.0])
 
 
 # --------------------------------------------------------------------------
@@ -313,16 +362,34 @@ def test_arbitrary_file_read_via_np_genfromtxt_is_blocked() -> None:
 # allow-list policy does, because new attributes are not auto-admitted).
 _DANGEROUS_NUMPY_ATTRS: tuple[str, ...] = (
     # Submodules that re-export stdlib modules under non-underscore names
-    "f2py", "ctypeslib", "distutils", "testing",
+    "f2py",
+    "ctypeslib",
+    "distutils",
+    "testing",
     # The ``lib`` subpackage exposes npyio (save/load/memmap helpers)
-    "lib", "compat",
+    "lib",
+    "compat",
     # File I/O functions that live directly on the numpy namespace
-    "save", "savez", "savez_compressed", "savetxt",
-    "load", "loadtxt", "genfromtxt", "fromregex",
-    "fromfile", "memmap", "DataSource",
+    "save",
+    "savez",
+    "savez_compressed",
+    "savetxt",
+    "load",
+    "loadtxt",
+    "genfromtxt",
+    "fromregex",
+    "fromfile",
+    "memmap",
+    "DataSource",
     # Utility surface that leaks internals
-    "show_config", "get_include", "source", "lookfor", "info",
-    "who", "disp", "deprecate",
+    "show_config",
+    "get_include",
+    "source",
+    "lookfor",
+    "info",
+    "who",
+    "disp",
+    "deprecate",
 )
 
 
@@ -334,11 +401,7 @@ def test_dangerous_numpy_attr_is_blocked(attr: str) -> None:
     — including any of the known stdlib-re-exporting submodules — must
     raise ``AttributeError`` on access.
     """
-    code = (
-        "def compute(series):\n"
-        f"    _ = np.{attr}\n"
-        "    return series['SPX']\n"
-    )
+    code = f"def compute(series):\n    _ = np.{attr}\n    return series['SPX']\n"
     # Some of these (e.g. ``load``, ``save``) start with a non-underscore
     # character and pass static validation — they fail at exec via the
     # facade's ``AttributeError``. Others (none in this list today) may
@@ -383,10 +446,7 @@ def test_forbidden_global_is_not_in_sandbox(forbidden: str) -> None:
     """
     # Names starting with underscore are rejected at validation time.
     # Others (pandas, scipy, …) fail at exec with NameError.
-    code = (
-        "def compute(series):\n"
-        f"    return {forbidden}\n"
-    )
+    code = f"def compute(series):\n    return {forbidden}\n"
     with pytest.raises((IndicatorValidationError, IndicatorRuntimeError)):
         run_indicator(code, {}, _series())
 
@@ -400,15 +460,13 @@ def test_facade_is_not_the_real_numpy_module() -> None:
     case.
     """
     captured: dict[str, object] = {}
-    code = (
-        "def compute(series):\n"
-        "    return series['SPX']\n"
-    )
+    code = "def compute(series):\n    return series['SPX']\n"
     # Build sandbox globals the way run_indicator does, inspect the type.
     from tcg.engine.indicator_exec import (
         _build_safe_globals,
         _NumpyFacade,
     )
+
     g = _build_safe_globals()
     captured["np"] = g["np"]
     assert isinstance(captured["np"], _NumpyFacade)
