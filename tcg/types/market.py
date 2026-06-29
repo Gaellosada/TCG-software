@@ -8,6 +8,19 @@ import numpy as np
 import numpy.typing as npt
 
 
+# Single source of truth for the dwh connection-pool size, shared across the
+# layer boundary: ``tcg.data._sql.connection.DwhConnectionPool`` uses it as its
+# ``max_size`` default, and ``tcg.engine.options.series.stream_resolver`` derives
+# its per-resolve concurrency cap from it (``max(1, N - 1)``) so the two cannot
+# drift (the import-linter forbids engine<->data imports, so a shared constant
+# here in the dependency-free ``tcg.types`` layer is the seam).  The resolver
+# MUST keep its concurrent dwh-connection fan-out <= this, reserving one slot for
+# the interleaved expirations / underlying-price lookups that share the pool.
+# (Was 4, sized for a single-user desktop app against the shared RDS; raising it
+# would also scale the derived resolver cap.)
+DEFAULT_DWH_POOL_MAX_SIZE: int = 4
+
+
 class AssetClass(StrEnum):
     EQUITY = "equity"
     INDEX = "index"

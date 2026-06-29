@@ -57,13 +57,15 @@ materialiser issues, per trade date::
     else:                             1 chain query
         - direct query at the resolved expiration
 
-For an N-day backtest this is N (or 2N for NearestToTarget) Mongo
+For an N-day backtest this is N (or 2N for NearestToTarget) dwh
 round-trips.  The per-date tasks run **concurrently** under
 ``asyncio.gather`` with a bounded semaphore (see
 :data:`_MAX_INFLIGHT_PER_DATE`) — wall-clock latency is therefore
-roughly ``ceil(N / _MAX_INFLIGHT_PER_DATE) × Mongo_RTT``, not
-``N × Mongo_RTT`` as a serial loop would give.  Total query count is
-unchanged from the serial loop.
+roughly ``ceil(N / _MAX_INFLIGHT_PER_DATE) × dwh_RTT``, not
+``N × dwh_RTT`` as a serial loop would give.  Total query count is
+unchanged from the serial loop.  The semaphore is sized to the dwh
+connection pool (``_DWH_RESOLVE_CONCURRENCY``) — each concurrent task
+holds a pool connection, so the fan-out must stay within ``max_size``.
 """
 
 from __future__ import annotations
@@ -88,6 +90,7 @@ from tcg.engine.options.selection._ports import (
     UnderlyingPriceResolver,
 )
 from tcg.engine.options.selection.selector import DefaultOptionsSelector
+from tcg.types.market import DEFAULT_DWH_POOL_MAX_SIZE
 from tcg.types.options import (
     ByDelta,
     ByMoneyness,
@@ -105,13 +108,25 @@ from tcg.types.options import (
 _log = logging.getLogger(__name__)
 
 
-# Bounded concurrency for the per-date resolver loop.  Each task holds
-# a Motor connection for the full cursor iteration of its chain query;
-# large collections (OPT_SP_500: 418K docs) produce long-lived cursors
-# that starve the pool when too many run in parallel.  16 keeps
-# wall-clock latency reasonable while leaving ample headroom in Motor's
-# default 100-slot pool for underlying-price lookups and other activity.
-_MAX_INFLIGHT_PER_DATE = 16
+# Bounded concurrency for the resolver's per-date / per-expiration chain
+# queries.  Each concurrent task independently acquires a dwh pool connection
+# (``async with pool.connection()``), so the resolver's fan-out MUST stay within
+# the pool's capacity or callers block on ``pool.connection()`` past the 30s
+# acquire window → ``PoolTimeout`` (this is exactly the OPT_SP_500 basket-load
+# failure: a 2-year window has ~95 expirations → ~95 fetch tasks vying for a
+# 4-slot pool).
+#
+# DERIVE the cap from the single source of truth ``DEFAULT_DWH_POOL_MAX_SIZE``
+# (in ``tcg.types.market``, also the pool's ``max_size`` default) so the two
+# cannot drift — reserve ONE slot for the interleaved ``list_expirations`` /
+# underlying-price / spot-map lookups that share the same pool.  At max_size=4
+# this is 3.  (NOTE: previously 16/8, sized for the OLD Mongo/Motor 100-slot
+# pool and never re-tuned after the Postgres cutover (#58) — that over-
+# subscription is what caused the PoolTimeout.)
+_DWH_RESOLVE_CONCURRENCY = max(1, DEFAULT_DWH_POOL_MAX_SIZE - 1)
+
+# Per-date fallback path cap (was 16). Capped at the pool-derived concurrency.
+_MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
 
 
 # Streams readable off ``OptionDailyRow``.  Mirrors the Pydantic
@@ -625,10 +640,12 @@ async def _resolve_bulk(
                     strike_max = _spot * (1 + _margin)
 
     # One bulk query per unique expiration, run concurrently but with a
-    # semaphore to avoid exhausting the MongoDB connection pool on
-    # multi-decade date ranges (e.g. 1990–2026 can produce 50+ groups).
-    _BULK_FETCH_CONCURRENCY = 8
-    _bulk_sem = asyncio.Semaphore(_BULK_FETCH_CONCURRENCY)
+    # semaphore so the concurrent dwh-connection fan-out stays within the pool
+    # (multi-decade date ranges can produce 50-95+ expiration groups; each
+    # ``query_chain_bulk`` acquires a pool connection).  Derived from the pool
+    # size (see ``_DWH_RESOLVE_CONCURRENCY``) so it can't over-subscribe the pool
+    # — was a hardcoded 8 (Mongo-era), which exceeded the 4-slot dwh pool.
+    _bulk_sem = asyncio.Semaphore(_DWH_RESOLVE_CONCURRENCY)
     chain_index: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
 
     async def _fetch_exp(
