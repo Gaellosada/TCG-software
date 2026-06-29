@@ -88,7 +88,8 @@ export function defaultBlock(section = 'entries') {
  *   - spot:          requires collection + instrument_id.
  *   - continuous:    requires collection + adjustment + cycle + rollOffset + strategy.
  *   - option_stream: requires collection + option_type + maturity + selection + stream
- *                    (roll_offset is optional — BE-side default 0; option streams
+ *                    (roll_offset is optional — the unified {value, unit:'days'|'months'}
+ *                    object, BE-side default {value:0,unit:'days'}; option streams
  *                    carry no back-adjustment, so there is no adjustment field).
  *   - basket:        two shapes (locked descriptor; see InstrumentPickerModal):
  *                    - {kind:'saved',   basket_id}                  → non-empty basket_id.

@@ -16,10 +16,16 @@ import styles from './OptionStreamForm.module.css';
  *     maturity: { kind, ... },           // discriminated union (kind field)
  *     selection: { kind, ... },          // discriminated union (kind field)
  *     stream: 'mid'|'iv'|'delta'|'gamma'|'vega'|'theta'|'open_interest'|'volume',
- *     roll_offset: <int 0..30>,                 // roll the maturity this many
- *                                               // calendar days earlier (mirrors
- *                                               // futures rollOffset); 0 = roll at
- *                                               // the maturity rule's normal time
+ *     roll_offset: { value: <int>, unit: 'days' | 'months' },  // ROLL-EARLY axis:
+ *                                               // resolve the maturity as of
+ *                                               // (date + offset) so the roll fires
+ *                                               // that much earlier; {value:0} = no
+ *                                               // shift. Range days 0..30 / months
+ *                                               // 0..12. DISTINCT from the maturity's
+ *                                               // own month offset (which expiration
+ *                                               // to target). "Roll at end of month"
+ *                                               // is the EndOfMonth maturity, not a
+ *                                               // roll_offset value.
  *   }
  *
  * NOTE: option continuous series carry NO back-adjustment — ratio/difference
