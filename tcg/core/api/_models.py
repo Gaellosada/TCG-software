@@ -55,7 +55,7 @@ from pydantic import (
     model_validator,
 )
 
-from tcg.core.api._models_options import MaturityRule, SelectionCriterion
+from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
 
 
 class SpotInstrumentRef(BaseModel):
@@ -132,17 +132,18 @@ class OptionStreamRef(BaseModel):
     # An explicit value (iv / delta / greeks / volume / open_interest) still
     # overrides; an out-of-enum value is still rejected by the Literal.
     stream: OptionStreamLabel = "mid"
-    # Roll offset in calendar days, mirroring ``ContinuousInstrumentRef.rollOffset``
-    # (futures).  The engine resolves the maturity rule as of ``date + roll_offset``
-    # for each date, so every roll happens ``roll_offset`` days EARLIER.  Additive,
-    # default 0 → preserves the existing wire contract; range 0..30 (same bound as
-    # the futures roll offset).  No-op for ``fixed`` maturity (single expiration).
-    roll_offset: int = Field(default=0, ge=0, le=30)
-    # Issue #3 roll SCHEDULE — ``"end_of_month"`` re-selects the held contract
-    # only on each month's last trading day (and holds it between), instead of
-    # re-resolving the maturity per trade date.  ``None`` (default) preserves the
-    # existing per-date behaviour + wire contract.  Orthogonal to ``maturity``.
-    roll_schedule: Literal["end_of_month"] | None = None
+    # Roll offset — the ROLL-EARLY axis: ``{value, unit: 'days'|'months'}``.  The
+    # engine resolves the maturity rule as of ``date + offset`` for each date, so
+    # every roll fires that much EARLIER.  Default ``{value:0}`` = no shift.
+    # DISTINCT from the maturity rule's ``offset_months`` (the TARGET-month axis —
+    # which expiration to aim at).  No-op for ``fixed`` maturity.  A shipped bare
+    # int (the old days-only field) reads back as ``{value:int, unit:'days'}`` via
+    # the model's before-validator.
+    #
+    # NOTE: "roll at end of month" is NOT expressed here — it is the ``EndOfMonth``
+    # maturity rule (which makes the resolver hold one contract per month).  The
+    # former separate ``roll_schedule`` field was removed (it duplicated that).
+    roll_offset: RollOffset = Field(default_factory=RollOffset)
 
     @field_validator("cycle", mode="before")
     @classmethod

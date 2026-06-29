@@ -172,19 +172,32 @@ function sanitiseOptionStreamInstrument(raw) {
   const stream = VALID_STREAMS.includes(raw.stream) ? raw.stream : null;
   if (!stream) return null;
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
-  // roll_offset rolls the maturity that many calendar days earlier (clamped
-  // 0..30). Legacy payloads lack the key — default 0 (the BE defaults it too).
-  // NOTE: option streams carry NO back-adjustment (ratio/difference are
-  // ill-posed for option premia), so any legacy `adjustment` key is dropped.
-  const roll_offset = Number.isFinite(raw.roll_offset)
-    ? Math.min(30, Math.max(0, Math.trunc(raw.roll_offset))) : 0;
-  // Issue #3 roll schedule: only 'end_of_month' is a valid non-null value; any
-  // other value (incl. legacy/absent) collapses to null (per-date default).
-  const roll_schedule = raw.roll_schedule === 'end_of_month' ? 'end_of_month' : null;
+  // roll_offset is the unified {value, unit:'days'|'months'} — the ROLL-EARLY
+  // axis. Per-unit clamp: days 0..30, months 0..12. A legacy bare int (the old
+  // days-only field) reads as {value:int, unit:'days'}. Absent → {0, days}.
+  // NOTE: option streams carry NO back-adjustment, so any legacy `adjustment`
+  // key is dropped; "roll at end of month" is the EndOfMonth MATURITY, so the
+  // former `roll_schedule` field is dropped here too (no pass-through).
+  const roll_offset = sanitiseRollOffset(raw.roll_offset);
   return {
     type: 'option_stream', collection, option_type, cycle, maturity, selection,
-    stream, roll_offset, roll_schedule,
+    stream, roll_offset,
   };
+}
+
+function sanitiseRollOffset(raw) {
+  const cap = (unit) => (unit === 'months' ? 12 : 30);
+  // Legacy bare int → days.
+  if (Number.isFinite(raw)) {
+    return { value: Math.min(30, Math.max(0, Math.trunc(raw))), unit: 'days' };
+  }
+  if (raw && typeof raw === 'object') {
+    const unit = raw.unit === 'months' ? 'months' : 'days';
+    const value = Number.isFinite(raw.value)
+      ? Math.min(cap(unit), Math.max(0, Math.trunc(raw.value))) : 0;
+    return { value, unit };
+  }
+  return { value: 0, unit: 'days' };
 }
 
 function sanitiseInstrument(raw) {

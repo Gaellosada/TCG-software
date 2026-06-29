@@ -691,20 +691,23 @@ def _maturity_pydantic_to_dataclass(maturity: Any) -> Any:
     raise OptionsValidationError(f"Unknown maturity kind {kind!r}")
 
 
-def _roll_schedule_pydantic_to_dataclass(value: Any) -> Any:
-    """Convert the wire ``roll_schedule`` value to its dataclass twin (Issue #3).
+def _roll_offset_pydantic_to_dataclass(value: Any) -> Any:
+    """Convert the Pydantic ``RollOffset`` (or a legacy int) to its dataclass twin.
 
-    The wire value is a bare ``Literal["end_of_month"] | None`` (not a
-    discriminated union), so this is a trivial map — kept co-located with the
-    maturity / selection converters to match the established pattern.
+    Accepts the validated Pydantic ``RollOffset`` model (``.value`` / ``.unit``)
+    OR a bare int (legacy days) for robustness on internally-constructed refs.
+    ``None`` → the no-op default ``RollOffset(value=0, unit='days')``.
     """
-    from tcg.types.options import EndOfMonthRoll
+    from tcg.types.options import RollOffset as RollOffsetDC
 
     if value is None:
-        return None
-    if value == "end_of_month":
-        return EndOfMonthRoll()
-    raise OptionsValidationError(f"Unknown roll_schedule {value!r}")
+        return RollOffsetDC()
+    if isinstance(value, bool):
+        raise OptionsValidationError(f"Invalid roll_offset {value!r}")
+    if isinstance(value, int):
+        return RollOffsetDC(value=value, unit="days")
+    # Pydantic RollOffset (duck-typed: has .value + .unit).
+    return RollOffsetDC(value=int(value.value), unit=value.unit)
 
 
 # ---------------------------------------------------------------------------

@@ -186,13 +186,12 @@ export default function usePortfolio() {
           maturity: leg.maturity || null,
           selection: leg.selection || null,
           stream: leg.stream || null,
-          // option_stream roll offset (snake_case — matches OptionStreamForm's
-          // emitted field + the OptionStreamRef wire field; distinct from the
-          // futures leg's camelCase `rollOffset` above). null for non-option
-          // legs. `adjustment` above is shared with the continuous leg.
+          // option_stream roll offset — the unified {value, unit} object
+          // (snake_case, matches OptionStreamForm + the OptionStreamRef wire
+          // field; distinct from the futures leg's camelCase `rollOffset`).
+          // null for non-option legs. ("End of month" is the maturity, not a
+          // separate roll_schedule — that field was removed.)
           roll_offset: leg.roll_offset ?? null,
-          // Issue #3 roll schedule for option legs — sits beside roll_offset.
-          roll_schedule: leg.roll_schedule ?? null,
         },
       ];
     });
@@ -334,17 +333,17 @@ export default function usePortfolio() {
           selection: leg.selection,
           stream: leg.stream,
         };
-        // Additive roll_offset — omit when at its default (0) to keep the
-        // request body minimal (the BE defaults roll_offset=0).  Option streams
-        // carry NO back-adjustment, so no `adjustment` is sent (unlike the
-        // continuous leg below).
-        if (leg.roll_offset > 0) {
-          apiLegs[leg.label].roll_offset = leg.roll_offset;
-        }
-        // Issue #3 roll schedule — send only the non-default ('end_of_month');
-        // null/absent means the BE per-date default. Sits beside roll_offset.
-        if (leg.roll_schedule) {
-          apiLegs[leg.label].roll_schedule = leg.roll_schedule;
+        // Roll offset is the unified {value, unit} object — send it only when
+        // its value is non-zero (omit the no-op to keep the body minimal; the
+        // BE defaults to value 0). Option streams carry NO back-adjustment, so
+        // no `adjustment` is sent. ("End of month" is the maturity, not a
+        // separate roll_schedule — that field was removed.)
+        const ro = leg.roll_offset;
+        if (ro && typeof ro === 'object' && ro.value > 0) {
+          apiLegs[leg.label].roll_offset = { value: ro.value, unit: ro.unit || 'days' };
+        } else if (typeof ro === 'number' && ro > 0) {
+          // Legacy in-memory int (days) — forward in the unified shape.
+          apiLegs[leg.label].roll_offset = { value: ro, unit: 'days' };
         }
       } else if (leg.type === 'continuous') {
         apiLegs[leg.label] = {

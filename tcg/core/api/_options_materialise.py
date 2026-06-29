@@ -127,7 +127,7 @@ async def materialise_option_streams(
     from tcg.core.api.options import (
         _criterion_pydantic_to_dataclass,
         _maturity_pydantic_to_dataclass,
-        _roll_schedule_pydantic_to_dataclass,
+        _roll_offset_pydantic_to_dataclass,
     )
 
     trade_dates = _business_dates_in_range(start_date, end_date)
@@ -166,8 +166,7 @@ async def materialise_option_streams(
             maturity=_maturity_pydantic_to_dataclass(ref.maturity),
             selection=_criterion_pydantic_to_dataclass(ref.selection),
             stream=ref.stream,
-            roll_offset=ref.roll_offset,
-            roll_schedule=_roll_schedule_pydantic_to_dataclass(ref.roll_schedule),
+            roll_offset=_roll_offset_pydantic_to_dataclass(ref.roll_offset),
             chain_reader=chain_reader,
             maturity_resolver=mat_resolver,
             underlying_price_resolver=ul_resolver,

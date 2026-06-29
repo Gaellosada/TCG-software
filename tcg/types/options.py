@@ -280,28 +280,39 @@ RollRule = AtExpiry | NDaysBeforeExpiry | DeltaCross
 
 
 # ---------------------------------------------------------------------------
-# Roll schedule (Issue #3) — WHEN to re-select the held contract
+# Roll offset — the ROLL-EARLY axis (how early to roll), in days OR months
 # ---------------------------------------------------------------------------
 #
-# Orthogonal to ``MaturityRule`` (WHICH expiration to target) and ``RollRule``
-# (Phase-2 vocabulary, not yet wired).  ``RollSchedule`` governs the cadence of
-# re-resolution: the default (``None``) re-resolves the maturity per trade date;
-# ``EndOfMonthRoll`` re-resolves only on the last trading day of each month and
-# HOLDS the resolved expiration between those rolls.  Frozen, no fields (mirrors
-# ``AtExpiry``).
+# This is ONE of the two distinct roll/maturity axes; keep them straight:
+#   * TARGET-month  — the ``MaturityRule``'s ``offset_months`` (NextThirdFriday /
+#     EndOfMonth): WHICH expiration to aim at (this month, next month, ...).
+#   * ROLL-EARLY    — ``RollOffset`` below: resolve the maturity rule as of
+#     ``date + offset`` so every roll happens that much EARLIER.
+# They are NOT the same concept (target vs roll-early), so both legitimately
+# speak in months; what was redundant — and is now removed — was the separate
+# ``roll_schedule`` cadence (its "end of month" duplicated the EndOfMonth
+# maturity).  "Roll at end of month" is now expressed ONLY by the EndOfMonth
+# maturity, which the resolver detects to hold one contract per month.
+#
+# ``unit`` carries days or months so a single control covers both granularities
+# (replaces the old days-only ``roll_offset: int``).  A shipped int (days) reads
+# back as ``RollOffset(value=int, unit="days")`` via the API read-shim.
+
+
+RollOffsetUnit = Literal["days", "months"]
 
 
 @dataclass(frozen=True)
-class EndOfMonthRoll:
-    """Roll on the last TRADING day of each month, holding the resolved
-    expiration in between (Issue #3).  Regardless of the held contract's own
-    expiry — a contract that expires mid-month leaves a gap for the tail of the
-    month (WARN, not block; pair with a maturity that targets >= 1 month out)."""
+class RollOffset:
+    """How early to roll (the ROLL-EARLY axis), in ``days`` or ``months``.
 
-    pass
+    The resolver shifts the maturity-resolution ref date forward by this amount
+    (``date + offset``) so each roll fires that much sooner.  ``value == 0`` is
+    the no-op default (roll at the maturity rule's natural time).  No-op for
+    ``FixedDate`` maturity (a single absolute expiration)."""
 
-
-RollSchedule = EndOfMonthRoll | None
+    value: int = 0
+    unit: RollOffsetUnit = "days"
 
 
 @dataclass(frozen=True)

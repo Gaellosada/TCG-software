@@ -1,19 +1,22 @@
-"""Tests for the END-OF-MONTH roll SCHEDULE on option streams (Issue #3).
+"""Tests for the END-OF-MONTH hold-and-roll on option streams.
 
-``RollSchedule = EndOfMonthRoll | None`` is a NEW, orthogonal dimension to the
-``maturity`` rule.  With ``roll_schedule=EndOfMonthRoll()`` the resolver:
+Choosing ``maturity = EndOfMonth(offset_months=N)`` IS the request to roll at
+month-end: the resolver then
 
-  * resolves the maturity rule ONCE on the last TRADING day of each month
+  * re-resolves the maturity ONLY on the last TRADING day of each month
     (plus unconditionally on the first queryable date), and
   * HOLDS that resolved expiration for every date until the next month-end
     roll — instead of re-resolving the maturity per trade date.
 
-The held expiration is selected exactly as before (maturity + ``roll_offset`` +
-the Issue-#2 snap-to-listed), Phases B/C are unchanged, and ``derive_rolls``
-fires only on the resulting monthly expiration transitions.
+(Originally this cadence was a separate ``roll_schedule=end_of_month`` knob;
+it was removed because its "end of month" duplicated the EndOfMonth maturity.
+The hold-within-month sweep + the Issue-#2 snap-to-listed are unchanged — only
+the TRIGGER moved from ``roll_schedule`` to ``maturity == EndOfMonth``.)
 
-Harness reuses the shared bulk fakes (``_stream_fakes``); the same harness the
-roll-offset and maturity-snap suites use.
+Non-EndOfMonth maturities (NextThirdFriday / PlusNDays / FixedDate /
+NearestToTarget) keep the stateless per-date resolution.
+
+Harness reuses the shared bulk fakes (``_stream_fakes``).
 """
 
 from __future__ import annotations
@@ -29,18 +32,17 @@ from tcg.engine.options.series.stream_resolver import resolve_option_stream
 from tcg.types.options import (
     ByStrike,
     EndOfMonth,
-    EndOfMonthRoll,
-    FixedDate,
     NextThirdFriday,
     OptionContractDoc,
     OptionDailyRow,
+    RollOffset,
 )
 
 from _stream_fakes import FakeBulkChainReader, FakeChainReader, _contract, _row
 
-# Listed monthly expirations = each month's last business day (Issue #3 snaps
-# the EndOfMonth(offset_months=1) arithmetic target to these).  Distinct mids
-# per expiration so the series value reveals which contract is held.
+# Listed monthly expirations = each month's last business day (the EndOfMonth
+# target snaps to these). Distinct mids per expiration so the series value
+# reveals which contract is held.
 _FEB = date(2024, 2, 29)
 _MAR = date(2024, 3, 28)  # 29th is Good Friday → 28th (trading-calendar snap)
 _APR = date(2024, 4, 30)
@@ -73,7 +75,7 @@ _DATES = [
 ]
 
 
-async def _resolve(dates, *, maturity, roll_schedule, roll_offset=0, available=None):
+async def _resolve(dates, *, maturity, roll_offset=RollOffset(), available=None):
     chains = _chains(dates)
     return await resolve_option_stream(
         dates=dates,
@@ -89,7 +91,6 @@ async def _resolve(dates, *, maturity, roll_schedule, roll_offset=0, available=N
         underlying_price_resolver=None,
         bulk_chain_reader=FakeBulkChainReader(chains),
         available_expirations=available if available is not None else _LISTED,
-        roll_schedule=roll_schedule,
     )
 
 
@@ -97,8 +98,8 @@ async def _resolve(dates, *, maturity, roll_schedule, roll_offset=0, available=N
 
 
 async def test_eom_holds_one_contract_per_month_and_rolls_monthly():
-    """EndOfMonth(offset_months=1) under EOM-roll re-resolves ONLY on each
-    month's last trading day and holds in between.
+    """EndOfMonth(offset_months=1) re-resolves ONLY on each month's last trading
+    day and holds in between.
 
     The roll fires ON the month-end date (``d >= cur_eom``), so the new
     contract is established on that day and held until the next month-end:
@@ -108,9 +109,8 @@ async def test_eom_holds_one_contract_per_month_and_rolls_monthly():
     Exactly one contract per holding-window, rolling at month-end — NOT
     re-selected per trade date.
     """
-    maturity = EndOfMonth(offset_months=1)
     values, errors, contracts = await _resolve(
-        _DATES, maturity=maturity, roll_schedule=EndOfMonthRoll()
+        _DATES, maturity=EndOfMonth(offset_months=1)
     )
 
     # No failures (snap notes are success-side).
@@ -141,22 +141,23 @@ async def test_eom_holds_one_contract_per_month_and_rolls_monthly():
     assert {c.expiration for c in contracts} == {_FEB, _MAR, _APR}
 
 
-async def test_eom_holds_constant_within_month_not_per_date():
-    """Within a single holding-month the contract does NOT change date-to-date —
-    the whole point of EOM-roll (vs the stateless per-date resolve)."""
-    # Two February dates that bracket mid-month; both must hold the SAME (MAR)
-    # contract even though a per-date resolve of EndOfMonth(1) on different Feb
-    # days would still give MAR here — so use a maturity that WOULD drift daily
-    # without holding: NextThirdFriday(0) resolves to a different 3rd-Friday as
-    # the ref date advances across its own 3rd Friday.  Under holding, the
-    # contract is pinned to whatever the month-end roll resolved.
-    dates = [date(2024, 2, 1), date(2024, 2, 15), date(2024, 2, 29)]
-    # List the relevant 3rd Fridays as available so the snap lands on a real one.
-    third_fris = [date(2024, 2, 16), date(2024, 3, 15), date(2024, 4, 19)]
+async def test_eom_holds_constant_across_a_month_boundary_vs_per_date():
+    """The hold pins the contract even where a PER-DATE resolve would drift.
+
+    With EndOfMonth(offset_months=0): a per-date resolve gives Jan-end on Jan
+    dates and Feb-end on Feb dates (it drifts on the 1st of Feb).  Under the
+    hold, Feb-1 still carries the JANUARY contract (the Feb month-end roll has
+    not fired yet) — the contract is pinned to the last roll, not re-picked
+    daily.  This is the whole point of the monthly hold.
+    """
+    _JAN = date(2024, 1, 31)
+    listed = [_JAN, _FEB]
+    mids = {_JAN: 1.0, _FEB: 2.0}
+    dates = [date(2024, 1, 30), date(2024, 1, 31), date(2024, 2, 1)]
     chains = {
         d: [
-            (_contract(strike=4500, expiration=e), _row(row_date=d, mid=float(e.month)))
-            for e in third_fris
+            (_contract(strike=4500, expiration=e), _row(row_date=d, mid=mids[e]))
+            for e in listed
         ]
         for d in dates
     }
@@ -165,30 +166,29 @@ async def test_eom_holds_constant_within_month_not_per_date():
         collection="OPT_SP_500",
         option_type="C",
         cycle=None,
-        maturity=NextThirdFriday(offset_months=0),
+        maturity=EndOfMonth(offset_months=0),
         selection=ByStrike(strike=4500.0),
         stream="mid",
         chain_reader=FakeChainReader(chains),
         maturity_resolver=DefaultMaturityResolver(),
         underlying_price_resolver=None,
         bulk_chain_reader=FakeBulkChainReader(chains),
-        available_expirations=third_fris,
-        roll_schedule=EndOfMonthRoll(),
+        available_expirations=listed,
     )
     assert all(c is not None for c in contracts)
-    # The first date (2024-02-01) is the init roll; it resolves NextThirdFriday(0)
-    # as of 2024-02-01 → 2024-02-16.  All three Feb dates HOLD that same expiry —
-    # no per-date drift to the March 3rd Friday even though 2024-02-29 alone
-    # would resolve forward.
-    assert {c.expiration for c in contracts} == {date(2024, 2, 16)}
+    held = [c.expiration for c in contracts]
+    # Jan-30 (init) → Jan-end; Jan-31 (month-end roll, still January) → Jan-end;
+    # Feb-1 HOLDS Jan-end (the Feb roll hasn't fired) — NOT Feb-end as a per-date
+    # resolve would give.
+    assert held == [_JAN, _JAN, _JAN]
+    assert values[2] == mids[_JAN]  # Feb-1 still on the Jan contract
 
 
 async def test_eom_roll_markers_fire_monthly():
     """derive_rolls over the held-contract array emits exactly the monthly
     expiration transitions (FEB→MAR at the Feb roll, MAR→APR at the Mar roll)."""
-    maturity = EndOfMonth(offset_months=1)
     values, errors, contracts = await _resolve(
-        _DATES, maturity=maturity, roll_schedule=EndOfMonthRoll()
+        _DATES, maturity=EndOfMonth(offset_months=1)
     )
     iso = [d.isoformat() for d in _DATES]
     vals = [None if np.isnan(v) else float(v) for v in values]
@@ -209,9 +209,9 @@ async def test_eom_roll_markers_fire_monthly():
 
 
 async def test_issue2_snap_preserved_under_monthly_holding():
-    """Issue #2's expiration-snap is now LOAD-BEARING under EOM-roll: a contract
-    is held ~21 days, not re-selected daily.  The snap must still fire on the
-    roll date and the SNAPPED expiration must be the held one all month.
+    """Issue #2's expiration-snap is LOAD-BEARING under the monthly hold: a
+    contract is held ~21 days, not re-selected daily.  The snap must still fire
+    on the roll date and the SNAPPED expiration must be the held one all month.
 
     EndOfMonth(offset_months=0)'s arithmetic target is the calendar month-end
     (e.g. 2024-01-31); the only LISTED expiration is the 3rd Friday 2024-01-19,
@@ -235,7 +235,6 @@ async def test_issue2_snap_preserved_under_monthly_holding():
         underlying_price_resolver=None,
         bulk_chain_reader=FakeBulkChainReader(chains),
         available_expirations=[listed],
-        roll_schedule=EndOfMonthRoll(),
     )
     # The snapped listed contract is held on EVERY January date (not just the
     # init date) — the snap survives the hold.
@@ -265,7 +264,6 @@ async def test_issue2_snap_note_travels_to_held_dates():
         underlying_price_resolver=None,
         bulk_chain_reader=FakeBulkChainReader(chains),
         available_expirations=[listed],
-        roll_schedule=EndOfMonthRoll(),
     )
     # All three dates (init roll + 2 held) carry the snap note + the held value.
     assert all(e == f"snapped_to:{listed.isoformat()}" for e in errors)
@@ -276,11 +274,13 @@ async def test_issue2_snap_note_travels_to_held_dates():
 
 
 async def test_mid_month_expiry_gap_does_not_crash():
-    """If the held contract expires mid-month (e.g. a 3rd-Friday maturity under
-    EOM-roll), the tail of the month has no chain data → NaN gap with a per-date
-    diagnostic, NOT an exception (Gael's locked decision: WARN, don't block)."""
-    # Hold the JAN 3rd-Friday (2024-01-19) under EOM-roll: dates after the 19th
-    # have NO chain for that contract → gap.
+    """If a held contract expires before the next month-end roll, the tail of
+    the month has no chain data → NaN gap with a per-date diagnostic, NOT an
+    exception (Gael's locked decision: WARN, don't block).
+
+    EndOfMonth(0) snaps to a mid-month listed expiry (2024-01-19) that dies on
+    the 19th; the held contract then has no chain for the rest of January.
+    """
     held_exp = date(2024, 1, 19)
     k = _contract(strike=4500, expiration=held_exp)
     dates = [date(2024, 1, 16), date(2024, 1, 19), date(2024, 1, 25), date(2024, 1, 31)]
@@ -289,13 +289,12 @@ async def test_mid_month_expiry_gap_does_not_crash():
     chains = {
         d: ([(k, _row(row_date=d, mid=1.5))] if d <= held_exp else []) for d in dates
     }
-    # No crash:
     values, errors, contracts = await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
         option_type="C",
         cycle=None,
-        maturity=FixedDate(date=held_exp),  # pins the held expiry mid-month
+        maturity=EndOfMonth(offset_months=0),  # snaps to the listed 2024-01-19
         selection=ByStrike(strike=4500.0),
         stream="mid",
         chain_reader=FakeChainReader(chains),
@@ -303,7 +302,6 @@ async def test_mid_month_expiry_gap_does_not_crash():
         underlying_price_resolver=None,
         bulk_chain_reader=FakeBulkChainReader(chains),
         available_expirations=[held_exp],
-        roll_schedule=EndOfMonthRoll(),
     )
     # On/before expiry: real value.  After expiry: NaN + no_chain_for_date.
     assert values[0] == 1.5 and values[1] == 1.5
@@ -311,47 +309,63 @@ async def test_mid_month_expiry_gap_does_not_crash():
     assert errors[2] == "no_chain_for_date" and errors[3] == "no_chain_for_date"
 
 
-# ── roll_schedule=None preserves the existing per-date behaviour ───────────
+# ── Non-EndOfMonth maturity keeps the stateless per-date resolution ────────
 
 
-async def test_roll_schedule_none_is_per_date_baseline():
-    """roll_schedule=None (default) keeps the stateless per-date resolve: the
-    output must be identical to omitting roll_schedule entirely."""
-    maturity = EndOfMonth(offset_months=1)
-    v_none, e_none, c_none = await _resolve(
-        _DATES, maturity=maturity, roll_schedule=None
-    )
-    # Default path (roll_schedule not passed).
-    chains = _chains(_DATES)
-    v_def, e_def, c_def = await resolve_option_stream(
-        dates=_DATES,
+async def test_non_eom_maturity_is_per_date_not_held():
+    """A NON-EndOfMonth maturity (NextThirdFriday) is NOT held monthly — it
+    re-resolves per trade date (only EndOfMonth triggers the hold).
+
+    Across the 3rd Friday of January (2024-01-19), NextThirdFriday(0) drifts
+    from the JAN expiry (before/at it advances to FEB per the "strictly after"
+    rule) — so consecutive dates around the boundary select DIFFERENT
+    expirations, proving there is no monthly hold.
+    """
+    jan_tf = date(2024, 1, 19)
+    feb_tf = date(2024, 2, 16)
+    listed = [jan_tf, feb_tf]
+    mids = {jan_tf: 1.0, feb_tf: 2.0}
+    # 2024-01-18 (before the 3rd Fri → JAN) and 2024-01-19 (ON it → advances to
+    # FEB by the strictly-after rule).
+    dates = [date(2024, 1, 18), date(2024, 1, 19)]
+    chains = {
+        d: [
+            (_contract(strike=4500, expiration=e), _row(row_date=d, mid=mids[e]))
+            for e in listed
+        ]
+        for d in dates
+    }
+    values, errors, contracts = await resolve_option_stream(
+        dates=dates,
         collection="OPT_SP_500",
         option_type="C",
         cycle=None,
-        maturity=maturity,
+        maturity=NextThirdFriday(offset_months=0),
         selection=ByStrike(strike=4500.0),
         stream="mid",
         chain_reader=FakeChainReader(chains),
         maturity_resolver=DefaultMaturityResolver(),
         underlying_price_resolver=None,
         bulk_chain_reader=FakeBulkChainReader(chains),
-        available_expirations=_LISTED,
+        available_expirations=listed,
     )
-    np.testing.assert_array_equal(v_none, v_def)
-    assert [c.expiration for c in c_none] == [c.expiration for c in c_def]
+    assert all(c is not None for c in contracts)
+    # Per-date drift across the 3rd-Friday boundary (NOT a single held expiry).
+    assert contracts[0].expiration == jan_tf
+    assert contracts[1].expiration == feb_tf
+    assert contracts[0].expiration != contracts[1].expiration
 
 
-# ── Reject roll_schedule on the legacy non-bulk path ───────────────────────
+# ── Reject EndOfMonth on the legacy non-bulk path ──────────────────────────
 
 
-async def test_roll_schedule_without_bulk_reader_raises():
-    """The legacy per-date path cannot honour a roll schedule (no pre-resolved
-    expiration sweep) → requesting one raises, mirroring the roll_offset guard."""
+async def test_end_of_month_without_bulk_reader_raises():
+    """The legacy per-date path cannot do the monthly-hold sweep (it lives in
+    the bulk Phase A), so EndOfMonth without a bulk reader raises rather than
+    silently re-resolving per-date."""
     dates = [date(2024, 1, 16), date(2024, 1, 31)]
     chains = _chains(dates)
-    with pytest.raises(
-        ValueError, match="roll_schedule requires the bulk chain reader"
-    ):
+    with pytest.raises(ValueError, match="EndOfMonth maturity requires the bulk"):
         await resolve_option_stream(
             dates=dates,
             collection="OPT_SP_500",
@@ -364,59 +378,73 @@ async def test_roll_schedule_without_bulk_reader_raises():
             maturity_resolver=DefaultMaturityResolver(),
             underlying_price_resolver=None,
             bulk_chain_reader=None,
-            roll_schedule=EndOfMonthRoll(),
         )
 
 
-# ── roll_offset composes with EOM-roll ─────────────────────────────────────
+# ── roll_offset (the ROLL-EARLY axis) composes with the monthly hold ───────
 
 
-async def test_roll_offset_shifts_held_resolution():
-    """roll_offset shifts the maturity resolution forward on each roll date, so
-    the held contract can differ from the no-offset hold.
+async def test_roll_offset_days_shifts_held_resolution():
+    """A ``days`` roll offset shifts the maturity resolution forward on each roll
+    date, so the held contract can differ from the no-offset hold.
 
     On the Jan roll date (2024-01-31), EndOfMonth(offset_months=1) resolves to
-    FEB-end.  With roll_offset=2, the resolution is as of 2024-02-02 → MARCH →
-    MAR-end, so January would hold MAR instead of FEB once the offset crosses
-    into February.  (We assert the held contract reflects the offset.)
+    FEB-end.  With roll_offset {value:2, unit:'days'}, the resolution is as of
+    2024-02-02 → EndOfMonth(1) → MARCH-end, so January holds MAR instead of FEB.
     """
-    # Single January date that is the month-end roll (init roll fires here too).
     dates = [date(2024, 1, 31)]
-    chains = _chains(dates)
-    _v0, _e0, c0 = await resolve_option_stream(
-        dates=dates,
-        collection="OPT_SP_500",
-        option_type="C",
-        cycle=None,
-        maturity=EndOfMonth(offset_months=1),
-        selection=ByStrike(strike=4500.0),
-        stream="mid",
-        roll_offset=0,
-        chain_reader=FakeChainReader(chains),
-        maturity_resolver=DefaultMaturityResolver(),
-        underlying_price_resolver=None,
-        bulk_chain_reader=FakeBulkChainReader(chains),
-        available_expirations=_LISTED,
-        roll_schedule=EndOfMonthRoll(),
+    _v0, _e0, c0 = await _resolve(
+        dates, maturity=EndOfMonth(offset_months=1), roll_offset=RollOffset()
     )
-    _v2, _e2, c2 = await resolve_option_stream(
-        dates=dates,
-        collection="OPT_SP_500",
-        option_type="C",
-        cycle=None,
+    _v2, _e2, c2 = await _resolve(
+        dates,
         maturity=EndOfMonth(offset_months=1),
-        selection=ByStrike(strike=4500.0),
-        stream="mid",
-        roll_offset=2,  # 2024-01-31 + 2 = 2024-02-02 → EndOfMonth(1) → MAR-end
-        chain_reader=FakeChainReader(chains),
-        maturity_resolver=DefaultMaturityResolver(),
-        underlying_price_resolver=None,
-        bulk_chain_reader=FakeBulkChainReader(chains),
-        available_expirations=_LISTED,
-        roll_schedule=EndOfMonthRoll(),
+        roll_offset=RollOffset(value=2, unit="days"),
     )
     assert c0[0].expiration == _FEB
-    assert c2[0].expiration == _MAR  # offset pushed the resolution into Feb
+    assert c2[0].expiration == _MAR  # +2 days pushed the resolution into Feb
+
+
+async def test_roll_offset_months_shifts_held_resolution():
+    """A ``months`` roll offset shifts the resolution forward by whole months.
+
+    EndOfMonth(offset_months=0) as of a January date targets JAN-end; with
+    roll_offset {value:1, unit:'months'} the ref date is shifted to February so
+    the target becomes FEB-end (i.e. roll one month early into the next).
+    """
+    _JAN = date(2024, 1, 31)
+    listed = [_JAN, _FEB]
+    mids = {_JAN: 1.0, _FEB: 2.0}
+    dates = [date(2024, 1, 31)]
+    chains = {
+        d: [
+            (_contract(strike=4500, expiration=e), _row(row_date=d, mid=mids[e]))
+            for e in listed
+        ]
+        for d in dates
+    }
+
+    async def _run(roll_offset):
+        return await resolve_option_stream(
+            dates=dates,
+            collection="OPT_SP_500",
+            option_type="C",
+            cycle=None,
+            maturity=EndOfMonth(offset_months=0),
+            selection=ByStrike(strike=4500.0),
+            stream="mid",
+            roll_offset=roll_offset,
+            chain_reader=FakeChainReader(chains),
+            maturity_resolver=DefaultMaturityResolver(),
+            underlying_price_resolver=None,
+            bulk_chain_reader=FakeBulkChainReader(chains),
+            available_expirations=listed,
+        )
+
+    _v0, _e0, c0 = await _run(RollOffset())
+    _vm, _em, cm = await _run(RollOffset(value=1, unit="months"))
+    assert c0[0].expiration == _JAN  # no offset → this month's end
+    assert cm[0].expiration == _FEB  # +1 month → next month's end
 
 
 # ── Init-guard semantics: retry within the month after a failed first resolve ──
@@ -426,10 +454,10 @@ class _FailFirstResolver(DefaultMaturityResolver):
     """Resolver that RAISES on its first resolve() call, then behaves normally.
 
     Stands in for a maturity rule that is transiently unresolvable on the first
-    queryable date (e.g. a calendar edge) but resolves on a later date in the
-    SAME month.  The sweep's init guard keys on ``held_exp is None`` so it keeps
-    retrying within the month rather than blanking it (vs ``held_roll_month is
-    None`` which would only retry at the next month-end)."""
+    queryable date but resolves on a later date in the SAME month.  The sweep's
+    init guard keys on ``held_exp is None`` so it keeps retrying within the
+    month rather than blanking it (vs ``held_roll_month is None`` which would
+    only retry at the next month-end)."""
 
     def __init__(self):
         self._calls = 0
@@ -461,7 +489,6 @@ async def test_failed_first_resolve_retries_within_month():
         underlying_price_resolver=None,
         bulk_chain_reader=FakeBulkChainReader(chains),
         available_expirations=_LISTED,
-        roll_schedule=EndOfMonthRoll(),
     )
     # Date 0 failed to resolve → NaN + maturity_resolution_failed.
     assert contracts[0] is None

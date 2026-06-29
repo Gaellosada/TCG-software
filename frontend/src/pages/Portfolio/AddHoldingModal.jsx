@@ -30,14 +30,11 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
           maturity: instrument.maturity,
           selection: instrument.selection,
           stream: instrument.stream,
-          // Roll offset from OptionStreamForm (roll N days earlier). Option
-          // streams carry no back-adjustment, so there is no adjustment field
-          // (unlike the continuous leg below). BE defaults roll_offset to 0.
+          // Roll offset from OptionStreamForm — the unified {value, unit} object
+          // (ROLL-EARLY axis), forwarded whole. Option streams carry no
+          // back-adjustment, so there is no adjustment field (unlike continuous).
+          // "Roll at end of month" is the EndOfMonth maturity, not a schedule.
           roll_offset: instrument.roll_offset,
-          // Issue #3 roll schedule — sits beside roll_offset (whenever one is
-          // threaded, so is the other). Dropping it would no-op EOM for direct
-          // portfolio option legs.
-          roll_schedule: instrument.roll_schedule ?? null,
           weight: 100,
         });
       } else if (instrument.type === 'continuous') {

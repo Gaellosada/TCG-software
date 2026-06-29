@@ -464,9 +464,11 @@ class TestPortfolioOptionStreamRollFields:
         ):
             label, ref = refs_with_labels[0]
             captured["ref"] = ref
-            # Base 5.0; roll_offset nudges the level (proves it is carried).
-            # Option streams have no adjustment, so the level never depends on it.
-            base = 5.0 + 0.1 * ref.roll_offset
+            # Base 5.0; the roll-offset VALUE nudges the level (proves it is
+            # carried).  ``ref.roll_offset`` is the unified RollOffset({value,
+            # unit}); read ``.value``.  Option streams have no adjustment, so the
+            # level never depends on it.
+            base = 5.0 + 0.1 * ref.roll_offset.value
             v = np.array([base + 0.1 * i for i in range(len(DATES))], dtype=np.float64)
             d = np.array(DATES, dtype=np.int64)
             return {label: (d, v, [None] * len(DATES), [None] * len(DATES))}
@@ -501,24 +503,47 @@ class TestPortfolioOptionStreamRollFields:
         """A stray ``adjustment`` leg key is ignored: the built OptionStreamRef
         has no ``adjustment`` attribute (option streams carry no
         back-adjustment)."""
+        from tcg.core.api._models_options import RollOffset
+
         client, captured = capture_client
         leg = {**OPT_MID_LEG, "adjustment": "ratio"}
         await self._equity(client, leg)
         assert not hasattr(captured["ref"], "adjustment")
-        assert captured["ref"].roll_offset == 0
+        assert captured["ref"].roll_offset == RollOffset()
 
-    async def test_roll_offset_threaded_into_ref(self, capture_client):
+    async def test_roll_offset_days_threaded_into_ref(self, capture_client):
+        from tcg.core.api._models_options import RollOffset
+
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "roll_offset": 5}
+        leg = {**OPT_MID_LEG, "roll_offset": {"value": 5, "unit": "days"}}
         await self._equity(client, leg)
-        assert captured["ref"].roll_offset == 5
+        assert captured["ref"].roll_offset == RollOffset(value=5, unit="days")
         assert not hasattr(captured["ref"], "adjustment")
 
+    async def test_roll_offset_months_threaded_into_ref(self, capture_client):
+        from tcg.core.api._models_options import RollOffset
+
+        client, captured = capture_client
+        leg = {**OPT_MID_LEG, "roll_offset": {"value": 2, "unit": "months"}}
+        await self._equity(client, leg)
+        assert captured["ref"].roll_offset == RollOffset(value=2, unit="months")
+
+    async def test_legacy_int_roll_offset_reads_as_days(self, capture_client):
+        """BACK-COMPAT: a persisted bare int leg roll_offset reads as days."""
+        from tcg.core.api._models_options import RollOffset
+
+        client, captured = capture_client
+        leg = {**OPT_MID_LEG, "roll_offset": 7}
+        await self._equity(client, leg)
+        assert captured["ref"].roll_offset == RollOffset(value=7, unit="days")
+
     async def test_defaults_when_absent(self, capture_client):
+        from tcg.core.api._models_options import RollOffset
+
         client, captured = capture_client
         await self._equity(client, OPT_MID_LEG)
         assert not hasattr(captured["ref"], "adjustment")
-        assert captured["ref"].roll_offset == 0
+        assert captured["ref"].roll_offset == RollOffset()
 
     async def test_stray_adjustment_does_not_change_series(self, capture_client):
         """A stray ``adjustment`` leg key must NOT change the equity curve —
@@ -531,13 +556,34 @@ class TestPortfolioOptionStreamRollFields:
     async def test_roll_offset_series_differs_from_default(self, capture_client):
         client, _captured = capture_client
         eq_default = await self._equity(client, OPT_MID_LEG)
-        eq_rolled = await self._equity(client, {**OPT_MID_LEG, "roll_offset": 7})
+        eq_rolled = await self._equity(
+            client, {**OPT_MID_LEG, "roll_offset": {"value": 7, "unit": "days"}}
+        )
         assert eq_default != eq_rolled
 
-    async def test_roll_offset_out_of_range_rejected(self, capture_client):
+    async def test_roll_offset_days_out_of_range_rejected(self, capture_client):
         client, _captured = capture_client
         body = {
-            "legs": {"SPX": SPX_LEG, "OPT": {**OPT_MID_LEG, "roll_offset": 31}},
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT": {**OPT_MID_LEG, "roll_offset": {"value": 31, "unit": "days"}},
+            },
+            "weights": {"SPX": 50, "OPT": 50},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code in (400, 422), resp.text
+
+    async def test_roll_offset_months_out_of_range_rejected(self, capture_client):
+        client, _captured = capture_client
+        body = {
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT": {**OPT_MID_LEG, "roll_offset": {"value": 13, "unit": "months"}},
+            },
             "weights": {"SPX": 50, "OPT": 50},
             "rebalance": "none",
             "return_type": "normal",
@@ -565,33 +611,15 @@ class TestPortfolioOptionStreamRollFields:
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200, resp.text
 
-    # ── Issue #3: roll_schedule threading through the PORTFOLIO leg path ────
+    # ── "Roll at end of month" is the EndOfMonth maturity, not a schedule ──
 
-    async def test_roll_schedule_threaded_into_ref(self, capture_client):
-        """A portfolio option leg threads roll_schedule into the built
-        OptionStreamRef (the LegSpec → OptionStreamRef hand-off)."""
+    async def test_end_of_month_maturity_threaded_into_ref(self, capture_client):
+        """A portfolio option leg with the EndOfMonth maturity threads it into
+        the OptionStreamRef (the monthly-hold roll trigger); there is no
+        ``roll_schedule`` attribute on the ref any more."""
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "roll_schedule": "end_of_month"}
+        leg = {**OPT_MID_LEG, "maturity": {"kind": "end_of_month", "offset_months": 1}}
         await self._equity(client, leg)
-        assert captured["ref"].roll_schedule == "end_of_month"
-
-    async def test_roll_schedule_defaults_to_none(self, capture_client):
-        client, captured = capture_client
-        await self._equity(client, OPT_MID_LEG)
-        assert captured["ref"].roll_schedule is None
-
-    async def test_invalid_roll_schedule_rejected(self, capture_client):
-        client, _captured = capture_client
-        body = {
-            "legs": {
-                "SPX": SPX_LEG,
-                "OPT": {**OPT_MID_LEG, "roll_schedule": "weekly"},
-            },
-            "weights": {"SPX": 50, "OPT": 50},
-            "rebalance": "none",
-            "return_type": "normal",
-            "start": "2024-01-01",
-            "end": "2024-12-31",
-        }
-        resp = await client.post("/api/portfolio/compute", json=body)
-        assert resp.status_code in (400, 422), resp.text
+        assert captured["ref"].maturity.kind == "end_of_month"
+        assert captured["ref"].maturity.offset_months == 1
+        assert not hasattr(captured["ref"], "roll_schedule")

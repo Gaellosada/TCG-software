@@ -47,11 +47,10 @@ export function savePortfolio(name, { legs, rebalance }) {
       maturity: l.maturity || null,
       selection: l.selection || null,
       stream: l.stream || null,
-      // ``?? null`` (not ``|| null``) so a valid roll_offset of 0 survives the
-      // round-trip. Snake-case: option legs use roll_offset (futures: rollOffset).
+      // Option legs use the unified {value, unit} roll_offset object (futures
+      // use camelCase `rollOffset` above). ``?? null`` so a {value:0} survives.
+      // ("End of month" is the maturity, not a separate roll_schedule.)
       roll_offset: l.roll_offset ?? null,
-      // Issue #3 roll schedule for option legs — persisted beside roll_offset.
-      roll_schedule: l.roll_schedule ?? null,
     })),
     weights: weightsDict,
     rebalance,

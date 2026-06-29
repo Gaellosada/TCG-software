@@ -430,7 +430,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
         from tcg.core.api.options import (
             _criterion_pydantic_to_dataclass,
             _maturity_pydantic_to_dataclass,
-            _roll_schedule_pydantic_to_dataclass,
+            _roll_offset_pydantic_to_dataclass,
         )
 
         # Reject tautological: by_delta selection + delta stream
@@ -452,8 +452,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             maturity=maturity,
             selection=selection,
             stream=inst_in.stream,
-            roll_offset=int(inst_in.roll_offset),
-            roll_schedule=_roll_schedule_pydantic_to_dataclass(inst_in.roll_schedule),
+            roll_offset=_roll_offset_pydantic_to_dataclass(inst_in.roll_offset),
         )
     else:
         if not inst_in.collection:
@@ -942,8 +941,6 @@ def _instrument_payload(inst: InputInstrument) -> dict:
     if isinstance(inst, InstrumentOptionStream):
         from dataclasses import asdict
 
-        from tcg.types.options import EndOfMonthRoll
-
         return {
             "type": "option_stream",
             "collection": inst.collection,
@@ -954,18 +951,15 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             "stream": inst.stream,
             # Snake_case ``roll_offset`` mirrors the inbound ``OptionStreamRef``
             # wire model so the emitted payload round-trips through
-            # ``OptionStreamRef.model_validate``.  NOTE: continuous emits
-            # ``rollOffset`` (camel) — option_stream deliberately differs because
-            # its inbound model reads snake_case.  No ``adjustment`` key: option
-            # streams carry no back-adjustment (raw stitched series).
-            "roll_offset": int(inst.roll_offset),
-            # Issue #3 roll schedule, emitted as the wire Literal so a saved
-            # signal round-trips it through ``OptionStreamRef.model_validate``.
-            "roll_schedule": (
-                "end_of_month"
-                if isinstance(inst.roll_schedule, EndOfMonthRoll)
-                else None
-            ),
+            # ``OptionStreamRef.model_validate``.  Emitted as the unified
+            # ``{value, unit}`` object (the wire model also still accepts a bare
+            # int for legacy reads).  No ``adjustment``/``roll_schedule`` key:
+            # option streams carry no back-adjustment, and "end of month" is the
+            # EndOfMonth maturity, not a separate schedule.
+            "roll_offset": {
+                "value": int(inst.roll_offset.value),
+                "unit": inst.roll_offset.unit,
+            },
         }
     return {
         "type": "continuous",

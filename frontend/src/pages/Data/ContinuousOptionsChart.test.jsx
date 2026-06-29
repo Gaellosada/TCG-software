@@ -120,6 +120,32 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('ContinuousOptionsChart — controls de-clip (P1)', () => {
+  // The options-stream controls were clipped below a `max-height: 220px;
+  // overflow-y: auto` box (`.controlsCapped`), hiding the Selection picker
+  // behind an unobvious inner scrollbar. The cap was removed so the whole form
+  // (incl. ByDelta/ByMoneyness/ByStrike) is visible. Guard it at the CSS source:
+  // `.controlsCapped` must not re-introduce a height cap / inner scroll.
+  it('.controlsCapped has no max-height / overflow-y cap (form not clipped)', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    // Resolved from the frontend root (vitest cwd) — robust to the transform's
+    // import.meta.url scheme.
+    const cssPath = path.resolve(
+      process.cwd(),
+      'src/pages/Data/ChartBase.module.css',
+    );
+    const css = fs.readFileSync(cssPath, 'utf8');
+    const block = css.slice(
+      css.indexOf('.controlsCapped'),
+      css.indexOf('}', css.indexOf('.controlsCapped')) + 1,
+    );
+    expect(block).toContain('.controlsCapped');
+    expect(block).not.toMatch(/max-height/);
+    expect(block).not.toMatch(/overflow-y/);
+  });
+});
+
 describe('ContinuousOptionsChart — initial render', () => {
   it('shows loading state while roots are being fetched', () => {
     mockGetOptionRoots.mockReturnValueOnce(new Promise(() => {}));

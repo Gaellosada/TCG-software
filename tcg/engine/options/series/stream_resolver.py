@@ -78,7 +78,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from tcg.engine.options.maturity.protocol import MaturityResolver
-from tcg.engine.options.maturity.resolver import last_trading_day_of_month
+from tcg.engine.options.maturity.resolver import _add_months, last_trading_day_of_month
 from tcg.engine.options.selection._match import (
     match_by_delta,
     match_by_moneyness,
@@ -92,12 +92,12 @@ from tcg.types.options import (
     ByDelta,
     ByMoneyness,
     ByStrike,
-    EndOfMonthRoll,
+    EndOfMonth,
     MaturitySpec,
     NearestToTarget,
     OptionContractDoc,
     OptionDailyRow,
-    RollSchedule,
+    RollOffset,
     SelectionCriterion,
     SelectionResult,
 )
@@ -150,6 +150,21 @@ def _missing_code_for(stream: str) -> str:
     diagnostic surface specific (a frontend filter can show
     ``missing_iv`` separately from ``missing_delta``)."""
     return f"missing_{stream}"
+
+
+def _apply_roll_offset(d: date, roll_offset: RollOffset) -> date:
+    """Shift ``d`` forward by the ROLL-EARLY offset (``days`` or ``months``).
+
+    The maturity rule is resolved as of the shifted date, so a positive offset
+    makes every roll fire that much earlier.  ``months`` uses the same
+    month-arithmetic (day clamped to month-end) as the maturity resolver's own
+    ``offset_months`` so the two month axes behave consistently.  ``value == 0``
+    returns ``d`` unchanged (the common no-op default)."""
+    if roll_offset.value == 0:
+        return d
+    if roll_offset.unit == "months":
+        return _add_months(d, roll_offset.value)
+    return d + timedelta(days=roll_offset.value)
 
 
 def _snap_to_listed(target: date, listed: Sequence[date]) -> date | None:
@@ -322,8 +337,7 @@ async def _resolve_bulk(
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
-    roll_offset: int = 0,
-    roll_schedule: RollSchedule = None,
+    roll_offset: RollOffset = RollOffset(),
     chain_reader: _CycleAwareReader,
     bulk_chain_reader: _CycleAwareBulkReader,
     maturity_resolver: MaturityResolver,
@@ -420,10 +434,10 @@ async def _resolve_bulk(
                 if not available:
                     expirations[idx] = None
                 else:
-                    # roll_offset: resolve maturity as of (d + roll_offset) so
-                    # every roll happens roll_offset calendar days earlier.
+                    # roll_offset (ROLL-EARLY axis): resolve maturity as of
+                    # (d + offset) so every roll happens that much earlier.
                     expirations[idx] = maturity_resolver.resolve_with_chain(
-                        ref_date=d + timedelta(days=roll_offset),
+                        ref_date=_apply_roll_offset(d, roll_offset),
                         rule=maturity,
                         available_expirations=available,
                     )
@@ -450,7 +464,7 @@ async def _resolve_bulk(
             """
             try:
                 target = maturity_resolver.resolve(
-                    ref_date=d + timedelta(days=roll_offset), rule=maturity
+                    ref_date=_apply_roll_offset(d, roll_offset), rule=maturity
                 )
             except Exception as exc:  # noqa: BLE001
                 # Dedicated code (distinct from ``no_chain_for_date``): the
@@ -468,18 +482,27 @@ async def _resolve_bulk(
                 return snapped, f"snapped_to:{snapped.isoformat()}"
             return target, None
 
-        if isinstance(roll_schedule, EndOfMonthRoll):
-            # Issue #3 — END-OF-MONTH roll: re-resolve the maturity rule only on
-            # the last TRADING day of each month (and unconditionally on the
-            # FIRST queryable date), and HOLD the resolved expiration across all
-            # dates until the next month-end roll.  A single forward pass is
+        if isinstance(maturity, EndOfMonth):
+            # END-OF-MONTH roll (Issue #3, now triggered by the maturity itself):
+            # choosing ``EndOfMonth`` as the maturity IS the request to roll at
+            # month-end, so hold one contract per month — re-resolve the maturity
+            # only on the last TRADING day of each month (and unconditionally on
+            # the FIRST queryable date), and HOLD the resolved expiration across
+            # all dates until the next month-end roll.  A single forward pass is
             # correct because ``queryable`` is sorted ascending (CME valid_days).
+            #
+            # ("End of month" now lives in ONE place — this maturity rule.  The
+            # former separate ``roll_schedule`` cadence was dropped; its
+            # ``end_of_month`` value duplicated exactly this.)
             #
             # This wraps the SAME ``_resolve_arith`` call (so Issue #2's snap is
             # preserved); it just changes the CADENCE from per-date to per-month.
             # The held contract may expire mid-month — that is the WARN-don't-block
             # edge: Phases B/C then naturally produce ``no_chain_for_date`` for
-            # the tail of the month (a gap), never a crash.
+            # the tail of the month (a gap), never a crash.  (EndOfMonth(offset_months)
+            # targets the offset month's end, so the held contract is naturally a
+            # month+ out — the gap case only arises if a different short-dated
+            # target were used, which EndOfMonth is not.)
             held_exp: date | None = None
             held_note: str | None = None
             # (year, month) whose month-end triggered the last SUCCESSFUL resolve
@@ -515,8 +538,9 @@ async def _resolve_bulk(
                 if held_note is not None and error_codes[idx] is None:
                     snap_notes[idx] = held_note
         else:
-            # Default (roll_schedule is None): stateless per-date resolution —
-            # the maturity rule is re-resolved for every trade date (unchanged).
+            # Non-EndOfMonth arithmetic maturity (PlusNDays / FixedDate /
+            # NextThirdFriday): stateless per-date resolution — the maturity rule
+            # is re-resolved for every trade date.  Only EndOfMonth holds monthly.
             for idx, d in queryable:
                 exp, note = _resolve_arith(idx, d)
                 expirations[idx] = exp
@@ -830,8 +854,7 @@ async def resolve_option_stream(
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
-    roll_offset: int = 0,
-    roll_schedule: RollSchedule = None,
+    roll_offset: RollOffset = RollOffset(),
     chain_reader: _CycleAwareReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
@@ -866,13 +889,16 @@ async def resolve_option_stream(
         ill-posed for option premia and are offered only for continuous
         FUTURES; see ``tcg/data/_rolling``).
     roll_offset:
-        Calendar days to roll EARLY: the maturity rule is resolved as of
-        ``date + roll_offset`` for each date, so every roll happens
-        ``roll_offset`` days sooner (mirrors the futures roll offset).
-        ``0`` (default) = no shift.  Honored in the bulk path; the legacy
-        per-date fallback resolves maturity inside the selector and cannot
-        apply the shift, so a non-zero ``roll_offset`` without a bulk reader
-        raises ``ValueError``.
+        ``RollOffset(value, unit)`` — the ROLL-EARLY axis.  The maturity rule
+        is resolved as of ``date + offset`` (``unit`` = ``days`` or ``months``)
+        for each date, so every roll happens that much sooner.  ``value == 0``
+        (default) = no shift.  Distinct from the maturity's own ``offset_months``
+        (the TARGET-month axis — which expiration to aim at).  Honored in the
+        bulk path; the legacy per-date fallback resolves maturity inside the
+        selector and cannot apply the shift, so a non-zero ``roll_offset``
+        without a bulk reader raises ``ValueError``.  ("Roll at end of month" is
+        NOT a roll_offset — it is the ``EndOfMonth`` maturity, which makes the
+        resolver hold one contract per month.)
     chain_reader:
         Cycle-aware chain reader (any object satisfying
         :class:`_CycleAwareReader`).
@@ -943,7 +969,6 @@ async def resolve_option_stream(
             selection=selection,
             stream=stream,
             roll_offset=roll_offset,
-            roll_schedule=roll_schedule,
             chain_reader=chain_reader,
             bulk_chain_reader=bulk_chain_reader,
             maturity_resolver=maturity_resolver,
@@ -961,17 +986,18 @@ async def resolve_option_stream(
     # and return a series that looks like the bulk result but is not), fail
     # loudly: production always wires the bulk reader, so this only fires on a
     # misconfigured caller.
-    if roll_offset != 0:
+    if roll_offset.value != 0:
         raise ValueError(
             "roll_offset requires the bulk chain reader; the legacy per-date "
             "path does not support it"
         )
-    # Symmetric guard: the EOM-roll sweep lives in the bulk Phase A, so the
-    # legacy per-date path cannot honour a roll schedule either.
-    if roll_schedule is not None:
+    # Symmetric guard: the EndOfMonth monthly-hold sweep lives in the bulk
+    # Phase A, so the legacy per-date path cannot honour it (it would silently
+    # re-resolve EndOfMonth per-date, diverging from the held-monthly result).
+    if isinstance(maturity, EndOfMonth):
         raise ValueError(
-            "roll_schedule requires the bulk chain reader; the legacy per-date "
-            "path does not support it"
+            "EndOfMonth maturity requires the bulk chain reader; the legacy "
+            "per-date path does not support the monthly-hold roll"
         )
 
     # Wrap the reader so every selector-emitted query carries the cycle.

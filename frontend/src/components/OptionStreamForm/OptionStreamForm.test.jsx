@@ -170,56 +170,64 @@ describe('<OptionStreamForm>', () => {
     expect(onChange.mock.calls[0][0].maturity).toEqual({ kind: 'plus_n_days', n: 30 });
   });
 
-  it('renders the Roll offset input defaulting to 0', () => {
+  // ── Unified roll offset {value, unit} (replaces days-only + roll_schedule) ──
+
+  it('renders the Roll offset value+unit defaulting to {0, days}', () => {
     renderForm();
-    const input = screen.getByLabelText('Roll offset days');
-    expect(input).toBeTruthy();
-    expect(input.value).toBe('0');
+    const value = screen.getByLabelText('Roll offset value');
+    const unit = screen.getByLabelText('Roll offset unit');
+    expect(value.value).toBe('0');
+    expect(unit.value).toBe('days');
   });
 
-  it('emits roll_offset on change, clamped to 0..30', () => {
+  it('does NOT render a Roll schedule control (removed — EOM is the maturity)', () => {
+    renderForm();
+    expect(screen.queryByLabelText('Roll schedule')).toBeNull();
+  });
+
+  it('emits roll_offset {value, unit:days} on value change, clamped 0..30', () => {
     const { onChange } = renderForm();
-    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '5' } });
     expect(onChange).toHaveBeenCalledOnce();
-    expect(onChange.mock.calls[0][0]).toMatchObject({ roll_offset: 5 });
-    onChange.mockClear();
-    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '99' } });
-    expect(onChange.mock.calls[0][0].roll_offset).toBe(30);
-  });
-
-  // ── Issue #3: roll schedule select ─────────────────────────────────────
-
-  it('renders the Roll schedule select defaulting to per-date (empty)', () => {
-    renderForm();
-    const sel = screen.getByLabelText('Roll schedule');
-    expect(sel).toBeTruthy();
-    expect(sel.value).toBe('');  // "" = At expiration (per date)
-  });
-
-  it('emits roll_schedule=end_of_month when selected', () => {
-    const { onChange } = renderForm();
-    fireEvent.change(screen.getByLabelText('Roll schedule'), {
-      target: { value: 'end_of_month' },
+    expect(onChange.mock.calls[0][0]).toMatchObject({
+      roll_offset: { value: 5, unit: 'days' },
     });
-    expect(onChange).toHaveBeenCalledOnce();
-    expect(onChange.mock.calls[0][0]).toMatchObject({ roll_schedule: 'end_of_month' });
+    onChange.mockClear();
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '99' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 30, unit: 'days' });
   });
 
-  it('emits roll_schedule=null when reset to per-date', () => {
+  it('switches unit to months and re-clamps the value to 0..12', () => {
+    // Start from a days value of 20, switch to months → re-clamp to 12.
     const value = buildDefaultOptionStream({ availableRoots: ROOTS });
-    value.roll_schedule = 'end_of_month';
+    value.roll_offset = { value: 20, unit: 'days' };
     const { onChange } = renderForm({ value });
-    fireEvent.change(screen.getByLabelText('Roll schedule'), { target: { value: '' } });
-    expect(onChange.mock.calls[0][0].roll_schedule).toBeNull();
+    fireEvent.change(screen.getByLabelText('Roll offset unit'), { target: { value: 'months' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 12, unit: 'months' });
   });
 
-  // Clamp every malformed / out-of-range input into the integer range 0..30.
-  // The setRollOffset handler does parseInt → NaN?0 → clamp(0,30). Each case
-  // must emit an integer roll_offset (never a string / float / negative).
-  // Note: the input defaults to 0, so a change event whose target value is
-  // '0' is a no-op for the controlled input and fires no onChange — it would
-  // test nothing about clamping, so it is intentionally excluded. The cases
-  // below all change the rendered string value, so onChange always fires.
+  it('emits a months value within 0..12', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.roll_offset = { value: 0, unit: 'months' };
+    const { onChange } = renderForm({ value });
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '3' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 3, unit: 'months' });
+    onChange.mockClear();
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '50' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 12, unit: 'months' });
+  });
+
+  it('reads a legacy bare-int roll_offset as {value, unit:days}', () => {
+    // A persisted spec from before the unification carries a bare int.
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.roll_offset = 7;  // legacy days-only int
+    renderForm({ value });
+    expect(screen.getByLabelText('Roll offset value').value).toBe('7');
+    expect(screen.getByLabelText('Roll offset unit').value).toBe('days');
+  });
+
+  // Clamp malformed / out-of-range value input into the unit's range (days
+  // 0..30). Each case emits an integer value (never a string / float / negative).
   it.each([
     ['empty string', '', 0],
     ['negative', '-5', 0],
@@ -227,15 +235,13 @@ describe('<OptionStreamForm>', () => {
     ['above max', '99', 30],
     ['exactly max', '30', 30],
     ['in range', '7', 7],
-  ])('clamps Roll offset input (%s) into 0..30 as an int', (_label, raw, expected) => {
+  ])('clamps Roll offset value (%s) into 0..30 (days) as an int', (_label, raw, expected) => {
     const { onChange } = renderForm();
-    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: raw } });
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: raw } });
     expect(onChange).toHaveBeenCalledOnce();
     const emitted = onChange.mock.calls[0][0].roll_offset;
-    expect(emitted).toBe(expected);
-    // Emitted as a real integer (parseInt result), not a string or float.
-    expect(typeof emitted).toBe('number');
-    expect(Number.isInteger(emitted)).toBe(true);
+    expect(emitted).toEqual({ value: expected, unit: 'days' });
+    expect(Number.isInteger(emitted.value)).toBe(true);
   });
 
   it('respects allowedSelectionKinds — only by_moneyness rendered', () => {

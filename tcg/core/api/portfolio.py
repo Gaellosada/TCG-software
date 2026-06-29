@@ -12,10 +12,11 @@ import numpy as np
 import numpy.typing as npt
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import ValidationError as PydanticValidationError
 
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import OptionStreamLabel, OptionStreamRef
-from tcg.core.api._models_options import MaturityRule, SelectionCriterion
+from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
 from tcg.core.api._options_materialise import (
     PRICE_LIKE_STREAMS,
     materialise_option_streams,
@@ -148,18 +149,19 @@ class LegSpec(BaseModel):
     # a legacy value on a persisted option leg is accepted and has no effect.
     adjustment: str | None = None
     cycle: str | None = None  # Optional for "continuous" and "option_stream"
-    # Optional for "continuous" AND "option_stream" (days before expiration to
-    # roll early); range 0..30, default 0.
-    roll_offset: int | None = None
+    # Roll-early offset.  "continuous" (futures) uses a bare int = DAYS (0..30).
+    # "option_stream" uses the unified ``RollOffset`` ``{value, unit:days|months}``
+    # — though a bare int is still accepted for it and read as days (legacy
+    # shim).  None = no shift.  ("Roll at end of month" for options is the
+    # EndOfMonth maturity, not a roll value — the former ``roll_schedule`` field
+    # was removed.)
+    roll_offset: int | RollOffset | None = None
     signal_spec: SignalLegSpec | None = None  # Required for "signal"
     # Option-stream fields (required when type == "option_stream")
     option_type: Literal["C", "P"] | None = None
     maturity: MaturityRule | None = None
     selection: SelectionCriterion | None = None
     stream: OptionStreamLabel | None = None
-    # Optional for "option_stream" (Issue #3): "end_of_month" holds the selected
-    # contract between month-end rolls.  Ignored for other leg types.
-    roll_schedule: Literal["end_of_month"] | None = None
 
     @field_validator("type")
     @classmethod
@@ -275,13 +277,26 @@ def _parse_legs(
                         f"Must be one of: {', '.join(e.value for e in AdjustmentMethod)}"
                     )
 
+            # Continuous (futures) legs roll in DAYS only. Accept a bare int or a
+            # RollOffset with unit='days'; reject months (futures EOM is the
+            # separate RollStrategy.END_OF_MONTH, not a roll-offset unit).
             roll_offset_days = 0
             if leg.roll_offset is not None:
-                if not (0 <= leg.roll_offset <= 30):
+                if isinstance(leg.roll_offset, RollOffset):
+                    if leg.roll_offset.unit != "days":
+                        raise ValidationError(
+                            f"Leg '{label}': continuous legs only support a "
+                            f"roll_offset in days, got unit "
+                            f"{leg.roll_offset.unit!r}"
+                        )
+                    raw_days = leg.roll_offset.value
+                else:
+                    raw_days = leg.roll_offset
+                if not (0 <= raw_days <= 30):
                     raise ValidationError(
                         f"Leg '{label}': roll_offset must be between 0 and 30"
                     )
-                roll_offset_days = leg.roll_offset
+                roll_offset_days = raw_days
 
             legs_spec[label] = ContinuousLegSpec(
                 collection=leg.collection,
@@ -554,24 +569,24 @@ async def _evaluate_option_stream_leg(
     #    Option streams carry NO back-adjustment (ratio/difference are ill-posed
     #    for option premia), so ``leg.adjustment`` is ignored on this path — the
     #    shared ``LegSpec.adjustment`` field applies only to continuous legs.
-    roll_offset = 0
-    if leg.roll_offset is not None:
-        if not (0 <= leg.roll_offset <= 30):
-            raise ValidationError(
-                f"Leg '{label}': roll_offset must be between 0 and 30"
-            )
-        roll_offset = leg.roll_offset
-    ref = OptionStreamRef(
-        type="option_stream",
-        collection=leg.collection,
-        option_type=leg.option_type,
-        cycle=leg.cycle,
-        maturity=leg.maturity,
-        selection=leg.selection,
-        stream=leg.stream,
-        roll_offset=roll_offset,
-        roll_schedule=leg.roll_schedule,
-    )
+    # ``roll_offset`` is the unified {value, unit} (a bare int reads as days).
+    # OptionStreamRef's RollOffset model validates the per-unit range and raises
+    # a structured error; default a missing value to the no-op.  ("end of month"
+    # is the EndOfMonth maturity, not a roll value — no roll_schedule here.)
+    roll_offset = RollOffset() if leg.roll_offset is None else leg.roll_offset
+    try:
+        ref = OptionStreamRef(
+            type="option_stream",
+            collection=leg.collection,
+            option_type=leg.option_type,
+            cycle=leg.cycle,
+            maturity=leg.maturity,
+            selection=leg.selection,
+            stream=leg.stream,
+            roll_offset=roll_offset,
+        )
+    except PydanticValidationError as exc:
+        raise ValidationError(f"Leg '{label}': {exc}") from exc
 
     # 2. Materialise via shared infrastructure
     result = await materialise_option_streams(

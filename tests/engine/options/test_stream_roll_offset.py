@@ -26,6 +26,7 @@ from tcg.types.options import (
     NearestToTarget,
     OptionContractDoc,
     OptionDailyRow,
+    RollOffset,
 )
 
 from _stream_fakes import FakeBulkChainReader, FakeChainReader, _contract, _row
@@ -54,6 +55,8 @@ def _both_exp_chains(
 
 
 async def _resolve(dates, chains, *, roll_offset, maturity=None, selection=None):
+    # ``roll_offset`` is given as an int (days) by the call sites; wrap it in the
+    # unified RollOffset({value, unit}) the resolver now takes.
     return await resolve_option_stream(
         dates=dates,
         collection="OPT_SP_500",
@@ -62,7 +65,7 @@ async def _resolve(dates, chains, *, roll_offset, maturity=None, selection=None)
         maturity=maturity or NearestToTarget(target_dte_days=30),
         selection=selection or ByStrike(strike=4500.0),
         stream="mid",
-        roll_offset=roll_offset,
+        roll_offset=RollOffset(value=roll_offset, unit="days"),
         chain_reader=FakeChainReader(chains),
         maturity_resolver=DefaultMaturityResolver(),
         underlying_price_resolver=None,
@@ -236,7 +239,8 @@ async def test_roll_offset_without_bulk_reader_raises():
             maturity=NearestToTarget(target_dte_days=30),
             selection=ByStrike(strike=4500.0),
             stream="mid",
-            roll_offset=5,  # non-zero offset with NO bulk reader → must raise.
+            # non-zero offset with NO bulk reader → must raise.
+            roll_offset=RollOffset(value=5, unit="days"),
             chain_reader=FakeChainReader(chains),
             maturity_resolver=DefaultMaturityResolver(),
             underlying_price_resolver=None,

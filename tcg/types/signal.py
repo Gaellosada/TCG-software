@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from tcg.types.options import MaturitySpec, RollSchedule, SelectionCriterion
+from tcg.types.options import MaturitySpec, RollOffset, SelectionCriterion
 
 
 # ---------------------------------------------------------------------------
@@ -99,21 +99,17 @@ class InstrumentOptionStream:
     maturity: MaturitySpec
     selection: SelectionCriterion
     stream: OptionStreamLabel
-    # Roll offset for the rolled stream, mirroring :class:`InstrumentContinuous`
-    # (futures convention).  Additive, defaults ``0`` so existing specs are
-    # unchanged.  ``roll_offset`` resolves the maturity rule as of
-    # ``date + roll_offset`` so every roll happens that many calendar days
-    # earlier.  See ``stream_resolver.resolve_option_stream``.
+    # Roll offset — the ROLL-EARLY axis: ``RollOffset(value, unit='days'|'months')``.
+    # The resolver evaluates the maturity rule as of ``date + offset`` so every
+    # roll fires that much earlier.  Default ``RollOffset()`` (value 0) = no shift.
+    # DISTINCT from the maturity's ``offset_months`` (TARGET-month axis).
     #
-    # NOTE: unlike :class:`InstrumentContinuous` (futures), option streams carry
-    # NO back-adjustment — ratio/difference are conceptually ill-posed for option
-    # premia, so the series is always the raw stitched stream.
-    roll_offset: int = 0
-    # Issue #3 roll SCHEDULE — orthogonal to ``maturity``.  ``None`` (default)
-    # re-resolves the maturity per trade date; ``EndOfMonthRoll`` re-resolves
-    # only on each month's last trading day and holds the resolved expiration
-    # between rolls.  See ``stream_resolver.resolve_option_stream``.
-    roll_schedule: RollSchedule = None
+    # NOTE: "roll at end of month" is the ``EndOfMonth`` maturity (which makes the
+    # resolver hold one contract per month), NOT a roll-offset value — the former
+    # separate ``roll_schedule`` field was removed.  And unlike
+    # :class:`InstrumentContinuous` (futures), option streams carry NO
+    # back-adjustment (the series is always the raw stitched stream).
+    roll_offset: RollOffset = field(default_factory=RollOffset)
     kind: Literal["option_stream"] = "option_stream"
 
 

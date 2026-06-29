@@ -155,16 +155,14 @@ export function buildDefaultOptionStream({
     maturity: defaultMaturity(allowedMaturityKinds[0] || 'next_third_friday'),
     selection: defaultSelection(allowedSelectionKinds[0] || 'by_moneyness', allowedOptionTypes[0] || 'C'),
     stream: allowedStreams[0] || 'mid',
-    // Roll offset in calendar days (mirrors futures rollOffset): roll this many
-    // days earlier. Default 0 = roll at the maturity rule's normal time.
-    // NOTE: option streams carry no back-adjustment, so there is no
-    // `adjustment` field — the series is always the raw stitched stream.
-    roll_offset: 0,
-    // Roll schedule (Issue #3): null = re-select per trade date (default);
-    // 'end_of_month' = hold the selected contract, re-selecting only on each
-    // month's last trading day. Pair with a maturity that targets >= 1 month
-    // out, else the held contract expires mid-month (gap).
-    roll_schedule: null,
+    // Roll offset — the ROLL-EARLY axis: {value, unit:'days'|'months'}. Resolve
+    // the maturity that much earlier so the roll fires sooner. Default value 0 =
+    // roll at the maturity rule's natural time. DISTINCT from the maturity's own
+    // month offset (the TARGET-month axis — which expiration to aim at).
+    // NOTE: "roll at end of month" is the EndOfMonth MATURITY (held monthly),
+    // NOT a roll-offset value. Option streams carry no back-adjustment, so there
+    // is no `adjustment` field — the series is always the raw stitched stream.
+    roll_offset: { value: 0, unit: 'days' },
   };
 }
 
@@ -277,17 +275,32 @@ export default function OptionStreamForm({
 
   const setStream = useCallback((stream) => emit({ stream }), [emit]);
 
-  const setRollSchedule = useCallback((raw) => {
-    // '' (the "At expiration / per-date" option) maps to null so the wire
-    // payload omits the schedule (default per-date behaviour).
-    emit({ roll_schedule: raw === 'end_of_month' ? 'end_of_month' : null });
-  }, [emit]);
+  // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
+  // as {value:int, unit:'days'}. Per-unit cap: days 0..30, months 0..12.
+  const _normOffset = (ro) => {
+    if (typeof ro === 'number') return { value: ro, unit: 'days' };
+    if (ro && typeof ro === 'object') {
+      return { value: Number.isFinite(ro.value) ? ro.value : 0, unit: ro.unit === 'months' ? 'months' : 'days' };
+    }
+    return { value: 0, unit: 'days' };
+  };
+  const _capFor = (unit) => (unit === 'months' ? 12 : 30);
 
-  const setRollOffset = useCallback((raw) => {
+  const setRollOffsetValue = useCallback((raw) => {
+    const cur = _normOffset(v.roll_offset);
     const parsed = parseInt(raw, 10);
-    const clamped = Number.isNaN(parsed) ? 0 : Math.min(30, Math.max(0, parsed));
-    emit({ roll_offset: clamped });
-  }, [emit]);
+    const cap = _capFor(cur.unit);
+    const value = Number.isNaN(parsed) ? 0 : Math.min(cap, Math.max(0, parsed));
+    emit({ roll_offset: { value, unit: cur.unit } });
+  }, [v.roll_offset, emit]);
+
+  const setRollOffsetUnit = useCallback((unit) => {
+    const cur = _normOffset(v.roll_offset);
+    const nextUnit = unit === 'months' ? 'months' : 'days';
+    // Re-clamp the existing value into the new unit's range when switching.
+    const value = Math.min(_capFor(nextUnit), Math.max(0, cur.value));
+    emit({ roll_offset: { value, unit: nextUnit } });
+  }, [v.roll_offset, emit]);
 
   const setMaturityKind = useCallback((kind) => {
     emit({ maturity: defaultMaturity(kind) });
@@ -321,10 +334,8 @@ export default function OptionStreamForm({
 
   const cycleSelectValue = v.cycle == null ? '_any' : v.cycle;
   const cycleAllowed = allowedCycles.map((c) => (c == null ? '_any' : c));
-  // Legacy/absent roll_offset → 0 (additive field).
-  const rollOffset = v.roll_offset ?? 0;
-  // Legacy/absent roll_schedule → '' (per-date default).
-  const rollSchedule = v.roll_schedule ?? '';
+  // Legacy/absent roll_offset → {value:0, unit:'days'} (handles a shipped int).
+  const rollOffset = _normOffset(v.roll_offset);
 
   return (
     <div className={styles.form} data-testid="option-stream-form" aria-disabled={disabled}>
@@ -470,37 +481,35 @@ export default function OptionStreamForm({
         </div>
       </div>
 
-      {/* Roll offset — roll N calendar days earlier (mirrors futures rollOffset) */}
+      {/* Roll early by — the ROLL-EARLY axis (value + unit). DISTINCT from the
+          maturity's own month offset (the TARGET-month axis above). "Roll at end
+          of month" is the End of Month MATURITY, not a roll-offset value. */}
       <label className={styles.row}>
-        <span className={styles.label}>Roll offset (days)</span>
-        <input
-          type="number"
-          className={styles.input}
-          min={0}
-          max={30}
-          step={1}
-          value={rollOffset}
-          onChange={(e) => setRollOffset(e.target.value)}
-          disabled={disabled}
-          aria-label="Roll offset days"
-          title="Roll this many calendar days earlier — the maturity rule is resolved as of (date + roll offset). 0 = roll at the rule's normal time."
-        />
-      </label>
-
-      {/* Roll schedule (Issue #3) — when to re-select the held contract */}
-      <label className={styles.row}>
-        <span className={styles.label}>Roll schedule</span>
-        <select
-          className={styles.input}
-          value={rollSchedule}
-          onChange={(e) => setRollSchedule(e.target.value)}
-          disabled={disabled}
-          aria-label="Roll schedule"
-          title="When to re-select the held contract. 'At expiration (per date)' resolves the maturity rule every trade date. 'End of month' holds the selected contract and rolls only on each month's last trading day — pair with a maturity targeting >= 1 month out."
-        >
-          <option value="">At expiration (per date)</option>
-          <option value="end_of_month">End of month</option>
-        </select>
+        <span className={styles.label}>Roll early by</span>
+        <div className={styles.subgroup}>
+          <input
+            type="number"
+            className={styles.input}
+            min={0}
+            max={rollOffset.unit === 'months' ? 12 : 30}
+            step={1}
+            value={rollOffset.value}
+            onChange={(e) => setRollOffsetValue(e.target.value)}
+            disabled={disabled}
+            aria-label="Roll offset value"
+            title="Roll this much earlier — the maturity rule is resolved as of (date + offset), so the roll fires sooner. 0 = roll at the rule's natural time. This is separate from the maturity's own month offset (which expiration to target)."
+          />
+          <select
+            className={styles.input}
+            value={rollOffset.unit}
+            onChange={(e) => setRollOffsetUnit(e.target.value)}
+            disabled={disabled}
+            aria-label="Roll offset unit"
+          >
+            <option value="days">days</option>
+            <option value="months">months</option>
+          </select>
+        </div>
       </label>
 
       {/* Selection criterion */}

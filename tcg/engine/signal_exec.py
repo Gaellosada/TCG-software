@@ -192,7 +192,8 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
             repr(inst.maturity),
             repr(inst.selection),
             inst.stream,
-            int(inst.roll_offset),
+            # Unified roll offset (value, unit) — both parts distinguish identity.
+            (int(inst.roll_offset.value), inst.roll_offset.unit),
         )
     if isinstance(inst, InstrumentBasket):
         # Kind-prefixed identities so a user-chosen basket_id of "inline"

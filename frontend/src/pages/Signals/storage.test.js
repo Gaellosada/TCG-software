@@ -201,12 +201,12 @@ describe('Signals storage (v6)', () => {
     };
     saveState(state);
     const loaded = loadState();
-    // roll_offset defaults to 0 for a legacy entry that predates it — the
-    // sanitiser stamps it on every option_stream.  Option streams carry no
-    // back-adjustment, so the loaded instrument has no `adjustment` field.
+    // roll_offset defaults to the unified {value:0, unit:'days'} for a legacy
+    // entry that predates it — the sanitiser stamps it on every option_stream.
+    // Option streams carry no back-adjustment, so no `adjustment` field.
     const inst = loaded.signals[0].inputs[0].instrument;
     expect('adjustment' in inst).toBe(false);
-    expect(inst.roll_offset).toBe(0);
+    expect(inst.roll_offset).toEqual({ value: 0, unit: 'days' });
     // Everything else is preserved verbatim.
     expect(inst).toMatchObject({
       type: 'option_stream',
@@ -238,7 +238,8 @@ describe('Signals storage (v6)', () => {
                 selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
                 stream: 'mid',
                 // A stray adjustment must be dropped on load — option streams
-                // carry no back-adjustment.
+                // carry no back-adjustment.  A legacy bare-int roll_offset reads
+                // back as the unified {value, unit:'days'}.
                 adjustment: 'ratio',
                 roll_offset: 5,
               },
@@ -253,7 +254,7 @@ describe('Signals storage (v6)', () => {
     const loaded = loadState();
     const inst = loaded.signals[0].inputs[0].instrument;
     expect('adjustment' in inst).toBe(false);
-    expect(inst.roll_offset).toBe(5);
+    expect(inst.roll_offset).toEqual({ value: 5, unit: 'days' });
     expect(inst).toMatchObject({
       type: 'option_stream',
       collection: 'OPT_SPX',
@@ -320,12 +321,12 @@ describe('Signals storage (v6)', () => {
     expect(inst.strategy).toBe('front_month');
   });
 
-  it('round-trips option_stream roll_schedule=end_of_month; coerces others to null', () => {
-    const mk = (rollSchedule) => ({
+  it('round-trips the unified option_stream roll_offset {value, unit}', () => {
+    const mk = (roll_offset) => ({
       signals: [
         {
-          id: `s-rs-${rollSchedule}`,
-          name: 'Opt RS',
+          id: 's-ro',
+          name: 'Opt RO',
           inputs: [
             {
               id: 'O',
@@ -337,7 +338,7 @@ describe('Signals storage (v6)', () => {
                 maturity: { kind: 'end_of_month', offset_months: 1 },
                 selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
                 stream: 'mid',
-                roll_schedule: rollSchedule,
+                roll_offset,
               },
             },
           ],
@@ -345,14 +346,27 @@ describe('Signals storage (v6)', () => {
         },
       ],
     });
-    saveState(mk('end_of_month'));
-    expect(loadState().signals[0].inputs[0].instrument.roll_schedule).toBe('end_of_month');
-    // A bogus value collapses to null (per-date default).
-    saveState(mk('biweekly'));
-    expect(loadState().signals[0].inputs[0].instrument.roll_schedule).toBeNull();
+    // days
+    saveState(mk({ value: 4, unit: 'days' }));
+    expect(loadState().signals[0].inputs[0].instrument.roll_offset).toEqual({
+      value: 4,
+      unit: 'days',
+    });
+    // months (clamped 0..12 — 13 → 12)
+    saveState(mk({ value: 13, unit: 'months' }));
+    expect(loadState().signals[0].inputs[0].instrument.roll_offset).toEqual({
+      value: 12,
+      unit: 'months',
+    });
+    // bogus unit → days
+    saveState(mk({ value: 2, unit: 'weeks' }));
+    expect(loadState().signals[0].inputs[0].instrument.roll_offset).toEqual({
+      value: 2,
+      unit: 'days',
+    });
   });
 
-  it('defaults a legacy option_stream (no roll_schedule key) to null', () => {
+  it('drops a legacy roll_schedule key on load (superseded by EndOfMonth maturity)', () => {
     const state = {
       signals: [
         {
@@ -366,10 +380,11 @@ describe('Signals storage (v6)', () => {
                 collection: 'OPT_SPX',
                 option_type: 'C',
                 cycle: null,
-                maturity: { kind: 'next_third_friday', offset_months: 0 },
+                maturity: { kind: 'end_of_month', offset_months: 1 },
                 selection: { kind: 'by_strike', strike: 4500 },
                 stream: 'mid',
-                // no roll_schedule key (predates Issue #3)
+                // A short-lived #3-era field — must NOT survive the sanitiser.
+                roll_schedule: 'end_of_month',
               },
             },
           ],
@@ -378,7 +393,10 @@ describe('Signals storage (v6)', () => {
       ],
     };
     saveState(state);
-    expect(loadState().signals[0].inputs[0].instrument.roll_schedule).toBeNull();
+    const inst = loadState().signals[0].inputs[0].instrument;
+    expect('roll_schedule' in inst).toBe(false);
+    // The roll-at-month-end intent now lives in the EndOfMonth maturity.
+    expect(inst.maturity).toEqual({ kind: 'end_of_month', offset_months: 1 });
   });
 
   it('sanitiser clamps a malformed option_stream roll_offset and drops a stray adjustment', () => {
@@ -400,7 +418,7 @@ describe('Signals storage (v6)', () => {
                 selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
                 stream: 'iv',
                 adjustment: 'bogus',     // stray key → dropped (no adjustment)
-                roll_offset: 99.7,       // out-of-range float → trunc + clamp to 30
+                roll_offset: 99.7,       // legacy float → trunc + clamp → {30, days}
               },
             },
           ],
@@ -410,7 +428,7 @@ describe('Signals storage (v6)', () => {
     }));
     const inst = loadState().signals[0].inputs[0].instrument;
     expect('adjustment' in inst).toBe(false);
-    expect(inst.roll_offset).toBe(30);
+    expect(inst.roll_offset).toEqual({ value: 30, unit: 'days' });
   });
 
   it('sanitiser rejects an option_stream with missing fields', () => {

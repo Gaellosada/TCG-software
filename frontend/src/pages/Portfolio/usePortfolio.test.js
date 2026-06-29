@@ -179,7 +179,7 @@ describe('usePortfolio — signal leg support', () => {
     expect(range.end).toBeTruthy();
   });
 
-  it('handleCalculate forwards option_stream roll_offset (no adjustment) to the API', async () => {
+  it('handleCalculate forwards option_stream roll_offset {value, unit} to the API', async () => {
     const { result } = renderHook(() => usePortfolio());
 
     act(() => {
@@ -194,7 +194,7 @@ describe('usePortfolio — signal leg support', () => {
         stream: 'mid',
         // A stray adjustment must NOT be forwarded — option streams have none.
         adjustment: 'ratio',
-        roll_offset: 5,
+        roll_offset: { value: 2, unit: 'months' },
         weight: 100,
       });
     });
@@ -221,13 +221,42 @@ describe('usePortfolio — signal leg support', () => {
       maturity: { kind: 'nearest_to_target', target_days: 30 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'mid',
-      roll_offset: 5,
+      roll_offset: { value: 2, unit: 'months' },
     });
     // The stray adjustment was dropped — option streams carry no back-adjustment.
     expect('adjustment' in leg).toBe(false);
+    // "End of month" is the maturity, not a separate roll_schedule.
+    expect('roll_schedule' in leg).toBe(false);
   });
 
-  it('handleCalculate omits option_stream roll fields when at defaults (none/0)', async () => {
+  it('handleCalculate forwards a legacy bare-int roll_offset as {value, days}', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => {
+      result.current.addLeg({
+        label: 'OPT_SP_500 C mid',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'nearest_to_target', target_days: 30 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'mid',
+        roll_offset: 5,  // legacy in-memory int
+        weight: 100,
+      });
+    });
+    act(() => {
+      result.current.setStartDate('2024-01-01');
+      result.current.setEndDate('2024-12-31');
+    });
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+    const leg = computePortfolio.mock.calls[0][0].legs[result.current.legs[0].label];
+    expect(leg.roll_offset).toEqual({ value: 5, unit: 'days' });
+  });
+
+  it('handleCalculate omits option_stream roll fields when at defaults', async () => {
     const { result } = renderHook(() => usePortfolio());
 
     act(() => {
@@ -241,7 +270,7 @@ describe('usePortfolio — signal leg support', () => {
         selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
         stream: 'iv',
         adjustment: 'none',
-        roll_offset: 0,
+        roll_offset: { value: 0, unit: 'days' },
         weight: 100,
       });
     });
@@ -259,45 +288,12 @@ describe('usePortfolio — signal leg support', () => {
     // Minimal request body — defaults are omitted (BE defaults them).
     expect(leg).not.toHaveProperty('adjustment');
     expect(leg).not.toHaveProperty('roll_offset');
-    // Issue #3: roll_schedule also omitted at its default (null → per-date).
     expect(leg).not.toHaveProperty('roll_schedule');
   });
 
-  // ── Issue #3 (review r2 MAJOR): roll_schedule on a direct portfolio OPTION
-  // leg must reach the compute wire (it was dropped by the enumerate-and-rebuild
-  // apiLegs path even though OptionStreamForm emitted it).
-  it('handleCalculate forwards option_stream roll_schedule=end_of_month to the API', async () => {
-    const { result } = renderHook(() => usePortfolio());
-    act(() => {
-      result.current.addLeg({
-        label: 'OPT_SP_500 C mid',
-        type: 'option_stream',
-        collection: 'OPT_SP_500',
-        option_type: 'C',
-        cycle: null,
-        maturity: { kind: 'end_of_month', offset_months: 1 },
-        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
-        stream: 'mid',
-        roll_offset: 0,
-        roll_schedule: 'end_of_month',
-        weight: 100,
-      });
-    });
-    act(() => {
-      result.current.setStartDate('2024-01-01');
-      result.current.setEndDate('2024-12-31');
-    });
-    await act(async () => {
-      await result.current.handleCalculate();
-    });
-
-    const leg = computePortfolio.mock.calls[0][0].legs[result.current.legs[0].label];
-    expect(leg.roll_schedule).toBe('end_of_month');
-  });
-
-  // ── Issue #3: roll_schedule must SURVIVE the localStorage persist round-trip
+  // ── Cleanup: roll_offset {value, unit} must SURVIVE the persist round-trip
   // for a direct portfolio option leg (savePortfolio → loadPortfolio).
-  it('roll_schedule survives the portfolio persist round-trip (option leg)', async () => {
+  it('roll_offset {value, unit} survives the portfolio persist round-trip', async () => {
     const { savePortfolio, loadPortfolio } = await import('./storage');
     const legs = [
       {
@@ -309,14 +305,13 @@ describe('usePortfolio — signal leg support', () => {
         maturity: { kind: 'end_of_month', offset_months: 1 },
         selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
         stream: 'mid',
-        roll_offset: 0,
-        roll_schedule: 'end_of_month',
+        roll_offset: { value: 3, unit: 'months' },
         weight: 100,
       },
     ];
     savePortfolio('rt-opt', { legs, rebalance: 'none' });
     const loaded = loadPortfolio('rt-opt');
-    expect(loaded.legs[0].roll_schedule).toBe('end_of_month');
+    expect(loaded.legs[0].roll_offset).toEqual({ value: 3, unit: 'months' });
   });
 
   // ── Issue #3: a direct portfolio CONTINUOUS leg's strategy must reach the

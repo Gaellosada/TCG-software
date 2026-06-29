@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Any, Literal, Mapping, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +270,55 @@ MaturityRule = Annotated[
 ]
 # Alias for spec compatibility.
 MaturitySpec = MaturityRule
+
+
+# ---------------------------------------------------------------------------
+# Roll offset — the ROLL-EARLY axis ({value, unit: days|months})
+# ---------------------------------------------------------------------------
+
+
+class RollOffset(BaseModel):
+    """How early to roll, in ``days`` or ``months`` (the ROLL-EARLY axis).
+
+    Wire shape ``{"value": int, "unit": "days"|"months"}``.  Distinct from the
+    maturity rule's ``offset_months`` (the TARGET-month axis — which expiration
+    to aim at); this is purely "resolve the maturity a bit earlier so the roll
+    fires sooner".  ``value == 0`` is the no-op default.
+
+    BACK-COMPAT read-shim: a shipped bare integer (the old days-only
+    ``roll_offset``) is coerced to ``{value: <int>, unit: "days"}`` by the
+    ``_coerce_legacy_int`` before-validator, so persisted signals/portfolios/
+    baskets carrying an int continue to load.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    value: int = Field(default=0, ge=0)
+    unit: Literal["days", "months"] = "days"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_int(cls, v: object) -> object:
+        # Shipped wire value was a bare int (days). Accept it transparently.
+        if isinstance(v, bool):  # guard: bool is an int subclass
+            raise ValueError("roll_offset must be an int or {value, unit}")
+        if isinstance(v, int):
+            return {"value": v, "unit": "days"}
+        if v is None:
+            return {"value": 0, "unit": "days"}
+        return v
+
+    @model_validator(mode="after")
+    def _check_range(self) -> "RollOffset":
+        # Per-unit bounds: days 0..30 (mirrors the prior int cap + the futures
+        # roll offset); months 0..12 (a year is the sensible ceiling).
+        cap = 30 if self.unit == "days" else 12
+        if not (0 <= self.value <= cap):
+            raise ValueError(
+                f"roll_offset value must be between 0 and {cap} for unit "
+                f"{self.unit!r}, got {self.value}"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

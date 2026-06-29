@@ -59,7 +59,7 @@ def test_instrument_identity_distinguishes_option_roll_offset():
     don't collapse to a single cached operand fetch.  Option streams carry no
     back-adjustment, so adjustment is not part of the identity."""
     from tcg.engine.signal_exec import _instrument_identity
-    from tcg.types.options import ByStrike, NearestToTarget
+    from tcg.types.options import ByStrike, NearestToTarget, RollOffset
     from tcg.types.signal import InstrumentOptionStream
 
     def _opt(**over):
@@ -76,7 +76,11 @@ def test_instrument_identity_distinguishes_option_roll_offset():
 
     base_id = _instrument_identity(_opt())
     assert _instrument_identity(_opt()) == base_id  # identical specs → same identity
-    assert _instrument_identity(_opt(roll_offset=5)) != base_id
+    # Both the offset VALUE and its UNIT are part of the identity.
+    assert _instrument_identity(_opt(roll_offset=RollOffset(value=5))) != base_id
+    assert _instrument_identity(
+        _opt(roll_offset=RollOffset(value=1, unit="months"))
+    ) != _instrument_identity(_opt(roll_offset=RollOffset(value=1, unit="days")))
     # Different streams are still distinguished.
     assert _instrument_identity(_opt(stream="iv")) != base_id
 
