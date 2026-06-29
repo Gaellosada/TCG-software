@@ -245,11 +245,24 @@ class CompareCondition:
 
 @dataclass(frozen=True)
 class CrossCondition:
-    """Directional crossover between two series."""
+    """Directional crossover between two series.
+
+    ``count``/``window`` extend the primitive to "crossed at least ``count``
+    times within the trailing ``window`` bars". A *crossing* is a single
+    directional crossover (sign change of ``lhs - rhs`` in the condition's
+    direction), counted **same-direction** only. The defaults ``count=1``,
+    ``window=1`` reproduce today's single-bar crossover BYTE-IDENTICALLY: a
+    trailing window of one bar holds only the current bar's crossing, so
+    ``count>=1`` is exactly the current ``fired[t]`` pulse. The engine routes
+    the default case to the unchanged crossover computation and only runs the
+    trailing-cumsum path when ``count>1 or window>1``.
+    """
 
     op: Literal["cross_above", "cross_below"]
     lhs: Operand
     rhs: Operand
+    count: int = 1
+    window: int = 1
 
 
 @dataclass(frozen=True)
@@ -335,6 +348,23 @@ class Block:
     # countdown is re-seeded on every disarm. Default ``1`` reproduces the
     # original single-flip re-arm exactly.
     requires_reset_count: int = 1
+    # Optional bounded TEMPORAL chain over this block's conditions
+    # (entries/exits only — reset blocks MUST keep this None; the API rejects
+    # otherwise). ``links`` maps the index of a SUCCESSOR condition (1..len-1,
+    # in the block's ``conditions`` order) to the ``within`` window in BARS,
+    # measured from the immediately-preceding matched event. A non-empty
+    # ``links`` turns the block from simultaneous CNF into ONE linear chain
+    # A -(W1)-> B -(W2)-> C: the keys must form a single contiguous forward
+    # chain (e.g. {1: W1, 2: W2}), windows must be finite and > 0, and no
+    # nesting is allowed (validated at the API layer, HTTP 400). ``None``/empty
+    # ⇒ today's zero-link CNF (the engine takes the literal unchanged latch
+    # path). A link window of 0 is rejected at the API layer (W=0 folds to
+    # plain AND, i.e. a non-link). Strictly-after semantics: the successor must
+    # match on a LATER bar (>=1 after) the predecessor's match, within the
+    # window; the block fires as an IMPULSE on the completion bar; a single
+    # forward-only in-flight candidate; NaN on any chain operand aborts the
+    # candidate.
+    links: dict[int, int] | None = None
 
 
 @dataclass(frozen=True)
