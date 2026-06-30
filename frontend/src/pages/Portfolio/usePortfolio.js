@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { queryKeys } from '../../queryKeys';
-import { formatDateInt } from '../../utils/format';
+import { formatDateInt, defaultDateRange } from '../../utils/format';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { fetchSignalLegRange } from './signalLegRange';
@@ -11,22 +11,6 @@ import { legsToRangesKey } from './legKey';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
-
-// Default compute window when none can be derived from the legs themselves.
-// Option-stream legs carry NO inherent date range (the backend REQUIRES an
-// explicit window to enumerate their trade dates — see
-// tcg/core/api/_series_fetch.py), so an option-only portfolio has no overlap
-// to anchor on. Prefill the platform-standard ~5-year-back-from-today window
-// (matching the basket default in Data/BasketChart.jsx) so the option leg
-// resolves without forcing the user to drag the slider first. The user can
-// still widen/narrow via the slider.
-function defaultRange() {
-  const end = new Date();
-  const start = new Date();
-  start.setFullYear(start.getFullYear() - 5);
-  const iso = (d) => d.toISOString().slice(0, 10);
-  return { start: iso(start), end: iso(end) };
-}
 
 // Pick a label that doesn't collide with any existing leg — API dict keys would collapse on duplicates.
 function uniqueLegLabel(desired, existingLegs) {
@@ -172,7 +156,7 @@ export default function usePortfolio() {
         // slider has concrete min/max (PortfolioPage binds them to
         // overlapRange) and Compute can resolve the option leg without a
         // manual drag.
-        setOverlapRange(defaultRange());
+        setOverlapRange(defaultDateRange());
       } else {
         setOverlapRange(null);
       }

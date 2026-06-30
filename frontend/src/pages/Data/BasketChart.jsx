@@ -6,20 +6,14 @@ import { queryKeys } from '../../queryKeys';
 import useTheme from '../../hooks/useTheme';
 import Chart from '../../components/Chart';
 import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
-import { formatDateInt } from '../../utils/format';
+import { formatDateInt, defaultDateRange } from '../../utils/format';
 import styles from './ChartBase.module.css';
 
 // Default exploration window for a basket (baskets carry no inherent date
 // range — D3).  ~5 years back from today, matching the platform's standard
 // long-history default.  The user can widen/narrow via the date pickers; an
-// option_stream-leg basket REQUIRES a window, so we prefill one.
-function defaultRange() {
-  const end = new Date();
-  const start = new Date();
-  start.setFullYear(start.getFullYear() - 5);
-  const iso = (d) => d.toISOString().slice(0, 10);
-  return { start: iso(start), end: iso(end) };
-}
+// option_stream-leg basket REQUIRES a window, so we prefill one. Shared with
+// the portfolio editor via the utils/format helper.
 
 // Build the discriminated wire descriptor for a SINGLE leg, as a one-leg
 // inline basket, so each per-leg trace reuses the same compute endpoint.
@@ -56,7 +50,7 @@ function BasketChart({ basket, name, assetClass, legs }) {
   const theme = useTheme();
   const colors = getChartColors(theme);
 
-  const [{ start, end }, setRange] = useState(defaultRange);
+  const [{ start, end }, setRange] = useState(defaultDateRange);
   const [showLegs, setShowLegs] = useState(false);
 
   const { data, loading, error } = useBasketSeries(basket, { start, end });

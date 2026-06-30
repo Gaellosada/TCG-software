@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // the correct calendar date regardless of the host timezone.  In production
 // CI (UTC) this is a no-op, but it validates the fix that prevents a
 // positive-offset TZ from slipping the date back by one day.
-import { formatDate, formatDateInt, formatNumber, formatPercent, formatCurrency } from './format';
+import { formatDate, formatDateInt, formatNumber, formatPercent, formatCurrency, defaultDateRange } from './format';
 
 describe('formatDate', () => {
   it('formats a UTC midnight Date correctly', () => {
@@ -112,5 +112,24 @@ describe('formatCurrency', () => {
   it('returns "--" for non-finite values', () => {
     expect(formatCurrency(null)).toBe('--');
     expect(formatCurrency(NaN)).toBe('--');
+  });
+});
+
+describe('defaultDateRange', () => {
+  it('returns a ~5-year-back-from-today window as YYYY-MM-DD', () => {
+    const { start, end } = defaultDateRange();
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    expect(start).toMatch(iso);
+    expect(end).toMatch(iso);
+    expect(start < end).toBe(true);
+  });
+
+  it('end is today and start is exactly 5 years earlier (UTC)', () => {
+    // Mirror the helper's own computation (toISOString-based, UTC).
+    const end = new Date();
+    const start = new Date();
+    start.setFullYear(start.getFullYear() - 5);
+    const isoUtc = (d) => d.toISOString().slice(0, 10);
+    expect(defaultDateRange()).toEqual({ start: isoUtc(start), end: isoUtc(end) });
   });
 });
