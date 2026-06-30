@@ -9,10 +9,12 @@ Properties proven here:
   * P3 cross_count(count=1, window=1) ≡ the historical single-bar crossover,
     byte-identical for arbitrary price series (incl. NaN).
   * P4 no spurious same-bar drop / no missed completion: for a single linear
-    chain, the single forward-only candidate automaton fires on EXACTLY the
-    bars a brute-force MULTI-candidate reference oracle fires (this both proves
-    the expire→advance→arm order is correct — coincident head+completion fires
-    — and that single-candidate loses no completion vs multi for a linear chain).
+    chain, the single forward-only candidate automaton fires on a SUBSET of the
+    bars a brute-force MULTI-candidate reference oracle fires (single ⊆ multi in
+    general; equality holds only for 2-stage chains where at most one candidate
+    can be in-flight). This proves the expire→advance→arm order is correct and
+    that the automaton introduces no spurious fires, while a discriminator probe
+    confirmed that > 2 stages can produce strict-subset outputs.
   * P5 NaN aborts the in-flight candidate: injecting a NaN on the awaited
     stage's operand inside the window prevents that completion.
   * P6 bounded state: the automaton's output depends only on a bounded window

@@ -340,3 +340,119 @@ async def test_http_malformed_link_window_never_500(http_client):
             f"window={window!r} -> {resp.status_code}: {resp.text}"
         )
         assert resp.json()["error_type"] == "validation"
+
+
+# --------------------------------------------------------------------------- #
+# count/window — malformed-value rejection over the HTTP boundary (MINOR-A/B)
+#
+# ``_ConditionIn.count`` and ``_ConditionIn.window`` must route EVERY invalid
+# value through the uniform HTTP-400 ``error_type='validation'`` envelope.
+# Before the ``Any`` widening (MINOR-A/B fix), ``count:1.5`` produced a 422
+# (Pydantic int_from_float) and ``count:true`` was silently coerced to 1 and
+# returned 200 (because ``bool`` is a subclass of ``int``).  Both are
+# wrong; the isinstance guards in ``_parse_condition`` own validation.
+# --------------------------------------------------------------------------- #
+
+
+def _cond_with_count(count) -> dict:
+    """A cross_above condition dict with ``count`` ALWAYS present (explicit null
+    when count is None — unlike ``_cross()``, which omits absent fields)."""
+    return {
+        "op": "cross_above",
+        "lhs": {"kind": "instrument", "input_id": "X"},
+        "rhs": {"kind": "constant", "value": 100.0},
+        "count": count,
+    }
+
+
+def _cond_with_window(window) -> dict:
+    """A cross_above condition dict with ``window`` ALWAYS present (explicit null
+    when window is None — unlike ``_cross()``, which omits absent fields)."""
+    return {
+        "op": "cross_above",
+        "lhs": {"kind": "instrument", "input_id": "X"},
+        "rhs": {"kind": "constant", "value": 100.0},
+        "window": window,
+    }
+
+
+def _single_cond_count_body(count) -> dict:
+    """Minimal valid 1-condition entry block with ``count`` always explicit in
+    the JSON (including null) so ``model_fields_set`` marks it as supplied."""
+    return {
+        "spec": {
+            "id": "minorAB",
+            "name": "",
+            "inputs": [SPX_INPUT],
+            "rules": {
+                "entries": [_entry_block([_cond_with_count(count)])],
+                "exits": [],
+            },
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+
+
+def _single_cond_window_body(window) -> dict:
+    """Minimal valid 1-condition entry block with ``window`` always explicit in
+    the JSON (including null) so ``model_fields_set`` marks it as supplied."""
+    return {
+        "spec": {
+            "id": "minorAB",
+            "name": "",
+            "inputs": [SPX_INPUT],
+            "rules": {
+                "entries": [_entry_block([_cond_with_window(window)])],
+                "exits": [],
+            },
+        },
+        "indicators": [],
+        "instruments": {},
+    }
+
+
+@pytest.mark.parametrize(
+    "count",
+    [None, 1.5, "x", True, False, [1], 0, -1],
+    ids=["null", "float", "string", "bool_true", "bool_false", "list", "zero", "neg"],
+)
+async def test_http_malformed_count_returns_400_validation(http_client, count):
+    """POST /api/signals/compute with a malformed cross ``count`` must return the
+    uniform HTTP-400 validation envelope (NOT 422, NOT a silently-coerced 200)."""
+    resp = await http_client.post(
+        "/api/signals/compute", json=_single_cond_count_body(count)
+    )
+    assert resp.status_code == 400, (
+        f"count={count!r} -> {resp.status_code}: {resp.text}"
+    )
+    assert resp.json()["error_type"] == "validation"
+
+
+@pytest.mark.parametrize(
+    "window",
+    [None, 1.5, "x", True, False, [1], 0, -1],
+    ids=["null", "float", "string", "bool_true", "bool_false", "list", "zero", "neg"],
+)
+async def test_http_malformed_window_returns_400_validation(http_client, window):
+    """POST /api/signals/compute with a malformed cross ``window`` must return the
+    uniform HTTP-400 validation envelope (NOT 422, NOT a silently-coerced 200)."""
+    resp = await http_client.post(
+        "/api/signals/compute", json=_single_cond_window_body(window)
+    )
+    assert resp.status_code == 400, (
+        f"window={window!r} -> {resp.status_code}: {resp.text}"
+    )
+    assert resp.json()["error_type"] == "validation"
+
+
+async def test_http_malformed_count_window_never_500(http_client):
+    """No malformed ``count`` or ``window`` value yields a 500 — every one
+    is caught as a 400 validation error, never an unhandled exception."""
+    for bad in [None, "abc", 1.5, True, False, [1], {"x": 1}, 0, -1]:
+        for body_fn in [_single_cond_count_body, _single_cond_window_body]:
+            resp = await http_client.post("/api/signals/compute", json=body_fn(bad))
+            assert resp.status_code == 400, (
+                f"value={bad!r} -> {resp.status_code}: {resp.text}"
+            )
+            assert resp.json()["error_type"] == "validation"

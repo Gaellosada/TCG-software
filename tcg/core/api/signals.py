@@ -182,8 +182,12 @@ class _ConditionIn(BaseModel):
     # cross_count extension (cross_above / cross_below only). Defaults
     # reproduce today's single-bar crossover byte-identically; both must be
     # integers >= 1 when supplied (validated in ``_parse_condition``).
-    count: int | None = None
-    window: int | None = None
+    # Deliberately typed ``Any`` (not ``int``) so the raw value reaches
+    # ``_parse_condition``'s isinstance guards unchanged — Pydantic must NOT
+    # coerce ``1.5`` → int (422) or ``true`` → 1 (silent 200) before we
+    # can emit the uniform HTTP-400 validation envelope.
+    count: Any = None
+    window: Any = None
 
 
 class _BlockIn(BaseModel):
@@ -671,15 +675,29 @@ def _parse_condition(c: _ConditionIn, *, path: str) -> Condition:
             rhs=_parse_operand(c.rhs, path=f"{path}.rhs"),
         )
     if op in _CROSS_OPS:
-        count = 1 if c.count is None else c.count
-        window = 1 if c.window is None else c.window
-        # Reject bool (subclasses int) and out-of-range values loudly. Defaults
-        # (count=1, window=1) reproduce today's single-bar crossover.
-        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        # Absent field (not in model_fields_set) → use default 1 (byte-identical
+        # single-bar crossover).  Explicitly supplied value (incl. null/None) →
+        # must pass the integer >= 1 guard below; explicit null is malformed.
+        count = 1 if "count" not in c.model_fields_set else c.count
+        window = 1 if "window" not in c.model_fields_set else c.window
+        # Reject None (explicit null), bool (subclasses int), non-int, and
+        # out-of-range values loudly with the uniform HTTP-400 envelope.
+        # Defaults (count=1, window=1) reproduce today's single-bar crossover.
+        if (
+            count is None
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
             raise SignalValidationError(
                 f"{path}: '{op}' count must be an integer >= 1 (got {c.count!r})"
             )
-        if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        if (
+            window is None
+            or isinstance(window, bool)
+            or not isinstance(window, int)
+            or window < 1
+        ):
             raise SignalValidationError(
                 f"{path}: '{op}' window must be an integer >= 1 (got {c.window!r})"
             )

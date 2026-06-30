@@ -5,6 +5,7 @@ import { render, screen, fireEvent, act, cleanup } from '@testing-library/react'
 afterEach(() => { cleanup(); });
 import BlockEditor, { reindexLinksAfterRemoval } from './BlockEditor';
 import { emptyRules, newBlockId } from './storage';
+import { normaliseSpecForRequest } from './requestBuilder';
 
 describe('reindexLinksAfterRemoval (pure) — re-chains to FULL coverage or CNF', () => {
   // A chained block must stay a FULL chain over the survivors (backend rejects
@@ -700,5 +701,116 @@ describe('BlockEditor (v4 / two-section model)', () => {
       expect(values).not.toContain('rolling_lt');
       expect(values).toContain('cross_above');
     });
+  });
+});
+
+// Regression for the MAJOR data-integrity bug (PR #69 review B): adding a
+// condition to a block that is ALREADY a chain must EXTEND ``links`` so the
+// block stays a FULL contiguous chain. Otherwise the editor renders an all-THEN
+// chain but ``normaliseLinks`` (full-coverage-or-omit) drops the partial map and
+// the block silently ships as CNF — the prior-cycle "runs as CNF, no error"
+// failure. DEFAULT_LINK_WINDOW is 5 (private to BlockEditor.jsx).
+const DEFAULT_LINK_WINDOW = 5;
+
+describe('handleAddCondition — chain links stay FULL-coverage (no silent CNF degradation)', () => {
+  // Build a 2-condition chain: two conditions AND a single linked gap {1:W}.
+  function chainedEntry(window = DEFAULT_LINK_WINDOW, overrides = {}) {
+    return seededEntry({
+      id: 'chain-1',
+      conditions: [
+        { op: 'gt', lhs: null, rhs: null },
+        { op: 'gt', lhs: null, rhs: null },
+      ],
+      links: { 1: window },
+      ...overrides,
+    });
+  }
+
+  it('adding a 3rd condition to a 2-condition chain extends links to FULL coverage {1:W, 2:DEFAULT}', () => {
+    const seeded = { entries: [chainedEntry(7)], exits: [] };
+    const { onRulesChange } = renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    const next = onRulesChange.mock.calls.pop()[0];
+    const block = next.entries[0];
+    expect(block.conditions).toHaveLength(3);
+    // (a) links extends to cover EVERY successor gap {1,2}; existing window kept,
+    //     the NEW trailing gap seeded with the default.
+    expect(block.links).toEqual({ 1: 7, 2: DEFAULT_LINK_WINDOW });
+  });
+
+  it('the WIRE payload (real normaliseSpecForRequest) ships the FULL links, NOT dropped to CNF', () => {
+    const seeded = { entries: [chainedEntry(7)], exits: [] };
+    const { onRulesChange } = renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    const next = onRulesChange.mock.calls.pop()[0];
+    // Run the ACTUAL request normaliser the compute call uses. A partial chain
+    // would be dropped to ``undefined`` (CNF); a full chain survives verbatim.
+    const wire = normaliseSpecForRequest({ inputs: [], rules: next });
+    const wireBlock = wire.rules.entries[0];
+    expect(wireBlock.links).toEqual({ 1: 7, 2: DEFAULT_LINK_WINDOW });
+    // (b) NOT undefined — the bug shipped this as CNF (links omitted).
+    expect(wireBlock.links).not.toBeUndefined();
+  });
+
+  it('adding a condition to a CNF block (no links) stays CNF — links omitted from the wire', () => {
+    const seeded = {
+      entries: [seededEntry({ conditions: [{ op: 'gt', lhs: null, rhs: null }] })],
+      exits: [],
+    };
+    const { onRulesChange } = renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    const next = onRulesChange.mock.calls.pop()[0];
+    const block = next.entries[0];
+    expect(block.conditions).toHaveLength(2);
+    // CNF in → CNF out: no links seeded.
+    expect(block.links).toBeUndefined();
+    const wire = normaliseSpecForRequest({ inputs: [], rules: next });
+    expect(wire.rules.entries[0].links).toBeUndefined();
+  });
+
+  it('remove-then-add stays a consistent FULL chain (re-chain on remove, extend on add)', () => {
+    // Start a 3-condition chain {1:4, 2:6}. The component is controlled, so we
+    // re-render it with each emitted rules object to feed the next interaction.
+    const start = {
+      entries: [
+        seededEntry({
+          id: 'chain-2',
+          conditions: [
+            { op: 'gt', lhs: null, rhs: null },
+            { op: 'gt', lhs: null, rhs: null },
+            { op: 'gt', lhs: null, rhs: null },
+          ],
+          links: { 1: 4, 2: 6 },
+        }),
+      ],
+      exits: [],
+    };
+    const { onRulesChange, rerender } = renderEditor(start);
+
+    // Remove the LAST condition (index 2). reindexLinksAfterRemoval → 2 conds
+    // remain, full chain {1:4}.
+    fireEvent.click(screen.getByTestId('remove-condition-0-2'));
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
+    let next = onRulesChange.mock.calls.pop()[0];
+    expect(next.entries[0].conditions).toHaveLength(2);
+    expect(next.entries[0].links).toEqual({ 1: 4 });
+
+    // Re-render with the new rules, then ADD a condition back. The chain must
+    // re-extend to FULL coverage {1:4, 2:DEFAULT} — not degrade to a partial map.
+    rerender(
+      <BlockEditor
+        rules={next}
+        onRulesChange={onRulesChange}
+        inputs={[SPX_INPUT]}
+        indicators={[]}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    next = onRulesChange.mock.calls.pop()[0];
+    expect(next.entries[0].conditions).toHaveLength(3);
+    expect(next.entries[0].links).toEqual({ 1: 4, 2: DEFAULT_LINK_WINDOW });
+    // And the wire ships the FULL chain.
+    const wire = normaliseSpecForRequest({ inputs: [], rules: next });
+    expect(wire.rules.entries[0].links).toEqual({ 1: 4, 2: DEFAULT_LINK_WINDOW });
   });
 });

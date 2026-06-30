@@ -17,6 +17,13 @@ oracle, no engine code) and then cross-checked against the engine; a reviewer ca
 re-derive every asserted number from the price series and the locked semantics in
 the comment block. The test does NOT snapshot the code's output.
 
+NOTE: This e2e test exercises both features working together over a realistic
+simulation, but does not discriminate a count-ignoring or arm-before-advance bug
+(identical positions/pnl/fired_indices would result). The actual discrimination
+for those properties lives in the unit tests (``test_cross_count_two_in_window``,
+the coincident-fire automaton test in ``tests/engine/test_temporal_composition.py``
+and ``tests/property/test_temporal_automaton.py``).
+
 ────────────────────────────────────────────────────────────────────────────
 SIGNAL
   Input X = spot SPX (close field). One ENTRY chain + one EXIT.
@@ -41,7 +48,7 @@ SYNTHETIC CLOSE SERIES (13 bars, dates 2024-01-01 .. 2024-01-13)
 BAR-BY-BAR HAND DERIVATION
   up-crosses of 100 (prev<=100 < cur): t2 (99→102), t4 (98→104).        [2 total]
   stage0 = (>=2 up-crosses of 100 in trailing 3 bars):
-    t2: window {t0,t1,t2} has 1 up-cross  → False  (PROVES count=2 matters:
+    t2: window {t0,t1,t2} has 1 up-cross  → False  (exercises count=2:
         a single cross of 100 does NOT satisfy the head)
     t4: window {t2,t3,t4} has 2 up-crosses → TRUE  (stage0 holds at t4 only)
     elsewhere False.                          stage0 = {t4}
@@ -52,7 +59,7 @@ BAR-BY-BAR HAND DERIVATION
     t6: stage1[6] = True and (t - tau) = 6 - 4 = 2 = window (inclusive upper
         edge) → advance to final stage → FIRE @ t6; candidate consumed (impulse).
     t10: stage1 matches again, BUT stage0 never re-fires (no second pair of
-        up-crosses of 100), so NO head is armed → NO fire (PROVES the
+        up-crosses of 100), so NO head is armed → NO fire (exercises the
         strictly-after arming: a bare stage-1 cross cannot fire the chain).
     fire = {t6}
   Exit cross_below 105: down-cross at t8 (109→104).      exit = {t8}
@@ -67,8 +74,8 @@ BAR-BY-BAR HAND DERIVATION
     realized_pnl[t] = Σ_{s=1..t}  pos[s-1] * (px[s] - px[s-1]) / px[s-1]
     i.e. the position from the PRIOR bar earns that bar's pct change; a simple
     cumulative SUM (NON-compounding — see test_temporal_e2e_realized_pnl_is_not
-    _compounding below, which documents this as the engine's intentional
-    contract, not a defect introduced here).
+    _compounding below, which documents this as the engine's pre-existing
+    behaviour, not a defect introduced here).
     Only two steps carry a non-zero position (pos[5]=0 → step into t6 is 0):
       step into t7 : pos[6]=1 * (109 - 113)/113 = -0.03539823008849557
       step into t8 : pos[7]=1 * (104 - 109)/109 = -0.04587155963302752
@@ -319,7 +326,7 @@ async def test_temporal_e2e_realized_pnl_is_not_compounding(
     t7→t8), the final cumulative P&L equals the SUM of the two bar returns. For
     two NEGATIVE returns the compounded product adds a positive cross term, so
     the non-compounded sum the engine emits is the MORE-negative (larger
-    magnitude) value. This is the engine's intentional behaviour — documented
+    magnitude) value. This is the engine's pre-existing behaviour — documented
     here so a future switch to compounding is caught, not silently absorbed."""
     resp = await temporal_client.post("/api/signals/compute", json=_signal_body())
     assert resp.status_code == 200, resp.text

@@ -175,7 +175,18 @@ function BlockEditor({
   function handleAddCondition(blockIdx) {
     const next = blocks.map((b, i) => {
       if (i !== blockIdx) return b;
-      return { ...b, conditions: [...(b.conditions || []), defaultCondition('gt')] };
+      const prevConds = b.conditions || [];
+      const conditions = [...prevConds, defaultCondition('gt')];
+      // A CNF block (no links) stays CNF on add. A CHAINED block must stay a
+      // FULL contiguous chain (the backend rejects a partial chain, gate G3),
+      // so EXTEND the map: the appended condition opens a new successor gap
+      // whose key == the pre-append condition count (1-based successor index).
+      // Seed its window with the default — existing windows are kept. Mirrors
+      // ``reindexLinksAfterRemoval`` which keeps links consistent on removal.
+      const isChain = b.links && typeof b.links === 'object' && Object.keys(b.links).length > 0;
+      if (!isChain) return { ...b, conditions };
+      const links = { ...b.links, [prevConds.length]: DEFAULT_LINK_WINDOW };
+      return { ...b, conditions, links };
     });
     updateBlocks(next);
   }
