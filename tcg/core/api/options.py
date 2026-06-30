@@ -397,6 +397,7 @@ async def _batch_underlying_prices(
     from tcg.engine.options.chain._join import (
         _futures_collection_for,
         _is_btc,
+        _is_crypto,
     )
 
     # BTC: underlying price lives on the row — no Mongo call.
@@ -440,8 +441,31 @@ async def _batch_underlying_prices(
         if fut_collection is None:
             return {}
         collection, instrument_id = fut_collection, contract.underlying_ref
+    elif not _is_crypto(contract):
+        # Option-on-future with NO per-contract ``underlying_ref`` (the dwh SQL
+        # reader does not preserve it) — mirror the _join Branch-3 fallback and
+        # the VIX path: resolve the FUT_* contract matching the option's
+        # expiration (the Black-76 forward), then bulk-fetch its prices.  Crypto
+        # roots are excluded above (spot/perp-settled, not option-on-future).
+        fut_collection = _futures_collection_for(contract.collection)
+        if fut_collection is None:
+            return {}
+        exp = contract.expiration
+        exp_int = exp.year * 10000 + exp.month * 100 + exp.day
+        try:
+            fut_id = await svc.find_futures_contract_by_expiration(
+                fut_collection, exp_int
+            )
+        except Exception:  # noqa: BLE001
+            # Same policy as VIX: don't 502 on a missing underlying.
+            return {}
+        if fut_id is None:
+            # No listed future matches this expiration (e.g. a weekly).
+            return {}
+        collection, instrument_id = fut_collection, fut_id
     else:
-        # No underlying ref and not BTC/VIX — cannot join.
+        # Crypto (ETH; BTC handled above) — spot/perp-settled, no listed-future
+        # forward; cannot join here.
         return {}
 
     try:

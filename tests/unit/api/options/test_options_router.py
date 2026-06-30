@@ -21,6 +21,7 @@ Coverage:
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
@@ -79,9 +80,7 @@ async def test_roots_injects_has_computed_greeks_from_engine(
     """
     import tcg.core.api.options as opt_api
 
-    monkeypatch.setattr(
-        opt_api, "blocked_roots", lambda: frozenset({"OPT_ETH"})
-    )
+    monkeypatch.setattr(opt_api, "blocked_roots", lambda: frozenset({"OPT_ETH"}))
 
     # SP500 has stored greeks AND is not blocked → has_computed_greeks=True,
     # has_greeks=True.
@@ -216,6 +215,41 @@ async def test_chain_stored_greeks_happy_path(
     assert row["iv"]["source"] == "stored"
     assert row["delta"]["source"] == "stored"
     assert row["delta"]["value"] == pytest.approx(0.512)
+
+
+async def test_chain_underlying_ref_none_resolves_via_future_by_expiration(
+    client: AsyncClient, options_reader: StubOptionsReader, mock_svc
+):
+    """Chain page (PR #67 fix D): an option-on-future whose contract has
+    ``underlying_ref=None`` (the dwh reality) must still resolve the underlying
+    via the FUT_* contract matching the option's expiration — mirroring the
+    _join Branch-3 / VIX fallback — instead of returning no underlying."""
+    options_reader.query_chain_result = [
+        (make_contract(underlying_ref=None), make_row()),
+    ]
+    # The matching FUT_SP_500 contract is resolved by expiration, then its close
+    # is fetched (get_prices already returns a close series via the fixture).
+    mock_svc.find_futures_contract_by_expiration = AsyncMock(
+        return_value="FUT_SP_500_EMINI_20240419"
+    )
+    resp = await client.get(
+        "/api/options/chain",
+        params={
+            "root": "OPT_SP_500",
+            "date": "2024-03-15",
+            "type": "both",
+            "expiration_min": "2024-03-15",
+            "expiration_max": "2024-06-30",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Underlying resolved (would be missing/None without the fallback).
+    assert body["underlying_price"]["value"] is not None
+    # The by-expiration resolver was consulted for the FUT_SP_500 contract.
+    mock_svc.find_futures_contract_by_expiration.assert_awaited()
+    args, _kw = mock_svc.find_futures_contract_by_expiration.await_args
+    assert args[0] == "FUT_SP_500"
 
 
 async def test_chain_compute_missing_fills_greeks(
