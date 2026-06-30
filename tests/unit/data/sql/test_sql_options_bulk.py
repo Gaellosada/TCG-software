@@ -309,3 +309,116 @@ class TestQueryChainBulk:
         )
         assert result == {}
         assert cur.calls == []
+
+
+class TestQueryChainBulkPartitionPruning:
+    """Regression: the bulk query must let PostgreSQL prune fact partitions.
+
+    The fact tables are RANGE-partitioned by ``trade_date`` (yearly, 1980..2050).
+    The final LEFT JOINs match ``p.trade_date = k.trade_date`` where ``k.trade_date``
+    is a RUNTIME value from the ``keyset`` CTE — a value the planner cannot use for
+    plan-time pruning, so it fans the join out across ALL ~71 yearly partitions of
+    BOTH facts (~142 partition scans + 142 relation locks PER call).  EXPLAIN ANALYZE
+    on live dwh confirmed this is the OPT_SP_500 chain-bulk slowness (planning 34 ms
+    + a 60 s ``statement_timeout`` blow-out under a cold cache -> the reported
+    PoolTimeout); the single-date ``query_chain`` is fast because ``= %s`` is a
+    constant and prunes to one partition.
+
+    FIX (proven live): add a REDUNDANT constant ``AND <fact>.trade_date BETWEEN %s
+    AND %s`` (min/max of the requested dates) to EACH fact LEFT JOIN.  The planner
+    prunes on the constant range; ``= k.trade_date`` keeps correctness.  Live: rows
+    identical (437==437; cross-year 100==100), partitions 142->2, exec 98ms->10ms.
+
+    These tests are DETERMINISTIC (no live dwh): they assert the generated SQL
+    carries the constant bound on BOTH joins and that the bound params are the
+    min/max of the date list.
+    """
+
+    def _make_reader(self):
+        def responder(sql: str, params: Any) -> list[dict]:
+            return []
+
+        cur = _FakeCursor(responder)
+        pool = _FakePool(cur)
+        reader = SqlOptionsDataReader(pool)  # type: ignore[arg-type]
+        return reader, cur
+
+    @staticmethod
+    def _chain_sql(cur: _FakeCursor) -> str:
+        call = next(c for c in cur.calls if "WITH ids AS" in c[0] or "FROM ids" in c[0])
+        return call[0]
+
+    async def test_both_fact_joins_carry_constant_trade_date_bound(self):
+        """Each fact LEFT JOIN ``ON`` clause has a constant ``trade_date BETWEEN``."""
+        reader, cur = self._make_reader()
+        dates = [date(2024, 3, 15), date(2024, 3, 18), date(2024, 6, 21)]
+        await reader.query_chain_bulk(
+            root="OPT_SP_500",
+            dates=dates,
+            type="C",
+            expiration_min=date(2024, 6, 21),
+            expiration_max=date(2024, 6, 21),
+        )
+        sql = self._chain_sql(cur)
+
+        # The constant range must appear on BOTH fact aliases (p = price, g =
+        # greeks), inside their JOIN ``ON`` — NOT merely on the keyset, which is
+        # already prunable via ``= ANY`` but the join is the part that fans out.
+        assert "p.trade_date BETWEEN" in sql, (
+            "fact_price_eod join lacks the constant trade_date bound -> the "
+            "planner cannot prune partitions (the OPT_SP_500 chain-bulk slowness)"
+        )
+        assert "g.trade_date BETWEEN" in sql, (
+            "fact_option_greeks join lacks the constant trade_date bound"
+        )
+
+    async def test_bound_params_are_min_and_max_of_dates(self):
+        """The BETWEEN bounds bind min(dates) and max(dates)."""
+        reader, cur = self._make_reader()
+        # Deliberately UNSORTED + duplicate to prove min/max (not first/last).
+        dates = [
+            date(2024, 6, 21),
+            date(2024, 3, 15),
+            date(2024, 4, 1),
+            date(2024, 3, 15),
+        ]
+        await reader.query_chain_bulk(
+            root="OPT_SP_500",
+            dates=dates,
+            type="C",
+            expiration_min=date(2024, 6, 21),
+            expiration_max=date(2024, 6, 21),
+        )
+        call = next(c for c in cur.calls if "WITH ids AS" in c[0] or "FROM ids" in c[0])
+        _sql, params = call
+        flat = list(params)
+        lo, hi = date(2024, 3, 15), date(2024, 6, 21)
+        # Both bounds present (each appears twice — once per fact join).
+        assert flat.count(lo) >= 2, f"min(dates) {lo} not bound on both joins: {flat}"
+        assert flat.count(hi) >= 2, f"max(dates) {hi} not bound on both joins: {flat}"
+
+    async def test_pruning_bound_does_not_change_rows(self):
+        """The constant bound is REDUNDANT (correctness-neutral): rows that match
+        ``= k.trade_date`` already lie within [min, max], so adding the bound
+        returns exactly the same chain.  Proven live (437==437); here we assert
+        the in-range rows still come through after the rewrite."""
+        d0, d1 = date(2024, 3, 15), date(2024, 3, 18)
+
+        def responder(sql: str, params: Any) -> list[dict]:
+            if "asset_class = 'forex'" in sql or "asset_class='forex'" in sql:
+                return []
+            return [
+                _chain_row(d0, "SPX240621C5000", 5000.0, 0.50),
+                _chain_row(d1, "SPX240621C5000", 5000.0, 0.48),
+            ]
+
+        cur = _FakeCursor(responder)
+        reader = SqlOptionsDataReader(_FakePool(cur))  # type: ignore[arg-type]
+        result = await reader.query_chain_bulk(
+            root="OPT_SP_500",
+            dates=[d0, d1],
+            type="C",
+            expiration_min=date(2024, 6, 21),
+            expiration_max=date(2024, 6, 21),
+        )
+        assert len(result[d0]) == 1 and len(result[d1]) == 1
