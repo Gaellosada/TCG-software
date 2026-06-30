@@ -80,6 +80,41 @@ function clampWeight(w) {
   return n;
 }
 
+/**
+ * Normalise a block-level temporal ``links`` map for the wire.
+ *
+ * ``links`` is a flat map { "<successor_condition_index>": <within_bars_int> }
+ * keyed by the SUCCESSOR condition's index within the block. A block is EITHER
+ * pure CNF OR one FULL linear chain: the backend (HTTP 400, gate G3) requires
+ * the keys to cover EXACTLY every successor gap ``{1..condCount-1}`` — no
+ * partial chain, no stray key, every window a finite integer ≥ 1. So this is
+ * all-or-nothing: any deviation returns ``undefined`` and the caller OMITS the
+ * field, falling back to CNF (which keeps a non-chained block byte-identical
+ * to a pre-feature payload, gate G1). Defence-in-depth alongside the storage
+ * sanitiser — the wire never ships a chain the backend would reject.
+ *
+ * @param {*} raw
+ * @param {number} condCount the block's condition count
+ * @returns {Object|undefined} full-coverage links map, or undefined to omit.
+ */
+function normaliseLinks(raw, condCount) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  if (!Number.isInteger(condCount) || condCount < 2) return undefined;
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const idx = Number(k);
+    if (!Number.isInteger(idx) || idx < 1 || idx >= condCount) return undefined;
+    const w = typeof v === 'number' ? v : Number(v);
+    if (!Number.isFinite(w) || w < 1) return undefined;
+    out[String(idx)] = Math.floor(w);
+  }
+  // Require FULL coverage of every successor gap {1..condCount-1}.
+  for (let i = 1; i < condCount; i += 1) {
+    if (!(String(i) in out)) return undefined;
+  }
+  return out;
+}
+
 function normaliseBlock(block, section) {
   if (!block || typeof block !== 'object') return block;
   const conditions = Array.isArray(block.conditions)
@@ -105,6 +140,11 @@ function normaliseBlock(block, section) {
     ? block.requires_reset_block_id
     : null;
   const resetCount = resetBlockId ? coerceResetCount(block.requires_reset_count) : 1;
+  // Block-level temporal chain. Entry+exit blocks may carry it; resets reject
+  // it (HTTP 400) so it is omitted from the reset literal above. Undefined ⇒
+  // omit the key (zero-link == CNF, byte-identical to a pre-feature payload).
+  // Full-coverage-or-nothing, keyed against the normalised condition count.
+  const links = normaliseLinks(block.links, conditions.length);
   if (section === 'exits') {
     // Exit blocks omit block-level input_id entirely (not empty-string)
     // so the backend invariant "exits must not carry input_id" is met.
@@ -124,6 +164,8 @@ function normaliseBlock(block, section) {
       target_entry_block_names: targetNames,
       requires_reset_block_id: resetBlockId,
       requires_reset_count: resetCount,
+      // Only present when there is a real chain — see normaliseLinks.
+      ...(links !== undefined ? { links } : {}),
     };
   }
   return {
@@ -136,6 +178,8 @@ function normaliseBlock(block, section) {
     conditions,
     requires_reset_block_id: resetBlockId,
     requires_reset_count: resetCount,
+    // Only present when there is a real chain — see normaliseLinks.
+    ...(links !== undefined ? { links } : {}),
   };
 }
 

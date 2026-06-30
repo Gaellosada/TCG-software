@@ -53,21 +53,31 @@
 //   - constant:    { kind:'constant', value }
 //
 // Migration policy:
-//   - v6 (current): the canonical version.
+//   - v7 (current): the canonical version. Adds block-level temporal
+//     ``links`` (a flat { successorIdx: withinBars } map; absent ⇒ CNF) and
+//     cross ``count``/``window`` scalars (defaults 1/1 ⇒ today's single-bar
+//     crossover). Both are purely additive with behaviour-preserving
+//     defaults, so a v6 payload is structurally a v7 payload minus the new
+//     optional fields.
 //   - v5 → v6: in-place migration of exit blocks. The singular
 //     ``target_entry_block_name`` (string) is folded into the plural
 //     ``target_entry_block_names`` (string[]): a non-empty name becomes
 //     ``[name]``; an empty string becomes ``[]``. The singular key is
 //     dropped. No other shape change — v5 and v6 are otherwise identical,
 //     so the migration is loss-free.
+//   - v6 → v7: a pure version stamp. No shape change — links are absent in
+//     all v6 payloads (⇒ CNF), crosses gain their count/window defaults at
+//     sanitise time, and retired rolling conditions stay (rendered as a
+//     read-only legacy chip; the op dropdown just no longer offers them).
 //   - any OTHER version: DROPPED on load (single console.warn per page load).
 //
-// The migration runs on the raw parsed payload BEFORE per-signal
-// sanitisation so the sanitiser only ever sees the plural shape.
+// The migrations run on the raw parsed payload BEFORE per-signal
+// sanitisation, chained v5→v6→v7, so the sanitiser only ever sees the
+// current shape.
 
 import { SIGNALS_STORAGE_KEY } from './storageKeys';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /** Canonical list of rule sections. */
 export const SECTIONS = Object.freeze(['entries', 'exits', 'resets']);
@@ -309,19 +319,101 @@ export function coerceResetCount(raw) {
   return 1;
 }
 
+/**
+ * Coerce a cross-condition ``count`` or ``window`` scalar to an integer ≥ 1.
+ *   - Numbers / numeric strings → floored if finite and ≥ 1.
+ *   - Anything non-finite or < 1 → 1 (the single-bar-crossover default,
+ *     byte-identical to a pre-feature ``CrossCondition``).
+ *
+ * Mirrors ``coerceResetCount`` (same int-≥-1 domain) so authoring controls,
+ * sanitisation and the wire all agree. ``count``/``window`` default to 1 so
+ * every existing cross condition deserialises unchanged.
+ *
+ * @param {*} raw
+ * @returns {number} integer ≥ 1
+ */
+export function coerceCrossField(raw) {
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (Number.isFinite(n) && n >= 1) return Math.floor(n);
+  return 1;
+}
+
+/**
+ * Field-local sanitiser for a block's temporal ``links`` map.
+ *
+ * ``links`` is a flat { "<successorIdx>": <withinBars> } map keyed by the
+ * SUCCESSOR condition's index within the block. A block is EITHER pure CNF OR
+ * one full linear chain — the backend (HTTP 400) requires the keys to cover
+ * EXACTLY every successor gap ``{1..condCount-1}`` (no partial chain). So this
+ * sanitiser is all-or-nothing:
+ *   - every key must parse to an integer in [1, condCount-1] with a window
+ *     that is a finite integer ≥ 1, AND
+ *   - the key set must equal exactly ``{1..condCount-1}`` (full coverage).
+ * If ANY of that fails (a stray key, a bad window, a missing gap, or < 2
+ * conditions), it returns ``undefined`` ⇒ the field is omitted and the block
+ * falls back to CNF — never a half-formed chain the backend would reject.
+ *
+ * @param {*} raw            the raw links value
+ * @param {number} condCount the block's condition count
+ * @returns {Object|undefined}
+ */
+export function sanitiseLinks(raw, condCount) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  if (!Number.isInteger(condCount) || condCount < 2) return undefined;
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const idx = Number(k);
+    if (!Number.isInteger(idx) || idx < 1 || idx >= condCount) return undefined;
+    const w = typeof v === 'number' ? v : Number(v);
+    if (!Number.isFinite(w) || w < 1) return undefined;
+    out[String(idx)] = Math.floor(w);
+  }
+  // Require FULL coverage of every successor gap {1..condCount-1}.
+  for (let i = 1; i < condCount; i += 1) {
+    if (!(String(i) in out)) return undefined;
+  }
+  return out;
+}
+
+/**
+ * Sanitise a single stored condition. Pure / field-local.
+ *
+ * Keeps any condition whose ``op`` is a string (so retired ``rolling_*``
+ * conditions survive — they are no longer authorable but stay evaluable and
+ * render as a read-only legacy chip). For cross conditions only, coerces the
+ * optional ``count``/``window`` scalars to int ≥ 1 (defaulting to 1) so a
+ * plain crossover is byte-identical to a pre-feature condition.
+ */
+function sanitiseCondition(c) {
+  if (c.op === 'cross_above' || c.op === 'cross_below') {
+    return {
+      ...c,
+      count: coerceCrossField(c.count),
+      window: coerceCrossField(c.window),
+    };
+  }
+  return c;
+}
+
 function sanitiseBlock(raw, section) {
   const id = (typeof raw.id === 'string' && raw.id) ? raw.id : newBlockId();
   const name = typeof raw.name === 'string' ? raw.name : '';
   const conditions = Array.isArray(raw.conditions)
-    ? raw.conditions.filter((c) => c && typeof c === 'object' && typeof c.op === 'string')
+    ? raw.conditions
+      .filter((c) => c && typeof c === 'object' && typeof c.op === 'string')
+      .map(sanitiseCondition)
     : [];
   const enabled = typeof raw.enabled === 'boolean' ? raw.enabled : true;
   const description = typeof raw.description === 'string' ? raw.description : '';
+  // Temporal chain: entries+exits only. Resets reject links (the backend
+  // 400s), so the reset branch never stores it. ``undefined`` ⇒ omit the
+  // field (CNF). Indexed against the sanitised condition count.
+  const links = sanitiseLinks(raw.links, conditions.length);
   if (section === 'resets') {
     // Reset blocks are signal-global: no block-level input_id, no weight,
-    // no target_entry_block_name, no requires_reset_block_id. Legacy
-    // payloads that smuggle these fields have them stripped here so
-    // saved state stays canonical.
+    // no target_entry_block_name, no requires_reset_block_id, no temporal
+    // links. Legacy payloads that smuggle these fields have them stripped
+    // here so saved state stays canonical.
     return { id, name, conditions, enabled, description };
   }
   if (section === 'exits') {
@@ -347,6 +439,8 @@ function sanitiseBlock(raw, section) {
       // No binding → force the single-fire default so a stale count can't
       // ride in storage.
       requires_reset_count: exitReset ? coerceResetCount(raw.requires_reset_count) : 1,
+      // Only stored when there is a real chain (≥2 conditions + valid map).
+      ...(links !== undefined ? { links } : {}),
     };
   }
   const input_id = typeof raw.input_id === 'string' ? raw.input_id : '';
@@ -363,6 +457,8 @@ function sanitiseBlock(raw, section) {
     requires_reset_block_id: entryReset,
     // Orphan-kill (see exits above).
     requires_reset_count: entryReset ? coerceResetCount(raw.requires_reset_count) : 1,
+    // Only stored when there is a real chain (≥2 conditions + valid map).
+    ...(links !== undefined ? { links } : {}),
   };
 }
 
@@ -402,7 +498,8 @@ function sanitiseSignal(raw) {
  * exit somehow already carries the plural array it is honoured as-is and
  * the singular key (if any) is dropped.
  *
- * Pure — does not mutate the input. Bumps ``version`` to 6.
+ * Pure — does not mutate the input. Bumps ``version`` to 6 (the literal — NOT
+ * SCHEMA_VERSION — so the migration chain stays explicit: v5→v6 then v6→v7).
  *
  * @param {object} parsed  parsed localStorage payload with ``version === 5``
  * @returns {object}       a v6-shaped payload
@@ -430,7 +527,31 @@ export function migrateV5ToV6(parsed) {
     });
     return { ...sig, rules: { ...rules, exits: nextExits } };
   });
-  return { ...parsed, version: SCHEMA_VERSION, signals };
+  return { ...parsed, version: 6, signals };
+}
+
+/**
+ * Migrate a parsed v6 payload to v7 in place (returns a new object graph).
+ *
+ * v7 adds two purely-additive, behaviour-preserving features:
+ *   - block-level temporal ``links`` (a flat { successorIdx: withinBars } map;
+ *     ABSENT in every v6 payload ⇒ CNF, the default), and
+ *   - cross ``count``/``window`` scalars (DEFAULT 1/1 ⇒ today's single-bar
+ *     crossover).
+ * Neither requires a shape rewrite — a v6 payload IS a v7 payload missing the
+ * new optional fields, which ``sanitiseBlock``/``sanitiseCondition`` fill in
+ * with their behaviour-preserving defaults. So this migration is a pure
+ * version stamp: bump ``version`` to 7 and let the sanitiser do the rest. (We
+ * stamp the literal SCHEMA_VERSION = 7; the per-signal sanitisation runs after
+ * in ``loadState``.)
+ *
+ * Pure — does not mutate the input.
+ *
+ * @param {object} parsed  parsed localStorage payload with ``version === 6``
+ * @returns {object}       a v7-shaped payload
+ */
+export function migrateV6ToV7(parsed) {
+  return { ...parsed, version: SCHEMA_VERSION };
 }
 
 export function loadState() {
@@ -451,11 +572,17 @@ export function loadState() {
     return empty;
   }
   if (!parsed || typeof parsed !== 'object') return empty;
-  // v5 → v6: loss-free in-place migration of exit blocks (singular target
-  // name → plural array). Anything else that isn't the current version is
-  // dropped. Run BEFORE sanitisation so the sanitiser sees plural shape.
+  // Migration chain, run BEFORE sanitisation so the sanitiser only ever sees
+  // the current shape. v5 → v6: loss-free exit-target singular→plural. v6 → v7:
+  // pure version stamp (links/cross defaults are applied by the sanitiser).
+  // Each step is gated on the running version so a v5 payload walks the whole
+  // chain (v5→v6→v7). Anything that isn't the current version after the chain
+  // is dropped.
   if (parsed.version === 5) {
     parsed = migrateV5ToV6(parsed);
+  }
+  if (parsed.version === 6) {
+    parsed = migrateV6ToV7(parsed);
   }
   if (parsed.version !== SCHEMA_VERSION) {
     if (!incompatibleVersionWarned) {

@@ -191,6 +191,15 @@ class _ConditionIn(BaseModel):
     min: _OperandIn | None = None
     max: _OperandIn | None = None
     lookback: int | None = None
+    # cross_count extension (cross_above / cross_below only). Defaults
+    # reproduce today's single-bar crossover byte-identically; both must be
+    # integers >= 1 when supplied (validated in ``_parse_condition``).
+    # Deliberately typed ``Any`` (not ``int``) so the raw value reaches
+    # ``_parse_condition``'s isinstance guards unchanged — Pydantic must NOT
+    # coerce ``1.5`` → int (422) or ``true`` → 1 (silent 200) before we
+    # can emit the uniform HTTP-400 validation envelope.
+    count: Any = None
+    window: Any = None
 
 
 class _BlockIn(BaseModel):
@@ -235,6 +244,20 @@ class _BlockIn(BaseModel):
     # validation rejects any request that sets this field. Remove once
     # no legacy clients remain (target: v5 or 2026-Q3).
     target_entry_block_id: str | None = None
+    # Optional temporal chain (entries/exits only — rejected on resets).
+    # Maps SUCCESSOR condition index (as a string key on the wire — JSON object
+    # keys are strings — or an int) to the ``within`` window in BARS.
+    #
+    # The value type is deliberately ``Any`` (not ``int``): a ``dict[str, int]``
+    # annotation makes Pydantic the de-facto window validator — it rejects a
+    # null/str/float window with a 422 (bypassing our uniform HTTP-400 envelope)
+    # AND silently coerces ``true`` → ``1`` (``bool`` subclasses ``int``),
+    # accepting a nonsense window. Keeping it permissive routes EVERY malformed
+    # window through ``_parse_links`` (the authoritative validator) which raises
+    # ``SignalValidationError`` → HTTP 400 ``error_type='validation'``. Validated
+    # in ``_parse_blocks``: finite int windows >= 1, single contiguous forward
+    # chain over indices 1..len-1, no nesting. ``None``/empty ⇒ zero-link CNF.
+    links: dict[str, Any] | None = None
 
 
 class _SignalRulesIn(BaseModel):
@@ -517,10 +540,38 @@ def _parse_condition(c: _ConditionIn, *, path: str) -> Condition:
             rhs=_parse_operand(c.rhs, path=f"{path}.rhs"),
         )
     if op in _CROSS_OPS:
+        # Absent field (not in model_fields_set) → use default 1 (byte-identical
+        # single-bar crossover).  Explicitly supplied value (incl. null/None) →
+        # must pass the integer >= 1 guard below; explicit null is malformed.
+        count = 1 if "count" not in c.model_fields_set else c.count
+        window = 1 if "window" not in c.model_fields_set else c.window
+        # Reject None (explicit null), bool (subclasses int), non-int, and
+        # out-of-range values loudly with the uniform HTTP-400 envelope.
+        # Defaults (count=1, window=1) reproduce today's single-bar crossover.
+        if (
+            count is None
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            raise SignalValidationError(
+                f"{path}: '{op}' count must be an integer >= 1 (got {c.count!r})"
+            )
+        if (
+            window is None
+            or isinstance(window, bool)
+            or not isinstance(window, int)
+            or window < 1
+        ):
+            raise SignalValidationError(
+                f"{path}: '{op}' window must be an integer >= 1 (got {c.window!r})"
+            )
         return CrossCondition(
             op=op,  # type: ignore[arg-type]
             lhs=_parse_operand(c.lhs, path=f"{path}.lhs"),
             rhs=_parse_operand(c.rhs, path=f"{path}.rhs"),
+            count=count,
+            window=window,
         )
     if op == "in_range":
         return InRangeCondition(
@@ -540,6 +591,61 @@ def _parse_condition(c: _ConditionIn, *, path: str) -> Condition:
             lookback=int(c.lookback),
         )
     raise SignalValidationError(f"{path}: unknown op {op!r}")
+
+
+def _parse_links(
+    raw_links: dict[str, Any] | None, n_conditions: int, *, path: str
+) -> dict[int, int] | None:
+    """Validate and normalise a block's temporal ``links`` (HTTP 400 on error).
+
+    Enforces the bounded-state invariants (G3) at the API layer:
+      * keys parse as integers in ``1..n_conditions-1`` (no index 0 — the head
+        carries no link; no out-of-range index);
+      * windows are integers ``>= 1`` (finite, positive — reject None/missing
+        and ``<= 0``; a window of 0 would be a non-link, so it is rejected at
+        authoring to keep the chain unambiguous);
+      * the keys form ONE contiguous forward chain covering EVERY successor —
+        exactly ``{1, 2, ..., n_conditions-1}`` (linear-chain-only, no gaps,
+        no nesting, spans the whole block).
+
+    Returns the normalised ``dict[int, int]`` (int keys) or ``None`` when no
+    links are supplied (empty/absent ⇒ zero-link CNF).
+    """
+    if not raw_links:
+        return None
+    out: dict[int, int] = {}
+    for raw_key, raw_win in raw_links.items():
+        try:
+            key = int(raw_key)
+        except (TypeError, ValueError):
+            raise SignalValidationError(
+                f"{path}: links key {raw_key!r} is not an integer condition index"
+            )
+        if isinstance(raw_win, bool) or not isinstance(raw_win, int):
+            raise SignalValidationError(
+                f"{path}: links window for index {key} must be an integer (got {raw_win!r})"
+            )
+        if raw_win < 1:
+            raise SignalValidationError(
+                f"{path}: links window for index {key} must be >= 1 "
+                f"(a window of 0 is a non-link; omit it instead)"
+            )
+        if key < 1 or key >= n_conditions:
+            raise SignalValidationError(
+                f"{path}: links key {key} out of range; valid successor "
+                f"indices are 1..{n_conditions - 1}"
+            )
+        if key in out:
+            raise SignalValidationError(f"{path}: duplicate links key {key}")
+        out[key] = raw_win
+    expected = set(range(1, n_conditions))
+    if set(out) != expected:
+        raise SignalValidationError(
+            f"{path}: links must form one contiguous forward chain over "
+            f"every condition — expected successor indices "
+            f"{sorted(expected)!r}, got {sorted(out)!r}"
+        )
+    return out
 
 
 def _parse_blocks(
@@ -606,6 +712,10 @@ def _parse_blocks(
         legacy_tgt = blk.target_entry_block_id or None
         rrb = blk.requires_reset_block_id or None
         rrc = blk.requires_reset_count
+        raw_links = blk.links or None
+        # Validated temporal chain (entries/exits only). Stays None for
+        # placeholders and resets (resets reject non-empty links above).
+        parsed_links: dict[int, int] | None = None
 
         # Placeholder blocks (no conditions + no input) are accepted
         # as sentinels; they skip evaluation. Otherwise full validation.
@@ -651,6 +761,13 @@ def _parse_blocks(
                 if rrc != 1:
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set requires_reset_count"
+                    )
+                # Temporal chains are forbidden on reset blocks: a sequence
+                # reset would break the per-True-bar re-arm countdown (silent
+                # strategy inertness). Mirror the input_id/weight rejection.
+                if raw_links:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set links"
                     )
             elif is_entry:
                 if has_target:
@@ -759,6 +876,11 @@ def _parse_blocks(
                     f"{path}: requires_reset_count must be an integer "
                     f">= 1 (got {rrc!r})"
                 )
+            # Temporal chain (entries/exits only — resets reject above). A
+            # non-empty links map must form one contiguous forward chain over
+            # the block's conditions (validated; HTTP 400 on malformed input).
+            if not is_reset:
+                parsed_links = _parse_links(raw_links, len(conds), path=path)
 
         out.append(
             Block(
@@ -772,6 +894,7 @@ def _parse_blocks(
                 description=str(blk.description or ""),
                 requires_reset_block_id=rrb,
                 requires_reset_count=int(rrc),
+                links=parsed_links,
             )
         )
     return tuple(out)

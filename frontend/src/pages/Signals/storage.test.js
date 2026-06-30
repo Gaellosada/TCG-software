@@ -11,7 +11,10 @@ import {
   newBlockId,
   cascadeDeleteEntry,
   coerceResetCount,
+  coerceCrossField,
+  sanitiseLinks,
   migrateV5ToV6,
+  migrateV6ToV7,
   __resetIncompatibleVersionWarnedForTests,
 } from './storage';
 import { coerceResetCount as coerceFromBlockShape } from './blockShape';
@@ -44,12 +47,12 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-describe('Signals storage (v6)', () => {
-  it('SCHEMA_VERSION is 6', () => {
-    expect(SCHEMA_VERSION).toBe(6);
+describe('Signals storage (v7)', () => {
+  it('SCHEMA_VERSION is 7', () => {
+    expect(SCHEMA_VERSION).toBe(7);
   });
 
-  it('storage key is tcg.signals.v5 (key unchanged; v5→v6 migrates in place)', () => {
+  it('storage key is tcg.signals.v5 (key unchanged; v5→v6→v7 migrates in place)', () => {
     expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v5');
   });
 
@@ -154,6 +157,11 @@ describe('Signals storage (v6)', () => {
                     op: 'cross_below',
                     lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
                     rhs: { kind: 'constant', value: 100 },
+                    // v7: cross conditions carry explicit count/window scalars
+                    // (defaults 1/1 = a single-bar crossover). The sanitiser
+                    // adds them on load so the on-disk shape is canonical.
+                    count: 1,
+                    window: 1,
                   },
                 ],
                 enabled: true,
@@ -1010,6 +1018,245 @@ describe('loadState — v5 payload is migrated to v6 (not dropped)', () => {
     const second = loadState();
     expect(second).toEqual(first);
     expect(second.signals[0].rules.exits[0].target_entry_block_names).toEqual(['Alpha']);
+  });
+});
+
+describe('migrateV6ToV7 (pure)', () => {
+  it('stamps version to 7 without changing shape', () => {
+    const v6 = {
+      version: 6,
+      signals: [{
+        id: 's1', name: 'S1', inputs: [],
+        rules: {
+          entries: [{ id: 'e1', input_id: 'X', weight: 50, name: 'Alpha', conditions: [] }],
+          exits: [], resets: [],
+        },
+      }],
+    };
+    const out = migrateV6ToV7(v6);
+    expect(out.version).toBe(7);
+    // No shape rewrite — signals pass through untouched (links absent ⇒ CNF).
+    expect(out.signals).toEqual(v6.signals);
+  });
+
+  it('does not mutate the input payload', () => {
+    const v6 = { version: 6, signals: [] };
+    migrateV6ToV7(v6);
+    expect(v6.version).toBe(6);
+  });
+});
+
+describe('loadState — a v5 payload walks the whole v5→v6→v7 chain', () => {
+  it('a v5 signal loads as v7 (not dropped) with the plural exit array', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: 5,
+      signals: [{
+        id: 's1', name: 'Legacy', doc: '', inputs: [],
+        rules: {
+          entries: [{ id: 'e1', input_id: 'X', weight: 50, name: 'Alpha', conditions: [] }],
+          exits: [{ id: 'x1', name: '', target_entry_block_name: 'Alpha', conditions: [] }],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const out = loadState();
+    expect(out.signals).toHaveLength(1);
+    expect(out.signals[0].rules.exits[0].target_entry_block_names).toEqual(['Alpha']);
+    // The chain reached the current version — no incompatible-version warn.
+    expect(warnSpy).not.toHaveBeenCalled();
+    // And it persists as v7.
+    saveState(out);
+    const stored = JSON.parse(storage._store.get(SIGNALS_STORAGE_KEY));
+    expect(stored.version).toBe(7);
+  });
+
+  it('an old v6 signal lacking links loads cleanly (folds to CNF, no links key)', () => {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: 6,
+      signals: [{
+        id: 's1', name: 'Old6', doc: '', inputs: [],
+        rules: {
+          entries: [{
+            id: 'e1', input_id: 'X', weight: 50, name: 'Alpha',
+            conditions: [
+              { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+              { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+            ],
+          }],
+          exits: [], resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    }));
+    const out = loadState();
+    expect(out.signals).toHaveLength(1);
+    // No links authored ⇒ none stored ⇒ pure CNF.
+    expect('links' in out.signals[0].rules.entries[0]).toBe(false);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('coerceCrossField — cross count/window coercion (int ≥ 1, default 1)', () => {
+  it.each([
+    [undefined, 1],
+    [null, 1],
+    [0, 1],
+    [-5, 1],
+    [NaN, 1],
+    ['nonsense', 1],
+    [1, 1],
+    [3, 3],
+    [2.9, 2],
+    ['4', 4],
+  ])('coerceCrossField(%s) → %s', (input, expected) => {
+    expect(coerceCrossField(input)).toBe(expected);
+  });
+});
+
+describe('sanitiseLinks — field-local temporal-links cleaner', () => {
+  it('keeps a FULL chain over every successor gap', () => {
+    expect(sanitiseLinks({ 1: 5, 2: 3 }, 3)).toEqual({ 1: 5, 2: 3 });
+  });
+  it('floors fractional windows and coerces numeric-string windows', () => {
+    expect(sanitiseLinks({ 1: 4.9, 2: '6' }, 3)).toEqual({ 1: 4, 2: 6 });
+  });
+  it('all-or-nothing: an out-of-range / index-0 key invalidates the WHOLE map (→ undefined)', () => {
+    // condCount=2 → only index 1 is a valid successor; a stray 0 or 2 is not a
+    // valid linear chain, so the whole thing folds to CNF (no partial chain).
+    expect(sanitiseLinks({ 0: 5, 1: 4, 2: 9 }, 2)).toBeUndefined();
+  });
+  it('all-or-nothing: a PARTIAL chain (missing a gap) folds to CNF', () => {
+    // condCount=3 needs {1,2}; only {1} present ⇒ undefined.
+    expect(sanitiseLinks({ 1: 5 }, 3)).toBeUndefined();
+  });
+  it('drops the whole map when any window is non-positive / non-finite', () => {
+    expect(sanitiseLinks({ 1: 0, 2: -3 }, 3)).toBeUndefined();
+    expect(sanitiseLinks({ 1: 5, 2: NaN }, 3)).toBeUndefined();
+  });
+  it('returns undefined for a block with < 2 conditions (no gap to link)', () => {
+    expect(sanitiseLinks({ 1: 5 }, 1)).toBeUndefined();
+    expect(sanitiseLinks({ 1: 5 }, 0)).toBeUndefined();
+  });
+  it('returns undefined for non-object / array input', () => {
+    expect(sanitiseLinks(null, 3)).toBeUndefined();
+    expect(sanitiseLinks([1, 2], 3)).toBeUndefined();
+    expect(sanitiseLinks('x', 3)).toBeUndefined();
+  });
+});
+
+describe('sanitiseBlock — links + cross defaults (via loadState round-trip)', () => {
+  function loadOneSignal(signalOver) {
+    storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
+      version: SCHEMA_VERSION,
+      signals: [{
+        id: 's1', name: 'S1', doc: '', inputs: [],
+        settings: { dont_repeat: true },
+        ...signalOver,
+      }],
+    }));
+    return loadState().signals[0];
+  }
+
+  it('preserves a valid links chain on an entry block', () => {
+    const sig = loadOneSignal({
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'Chain',
+          conditions: [
+            { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+          ],
+          links: { 1: 5 },
+        }],
+        exits: [], resets: [],
+      },
+    });
+    expect(sig.rules.entries[0].links).toEqual({ 1: 5 });
+  });
+
+  it('STRIPS links from a reset block (backend rejects them)', () => {
+    const sig = loadOneSignal({
+      rules: {
+        entries: [], exits: [],
+        resets: [{
+          id: 'r1', name: 'Arm',
+          conditions: [
+            { op: 'gt', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 1 } },
+          ],
+          links: { 1: 4 },
+        }],
+      },
+    });
+    expect('links' in sig.rules.resets[0]).toBe(false);
+  });
+
+  it('drops links when the chain references an out-of-range condition', () => {
+    const sig = loadOneSignal({
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'Chain',
+          conditions: [
+            { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+          ],
+          links: { 5: 5 }, // index 5 doesn't exist (only 0,1)
+        }],
+        exits: [], resets: [],
+      },
+    });
+    expect('links' in sig.rules.entries[0]).toBe(false);
+  });
+
+  it('defaults cross count/window to 1 on a stored crossover (byte-identical to pre-feature)', () => {
+    const sig = loadOneSignal({
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'X',
+          conditions: [
+            { op: 'cross_above', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 } },
+          ],
+        }],
+        exits: [], resets: [],
+      },
+    });
+    const c = sig.rules.entries[0].conditions[0];
+    expect(c.count).toBe(1);
+    expect(c.window).toBe(1);
+  });
+
+  it('preserves explicit cross count/window and coerces them to int ≥ 1', () => {
+    const sig = loadOneSignal({
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'X',
+          conditions: [
+            { op: 'cross_below', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 }, count: 3, window: 10 },
+          ],
+        }],
+        exits: [], resets: [],
+      },
+    });
+    const c = sig.rules.entries[0].conditions[0];
+    expect(c.count).toBe(3);
+    expect(c.window).toBe(10);
+  });
+
+  it('keeps a retired rolling condition (still evaluable, no longer authorable)', () => {
+    const sig = loadOneSignal({
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'X',
+          conditions: [
+            { op: 'rolling_gt', operand: { kind: 'instrument', input_id: 'X', field: 'close' }, lookback: 5 },
+          ],
+        }],
+        exits: [], resets: [],
+      },
+    });
+    const c = sig.rules.entries[0].conditions[0];
+    expect(c.op).toBe('rolling_gt');
+    expect(c.lookback).toBe(5);
   });
 });
 

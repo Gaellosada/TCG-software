@@ -5,11 +5,13 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import DocView from '../Indicators/DocView';
 import {
   ALL_OPS,
+  CROSS_OPS,
   OP_LABELS,
   ROLLING_OP_HELP,
   conditionShape,
   defaultCondition,
   migrateCondition,
+  isLegacyOp,
 } from './conditionOps';
 import { defaultBlock, isBlockRunnable, collectEntryIds } from './blockShape';
 import { SECTIONS, cascadeDeleteEntry } from './storage';
@@ -26,6 +28,41 @@ const ADD_BLOCK_LABELS = {
   exits: '+ Add block (OR)',
   resets: '+ Add reset block',
 };
+
+// Default window (bars) seeded when a block is first switched AND → THEN.
+const DEFAULT_LINK_WINDOW = 5;
+
+/**
+ * Re-chain a block's temporal ``links`` after the condition at ``removedIdx``
+ * is removed. The backend requires a chain to cover EVERY successor gap
+ * (``{1..n-1}``) or none, so a chained block must stay a FULL chain over the
+ * surviving conditions — never a partial one.
+ *
+ * Strategy: if the block was a chain (any links) and ≥2 conditions remain,
+ * rebuild a full chain over the ``remainingCount`` conditions, preserving the
+ * window of each surviving gap where it can be mapped back and defaulting any
+ * new/ambiguous gap to ``defaultWindow``. If <2 conditions remain, or it
+ * wasn't a chain, return ``undefined`` (CNF).
+ *
+ * Window mapping: a surviving gap at new successor index ``j`` (1-based)
+ * corresponds to the OLD successor index of the condition that now sits at new
+ * position ``j`` — i.e. old index ``j`` if ``j < removedIdx`` else ``j+1``. If
+ * that old key had a window, reuse it; otherwise default.
+ *
+ * Pure. Defensive against a missing/garbage map.
+ */
+export function reindexLinksAfterRemoval(links, removedIdx, remainingCount, defaultWindow = DEFAULT_LINK_WINDOW) {
+  if (!links || typeof links !== 'object' || Object.keys(links).length === 0) return undefined;
+  if (!Number.isInteger(remainingCount) || remainingCount < 2) return undefined;
+  const out = {};
+  for (let j = 1; j < remainingCount; j += 1) {
+    // The new condition at position j came from old position (j < removedIdx ? j : j+1).
+    const oldKey = j < removedIdx ? j : j + 1;
+    const w = links[oldKey];
+    out[j] = (Number.isFinite(w) && w >= 1) ? Math.floor(w) : defaultWindow;
+  }
+  return out;
+}
 
 /**
  * Middle panel — block/condition editor (v4 / signals-refactor-v4).
@@ -138,7 +175,18 @@ function BlockEditor({
   function handleAddCondition(blockIdx) {
     const next = blocks.map((b, i) => {
       if (i !== blockIdx) return b;
-      return { ...b, conditions: [...(b.conditions || []), defaultCondition('gt')] };
+      const prevConds = b.conditions || [];
+      const conditions = [...prevConds, defaultCondition('gt')];
+      // A CNF block (no links) stays CNF on add. A CHAINED block must stay a
+      // FULL contiguous chain (the backend rejects a partial chain, gate G3),
+      // so EXTEND the map: the appended condition opens a new successor gap
+      // whose key == the pre-append condition count (1-based successor index).
+      // Seed its window with the default — existing windows are kept. Mirrors
+      // ``reindexLinksAfterRemoval`` which keeps links consistent on removal.
+      const isChain = b.links && typeof b.links === 'object' && Object.keys(b.links).length > 0;
+      if (!isChain) return { ...b, conditions };
+      const links = { ...b.links, [prevConds.length]: DEFAULT_LINK_WINDOW };
+      return { ...b, conditions, links };
     });
     updateBlocks(next);
   }
@@ -146,7 +194,16 @@ function BlockEditor({
   function handleRemoveCondition(blockIdx, condIdx) {
     const next = blocks.map((b, i) => {
       if (i !== blockIdx) return b;
-      return { ...b, conditions: (b.conditions || []).filter((_, j) => j !== condIdx) };
+      const nextConds = (b.conditions || []).filter((_, j) => j !== condIdx);
+      // A chained block must stay a FULL chain over the surviving conditions
+      // (the backend rejects a partial chain). Re-chain: preserve surviving
+      // gap windows, default any new gap, drop to CNF if <2 conditions remain.
+      const nextLinks = reindexLinksAfterRemoval(b.links, condIdx, nextConds.length);
+      return {
+        ...b,
+        conditions: nextConds,
+        links: nextLinks, // undefined ⇒ CNF
+      };
     });
     updateBlocks(next);
   }
@@ -158,6 +215,49 @@ function BlockEditor({
         ...b,
         conditions: (b.conditions || []).map((c, j) => (j === condIdx ? nextCondition : c)),
       };
+    });
+    updateBlocks(next);
+  }
+
+  // Switch the WHOLE block between an ordered chain and plain CNF.
+  //
+  // The backend (G3) requires a block's links to cover EVERY successor gap
+  // ``{1..n-1}`` or none — a partial chain is rejected (HTTP 400). So toggling
+  // ANY gap to THEN converts the whole block to a chain: every gap gets a link
+  // (existing windows kept, unset gaps seeded with the default window).
+  // Toggling any THEN gap back to AND reverts the WHOLE block to CNF (clears
+  // all links). This keeps the per-gap chip UX while only ever emitting a
+  // backend-valid full chain. Per-link windows stay individually editable via
+  // ``handleUpdateLinkWindow``.
+  function handleSetChainMode(blockIdx, on) {
+    const next = blocks.map((b, i) => {
+      if (i !== blockIdx) return b;
+      const nConds = (b.conditions || []).length;
+      if (!on || nConds < 2) {
+        // Revert to CNF (or nothing to chain).
+        return { ...b, links: undefined };
+      }
+      const prev = (b.links && typeof b.links === 'object') ? b.links : {};
+      const nextLinks = {};
+      for (let k = 1; k < nConds; k += 1) {
+        const existing = prev[k];
+        nextLinks[k] = (Number.isFinite(existing) && existing >= 1)
+          ? Math.floor(existing) : DEFAULT_LINK_WINDOW;
+      }
+      return { ...b, links: nextLinks };
+    });
+    updateBlocks(next);
+  }
+
+  // Edit a SINGLE per-link window (bars) without changing chain membership.
+  // Only meaningful when the block is already a chain. Clamps to int >= 1.
+  function handleUpdateLinkWindow(blockIdx, condIdx, within) {
+    const next = blocks.map((b, i) => {
+      if (i !== blockIdx) return b;
+      const prev = (b.links && typeof b.links === 'object') ? b.links : {};
+      if (!(condIdx in prev)) return b; // not a chain / no such gap — no-op
+      const w = Number.isFinite(within) && within >= 1 ? Math.floor(within) : 1;
+      return { ...b, links: { ...prev, [condIdx]: w } };
     });
     updateBlocks(next);
   }
@@ -251,6 +351,8 @@ function BlockEditor({
                   onAddCondition={() => handleAddCondition(blockIdx)}
                   onRemoveCondition={(condIdx) => handleRemoveCondition(blockIdx, condIdx)}
                   onUpdateCondition={(condIdx, next) => handleUpdateCondition(blockIdx, condIdx, next)}
+                  onSetChainMode={(on) => handleSetChainMode(blockIdx, on)}
+                  onUpdateLinkWindow={(condIdx, within) => handleUpdateLinkWindow(blockIdx, condIdx, within)}
                   onRemoveBlock={() => handleRemoveBlock(blockIdx)}
                   inputs={inputs}
                   indicators={indicators}
@@ -286,6 +388,8 @@ function Block({
   onAddCondition,
   onRemoveCondition,
   onUpdateCondition,
+  onSetChainMode,
+  onUpdateLinkWindow,
   onRemoveBlock,
   inputs,
   indicators,
@@ -294,6 +398,11 @@ function Block({
   const [descOpen, setDescOpen] = useState(false);
   const conditions = block.conditions || [];
   const enabled = block.enabled !== false;
+  const links = (block.links && typeof block.links === 'object') ? block.links : null;
+  // The block is a chain iff it has any link. Backend enforces full coverage,
+  // so when chained every gap is linked (all-or-nothing). A reset block is
+  // never a chain (links are rejected there) — guard defensively.
+  const isChain = section !== 'resets' && !!links && Object.keys(links).length > 0;
 
   const handleToggleEnabled = useCallback((e) => {
     onUpdateBlock({ ...block, enabled: e.target.checked });
@@ -350,6 +459,16 @@ function Block({
             condition={cond}
             onChange={(next) => onUpdateCondition(condIdx, next)}
             onRemove={() => onRemoveCondition(condIdx)}
+            // Reset blocks never carry a sequence (backend rejects links there),
+            // so the THEN toggle is suppressed and they stay pure CNF.
+            sequenceable={section !== 'resets'}
+            onSetChainMode={onSetChainMode}
+            onUpdateLinkWindow={onUpdateLinkWindow}
+            // Whole-block chain mode (all-or-nothing: every gap is linked when
+            // chained). Each gap's chip flips the whole block.
+            isChain={isChain}
+            // This gap's individual window (keyed by SUCCESSOR index = condIdx).
+            linkWithin={links && Number.isFinite(links[condIdx]) ? links[condIdx] : null}
             inputs={inputs}
             indicators={indicators}
             readOnly={readOnly}
@@ -401,12 +520,25 @@ function Condition({
   condition,
   onChange,
   onRemove,
+  sequenceable = true,
+  onSetChainMode,
+  onUpdateLinkWindow,
+  isChain = false,
+  linkWithin = null,
   inputs,
   indicators,
   readOnly = false,
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const shape = conditionShape(condition.op);
+  const isCross = CROSS_OPS.includes(condition.op);
+  const legacy = isLegacyOp(condition.op);
+  // ``count`` drives whether the ×N / within W cross controls are shown. A
+  // count of 1 (a plain crossover) keeps the row visually identical to the
+  // pre-feature crossover — only a small "×N" reveal button is shown.
+  const crossCount = Number.isInteger(condition.count) && condition.count >= 1 ? condition.count : 1;
+  const crossWindow = Number.isInteger(condition.window) && condition.window >= 1 ? condition.window : 1;
+  const [crossOpen, setCrossOpen] = useState(crossCount > 1);
 
   function updateOp(nextOp) {
     onChange(migrateCondition(condition, nextOp));
@@ -421,7 +553,36 @@ function Condition({
     onChange({ ...condition, lookback: Number.isFinite(n) ? n : 1 });
   }
 
-  const opSelect = (
+  function updateCrossField(field, raw) {
+    const n = parseInt(raw, 10);
+    onChange({ ...condition, [field]: Number.isFinite(n) && n >= 1 ? n : 1 });
+  }
+
+  // Flip the WHOLE block between an ordered chain and CNF. The backend requires
+  // every successor gap linked or none (no partial chain), so each gap's chip
+  // toggles the block-wide mode — not just this one gap.
+  function toggleChain() {
+    onSetChainMode(!isChain);
+  }
+
+  // Edit just THIS gap's window (bars); chain membership is unchanged.
+  function updateLinkWindow(raw) {
+    const n = parseInt(raw, 10);
+    onUpdateLinkWindow(condIdx, Number.isFinite(n) && n >= 1 ? n : 1);
+  }
+
+  // The op selector is replaced by a static label for retired (legacy) ops —
+  // they are no longer in ALL_OPS so a <select> would render blank.
+  const opSelect = legacy ? (
+    <span
+      className={styles.legacyOpLabel}
+      data-testid={`op-legacy-${blockIdx}-${condIdx}`}
+      title="Retired operator — still evaluated, but no longer editable. Recreate with another operator if you need to change it."
+    >
+      {OP_LABELS[condition.op] || condition.op}
+      <span className={styles.legacyBadge}>legacy</span>
+    </span>
+  ) : (
     <select
       className={styles.opSelect}
       value={condition.op}
@@ -436,9 +597,113 @@ function Condition({
     </select>
   );
 
+  // cross ×N / within W controls. Shown only when count > 1 OR the user has
+  // expanded them; a plain crossover (count === 1, collapsed) shows just a
+  // compact "×N" reveal button so it reads identically to a pre-feature row.
+  const crossControls = isCross ? (
+    crossCount > 1 || crossOpen ? (
+      <div className={styles.crossCountCell} data-testid={`cross-controls-${blockIdx}-${condIdx}`}>
+        <span className={styles.conditionInlineLabel}>×</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          className={styles.crossCountInput}
+          value={crossCount}
+          onChange={(e) => updateCrossField('count', e.target.value)}
+          aria-label="Crossings required (N)"
+          data-testid={`cross-count-${blockIdx}-${condIdx}`}
+          readOnly={readOnly}
+        />
+        <span className={styles.conditionInlineLabel}>within</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          className={styles.crossCountInput}
+          value={crossWindow}
+          onChange={(e) => updateCrossField('window', e.target.value)}
+          aria-label="Within window (bars)"
+          data-testid={`cross-window-${blockIdx}-${condIdx}`}
+          readOnly={readOnly}
+        />
+        <span className={styles.conditionInlineLabel}>bars</span>
+      </div>
+    ) : (
+      <button
+        type="button"
+        className={styles.crossExpandBtn}
+        onClick={() => setCrossOpen(true)}
+        title="Require N crossings within a trailing window of W bars"
+        aria-label="Add ×N within W controls"
+        data-testid={`cross-expand-${blockIdx}-${condIdx}`}
+        disabled={readOnly}
+      >
+        ×N
+      </button>
+    )
+  ) : null;
+
+  // The separator chip between this condition and the previous one. For a
+  // sequenceable section it is an AND ⇄ THEN toggle that flips the whole block
+  // between CNF and one ordered chain (all gaps linked or none). When chained,
+  // each gap also exposes its own "within [W] bars" window. Reset blocks (not
+  // sequenceable) keep the plain static AND label.
+  let separator = null;
+  if (!isFirst) {
+    if (!sequenceable) {
+      separator = <div className={styles.conditionAndLabel}>AND</div>;
+    } else if (isChain) {
+      separator = (
+        <div className={styles.conditionLinkChip} data-testid={`link-chip-${blockIdx}-${condIdx}`}>
+          <button
+            type="button"
+            className={`${styles.conditionLinkToggle} ${styles.conditionLinkToggleActive}`}
+            onClick={toggleChain}
+            disabled={readOnly}
+            title="Ordered: this condition must fire AFTER the previous one, within the window. Click to revert the whole block to AND."
+            data-testid={`link-toggle-${blockIdx}-${condIdx}`}
+          >
+            THEN
+          </button>
+          <span className={styles.linkWindowWrap}>
+            within
+            <input
+              type="number"
+              min="1"
+              step="1"
+              className={styles.linkWindowInput}
+              value={linkWithin ?? DEFAULT_LINK_WINDOW}
+              onChange={(e) => updateLinkWindow(e.target.value)}
+              aria-label="Within window (bars)"
+              data-testid={`link-window-${blockIdx}-${condIdx}`}
+              readOnly={readOnly}
+            />
+            bars
+          </span>
+        </div>
+      );
+    } else {
+      separator = (
+        <div className={styles.conditionLinkChip} data-testid={`link-chip-${blockIdx}-${condIdx}`}>
+          <button
+            type="button"
+            className={styles.conditionLinkToggle}
+            onClick={toggleChain}
+            disabled={readOnly}
+            title="AND (simultaneous). Click to make the whole block an ordered sequence (each condition must fire AFTER the previous, within a window)."
+            data-testid={`link-toggle-${blockIdx}-${condIdx}`}
+          >
+            AND
+          </button>
+        </div>
+      );
+    }
+  }
+
   return (
     <div className={styles.condition} data-testid={`condition-${blockIdx}-${condIdx}`}>
-      {!isFirst && <div className={styles.conditionAndLabel}>AND</div>}
+      {separator}
       <div className={styles.conditionRow}>
         <span className={styles.conditionLabel}>Cond {condIdx + 1}</span>
         {shape === 'binary' && (
@@ -464,6 +729,7 @@ function Condition({
                 readOnly={readOnly}
               />
             </div>
+            {crossControls}
           </>
         )}
         {shape === 'range' && (
@@ -503,6 +769,12 @@ function Condition({
           </>
         )}
         {shape === 'rolling' && (
+          // Rolling is RETIRED from authoring (block-temporal-composition v1):
+          // it is still evaluated by the backend and fully rendered here as a
+          // read-only "legacy" chip — operand, the static op label, and
+          // lookback are all VISIBLE but not editable (recreate the condition
+          // with a current operator to change it). The row can still be
+          // deleted via the × button.
           <>
             <div className={styles.conditionOperandCell}>
               <OperandSlot
@@ -511,7 +783,7 @@ function Condition({
                 inputs={inputs}
                 indicators={indicators}
                 slotLabel={`cond ${condIdx + 1} operand`}
-                readOnly={readOnly}
+                readOnly={readOnly || legacy}
               />
             </div>
             <div className={styles.conditionOpCell}>{opSelect}</div>
@@ -537,7 +809,7 @@ function Condition({
                 value={condition.lookback ?? 1}
                 onChange={(e) => updateLookback(e.target.value)}
                 aria-label="Lookback (int)"
-                readOnly={readOnly}
+                readOnly={readOnly || legacy}
               />
             </div>
           </>

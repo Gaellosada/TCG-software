@@ -664,3 +664,167 @@ describe('normaliseBlock — orphan requires_reset_count is forced to 1 on the w
     expect(body.spec.rules.exits[0].requires_reset_count).toBe(1);
   });
 });
+
+// Block-level temporal ``links`` (block-temporal-composition v1).
+//
+// ``links`` is a flat map { "<successor_condition_index>": <within_bars_int> }
+// keyed by the SUCCESSOR condition's index within the block. It MUST be added
+// to the entry+exit whitelist in normaliseBlock and OMITTED from resets
+// (a reset block carrying links is rejected by the backend with HTTP 400 —
+// it must never reach the wire). This is the G4 gate: without the whitelist
+// line, a block authored as a temporal chain silently runs as plain CNF on
+// the backend because normaliseBlock rebuilds each section literal with NO
+// spread, dropping any field not explicitly copied.
+describe('normaliseBlock — block-level temporal links whitelist (G4)', () => {
+  it('emits links on ENTRY blocks (flat {successor_index: within_bars} verbatim)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'Chain',
+          conditions: [
+            { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'constant', value: 3 }, rhs: { kind: 'constant', value: 0 } },
+          ],
+          links: { 1: 5, 2: 3 },
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    const entry = body.spec.rules.entries[0];
+    expect('links' in entry).toBe(true);
+    // JSON object keys are strings; values are the within-bar windows.
+    expect(entry.links).toEqual({ 1: 5, 2: 3 });
+    // The chain survives a JSON round-trip (the actual wire serialisation).
+    const rt = JSON.parse(JSON.stringify(body)).spec.rules.entries[0];
+    expect(rt.links).toEqual({ 1: 5, 2: 3 });
+  });
+
+  it('emits links on EXIT blocks (sequence exits are allowed)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [{
+          id: 'x1', name: 'Exit', target_entry_block_names: ['Alpha'],
+          conditions: [
+            { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+          ],
+          links: { 1: 7 },
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    const exit = body.spec.rules.exits[0];
+    expect('links' in exit).toBe(true);
+    expect(exit.links).toEqual({ 1: 7 });
+  });
+
+  it('OMITS links from the wire when a block has no temporal chain (zero-link == CNF, byte-identical)', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'Plain',
+          conditions: [
+            { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+          ],
+          // no links key at all
+        }],
+        exits: [{
+          id: 'x1', name: 'Exit', target_entry_block_names: ['Plain'],
+          conditions: [
+            { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+          ],
+          links: {}, // empty map also folds to CNF — must not ride the wire
+        }],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    // A plain CNF block must NOT grow a links key — the payload stays
+    // byte-identical to a pre-feature signal so G1 (CNF byte-identical) holds.
+    expect('links' in body.spec.rules.entries[0]).toBe(false);
+    expect('links' in body.spec.rules.exits[0]).toBe(false);
+  });
+
+  it('OMITS links from RESET blocks even when an upstream payload smuggles it in', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [],
+        exits: [],
+        resets: [{
+          id: 'r1', name: 'Arm',
+          conditions: [
+            { op: 'gt', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 1 } },
+          ],
+          // Tampered payload — the backend rejects links on resets with HTTP
+          // 400, so the wire builder must strip it before it ever gets there.
+          links: { 1: 4 },
+        }],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    expect('links' in body.spec.rules.resets[0]).toBe(false);
+  });
+
+  it('drops a malformed links map (non-object / NaN windows) rather than shipping garbage', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50, name: 'Garbled',
+          conditions: [
+            { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+            { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+          ],
+          links: { 1: 'oops', 2: 0, bogus: 4 }, // all entries invalid → drop
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    // No salvageable links → omit entirely (folds to CNF) rather than ship a
+    // garbled map the backend would 400 on.
+    expect('links' in body.spec.rules.entries[0]).toBe(false);
+  });
+});
+
+// cross_count fields (count/window) ride the wire on a CrossCondition.
+// normaliseCondition spreads ``...condition`` so scalar fields flow through,
+// but a round-trip test pins the contract against silent regressions.
+describe('normaliseCondition — cross count/window flow through (SC5)', () => {
+  it('passes count + window verbatim on a cross condition', () => {
+    const signal = {
+      id: 's', name: 'S', inputs: V4_INPUTS,
+      rules: {
+        entries: [{
+          id: 'e1', input_id: 'X', weight: 50,
+          conditions: [
+            {
+              op: 'cross_above',
+              lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+              rhs: { kind: 'constant', value: 0 },
+              count: 3,
+              window: 10,
+            },
+          ],
+        }],
+        exits: [],
+        resets: [],
+      },
+    };
+    const { body } = buildComputeRequestBody(signal, []);
+    const cond = body.spec.rules.entries[0].conditions[0];
+    expect(cond.count).toBe(3);
+    expect(cond.window).toBe(10);
+  });
+});
