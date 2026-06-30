@@ -662,18 +662,38 @@ async def _resolve_bulk(
 
     async def _fetch_exp(
         exp: date,
-        group_dates: list[date],
+        group: list[tuple[int, date]],
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        async with _bulk_sem:
-            result = await bulk_reader.query_chain_bulk(
-                root=collection,
-                dates=group_dates,
-                type=option_type,
-                expiration_min=exp,
-                expiration_max=exp,
-                strike_min=strike_min,
-                strike_max=strike_max,
+        group_dates = [d for _idx, d in group]
+        try:
+            async with _bulk_sem:
+                result = await bulk_reader.query_chain_bulk(
+                    root=collection,
+                    dates=group_dates,
+                    type=option_type,
+                    expiration_min=exp,
+                    expiration_max=exp,
+                    strike_min=strike_min,
+                    strike_max=strike_max,
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A single expiration's bulk fetch failing (a transient dwh error,
+            # or a PoolTimeout under contention) must NOT abort the whole
+            # resolve.  Mirror Phase C's per-date degradation: mark THIS
+            # expiration's dates ``data_access_error`` (-> NaN) and return an
+            # empty chain so the other expirations still resolve.  Without this,
+            # the exception propagates out of the gather and the API returns a
+            # hard 500 for the entire series (the OPT_SP_500 PoolTimeout
+            # symptom).
+            for idx, _d in group:
+                error_codes[idx] = "data_access_error"
+            _log.debug(
+                "Phase-B bulk fetch failed exp=%s (%d dates): %s",
+                exp,
+                len(group_dates),
+                exc,
             )
+            result = {}
         # Tick progress after each expiration fetch so the frontend
         # sees Phase B movement instead of a stuck 0%.  The progress
         # endpoint clamps fraction to [0, 1] so the extra ticks are safe.
@@ -684,9 +704,7 @@ async def _resolve_bulk(
                 pass
         return result
 
-    fetch_tasks = [
-        _fetch_exp(exp, [d for _idx, d in group]) for exp, group in exp_groups.items()
-    ]
+    fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
     fetch_results = await asyncio.gather(*fetch_tasks)
     for result in fetch_results:
         chain_index.update(result)

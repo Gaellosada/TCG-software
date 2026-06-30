@@ -243,16 +243,30 @@ async def test_concurrent_resolves_starve_the_shared_pool():
 
 
 async def test_without_gate_the_same_setup_still_starves():
-    """Guard the guard: with NO shared gate the identical two-resolve setup DOES
-    starve the pool (peak demand 2x3 > 4) — proving the passing test above is the
-    gate's doing, not a vacuous pass.  Phase B propagates the PoolTimeout, so the
-    resolve raises (wrapped as data_access_error per-date only in Phase C; the bulk
-    gather re-raises) — either way the run does not cleanly complete."""
+    """Guard the guard: with NO shared gate the identical two-resolve setup STILL
+    starves the pool (peak demand 2x3 > 4) — proving the passing test above is the
+    gate's doing, not a vacuous pass.
+
+    Phase-B fetch errors are now caught per-expiration (FIX C: a PoolTimeout
+    degrades to a per-date NaN instead of aborting the resolve), so the run no
+    longer RAISES — but starvation still shows up as every date failing with
+    ``data_access_error`` and the pool being saturated.  The gate's value is
+    therefore "real values vs starved NaN" (not "completes vs raises").
+    """
     pool = _BoundedSharedPool(
         max_size=DEFAULT_DWH_POOL_MAX_SIZE, acquire_timeout=_ACQUIRE_TIMEOUT
     )
-    with pytest.raises(PoolTimeout):
-        await asyncio.gather(_resolve_once(pool, None), _resolve_once(pool, None))
+    (v1, e1, c1), (v2, e2, c2) = await asyncio.gather(
+        _resolve_once(pool, None), _resolve_once(pool, None)
+    )
+    # The pool was saturated beyond the per-call reservation.
     assert pool.peak >= DEFAULT_DWH_POOL_MAX_SIZE, (
         "expected the un-gated concurrent resolves to saturate the pool"
+    )
+    # Starvation surfaced as data_access_error on at least some dates (vs the
+    # gated test above, where every date resolves to a real value).
+    starved = [e for e in (e1 + e2) if e == "data_access_error"]
+    assert starved, (
+        "expected un-gated concurrent resolves to starve (data_access_error dates) "
+        "— if none, the shared pool was not actually over-subscribed"
     )
