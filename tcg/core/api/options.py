@@ -443,24 +443,27 @@ async def _batch_underlying_prices(
         collection, instrument_id = fut_collection, contract.underlying_ref
     elif not _is_crypto(contract):
         # Option-on-future with NO per-contract ``underlying_ref`` (the dwh SQL
-        # reader does not preserve it) — mirror the _join Branch-3 fallback and
-        # the VIX path: resolve the FUT_* contract matching the option's
-        # expiration (the Black-76 forward), then bulk-fetch its prices.  Crypto
-        # roots are excluded above (spot/perp-settled, not option-on-future).
+        # reader does not preserve it) — mirror the _join Branch-3 fallback:
+        # resolve the FRONT-QUARTERLY future (nearest FUT_* expiration >= the
+        # option's), the Black-76 forward, then bulk-fetch its prices.  ``>=``
+        # (not exact) so serial/weekly option months — which have no own future
+        # on a quarterly curve — map to the front quarterly (e.g. a July ES
+        # option → the September future).  Crypto roots are excluded above
+        # (spot/perp-settled, not option-on-future).
         fut_collection = _futures_collection_for(contract.collection)
         if fut_collection is None:
             return {}
         exp = contract.expiration
         exp_int = exp.year * 10000 + exp.month * 100 + exp.day
         try:
-            fut_id = await svc.find_futures_contract_by_expiration(
+            fut_id = await svc.find_front_futures_contract_on_or_after(
                 fut_collection, exp_int
             )
         except Exception:  # noqa: BLE001
             # Same policy as VIX: don't 502 on a missing underlying.
             return {}
         if fut_id is None:
-            # No listed future matches this expiration (e.g. a weekly).
+            # No future expires on/after the option (past the last listed future).
             return {}
         collection, instrument_id = fut_collection, fut_id
     else:

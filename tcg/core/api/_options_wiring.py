@@ -286,6 +286,38 @@ class _FuturesDataPortAdapter:
             collection, contract_ref, target_date
         )
 
+    async def get_futures_close_on_or_after_expiration(
+        self,
+        collection: str,
+        expiration: date,
+        target_date: date,
+    ) -> float | None:
+        """Find the FRONT-QUARTERLY future — the nearest FUT_* contract in
+        ``collection`` whose ``expiration`` is >= ``expiration`` — and return its
+        ``close`` on ``target_date``.
+
+        Used by the option-on-future underlying resolver (``_join`` Branch 3) for
+        roots without a per-contract ``underlying_ref`` (the dwh SQL reader does
+        not preserve it).  ``>=`` (not exact) because index/commodity futures are
+        quarterly while options list serial months + weeklies, which settle
+        against the front quarterly future.  Delegates to the public
+        ``MarketDataService.find_front_futures_contract_on_or_after`` (no private
+        attribute access).  Returns ``None`` when no future expires on/after the
+        option or the resolved contract has no bar for ``target_date``.
+        """
+        expiration_int = date_to_int(expiration)
+        try:
+            contract_ref = await self._md.find_front_futures_contract_on_or_after(
+                collection, expiration_int
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if contract_ref is None:
+            return None
+        return await self.get_futures_close_on_date(
+            collection, contract_ref, target_date
+        )
+
 
 # ---------------------------------------------------------------------------
 # Underlying-price resolver (closure over the three ports)

@@ -368,6 +368,23 @@ class DefaultMarketDataService:
         """
         return await self._sql.find_contract_by_expiration(collection, expiration_int)
 
+    async def find_front_futures_contract_on_or_after(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the symbol of the FRONT futures contract in *collection* — the
+        nearest one whose expiration is >= *expiration_int* (YYYYMMDD int), or
+        None.
+
+        Used by the option-on-future underlying resolver to map a serial/weekly
+        option (no listed future of its own expiration) to the front-quarterly
+        future (the Black-76 forward).
+        """
+        return await self._sql.find_front_contract_on_or_after(
+            collection, expiration_int
+        )
+
     # --- Internal ---
 
     @staticmethod

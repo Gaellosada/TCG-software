@@ -26,12 +26,16 @@ Three join strategies, dispatched on contract metadata:
    name (``OPT_X`` → ``FUT_X``).  When ``contract.underlying_ref``
    is present (Mongo-era data) look up that FUT_* contract by id;
    otherwise — the dwh SQL reader does NOT preserve ``underlying_ref``
-   — fall back to the FUT_* contract whose ``expiration`` equals the
-   option's (``get_futures_close_by_expiration``), which is the
-   Black-76 forward, the SAME by-expiration resolution Branch 2 uses
-   for VIX.  This covers SP500, NASDAQ, GOLD, T_BOND, T_NOTE, EURUSD,
-   JPYUSD.  Returns ``None`` on miss (e.g. a weekly option whose
-   expiration has no matching listed future).
+   — fall back to the FRONT-QUARTERLY future: the nearest FUT_*
+   contract whose ``expiration`` is >= the option's
+   (``get_futures_close_on_or_after_expiration``), whose close is the
+   Black-76 forward.  ``>=`` (not exact) because index/commodity
+   futures are quarterly (Mar/Jun/Sep/Dec) while options also list
+   serial months + weeklies — a serial/weekly option settles against
+   the front quarterly future (e.g. a July ES option → the September
+   future).  Covers SP500, NASDAQ, GOLD, T_BOND, T_NOTE, EURUSD,
+   JPYUSD.  Returns ``None`` only when no future expires on/after the
+   option (i.e. past the last listed future).
 
 OPT_ETH (and any crypto root) is NOT an option-on-future — it is
 spot/perp-settled (Deribit), so the by-expiration fallback is skipped
@@ -144,15 +148,20 @@ async def resolve_underlying_price(
     # No per-contract ``underlying_ref`` (the dwh SQL reader does not preserve
     # the Mongo FUT ``_id`` — see ``tcg.data._sql.options`` ``_meta_to_contract``),
     # which would otherwise make EVERY option-on-future series all-NaN
-    # (``missing_underlying_price``).  Fall back to the SAME by-expiration
-    # resolution the VIX branch (Branch 2) uses: the FUT_* contract whose
-    # ``expiration`` equals the option's IS the Black-76 forward for an
-    # option-on-future, so it is the correct underlying (NOT the cash index —
-    # they differ by cost-of-carry/dividends).  ``get_futures_close_by_expiration``
-    # matches an EXACT expiration; a weekly option whose expiration has no
-    # matching (monthly) future resolves to ``None`` (graceful, mirroring VIX
-    # weeklies) → ``missing_underlying_price`` on those dates, never a crash.
-    return await futures_port.get_futures_close_by_expiration(
+    # (``missing_underlying_price``).  Resolve the FRONT-QUARTERLY future = the
+    # nearest FUT_* contract whose ``expiration`` is >= the option's, and use its
+    # close as the Black-76 forward (the correct underlying for an
+    # option-on-future — NOT the cash index, which differs by carry/dividends).
+    #
+    # WHY ``>=`` not exact: index futures (ES/NQ) are QUARTERLY (Mar/Jun/Sep/Dec)
+    # while options also list SERIAL months + weeklies.  A serial/weekly option
+    # has NO future of its own expiration; per CME it settles against the FRONT
+    # quarterly future (e.g. a July option → the September ES future).  An exact
+    # match (like the VIX branch, where every monthly option HAS a matching
+    # monthly future) would leave all serial/weekly months all-NaN.  The only
+    # residual ``None`` is an option expiring AFTER the last listed future
+    # (graceful → ``missing_underlying_price`` on those dates, never a crash).
+    return await futures_port.get_futures_close_on_or_after_expiration(
         fut_collection,
         contract.expiration,
         target_date,

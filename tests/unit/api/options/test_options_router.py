@@ -222,15 +222,15 @@ async def test_chain_underlying_ref_none_resolves_via_future_by_expiration(
 ):
     """Chain page (PR #67 fix D): an option-on-future whose contract has
     ``underlying_ref=None`` (the dwh reality) must still resolve the underlying
-    via the FUT_* contract matching the option's expiration — mirroring the
-    _join Branch-3 / VIX fallback — instead of returning no underlying."""
+    via the FRONT-QUARTERLY future (nearest FUT_* expiration >= the option's) —
+    mirroring the _join Branch-3 fallback — instead of returning no underlying."""
     options_reader.query_chain_result = [
         (make_contract(underlying_ref=None), make_row()),
     ]
-    # The matching FUT_SP_500 contract is resolved by expiration, then its close
-    # is fetched (get_prices already returns a close series via the fixture).
-    mock_svc.find_futures_contract_by_expiration = AsyncMock(
-        return_value="FUT_SP_500_EMINI_20240419"
+    # The front-quarterly FUT_SP_500 contract is resolved (on/after the option's
+    # expiration), then its close is fetched (get_prices returns a close series).
+    mock_svc.find_front_futures_contract_on_or_after = AsyncMock(
+        return_value="FUT_SP_500_EMINI_20240621"
     )
     resp = await client.get(
         "/api/options/chain",
@@ -246,9 +246,9 @@ async def test_chain_underlying_ref_none_resolves_via_future_by_expiration(
     body = resp.json()
     # Underlying resolved (would be missing/None without the fallback).
     assert body["underlying_price"]["value"] is not None
-    # The by-expiration resolver was consulted for the FUT_SP_500 contract.
-    mock_svc.find_futures_contract_by_expiration.assert_awaited()
-    args, _kw = mock_svc.find_futures_contract_by_expiration.await_args
+    # The front-quarterly resolver was consulted for the FUT_SP_500 collection.
+    mock_svc.find_front_futures_contract_on_or_after.assert_awaited()
+    args, _kw = mock_svc.find_front_futures_contract_on_or_after.await_args
     assert args[0] == "FUT_SP_500"
 
 

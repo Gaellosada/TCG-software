@@ -140,6 +140,21 @@ class MarketDataService(Protocol):
         """
         ...
 
+    async def find_front_futures_contract_on_or_after(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the ``_id`` of the FRONT futures contract — the nearest one in
+        *collection* whose ``expiration`` is >= *expiration_int* (YYYYMMDD int).
+
+        Used to resolve the front-quarterly future for an option-on-future whose
+        own expiration has no listed future (serial/weekly months on a quarterly
+        futures curve).  Returns ``None`` when no contract expires on/after the
+        date.
+        """
+        ...
+
     @property
     def options_reader(self) -> OptionsDataReader:
         """Return the underlying options data reader.
