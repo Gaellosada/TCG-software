@@ -12,6 +12,22 @@ import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
 
+// Default compute window when none can be derived from the legs themselves.
+// Option-stream legs carry NO inherent date range (the backend REQUIRES an
+// explicit window to enumerate their trade dates — see
+// tcg/core/api/_series_fetch.py), so an option-only portfolio has no overlap
+// to anchor on. Prefill the platform-standard ~5-year-back-from-today window
+// (matching the basket default in Data/BasketChart.jsx) so the option leg
+// resolves without forcing the user to drag the slider first. The user can
+// still widen/narrow via the slider.
+function defaultRange() {
+  const end = new Date();
+  const start = new Date();
+  start.setFullYear(start.getFullYear() - 5);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  return { start: iso(start), end: iso(end) };
+}
+
 // Pick a label that doesn't collide with any existing leg — API dict keys would collapse on duplicates.
 function uniqueLegLabel(desired, existingLegs) {
   const existing = new Set(existingLegs.map((l) => l.label));
@@ -150,6 +166,13 @@ export default function usePortfolio() {
         } else {
           setOverlapRange(null);
         }
+      } else if (legs.some((l) => l.type === 'option_stream')) {
+        // No priced leg to anchor on, but an option_stream leg needs an
+        // explicit window. Seed the platform-standard 5-year default so the
+        // slider has concrete min/max (PortfolioPage binds them to
+        // overlapRange) and Compute can resolve the option leg without a
+        // manual drag.
+        setOverlapRange(defaultRange());
       } else {
         setOverlapRange(null);
       }
@@ -302,9 +325,20 @@ export default function usePortfolio() {
       return;
     }
 
-    // Option stream legs require explicit dates (the backend can't infer range)
+    // Effective compute window: an explicit slider selection takes priority;
+    // otherwise fall back to the available range (the overlap of the priced
+    // legs, or the 5-year default seeded for option-only portfolios). This
+    // lets an option leg resolve over the portfolio's available window without
+    // forcing a manual slider drag — the slider already renders '' as the full
+    // range, so the request now matches what the user sees.
+    const effectiveStart = startDate || overlapRange?.start;
+    const effectiveEnd = endDate || overlapRange?.end;
+
+    // Option stream legs require an explicit window (the backend can't infer
+    // their date range). With the fallback above this is normally satisfied;
+    // the guard remains as a safety net (e.g. ranges not yet settled).
     const hasOptionStreamLegs = legs.some((l) => l.type === 'option_stream');
-    if (hasOptionStreamLegs && (!startDate || !endDate)) {
+    if (hasOptionStreamLegs && (!effectiveStart || !effectiveEnd)) {
       setError('Option stream legs require explicit start and end dates. Please set a date range.');
       return;
     }
@@ -380,8 +414,8 @@ export default function usePortfolio() {
           weights: apiWeights,
           rebalance,
           returnType: 'normal',
-          start: startDate || undefined,
-          end: endDate || undefined,
+          start: effectiveStart || undefined,
+          end: effectiveEnd || undefined,
           signal,
         });
         if (!signal.aborted) {
@@ -392,7 +426,7 @@ export default function usePortfolio() {
         setError(err.message || 'Computation failed');
       }
     });
-  }, [legs, rebalance, startDate, endDate, runAbortable]);
+  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable]);
 
   const clearError = useCallback(() => setError(null), []);
 

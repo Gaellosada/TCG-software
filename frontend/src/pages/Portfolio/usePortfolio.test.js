@@ -358,6 +358,162 @@ describe('usePortfolio — signal leg support', () => {
 });
 
 // ---------------------------------------------------------------------------
+// BUG (PR #67 runtime): a portfolio option leg is blocked by the
+// "Option stream legs require explicit start and end dates" guard even in the
+// normal flow where the user never drags the TimeRangeSlider. The slider
+// treats empty startDate/endDate as "use full min/max" and VISUALLY shows a
+// complete range, but handleCalculate treats '' as "no dates" and rejects.
+// So the user sees a full-range timeframe yet Compute fails with a confusing
+// "please set a date range". A portfolio option leg should resolve over the
+// portfolio's available/backtest window without forcing a manual drag.
+//
+// These tests are RED on the current code and define the acceptance criterion
+// for the fix.
+// ---------------------------------------------------------------------------
+
+describe('usePortfolio — option leg date window (PR #67 bug)', () => {
+  const optionLeg = {
+    label: 'OPT_SP_500 C mid',
+    type: 'option_stream',
+    collection: 'OPT_SP_500',
+    option_type: 'C',
+    cycle: null,
+    maturity: { kind: 'nearest_to_target', target_days: 30 },
+    selection: { kind: 'by_delta', target: -0.1, tolerance: 0.05, strict: false },
+    stream: 'mid',
+    weight: 100,
+  };
+
+  it('computes an OPTION-ONLY portfolio without a manual slider drag', async () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(optionLeg);
+    });
+
+    // Let the per-leg date-range useEffect settle (mirrors the real UI: the
+    // user adds a leg, the ranges load, the slider renders showing a full
+    // range, then the user clicks Compute WITHOUT dragging).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    // Expected: the request goes through (BE resolves over the window) and no
+    // "set a date range" guard error is surfaced.
+    expect(result.current.error).toBeNull();
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const body = computePortfolio.mock.calls[0][0];
+    // The portfolio MUST supply a concrete window for the option leg.
+    expect(body.start).toBeTruthy();
+    expect(body.end).toBeTruthy();
+  });
+
+  it('seeds the platform-standard 5-year default window for an option-only portfolio', async () => {
+    // Option-only portfolios have no priced leg to anchor on, so the window
+    // must default to ~5 years back from today (matching the basket default),
+    // and that window must reach both the slider (via overlapRange) and the
+    // compute request.
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(optionLeg);
+    });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    // Expected window computed the same way the hook's defaultRange() does.
+    const end = new Date();
+    const start = new Date();
+    start.setFullYear(start.getFullYear() - 5);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const expectedStart = iso(start);
+    const expectedEnd = iso(end);
+
+    // The slider min/max are bound to overlapRange (PortfolioPage), so it must
+    // carry the default window.
+    expect(result.current.overlapRange).toEqual({ start: expectedStart, end: expectedEnd });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const body = computePortfolio.mock.calls[0][0];
+    expect(body.start).toBe(expectedStart);
+    expect(body.end).toBe(expectedEnd);
+  });
+
+  it('computes an OPTION + INSTRUMENT portfolio without a manual slider drag', async () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg({
+        label: 'SPX',
+        type: 'instrument',
+        collection: 'INDEX',
+        symbol: 'SPX',
+        weight: 100,
+      });
+      result.current.addLeg(optionLeg);
+    });
+
+    // Ranges settle: the instrument leg yields a real overlapRange, so the
+    // slider shows that full window — but startDate/endDate are still ''.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const body = computePortfolio.mock.calls[0][0];
+    // The window falls back to the available overlap (the instrument's
+    // 2020-01-01..2020-12-31 from the getInstrumentPrices mock) — NOT the 5y
+    // default — so the BE can enumerate the option leg's trade dates and the
+    // window matches what the slider shows.
+    expect(body.start).toBe('2020-01-01');
+    expect(body.end).toBe('2020-12-31');
+  });
+
+  it('an explicit slider selection overrides the fallback window', async () => {
+    // The auto-window is only a FALLBACK: when the user has narrowed the range
+    // via the slider, those exact dates must be sent (not the overlap/default).
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(optionLeg);
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    act(() => {
+      result.current.setStartDate('2022-03-01');
+      result.current.setEndDate('2022-09-30');
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    const body = computePortfolio.mock.calls[0][0];
+    expect(body.start).toBe('2022-03-01');
+    expect(body.end).toBe('2022-09-30');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // addLeg auto-suffix tests (item 4 in review-nits spec)
 // ---------------------------------------------------------------------------
 
