@@ -138,6 +138,14 @@ async def materialise_option_streams(
         svc
     )
 
+    # Process-wide dwh-pool concurrency gate: streams here resolve sequentially,
+    # but OTHER requests (basket series, a second chart panel) may resolve
+    # concurrently against the SAME 4-slot pool — the shared gate bounds the SUM
+    # so the pool is never over-subscribed (see _options_concurrency).
+    from tcg.core.api._options_concurrency import get_dwh_concurrency_gate
+
+    gate = get_dwh_concurrency_gate()
+
     results: dict[
         str,
         tuple[
@@ -173,6 +181,7 @@ async def materialise_option_streams(
             progress_callback=progress_callback,
             bulk_chain_reader=bulk_reader,
             available_expirations=all_expirations,
+            concurrency_gate=gate,
         )
         dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
         results[label] = (dates_arr, values, diagnostics, contracts)

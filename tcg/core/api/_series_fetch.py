@@ -418,6 +418,16 @@ def make_signal_fetcher(
                 "wiring"
             ]
 
+            # Shared process-wide dwh-pool gate: a basket with several option
+            # legs resolves them in turn HERE, but the Data page fires the
+            # composite + per-leg series concurrently (and other panels/requests
+            # may overlap), all sharing the ONE 4-slot pool.  The gate bounds the
+            # SUM across all concurrent resolves so the pool is not exhausted
+            # (the OPT_SP_500 basket PoolTimeout).  See _options_concurrency.
+            from tcg.core.api._options_concurrency import get_dwh_concurrency_gate
+
+            gate = get_dwh_concurrency_gate()
+
             # Pre-fetch available expirations filtered by type + cycle.
             all_expirations = await svc.list_option_expirations_filtered(
                 instrument.collection,
@@ -442,6 +452,7 @@ def make_signal_fetcher(
                 underlying_price_resolver=ul_resolver,
                 bulk_chain_reader=bulk_reader,
                 available_expirations=all_expirations,
+                concurrency_gate=gate,
             )
 
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)

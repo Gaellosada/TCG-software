@@ -360,6 +360,7 @@ async def _resolve_bulk(
     last_trade_date: date | None,
     progress_callback: Callable[[], None] | None,
     available_expirations: Sequence[date] | None,
+    concurrency_gate: "asyncio.Semaphore | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
@@ -642,10 +643,21 @@ async def _resolve_bulk(
     # One bulk query per unique expiration, run concurrently but with a
     # semaphore so the concurrent dwh-connection fan-out stays within the pool
     # (multi-decade date ranges can produce 50-95+ expiration groups; each
-    # ``query_chain_bulk`` acquires a pool connection).  Derived from the pool
-    # size (see ``_DWH_RESOLVE_CONCURRENCY``) so it can't over-subscribe the pool
-    # — was a hardcoded 8 (Mongo-era), which exceeded the 4-slot dwh pool.
-    _bulk_sem = asyncio.Semaphore(_DWH_RESOLVE_CONCURRENCY)
+    # ``query_chain_bulk`` acquires a pool connection).
+    #
+    # When ``concurrency_gate`` is supplied (production wires ONE process-wide
+    # semaphore sized to the dwh pool — see ``tcg.core.api._options_concurrency``),
+    # use it so the bound is SHARED across all concurrent resolves: the per-call
+    # ``_DWH_RESOLVE_CONCURRENCY`` only bounds ONE resolve, so two concurrent
+    # resolves (e.g. the Data-page composite + per-leg basket series) would each
+    # take up to 3 slots → 6 > the 4-slot pool → PoolTimeout.  The shared gate
+    # bounds the SUM.  ``None`` (e.g. unit tests / a lone resolve) falls back to a
+    # fresh per-call semaphore = the prior behaviour.
+    _bulk_sem = (
+        concurrency_gate
+        if concurrency_gate is not None
+        else asyncio.Semaphore(_DWH_RESOLVE_CONCURRENCY)
+    )
     chain_index: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
 
     async def _fetch_exp(
@@ -747,8 +759,16 @@ async def _resolve_bulk(
                     pass
 
     if isinstance(selection, ByMoneyness):
-        # ByMoneyness: underlying price lookup requires I/O — async path.
-        sem = asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
+        # ByMoneyness: underlying price lookup requires I/O (each acquires a dwh
+        # pool connection) — async path.  Share the SAME process-wide gate as
+        # Phase B when supplied so the global bound also covers these lookups
+        # (Phases B and C don't overlap, so reusing the one gate is correct);
+        # fall back to the per-call cap otherwise.
+        sem = (
+            concurrency_gate
+            if concurrency_gate is not None
+            else asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
+        )
 
         async def _resolve_one_moneyness(idx: int, d: date) -> None:
             try:
@@ -879,6 +899,7 @@ async def resolve_option_stream(
     progress_callback: Callable[[], None] | None = None,
     bulk_chain_reader: _CycleAwareBulkReader | None = None,
     available_expirations: Sequence[date] | None = None,
+    concurrency_gate: "asyncio.Semaphore | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
 
@@ -941,6 +962,19 @@ async def resolve_option_stream(
         provided, the NearestToTarget probe query (which materialises
         thousands of docs) is skipped entirely.  When ``None``, falls
         back to the expensive probe.
+    concurrency_gate:
+        Optional SHARED ``asyncio.Semaphore`` bounding the dwh-pool
+        connection fan-out across ALL concurrent resolves.  Production
+        wires ONE process-wide gate sized to the pool (built in
+        ``tcg.core`` — the engine never imports the pool, preserving the
+        ``engine``⊥``data`` import-linter contract).  Used for both the
+        Phase-B bulk fetch and the Phase-C ByMoneyness underlying lookups.
+        ``None`` (a lone resolve / unit test) uses a fresh per-call
+        semaphore sized to ``_DWH_RESOLVE_CONCURRENCY`` — the prior
+        behaviour, which bounds ONE resolve but not the SUM of concurrent
+        resolves (the gap that caused the OPT_SP_500 PoolTimeout when the
+        Data page fired the composite + per-leg basket series at once).
+        Only consulted on the bulk path.
 
     Returns
     -------
@@ -993,6 +1027,7 @@ async def resolve_option_stream(
             last_trade_date=last_trade_date,
             progress_callback=progress_callback,
             available_expirations=available_expirations,
+            concurrency_gate=concurrency_gate,
         )
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
