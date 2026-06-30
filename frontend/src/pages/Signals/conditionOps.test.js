@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+  ALL_OPS,
+  ROLLING_OPS,
+  CROSS_OPS,
+  isLegacyOp,
   conditionShape,
   defaultCondition,
   defaultIndicatorOperand,
@@ -34,12 +38,49 @@ describe('defaultCondition — no default operand injection', () => {
     const c = defaultCondition('in_range');
     expect(c).toEqual({ op: 'in_range', operand: null, min: null, max: null });
   });
-  it('rolling op returns null operand and integer lookback', () => {
+  it('rolling op (still constructible for legacy) returns null operand + lookback', () => {
     const c = defaultCondition('rolling_gt');
     expect(c).toEqual({ op: 'rolling_gt', operand: null, lookback: 1 });
   });
+  it('cross op returns null lhs / rhs PLUS count/window defaulted to 1', () => {
+    expect(defaultCondition('cross_above')).toEqual({
+      op: 'cross_above', lhs: null, rhs: null, count: 1, window: 1,
+    });
+    expect(defaultCondition('cross_below')).toEqual({
+      op: 'cross_below', lhs: null, rhs: null, count: 1, window: 1,
+    });
+  });
   it('defaults to gt when op is omitted', () => {
     expect(defaultCondition().op).toBe('gt');
+  });
+});
+
+describe('ALL_OPS — rolling retired from authoring', () => {
+  it('does NOT list rolling ops (no new rolling condition can be authored)', () => {
+    expect(ALL_OPS).not.toContain('rolling_gt');
+    expect(ALL_OPS).not.toContain('rolling_lt');
+  });
+  it('still lists comparators, cross and range ops', () => {
+    expect(ALL_OPS).toContain('gt');
+    expect(ALL_OPS).toContain('cross_above');
+    expect(ALL_OPS).toContain('cross_below');
+    expect(ALL_OPS).toContain('in_range');
+  });
+});
+
+describe('isLegacyOp — retired operators', () => {
+  it.each(ROLLING_OPS)('%s is legacy (retired but evaluable)', (op) => {
+    expect(isLegacyOp(op)).toBe(true);
+  });
+  it.each(['gt', 'lt', 'cross_above', 'cross_below', 'in_range'])('%s is NOT legacy', (op) => {
+    expect(isLegacyOp(op)).toBe(false);
+  });
+  it('rolling still maps to the rolling shape (so it renders + evaluates)', () => {
+    expect(conditionShape('rolling_gt')).toBe('rolling');
+    expect(operandSlots('rolling_gt')).toEqual(['operand']);
+  });
+  it('cross ops are not legacy', () => {
+    for (const op of CROSS_OPS) expect(isLegacyOp(op)).toBe(false);
   });
 });
 
@@ -188,5 +229,60 @@ describe('migrateCondition — preserves compatible slots', () => {
     expect(next.lhs).toEqual(current.lhs);
     expect(next.lhs.params_override).toEqual({ window: 50 });
     expect(next.lhs.series_override).toEqual({ close: 'X' });
+  });
+
+  it('gt → cross_above (both binary) adds count/window defaults', () => {
+    const current = {
+      op: 'gt',
+      lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+      rhs: { kind: 'constant', value: 0 },
+    };
+    const next = migrateCondition(current, 'cross_above');
+    expect(next.op).toBe('cross_above');
+    expect(next.lhs).toEqual(current.lhs);
+    expect(next.rhs).toEqual(current.rhs);
+    expect(next.count).toBe(1);
+    expect(next.window).toBe(1);
+  });
+
+  it('cross_above → gt drops the count/window scalars', () => {
+    const current = {
+      op: 'cross_above',
+      lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+      rhs: { kind: 'constant', value: 0 },
+      count: 3, window: 10,
+    };
+    const next = migrateCondition(current, 'gt');
+    expect(next.op).toBe('gt');
+    expect('count' in next).toBe(false);
+    expect('window' in next).toBe(false);
+    expect(next.lhs).toEqual(current.lhs);
+  });
+
+  it('cross_above → cross_below (cross↔cross) preserves count/window', () => {
+    const current = {
+      op: 'cross_above',
+      lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+      rhs: { kind: 'constant', value: 0 },
+      count: 4, window: 12,
+    };
+    const next = migrateCondition(current, 'cross_below');
+    expect(next.op).toBe('cross_below');
+    expect(next.count).toBe(4);
+    expect(next.window).toBe(12);
+  });
+
+  it('in_range → cross_above (shape change) lands with count/window defaults', () => {
+    const current = {
+      op: 'in_range',
+      operand: { kind: 'instrument', input_id: 'X', field: 'close' },
+      min: { kind: 'constant', value: 0 },
+      max: { kind: 'constant', value: 10 },
+    };
+    const next = migrateCondition(current, 'cross_above');
+    expect(next.op).toBe('cross_above');
+    expect(next.lhs).toEqual(current.operand); // operand → lhs preserved
+    expect(next.count).toBe(1);
+    expect(next.window).toBe(1);
   });
 });

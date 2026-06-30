@@ -3,8 +3,45 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup } from '@testing-library/react';
 
 afterEach(() => { cleanup(); });
-import BlockEditor from './BlockEditor';
+import BlockEditor, { reindexLinksAfterRemoval } from './BlockEditor';
 import { emptyRules, newBlockId } from './storage';
+import { normaliseSpecForRequest } from './requestBuilder';
+
+describe('reindexLinksAfterRemoval (pure) — re-chains to FULL coverage or CNF', () => {
+  // A chained block must stay a FULL chain over the survivors (backend rejects
+  // a partial chain), so removal RE-CHAINS rather than leaving gaps.
+  it('returns undefined for a missing / non-object / empty map', () => {
+    expect(reindexLinksAfterRemoval(undefined, 1, 2)).toBeUndefined();
+    expect(reindexLinksAfterRemoval(null, 1, 2)).toBeUndefined();
+    expect(reindexLinksAfterRemoval({}, 1, 2)).toBeUndefined();
+  });
+  it('drops to CNF when < 2 conditions remain', () => {
+    expect(reindexLinksAfterRemoval({ 1: 5 }, 1, 1)).toBeUndefined();
+  });
+  it('removing the MIDDLE condition re-chains over the survivors, preserving mappable windows', () => {
+    // conds 0..3 (4), full chain {1:4, 2:6, 3:8}. Remove cond 1 → 3 remain.
+    // Rule: new gap j inherits the window LEADING INTO the condition now at
+    // position j (old key = j < removedIdx ? j : j+1). removedIdx=1:
+    //   new gap1 ← old key 2 (6); new gap2 ← old key 3 (8). Full coverage {1,2}.
+    expect(reindexLinksAfterRemoval({ 1: 4, 2: 6, 3: 8 }, 1, 3)).toEqual({ 1: 6, 2: 8 });
+  });
+  it('removing the LAST condition keeps the remaining full chain', () => {
+    // conds 0..2 (3), {1:4, 2:6}. Remove cond 2 → 2 remain; new gap 1 ← old 1 (4).
+    expect(reindexLinksAfterRemoval({ 1: 4, 2: 6 }, 2, 2)).toEqual({ 1: 4 });
+  });
+  it('removing condition 0 re-chains and maps surviving windows by new position', () => {
+    // {1:4, 2:6, 3:8}, remove cond 0 → 3 remain. new gap j ← old key j+1.
+    // gap1 ← old 2 (6); gap2 ← old 3 (8). Full coverage {1,2}.
+    expect(reindexLinksAfterRemoval({ 1: 4, 2: 6, 3: 8 }, 0, 3)).toEqual({ 1: 6, 2: 8 });
+  });
+  it('defaults a new/unmappable gap window to the default', () => {
+    // A chain {1:4, 2:6} over 3 conds; remove cond 1 → 2 remain. new gap1 ←
+    // old 1 (4). (No unmappable gap here, but verify default path:)
+    // chain {2:6} only (a hypothetically sparse map) over 3 conds, remove 0 →
+    // gap1 ← old 2 (6); gap2 ← old 3 (missing → default 5).
+    expect(reindexLinksAfterRemoval({ 2: 6 }, 0, 3)).toEqual({ 1: 6, 2: 5 });
+  });
+});
 
 // Stub network layer used deep in the operand/instrument pickers.
 vi.mock('../../api/data', () => ({
@@ -440,5 +477,340 @@ describe('BlockEditor (v4 / two-section model)', () => {
       // The block IS rendered (header with status dot + name)
       expect(screen.getByTestId('block-header-0')).toBeDefined();
     });
+  });
+
+  // ----------------------------------------------------------------------
+  // block-temporal-composition v1 — AND⇄THEN link toggle, cross ×N/within W,
+  // legacy rolling chip, and readOnly gating.
+  // ----------------------------------------------------------------------
+  describe('Temporal links — AND ⇄ THEN toggle (all-or-nothing chain)', () => {
+    function twoCondEntry(over = {}) {
+      return seededEntry({
+        conditions: [
+          { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+          { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+        ],
+        ...over,
+      });
+    }
+    function threeCondEntry(over = {}) {
+      return seededEntry({
+        conditions: [
+          { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+          { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+          { op: 'gt', lhs: { kind: 'constant', value: 3 }, rhs: { kind: 'constant', value: 0 } },
+        ],
+        ...over,
+      });
+    }
+
+    it('first condition has NO separator; second shows an AND toggle by default', () => {
+      renderEditor({ entries: [twoCondEntry()], exits: [] });
+      expect(screen.queryByTestId('link-toggle-0-0')).toBeNull();
+      const toggle = screen.getByTestId('link-toggle-0-1');
+      expect(toggle.textContent).toBe('AND');
+    });
+
+    it('toggling a 2-condition block sets the single full-coverage link {1:5}', () => {
+      const { onRulesChange } = renderEditor({ entries: [twoCondEntry()], exits: [] });
+      fireEvent.click(screen.getByTestId('link-toggle-0-1'));
+      const next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].links).toEqual({ 1: 5 });
+    });
+
+    it('all-or-nothing: toggling ANY gap on a 3-condition block fills EVERY gap', () => {
+      const { onRulesChange } = renderEditor({ entries: [threeCondEntry()], exits: [] });
+      // Toggle the SECOND gap (successor index 2) — the whole block becomes a
+      // chain, so BOTH gaps {1,2} get the default window (backend needs full
+      // coverage; a partial chain would 400).
+      fireEvent.click(screen.getByTestId('link-toggle-0-2'));
+      const next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].links).toEqual({ 1: 5, 2: 5 });
+    });
+
+    it('all-or-nothing: toggling any THEN gap back reverts the WHOLE block to CNF', () => {
+      const { onRulesChange } = renderEditor({ entries: [threeCondEntry({ links: { 1: 4, 2: 6 } })], exits: [] });
+      // Both gaps show THEN.
+      expect(screen.getByTestId('link-toggle-0-1').textContent).toBe('THEN');
+      expect(screen.getByTestId('link-toggle-0-2').textContent).toBe('THEN');
+      // Revert via the FIRST gap → all links cleared.
+      fireEvent.click(screen.getByTestId('link-toggle-0-1'));
+      const next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].links).toBeUndefined();
+    });
+
+    it('editing one per-link window updates only that gap, keeping full coverage', () => {
+      const { onRulesChange } = renderEditor({ entries: [threeCondEntry({ links: { 1: 5, 2: 5 } })], exits: [] });
+      const win2 = screen.getByTestId('link-window-0-2');
+      expect(Number(win2.value)).toBe(5);
+      fireEvent.change(win2, { target: { value: '12' } });
+      const next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].links).toEqual({ 1: 5, 2: 12 });
+    });
+
+    it('every gap toggle is enabled (no top-down contiguity gate — it is block-wide)', () => {
+      renderEditor({ entries: [threeCondEntry()], exits: [] });
+      expect(screen.getByTestId('link-toggle-0-1').disabled).toBe(false);
+      expect(screen.getByTestId('link-toggle-0-2').disabled).toBe(false);
+    });
+
+    it('readOnly disables the toggle and the per-link window', () => {
+      renderEditor({ entries: [twoCondEntry({ links: { 1: 5 } })], exits: [] }, { readOnly: true });
+      expect(screen.getByTestId('link-toggle-0-1').disabled).toBe(true);
+      expect(screen.getByTestId('link-window-0-1').readOnly).toBe(true);
+    });
+
+    it('reset blocks do NOT show the THEN toggle (links rejected there) — plain AND only', () => {
+      const reset = {
+        id: 'r1', name: 'Arm', enabled: true, description: '',
+        conditions: [
+          { op: 'gt', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 } },
+          { op: 'gt', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 1 } },
+        ],
+      };
+      renderEditor({ entries: [], exits: [], resets: [reset] }, { section: 'resets' });
+      // The static AND label is present but there is NO interactive link toggle.
+      expect(screen.queryByTestId('link-toggle-0-1')).toBeNull();
+    });
+
+    it('removing a condition from a chain RE-CHAINS to full coverage over the survivors', () => {
+      const { onRulesChange } = renderEditor({ entries: [threeCondEntry({ links: { 1: 4, 2: 6 } })], exits: [] });
+      // Remove the middle condition (index 1) — confirm via the dialog.
+      act(() => { fireEvent.click(screen.getByTestId('remove-condition-0-1')); });
+      const confirm = screen.getByRole('button', { name: /delete/i });
+      act(() => { fireEvent.click(confirm); });
+      const next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].conditions).toHaveLength(2);
+      // 2 conditions remain → still a full chain over the single gap. The new
+      // gap (C0→C2) inherits the window leading into the surviving condition
+      // now at position 1 (old key 2 = 6). NOT a partial / stale map.
+      expect(next.entries[0].links).toEqual({ 1: 6 });
+    });
+
+    it('removing down to a single condition drops links to CNF', () => {
+      const { onRulesChange } = renderEditor({ entries: [twoCondEntry({ links: { 1: 5 } })], exits: [] });
+      act(() => { fireEvent.click(screen.getByTestId('remove-condition-0-1')); });
+      const confirm = screen.getByRole('button', { name: /delete/i });
+      act(() => { fireEvent.click(confirm); });
+      const next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].conditions).toHaveLength(1);
+      expect(next.entries[0].links).toBeUndefined();
+    });
+  });
+
+  describe('cross ×N / within W controls', () => {
+    function crossEntry(over = {}) {
+      return seededEntry({
+        conditions: [
+          {
+            op: 'cross_above',
+            lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
+            rhs: { kind: 'constant', value: 0 },
+            count: 1,
+            window: 1,
+            ...over,
+          },
+        ],
+      });
+    }
+
+    it('a plain crossover (count==1) hides the controls and shows a compact ×N reveal button', () => {
+      renderEditor({ entries: [crossEntry()], exits: [] });
+      expect(screen.queryByTestId('cross-controls-0-0')).toBeNull();
+      expect(screen.getByTestId('cross-expand-0-0')).toBeDefined();
+    });
+
+    it('clicking ×N reveals the count/window inputs', () => {
+      renderEditor({ entries: [crossEntry()], exits: [] });
+      fireEvent.click(screen.getByTestId('cross-expand-0-0'));
+      expect(screen.getByTestId('cross-controls-0-0')).toBeDefined();
+      expect(screen.getByTestId('cross-count-0-0')).toBeDefined();
+      expect(screen.getByTestId('cross-window-0-0')).toBeDefined();
+    });
+
+    it('a cross with count>1 shows the controls immediately (no reveal needed)', () => {
+      renderEditor({ entries: [crossEntry({ count: 3, window: 10 })], exits: [] });
+      expect(screen.getByTestId('cross-controls-0-0')).toBeDefined();
+      expect(Number(screen.getByTestId('cross-count-0-0').value)).toBe(3);
+      expect(Number(screen.getByTestId('cross-window-0-0').value)).toBe(10);
+    });
+
+    it('editing count/window writes the values onto the condition', () => {
+      const { onRulesChange } = renderEditor({ entries: [crossEntry({ count: 2, window: 5 })], exits: [] });
+      fireEvent.change(screen.getByTestId('cross-count-0-0'), { target: { value: '4' } });
+      let next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].conditions[0].count).toBe(4);
+      fireEvent.change(screen.getByTestId('cross-window-0-0'), { target: { value: '8' } });
+      next = onRulesChange.mock.calls.pop()[0];
+      expect(next.entries[0].conditions[0].window).toBe(8);
+    });
+
+    it('a NON-cross condition (gt) shows no cross controls at all', () => {
+      const seeded = { entries: [seededEntry({ conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }] })], exits: [] };
+      renderEditor(seeded);
+      expect(screen.queryByTestId('cross-expand-0-0')).toBeNull();
+      expect(screen.queryByTestId('cross-controls-0-0')).toBeNull();
+    });
+
+    it('readOnly disables the count/window inputs and the reveal button', () => {
+      renderEditor({ entries: [crossEntry({ count: 3, window: 10 })], exits: [] }, { readOnly: true });
+      expect(screen.getByTestId('cross-count-0-0').readOnly).toBe(true);
+      expect(screen.getByTestId('cross-window-0-0').readOnly).toBe(true);
+    });
+  });
+
+  describe('Retired rolling condition renders as a read-only legacy chip', () => {
+    function rollingEntry() {
+      return seededEntry({
+        conditions: [
+          { op: 'rolling_gt', operand: { kind: 'instrument', input_id: 'X', field: 'close' }, lookback: 5 },
+        ],
+      });
+    }
+
+    it('replaces the op <select> with a static legacy label (rolling not in the dropdown)', () => {
+      renderEditor({ entries: [rollingEntry()], exits: [] });
+      // No op <select> for a legacy condition.
+      expect(screen.queryByTestId('op-select-0-0')).toBeNull();
+      const legacy = screen.getByTestId('op-legacy-0-0');
+      expect(legacy.textContent).toMatch(/rolling/i);
+      expect(legacy.textContent).toMatch(/legacy/i);
+    });
+
+    it('the operand and lookback are visible but read-only (still evaluable, not editable)', () => {
+      renderEditor({ entries: [rollingEntry()], exits: [] });
+      // Lookback input is present and read-only.
+      const lookback = screen.getByLabelText('Lookback (int)');
+      expect(Number(lookback.value)).toBe(5);
+      expect(lookback.readOnly).toBe(true);
+    });
+
+    it('an authorable op DOES still render the op <select>', () => {
+      const seeded = { entries: [seededEntry({ conditions: [{ op: 'gt', lhs: null, rhs: null }] })], exits: [] };
+      renderEditor(seeded);
+      expect(screen.getByTestId('op-select-0-0')).toBeDefined();
+      expect(screen.queryByTestId('op-legacy-0-0')).toBeNull();
+    });
+
+    it('the op dropdown does NOT offer rolling operators', () => {
+      const seeded = { entries: [seededEntry({ conditions: [{ op: 'gt', lhs: null, rhs: null }] })], exits: [] };
+      renderEditor(seeded);
+      const select = screen.getByTestId('op-select-0-0');
+      const values = Array.from(select.querySelectorAll('option')).map((o) => o.value);
+      expect(values).not.toContain('rolling_gt');
+      expect(values).not.toContain('rolling_lt');
+      expect(values).toContain('cross_above');
+    });
+  });
+});
+
+// Regression for the MAJOR data-integrity bug (PR #69 review B): adding a
+// condition to a block that is ALREADY a chain must EXTEND ``links`` so the
+// block stays a FULL contiguous chain. Otherwise the editor renders an all-THEN
+// chain but ``normaliseLinks`` (full-coverage-or-omit) drops the partial map and
+// the block silently ships as CNF — the prior-cycle "runs as CNF, no error"
+// failure. DEFAULT_LINK_WINDOW is 5 (private to BlockEditor.jsx).
+const DEFAULT_LINK_WINDOW = 5;
+
+describe('handleAddCondition — chain links stay FULL-coverage (no silent CNF degradation)', () => {
+  // Build a 2-condition chain: two conditions AND a single linked gap {1:W}.
+  function chainedEntry(window = DEFAULT_LINK_WINDOW, overrides = {}) {
+    return seededEntry({
+      id: 'chain-1',
+      conditions: [
+        { op: 'gt', lhs: null, rhs: null },
+        { op: 'gt', lhs: null, rhs: null },
+      ],
+      links: { 1: window },
+      ...overrides,
+    });
+  }
+
+  it('adding a 3rd condition to a 2-condition chain extends links to FULL coverage {1:W, 2:DEFAULT}', () => {
+    const seeded = { entries: [chainedEntry(7)], exits: [] };
+    const { onRulesChange } = renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    const next = onRulesChange.mock.calls.pop()[0];
+    const block = next.entries[0];
+    expect(block.conditions).toHaveLength(3);
+    // (a) links extends to cover EVERY successor gap {1,2}; existing window kept,
+    //     the NEW trailing gap seeded with the default.
+    expect(block.links).toEqual({ 1: 7, 2: DEFAULT_LINK_WINDOW });
+  });
+
+  it('the WIRE payload (real normaliseSpecForRequest) ships the FULL links, NOT dropped to CNF', () => {
+    const seeded = { entries: [chainedEntry(7)], exits: [] };
+    const { onRulesChange } = renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    const next = onRulesChange.mock.calls.pop()[0];
+    // Run the ACTUAL request normaliser the compute call uses. A partial chain
+    // would be dropped to ``undefined`` (CNF); a full chain survives verbatim.
+    const wire = normaliseSpecForRequest({ inputs: [], rules: next });
+    const wireBlock = wire.rules.entries[0];
+    expect(wireBlock.links).toEqual({ 1: 7, 2: DEFAULT_LINK_WINDOW });
+    // (b) NOT undefined — the bug shipped this as CNF (links omitted).
+    expect(wireBlock.links).not.toBeUndefined();
+  });
+
+  it('adding a condition to a CNF block (no links) stays CNF — links omitted from the wire', () => {
+    const seeded = {
+      entries: [seededEntry({ conditions: [{ op: 'gt', lhs: null, rhs: null }] })],
+      exits: [],
+    };
+    const { onRulesChange } = renderEditor(seeded);
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    const next = onRulesChange.mock.calls.pop()[0];
+    const block = next.entries[0];
+    expect(block.conditions).toHaveLength(2);
+    // CNF in → CNF out: no links seeded.
+    expect(block.links).toBeUndefined();
+    const wire = normaliseSpecForRequest({ inputs: [], rules: next });
+    expect(wire.rules.entries[0].links).toBeUndefined();
+  });
+
+  it('remove-then-add stays a consistent FULL chain (re-chain on remove, extend on add)', () => {
+    // Start a 3-condition chain {1:4, 2:6}. The component is controlled, so we
+    // re-render it with each emitted rules object to feed the next interaction.
+    const start = {
+      entries: [
+        seededEntry({
+          id: 'chain-2',
+          conditions: [
+            { op: 'gt', lhs: null, rhs: null },
+            { op: 'gt', lhs: null, rhs: null },
+            { op: 'gt', lhs: null, rhs: null },
+          ],
+          links: { 1: 4, 2: 6 },
+        }),
+      ],
+      exits: [],
+    };
+    const { onRulesChange, rerender } = renderEditor(start);
+
+    // Remove the LAST condition (index 2). reindexLinksAfterRemoval → 2 conds
+    // remain, full chain {1:4}.
+    fireEvent.click(screen.getByTestId('remove-condition-0-2'));
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
+    let next = onRulesChange.mock.calls.pop()[0];
+    expect(next.entries[0].conditions).toHaveLength(2);
+    expect(next.entries[0].links).toEqual({ 1: 4 });
+
+    // Re-render with the new rules, then ADD a condition back. The chain must
+    // re-extend to FULL coverage {1:4, 2:DEFAULT} — not degrade to a partial map.
+    rerender(
+      <BlockEditor
+        rules={next}
+        onRulesChange={onRulesChange}
+        inputs={[SPX_INPUT]}
+        indicators={[]}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('add-condition-0'));
+    next = onRulesChange.mock.calls.pop()[0];
+    expect(next.entries[0].conditions).toHaveLength(3);
+    expect(next.entries[0].links).toEqual({ 1: 4, 2: DEFAULT_LINK_WINDOW });
+    // And the wire ships the FULL chain.
+    const wire = normaliseSpecForRequest({ inputs: [], rules: next });
+    expect(wire.rules.entries[0].links).toEqual({ 1: 4, 2: DEFAULT_LINK_WINDOW });
   });
 });

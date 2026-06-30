@@ -564,7 +564,10 @@
 
 .condition {
   border-top: 1px solid var(--border-secondary);
-  padding: 4px 0;
+  /* 12px top clears the conditionLinkChip (top:-9px, ~18px tall → bottom at
+     +9px); leaves ~3px breathing room consistent with the block's 4px rhythm.
+     The old 4px was sized for the plain-text .conditionAndLabel (shorter). */
+  padding: 12px 0 4px;
   margin-top: 3px;
   position: relative;
 }
@@ -585,6 +588,150 @@
   font-weight: 600;
   padding: 0 4px;
   letter-spacing: 0.08em;
+}
+
+/* ---------- Temporal link separator (block-temporal-composition v1) ----------
+ * The AND chip between two conditions becomes an AND ⇄ "THEN within [W] bars"
+ * toggle. The container reuses the absolute-positioned chip slot
+ * (.conditionAndLabel) so the layout is unchanged when collapsed to AND. */
+.conditionLinkChip {
+  position: absolute;
+  top: -9px;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-secondary);
+  padding: 0 4px;
+}
+
+/* The AND/THEN toggle button — small, chip-like, reuses the AND label type. */
+.conditionLinkToggle {
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.conditionLinkToggle:hover:not(:disabled) {
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+}
+
+/* Active (THEN) state — accent border so a linked gap reads as "ordered". */
+.conditionLinkToggleActive {
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+  background: var(--bg-secondary);
+}
+
+.conditionLinkToggle:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* The per-link "within [W] bars" inline window editor (shown when THEN). */
+.linkWindowWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.62rem;
+  color: var(--text-secondary);
+  letter-spacing: 0.04em;
+}
+
+.linkWindowInput {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.7rem;
+  padding: 0 4px;
+  width: 44px;
+  height: 18px;
+}
+
+/* ---------- cross ×N / within W controls (shown only when count > 1) ----------
+ * A plain crossover (count == 1) shows just a small "×N" toggle button so the
+ * row stays visually identical to a pre-feature crossover; clicking it reveals
+ * the count/window inputs. */
+.crossCountCell {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--signal-control-height);
+}
+
+.crossCountInput {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  padding: 0 4px;
+  width: 46px;
+  height: var(--signal-control-height);
+}
+
+/* Small "×N" reveal button for a plain (count == 1) crossover. */
+.crossExpandBtn {
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.crossExpandBtn:hover:not(:disabled) {
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+}
+
+.crossExpandBtn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* ---------- Retired (legacy) rolling condition ---------- */
+/* The op <select> is replaced by static text because rolling ops are no longer
+ * in ALL_OPS — a <select> would render blank. Shows "rolling > (legacy)". */
+.legacyOpLabel {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.74rem;
+  font-style: italic;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
+  min-height: var(--signal-control-height);
+  white-space: nowrap;
+}
+
+.legacyBadge {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.8;
 }
 
 /*

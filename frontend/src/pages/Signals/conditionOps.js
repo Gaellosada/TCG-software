@@ -11,16 +11,40 @@ export const CROSS_OPS = Object.freeze(['cross_above', 'cross_below']);
 /** Range operator: takes operand + min + max. */
 export const RANGE_OPS = Object.freeze(['in_range']);
 
-/** Rolling comparators: take operand + lookback (int). */
+/**
+ * Rolling comparators: take operand + lookback (int).
+ *
+ * RETIRED FROM AUTHORING (block-temporal-composition v1): rolling is no longer
+ * in ``ALL_OPS`` so the op dropdown does not offer it and no NEW rolling
+ * condition can be created. It is kept fully evaluable and renderable — the
+ * dataclass, parser and engine eval are unchanged on the backend, and an
+ * existing rolling condition renders as a read-only "legacy" chip in the
+ * editor (see ``isLegacyOp`` + the legacy branch in BlockEditor). cross_count
+ * is NOT a rolling replacement (rolling = lagged-level/trend test; cross =
+ * event count), so there is no auto-migration.
+ */
 export const ROLLING_OPS = Object.freeze(['rolling_gt', 'rolling_lt']);
 
-/** Flat list of every supported op — shown in the op dropdown in order. */
+/**
+ * Flat list of every AUTHORABLE op — shown in the op dropdown in order.
+ * Rolling ops are deliberately excluded (retired from authoring) but stay
+ * evaluable/renderable via ``conditionShape``/``isLegacyOp``.
+ */
 export const ALL_OPS = Object.freeze([
   ...BINARY_COMPARE_OPS,
   ...CROSS_OPS,
   ...RANGE_OPS,
-  ...ROLLING_OPS,
 ]);
+
+/**
+ * Return ``true`` if ``op`` is a retired/legacy operator — present on existing
+ * signals and still evaluable, but no longer offered for authoring (so the op
+ * ``<select>`` does not list it). The editor renders such a condition with a
+ * static "(legacy)" label instead of the op dropdown.
+ */
+export function isLegacyOp(op) {
+  return ROLLING_OPS.includes(op);
+}
 
 /**
  * Help copy for rolling operators — surfaced via an inline info button
@@ -106,6 +130,11 @@ export function defaultCondition(op = 'gt') {
   if (shape === 'rolling') {
     return { op, operand: null, lookback: 1 };
   }
+  // Cross ops share the 'binary' shape but carry count/window scalars
+  // (defaults 1/1 == a single-bar crossover, byte-identical to pre-feature).
+  if (CROSS_OPS.includes(op)) {
+    return { op, lhs: null, rhs: null, count: 1, window: 1 };
+  }
   return { op, lhs: null, rhs: null };
 }
 
@@ -162,6 +191,24 @@ export function migrateCondition(current, nextOp) {
   const base = defaultCondition(nextOp);
   const currShape = conditionShape(current.op);
   if (nextShape === currShape) {
+    // Same structural shape — preserve operands, only the op changes. But
+    // cross ops carry extra count/window scalars while plain comparators do
+    // not, so reconcile them across a binary↔cross switch (both are 'binary'
+    // shape): entering a cross defaults count/window; leaving one drops them.
+    const nextIsCross = CROSS_OPS.includes(nextOp);
+    const currIsCross = CROSS_OPS.includes(current.op);
+    if (nextIsCross && !currIsCross) {
+      return {
+        ...current,
+        op: nextOp,
+        count: Number.isInteger(current.count) && current.count >= 1 ? current.count : 1,
+        window: Number.isInteger(current.window) && current.window >= 1 ? current.window : 1,
+      };
+    }
+    if (!nextIsCross && currIsCross) {
+      const { count: _c, window: _w, ...rest } = current;
+      return { ...rest, op: nextOp };
+    }
     return { ...current, op: nextOp };
   }
   // Try to preserve the most-structurally-similar slot — but never fabricate
@@ -170,7 +217,9 @@ export function migrateCondition(current, nextOp) {
   if (nextShape === 'binary') {
     const lhs = current.lhs || current.operand || base.lhs;
     const rhs = current.rhs || current.max || base.rhs;
-    return { op: nextOp, lhs, rhs };
+    // ``base`` already carries count/window when nextOp is a cross op, so a
+    // cross target lands with its 1/1 defaults; a plain comparator gets none.
+    return { ...base, op: nextOp, lhs, rhs };
   }
   if (nextShape === 'range') {
     const operand = current.operand || current.lhs || base.operand;

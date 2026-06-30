@@ -575,7 +575,26 @@ def _eval_condition(
                     fired = (a_prev >= b_prev) & (a_cur < b_cur)
             fired = fired & ~prev_nan & ~cur_nan
             truth[1:] = fired
-        return truth, nan_at_t
+        count = int(getattr(cond, "count", 1) or 1)
+        window = int(getattr(cond, "window", 1) or 1)
+        if count == 1 and window == 1:
+            # Default single-bar crossover: byte-identical to the historical
+            # code path (a trailing window of one bar holds only bar t's
+            # crossing, so count>=1 is exactly the pulse computed above).
+            return truth, nan_at_t
+        # cross_count: True iff >= ``count`` SAME-DIRECTION crossings occurred
+        # in the trailing ``window`` bars (inclusive of bar t). Vectorized
+        # trailing sum over the cross-edge pulses (``truth``); O(T). A NaN bar
+        # cannot produce a pulse (guarded above) so it contributes 0 — no
+        # warm-up poison is added (the count is simply lower early on),
+        # matching the locked decision "NaN -> 0".
+        pulses = truth.astype(np.int64)
+        prefix = np.concatenate(([0], np.cumsum(pulses)))  # len T+1
+        idx = np.arange(T)
+        lo = np.maximum(0, idx - window + 1)
+        windowed = prefix[idx + 1] - prefix[lo]
+        truth = windowed >= count
+        return truth.astype(np.bool_, copy=False), nan_at_t
 
     if isinstance(cond, InRangeCondition):
         x = values_by_key[k(cond.operand)]
@@ -699,6 +718,123 @@ def _exit_input_ids(exit_block: Block, entries_by_name: dict[str, Block]) -> lis
     return out
 
 
+def _chain_window_list(block: Block) -> list[int] | None:
+    """Return the per-link window list for a temporal chain, or ``None`` for a
+    zero-link (pure-CNF) block.
+
+    ``block.links`` maps successor-condition index → ``within`` window in bars.
+    A valid v1 chain is ONE contiguous forward chain over indices
+    ``1..len(conditions)-1`` (keys ``{1, 2, ..., m-1}``) with finite windows
+    ``>= 1``; a window of 0 is treated as a non-link (W=0 folds to plain AND).
+    The API layer validates and rejects malformed ``links`` (HTTP 400); here we
+    defensively treat anything that is not a clean full forward chain of
+    positive windows as "no chain" so a directly-constructed Signal degrades to
+    CNF rather than misbehaving.
+
+    Returns a list ``W`` of length ``m-1`` where ``W[i]`` is the window from
+    condition ``i`` to condition ``i+1`` (``i`` in ``0..m-2``). Returns ``None``
+    when there are no usable links.
+    """
+    links = block.links
+    if not links:
+        return None
+    m = len(block.conditions)
+    if m < 2:
+        return None
+    # Drop W<=0 entries (W=0 == non-link). Keep only positive windows.
+    pos = {int(kk): int(vv) for kk, vv in links.items() if int(vv) >= 1}
+    if not pos:
+        return None
+    # Must be a single contiguous forward chain starting at index 1:
+    # keys exactly {1, 2, ..., k} for some k in 1..m-1 (no gaps, no index 0,
+    # no index >= m). Anything else degrades to CNF here (API rejects upstream).
+    keys = sorted(pos)
+    if keys[0] != 1 or keys[-1] >= m:
+        return None
+    if keys != list(range(1, keys[-1] + 1)):
+        return None
+    # Build the window list; links only cover indices 1..keys[-1]. A chain that
+    # stops short of the last condition is not a single linear chain over the
+    # whole block, so require it to reach the final condition.
+    if keys[-1] != m - 1:
+        return None
+    return [pos[i + 1] for i in range(m - 1)]
+
+
+def _sequence_active(
+    stage_truth: list[npt.NDArray[np.bool_]],
+    stage_nan: list[npt.NDArray[np.bool_]],
+    windows: list[int],
+    T: int,
+) -> npt.NDArray[np.bool_]:
+    """Single forward-only candidate automaton for one linear chain.
+
+    ``stage_truth[r][t]`` = condition ``r`` matched at bar ``t`` (already
+    NaN-poisoned: a NaN bar is never a match). ``windows[r]`` = bars allowed
+    from stage ``r``'s match to stage ``r+1``'s match (inclusive, strictly
+    after — the successor must land on a LATER bar). Returns ``active[T]`` with
+    an IMPULSE True only on the bar the final stage completes.
+
+    Per-bar STRICT ORDER (load-bearing — see redteam Findings 1 & 6):
+      1. **expire**: if a candidate is in flight and ``t - tau > windows[r]``
+         (the window to the next stage elapsed), reset to idle.
+      2. **NaN-abort**: a NaN on the awaited stage's operands while in flight
+         aborts the candidate (location-independent; does not let the deadline
+         tick through a data gap).
+      3. **advance**: if in flight and the awaited next stage matches at ``t``
+         with ``1 <= t - tau <= windows[r]`` (tested against the PRE-ARM tau),
+         advance; on reaching the last stage, FIRE at ``t`` and consume the
+         candidate (single in-flight).
+      4. **arm**: if the head condition matches at ``t``, (re)arm a candidate at
+         stage 0 with ``tau = t`` (latest-start). Arm runs AFTER advance so a
+         coincident head+completion advances the OLDER candidate rather than
+         silently dropping it.
+
+    Single candidate, forward-only (``tau`` only advances), so for a single
+    linear chain it cannot miss a completion that a multi-candidate scan would
+    catch (redteam Finding 1 honest assessment). State is O(1): ``(stage, tau)``.
+    """
+    m = len(stage_truth)
+    active = np.zeros(T, dtype=np.bool_)
+    if m == 0:
+        return active
+    if m == 1:
+        # Degenerate: a one-condition "chain" is just the condition (impulse ==
+        # level for a single stage). Should not happen (windows would be empty)
+        # but keep it exact.
+        return stage_truth[0].astype(np.bool_, copy=False)
+
+    head = stage_truth[0]
+    stage = -1  # -1 == idle (no candidate). 0..m-1 == highest stage reached.
+    tau = -1  # bar of the stage-``stage`` match (valid when stage >= 0).
+    for t in range(T):
+        # 1. expire: window to the NEXT stage (stage+1) has elapsed.
+        if stage >= 0 and stage < m - 1:
+            if t - tau > windows[stage]:
+                stage = -1
+                tau = -1
+        # 2. NaN-abort: a NaN on the awaited next stage's operands aborts.
+        if stage >= 0 and stage < m - 1:
+            if bool(stage_nan[stage + 1][t]):
+                stage = -1
+                tau = -1
+        # 3. advance against the PRE-ARM tau (strictly-after >= 1 bar).
+        if stage >= 0 and stage < m - 1:
+            nxt = stage + 1
+            if bool(stage_truth[nxt][t]) and 1 <= (t - tau) <= windows[stage]:
+                stage = nxt
+                tau = t
+                if stage == m - 1:
+                    active[t] = True
+                    stage = -1  # impulse: consume, ready to re-detect.
+                    tau = -1
+        # 4. arm head (latest-start) — AFTER advance.
+        if bool(head[t]):
+            stage = 0
+            tau = t
+    return active
+
+
 def _eval_block_activity(
     block: Block,
     indicators: dict[str, IndicatorSpecInput],
@@ -706,12 +842,29 @@ def _eval_block_activity(
     values_by_key: dict[tuple, npt.NDArray[np.float64]],
     T: int,
 ) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_]]:
-    active = np.ones(T, dtype=np.bool_)
+    windows = _chain_window_list(block)
+    if windows is None:
+        # Zero-link CNF — the LITERAL historical path. Do not refactor.
+        active = np.ones(T, dtype=np.bool_)
+        any_nan = np.zeros(T, dtype=np.bool_)
+        for cond in block.conditions:
+            c_truth, c_nan = _eval_condition(cond, indicators, inputs, values_by_key, T)
+            active &= c_truth
+            any_nan |= c_nan
+        return active, any_nan
+    # Temporal chain: per-condition truths feed the single-candidate automaton.
+    # ``any_nan`` stays the OR over ALL conditions (G2: NaN-poison preserved —
+    # the downstream nan_poison mask and the per-input position zeroing are
+    # unchanged). The automaton only READS already-poisoned truth/nan.
+    stage_truth: list[npt.NDArray[np.bool_]] = []
+    stage_nan: list[npt.NDArray[np.bool_]] = []
     any_nan = np.zeros(T, dtype=np.bool_)
     for cond in block.conditions:
         c_truth, c_nan = _eval_condition(cond, indicators, inputs, values_by_key, T)
-        active &= c_truth
+        stage_truth.append(c_truth)
+        stage_nan.append(c_nan)
         any_nan |= c_nan
+    active = _sequence_active(stage_truth, stage_nan, windows, T)
     return active, any_nan
 
 
