@@ -564,7 +564,10 @@
 
 .condition {
   border-top: 1px solid var(--border-secondary);
-  padding: 4px 0;
+  /* 12px top clears the conditionLinkChip (top:-9px, ~18px tall → bottom at
+     +9px); leaves ~3px breathing room consistent with the block's 4px rhythm.
+     The old 4px was sized for the plain-text .conditionAndLabel (shorter). */
+  padding: 12px 0 4px;
   margin-top: 3px;
   position: relative;
 }
