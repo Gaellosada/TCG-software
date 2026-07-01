@@ -18,9 +18,12 @@ Why the existing test misses the bug
        per-leg breakdown is on) one ``getBasketSeries`` per leg — concurrent
        ``POST /api/data/basket/series`` requests, each its own resolve;
      - any two browser tabs / chart panels resolving option streams at once.
-   With ``max_size=4`` and a per-call cap of 3, just TWO concurrent resolves demand
-   up to ``2 * 3 = 6`` connections from a 4-slot pool → the 30 s acquire window
-   elapses → ``PoolTimeout`` ("couldn't get a connection after 30.00 sec").
+   With a pool of ``max_size`` and a per-call cap of ``max_size - 1``, just TWO
+   concurrent resolves demand up to ``2 * (max_size - 1)`` connections — which
+   EXCEEDS ``max_size`` for any ``max_size >= 2`` (e.g. 6 > 4, or 14 > 8) → the
+   acquire window elapses → ``PoolTimeout`` ("couldn't get a connection …").  The
+   assertions below derive from ``DEFAULT_DWH_POOL_MAX_SIZE`` so they hold at any
+   pool size.
 
 2. The existing test's fake reader returns in ``asyncio.sleep(0.01)``.  The live
    ``query_chain_bulk`` on ``OPT_SP_500`` takes ~28-60 s (measured live: a single

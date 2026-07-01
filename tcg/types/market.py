@@ -16,9 +16,16 @@ import numpy.typing as npt
 # here in the dependency-free ``tcg.types`` layer is the seam).  The resolver
 # MUST keep its concurrent dwh-connection fan-out <= this, reserving one slot for
 # the interleaved expirations / underlying-price lookups that share the pool.
-# (Was 4, sized for a single-user desktop app against the shared RDS; raising it
-# would also scale the derived resolver cap.)
-DEFAULT_DWH_POOL_MAX_SIZE: int = 4
+#
+# 8 (was 4): the option-stream resolver fans out one query per expiration (Phase B)
+# plus underlying lookups; a larger pool lets more run concurrently, roughly halving
+# the ceil(N / k) wall on a multi-year option leg.  The derived resolver cap and the
+# process-wide gate (``max(1, N - 1)`` = 7) scale from this automatically.  8 is
+# comfortable for the single-user desktop app against the shared RDS (well within the
+# warehouse's connection budget); do NOT raise much further — it would let more heavy
+# chain queries pile on the shared warehouse without proportional benefit.  Pure
+# parallelism: this changes ONLY concurrency, never any computed value.
+DEFAULT_DWH_POOL_MAX_SIZE: int = 8
 
 
 class AssetClass(StrEnum):

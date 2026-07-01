@@ -155,13 +155,15 @@ async def test_bulk_resolve_peak_connections_within_pool_size():
 
 
 async def test_old_unbounded_cap_would_violate_the_invariant():
-    """Guard the guard: with the OLD hardcoded cap (8) the SAME fan-out drives
-    peak > pool size — proving the test detects the regression, not a vacuous
-    pass.  (Monkeypatch only the bulk semaphore size for this one check.)"""
+    """Guard the guard: with an OVER-SIZED cap (pool_size + 4) the SAME fan-out
+    drives peak > pool size — proving the test detects the regression, not a
+    vacuous pass.  Sized relative to the pool so it holds at any
+    ``DEFAULT_DWH_POOL_MAX_SIZE`` (the ~24-expiration fan-out here reaches it).
+    (Monkeypatch only the bulk semaphore size for this one check.)"""
     reader = _ConcurrencyTrackingBulkReader()
-    # Temporarily patch the module's derived cap to the old Mongo-era value.
+    # Temporarily patch the module's derived cap to an over-subscribing value.
     orig = sr._DWH_RESOLVE_CONCURRENCY
-    sr._DWH_RESOLVE_CONCURRENCY = 8
+    sr._DWH_RESOLVE_CONCURRENCY = DEFAULT_DWH_POOL_MAX_SIZE + 4
     try:
         await resolve_option_stream(
             dates=_DATES,
@@ -180,5 +182,5 @@ async def test_old_unbounded_cap_would_violate_the_invariant():
         )
     finally:
         sr._DWH_RESOLVE_CONCURRENCY = orig
-    # Old cap (8) over-subscribes the 4-slot pool — exactly the starvation bug.
+    # An over-sized cap over-subscribes the pool — exactly the starvation bug.
     assert reader.peak > DEFAULT_DWH_POOL_MAX_SIZE
