@@ -30,6 +30,7 @@ from tcg.core.api._options_materialise import derive_rolls
 from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
 from tcg.types.options import (
+    ByDelta,
     ByStrike,
     EndOfMonth,
     NextThirdFriday,
@@ -499,3 +500,221 @@ async def test_failed_first_resolve_retries_within_month():
     # guard this date would have been skipped and stayed NaN.)
     assert contracts[1] is not None and contracts[1].expiration == _FEB
     assert values[1] == _MID[_FEB]
+
+
+# ── EndOfMonth COMPOSED WITH hold_between_rolls (select-and-hold) ───────────
+#
+# The two roll axes are orthogonal and must COMPOSE:
+#   * ``EndOfMonth`` (a maturity rule) governs WHICH expiration is held and WHEN
+#     it re-resolves (monthly, at each month-end) — the Phase-A ``held_exp`` sweep.
+#   * ``hold_between_rolls=True`` (select-and-hold) governs the CONTRACT: it
+#     segments the dates by the resolved expiration and FREEZES the full contract
+#     (strike included) for the whole segment, then emits the held-contract
+#     premium LEVEL + the ``is_roll`` / ``roll_premium`` side-channel that
+#     ``signal_exec``'s fixed-contract dollar-P&L recurrence consumes.
+#
+# The ground-truth Java naked-short-put sim needs BOTH: select the ~2-month put
+# at each month-end (EndOfMonth) and hold that EXACT contract across the month
+# (hold_between_rolls), rolling on the month-end expiration change.  These tests
+# lock that composition at the resolver level (the existing EOM tests above run
+# the daily-reselect path; the existing hold tests use NearestToTarget).  Under
+# ByDelta the freeze is load-bearing: the target-delta STRIKE drifts intra-month,
+# so the daily path would churn the strike WITHIN a held month — the hold pins
+# the month-open pick.
+
+# A per-strike delta grid engineered so ByDelta(-0.10) would pick a DIFFERENT
+# strike on the FEB segment's open date (01-16 → 4400) than mid-segment
+# (02-15 → 4500).  The hold must freeze the 01-16 pick (4400) for the whole FEB
+# segment.  Each monthly segment's OPEN date carries the -0.10 strike the hold
+# pins: FEB→4400 (01-16), MAR→4450 (02-29), APR→4500 (03-28).
+_HOLD_STRIKES = (4400, 4450, 4500)
+_HOLD_DELTAS: dict[date, dict[date, dict[int, float]]] = {
+    # FEB expiration deltas per date.  Open (01-16) → 4400 is the -0.10 strike;
+    # by 02-15 the -0.10 strike has drifted to 4500 (daily path would churn).
+    _FEB: {
+        date(2024, 1, 16): {4400: -0.10, 4450: -0.16, 4500: -0.22},  # open → 4400
+        date(2024, 1, 31): {4400: -0.08, 4450: -0.13, 4500: -0.18},
+        date(2024, 2, 15): {4400: -0.04, 4450: -0.07, 4500: -0.10},  # drift → 4500
+    },
+    # MAR expiration deltas.  Open (02-29 roll) → 4450 is the -0.10 strike.
+    _MAR: {
+        date(2024, 2, 29): {4400: -0.06, 4450: -0.10, 4500: -0.15},  # open → 4450
+        date(2024, 3, 15): {4400: -0.04, 4450: -0.07, 4500: -0.11},
+    },
+    # APR expiration deltas.  Open (03-28 roll) → 4500 is the -0.10 strike.
+    _APR: {
+        date(2024, 3, 28): {4400: -0.03, 4450: -0.06, 4500: -0.10},  # open → 4500
+        date(2024, 4, 1): {4400: -0.03, 4450: -0.05, 4500: -0.09},
+    },
+}
+# Per-(expiration, date, strike) mids so the held-premium LEVEL is identifiable
+# and the roll-day OLD/NEW seam is well-defined.  Only the (expiration, date)
+# pairs that occur in a segment need entries; a far expiration on an off-date is
+# simply not consulted (it is still listed/quoted, value irrelevant → 0.0).
+_HOLD_MIDS: dict[date, dict[date, dict[int, float]]] = {
+    _FEB: {
+        date(2024, 1, 16): {4400: 30.0, 4450: 40.0, 4500: 55.0},
+        date(2024, 1, 31): {4400: 28.0, 4450: 41.0, 4500: 56.0},
+        date(2024, 2, 15): {4400: 26.0, 4450: 43.0, 4500: 58.0},  # last FEB day
+        date(2024, 2, 29): {
+            4400: 24.0,
+            4450: 45.0,
+            4500: 60.0,
+        },  # roll day: FEB OLD mid
+    },
+    _MAR: {
+        date(2024, 2, 29): {4400: 12.0, 4450: 18.0, 4500: 25.0},  # roll day: MAR OPEN
+        date(2024, 3, 15): {4400: 11.0, 4450: 17.0, 4500: 24.0},
+        date(2024, 3, 28): {4400: 9.0, 4450: 14.0, 4500: 21.0},  # roll day: MAR OLD mid
+    },
+    _APR: {
+        date(2024, 3, 28): {4400: 8.0, 4450: 13.0, 4500: 19.0},  # roll day: APR OPEN
+        date(2024, 4, 1): {4400: 7.0, 4450: 12.0, 4500: 18.0},
+    },
+}
+
+
+def _hold_chains() -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+    """Every date lists all three expirations at all three strikes.
+
+    A contract's delta/mid on a date come from the grids above when present;
+    otherwise a benign filler (delta -0.50, mid 0.0) — those (expiration, date)
+    pairs never sit inside a segment, so their value is never read.
+    """
+    chains: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+    for d in _DATES:
+        rows: list[tuple[OptionContractDoc, OptionDailyRow]] = []
+        for exp in (_FEB, _MAR, _APR):
+            dmap = _HOLD_DELTAS.get(exp, {}).get(d, {})
+            mmap = _HOLD_MIDS.get(exp, {}).get(d, {})
+            for k in _HOLD_STRIKES:
+                rows.append(
+                    (
+                        _contract(strike=float(k), expiration=exp, type_="P"),
+                        _row(
+                            row_date=d,
+                            mid=mmap.get(k, 0.0),
+                            delta=dmap.get(k, -0.50),
+                        ),
+                    )
+                )
+        chains[d] = rows
+    return chains
+
+
+_BYDELTA_10 = ByDelta(target_delta=-0.10, tolerance=0.20)
+
+
+async def _resolve_hold(*, hold_between_rolls, roll_info=None):
+    chains = _hold_chains()
+    return await resolve_option_stream(
+        dates=_DATES,
+        collection="OPT_SP_500",
+        option_type="P",
+        cycle=None,
+        maturity=EndOfMonth(offset_months=1),
+        selection=_BYDELTA_10,
+        stream="mid",
+        chain_reader=FakeChainReader(chains),
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=FakeBulkChainReader(chains),
+        available_expirations=_LISTED,
+        hold_between_rolls=hold_between_rolls,
+        hold_roll_info_out=roll_info,
+    )
+
+
+async def test_eom_plus_hold_freezes_full_contract_per_month():
+    """EndOfMonth + hold_between_rolls: the FULL contract (strike included) is
+    frozen for each monthly hold and re-picked ONLY at the month-end roll.
+
+    ByDelta(-0.10) would churn the STRIKE within the FEB month on the daily path
+    (01-16 → 4400, 02-15 → 4500); the hold pins the FEB-open pick (4400) for the
+    whole FEB segment.  Each monthly segment holds ONE contract:
+      * FEB segment [01-16, 01-31, 02-15] → K=4400 exp=FEB,
+      * MAR segment [02-29, 03-15]        → K=4450 exp=MAR,
+      * APR segment [03-28, 04-01]        → K=4500 exp=APR.
+    """
+    # Reference: the DAILY path DOES churn the strike within the FEB month
+    # (proving the freeze is load-bearing, not a no-op on this fixture).
+    _dv, _de, daily_contracts = await _resolve_hold(hold_between_rolls=False)
+    daily = {d: (c.expiration, c.strike) for d, c in zip(_DATES, daily_contracts)}
+    assert daily[date(2024, 1, 16)] == (_FEB, 4400.0)
+    assert daily[date(2024, 2, 15)] == (_FEB, 4500.0)  # strike churned within FEB
+
+    # HOLD path: the FEB-open pick (4400) is frozen across the whole FEB month.
+    _v, errors, contracts = await _resolve_hold(hold_between_rolls=True)
+    assert all(e is None or e.startswith("snapped_to:") for e in errors), errors
+    held = {d: (c.expiration, c.strike) for d, c in zip(_DATES, contracts)}
+    # FEB segment — one frozen contract despite the intra-month delta drift.
+    assert held[date(2024, 1, 16)] == (_FEB, 4400.0)
+    assert held[date(2024, 1, 31)] == (_FEB, 4400.0)
+    assert held[date(2024, 2, 15)] == (_FEB, 4400.0)  # frozen (daily gave 4500)
+    # MAR segment — re-picked at the Feb month-end roll and frozen.
+    assert held[date(2024, 2, 29)] == (_MAR, 4450.0)
+    assert held[date(2024, 3, 15)] == (_MAR, 4450.0)
+    # APR segment — re-picked at the Mar month-end roll and frozen.
+    assert held[date(2024, 3, 28)] == (_APR, 4500.0)
+    assert held[date(2024, 4, 1)] == (_APR, 4500.0)
+    # Exactly three held contracts across the span (one per month).
+    assert len({(c.expiration, c.strike) for c in contracts}) == 3
+
+
+async def test_eom_plus_hold_roll_markers_and_roll_premium():
+    """EndOfMonth + hold: ``is_roll`` fires on the initial open AND each month-end
+    expiration change; ``roll_premium`` at a roll is the NEW segment's roll-day
+    OPEN mid; the roll-day VALUE is the OLD contract's mid on that day (realise
+    the OLD / open the NEW — the seam the fixed-contract $-P&L consumes).
+    """
+    roll_info: dict = {}
+    values, errors, contracts = await _resolve_hold(
+        hold_between_rolls=True, roll_info=roll_info
+    )
+    assert all(e is None or e.startswith("snapped_to:") for e in errors), errors
+
+    is_roll = np.asarray(roll_info["is_roll"], dtype=bool)
+    roll_premium = np.asarray(roll_info["roll_premium"], dtype=np.float64)
+    by_date = dict(zip(_DATES, range(len(_DATES))))
+
+    # Rolls fire on the initial open (01-16) and each month-end expiration change
+    # (02-29 FEB→MAR, 03-28 MAR→APR) — NOT on the non-roll interior dates.
+    roll_dates = {_DATES[i] for i in range(len(_DATES)) if is_roll[i]}
+    assert roll_dates == {date(2024, 1, 16), date(2024, 2, 29), date(2024, 3, 28)}
+
+    # Initial open (01-16): roll_premium = FEB 4400 open mid (30.0); value = same.
+    i0 = by_date[date(2024, 1, 16)]
+    assert roll_premium[i0] == pytest.approx(30.0)
+    assert values[i0] == pytest.approx(30.0)
+
+    # Feb roll (02-29): the segment's OPEN premium is the NEW (MAR 4450) roll-day
+    # mid (18.0); the date's VALUE is the OLD (FEB 4400) mid on the roll day (24.0)
+    # — so the step ENDING here is the OLD's own move into the roll.
+    i_feb = by_date[date(2024, 2, 29)]
+    assert roll_premium[i_feb] == pytest.approx(18.0)  # MAR 4450 open
+    assert values[i_feb] == pytest.approx(24.0)  # OLD FEB 4400 mid on roll day
+
+    # Mar roll (03-28): NEW = APR 4500 open (19.0); value = OLD MAR 4450 mid (14.0).
+    i_mar = by_date[date(2024, 3, 28)]
+    assert roll_premium[i_mar] == pytest.approx(19.0)  # APR 4500 open
+    assert values[i_mar] == pytest.approx(14.0)  # OLD MAR 4450 mid on roll day
+
+    # An interior (non-roll) date carries the held contract's own mid, no marker.
+    i_mid = by_date[date(2024, 3, 15)]
+    assert not is_roll[i_mid]
+    assert values[i_mid] == pytest.approx(17.0)  # held MAR 4450 mid on 03-15
+
+
+async def test_eom_plus_hold_roll_markers_match_derive_rolls():
+    """The hold-mode held-contract array yields the SAME monthly roll dates as
+    ``derive_rolls`` reports (FEB→MAR on 02-29, MAR→APR on 03-28) — the roll
+    markers and the display roll events agree under EOM+hold."""
+    values, _errors, contracts = await _resolve_hold(hold_between_rolls=True)
+    iso = [d.isoformat() for d in _DATES]
+    vals = [None if np.isnan(v) else float(v) for v in values]
+    rolls = derive_rolls(iso, vals, contracts)
+    assert [r["date"] for r in rolls] == ["2024-02-29", "2024-03-28"]
+    assert rolls[0]["sold"]["expiration"] == _FEB.isoformat()
+    assert rolls[0]["bought"]["expiration"] == _MAR.isoformat()
+    assert rolls[1]["sold"]["expiration"] == _MAR.isoformat()
+    assert rolls[1]["bought"]["expiration"] == _APR.isoformat()
