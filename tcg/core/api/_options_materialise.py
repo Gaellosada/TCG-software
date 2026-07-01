@@ -134,8 +134,13 @@ async def materialise_option_streams(
     if not trade_dates:
         return "option_stream requires explicit ISO 'start' and 'end' dates"
 
+    # Pass the resolve window so the futures adapter memoizes the underlying: one
+    # ranged fetch per distinct future over the window instead of one single-date
+    # fetch per trade date (the ByMoneyness/ByDelta Phase-C N+1).  Result-invariant.
+    # trade_dates is non-empty here, so the window spans every date we look up.
+    _prefetch = (trade_dates[0], trade_dates[-1])
     chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
-        svc
+        svc, underlying_prefetch_window=_prefetch
     )
 
     # Process-wide dwh-pool concurrency gate: streams here resolve sequentially,

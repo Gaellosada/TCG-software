@@ -373,10 +373,11 @@ async def test_compute_basket_series_option_leg_parity_with_in_signal_path(
     svc = MagicMock()
     svc.list_option_expirations_filtered = AsyncMock(return_value=_OPT_EXPIRATIONS)
 
-    # Same stubs the in-signal option-stream suite uses.
+    # Same stubs the in-signal option-stream suite uses (accept the optional
+    # underlying_prefetch_window kwarg the perf memo threads through).
     monkeypatch.setattr(
         "tcg.core.api._options_wiring.build_stream_resolver_wiring",
-        lambda _svc: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
     )
 
     async def fake_resolve(*, dates, **_kw):

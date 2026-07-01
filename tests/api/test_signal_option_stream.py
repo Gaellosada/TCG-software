@@ -129,11 +129,12 @@ def mock_app(monkeypatch):
     svc.get_prices = AsyncMock(return_value=_price_series())
     svc.list_option_expirations_filtered = AsyncMock(return_value=AVAILABLE_EXPIRATIONS)
 
-    # Mock the wiring factory to return stubs
+    # Mock the wiring factory to return stubs (accept the optional
+    # underlying_prefetch_window kwarg the perf memo threads through).
     mock_wiring = (MagicMock(), MagicMock(), MagicMock(), MagicMock())
     monkeypatch.setattr(
         "tcg.core.api._options_wiring.build_stream_resolver_wiring",
-        lambda svc: mock_wiring,
+        lambda svc, **_kw: mock_wiring,
     )
 
     # Mock resolve_option_stream — 3-tuple (values, diagnostics, contracts).
@@ -295,7 +296,7 @@ def capture_app(monkeypatch):
     mock_wiring = (MagicMock(), MagicMock(), MagicMock(), MagicMock())
     monkeypatch.setattr(
         "tcg.core.api._options_wiring.build_stream_resolver_wiring",
-        lambda svc: mock_wiring,
+        lambda svc, **_kw: mock_wiring,
     )
 
     async def recording_resolve(**kwargs):

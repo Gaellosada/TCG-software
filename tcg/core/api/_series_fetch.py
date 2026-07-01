@@ -411,9 +411,15 @@ def make_signal_fetcher(
             if not trade_dates:
                 raise SignalDataError("option_stream requires explicit start/end dates")
 
-            # Build wiring once per signal evaluation, capture in closure.
+            # Build wiring once per signal evaluation, capture in closure.  Pass the
+            # fetcher window so the futures adapter memoizes the underlying (one
+            # ranged fetch per distinct future, not per trade date — the Phase-C
+            # N+1).  All option legs share this window, so the cache is reused
+            # across legs; result-invariant.
             if "wiring" not in _os_wiring_cache:
-                _os_wiring_cache["wiring"] = build_stream_resolver_wiring(svc)
+                _os_wiring_cache["wiring"] = build_stream_resolver_wiring(
+                    svc, underlying_prefetch_window=(trade_dates[0], trade_dates[-1])
+                )
             chain_reader, mat_resolver, ul_resolver, bulk_reader = _os_wiring_cache[
                 "wiring"
             ]

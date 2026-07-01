@@ -226,10 +226,68 @@ class _FuturesDataPortAdapter:
     ``"FUT_SP_500_EMINI_20240621"`` — which Module 1 surfaces from the
     OPT_* document.  We use ``MarketDataService.get_prices`` to read the
     contract's series and find the date.
+
+    Per-resolve memoization (perf)
+    ------------------------------
+    The option-stream resolver's ByMoneyness/ByDelta Phase C resolves the
+    underlying future PER TRADE DATE — but all dates of an expiration share ONE
+    front-quarterly future, so a naive per-date single-date ``get_prices`` is
+    ~97% redundant (the OPT_SP_500 portfolio-leg N+1: ~1500 fetches for ~36
+    distinct futures).  When ``prefetch_window`` is supplied, the FIRST close
+    lookup for a given ``contract_ref`` fetches that future's closes over the
+    WHOLE window in one ranged ``get_prices`` (mirroring
+    ``_batch_underlying_prices``) and caches ``{trade_date: close}``; every later
+    date is served from the cache.  The front-FUT id resolution
+    (``find_front_...``) is memoized too, per ``(collection, expiration_int)``.
+
+    RESULT-INVARIANT: the cached close for a date is exactly the value a
+    single-date fetch would return (same stored data) — only the number of
+    round-trips changes.  The cache is scoped to ONE adapter instance = ONE
+    resolve (a fresh adapter is built per ``build_stream_resolver_wiring`` call),
+    so there is no cross-request staleness.  ``prefetch_window=None`` preserves
+    the exact prior per-date behaviour.
     """
 
-    def __init__(self, market_data: MarketDataService) -> None:
+    def __init__(
+        self,
+        market_data: MarketDataService,
+        prefetch_window: "tuple[date, date] | None" = None,
+    ) -> None:
         self._md = market_data
+        self._prefetch_window = prefetch_window
+        # contract_ref -> {trade_date_int: close}; None marks a fetch that failed
+        # or returned nothing (so we don't re-hit the dwh for that future).
+        self._close_cache: dict[str, dict[int, float] | None] = {}
+        # (kind, collection, expiration_int) -> resolved FUT id (or None); ``kind``
+        # ("exact" | "front") separates the VIX exact-match namespace from the
+        # front-quarterly (>=) namespace so they never collide on the same key.
+        self._front_id_cache: dict[tuple[str, str, int], str | None] = {}
+
+    async def _window_closes(
+        self, collection: str, contract_ref: str
+    ) -> dict[int, float] | None:
+        """Return (and cache) ``{trade_date_int: close}`` for ``contract_ref`` over
+        the prefetch window, fetched in ONE ranged ``get_prices``.  Cached per
+        adapter (per resolve)."""
+        if contract_ref in self._close_cache:
+            return self._close_cache[contract_ref]
+        assert self._prefetch_window is not None
+        start, end = self._prefetch_window
+        try:
+            series = await self._md.get_prices(
+                collection, contract_ref, start=start, end=end
+            )
+        except Exception:  # noqa: BLE001
+            self._close_cache[contract_ref] = None
+            return None
+        if series is None or len(series) == 0:
+            self._close_cache[contract_ref] = None
+            return None
+        closes = {
+            int(d): float(series.close[i]) for i, d in enumerate(series.dates.tolist())
+        }
+        self._close_cache[contract_ref] = closes
+        return closes
 
     async def get_futures_close_on_date(
         self,
@@ -237,6 +295,14 @@ class _FuturesDataPortAdapter:
         contract_ref: str,
         target_date: date,
     ) -> float | None:
+        target_int = date_to_int(target_date)
+        # Memoized path: serve from the one ranged fetch per future.
+        if self._prefetch_window is not None:
+            closes = await self._window_closes(collection, contract_ref)
+            if closes is None:
+                return None
+            return closes.get(target_int)
+        # Legacy per-date path (unchanged) when no window was supplied.
         try:
             series = await self._md.get_prices(
                 collection,
@@ -248,7 +314,6 @@ class _FuturesDataPortAdapter:
             return None
         if series is None or len(series) == 0:
             return None
-        target_int = date_to_int(target_date)
         for idx, d in enumerate(series.dates.tolist()):
             if int(d) == target_int:
                 return float(series.close[idx])
@@ -274,12 +339,17 @@ class _FuturesDataPortAdapter:
         rather than reaching into private attributes.
         """
         expiration_int = date_to_int(expiration)
-        try:
-            contract_ref = await self._md.find_futures_contract_by_expiration(
-                collection, expiration_int
-            )
-        except Exception:  # noqa: BLE001
-            return None
+        key = ("exact", collection, expiration_int)
+        if key in self._front_id_cache:
+            contract_ref = self._front_id_cache[key]
+        else:
+            try:
+                contract_ref = await self._md.find_futures_contract_by_expiration(
+                    collection, expiration_int
+                )
+            except Exception:  # noqa: BLE001
+                contract_ref = None
+            self._front_id_cache[key] = contract_ref
         if contract_ref is None:
             return None
         return await self.get_futures_close_on_date(
@@ -303,15 +373,23 @@ class _FuturesDataPortAdapter:
         against the front quarterly future.  Delegates to the public
         ``MarketDataService.find_front_futures_contract_on_or_after`` (no private
         attribute access).  Returns ``None`` when no future expires on/after the
-        option or the resolved contract has no bar for ``target_date``.
+        option or the resolved contract has no bar for ``target_date``.  The
+        resolved front-FUT id is memoized per ``(collection, expiration_int)`` so
+        the ~N-per-window per-date lookups collapse to one id resolution per
+        distinct expiration (see the class docstring).
         """
         expiration_int = date_to_int(expiration)
-        try:
-            contract_ref = await self._md.find_front_futures_contract_on_or_after(
-                collection, expiration_int
-            )
-        except Exception:  # noqa: BLE001
-            return None
+        key = ("front", collection, expiration_int)
+        if key in self._front_id_cache:
+            contract_ref = self._front_id_cache[key]
+        else:
+            try:
+                contract_ref = await self._md.find_front_futures_contract_on_or_after(
+                    collection, expiration_int
+                )
+            except Exception:  # noqa: BLE001
+                contract_ref = None
+            self._front_id_cache[key] = contract_ref
         if contract_ref is None:
             return None
         return await self.get_futures_close_on_date(
@@ -432,6 +510,7 @@ def build_options_chain(market_data: MarketDataService) -> DefaultOptionsChain:
 
 def build_stream_resolver_wiring(
     market_data: MarketDataService,
+    underlying_prefetch_window: "tuple[date, date] | None" = None,
 ) -> tuple[
     CachedChainReader,
     DefaultMaturityResolver,
@@ -445,6 +524,13 @@ def build_stream_resolver_wiring(
     engine layer (so the engine never imports from ``tcg.data`` or
     ``tcg.core``).  This factory hands the engine the four live
     components without imposing the selector class on it.
+
+    ``underlying_prefetch_window`` (``(start, end)``): passed to the futures
+    adapter so the per-date underlying lookups (ByMoneyness/ByDelta Phase C)
+    collapse to ONE ranged fetch per distinct future over that window instead of
+    a single-date fetch per trade date (the OPT_SP_500 portfolio-leg N+1).
+    Result-invariant memoization scoped to THIS wiring (one resolve); ``None``
+    keeps the per-date behaviour.  Callers pass their resolve window.
 
     Returns
     -------
@@ -468,7 +554,9 @@ def build_stream_resolver_wiring(
     bulk = _BulkOptionsDataPortAdapter(reader)
     maturity_resolver = DefaultMaturityResolver()
     index_port = _IndexDataPortAdapter(market_data)
-    futures_port = _FuturesDataPortAdapter(market_data)
+    futures_port = _FuturesDataPortAdapter(
+        market_data, prefetch_window=underlying_prefetch_window
+    )
     underlying_resolver = _build_underlying_resolver(index_port, futures_port)
     return cached, maturity_resolver, underlying_resolver, bulk
 
