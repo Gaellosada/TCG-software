@@ -246,9 +246,17 @@ class TestFuturesBranch:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_futures_branch_with_missing_underlying_ref_returns_none(self) -> None:
-        # Defensive: option-on-future contract lacking the underlying_ref
-        # cannot be joined; do not attempt a guess.
+    async def test_futures_branch_missing_underlying_ref_falls_back_to_front_quarterly(
+        self,
+    ) -> None:
+        # NEW CONTRACT (PR #67 fix D): the dwh SQL reader never populates
+        # ``underlying_ref``, so an option-on-future with ``underlying_ref=None``
+        # must FALL BACK to the FRONT-QUARTERLY future (nearest FUT_* with
+        # expiration >= the option's) — the Black-76 forward — NOT return None.
+        # (Previously this asserted ``return None``, which made every
+        # SP500/NASDAQ by-moneyness/delta series all-NaN.)  On-or-after (not exact)
+        # so SERIAL/weekly months — which have no own future — map to the front
+        # quarterly (e.g. a July option → the September future).
         contract = _make_contract(
             collection="OPT_NASDAQ_100",
             root_underlying="IND_NASDAQ_100",
@@ -257,6 +265,7 @@ class TestFuturesBranch:
         row = _make_row(target_date=date(2024, 6, 21))
         index_port = AsyncMock()
         futures_port = AsyncMock()
+        futures_port.get_futures_close_on_or_after_expiration.return_value = 19850.0
 
         result = await resolve_underlying_price(
             contract=contract,
@@ -266,7 +275,11 @@ class TestFuturesBranch:
             futures_port=futures_port,
         )
 
-        assert result is None
+        assert result == 19850.0
+        futures_port.get_futures_close_on_or_after_expiration.assert_awaited_once_with(
+            "FUT_NASDAQ_100", date(2024, 6, 21), date(2024, 6, 21)
+        )
+        # The legacy per-contract-ref path is NOT used when underlying_ref is None.
         futures_port.get_futures_close_on_date.assert_not_awaited()
 
 
@@ -345,9 +358,7 @@ class TestSharedVixForward:
         )
         futures_port = AsyncMock()
 
-        result = await resolve_vix_forward(
-            contract, futures_port, date(2024, 6, 21)
-        )
+        result = await resolve_vix_forward(contract, futures_port, date(2024, 6, 21))
 
         assert result is None
         futures_port.get_futures_close_by_expiration.assert_not_awaited()
@@ -392,4 +403,3 @@ class TestSharedVixForward:
         result = await resolve_vix_futures_ref(contract, svc)
 
         assert result is None
-

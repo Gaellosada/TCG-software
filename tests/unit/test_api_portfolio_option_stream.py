@@ -305,6 +305,142 @@ class TestPortfolioOptionStream:
         assert expected_keys <= set(metrics.keys())
 
 
+# ── Actionable all-NaN diagnostics (Issue #2 seam 1b) ───────────────────
+
+
+class TestPortfolioOptionStreamAllNanDiagnostics:
+    """When a price-like option leg is all-NaN, the 400 must fold in the
+    DISCARDED per-date diagnostics (the ``error_codes`` list) so the user
+    learns WHY — the dominant cause + an actionable hint — instead of a blunt
+    'all option stream values are NaN'."""
+
+    def _nan_with_diags(self, diags):
+        async def _materialise(
+            refs_with_labels, *, svc, start_date, end_date, progress_callback=None
+        ):
+            label = refs_with_labels[0][0]
+            d = np.array(DATES, dtype=np.int64)
+            v = np.full(len(DATES), np.nan, dtype=np.float64)
+            return {label: (d, v, list(diags), [None] * len(DATES))}
+
+        return _materialise
+
+    async def _post_optmid_only(self, client):
+        body = {
+            "legs": {"OPT_MID": OPT_MID_LEG},
+            "weights": {"OPT_MID": 100},
+            "rebalance": "none",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        return await client.post("/api/portfolio/compute", json=body)
+
+    async def test_all_nan_message_names_dominant_missing_delta(
+        self, client, monkeypatch
+    ):
+        """ByDelta over a no-stored-greeks range: every date is
+        ``missing_delta_no_compute`` -> the 400 names that cause and steers the
+        user to By Moneyness / By Strike or a range with greeks."""
+        diags = ["missing_delta_no_compute"] * len(DATES)
+        monkeypatch.setattr(
+            "tcg.core.api.portfolio.materialise_option_streams",
+            self._nan_with_diags(diags),
+        )
+        resp = await self._post_optmid_only(client)
+        assert resp.status_code == 400, resp.text
+        msg = resp.json()["message"]
+        # Keeps the original phrase as a prefix...
+        assert "all option stream values are NaN" in msg
+        # ...and adds the dominant cause + an actionable hint.
+        assert "missing_delta_no_compute" in msg
+        assert "greeks" in msg.lower()
+        assert ("moneyness" in msg.lower()) or ("strike" in msg.lower())
+
+    async def test_all_nan_message_names_dominant_missing_mid(
+        self, client, monkeypatch
+    ):
+        """Sparse quotes: every date is ``missing_mid`` -> the 400 names that
+        cause and mentions bid/ask quotes."""
+        diags = ["missing_mid"] * len(DATES)
+        monkeypatch.setattr(
+            "tcg.core.api.portfolio.materialise_option_streams",
+            self._nan_with_diags(diags),
+        )
+        resp = await self._post_optmid_only(client)
+        assert resp.status_code == 400, resp.text
+        msg = resp.json()["message"]
+        assert "all option stream values are NaN" in msg
+        assert "missing_mid" in msg
+        assert ("bid" in msg.lower()) or ("quote" in msg.lower())
+
+    async def test_all_nan_message_handles_no_chain(self, client, monkeypatch):
+        """Maturity rule whose (post-snap) expiration still isn't listed:
+        ``no_chain_for_date`` -> the 400 names that cause and mentions the
+        expiration not being listed for the root."""
+        diags = ["no_chain_for_date"] * len(DATES)
+        monkeypatch.setattr(
+            "tcg.core.api.portfolio.materialise_option_streams",
+            self._nan_with_diags(diags),
+        )
+        resp = await self._post_optmid_only(client)
+        assert resp.status_code == 400, resp.text
+        msg = resp.json()["message"]
+        assert "no_chain_for_date" in msg
+        assert ("expiration" in msg.lower()) or ("listed" in msg.lower())
+
+    async def test_all_nan_message_robust_when_no_diagnostics(
+        self, client, monkeypatch
+    ):
+        """Defensive: an all-None diagnostics list (no per-date code) still
+        produces the base message without crashing."""
+        diags = [None] * len(DATES)
+        monkeypatch.setattr(
+            "tcg.core.api.portfolio.materialise_option_streams",
+            self._nan_with_diags(diags),
+        )
+        resp = await self._post_optmid_only(client)
+        assert resp.status_code == 400, resp.text
+        assert "all option stream values are NaN" in resp.json()["message"]
+
+
+class TestPortfolioOptionStreamDisjointDates:
+    """When an option leg's dates don't overlap the other legs', the
+    'No overlapping dates' 400 must name option legs as a common cause
+    (Issue #2 seam 1c) — the old message mentioned only instrument/signal."""
+
+    async def test_disjoint_option_dates_message_mentions_options(
+        self, client, monkeypatch
+    ):
+        # Option leg materialises on dates far from the instrument's DATES.
+        disjoint = [20200102, 20200103, 20200106]
+
+        async def disjoint_materialise(
+            refs_with_labels, *, svc, start_date, end_date, progress_callback=None
+        ):
+            label = refs_with_labels[0][0]
+            d = np.array(disjoint, dtype=np.int64)
+            v = np.array([5.0, 5.1, 5.2], dtype=np.float64)
+            return {label: (d, v, [None] * 3, [None] * 3)}
+
+        monkeypatch.setattr(
+            "tcg.core.api.portfolio.materialise_option_streams",
+            disjoint_materialise,
+        )
+        body = {
+            "legs": {"SPX": SPX_LEG, "OPT_MID": OPT_MID_LEG},
+            "weights": {"SPX": 50, "OPT_MID": 50},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2019-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 400, resp.text
+        msg = resp.json()["message"].lower()
+        assert "no overlapping dates" in msg
+        assert "option" in msg
+
+
 # ── roll_offset threading + adjustment-removal (the MAJOR review finding) ─
 
 
@@ -328,9 +464,11 @@ class TestPortfolioOptionStreamRollFields:
         ):
             label, ref = refs_with_labels[0]
             captured["ref"] = ref
-            # Base 5.0; roll_offset nudges the level (proves it is carried).
-            # Option streams have no adjustment, so the level never depends on it.
-            base = 5.0 + 0.1 * ref.roll_offset
+            # Base 5.0; the roll-offset VALUE nudges the level (proves it is
+            # carried).  ``ref.roll_offset`` is the unified RollOffset({value,
+            # unit}); read ``.value``.  Option streams have no adjustment, so the
+            # level never depends on it.
+            base = 5.0 + 0.1 * ref.roll_offset.value
             v = np.array([base + 0.1 * i for i in range(len(DATES))], dtype=np.float64)
             d = np.array(DATES, dtype=np.int64)
             return {label: (d, v, [None] * len(DATES), [None] * len(DATES))}
@@ -365,24 +503,47 @@ class TestPortfolioOptionStreamRollFields:
         """A stray ``adjustment`` leg key is ignored: the built OptionStreamRef
         has no ``adjustment`` attribute (option streams carry no
         back-adjustment)."""
+        from tcg.core.api._models_options import RollOffset
+
         client, captured = capture_client
         leg = {**OPT_MID_LEG, "adjustment": "ratio"}
         await self._equity(client, leg)
         assert not hasattr(captured["ref"], "adjustment")
-        assert captured["ref"].roll_offset == 0
+        assert captured["ref"].roll_offset == RollOffset()
 
-    async def test_roll_offset_threaded_into_ref(self, capture_client):
+    async def test_roll_offset_days_threaded_into_ref(self, capture_client):
+        from tcg.core.api._models_options import RollOffset
+
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "roll_offset": 5}
+        leg = {**OPT_MID_LEG, "roll_offset": {"value": 5, "unit": "days"}}
         await self._equity(client, leg)
-        assert captured["ref"].roll_offset == 5
+        assert captured["ref"].roll_offset == RollOffset(value=5, unit="days")
         assert not hasattr(captured["ref"], "adjustment")
 
+    async def test_roll_offset_months_threaded_into_ref(self, capture_client):
+        from tcg.core.api._models_options import RollOffset
+
+        client, captured = capture_client
+        leg = {**OPT_MID_LEG, "roll_offset": {"value": 2, "unit": "months"}}
+        await self._equity(client, leg)
+        assert captured["ref"].roll_offset == RollOffset(value=2, unit="months")
+
+    async def test_legacy_int_roll_offset_reads_as_days(self, capture_client):
+        """BACK-COMPAT: a persisted bare int leg roll_offset reads as days."""
+        from tcg.core.api._models_options import RollOffset
+
+        client, captured = capture_client
+        leg = {**OPT_MID_LEG, "roll_offset": 7}
+        await self._equity(client, leg)
+        assert captured["ref"].roll_offset == RollOffset(value=7, unit="days")
+
     async def test_defaults_when_absent(self, capture_client):
+        from tcg.core.api._models_options import RollOffset
+
         client, captured = capture_client
         await self._equity(client, OPT_MID_LEG)
         assert not hasattr(captured["ref"], "adjustment")
-        assert captured["ref"].roll_offset == 0
+        assert captured["ref"].roll_offset == RollOffset()
 
     async def test_stray_adjustment_does_not_change_series(self, capture_client):
         """A stray ``adjustment`` leg key must NOT change the equity curve —
@@ -395,13 +556,34 @@ class TestPortfolioOptionStreamRollFields:
     async def test_roll_offset_series_differs_from_default(self, capture_client):
         client, _captured = capture_client
         eq_default = await self._equity(client, OPT_MID_LEG)
-        eq_rolled = await self._equity(client, {**OPT_MID_LEG, "roll_offset": 7})
+        eq_rolled = await self._equity(
+            client, {**OPT_MID_LEG, "roll_offset": {"value": 7, "unit": "days"}}
+        )
         assert eq_default != eq_rolled
 
-    async def test_roll_offset_out_of_range_rejected(self, capture_client):
+    async def test_roll_offset_days_out_of_range_rejected(self, capture_client):
         client, _captured = capture_client
         body = {
-            "legs": {"SPX": SPX_LEG, "OPT": {**OPT_MID_LEG, "roll_offset": 31}},
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT": {**OPT_MID_LEG, "roll_offset": {"value": 31, "unit": "days"}},
+            },
+            "weights": {"SPX": 50, "OPT": 50},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code in (400, 422), resp.text
+
+    async def test_roll_offset_months_out_of_range_rejected(self, capture_client):
+        client, _captured = capture_client
+        body = {
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT": {**OPT_MID_LEG, "roll_offset": {"value": 13, "unit": "months"}},
+            },
             "weights": {"SPX": 50, "OPT": 50},
             "rebalance": "none",
             "return_type": "normal",
@@ -428,3 +610,16 @@ class TestPortfolioOptionStreamRollFields:
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200, resp.text
+
+    # ── "Roll at end of month" is the EndOfMonth maturity, not a schedule ──
+
+    async def test_end_of_month_maturity_threaded_into_ref(self, capture_client):
+        """A portfolio option leg with the EndOfMonth maturity threads it into
+        the OptionStreamRef (the monthly-hold roll trigger); there is no
+        ``roll_schedule`` attribute on the ref any more."""
+        client, captured = capture_client
+        leg = {**OPT_MID_LEG, "maturity": {"kind": "end_of_month", "offset_months": 1}}
+        await self._equity(client, leg)
+        assert captured["ref"].maturity.kind == "end_of_month"
+        assert captured["ref"].maturity.offset_months == 1
+        assert not hasattr(captured["ref"], "roll_schedule")

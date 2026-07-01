@@ -14,7 +14,7 @@
 // continuous-series payload. Mirrors ContinuousOptionsChart.test.jsx.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, waitFor } from '@testing-library/react';
+import { render, cleanup, waitFor, screen, fireEvent } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before the component import (vitest hoists them).
@@ -317,5 +317,42 @@ describe('ContinuousChart — vertical-line removal (regression guards)', () => 
 
     expect(capturedChartProps.layoutOverrides).toBeTruthy();
     expect(capturedChartProps.layoutOverrides.yaxis3).toBeUndefined();
+  });
+});
+
+describe('ContinuousChart — roll strategy control (Issue #3)', () => {
+  it('defaults the query to strategy=front_month', async () => {
+    mockSeriesResult = makePayload({
+      dates: [20240101, 20240102],
+      close: [100, 101],
+      roll_dates: [],
+      contracts: ['ESH24'],
+    });
+    render(<ContinuousChart collection="FUT_ES" />);
+    await waitFor(() => expect(mockGetContinuousSeries).toHaveBeenCalled());
+    const firstCall = mockGetContinuousSeries.mock.calls[0];
+    expect(firstCall[1]).toMatchObject({ strategy: 'front_month' });
+  });
+
+  it('re-queries with strategy=end_of_month when the select changes', async () => {
+    mockSeriesResult = makePayload({
+      dates: [20240101, 20240102],
+      close: [100, 101],
+      roll_dates: [],
+      contracts: ['ESH24'],
+    });
+    render(<ContinuousChart collection="FUT_ES" />);
+    // Controls render only after the series resolves (loading guard) — wait for
+    // the Chart to mount, which means the controls panel is present.
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+
+    fireEvent.change(screen.getByLabelText(/Roll strategy/i), {
+      target: { value: 'end_of_month' },
+    });
+
+    await waitFor(() => {
+      const last = mockGetContinuousSeries.mock.calls.at(-1);
+      expect(last[1]).toMatchObject({ strategy: 'end_of_month' });
+    });
   });
 });

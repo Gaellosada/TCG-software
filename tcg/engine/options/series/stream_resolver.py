@@ -57,13 +57,15 @@ materialiser issues, per trade date::
     else:                             1 chain query
         - direct query at the resolved expiration
 
-For an N-day backtest this is N (or 2N for NearestToTarget) Mongo
+For an N-day backtest this is N (or 2N for NearestToTarget) dwh
 round-trips.  The per-date tasks run **concurrently** under
 ``asyncio.gather`` with a bounded semaphore (see
 :data:`_MAX_INFLIGHT_PER_DATE`) — wall-clock latency is therefore
-roughly ``ceil(N / _MAX_INFLIGHT_PER_DATE) × Mongo_RTT``, not
-``N × Mongo_RTT`` as a serial loop would give.  Total query count is
-unchanged from the serial loop.
+roughly ``ceil(N / _MAX_INFLIGHT_PER_DATE) × dwh_RTT``, not
+``N × dwh_RTT`` as a serial loop would give.  Total query count is
+unchanged from the serial loop.  The semaphore is sized to the dwh
+connection pool (``_DWH_RESOLVE_CONCURRENCY``) — each concurrent task
+holds a pool connection, so the fan-out must stay within ``max_size``.
 """
 
 from __future__ import annotations
@@ -78,6 +80,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from tcg.engine.options.maturity.protocol import MaturityResolver
+from tcg.engine.options.maturity.resolver import _add_months, last_trading_day_of_month
 from tcg.engine.options.selection._match import (
     match_by_delta,
     match_by_moneyness,
@@ -87,14 +90,17 @@ from tcg.engine.options.selection._ports import (
     UnderlyingPriceResolver,
 )
 from tcg.engine.options.selection.selector import DefaultOptionsSelector
+from tcg.types.market import DEFAULT_DWH_POOL_MAX_SIZE
 from tcg.types.options import (
     ByDelta,
     ByMoneyness,
     ByStrike,
+    EndOfMonth,
     MaturitySpec,
     NearestToTarget,
     OptionContractDoc,
     OptionDailyRow,
+    RollOffset,
     SelectionCriterion,
     SelectionResult,
 )
@@ -102,13 +108,25 @@ from tcg.types.options import (
 _log = logging.getLogger(__name__)
 
 
-# Bounded concurrency for the per-date resolver loop.  Each task holds
-# a Motor connection for the full cursor iteration of its chain query;
-# large collections (OPT_SP_500: 418K docs) produce long-lived cursors
-# that starve the pool when too many run in parallel.  16 keeps
-# wall-clock latency reasonable while leaving ample headroom in Motor's
-# default 100-slot pool for underlying-price lookups and other activity.
-_MAX_INFLIGHT_PER_DATE = 16
+# Bounded concurrency for the resolver's per-date / per-expiration chain
+# queries.  Each concurrent task independently acquires a dwh pool connection
+# (``async with pool.connection()``), so the resolver's fan-out MUST stay within
+# the pool's capacity or callers block on ``pool.connection()`` past the 30s
+# acquire window → ``PoolTimeout`` (this is exactly the OPT_SP_500 basket-load
+# failure: a 2-year window has ~95 expirations → ~95 fetch tasks vying for a
+# 4-slot pool).
+#
+# DERIVE the cap from the single source of truth ``DEFAULT_DWH_POOL_MAX_SIZE``
+# (in ``tcg.types.market``, also the pool's ``max_size`` default) so the two
+# cannot drift — reserve ONE slot for the interleaved ``list_expirations`` /
+# underlying-price / spot-map lookups that share the same pool.  At max_size=4
+# this is 3.  (NOTE: previously 16/8, sized for the OLD Mongo/Motor 100-slot
+# pool and never re-tuned after the Postgres cutover (#58) — that over-
+# subscription is what caused the PoolTimeout.)
+_DWH_RESOLVE_CONCURRENCY = max(1, DEFAULT_DWH_POOL_MAX_SIZE - 1)
+
+# Per-date fallback path cap (was 16). Capped at the pool-derived concurrency.
+_MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
 
 
 # Streams readable off ``OptionDailyRow``.  Mirrors the Pydantic
@@ -147,6 +165,41 @@ def _missing_code_for(stream: str) -> str:
     diagnostic surface specific (a frontend filter can show
     ``missing_iv`` separately from ``missing_delta``)."""
     return f"missing_{stream}"
+
+
+def _apply_roll_offset(d: date, roll_offset: RollOffset) -> date:
+    """Shift ``d`` forward by the ROLL-EARLY offset (``days`` or ``months``).
+
+    The maturity rule is resolved as of the shifted date, so a positive offset
+    makes every roll fire that much earlier.  ``months`` uses the same
+    month-arithmetic (day clamped to month-end) as the maturity resolver's own
+    ``offset_months`` so the two month axes behave consistently.  ``value == 0``
+    returns ``d`` unchanged (the common no-op default)."""
+    if roll_offset.value == 0:
+        return d
+    if roll_offset.unit == "months":
+        return _add_months(d, roll_offset.value)
+    return d + timedelta(days=roll_offset.value)
+
+
+def _snap_to_listed(target: date, listed: Sequence[date]) -> date | None:
+    """Snap an arithmetic-maturity *target* to the nearest LISTED expiration.
+
+    Mirrors ``NearestToTarget`` (no distance cap, decision D2): the
+    arithmetic-maturity rules compute a target date that may not correspond to
+    any real contract; this snaps it to the closest expiration the root
+    actually lists.  Tie-break: the EARLIER expiration wins (parity with the
+    ``(delta, dte)`` tie-break in ``resolve_with_chain`` — a smaller-DTE / earlier
+    contract is preferred when equidistant).
+
+    Returns the snapped expiration, or ``None`` when *listed* is empty (caller
+    then keeps the raw arithmetic target / its existing fallback).
+    """
+    if not listed:
+        return None
+    # listed is pre-sorted ascending by the caller; min() with a stable key
+    # therefore returns the earliest on a tie.
+    return min(listed, key=lambda e: (abs((e - target).days), e))
 
 
 @runtime_checkable
@@ -299,7 +352,7 @@ async def _resolve_bulk(
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
-    roll_offset: int = 0,
+    roll_offset: RollOffset = RollOffset(),
     chain_reader: _CycleAwareReader,
     bulk_chain_reader: _CycleAwareBulkReader,
     maturity_resolver: MaturityResolver,
@@ -307,6 +360,7 @@ async def _resolve_bulk(
     last_trade_date: date | None,
     progress_callback: Callable[[], None] | None,
     available_expirations: Sequence[date] | None,
+    concurrency_gate: "asyncio.Semaphore | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
@@ -352,6 +406,11 @@ async def _resolve_bulk(
     # enumerate available expirations; for other rules it is pure date
     # arithmetic with no I/O.
     expirations: dict[int, date | None] = {}  # index → resolved expiration
+    # index → "snapped_to:<iso>" note for arithmetic targets that were snapped
+    # to a listed expiration.  Folded into ``error_codes`` AFTER Phase C, only
+    # for dates that resolved to a real value (a success-side diagnostic; the
+    # failure channel must stay clean so Phase C still runs selection).
+    snap_notes: dict[int, str] = {}
 
     if isinstance(maturity, NearestToTarget):
         if queryable:
@@ -391,18 +450,118 @@ async def _resolve_bulk(
                 if not available:
                     expirations[idx] = None
                 else:
-                    # roll_offset: resolve maturity as of (d + roll_offset) so
-                    # every roll happens roll_offset calendar days earlier.
+                    # roll_offset (ROLL-EARLY axis): resolve maturity as of
+                    # (d + offset) so every roll happens that much earlier.
                     expirations[idx] = maturity_resolver.resolve_with_chain(
-                        ref_date=d + timedelta(days=roll_offset),
+                        ref_date=_apply_roll_offset(d, roll_offset),
                         rule=maturity,
                         available_expirations=available,
                     )
     else:
-        for idx, d in queryable:
-            expirations[idx] = maturity_resolver.resolve(
-                ref_date=d + timedelta(days=roll_offset), rule=maturity
-            )
+        # Pure date-arithmetic rules (EndOfMonth / PlusNDays / FixedDate /
+        # NextThirdFriday) compute a target expiration with no chain-existence
+        # check.  When the caller supplied the root's listed expirations, SNAP
+        # the arithmetic target to the nearest listed one (decision D2:
+        # unconditional, like NearestToTarget which has no distance cap) so a
+        # target that no contract matches (daily-expiry roots, sparse listings)
+        # no longer produces a silent all-NaN ``no_chain_for_date`` series.  A
+        # per-date ``snapped_to:<iso>`` diagnostic records the substitution.
+        listed = sorted(available_expirations) if available_expirations else []
+
+        def _resolve_arith(idx: int, d: date) -> tuple[date | None, str | None]:
+            """Resolve the arithmetic maturity for one ref date ``d``.
+
+            Returns ``(expiration_or_None, snap_note_or_None)``.  On a resolver
+            failure it sets ``error_codes[idx] = "maturity_resolution_failed"``
+            (hardening finding D — a non-TCGError, e.g. a calendar month with
+            zero business days, must become a per-date NaN, not a 500) and
+            returns ``(None, None)``.  Issue #2's snap-to-listed is applied here
+            so it is preserved on BOTH the per-date and the EOM-roll (held) path.
+            """
+            try:
+                target = maturity_resolver.resolve(
+                    ref_date=_apply_roll_offset(d, roll_offset), rule=maturity
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Dedicated code (distinct from ``no_chain_for_date``): the
+                # maturity RULE itself could not be resolved, not "the chain has
+                # no contract on the computed date".  Phase B preserves an
+                # already-set code, so this survives the ``exp is None`` branch.
+                error_codes[idx] = "maturity_resolution_failed"
+                _log.debug("maturity resolve failed date=%s: %s", d, exc)
+                return None, None
+            snapped = _snap_to_listed(target, listed)
+            if snapped is not None and snapped != target:
+                # ``snapped_to:`` is a SUCCESS-side note (the value array is the
+                # source of truth for NaN-ness); it is folded into ``error_codes``
+                # AFTER Phase C only on dates that still resolved to a real value.
+                return snapped, f"snapped_to:{snapped.isoformat()}"
+            return target, None
+
+        if isinstance(maturity, EndOfMonth):
+            # END-OF-MONTH roll (Issue #3, now triggered by the maturity itself):
+            # choosing ``EndOfMonth`` as the maturity IS the request to roll at
+            # month-end, so hold one contract per month — re-resolve the maturity
+            # only on the last TRADING day of each month (and unconditionally on
+            # the FIRST queryable date), and HOLD the resolved expiration across
+            # all dates until the next month-end roll.  A single forward pass is
+            # correct because ``queryable`` is sorted ascending (CME valid_days).
+            #
+            # ("End of month" now lives in ONE place — this maturity rule.  The
+            # former separate ``roll_schedule`` cadence was dropped; its
+            # ``end_of_month`` value duplicated exactly this.)
+            #
+            # This wraps the SAME ``_resolve_arith`` call (so Issue #2's snap is
+            # preserved); it just changes the CADENCE from per-date to per-month.
+            # The held contract may expire mid-month — that is the WARN-don't-block
+            # edge: Phases B/C then naturally produce ``no_chain_for_date`` for
+            # the tail of the month (a gap), never a crash.  (EndOfMonth(offset_months)
+            # targets the offset month's end, so the held contract is naturally a
+            # month+ out — the gap case only arises if a different short-dated
+            # target were used, which EndOfMonth is not.)
+            held_exp: date | None = None
+            held_note: str | None = None
+            # (year, month) whose month-end triggered the last SUCCESSFUL resolve
+            # — guards against re-resolving more than once per month.
+            held_roll_month: tuple[int, int] | None = None
+            # Memoise the month-end per (year, month): the sweep visits every
+            # trade date but there are only ~N_months distinct month-ends, so
+            # this avoids a redundant valid_days() scan on each held date.
+            eom_cache: dict[tuple[int, int], date] = {}
+            for idx, d in queryable:
+                ym = (d.year, d.month)
+                cur_eom = eom_cache.get(ym)
+                if cur_eom is None:
+                    cur_eom = last_trading_day_of_month(d)
+                    eom_cache[ym] = cur_eom
+                # Init guard keys on ``held_exp is None`` (per the diagnosis), NOT
+                # ``held_roll_month is None``: if the FIRST roll-date resolve fails
+                # (held_exp stays None while held_roll_month got set), we keep
+                # re-trying on each subsequent date until a contract resolves —
+                # rather than blanking the whole month. On the success path the two
+                # guards are identical (held_exp is non-None after the first
+                # resolve, so the cadence is governed by the d >= cur_eom term).
+                is_roll_date = held_exp is None or (
+                    d >= cur_eom and ym != held_roll_month
+                )
+                if is_roll_date:
+                    held_exp, held_note = _resolve_arith(idx, d)
+                    held_roll_month = (d.year, d.month)
+                expirations[idx] = held_exp
+                # The snap note is a property of the HELD contract, so it travels
+                # to every held date (not only the roll date).  Skip dates whose
+                # roll-date resolve failed — they already carry the failure code.
+                if held_note is not None and error_codes[idx] is None:
+                    snap_notes[idx] = held_note
+        else:
+            # Non-EndOfMonth arithmetic maturity (PlusNDays / FixedDate /
+            # NextThirdFriday): stateless per-date resolution — the maturity rule
+            # is re-resolved for every trade date.  Only EndOfMonth holds monthly.
+            for idx, d in queryable:
+                exp, note = _resolve_arith(idx, d)
+                expirations[idx] = exp
+                if note is not None:
+                    snap_notes[idx] = note
 
     # ── Phase B: Group by expiration and bulk fetch ─────────────────
 
@@ -411,7 +570,10 @@ async def _resolve_bulk(
     for idx, d in queryable:
         exp = expirations.get(idx)
         if exp is None:
-            error_codes[idx] = "no_chain_for_date"
+            # Preserve a more specific code already set in Phase A (e.g.
+            # ``maturity_resolution_failed``); default to ``no_chain_for_date``.
+            if error_codes[idx] is None:
+                error_codes[idx] = "no_chain_for_date"
         else:
             exp_groups[exp].append((idx, d))
 
@@ -479,26 +641,59 @@ async def _resolve_bulk(
                     strike_max = _spot * (1 + _margin)
 
     # One bulk query per unique expiration, run concurrently but with a
-    # semaphore to avoid exhausting the MongoDB connection pool on
-    # multi-decade date ranges (e.g. 1990–2026 can produce 50+ groups).
-    _BULK_FETCH_CONCURRENCY = 8
-    _bulk_sem = asyncio.Semaphore(_BULK_FETCH_CONCURRENCY)
+    # semaphore so the concurrent dwh-connection fan-out stays within the pool
+    # (multi-decade date ranges can produce 50-95+ expiration groups; each
+    # ``query_chain_bulk`` acquires a pool connection).
+    #
+    # When ``concurrency_gate`` is supplied (production wires ONE process-wide
+    # semaphore sized to the dwh pool — see ``tcg.core.api._options_concurrency``),
+    # use it so the bound is SHARED across all concurrent resolves: the per-call
+    # ``_DWH_RESOLVE_CONCURRENCY`` only bounds ONE resolve, so two concurrent
+    # resolves (e.g. the Data-page composite + per-leg basket series) would each
+    # take up to 3 slots → 6 > the 4-slot pool → PoolTimeout.  The shared gate
+    # bounds the SUM.  ``None`` (e.g. unit tests / a lone resolve) falls back to a
+    # fresh per-call semaphore = the prior behaviour.
+    _bulk_sem = (
+        concurrency_gate
+        if concurrency_gate is not None
+        else asyncio.Semaphore(_DWH_RESOLVE_CONCURRENCY)
+    )
     chain_index: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
 
     async def _fetch_exp(
         exp: date,
-        group_dates: list[date],
+        group: list[tuple[int, date]],
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        async with _bulk_sem:
-            result = await bulk_reader.query_chain_bulk(
-                root=collection,
-                dates=group_dates,
-                type=option_type,
-                expiration_min=exp,
-                expiration_max=exp,
-                strike_min=strike_min,
-                strike_max=strike_max,
+        group_dates = [d for _idx, d in group]
+        try:
+            async with _bulk_sem:
+                result = await bulk_reader.query_chain_bulk(
+                    root=collection,
+                    dates=group_dates,
+                    type=option_type,
+                    expiration_min=exp,
+                    expiration_max=exp,
+                    strike_min=strike_min,
+                    strike_max=strike_max,
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A single expiration's bulk fetch failing (a transient dwh error,
+            # or a PoolTimeout under contention) must NOT abort the whole
+            # resolve.  Mirror Phase C's per-date degradation: mark THIS
+            # expiration's dates ``data_access_error`` (-> NaN) and return an
+            # empty chain so the other expirations still resolve.  Without this,
+            # the exception propagates out of the gather and the API returns a
+            # hard 500 for the entire series (the OPT_SP_500 PoolTimeout
+            # symptom).
+            for idx, _d in group:
+                error_codes[idx] = "data_access_error"
+            _log.debug(
+                "Phase-B bulk fetch failed exp=%s (%d dates): %s",
+                exp,
+                len(group_dates),
+                exc,
             )
+            result = {}
         # Tick progress after each expiration fetch so the frontend
         # sees Phase B movement instead of a stuck 0%.  The progress
         # endpoint clamps fraction to [0, 1] so the extra ticks are safe.
@@ -509,9 +704,7 @@ async def _resolve_bulk(
                 pass
         return result
 
-    fetch_tasks = [
-        _fetch_exp(exp, [d for _idx, d in group]) for exp, group in exp_groups.items()
-    ]
+    fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
     fetch_results = await asyncio.gather(*fetch_tasks)
     for result in fetch_results:
         chain_index.update(result)
@@ -584,8 +777,16 @@ async def _resolve_bulk(
                     pass
 
     if isinstance(selection, ByMoneyness):
-        # ByMoneyness: underlying price lookup requires I/O — async path.
-        sem = asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
+        # ByMoneyness: underlying price lookup requires I/O (each acquires a dwh
+        # pool connection) — async path.  Share the SAME process-wide gate as
+        # Phase B when supplied so the global bound also covers these lookups
+        # (Phases B and C don't overlap, so reusing the one gate is correct);
+        # fall back to the per-call cap otherwise.
+        sem = (
+            concurrency_gate
+            if concurrency_gate is not None
+            else asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
+        )
 
         async def _resolve_one_moneyness(idx: int, d: date) -> None:
             try:
@@ -676,6 +877,15 @@ async def _resolve_bulk(
                 except Exception:  # pragma: no cover (defensive)
                     pass
 
+    # Fold snap diagnostics in AFTER selection: a ``snapped_to:<iso>`` note is a
+    # success-side annotation, so it is recorded only where the date resolved to
+    # a real value (``error_codes[idx]`` still None).  Dates where the snapped
+    # expiration itself failed selection keep their real failure code (e.g.
+    # ``no_match_within_tolerance``) — the snap note must not mask a failure.
+    for idx, note in snap_notes.items():
+        if error_codes[idx] is None:
+            error_codes[idx] = note
+
     # Option continuous series are RAW stitched mids: no back-adjustment.  A
     # back-adjusted option-premium series represents no tradable instrument
     # (theta decays premia toward 0, so a ratio factor diverges and an additive
@@ -699,7 +909,7 @@ async def resolve_option_stream(
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
-    roll_offset: int = 0,
+    roll_offset: RollOffset = RollOffset(),
     chain_reader: _CycleAwareReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
@@ -707,6 +917,7 @@ async def resolve_option_stream(
     progress_callback: Callable[[], None] | None = None,
     bulk_chain_reader: _CycleAwareBulkReader | None = None,
     available_expirations: Sequence[date] | None = None,
+    concurrency_gate: "asyncio.Semaphore | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
 
@@ -734,13 +945,16 @@ async def resolve_option_stream(
         ill-posed for option premia and are offered only for continuous
         FUTURES; see ``tcg/data/_rolling``).
     roll_offset:
-        Calendar days to roll EARLY: the maturity rule is resolved as of
-        ``date + roll_offset`` for each date, so every roll happens
-        ``roll_offset`` days sooner (mirrors the futures roll offset).
-        ``0`` (default) = no shift.  Honored in the bulk path; the legacy
-        per-date fallback resolves maturity inside the selector and cannot
-        apply the shift, so a non-zero ``roll_offset`` without a bulk reader
-        raises ``ValueError``.
+        ``RollOffset(value, unit)`` — the ROLL-EARLY axis.  The maturity rule
+        is resolved as of ``date + offset`` (``unit`` = ``days`` or ``months``)
+        for each date, so every roll happens that much sooner.  ``value == 0``
+        (default) = no shift.  Distinct from the maturity's own ``offset_months``
+        (the TARGET-month axis — which expiration to aim at).  Honored in the
+        bulk path; the legacy per-date fallback resolves maturity inside the
+        selector and cannot apply the shift, so a non-zero ``roll_offset``
+        without a bulk reader raises ``ValueError``.  ("Roll at end of month" is
+        NOT a roll_offset — it is the ``EndOfMonth`` maturity, which makes the
+        resolver hold one contract per month.)
     chain_reader:
         Cycle-aware chain reader (any object satisfying
         :class:`_CycleAwareReader`).
@@ -766,6 +980,19 @@ async def resolve_option_stream(
         provided, the NearestToTarget probe query (which materialises
         thousands of docs) is skipped entirely.  When ``None``, falls
         back to the expensive probe.
+    concurrency_gate:
+        Optional SHARED ``asyncio.Semaphore`` bounding the dwh-pool
+        connection fan-out across ALL concurrent resolves.  Production
+        wires ONE process-wide gate sized to the pool (built in
+        ``tcg.core`` — the engine never imports the pool, preserving the
+        ``engine``⊥``data`` import-linter contract).  Used for both the
+        Phase-B bulk fetch and the Phase-C ByMoneyness underlying lookups.
+        ``None`` (a lone resolve / unit test) uses a fresh per-call
+        semaphore sized to ``_DWH_RESOLVE_CONCURRENCY`` — the prior
+        behaviour, which bounds ONE resolve but not the SUM of concurrent
+        resolves (the gap that caused the OPT_SP_500 PoolTimeout when the
+        Data page fired the composite + per-leg basket series at once).
+        Only consulted on the bulk path.
 
     Returns
     -------
@@ -773,11 +1000,21 @@ async def resolve_option_stream(
         Shape ``(len(dates),)`` ``float64`` array.  NaN where the stream
         value is missing or the selection failed.
     error_codes:
-        Parallel list, one entry per date.  ``None`` when the value is
-        real; otherwise a string diagnostic — propagated verbatim from
+        Parallel list, one entry per date.  Usually ``None`` when the value
+        is real; otherwise a string diagnostic — propagated verbatim from
         ``SelectionResult.error_code`` when selection fails, or
         ``f"missing_{stream}"`` when selection succeeded but the row's
         stream field was ``None``.
+
+        One entry is NON-None yet coexists with a REAL value:
+        ``f"snapped_to:{iso}"`` is a SUCCESS-side annotation, set when a
+        non-NearestToTarget maturity rule's arithmetic expiration was not
+        listed and was snapped to the nearest listed expiration (``iso``).
+        It is recorded only on dates that resolved to a real value (folded in
+        after selection), so a ``snapped_to:`` entry never implies NaN.
+        Consumers that treat "error_code present ⇒ failure/NaN" must therefore
+        exclude the ``snapped_to:`` prefix (the value array is the source of
+        truth for NaN-ness).
     contracts:
         Parallel list of ``OptionContractDoc | None``, one entry per
         date.  ``None`` when chain was missing or the selection match
@@ -808,6 +1045,7 @@ async def resolve_option_stream(
             last_trade_date=last_trade_date,
             progress_callback=progress_callback,
             available_expirations=available_expirations,
+            concurrency_gate=concurrency_gate,
         )
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
@@ -818,10 +1056,18 @@ async def resolve_option_stream(
     # and return a series that looks like the bulk result but is not), fail
     # loudly: production always wires the bulk reader, so this only fires on a
     # misconfigured caller.
-    if roll_offset != 0:
+    if roll_offset.value != 0:
         raise ValueError(
             "roll_offset requires the bulk chain reader; the legacy per-date "
             "path does not support it"
+        )
+    # Symmetric guard: the EndOfMonth monthly-hold sweep lives in the bulk
+    # Phase A, so the legacy per-date path cannot honour it (it would silently
+    # re-resolve EndOfMonth per-date, diverging from the held-monthly result).
+    if isinstance(maturity, EndOfMonth):
+        raise ValueError(
+            "EndOfMonth maturity requires the bulk chain reader; the legacy "
+            "per-date path does not support the monthly-hold roll"
         )
 
     # Wrap the reader so every selector-emitted query carries the cycle.

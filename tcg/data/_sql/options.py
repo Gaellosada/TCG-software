@@ -382,8 +382,26 @@ class SqlOptionsDataReader:
                 dim_where.append("expiration_cycle = %s")
                 params.append(expiration_cycle)
 
-            # The date list is bound twice (once per fact in the key-set
-            # UNION); both reference the same Python list object.
+            # Partition-pruning bound (CRITICAL): the fact tables are RANGE-
+            # partitioned by ``trade_date`` (yearly, 1980..2050).  The LEFT JOINs
+            # match ``p.trade_date = k.trade_date`` where ``k.trade_date`` is a
+            # RUNTIME value from the ``keyset`` CTE — the planner cannot prune on a
+            # runtime value, so without help it fans the join out across ALL ~71
+            # yearly partitions of BOTH facts (~142 partition scans + locks per
+            # call; EXPLAIN-confirmed planning 34ms and a 60s statement_timeout
+            # blow-out under a cold cache → the OPT_SP_500 PoolTimeout).  Adding a
+            # REDUNDANT CONSTANT ``trade_date BETWEEN <min> AND <max>`` on each join
+            # gives the planner a plan-time range to prune on (collapsing to just
+            # the spanned year partitions); ``= k.trade_date`` keeps correctness.
+            # The bound is redundant — every row matching ``= k.trade_date`` already
+            # lies within [min, max] — so the result is byte-identical (verified on
+            # live dwh: rows identical, partitions 142→2, exec 98ms→10ms).  This is
+            # the same constant-pushdown ``query_chain`` relies on (see :237).
+            date_lo, date_hi = min(date_list), max(date_list)
+
+            # The date list is bound twice (once per fact in the key-set UNION);
+            # both reference the same Python list object.  The (lo, hi) pair is
+            # bound once per fact LEFT JOIN.
             sql = f"""
                 WITH ids AS (
                     SELECT instrument_id, symbol AS option_symbol, root_symbol,
@@ -416,12 +434,14 @@ class SqlOptionsDataReader:
                 LEFT JOIN {SCHEMA}.fact_price_eod p
                        ON p.instrument_id = k.instrument_id
                       AND p.trade_date = k.trade_date
+                      AND p.trade_date BETWEEN %s AND %s
                 LEFT JOIN {SCHEMA}.fact_option_greeks g
                        ON g.instrument_id = k.instrument_id
                       AND g.trade_date = k.trade_date
+                      AND g.trade_date BETWEEN %s AND %s
                 ORDER BY k.trade_date, i.instrument_id
             """
-            params.extend([date_list, date_list])
+            params.extend([date_list, date_list, date_lo, date_hi, date_lo, date_hi])
 
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:

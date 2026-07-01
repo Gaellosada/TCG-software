@@ -279,7 +279,11 @@ def test_inline_option_stream_leg_threads_roll_offset_and_ignores_adjustment() -
         weight=0.5,
     )
     assert not hasattr(leg.instrument, "adjustment")
-    assert leg.instrument.roll_offset == 5
+    # A bare int reads as the unified {value, unit:'days'} (back-compat shim).
+    assert (leg.instrument.roll_offset.value, leg.instrument.roll_offset.unit) == (
+        5,
+        "days",
+    )
 
 
 def test_inline_option_stream_leg_defaults_when_absent() -> None:
@@ -300,7 +304,10 @@ def test_inline_option_stream_leg_defaults_when_absent() -> None:
         weight=0.5,
     )
     assert not hasattr(leg.instrument, "adjustment")
-    assert leg.instrument.roll_offset == 0
+    assert (leg.instrument.roll_offset.value, leg.instrument.roll_offset.unit) == (
+        0,
+        "days",
+    )
 
 
 def test_inline_option_stream_leg_roll_offset_out_of_range_rejected() -> None:

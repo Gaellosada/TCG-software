@@ -204,10 +204,11 @@ export function buildInputTraces(positions, dates, opts = {}) {
 
 /**
  * Sum ``realized_pnl`` across inputs into a single aggregate series.
- * Decision (logged to output): aggregate = summed-across-inputs line.
- * Rationale: the ask says "realized P&L line" (singular); summing across
- * inputs gives the portfolio-level curve which is what a user reading
- * "P&L" expects to see.
+ *
+ * Each per-input ``realized_pnl`` is a cumulative CONTRIBUTION (fraction of
+ * starting capital) to the one compounded account (Issue #4), so the sum
+ * equals ``equity_ratio - 1`` by the reconciliation invariant. Used as the
+ * fallback inside :func:`signalEquityRatio`; prefer that for the equity line.
  *
  * @param {number[][] | undefined} realizedPnl
  * @param {number} len   timestamps.length — guards against ragged arrays
@@ -228,6 +229,34 @@ export function aggregateRealizedPnl(realizedPnl, len) {
     }
   }
   return anyFinite ? out : null;
+}
+
+/**
+ * The signal's COMPOUNDED equity curve as a fraction of starting capital,
+ * i.e. ``equity_ratio`` (starts at 1.0). This is the SINGLE source of truth
+ * for the equity line and the Statistics panel — both multiply it by capital
+ * exactly once, so there is never a double ``(1 + …)`` transform.
+ *
+ * The engine sends ``equity_ratio`` directly (Issue #4). For resilience to an
+ * older payload we fall back to ``1 + Σ_inputs realized_pnl`` — which equals
+ * ``equity_ratio`` by the reconciliation invariant
+ * (``Σ_i realized_pnl_i == equity_ratio - 1``).
+ *
+ * @param {object} result  signals compute response
+ * @param {number} len     timestamps.length
+ * @returns {number[] | null}  ratio per bar, or null if unavailable
+ */
+export function signalEquityRatio(result, len) {
+  if (!result) return null;
+  const er = result.equity_ratio;
+  if (Array.isArray(er) && er.length === len) {
+    // Trust the engine's compounded, wipeout-clamped curve verbatim.
+    return er.map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN));
+  }
+  // Fallback: reconstruct from per-input cumulative contributions.
+  const pnl = aggregateRealizedPnl(result.realized_pnl, len);
+  if (!pnl) return null;
+  return pnl.map((v) => 1 + v);
 }
 
 /**
@@ -572,10 +601,14 @@ export function buildResultsPlot(result, opts = {}) {
   const topInputTraces = buildInputTraces(positions, dates, { legendGroupSuffix: '-top' });
   traces.push(...topInputTraces);
 
-  const pnlRaw = aggregateRealizedPnl(result.realized_pnl, result.timestamps.length);
-  if (pnlRaw) {
+  const ratio = signalEquityRatio(result, result.timestamps.length);
+  if (ratio) {
     const capital = opts.capital ?? 1;
-    const pnlScaled = capital === 1 ? pnlRaw : pnlRaw.map((v) => v * capital);
+    // Equity is the SINGLE source of truth: capital · compounded ratio.
+    const equity = ratio.map((v) => capital * v);
+    // Realized P&L is the dollar gain/loss off that equity (= equity − capital),
+    // so the two lines always reconcile. No second ``(1 + …)`` transform.
+    const pnlScaled = equity.map((v) => v - capital);
     traces.push({
       x: dates,
       y: pnlScaled,
@@ -586,8 +619,6 @@ export function buildResultsPlot(result, opts = {}) {
       hovertemplate: '%{x}<br>P&L %{y:,.2f}<extra></extra>',
       legendgroup: 'pnl',
     });
-    // Equity curve: initial capital + cumulative P&L
-    const equity = pnlScaled.map((v) => capital + v);
     traces.push({
       x: dates,
       y: equity,

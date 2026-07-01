@@ -84,6 +84,13 @@ export default function InstrumentPickerModal({
   title,
   hiddenCategories = [],
   allowBaskets = false,
+  // Restrict the option-stream picker (the direct Options drill-down) to a
+  // subset of streams.  The Portfolio add-holding flow passes ['mid'] so an
+  // option leg is the option PRICE only — iv/greeks/volume are SIGNAL-level
+  // operands, not a portfolio concern (Issue #2 D1).  ``null`` (default) = no
+  // restriction (Data-page chart / signals keep the full stream choice).  Does
+  // NOT affect the basket-leg sub-picker (that path is Signals-only).
+  optionStreamAllowedStreams = null,
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -99,6 +106,8 @@ export default function InstrumentPickerModal({
   const [adjustment, setAdjustment] = useState('none');
   const [cycle, setCycle] = useState('');
   const [rollOffset, setRollOffset] = useState(2);
+  // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
+  const [strategy, setStrategy] = useState('front_month');
   const [availableCycles, setAvailableCycles] = useState([]);
 
   // Options drill-down state
@@ -268,6 +277,7 @@ export default function InstrumentPickerModal({
       setAdjustment('none');
       setCycle('');
       setRollOffset(2);
+      setStrategy('front_month');
       setExpanded({});
       setInOptionsDrillDown(false);
       setOptionStreamValue(null);
@@ -297,14 +307,14 @@ export default function InstrumentPickerModal({
       onSelect({
         type: 'continuous',
         collection,
-        strategy: 'front_month',
+        strategy,
         adjustment,
         cycle: cycle || null,
         rollOffset,
       });
       onClose();
     },
-    [adjustment, cycle, rollOffset, onSelect, onClose],
+    [adjustment, cycle, rollOffset, strategy, onSelect, onClose],
   );
 
   const handleBackFromFut = useCallback(() => {
@@ -312,6 +322,7 @@ export default function InstrumentPickerModal({
     setAdjustment('none');
     setCycle('');
     setRollOffset(2);
+    setStrategy('front_month');
   }, []);
 
   const handleEnterOptionsDrillDown = useCallback(() => {
@@ -422,6 +433,9 @@ export default function InstrumentPickerModal({
                     value={optionStreamValue}
                     onChange={setOptionStreamValue}
                     availableRoots={optionRoots}
+                    {...(optionStreamAllowedStreams
+                      ? { allowedStreams: optionStreamAllowedStreams }
+                      : {})}
                   />
                   <button
                     className={styles.selectContinuousBtn}
@@ -458,13 +472,14 @@ export default function InstrumentPickerModal({
                   adjustment,
                   cycle: cycle || null,
                   rollOffset,
-                  strategy: 'front_month',
+                  strategy,
                 }}
                 onChange={(next) => {
                   if (typeof next.adjustment === 'string') setAdjustment(next.adjustment);
                   // Sub-component emits null for "All", parent state is ''.
                   setCycle(next.cycle == null ? '' : next.cycle);
                   if (Number.isFinite(next.rollOffset)) setRollOffset(next.rollOffset);
+                  if (typeof next.strategy === 'string') setStrategy(next.strategy);
                 }}
                 availableCycles={availableCycles}
                 assetClass="future"
@@ -674,6 +689,8 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
   // The <select> control uses '' to mean "All" (null on the wire).
   const cycleSelect = cycleRaw == null ? '' : cycleRaw;
   const rollOffset = value && Number.isFinite(value.rollOffset) ? value.rollOffset : 0;
+  // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
+  const strategy = (value && value.strategy) || 'front_month';
 
   const emit = useCallback((patch) => {
     const next = {
@@ -682,14 +699,27 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
       adjustment,
       cycle: cycleRaw == null ? null : cycleRaw,
       rollOffset,
-      strategy: 'front_month',
+      strategy,
       ...patch,
     };
     onChange(next);
-  }, [value && value.collection, adjustment, cycleRaw, rollOffset, onChange]);
+  }, [value && value.collection, adjustment, cycleRaw, rollOffset, strategy, onChange]);
 
   return (
     <div className={styles.rollingOptions} data-testid="continuous-spec-picker">
+      <label className={styles.optionLabel}>
+        Roll strategy
+        <select
+          className={styles.optionSelect}
+          value={strategy}
+          onChange={(e) => emit({ strategy: e.target.value })}
+          data-testid="continuous-spec-picker-strategy"
+        >
+          <option value="front_month">Front month (at expiry)</option>
+          <option value="end_of_month">End of month</option>
+        </select>
+      </label>
+
       <label className={styles.optionLabel}>
         Adjustment
         <select
@@ -1716,7 +1746,9 @@ function ContinuousLegPicker({ leg, candidateCollections, onChangeInstrument, te
           ...inst,
           type: 'continuous',
           collection: e.target.value,
-          strategy: 'front_month',
+          // Preserve the leg's chosen roll strategy (Issue #3) — do NOT hardcode
+          // it, or picking a collection would silently revert end_of_month.
+          strategy: inst.strategy || 'front_month',
         })}
         data-testid={`${testId}-collection-select`}
       >
@@ -1732,7 +1764,10 @@ function ContinuousLegPicker({ leg, candidateCollections, onChangeInstrument, te
           adjustment: inst.adjustment || 'none',
           cycle: inst.cycle == null ? null : inst.cycle,
           rollOffset: Number.isFinite(inst.rollOffset) ? inst.rollOffset : 0,
-          strategy: 'front_month',
+          // Read strategy from the leg (Issue #3): hardcoding front_month here
+          // would (a) display the wrong value and (b) make ContinuousSpecPicker's
+          // value-spreading emit silently revert end_of_month on any other edit.
+          strategy: inst.strategy || 'front_month',
         }}
         onChange={(next) => onChangeInstrument(next)}
         availableCycles={undefined /* sub-component loads its own keyed off value.collection */}

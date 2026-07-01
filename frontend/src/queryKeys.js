@@ -59,6 +59,20 @@ export const queryKeys = {
     /** GET /data/continuous/{collection}/cycles — available roll cycles */
     cycles: (collection) => ['market', 'cycles', collection],
 
+    /**
+     * POST /data/basket/series — a basket's composite weighted-sum series.
+     * Keyed on a stable serialisation of the basket descriptor (saved id or
+     * inline legs) + the date window + price field.
+     */
+    basketSeries: (basket, { start = null, end = null, field = 'close' } = {}) => [
+      'market',
+      'basketSeries',
+      JSON.stringify(basket ?? null),
+      start || null,
+      end || null,
+      field || 'close',
+    ],
+
     /** GET /options/roots — option-root catalogue (used by CategoryBrowser + charts) */
     optionRoots: () => ['market', 'optionRoots'],
 

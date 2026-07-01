@@ -44,10 +44,42 @@ class TestBuildRollConfigHappyPath:
         config = build_roll_config("none", "", 0)
         assert config.cycle is None
 
-    def test_strategy_always_front_month(self):
+    def test_strategy_defaults_to_front_month(self):
+        """When ``strategy`` is omitted, the config defaults to FRONT_MONTH
+        (preserves every existing positional caller)."""
         for adj in ("none", "ratio", "difference"):
             config = build_roll_config(adj, None, 0)
             assert config.strategy == RollStrategy.FRONT_MONTH
+
+
+class TestBuildRollConfigStrategy:
+    """Issue #3 (trap a): ``build_roll_config`` must thread the chosen roll
+    ``strategy`` instead of hardcoding FRONT_MONTH — otherwise END_OF_MONTH
+    silently no-ops for the signals + indicators paths that route through this
+    adapter."""
+
+    def test_end_of_month_threaded(self):
+        config = build_roll_config("none", None, 0, strategy="end_of_month")
+        assert config.strategy == RollStrategy.END_OF_MONTH
+
+    def test_explicit_front_month_threaded(self):
+        config = build_roll_config("ratio", "HMUZ", 2, strategy="front_month")
+        assert config.strategy == RollStrategy.FRONT_MONTH
+        # The other params are still honoured alongside the strategy.
+        assert config.adjustment == AdjustmentMethod.RATIO
+        assert config.cycle == "HMUZ"
+        assert config.roll_offset_days == 2
+
+    def test_invalid_strategy_raises(self):
+        with pytest.raises(ValueError, match=r"[Ii]nvalid.*strategy|strategy"):
+            build_roll_config("none", None, 0, strategy="bogus")
+
+    def test_end_of_month_with_all_params(self):
+        config = build_roll_config("difference", "HMUZ", 3, strategy="end_of_month")
+        assert config.strategy == RollStrategy.END_OF_MONTH
+        assert config.adjustment == AdjustmentMethod.DIFFERENCE
+        assert config.cycle == "HMUZ"
+        assert config.roll_offset_days == 3
 
 
 class TestBuildRollConfigInvalidAdjustment:

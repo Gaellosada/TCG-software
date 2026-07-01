@@ -173,14 +173,22 @@ def test_saved_basket_option_ref_threads_roll_offset_and_tolerates_legacy_adjust
         stream="mid",
     )
     # A legacy ``adjustment`` key is accepted and discarded (no attribute set).
+    # A bare int roll_offset reads as the unified {value, unit:'days'}.
     m = _OptionStreamRefLocal(**common, adjustment="ratio", roll_offset=5)
     assert not hasattr(m, "adjustment")
-    assert m.roll_offset == 5
+    assert (m.roll_offset.value, m.roll_offset.unit) == (5, "days")
+    # The unified {value, unit} object is accepted directly too (months).
+    m2 = _OptionStreamRefLocal(**common, roll_offset={"value": 2, "unit": "months"})
+    assert (m2.roll_offset.value, m2.roll_offset.unit) == (2, "months")
+    # A legacy ``roll_schedule`` key (short-lived, unreleased) is tolerated &
+    # stripped, so an ``extra='forbid'`` model does not 422 on a test-era basket.
+    m3 = _OptionStreamRefLocal(**common, roll_schedule="end_of_month")
+    assert not hasattr(m3, "roll_schedule")
     # Absent → defaults (additive, contract-preserving).
     d = _OptionStreamRefLocal(**common)
     assert not hasattr(d, "adjustment")
-    assert d.roll_offset == 0
-    # roll_offset bounded 0..30, mirroring OptionStreamRef.
+    assert (d.roll_offset.value, d.roll_offset.unit) == (0, "days")
+    # roll_offset days bounded 0..30, mirroring OptionStreamRef.
     with pytest.raises(ValidationError):
         _OptionStreamRefLocal(**common, roll_offset=40)
 

@@ -88,7 +88,8 @@ export function defaultBlock(section = 'entries') {
  *   - spot:          requires collection + instrument_id.
  *   - continuous:    requires collection + adjustment + cycle + rollOffset + strategy.
  *   - option_stream: requires collection + option_type + maturity + selection + stream
- *                    (roll_offset is optional — BE-side default 0; option streams
+ *                    (roll_offset is optional — the unified {value, unit:'days'|'months'}
+ *                    object, BE-side default {value:0,unit:'days'}; option streams
  *                    carry no back-adjustment, so there is no adjustment field).
  *   - basket:        two shapes (locked descriptor; see InstrumentPickerModal):
  *                    - {kind:'saved',   basket_id}                  → non-empty basket_id.
@@ -166,7 +167,9 @@ export function isInputConfigured(input) {
         && ['none', 'ratio', 'difference'].includes(inst.adjustment)
         && (inst.cycle == null || typeof inst.cycle === 'string')
         && Number.isFinite(inst.rollOffset)
-        && inst.strategy === 'front_month';
+        // Issue #3: accept both roll strategies (was front_month-only, which
+        // would mark an end_of_month leg as not-configured / not runnable).
+        && ['front_month', 'end_of_month'].includes(inst.strategy);
     }
     // option_stream:
     return isInstrumentRefConfigured(inst);

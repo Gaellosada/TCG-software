@@ -17,11 +17,11 @@ export function legsToRangesKey(legs) {
     if (l.type === 'option_stream') {
       const m = l.maturity || {};
       const s = l.selection || {};
-      // Include roll_offset (mirrors the continuous key's rollOffset):
-      // roll_offset shifts which contract is picked per date, so changing it
-      // must retrigger the range refetch. Option streams carry no
+      // Include roll_offset (the unified {value, unit} object — JSON-encoded so
+      // both parts are in the key): it shifts which contract is picked, so
+      // changing it must retrigger the range refetch. Option streams carry no
       // back-adjustment, so there is no adjustment segment.
-      return `o:${l.collection}:${l.option_type}:${l.cycle}:${JSON.stringify(m)}:${JSON.stringify(s)}:${l.stream}:${l.roll_offset ?? 0}`;
+      return `o:${l.collection}:${l.option_type}:${l.cycle}:${JSON.stringify(m)}:${JSON.stringify(s)}:${l.stream}:${JSON.stringify(l.roll_offset ?? { value: 0, unit: 'days' })}`;
     }
     if (l.type === 'continuous') return `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`;
     return `i:${l.collection}:${l.symbol}`;

@@ -33,6 +33,28 @@ export function formatDateTime(value) {
 }
 
 /**
+ * Default exploration window for views whose data carries no inherent date
+ * range — notably option_stream legs (the backend REQUIRES an explicit window
+ * to enumerate their trade dates). Returns ``{ start, end }`` as YYYY-MM-DD,
+ * with ``end`` = today and ``start`` = ~5 years back — the platform's standard
+ * long-history default. Shared by the basket explorer (Data/BasketChart) and
+ * the portfolio editor (Portfolio/usePortfolio) so both prefill the same
+ * window. The user can widen/narrow afterwards.
+ *
+ * Note: formats via toISOString (UTC) for parity with the original call sites;
+ * unlike formatDate() this can land on the prior day near midnight in
+ * positive-offset timezones, which is immaterial for a multi-year lookback.
+ * @returns {{ start: string, end: string }}
+ */
+export function defaultDateRange() {
+  const end = new Date();
+  const start = new Date();
+  start.setFullYear(start.getFullYear() - 5);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  return { start: iso(start), end: iso(end) };
+}
+
+/**
  * Format a YYYYMMDD integer as YYYY-MM-DD string.
  * @param {number} dateInt
  * @returns {string}

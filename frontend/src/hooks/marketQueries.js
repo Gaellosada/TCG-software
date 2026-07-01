@@ -41,6 +41,7 @@ import {
   getInstrumentPrices,
   getContinuousSeries,
   getAvailableCycles,
+  getBasketSeries,
 } from '../api/data';
 import {
   getOptionRoots,
@@ -133,6 +134,27 @@ export function useContinuousSeries(collection, params = {}, options = {}) {
           rollOffset,
         }),
       enabled: !!collection && (options.enabled ?? true),
+      placeholderData: keepPreviousData,
+      ...options,
+    }),
+  );
+}
+
+/**
+ * A basket's composite weighted-sum series (Data-page exploration).
+ *
+ * ``basket`` is the discriminated wire descriptor — ``{kind:'saved',
+ * basket_id}`` or ``{kind:'inline', asset_class, legs}``.  Disabled until a
+ * basket is supplied.  ``placeholderData: keepPreviousData`` so changing the
+ * date window keeps the previous curve on screen while the new one loads.
+ */
+export function useBasketSeries(basket, params = {}, options = {}) {
+  const { start, end, field = 'close' } = params;
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.basketSeries(basket, { start, end, field }),
+      queryFn: ({ signal }) => getBasketSeries(basket, { start, end, field, signal }),
+      enabled: !!basket && (options.enabled ?? true),
       placeholderData: keepPreviousData,
       ...options,
     }),

@@ -1,6 +1,12 @@
 import { useCallback } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 
+// A portfolio option leg is the option PRICE only (Issue #2 D1): pin the
+// option-stream picker to mid and hide the Series selector. iv/greeks/volume
+// are signal-level operands, not portfolio legs. Module-level const so the
+// array identity is stable across renders (not recreated each render).
+const PORTFOLIO_OPTION_STREAMS = ['mid'];
+
 /**
  * Portfolio-specific wrapper around InstrumentPickerModal.
  * Translates the generic instrument selection into the portfolio leg format
@@ -24,9 +30,10 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
           maturity: instrument.maturity,
           selection: instrument.selection,
           stream: instrument.stream,
-          // Roll offset from OptionStreamForm (roll N days earlier). Option
-          // streams carry no back-adjustment, so there is no adjustment field
-          // (unlike the continuous leg below). BE defaults roll_offset to 0.
+          // Roll offset from OptionStreamForm — the unified {value, unit} object
+          // (ROLL-EARLY axis), forwarded whole. Option streams carry no
+          // back-adjustment, so there is no adjustment field (unlike continuous).
+          // "Roll at end of month" is the EndOfMonth maturity, not a schedule.
           roll_offset: instrument.roll_offset,
           weight: 100,
         });
@@ -61,6 +68,7 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
       onClose={onClose}
       onSelect={handleSelect}
       title="Add Holding"
+      optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
     />
   );
 }

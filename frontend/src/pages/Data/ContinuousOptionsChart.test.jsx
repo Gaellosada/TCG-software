@@ -120,6 +120,32 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('ContinuousOptionsChart — controls de-clip (P1)', () => {
+  // The options-stream controls were clipped below a `max-height: 220px;
+  // overflow-y: auto` box (`.controlsCapped`), hiding the Selection picker
+  // behind an unobvious inner scrollbar. The cap was removed so the whole form
+  // (incl. ByDelta/ByMoneyness/ByStrike) is visible. Guard it at the CSS source:
+  // `.controlsCapped` must not re-introduce a height cap / inner scroll.
+  it('.controlsCapped has no max-height / overflow-y cap (form not clipped)', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    // Resolved from the frontend root (vitest cwd) — robust to the transform's
+    // import.meta.url scheme.
+    const cssPath = path.resolve(
+      process.cwd(),
+      'src/pages/Data/ChartBase.module.css',
+    );
+    const css = fs.readFileSync(cssPath, 'utf8');
+    const block = css.slice(
+      css.indexOf('.controlsCapped'),
+      css.indexOf('}', css.indexOf('.controlsCapped')) + 1,
+    );
+    expect(block).toContain('.controlsCapped');
+    expect(block).not.toMatch(/max-height/);
+    expect(block).not.toMatch(/overflow-y/);
+  });
+});
+
 describe('ContinuousOptionsChart — initial render', () => {
   it('shows loading state while roots are being fetched', () => {
     mockGetOptionRoots.mockReturnValueOnce(new Promise(() => {}));
@@ -232,6 +258,67 @@ describe('ContinuousOptionsChart — resolve flow', () => {
       expect(screen.getByTestId('resolve-error')).toBeTruthy();
     });
     expect(screen.getByText(/Server error: 500/)).toBeTruthy();
+  });
+});
+
+describe('ContinuousOptionsChart — maturity snap notice (Issue #2 D2)', () => {
+  async function resolveAndWaitForChart() {
+    render(<ContinuousOptionsChart collection="OPT_SP_500" />);
+    await waitFor(() => expect(screen.getByTestId('resolve-button')).toBeTruthy());
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('resolve-button'));
+    });
+    await waitFor(() => expect(screen.getByTestId('chart')).toBeTruthy());
+  }
+
+  it('shows a snap notice naming the snapped-to expiration when diagnostics carry snapped_to', async () => {
+    mockResolveResult = {
+      dates: ['2025-01-02', '2025-01-03', '2025-01-06'],
+      streams: {
+        'MID / Call / end of month': {
+          values: [100.5, 101.2, 99.8],
+          diagnostics: [
+            'snapped_to:2025-01-17',
+            'snapped_to:2025-01-17',
+            'snapped_to:2025-01-17',
+          ],
+        },
+      },
+    };
+    await resolveAndWaitForChart();
+    const notice = await screen.findByTestId('snap-notice');
+    expect(notice).toBeTruthy();
+    // The notice names the (unique) snapped-to expiration date.
+    expect(notice.textContent).toMatch(/2025-01-17/);
+    expect(notice.textContent.toLowerCase()).toMatch(/snap/);
+  });
+
+  it('dedupes and lists multiple distinct snapped-to expirations', async () => {
+    mockResolveResult = {
+      dates: ['2025-01-02', '2025-02-03', '2025-02-04'],
+      streams: {
+        'MID / Call / end of month': {
+          values: [100.5, 101.2, 99.8],
+          diagnostics: [
+            'snapped_to:2025-01-17',
+            'snapped_to:2025-02-21',
+            'snapped_to:2025-02-21',
+          ],
+        },
+      },
+    };
+    await resolveAndWaitForChart();
+    const notice = await screen.findByTestId('snap-notice');
+    expect(notice.textContent).toMatch(/2025-01-17/);
+    expect(notice.textContent).toMatch(/2025-02-21/);
+    // 2025-02-21 appears once despite two diagnostic entries (deduped).
+    expect(notice.textContent.match(/2025-02-21/g)).toHaveLength(1);
+  });
+
+  it('shows NO snap notice when no diagnostic is a snap', async () => {
+    // Default mockResolveResult has diagnostics ['ok','ok','ok'].
+    await resolveAndWaitForChart();
+    expect(screen.queryByTestId('snap-notice')).toBeNull();
   });
 
   it('sends the type field in the ref for backend OptionStreamRef validation', async () => {

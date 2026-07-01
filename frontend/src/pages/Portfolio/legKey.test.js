@@ -118,16 +118,27 @@ describe('legsToRangesKey', () => {
       maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
       stream: 'mid', adjustment: 'none',
     };
-    const k0 = legsToRangesKey([{ ...base, roll_offset: 0 }]);
-    const k5 = legsToRangesKey([{ ...base, roll_offset: 5 }]);
+    const k0 = legsToRangesKey([{ ...base, roll_offset: { value: 0, unit: 'days' } }]);
+    const k5 = legsToRangesKey([{ ...base, roll_offset: { value: 5, unit: 'days' } }]);
     expect(k0).not.toBe(k5);
+  });
+
+  it('the roll_offset UNIT is part of the key (5 days != 5 months)', () => {
+    const base = {
+      type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C', cycle: null,
+      maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
+      stream: 'mid',
+    };
+    const days = legsToRangesKey([{ ...base, roll_offset: { value: 5, unit: 'days' } }]);
+    const months = legsToRangesKey([{ ...base, roll_offset: { value: 5, unit: 'months' } }]);
+    expect(days).not.toBe(months);
   });
 
   it('adjustment does NOT affect the option_stream key (option streams have no back-adjustment)', () => {
     const base = {
       type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C', cycle: null,
       maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
-      stream: 'mid', roll_offset: 0,
+      stream: 'mid', roll_offset: { value: 0, unit: 'days' },
     };
     // A stray `adjustment` key (e.g. a legacy leg) must not change the key —
     // it is not part of the option-stream identity.
@@ -136,13 +147,13 @@ describe('legsToRangesKey', () => {
     expect(plain).toBe(stray);
   });
 
-  it('missing roll_offset defaults to 0 in the key (legacy legs)', () => {
+  it('missing roll_offset defaults to {0, days} in the key (legacy legs)', () => {
     const legacy = {
       type: 'option_stream', collection: 'OPT_SP_500', option_type: 'C', cycle: null,
       maturity: { kind: 'next_third_friday' }, selection: { kind: 'by_delta' },
       stream: 'mid',
     };
-    const explicit = { ...legacy, roll_offset: 0 };
+    const explicit = { ...legacy, roll_offset: { value: 0, unit: 'days' } };
     // A legacy leg (no roll_offset) keys identically to one with the default
     // — so loading old state doesn't spuriously invalidate the range cache.
     expect(legsToRangesKey([legacy])).toBe(legsToRangesKey([explicit]));

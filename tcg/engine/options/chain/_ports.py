@@ -125,3 +125,27 @@ class FuturesDataPort(Protocol):
         ``error_code="missing_forward_vix_curve"``.
         """
         ...
+
+    async def get_futures_close_on_or_after_expiration(
+        self,
+        collection: str,
+        expiration: date,
+        target_date: date,
+    ) -> float | None:
+        """Return the ``target_date`` close of the FRONT-QUARTERLY future for an
+        option-on-future: the nearest FUT_* contract in *collection* whose
+        ``expiration`` is >= the option's *expiration*.
+
+        Used by the option-on-future branch of the underlying-price resolver for
+        roots whose per-contract ``underlying_ref`` is absent (the dwh SQL
+        reader does not preserve it).  ``>=`` (not exact) because index/commodity
+        futures are quarterly (Mar/Jun/Sep/Dec) while options also list serial
+        months + weeklies; a serial/weekly option settles against the front
+        quarterly future (e.g. a July ES option → the September future).
+
+        Returns ``None`` when:
+        - no FUT_* contract expires on/after the option (i.e. the option is past
+          the last listed future), or
+        - the resolved front contract has no row for ``target_date``.
+        """
+        ...

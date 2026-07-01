@@ -45,7 +45,7 @@ export default {
       maturity: { kind: 'nearest_to_target', target_days: 30 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
-      roll_offset: 0,
+      roll_offset: { value: 0, unit: 'days' },
     },
     back_atm_iv: {
       type: 'option_stream',
@@ -56,7 +56,7 @@ export default {
       maturity: { kind: 'nearest_to_target', target_days: 90 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
-      roll_offset: 0,
+      roll_offset: { value: 0, unit: 'days' },
     },
   },
   doc: `**Intuition.** The term-structure slope of implied volatility compares the front-expiry ATM-contract IV against a longer-dated (back) expiry ATM-contract IV. In normal regimes, longer-dated IV exceeds front-month IV (contango, slope < 0): the market demands a vol premium for time. Around stress events the front explodes and the slope flips positive (backwardation): short-dated options are richer than long-dated ones. Traders use the sign and magnitude of the slope as a stress / regime signal and as a calendar-spread entry filter.

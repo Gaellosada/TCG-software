@@ -32,6 +32,8 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from tcg.types.market import DEFAULT_DWH_POOL_MAX_SIZE
+
 logger = logging.getLogger(__name__)
 
 SCHEMA = "tcg_instruments"
@@ -64,7 +66,7 @@ class DwhConnectionPool:
         user: str,
         password: str,
         min_size: int = 1,
-        max_size: int = 4,
+        max_size: int = DEFAULT_DWH_POOL_MAX_SIZE,
         statement_timeout_ms: int = 60_000,
         sslmode: str = "require",
         connect_timeout: int = 15,
@@ -162,8 +164,15 @@ class DwhConnectionPool:
         logger.info("DwhConnectionPool closed")
 
     @asynccontextmanager
-    async def connection(self) -> AsyncIterator[AsyncConnection[tuple[object, ...]]]:
+    async def connection(
+        self, timeout: float | None = None
+    ) -> AsyncIterator[AsyncConnection[tuple[object, ...]]]:
         """Context manager: yield a single connection from the pool.
+
+        ``timeout`` (seconds) bounds how long to wait for a free connection to be
+        handed out; ``None`` uses psycopg_pool's default (30s).  Previously this
+        kwarg was swallowed, so the 30s acquire timeout was silently un-tunable
+        (a saturated pool hung 30s before ``PoolTimeout``); it is now forwarded.
 
         Usage:
             async with pool.connection() as conn:
@@ -174,7 +183,8 @@ class DwhConnectionPool:
             raise RuntimeError("DwhConnectionPool not connected (call connect() first)")
         # Read-only + autocommit are applied once per connection by the pool's
         # ``configure`` callback (_configure_connection), so nothing to set here.
-        async with self._pool.connection() as conn:
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        async with self._pool.connection(**kwargs) as conn:
             yield conn
 
     async def fetch_one(

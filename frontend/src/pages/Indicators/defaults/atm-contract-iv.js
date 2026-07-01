@@ -54,7 +54,7 @@ export default {
       maturity: { kind: 'next_third_friday', offset_months: 0 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'iv',
-      roll_offset: 0,
+      roll_offset: { value: 0, unit: 'days' },
     },
   },
   doc: `**Intuition.** ATM contract IV is the stored implied volatility of the *nearest-strike-to-spot front-month contract* — i.e. the single listed contract whose strike is closest to current spot, on the next listed monthly expiry. It is the cheapest-to-compute proxy for "the ATM IV the market is showing right now": no smile fit, no interpolation, just the IV the data provider stamped on that one contract. Traders use it to gauge fear / complacency, to compare against realised volatility (vol risk premium), and as a regime filter. This indicator is a pass-through (or optionally a simple-moving-average smooth) over the supplied stream.

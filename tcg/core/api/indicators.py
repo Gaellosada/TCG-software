@@ -358,7 +358,10 @@ async def compute_indicator(
                 case "continuous":
                     try:
                         roll_config = build_roll_config(
-                            ref.adjustment, ref.cycle, ref.rollOffset
+                            ref.adjustment,
+                            ref.cycle,
+                            ref.rollOffset,
+                            strategy=ref.strategy,
                         )
                     except ValueError as exc:
                         return error_response(
