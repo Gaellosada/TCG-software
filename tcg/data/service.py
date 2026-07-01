@@ -8,7 +8,7 @@ unchanged ``ContinuousSeriesBuilder`` fed SQL-sourced contracts.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Literal, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -346,7 +346,7 @@ class DefaultMarketDataService:
         self,
         root: str,
         option_type: Literal["C", "P"] | None = None,
-        cycle: str | None = None,
+        cycle: str | Sequence[str] | None = None,
     ) -> list[date]:
         return await self._options.list_expirations_filtered(
             root, option_type=option_type, cycle=cycle

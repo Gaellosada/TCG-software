@@ -194,6 +194,9 @@ def _instrument_identity(inst: InputInstrument) -> tuple:
             inst.stream,
             # Unified roll offset (value, unit) — both parts distinguish identity.
             (int(inst.roll_offset.value), inst.roll_offset.unit),
+            # Select-and-hold vs daily-reselect are DIFFERENT series (different
+            # P&L) → distinct identity so they never share a fetch-cache slot.
+            bool(inst.hold_between_rolls),
         )
     if isinstance(inst, InstrumentBasket):
         # Kind-prefixed identities so a user-chosen basket_id of "inline"
@@ -522,6 +525,30 @@ def _union_align(
         values_by_key[key] = out
 
     return index, values_by_key
+
+
+def _align_series_to_index(
+    dates: npt.NDArray[np.int64],
+    values: npt.NDArray[np.float64],
+    index: npt.NDArray[np.int64],
+    *,
+    fill: float,
+) -> npt.NDArray[np.float64]:
+    """Re-index ``(dates, values)`` onto ``index`` (same rule as ``_union_align``).
+
+    ``dates`` must be sorted ascending.  Dates in ``index`` absent from ``dates``
+    get ``fill``.  Used to bring a hold-mode option's ``is_roll`` / ``roll_premium``
+    side-channel arrays onto the signal's union axis so they line up with the
+    input's premium series.
+    """
+    out = np.full(index.size, fill, dtype=np.float64)
+    if dates.size == 0 or index.size == 0:
+        return out
+    pos = np.searchsorted(dates, index)
+    safe_pos = np.clip(pos, 0, dates.size - 1)
+    match = dates[safe_pos] == index
+    out[match] = values[safe_pos[match]]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +947,202 @@ def _compound_clamped(
 
 
 # ---------------------------------------------------------------------------
+# Fixed-contract dollar-P&L for held option positions (hold_between_rolls)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _HoldPnLSpec:
+    """Per-(hold-mode option input) data for the fixed-contract dollar-P&L path.
+
+    Aligned to the signal's union date axis (length ``T``).  Direction is the
+    block-weight SIGN (``sign``); ``nav_times`` is the premium-notional size (NOT
+    ``|weight|/100`` — that is the whole reason ``nav_times`` is a separate field).
+
+    * ``premium`` — the HELD contract's mid LEVEL of the contract owning each
+      date's value (the resolver's hold-mode ``values``: OLD contract's mid on a
+      roll day, held contract otherwise).
+    * ``is_roll`` — True at each hold segment's first date (incl. the initial
+      open); a roll RESIZES the held quantity off the post-P&L NAV.
+    * ``roll_premium`` — at each ``is_roll`` date, the NEW segment's roll-day OPEN
+      mid: the base for that segment's daily P&L and its quantity sizing (the ONLY
+      place the NEW open premium is surfaced — ``premium`` on a roll date is the
+      OLD mid, so the seam is exact, never a raw old→new level gap).
+    * ``pos_active`` — per-bar 0/1: whether the input's net position is open
+      (latched) on the step START.  A closed position contributes 0 that step; a
+      re-open mid-hold is treated as a fresh open at the current premium (a new
+      sizing point) so the $-P&L only accrues while the leg is actually held.
+    """
+
+    ref_id: str
+    sign: float
+    nav_times: float
+    premium: npt.NDArray[np.float64]
+    is_roll: npt.NDArray[np.bool_]
+    roll_premium: npt.NDArray[np.float64]
+    pos_active: npt.NDArray[np.bool_]
+
+
+def _compound_with_hold(
+    vectorized_net_step: npt.NDArray[np.float64],
+    hold_specs: list[_HoldPnLSpec],
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    dict[str, npt.NDArray[np.float64]],
+]:
+    """Sequential joint compounding for a mix of vectorized inputs and hold-mode
+    option inputs (fixed-contract dollar P&L).
+
+    ``vectorized_net_step`` (length ``T-1``) is the SUM of every non-hold input's
+    equity-independent ``contrib_step`` (``pos·Δprice/price`` etc.).  Each entry
+    of ``hold_specs`` contributes, PER STEP ``s`` (from bar ``s`` to ``s+1``),
+
+        contrib = sign · nav_times · (equity_ratio[roll] / equity_ratio[s])
+                         · (premium[s+1] − base) / premium[roll]
+
+    where ``base`` is the current segment's roll-day open premium on the step
+    right after a roll, else ``premium[s]`` (interior); ``premium[roll]`` and
+    ``equity_ratio[roll]`` are frozen at the segment's roll.  This is the
+    fraction-of-current-NAV form of ``qty·Δpremium`` with the held quantity sized
+    once per roll off the compounding NAV — verified equal to the Java oracle NAV
+    ratio to machine epsilon.  Because it reads ``equity_ratio[s]`` (the running
+    JOINT equity at the step start), the whole account is compounded in ONE
+    sequential pass; the vectorized inputs' per-step contributions are added in.
+
+    Returns ``(equity_ratio, step_scale, hold_contrib_steps)`` where:
+      * ``equity_ratio`` (length ``T``), ``step_scale`` (length ``T-1``) have the
+        SAME meaning as :func:`_compound_clamped` (absorbing ruin clamp; the loss
+        cap on the wiping step), so the existing per-input ``realized_pnl`` builder
+        (``cumsum(step_scale·equity_ratio[:-1]·contrib_step)``) reconciles to
+        ``equity_ratio − 1``;
+      * ``hold_contrib_steps[ref_id]`` (length ``T-1``) is each hold input's ACTUAL
+        booked per-step contribution (pre-clamp; the clamp is applied uniformly via
+        ``step_scale`` in the realized_pnl builder, exactly as for vectorized
+        inputs) so its ``realized_pnl`` can be built the same way.
+    """
+    n = vectorized_net_step.size  # T-1
+    T = n + 1
+    ratio = np.ones(T, dtype=np.float64)
+    step_scale = np.ones(max(n, 0), dtype=np.float64)
+    hold_contrib: dict[str, npt.NDArray[np.float64]] = {
+        spec.ref_id: np.zeros(max(n, 0), dtype=np.float64) for spec in hold_specs
+    }
+
+    # Per-hold-spec running segment state: the roll-day open premium and the
+    # equity_ratio captured at the segment's roll (both frozen until the next
+    # roll).  ``seg_premium`` is NaN until the leg's first valid open; while NaN
+    # the leg books 0 (not yet sized / no quote to size against).  ``holding``
+    # tracks whether a sized position is currently held.
+    seg_premium: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
+    seg_er: dict[str, float] = {spec.ref_id: 1.0 for spec in hold_specs}
+    holding: dict[str, bool] = {spec.ref_id: False for spec in hold_specs}
+
+    # Seed bar-0 sizing: the loop below sizes at bar s+1, so the initial open at
+    # bar 0 (a leg latched at bar 0, whose first date is a segment open) must be
+    # sized here off ratio[0]==1 and bar 0's open premium.  A leg not yet open at
+    # bar 0 stays flat until its first latch bar, where the loop sizes it.
+    for spec in hold_specs:
+        rid = spec.ref_id
+        if T >= 1 and bool(spec.pos_active[0]):
+            open_prem = (
+                spec.roll_premium[0] if bool(spec.is_roll[0]) else spec.premium[0]
+            )
+            if np.isfinite(open_prem) and open_prem > 0.0:
+                seg_premium[rid] = float(open_prem)
+                seg_er[rid] = ratio[0]  # == 1.0
+                holding[rid] = True
+
+    wiped = False
+    for s in range(n):
+        if wiped:
+            ratio[s + 1] = 0.0
+            step_scale[s] = 0.0
+            continue
+
+        net = float(vectorized_net_step[s])
+
+        # Book each hold leg's step P&L on the quantity held INTO bar s+1 (sized
+        # at the leg's current segment: seg_premium/seg_er, frozen at its roll).
+        # The step-owner's move is (premium[s+1] − base): interior → base is the
+        # held mid on bar s (premium[s]); the FIRST step of a segment (previous
+        # bar was that segment's roll) → base is the segment's roll-day OPEN
+        # (roll_premium[s]), NOT premium[s] (which on a roll bar is the OLD mid).
+        for spec in hold_specs:
+            rid = spec.ref_id
+            contrib = 0.0
+            if (
+                holding[rid]
+                and bool(spec.pos_active[s])
+                and bool(spec.pos_active[s + 1])
+                and ratio[s] != 0.0
+            ):
+                base = (
+                    spec.roll_premium[s] if bool(spec.is_roll[s]) else spec.premium[s]
+                )
+                cur = spec.premium[s + 1]
+                seg_p = seg_premium[rid]
+                dprem = cur - base
+                if (
+                    np.isfinite(dprem)
+                    and np.isfinite(base)
+                    and np.isfinite(seg_p)
+                    and seg_p != 0.0
+                ):
+                    contrib = (
+                        spec.sign
+                        * spec.nav_times
+                        * (seg_er[rid] / ratio[s])
+                        * dprem
+                        / seg_p
+                    )
+            hold_contrib[rid][s] = contrib
+            net += contrib
+
+        # Advance the joint equity with the absorbing ruin clamp (identical to
+        # _compound_clamped) — this is the equity_ratio the NEXT step's hold
+        # contribs read via ratio[s+1].
+        f = 1.0 + net
+        if not np.isfinite(f) or f <= 0.0:
+            ratio[s + 1] = 0.0
+            step_scale[s] = (-1.0 / net) if net != 0.0 else 0.0
+            wiped = True
+        else:
+            ratio[s + 1] = ratio[s] * f
+
+        # AFTER booking bar s+1: (re)size each hold leg whose bar s+1 is a roll or
+        # a fresh open, off the POST-step NAV (ratio[s+1]) and the segment's
+        # roll-day open premium.  A roll realises the OLD (already folded into
+        # ratio[s+1], seam-free) and opens the NEW; a fresh latch-open sizes at the
+        # current premium.  Sizing after the step means seg_er = ratio[s+1] — the
+        # verified oracle ordering (qty_new = nav_times·NAV_at_roll/premium_roll).
+        for spec in hold_specs:
+            rid = spec.ref_id
+            active_next = bool(spec.pos_active[s + 1])
+            if not active_next:
+                # Position closed at or before bar s+1 → drop the sizing (a later
+                # re-open re-sizes fresh).
+                holding[rid] = False
+                continue
+            is_open_point = bool(spec.is_roll[s + 1]) or not holding[rid]
+            if is_open_point:
+                open_prem = (
+                    spec.roll_premium[s + 1]
+                    if bool(spec.is_roll[s + 1])
+                    else spec.premium[s + 1]
+                )
+                if np.isfinite(open_prem) and open_prem > 0.0 and ratio[s + 1] != 0.0:
+                    seg_premium[rid] = float(open_prem)
+                    seg_er[rid] = ratio[s + 1]
+                    holding[rid] = True
+                elif not holding[rid]:
+                    # Cannot size (no quotable open premium) → stay flat.
+                    holding[rid] = False
+
+    return ratio, step_scale, hold_contrib
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1086,6 +1309,44 @@ async def evaluate_signal(
 
     index, values_by_key = _union_align(resolved)
     T = index.size
+
+    # ── 3b. Hold-mode option roll info (fixed-contract dollar-P&L side-channel) ──
+    #
+    # A hold-mode (``hold_between_rolls``) option input needs, beyond its held
+    # premium LEVEL (already in ``values_by_key``), the resolver's roll structure
+    # (``is_roll`` + each segment's roll-day OPEN premium) to run the
+    # fixed-contract dollar-P&L recurrence.  The fetcher exposes it OPTIONALLY as
+    # ``fetch_hold_roll_info(instrument) -> (dates, is_roll, roll_premium)``.  We
+    # consult it ONLY for referenced hold-mode option inputs and align each array
+    # onto ``index`` exactly as ``_union_align`` does; a hold input whose fetcher
+    # lacks the capability is a wiring error (loud, not silent — the $-P&L path
+    # cannot be run without the roll structure).
+    hold_roll_info: dict[
+        str, tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
+    ] = {}
+    if T > 0:
+        _roll_fetch = getattr(fetcher, "fetch_hold_roll_info", None)
+        for ref_id in referenced_ids:
+            inp = inputs[ref_id]
+            if not (
+                isinstance(inp.instrument, InstrumentOptionStream)
+                and inp.instrument.hold_between_rolls
+            ):
+                continue
+            if _roll_fetch is None:
+                raise SignalDataError(
+                    f"input {ref_id!r}: hold_between_rolls option requires the "
+                    f"fetcher to provide 'fetch_hold_roll_info' (fixed-contract "
+                    f"dollar-P&L roll structure); none available"
+                )
+            r_dates, r_is_roll, r_roll_premium = await _roll_fetch(inp.instrument)
+            is_roll_aligned = _align_series_to_index(
+                r_dates, r_is_roll.astype(np.float64), index, fill=0.0
+            )
+            roll_premium_aligned = _align_series_to_index(
+                r_dates, r_roll_premium.astype(np.float64), index, fill=np.nan
+            )
+            hold_roll_info[ref_id] = (is_roll_aligned, roll_premium_aligned)
 
     if T == 0:
         return SignalEvalResult(
@@ -1356,6 +1617,10 @@ async def evaluate_signal(
         price_label: str | None
         price_values: npt.NDArray[np.float64] | None
         contrib_step: npt.NDArray[np.float64]  # length T-1 (0 when T<2)
+        # Non-None for a hold-mode option input: its fixed-contract dollar-P&L
+        # spec.  Such an input's ``contrib_step`` is NOT computed here (it is
+        # equity-coupled) — it is filled in by ``_compound_with_hold`` in 6b.
+        hold_spec: "_HoldPnLSpec | None" = None
 
     accums: list[_InputAccum] = []
     for ref_id in referenced_ids:
@@ -1375,6 +1640,10 @@ async def evaluate_signal(
             if isinstance(inp.instrument, InstrumentSpot):
                 price_label = f"{inp.instrument.instrument_id}.close"
             elif isinstance(inp.instrument, InstrumentOptionStream):
+                # Both modes emit the option premium (mid) LEVEL — in hold mode it
+                # is the HELD contract's mid, otherwise the daily-reselected mid.
+                # Label it as the stream either way (it IS a premium level, not a
+                # return).
                 price_label = f"{inp.instrument.collection}.{inp.instrument.stream}"
             elif isinstance(inp.instrument, InstrumentBasket):
                 # Baskets identify themselves by ``basket_id`` (saved) or
@@ -1388,8 +1657,44 @@ async def evaluate_signal(
                 price_label = f"{inp.instrument.collection}.continuous.close"
             price_values = values_by_key[key]
 
+        # A SELECT-AND-HOLD option stream (``hold_between_rolls``) books
+        # FIXED-CONTRACT DOLLAR P&L, not a price %-return: the held premium LEVEL
+        # (``price_values``) plus the roll structure (``hold_roll_info``) drive the
+        # equity-coupled recurrence in ``_compound_with_hold`` (6b).  Its
+        # ``contrib_step`` is left ZERO here and filled in there.  DEFAULT-OFF
+        # option streams (and every non-option input) take the price-level
+        # ``Δprice/price`` branch below, byte-identical to before.
+        _hold_mode_option = (
+            isinstance(inp.instrument, InstrumentOptionStream)
+            and inp.instrument.hold_between_rolls
+        )
         contrib_step = np.zeros(max(T - 1, 0), dtype=np.float64)
-        if price_values is not None and T >= 2:
+        hold_spec: _HoldPnLSpec | None = None
+        if _hold_mode_option and price_values is not None and ref_id in hold_roll_info:
+            is_roll_arr, roll_premium_arr = hold_roll_info[ref_id]
+            # Direction is the SIGN of the net latched position; ``nav_times`` is
+            # the SIZE (a separate field, may exceed the |weight| the sign carries).
+            # ``pos`` already folds every latched block's signed weight for this
+            # input, so its sign is the leg's direction and its non-zero mask is
+            # "position open".  The MAGNITUDE of pos is NOT used for sizing (that is
+            # nav_times) — only its sign + open/closed state.
+            with np.errstate(invalid="ignore"):
+                pos_sign = np.sign(pos)
+            # A single hold-mode option input is driven by one entry block's sign;
+            # if multiple blocks on the same input disagree in sign the net sign
+            # governs (same as the price path's net position).
+            nonzero = pos_sign[pos_sign != 0.0]
+            leg_sign = float(nonzero[0]) if nonzero.size else 1.0
+            hold_spec = _HoldPnLSpec(
+                ref_id=ref_id,
+                sign=leg_sign,
+                nav_times=float(inp.instrument.nav_times),
+                premium=price_values,
+                is_roll=is_roll_arr > 0.5,
+                roll_premium=roll_premium_arr,
+                pos_active=pos != 0.0,
+            )
+        elif price_values is not None and T >= 2:
             prev_price = price_values[:-1]
             cur_price = price_values[1:]
             valid = (
@@ -1407,19 +1712,46 @@ async def evaluate_signal(
                 price_label=price_label,
                 price_values=price_values,
                 contrib_step=contrib_step,
+                hold_spec=hold_spec,
             )
         )
 
     # 6b. Net per-bar return → compounded, wipeout-clamped equity ratio.
     #     ``step_scale`` caps the loss on a wiping bar so the per-input
     #     contributions below reconcile to ``equity_ratio - 1`` through ruin.
+    #
+    #     Two paths:
+    #       * NO hold-mode option input → the vectorized ``_compound_clamped`` of
+    #         the summed per-input ``contrib_step`` (byte-identical to before → the
+    #         golden-master is unmoved);
+    #       * ≥1 hold-mode option input → ``_compound_with_hold``: a SEQUENTIAL
+    #         joint pass because a hold leg's contribution is equity-coupled
+    #         (contrib[t] ∝ equity_ratio[roll]/equity_ratio[t-1]).  It sums the
+    #         vectorized inputs' equity-independent steps AND each hold leg's
+    #         fixed-contract dollar-P&L step, applying the SAME ruin clamp, and
+    #         returns each hold leg's actual booked ``contrib_step`` so 6c is
+    #         uniform.
     equity_ratio = np.ones(T, dtype=np.float64)
     step_scale = np.ones(max(T - 1, 0), dtype=np.float64)
-    if T >= 2:
+    hold_specs = [acc.hold_spec for acc in accums if acc.hold_spec is not None]
+    if T >= 2 and not hold_specs:
         net_step = np.zeros(T - 1, dtype=np.float64)
         for acc in accums:
             net_step += acc.contrib_step
         equity_ratio, step_scale = _compound_clamped(net_step)
+    elif T >= 2:
+        vectorized_net_step = np.zeros(T - 1, dtype=np.float64)
+        for acc in accums:
+            if acc.hold_spec is None:
+                vectorized_net_step += acc.contrib_step
+        equity_ratio, step_scale, hold_contrib = _compound_with_hold(
+            vectorized_net_step, hold_specs
+        )
+        # Write each hold leg's actual booked per-step contribution back so its
+        # ``realized_pnl`` is built by the SAME 6c formula as every other input.
+        for acc in accums:
+            if acc.hold_spec is not None:
+                acc.contrib_step = hold_contrib[acc.ref_id]
 
     # 6c. Per-input cumulative contributions (deploy prior-bar equity, with
     #     the wipeout loss-cap applied uniformly across inputs on the wiping

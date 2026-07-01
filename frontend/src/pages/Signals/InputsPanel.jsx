@@ -260,6 +260,11 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
         onSelect={handlePickerSelect}
         title="Select Instrument"
         allowBaskets={true}
+        // Signals inputs are backtested → surface the option-stream select-and-hold
+        // (fixed-contract dollar P&L) + nav_times controls in the direct options
+        // drill-down.  (Not on the basket-leg sub-picker: the backend rejects
+        // hold_between_rolls on a basket leg.)
+        showOptionHoldControls={true}
       />
     </div>
   );

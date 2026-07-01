@@ -23,6 +23,50 @@ from typing import Any, Literal, Mapping, Optional
 
 
 # ---------------------------------------------------------------------------
+# Cycle-tag normalisation (the "monthly 3rd-Friday series" spans two tags)
+# ---------------------------------------------------------------------------
+#
+# The dwh tags the SAME economic series — the standard monthly option, expiring
+# the 3rd Friday of the month — under DIFFERENT ``expiration_cycle`` values
+# across eras / providers: early E-mini (``OPT_SP_500``) history tags it ``"M"``;
+# later history tags the very same 3rd-Friday contract ``"W3 Friday"`` and leaves
+# ``"M"`` for the QUARTERLIES only.  A selection filtered on ``"M"`` alone
+# therefore tracks the monthly in early years but silently falls back to sparse
+# quarterlies in later years — the direct cause of the delta-selected option
+# landing on a poorly-covered expiry (garbage strike) in 2022+.
+#
+# ``"M"`` is the UI's "Monthly" choice, so its ROBUST meaning is "the monthly
+# 3rd-Friday series across all eras" = the union of both tags.  ``expand_cycle``
+# maps ``"M"`` → both tags and passes every other value through unchanged, so the
+# monthly filter is complete without disturbing any other cycle (``"W"``, ``"Q"``,
+# the specific ``"W1/2/4 Friday"`` weeklies) or the ``None`` all-cycles case.
+
+#: The ``expiration_cycle`` tags that together make up the standard MONTHLY
+#: (3rd-Friday) series.  ``"W3 Friday"`` IS the 3rd-Friday weekly = the monthly;
+#: on dates where a contract is double-tagged (both ``"M"`` and ``"W3 Friday"``
+#: for the same expiration) the caller de-dupes by expiration / contract id.
+MONTHLY_CYCLE_TAGS: tuple[str, ...] = ("M", "W3 Friday")
+
+
+def expand_cycle(cycle: str | None) -> str | tuple[str, ...] | None:
+    """Expand a cycle filter to its full tag set for option-STREAM selection.
+
+    ``"M"`` → :data:`MONTHLY_CYCLE_TAGS` (the monthly 3rd-Friday series spans two
+    dwh tags across eras — see the module note).  Every other value (a specific
+    cycle, or ``None`` for all-cycles) is returned unchanged, so only the
+    "Monthly" filter is broadened.  The result is a scalar / ``None`` (pass
+    through) or a tuple (query all of them); the data layer accepts both.
+
+    This is applied ONLY on the stream-selection path (signals / option-stream
+    series), NOT on the raw chain browser — a user inspecting the ``"M"`` chain
+    still sees exactly the ``"M"``-tagged contracts.
+    """
+    if cycle == "M":
+        return MONTHLY_CYCLE_TAGS
+    return cycle
+
+
+# ---------------------------------------------------------------------------
 # Enumeration types
 # ---------------------------------------------------------------------------
 

@@ -91,6 +91,13 @@ export default function InstrumentPickerModal({
   // restriction (Data-page chart / signals keep the full stream choice).  Does
   // NOT affect the basket-leg sub-picker (that path is Signals-only).
   optionStreamAllowedStreams = null,
+  // SIGNALS-only: surface the option-stream "Hold contract between rolls
+  // (fixed-contract P&L)" + nav_times controls in the DIRECT options drill-down
+  // (a standalone option signal INPUT).  Default false so Data/Portfolio pickers
+  // are unchanged.  NEVER passed to the basket-leg sub-picker (the backend
+  // rejects hold_between_rolls on a basket leg — multi-leg held books are
+  // Phase-2), so a basket option leg never shows these controls.
+  showOptionHoldControls = false,
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -433,6 +440,7 @@ export default function InstrumentPickerModal({
                     value={optionStreamValue}
                     onChange={setOptionStreamValue}
                     availableRoots={optionRoots}
+                    showHoldControls={showOptionHoldControls}
                     {...(optionStreamAllowedStreams
                       ? { allowedStreams: optionStreamAllowedStreams }
                       : {})}

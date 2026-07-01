@@ -81,6 +81,8 @@ from numpy.typing import NDArray
 
 from tcg.engine.options.maturity.protocol import MaturityResolver
 from tcg.engine.options.maturity.resolver import _add_months, last_trading_day_of_month
+from tcg.engine.options.pricing.kernel import BS76Kernel
+from tcg.engine.options.pricing.protocol import PricingKernel
 from tcg.engine.options.selection._match import (
     match_by_delta,
     match_by_moneyness,
@@ -132,8 +134,13 @@ _MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
 # Streams readable off ``OptionDailyRow``.  Mirrors the Pydantic
 # ``OptionStreamLabel`` literal at the API boundary; redeclared here
 # so the engine layer does not import from ``tcg.core``.
+#
+# ``bs_mid`` is the one COMPUTED stream (not a row field): the contract's
+# Black-76 theoretical price from its stored IV + the underlying FUTURE price
+# (the Java sim's price basis), intrinsic at expiry.  See ``_price_bs_mid``.
 StreamLabel = Literal[
     "mid",
+    "bs_mid",
     "iv",
     "delta",
     "gamma",
@@ -144,9 +151,20 @@ StreamLabel = Literal[
 ]
 
 
+# The COMPUTED stream label — priced from IV + underlying, not read off the row.
+_BS_MID = "bs_mid"
+
+# Java default: r = 0 (Phase 1 mandate; the Black-76 forward already embeds
+# carry, so the discount factor exp(-rT) is identically 1).  ACT/365 day-count
+# for DTE → year fraction, matching the kernel's convention.
+_BS_RATE: float = 0.0
+_DAYS_PER_YEAR: float = 365.0
+
+
 # Map stream label → ``OptionDailyRow`` attribute.  Centralised so a
 # missing-field bug surfaces as a KeyError at construction time, not a
-# silent NaN at runtime.
+# silent NaN at runtime.  ``bs_mid`` is deliberately ABSENT — it is computed
+# (see ``_price_bs_mid`` / ``_extract_stream_value``), not read off a field.
 _STREAM_TO_ATTR: dict[str, str] = {
     "mid": "mid",
     "iv": "iv_stored",
@@ -165,6 +183,96 @@ def _missing_code_for(stream: str) -> str:
     diagnostic surface specific (a frontend filter can show
     ``missing_iv`` separately from ``missing_delta``)."""
     return f"missing_{stream}"
+
+
+def _price_bs_mid(
+    *,
+    iv: float | None,
+    future_price: float | None,
+    strike: float,
+    option_type: Literal["C", "P"],
+    dte_days: int,
+    kernel: "PricingKernel",
+) -> tuple[float | None, str | None]:
+    """Black-76 theoretical premium from surface IV + the underlying FUTURE.
+
+    Reproduces the Java sim's price basis (recon §4): the held option is priced
+    as a Black-Scholes/Black-76 theoretical value from the day's stored surface
+    IV on the E-mini FUTURE (ACT/365, r=0), intrinsic at expiry — NOT the raw
+    bid-ask mid.  For deep-OTM 10Δ puts with wide quotes the two differ a lot.
+
+    Returns ``(price, error_code)`` — exactly one non-None:
+      * ``future_price`` missing / ≤ 0 → ``(None, "missing_underlying_price")``
+        (options are on the future, whose price comes from the underlying
+        resolver — OPT_SP_500 greeks store NULL underlying_price, so a row field
+        is not usable);
+      * at/after expiry (``dte_days <= 0``) → INTRINSIC value (``max(K−F,0)`` put
+        / ``max(F−K,0)`` call), matching the Java expiry rule — needs only the
+        future, NOT the IV (a fabricated-IV price at expiry would be wrong);
+      * before expiry with ``iv`` missing / ≤ 0 → ``(None, "missing_bs_iv")``
+        (no fabrication — a real diagnostic);
+      * otherwise the Black-76 price at ``T = dte_days/365``.
+    """
+    if future_price is None or future_price <= 0.0:
+        return None, "missing_underlying_price"
+    F = float(future_price)
+    K = float(strike)
+    # Expiry (or past): intrinsic value — independent of IV (Java expiry rule).
+    if dte_days <= 0:
+        intrinsic = max(K - F, 0.0) if option_type == "P" else max(F - K, 0.0)
+        return intrinsic, None
+    if iv is None or iv <= 0.0:
+        return None, "missing_bs_iv"
+    T = dte_days / _DAYS_PER_YEAR
+    sigma = float(iv)
+    if option_type == "P":
+        price = kernel.price_put(F, K, T, _BS_RATE, sigma)
+    else:
+        price = kernel.price_call(F, K, T, _BS_RATE, sigma)
+    # A non-finite kernel output (pathological inputs) is a loud diagnostic, not
+    # a silent NaN that would poison the P&L series.
+    if not np.isfinite(price):
+        return None, "missing_bs_price"
+    return float(price), None
+
+
+async def _extract_stream_value(
+    *,
+    stream: StreamLabel,
+    contract: OptionContractDoc,
+    row: OptionDailyRow,
+    d: date,
+    attr_name: str,
+    underlying_price_resolver: UnderlyingPriceResolver | None,
+    kernel: "PricingKernel | None",
+) -> tuple[float | None, str | None]:
+    """Extract one stream value for a selected ``(contract, row)`` on date ``d``.
+
+    Row-attribute streams (``mid``/``iv``/greeks/…) read ``getattr(row, attr)``
+    synchronously.  ``bs_mid`` is COMPUTED: it awaits the underlying FUTURE price
+    and prices via the Black-76 ``kernel`` (see :func:`_price_bs_mid`).  Returns
+    ``(value, error_code)`` — exactly one non-None.  Shared by the Phase-C
+    per-date path and the select-and-hold path so the two never diverge.
+    """
+    if stream == _BS_MID:
+        if kernel is None:  # pragma: no cover (resolver always builds one)
+            return None, "missing_bs_price"
+        F: float | None = None
+        if underlying_price_resolver is not None:
+            F = await underlying_price_resolver(contract, d)
+        dte_days = (contract.expiration - d).days
+        return _price_bs_mid(
+            iv=row.iv_stored,
+            future_price=F,
+            strike=contract.strike,
+            option_type=contract.type,
+            dte_days=dte_days,
+            kernel=kernel,
+        )
+    raw = getattr(row, attr_name, None)
+    if raw is None:
+        return None, _missing_code_for(stream)
+    return float(raw), None
 
 
 def _apply_roll_offset(d: date, roll_offset: RollOffset) -> date:
@@ -202,6 +310,73 @@ def _snap_to_listed(target: date, listed: Sequence[date]) -> date | None:
     return min(listed, key=lambda e: (abs((e - target).days), e))
 
 
+# ---------------------------------------------------------------------------
+# Coverage-aware expiration selection (opt-in, default OFF)
+# ---------------------------------------------------------------------------
+#
+# WHY.  ``NearestToTarget`` picks the single nearest-DTE expiration from the
+# (cycle-filtered) listed set, with NO awareness of whether that expiration
+# actually carries strikes near the requested delta / moneyness.  On options
+# with sparse or era-varying coverage (e.g. the E-mini ``OPT_SP_500`` M-cycle in
+# later years, where a target month can have ZERO delta-bearing puts), the
+# nearest-DTE expiration can be a thin listing whose only greeked strikes are
+# deep-OTM garbage.  ``ByDelta(-0.10)`` then returns that garbage (moneyness
+# ~0.17) instead of the true 10-delta put (~0.88) that exists at a neighbouring
+# expiration — corr against a ground-truth sim collapses/inverts in those eras.
+#
+# Coverage-aware selection resolves the expiration to the nearest-DTE candidate
+# that has an IN-TOLERANCE delta/moneyness match, retrying the next-nearest
+# within a bounded DTE window; if none is in tolerance it falls back to the
+# nearest-DTE best-effort (== the current behaviour) so it never regresses to
+# all-NaN.  Gated behind ``coverage_aware`` — OFF by default (byte-identical /
+# golden-preserving).
+
+#: Max number of nearest-DTE candidate expirations considered per date in
+#: coverage-aware mode.  Bounds the extra Phase-B fetch fan-out (each unique
+#: candidate expiration = one bulk query).  Conservative default; the right value
+#: depends on the root's expiry spacing (see the live-data request).
+_COVERAGE_MAX_CANDIDATES: int = 4
+
+#: Only consider candidate expirations whose DTE is within this many days of the
+#: nearest-DTE candidate's DTE.  Keeps the retry local to the target maturity
+#: (a ~2-month target should not silently jump to a 6-month expiration).
+_COVERAGE_DTE_WINDOW_DAYS: int = 45
+
+
+def _coverage_candidates(
+    ref_date: date,
+    target_dte_days: int,
+    available: Sequence[date],
+) -> list[date]:
+    """Ordered candidate expirations for coverage-aware ``NearestToTarget``.
+
+    Sorted by ``(|dte - target|, dte)`` — the SAME key ``resolve_with_chain``
+    ranks by, so ``candidates[0]`` is exactly the expiration the coverage-BLIND
+    path would have picked.  Truncated to :data:`_COVERAGE_MAX_CANDIDATES` and to
+    a ``±`` :data:`_COVERAGE_DTE_WINDOW_DAYS` window around the nearest
+    candidate's DTE, so the coverage retry stays near the requested maturity and
+    the Phase-B fan-out stays bounded.
+
+    Returns ``[]`` when *available* is empty.
+    """
+    if not available:
+        return []
+    target_date = ref_date + timedelta(days=target_dte_days)
+
+    def _key(exp: date) -> tuple[int, int]:
+        dte = (exp - ref_date).days
+        return (abs((exp - target_date).days), dte)
+
+    ordered = sorted(available, key=_key)
+    nearest_dte = (ordered[0] - ref_date).days
+    windowed = [
+        e
+        for e in ordered
+        if abs((e - ref_date).days - nearest_dte) <= _COVERAGE_DTE_WINDOW_DAYS
+    ]
+    return windowed[:_COVERAGE_MAX_CANDIDATES]
+
+
 @runtime_checkable
 class _CycleAwareReader(Protocol):
     """Structural shape of a chain reader that accepts ``expiration_cycle``.
@@ -222,7 +397,7 @@ class _CycleAwareReader(Protocol):
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
-        expiration_cycle: str | None = None,
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]: ...
 
 
@@ -246,7 +421,7 @@ class _CycleAwareBulkReader(Protocol):
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
-        expiration_cycle: str | None = None,
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]: ...
 
 
@@ -260,7 +435,9 @@ class _CycleInjectingReader:
     — but we still wrap to keep the call site uniform.
     """
 
-    def __init__(self, inner: _CycleAwareReader, cycle: str | None) -> None:
+    def __init__(
+        self, inner: _CycleAwareReader, cycle: str | Sequence[str] | None
+    ) -> None:
         self._inner = inner
         self._cycle = cycle
 
@@ -295,7 +472,9 @@ class _CycleInjectingBulkReader:
     injecting the caller's cycle into the underlying cycle-aware reader.
     """
 
-    def __init__(self, inner: _CycleAwareBulkReader, cycle: str | None) -> None:
+    def __init__(
+        self, inner: _CycleAwareBulkReader, cycle: str | Sequence[str] | None
+    ) -> None:
         self._inner = inner
         self._cycle = cycle
 
@@ -339,6 +518,267 @@ def _row_for_contract(
 
 
 # ---------------------------------------------------------------------------
+# Select-and-hold (``hold_between_rolls``) helpers
+# ---------------------------------------------------------------------------
+#
+# See ``resolve_option_stream``'s ``hold_between_rolls`` docstring for the WHY.
+# The mode emits, per date, the HELD-CONTRACT PREMIUM (mid) LEVEL of the contract
+# that OWNS the step ending on that date (the OLD contract on the roll day), PLUS
+# roll info (``is_roll`` segment-start markers + each segment's roll-day OPEN
+# premium).  It does NOT stitch/ratio-adjust the option series (a stitched OPTION
+# level would court Gael's hard "no ratio-adjustment for options" constraint):
+# ``signal_exec`` runs the FIXED-CONTRACT DOLLAR-P&L recurrence over these arrays
+# (size a held quantity once per roll off the compounding NAV and the roll
+# premium, book ``qty·Δpremium`` daily, realise+resize at the next roll), which is
+# oracle-exact against the ground-truth Java close+reopen sim.  One helper:
+#   * ``_hold_segments`` — split the queryable dates into contiguous HELD-contract
+#     runs (a new run begins where the resolved *expiration* changes — the same
+#     maturity-roll discriminator ``derive_rolls`` uses).
+
+
+def _hold_segments(
+    queryable: "list[tuple[int, date]]",
+    expirations: "dict[int, date | None]",
+) -> "list[list[tuple[int, date]]]":
+    """Split ``queryable`` into contiguous runs sharing a resolved expiration.
+
+    ``queryable`` is the chronological ``[(idx, date), ...]`` of dates that got a
+    resolved expiration; ``expirations[idx]`` is that date's target expiration.  A
+    new segment starts whenever the expiration differs from the previous
+    queryable date's (a maturity ROLL — the same rule ``derive_rolls`` applies by
+    comparing ``.expiration``).  Dates whose expiration is ``None`` (resolution
+    failed / no chain) are DROPPED from segmentation — they keep whatever
+    error_code Phase A/B set and contribute NaN; a ``None`` gap does not by itself
+    force a new segment (the held contract continues across an isolated missing
+    day), matching the WARN-don't-block philosophy of the rest of the resolver.
+
+    Returns a list of segments, each a non-empty ``[(idx, date), ...]`` list.
+    """
+    segments: list[list[tuple[int, date]]] = []
+    prev_exp: date | None = None
+    for idx, d in queryable:
+        exp = expirations.get(idx)
+        if exp is None:
+            # No resolved expiration for this date — leave it out of every
+            # segment (its NaN + code already stand); do not break the run.
+            continue
+        if not segments or exp != prev_exp:
+            segments.append([(idx, d)])
+        else:
+            segments[-1].append((idx, d))
+        prev_exp = exp
+    return segments
+
+
+async def _resolve_hold(
+    *,
+    dates: Sequence[date],
+    queryable: "list[tuple[int, date]]",
+    expirations: "dict[int, date | None]",
+    chain_index: "dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]",
+    attr_name: str,
+    stream: StreamLabel,
+    values: NDArray[np.float64],
+    error_codes: list[str | None],
+    contracts: list[OptionContractDoc | None],
+    snap_notes: "dict[int, str]",
+    select_contract_on_date: "Callable[[date, list[tuple[OptionContractDoc, OptionDailyRow]]], object]",
+    progress_callback: Callable[[], None] | None,
+    underlying_price_resolver: UnderlyingPriceResolver | None = None,
+    kernel: "PricingKernel | None" = None,
+    roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
+) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
+    """Select-and-hold resolution over the pre-fetched ``chain_index``.
+
+    Runs AFTER Phase A (per-date ``expirations``) and Phase B (``chain_index``)
+    on the SAME data the per-date Phase C would use.  Instead of a daily-
+    reselected mid LEVEL it emits, PER DATE, the HELD-CONTRACT PREMIUM (mid) LEVEL
+    of the contract that OWNS the step ENDING on that date (the OLD contract on the
+    roll day), and — via ``roll_info_out`` — the roll structure ``signal_exec``
+    needs to run the FIXED-CONTRACT DOLLAR-P&L recurrence (no ``Δmid/mid`` on a
+    stitched level, so NO option ratio-adjust):
+
+    1. **Segment** the queryable dates into contiguous maturity runs
+       (:func:`_hold_segments` — a new run at each ``expiration`` change, the
+       ``derive_rolls`` discriminator).
+    2. **Select once per segment**: pick the contract on the segment's FIRST
+       date via ``select_contract_on_date`` and FREEZE it for the whole run (no
+       daily strike churn).  Record it in ``contracts`` for every date of the run
+       (the roll-event array reads maturity transitions off this).
+    3. **Own each date's VALUE** by exactly one contract's mid LEVEL:
+         * a date INTERIOR to a segment → the segment's held contract's mid;
+         * a ROLL date (a segment's first date, when the previous output index
+           belongs to the OLD segment) → the OLD (previous) contract's mid ON the
+           roll day.  So the step ENDING on the roll day (``values[t]-base`` in
+           signal_exec) is the OLD contract's OWN move into the roll — the
+           ground-truth Java "realise the OLD" side of a close+reopen.
+    4. **Roll info** (``roll_info_out``): ``is_roll`` marks every segment's first
+       date (incl. the initial open at index 0); ``roll_premium`` at those dates
+       is the NEW (this-segment) contract's roll-day OPEN mid — the base against
+       which the NEW segment's daily P&L and its held-quantity sizing are computed.
+       This is the ONLY place the NEW open premium is surfaced (``values`` on the
+       roll date carries the OLD mid), so the seam is exact (realise OLD @ its
+       roll-day mid, open NEW @ its roll-day mid), never a raw old→new level gap.
+
+    Writes the held mid LEVEL into ``values`` (``values[t]`` == the owning
+    contract's mid on ``t``; NaN where that contract has no quote), preserving
+    Phase-A/B error codes for dates not covered by a segment.  When
+    ``roll_info_out`` is a dict it is populated with ``{"is_roll", "roll_premium"}``
+    (both length ``T`` ``float64``/bool arrays).  Returns the
+    ``(values, error_codes, contracts)`` triple (roll info goes through the
+    out-dict so the 3-tuple return stays stable for every non-hold caller).
+    NOTE: in hold mode ``values`` is the held-contract mid LEVEL — an honest
+    per-leg display of the premium actually held; the signals P&L path is the only
+    consumer that pairs it with ``roll_info_out``.
+    """
+    n = len(dates)
+
+    segments = _hold_segments(queryable, expirations)
+
+    # Per-output-index: the mid LEVEL of the contract owning that date's value
+    # (OLD contract on a roll date, held contract otherwise); plus the roll
+    # structure the dollar-P&L recurrence needs.
+    held_value: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
+    is_roll: NDArray[np.bool_] = np.zeros(n, dtype=np.bool_)
+    roll_premium: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
+
+    async def _mid_of(contract: OptionContractDoc | None, d: date) -> float:
+        """Read ``contract``'s ``stream`` value on date ``d`` from the chain.
+
+        Returns ``NaN`` when the contract is absent from ``d``'s chain or the
+        stream value is unavailable (a NaN value makes the adjacent P&L steps
+        contribute 0 in signal_exec, mirroring the price path's ``valid`` mask).
+        For ``bs_mid`` the value is COMPUTED (Black-76 from IV + the underlying
+        future), so this is async — the future price is fetched per date."""
+        if contract is None:
+            return np.nan
+        rows = chain_index.get(d, [])
+        row = _row_for_contract(rows, contract) if rows else None
+        if row is None:
+            return np.nan
+        value, _code = await _extract_stream_value(
+            stream=stream,
+            contract=contract,
+            row=row,
+            d=d,
+            attr_name=attr_name,
+            underlying_price_resolver=underlying_price_resolver,
+            kernel=kernel,
+        )
+        return np.nan if value is None else float(value)
+
+    prev_seg_contract: OptionContractDoc | None = None
+    prev_seg_last_idx: int | None = None
+
+    for seg_num, seg in enumerate(segments):
+        # Select the held contract on the segment's FIRST date, then freeze it.
+        first_idx, first_date = seg[0]
+        # Restrict selection to THIS segment's resolved expiration: the roll day's
+        # merged chain carries BOTH the OLD and NEW expirations (so the OLD's
+        # roll-day mid is available), but the NEW segment must select a NEW-
+        # expiration contract — never accidentally re-pick an OLD one on a delta
+        # tie.  (Non-roll first dates carry only their own expiration, so this
+        # filter is a no-op there.)
+        seg_exp = expirations.get(first_idx)
+        first_rows = [
+            (c, r)
+            for (c, r) in chain_index.get(first_date, [])
+            if seg_exp is None or c.expiration == seg_exp
+        ]
+        held, sel_err = await select_contract_on_date(  # type: ignore[misc]
+            first_date, first_rows
+        )
+        if held is None:
+            # Selection failed at the roll — the whole segment cannot be priced.
+            # Mark each of its dates (NaN value + diagnostic); the NEXT segment
+            # then treats its first date as a fresh open (no OLD owner), since this
+            # segment yielded no contract to realise.
+            for idx, _d in seg:
+                if error_codes[idx] is None:
+                    error_codes[idx] = sel_err or "no_chain_for_date"
+            prev_seg_contract = None
+            prev_seg_last_idx = None
+            continue
+
+        # This segment's roll-day OPEN premium = the NEW held contract's own mid on
+        # the segment's first date.  It is the base for the NEW segment's P&L and
+        # for sizing the held quantity (surfaced via roll_info_out — values[first]
+        # may carry the OLD mid on a true roll date).
+        seg_open_premium = await _mid_of(held, first_date)
+
+        for idx, d in seg:
+            # Record the held contract on every date of the run.
+            contracts[idx] = held
+
+        for j, (idx, d) in enumerate(seg):
+            held_mid_today = await _mid_of(held, d)
+            is_true_roll = (
+                seg_num > 0
+                and prev_seg_contract is not None
+                and prev_seg_last_idx == idx - 1
+            )
+            if j == 0 and is_true_roll:
+                # Roll date: this date's VALUE is the OLD contract's mid ON the
+                # roll day, so the step ENDING here is the OLD's own move into the
+                # roll (realise the OLD).  The NEW open premium lives in
+                # roll_premium (below).
+                old_mid_today = await _mid_of(prev_seg_contract, d)
+                held_value[idx] = old_mid_today
+                is_roll[idx] = True
+                roll_premium[idx] = seg_open_premium
+                # Diagnostic keys on the OLD mid (that is this date's value); the
+                # NEW open premium is validated when the NEXT step consumes it.
+                if not np.isfinite(old_mid_today) and error_codes[idx] is None:
+                    rows = chain_index.get(d, [])
+                    error_codes[idx] = (
+                        "no_chain_for_date" if not rows else _missing_code_for(stream)
+                    )
+            else:
+                # Interior date (or the very first open, seg_num==0 j==0): the
+                # value is THIS segment's held contract's mid.
+                held_value[idx] = held_mid_today
+                if j == 0:
+                    # Segment open that is NOT a true roll (first segment overall,
+                    # or a gap/failed prior segment): still a sizing point.
+                    is_roll[idx] = True
+                    roll_premium[idx] = seg_open_premium
+                # Per-date diagnostic: the held contract not quoting today is a
+                # missing-stream day (the price path's equivalent of a NaN value).
+                if not np.isfinite(held_mid_today) and error_codes[idx] is None:
+                    rows = chain_index.get(d, [])
+                    error_codes[idx] = (
+                        "no_chain_for_date" if not rows else _missing_code_for(stream)
+                    )
+
+        prev_seg_contract = held
+        prev_seg_last_idx = seg[-1][0]
+
+    for i in range(n):
+        values[i] = held_value[i]
+
+    if roll_info_out is not None:
+        roll_info_out["is_roll"] = is_roll.astype(np.float64)
+        roll_info_out["roll_premium"] = roll_premium
+
+    # Fold snap diagnostics in AFTER extraction (success-side note; only where the
+    # date resolved a held contract with a quote) — mirrors Phase C's handling.
+    for idx, note in snap_notes.items():
+        if error_codes[idx] is None and contracts[idx] is not None:
+            error_codes[idx] = note
+
+    # Progress: tick once per date (the HOLD path did no per-date async gather,
+    # so emit the ticks Phase C would have).
+    if progress_callback is not None:
+        for _ in range(n):
+            try:
+                progress_callback()
+            except Exception:  # pragma: no cover (defensive)
+                pass
+
+    return values, error_codes, contracts
+
+
+# ---------------------------------------------------------------------------
 # Bulk pre-fetch path (Phase A → B → C)
 # ---------------------------------------------------------------------------
 
@@ -348,7 +788,7 @@ async def _resolve_bulk(
     dates: Sequence[date],
     collection: str,
     option_type: Literal["C", "P"],
-    cycle: str | None,
+    cycle: str | Sequence[str] | None,
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
@@ -361,6 +801,9 @@ async def _resolve_bulk(
     progress_callback: Callable[[], None] | None,
     available_expirations: Sequence[date] | None,
     concurrency_gate: "asyncio.Semaphore | None" = None,
+    hold_between_rolls: bool = False,
+    hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
+    coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
@@ -383,11 +826,27 @@ async def _resolve_bulk(
     when selection failed / chain missing).  Roll-event derivation is
     done at the API layer over the parallel ``contracts`` array.
     """
-    attr_name = _STREAM_TO_ATTR[stream]
+    # ``bs_mid`` is COMPUTED, not a row attribute — it has no ``_STREAM_TO_ATTR``
+    # entry (``attr_name`` is unused for it; ``_extract_stream_value`` prices it
+    # from IV + the underlying future).  All other labels map to a row field.
+    attr_name = "" if stream == _BS_MID else _STREAM_TO_ATTR[stream]
+    # Build the Black-76 kernel once per resolve for the bs_mid computed stream
+    # (stateless, pure — engine-local, so no wiring/param threading needed).
+    kernel: PricingKernel | None = BS76Kernel() if stream == _BS_MID else None
     n = len(dates)
     values: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
     error_codes: list[str | None] = [None] * n
     contracts: list[OptionContractDoc | None] = [None] * n
+
+    # Coverage-aware selection is a Phase-C re-pick; hold mode bypasses Phase C
+    # (it segments + freezes ONE contract per roll via ``_resolve_hold``).  The
+    # two are not composed in this pass — fail loudly rather than silently
+    # ignoring coverage in hold mode.  (A future pass can teach ``_resolve_hold``
+    # to select its per-segment contract coverage-aware.)
+    if coverage_aware and hold_between_rolls:
+        raise ValueError(
+            "coverage_aware is not supported together with hold_between_rolls yet"
+        )
 
     # Wrap bulk reader with cycle injection.
     bulk_reader = _CycleInjectingBulkReader(bulk_chain_reader, cycle)
@@ -411,6 +870,14 @@ async def _resolve_bulk(
     # for dates that resolved to a real value (a success-side diagnostic; the
     # failure channel must stay clean so Phase C still runs selection).
     snap_notes: dict[int, str] = {}
+
+    # Coverage-aware mode only: per-date ORDERED candidate expirations
+    # (nearest-DTE first).  ``candidates[idx][0]`` is always the coverage-blind
+    # pick, so ``expirations[idx]`` (set below) still equals the legacy choice —
+    # the extra candidates are only consulted by the coverage-aware Phase-C
+    # selection, which re-picks the nearest-DTE candidate that is actually
+    # covered.  Empty dict when the mode is off (the common default).
+    candidates: dict[int, list[date]] = {}
 
     if isinstance(maturity, NearestToTarget):
         if queryable:
@@ -452,11 +919,23 @@ async def _resolve_bulk(
                 else:
                     # roll_offset (ROLL-EARLY axis): resolve maturity as of
                     # (d + offset) so every roll happens that much earlier.
+                    ref = _apply_roll_offset(d, roll_offset)
                     expirations[idx] = maturity_resolver.resolve_with_chain(
-                        ref_date=_apply_roll_offset(d, roll_offset),
+                        ref_date=ref,
                         rule=maturity,
                         available_expirations=available,
                     )
+                    if coverage_aware and isinstance(selection, ByDelta):
+                        # Build the ordered candidate list for the coverage-aware
+                        # Phase-C re-pick.  candidates[idx][0] == the resolve above
+                        # (same ranking key), so the coverage-blind grouping/output
+                        # below is unchanged; the extras only enable the retry.
+                        # Scoped to ByDelta — the only criterion with a delta
+                        # "coverage" notion (ByStrike is exact; ByMoneyness support
+                        # is a later pass, see the design note).
+                        candidates[idx] = _coverage_candidates(
+                            ref, maturity.target_dte_days, available
+                        )
     else:
         # Pure date-arithmetic rules (EndOfMonth / PlusNDays / FixedDate /
         # NextThirdFriday) compute a target expiration with no chain-existence
@@ -576,6 +1055,36 @@ async def _resolve_bulk(
                 error_codes[idx] = "no_chain_for_date"
         else:
             exp_groups[exp].append((idx, d))
+
+    # COVERAGE-AWARE mode only: also fetch each date's NON-primary candidate
+    # expirations, so Phase C can re-pick the nearest-DTE candidate that is
+    # actually covered.  The primary candidate (== ``expirations[idx]``) is
+    # already in the group above; add the rest here.  (Default mode never
+    # populates ``candidates`` → this loop is a no-op, so Phase B is
+    # byte-identical.)
+    if coverage_aware and candidates:
+        for idx, d in queryable:
+            for cand in candidates.get(idx, ()):
+                if cand != expirations.get(idx):
+                    exp_groups[cand].append((idx, d))
+
+    # HOLD mode only: the OLD contract's return INTO the roll day needs the OLD
+    # contract's mid ON the roll day, but the roll day's resolved expiration is
+    # the NEW one — so Phase B would fetch only the NEW chain there.  Add each
+    # roll day (the first queryable date whose expiration differs from the prior
+    # queryable date's) to the PREVIOUS (OLD) expiration's fetch group too, so the
+    # merged ``chain_index`` for the roll day carries BOTH chains.  (Default mode
+    # never does this — each date stays in exactly one group, so Phase B is
+    # byte-identical.)
+    if hold_between_rolls:
+        prev_exp: date | None = None
+        for idx, d in queryable:
+            exp = expirations.get(idx)
+            if exp is not None and prev_exp is not None and exp != prev_exp:
+                # ``idx`` is a roll day → also fetch the OLD (prev) expiration here.
+                exp_groups[prev_exp].append((idx, d))
+            if exp is not None:
+                prev_exp = exp
 
     # ── Strike-window narrowing ────────────────────────────────────
     # Pre-compute a strike range from the selection criterion so that
@@ -707,60 +1216,231 @@ async def _resolve_bulk(
     fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
     fetch_results = await asyncio.gather(*fetch_tasks)
     for result in fetch_results:
-        chain_index.update(result)
+        # MERGE (extend), do not overwrite: in HOLD mode a roll day appears in
+        # TWO expiration groups (OLD + NEW), so its rows arrive from two fetches
+        # and must be concatenated.  In the default path each date is in exactly
+        # one group, so this is a plain insert (byte-identical).
+        for d, rows in result.items():
+            if d in chain_index:
+                chain_index[d] = chain_index[d] + rows
+            else:
+                chain_index[d] = rows
+
+    # ── Shared per-date selection (used by BOTH Phase C and the HOLD path) ──
+    async def _select_contract_on_date(
+        d: date,
+        rows: list[tuple[OptionContractDoc, OptionDailyRow]],
+    ) -> tuple[OptionContractDoc | None, str | None]:
+        """Run the configured selection criterion against ``rows`` for date ``d``.
+
+        Returns ``(contract, error_code)`` — exactly one non-None.  Mirrors the
+        per-date Phase-C matching (ByStrike / ByDelta pure-CPU; ByMoneyness needs
+        the underlying price), but yields the CONTRACT rather than writing a
+        stream value, so the HOLD path can select once per segment and freeze it.
+        """
+        if not rows:
+            return None, "no_chain_for_date"
+        if isinstance(selection, ByStrike):
+            result = match_by_strike(rows, selection.strike)
+        elif isinstance(selection, ByDelta):
+            deltas = [r.delta_stored for _c, r in rows]
+            result = match_by_delta(
+                rows=rows,
+                deltas=deltas,
+                target=selection.target_delta,
+                tolerance=selection.tolerance,
+                strict=selection.strict,
+                chain_size=len(rows),
+            )
+        elif isinstance(selection, ByMoneyness):
+            if underlying_price_resolver is None:
+                return None, "missing_underlying_price"
+            S = await underlying_price_resolver(rows[0][0], d)
+            if S is None or S <= 0:
+                return None, "missing_underlying_price"
+            result = match_by_moneyness(
+                rows=rows,
+                target_K_over_S=selection.target_K_over_S,
+                tolerance=selection.tolerance,
+                underlying_price=float(S),
+            )
+        else:  # pragma: no cover (defensive — union is closed)
+            return None, "data_access_error"
+        if result.error_code is not None:
+            return None, result.error_code
+        if result.contract is None:  # pragma: no cover (defensive)
+            return None, "no_chain_for_date"
+        return result.contract, None
+
+    # ── HOLD path (select-and-hold): select ONCE per maturity segment, freeze
+    #    the contract between rolls, and emit the per-date HELD-CONTRACT MID LEVEL
+    #    (the OLD contract's mid on the roll day) plus the is_roll/roll_premium
+    #    side-channel (via hold_roll_info_out) that signal_exec's fixed-contract
+    #    dollar-P&L recurrence consumes — NOT a stitched level, so no option
+    #    ratio-adjust.  Bypasses the per-date Phase C entirely and returns early. ─
+    if hold_between_rolls:
+        return await _resolve_hold(
+            dates=dates,
+            queryable=queryable,
+            expirations=expirations,
+            chain_index=chain_index,
+            attr_name=attr_name,
+            stream=stream,
+            values=values,
+            error_codes=error_codes,
+            contracts=contracts,
+            snap_notes=snap_notes,
+            select_contract_on_date=_select_contract_on_date,
+            progress_callback=progress_callback,
+            underlying_price_resolver=underlying_price_resolver,
+            kernel=kernel,
+            roll_info_out=hold_roll_info_out,
+        )
 
     # ── Phase C: Per-date selection + stream extraction ─────────────
     #
-    # ByStrike and ByDelta are pure CPU (matching against pre-fetched
-    # rows) — no asyncio tasks or semaphore needed.  Only ByMoneyness
-    # requires I/O (underlying_price_resolver), so it keeps the async
-    # gather + semaphore pattern.
+    # ByStrike and ByDelta SELECT with pure CPU (matching against pre-fetched
+    # rows).  For row-attribute streams that whole path is sync (no I/O).  But
+    # ``bs_mid`` needs the underlying FUTURE price to price the contract, so it
+    # routes ByStrike/ByDelta through an async gather too (like ByMoneyness).
+    # ByMoneyness always needs I/O (underlying_price_resolver) for selection.
+
+    def _match_delta(
+        rows: list[tuple[OptionContractDoc, OptionDailyRow]],
+        *,
+        strict: bool,
+    ) -> SelectionResult:
+        """``ByDelta`` match over *rows* (``strict`` overridable for coverage)."""
+        deltas = [r.delta_stored for _c, r in rows]
+        return match_by_delta(
+            rows=rows,
+            deltas=deltas,
+            target=selection.target_delta,  # type: ignore[union-attr]
+            tolerance=selection.tolerance,  # type: ignore[union-attr]
+            strict=strict,
+            chain_size=len(rows),
+        )
+
+    def _coverage_aware_delta_select(
+        idx: int, d: date
+    ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
+        """Coverage-aware ``ByDelta`` selection over the date's CANDIDATE expiries.
+
+        Walks ``candidates[idx]`` nearest-DTE first (the same order the
+        coverage-blind path ranks by), restricting ``chain_index[d]`` to each
+        candidate's expiration and running a STRICT ``ByDelta`` match (delta must
+        be within ``selection.tolerance``).  Returns the FIRST candidate expiry
+        that has such a match — i.e. the nearest-DTE expiration that is actually
+        COVERED near the target delta.
+
+        Fallback: when NO candidate is covered, re-runs the match on the PRIMARY
+        candidate (``candidates[idx][0]`` == the coverage-blind pick) with the
+        selection's OWN ``strict`` — identical to the non-coverage result, so the
+        worst case never regresses to all-NaN (it degrades to today's behaviour).
+        A ``coverage_skipped:<iso>`` note is recorded when a strictly-nearer
+        candidate was skipped for a covered farther one.
+        """
+        cand = candidates.get(idx) or []
+        if not cand:
+            # No candidate list (e.g. date resolved to None) — defer to the plain
+            # path over whatever chain_index holds.
+            return _select_sync(idx, d, _restrict_expiration=None)
+        primary = cand[0]
+        for pos, exp in enumerate(cand):
+            exp_rows = [
+                (c, r) for (c, r) in chain_index.get(d, []) if c.expiration == exp
+            ]
+            if not exp_rows:
+                continue
+            result = _match_delta(exp_rows, strict=True)
+            if result.error_code is None and result.contract is not None:
+                row = _row_for_contract(exp_rows, result.contract)
+                if row is None:  # pragma: no cover (defensive)
+                    continue
+                contracts[idx] = result.contract
+                if pos > 0:
+                    # A strictly-nearer candidate existed but was not covered.
+                    snap_notes[idx] = f"coverage_skipped:{primary.isoformat()}"
+                return result.contract, row
+        # No covered candidate → fall back to the primary's best-effort match
+        # (the coverage-blind result, so no regression vs. today).
+        return _select_sync(idx, d, _restrict_expiration=primary)
+
+    def _select_sync(
+        idx: int,
+        d: date,
+        _restrict_expiration: date | None = None,
+    ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
+        """Run ByStrike/ByDelta selection for date ``d`` (pure CPU).
+
+        Returns the selected ``(contract, row)`` or ``None`` (having set the
+        per-date error_code).  Does NOT extract the stream value — that is done
+        by the caller (sync for row-attr streams, async for bs_mid).
+
+        ``_restrict_expiration`` (coverage-aware fallback only): when set, the
+        match runs against ONLY that expiration's rows from the merged
+        ``chain_index`` (in coverage mode the index carries several candidate
+        expiries).  ``None`` (the default / non-coverage path) uses the full
+        chain, byte-identical to before."""
+        rows = chain_index.get(d, [])
+        if _restrict_expiration is not None:
+            rows = [(c, r) for (c, r) in rows if c.expiration == _restrict_expiration]
+        if not rows:
+            error_codes[idx] = "no_chain_for_date"
+            return None
+        result: SelectionResult
+        if isinstance(selection, ByStrike):
+            result = match_by_strike(rows, selection.strike)
+        elif isinstance(selection, ByDelta):
+            deltas: list[float | None] = [r.delta_stored for _c, r in rows]
+            result = match_by_delta(
+                rows=rows,
+                deltas=deltas,
+                target=selection.target_delta,
+                tolerance=selection.tolerance,
+                strict=selection.strict,
+                chain_size=len(rows),
+            )
+        else:
+            raise TypeError(  # pragma: no cover
+                f"Unsupported SelectionCriterion for sync path: "
+                f"{type(selection).__name__}"
+            )
+        if result.error_code is not None:
+            error_codes[idx] = result.error_code
+            return None
+        if result.contract is None:  # pragma: no cover (defensive)
+            error_codes[idx] = "no_chain_for_date"
+            return None
+        row = _row_for_contract(rows, result.contract)
+        if row is None:  # pragma: no cover (defensive)
+            error_codes[idx] = "no_chain_for_date"
+            return None
+        # Capture the selected contract BEFORE extracting the value so a missing
+        # stream value still records the contract identity (selection succeeded).
+        contracts[idx] = result.contract
+        return result.contract, row
+
+    # Coverage-aware routing lives in ONE place: ByDelta in coverage mode walks
+    # the candidate expiries; everything else (ByStrike, or coverage off) uses the
+    # plain full-chain match.  (ByMoneyness is handled on its own async path
+    # below.)
+    _use_coverage_delta = coverage_aware and isinstance(selection, ByDelta)
+
+    def _do_delta_or_strike_select(
+        idx: int, d: date
+    ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
+        if _use_coverage_delta:
+            return _coverage_aware_delta_select(idx, d)
+        return _select_sync(idx, d)
 
     def _resolve_one_sync(idx: int, d: date) -> None:
-        """CPU-only resolution for ByStrike and ByDelta."""
+        """CPU-only resolution for ByStrike/ByDelta with a ROW-ATTRIBUTE stream."""
         try:
-            rows = chain_index.get(d, [])
-            if not rows:
-                error_codes[idx] = "no_chain_for_date"
+            sel = _do_delta_or_strike_select(idx, d)
+            if sel is None:
                 return
-
-            result: SelectionResult
-            if isinstance(selection, ByStrike):
-                result = match_by_strike(rows, selection.strike)
-            elif isinstance(selection, ByDelta):
-                deltas: list[float | None] = [r.delta_stored for _c, r in rows]
-                result = match_by_delta(
-                    rows=rows,
-                    deltas=deltas,
-                    target=selection.target_delta,
-                    tolerance=selection.tolerance,
-                    strict=selection.strict,
-                    chain_size=len(rows),
-                )
-            else:
-                raise TypeError(  # pragma: no cover
-                    f"Unsupported SelectionCriterion for sync path: "
-                    f"{type(selection).__name__}"
-                )
-
-            if result.error_code is not None:
-                error_codes[idx] = result.error_code
-                return
-            if result.contract is None:  # pragma: no cover (defensive)
-                error_codes[idx] = "no_chain_for_date"
-                return
-
-            row = _row_for_contract(rows, result.contract)
-            if row is None:  # pragma: no cover (defensive)
-                error_codes[idx] = "no_chain_for_date"
-                return
-
-            # Capture the selected contract for downstream roll-event
-            # derivation.  Set BEFORE reading the stream so a missing
-            # stream value still records the contract identity (the
-            # selection itself succeeded).
-            contracts[idx] = result.contract
-
+            contract, row = sel
             raw = getattr(row, attr_name, None)
             if raw is None:
                 error_codes[idx] = _missing_code_for(stream)
@@ -769,6 +1449,46 @@ async def _resolve_bulk(
         except Exception as exc:
             error_codes[idx] = "data_access_error"
             _log.debug("resolve_one_bulk date=%s failed: %s", d, exc)
+        finally:
+            if progress_callback is not None:
+                try:
+                    progress_callback()
+                except Exception:  # pragma: no cover (defensive)
+                    pass
+
+    async def _resolve_one_bs_mid_sync_select(idx: int, d: date) -> None:
+        """ByStrike/ByDelta selection (sync) + bs_mid pricing (async I/O).
+
+        Shares the Phase-B/-C gate so the underlying-price fan-out stays within
+        the dwh pool."""
+        _sem = (
+            concurrency_gate
+            if concurrency_gate is not None
+            else asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
+        )
+        try:
+            sel = _do_delta_or_strike_select(idx, d)
+            if sel is None:
+                return
+            contract, row = sel
+            async with _sem:
+                value, code = await _extract_stream_value(
+                    stream=stream,
+                    contract=contract,
+                    row=row,
+                    d=d,
+                    attr_name=attr_name,
+                    underlying_price_resolver=underlying_price_resolver,
+                    kernel=kernel,
+                )
+            if code is not None:
+                error_codes[idx] = code
+                return
+            if value is not None:
+                values[idx] = value
+        except Exception as exc:
+            error_codes[idx] = "data_access_error"
+            _log.debug("resolve_one_bulk bs_mid date=%s failed: %s", d, exc)
         finally:
             if progress_callback is not None:
                 try:
@@ -827,11 +1547,26 @@ async def _resolve_bulk(
                 # derivation.  See _resolve_one_sync for rationale.
                 contracts[idx] = result.contract
 
-                raw = getattr(row, attr_name, None)
-                if raw is None:
-                    error_codes[idx] = _missing_code_for(stream)
+                # Extract the value via the shared extractor so ``bs_mid`` (priced
+                # from the underlying future) works on the ByMoneyness path too.
+                # The underlying was already fetched above for selection; the
+                # bs_mid extractor fetches it again (result-invariant; the futures
+                # adapter memoizes per resolve, so no extra dwh round-trip in
+                # production).
+                value, code = await _extract_stream_value(
+                    stream=stream,
+                    contract=result.contract,
+                    row=row,
+                    d=d,
+                    attr_name=attr_name,
+                    underlying_price_resolver=underlying_price_resolver,
+                    kernel=kernel,
+                )
+                if code is not None:
+                    error_codes[idx] = code
                     return
-                values[idx] = float(raw)
+                if value is not None:
+                    values[idx] = value
             except Exception as exc:
                 error_codes[idx] = "data_access_error"
                 _log.debug("resolve_one_bulk date=%s failed: %s", d, exc)
@@ -855,9 +1590,26 @@ async def _resolve_bulk(
 
         if tasks:
             await asyncio.gather(*tasks)
+    elif stream == _BS_MID:
+        # ByStrike / ByDelta with the COMPUTED bs_mid stream: selection is pure
+        # CPU but pricing needs the underlying future (I/O) → async gather.
+        bs_tasks: list[asyncio.Task[None]] = []
+        for idx, d in queryable:
+            if error_codes[idx] is not None:
+                if progress_callback is not None:
+                    try:
+                        progress_callback()
+                    except Exception:  # pragma: no cover (defensive)
+                        pass
+                continue
+            bs_tasks.append(
+                asyncio.ensure_future(_resolve_one_bs_mid_sync_select(idx, d))
+            )
+        if bs_tasks:
+            await asyncio.gather(*bs_tasks)
     else:
-        # ByStrike / ByDelta: pure CPU — synchronous for-loop, no
-        # asyncio tasks or semaphore overhead.
+        # ByStrike / ByDelta with a ROW-ATTRIBUTE stream: pure CPU — synchronous
+        # for-loop, no asyncio tasks or semaphore overhead.
         for idx, d in queryable:
             if error_codes[idx] is not None:
                 if progress_callback is not None:
@@ -905,7 +1657,7 @@ async def resolve_option_stream(
     dates: Sequence[date],
     collection: str,
     option_type: Literal["C", "P"],
-    cycle: str | None,
+    cycle: str | Sequence[str] | None,
     maturity: MaturitySpec,
     selection: SelectionCriterion,
     stream: StreamLabel,
@@ -918,6 +1670,9 @@ async def resolve_option_stream(
     bulk_chain_reader: _CycleAwareBulkReader | None = None,
     available_expirations: Sequence[date] | None = None,
     concurrency_gate: "asyncio.Semaphore | None" = None,
+    hold_between_rolls: bool = False,
+    hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
+    coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
 
@@ -993,6 +1748,56 @@ async def resolve_option_stream(
         resolves (the gap that caused the OPT_SP_500 PoolTimeout when the
         Data page fired the composite + per-leg basket series at once).
         Only consulted on the bulk path.
+    hold_between_rolls:
+        SELECT-AND-HOLD mode (default ``False`` = the current behaviour,
+        byte-identical).  When ``True``, the resolver picks the contract ONCE
+        at each maturity ROLL (a roll = the resolved *expiration* changing — the
+        ``derive_rolls`` discriminator) and FREEZES it between rolls, then emits
+        — PER DATE — the HELD-CONTRACT PREMIUM (mid) LEVEL of the contract that
+        OWNS that date's value: the held contract on interior dates, and the OLD
+        contract's mid ON the roll day (so the step ending on the roll day is the
+        OLD's OWN move into the roll — realise the OLD).  Requires the bulk chain
+        reader (like ``roll_offset`` / ``EndOfMonth``); raises ``ValueError`` on
+        the legacy per-date path.  This is the input for ``signal_exec``'s
+        FIXED-CONTRACT DOLLAR-P&L recurrence (size a held quantity once per roll
+        off the compounding NAV and the roll premium, book ``qty·Δpremium`` daily,
+        realise+resize at the next roll), which is oracle-exact against the
+        ground-truth Java sim — fixing the meaningless P&L a ByDelta/ByMoneyness
+        signal otherwise gets from the daily strike churn.  It does NOT
+        stitch/ratio-adjust the option series (which would court the hard "no
+        ratio-adjustment for options" constraint).  NOTE: in hold mode ``values``
+        is the held-contract mid LEVEL (an honest per-leg premium display); the
+        signals P&L path is the only consumer that pairs it with
+        ``hold_roll_info_out`` (the display materialiser never enables hold mode,
+        so the Data-page/chart stream is unchanged).
+    hold_roll_info_out:
+        Optional out-dict populated ONLY in hold mode.  Receives
+        ``{"is_roll", "roll_premium"}`` — both length-``T`` arrays aligned to
+        ``dates``.  ``is_roll`` (float 0/1) marks each hold segment's first date
+        (incl. the initial open at index 0); ``roll_premium`` at those dates is
+        the NEW (this-segment) contract's roll-day OPEN mid — the base against
+        which that segment's daily P&L and its held-quantity sizing are computed
+        (``values`` on a roll date carries the OLD mid, so this is the ONLY place
+        the NEW open premium is surfaced → the seam is exact, never a raw old→new
+        level gap).  The 3-tuple return is unchanged; roll info travels through
+        this out-dict so every non-hold caller is unaffected.
+    coverage_aware:
+        COVERAGE-AWARE expiration selection (default ``False`` = the current
+        behaviour, byte-identical).  Effective ONLY on the bulk path, ONLY for
+        ``NearestToTarget`` maturity + ``ByDelta`` selection.  When ``True`` the
+        resolver, instead of the single nearest-DTE listed expiration, considers a
+        small bounded set of nearest-DTE candidate expirations (see
+        :data:`_COVERAGE_MAX_CANDIDATES` / :data:`_COVERAGE_DTE_WINDOW_DAYS`) and
+        picks the nearest-DTE one that actually has an IN-TOLERANCE delta strike —
+        skipping thinly-listed expirations whose only greeked strikes are far from
+        the target delta (the OPT_SP_500 later-era failure where ``ByDelta(-0.10)``
+        picked deep-OTM garbage from a gappy target month).  If NO candidate is
+        covered it falls back to the nearest-DTE best-effort match (== the
+        coverage-blind result), so it never regresses to all-NaN.  A
+        ``coverage_skipped:<iso>`` success-side note (same channel as
+        ``snapped_to:``) records when a strictly-nearer expiration was skipped.
+        Requires the bulk chain reader; not composable with ``hold_between_rolls``
+        yet — both raise ``ValueError``.
 
     Returns
     -------
@@ -1023,7 +1828,10 @@ async def resolve_option_stream(
         stream value — selection itself succeeded).  Used by the API
         layer to derive roll events at ``contract_id`` transitions.
     """
-    if stream not in _STREAM_TO_ATTR:
+    # ``bs_mid`` is a valid COMPUTED label (priced, not read off a row) — it is
+    # deliberately absent from ``_STREAM_TO_ATTR``; every OTHER label must map to
+    # a row field.
+    if stream != _BS_MID and stream not in _STREAM_TO_ATTR:
         raise ValueError(f"unknown stream label {stream!r}")
 
     # ── Bulk path: when a bulk reader is provided, use the pre-fetch
@@ -1046,9 +1854,24 @@ async def resolve_option_stream(
             progress_callback=progress_callback,
             available_expirations=available_expirations,
             concurrency_gate=concurrency_gate,
+            hold_between_rolls=hold_between_rolls,
+            hold_roll_info_out=hold_roll_info_out,
+            coverage_aware=coverage_aware,
         )
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
+
+    # Symmetric guard: coverage-aware selection walks the pre-fetched candidate
+    # chains from Phase B, which only the bulk path materialises.  The legacy
+    # per-date path resolves + selects one expiration per date with no candidate
+    # set, so it cannot honour the flag — fail loudly rather than silently
+    # returning the coverage-BLIND series.  Production always wires the bulk
+    # reader.
+    if coverage_aware:
+        raise ValueError(
+            "coverage_aware requires the bulk chain reader; the legacy per-date "
+            "path does not support coverage-aware expiration selection"
+        )
 
     # The legacy per-date path resolves maturity inside the selector, so it
     # cannot honor an early roll (``roll_offset``) — that needs the bulk path's
@@ -1061,6 +1884,17 @@ async def resolve_option_stream(
             "roll_offset requires the bulk chain reader; the legacy per-date "
             "path does not support it"
         )
+    # Symmetric guard: select-and-hold needs the bulk path's pre-resolved
+    # per-date expirations to segment the roll boundaries and re-read the HELD
+    # contract off the pre-fetched chain.  The legacy per-date path re-selects a
+    # fresh contract each day (the churn this mode exists to eliminate), so it
+    # cannot honour the flag — fail loudly rather than silently returning the
+    # unheld daily-reselect series.  Production always wires the bulk reader.
+    if hold_between_rolls:
+        raise ValueError(
+            "hold_between_rolls requires the bulk chain reader; the legacy "
+            "per-date path does not support select-and-hold"
+        )
     # Symmetric guard: the EndOfMonth monthly-hold sweep lives in the bulk
     # Phase A, so the legacy per-date path cannot honour it (it would silently
     # re-resolve EndOfMonth per-date, diverging from the held-monthly result).
@@ -1068,6 +1902,15 @@ async def resolve_option_stream(
         raise ValueError(
             "EndOfMonth maturity requires the bulk chain reader; the legacy "
             "per-date path does not support the monthly-hold roll"
+        )
+    # Symmetric guard: the COMPUTED ``bs_mid`` stream (Black-76 from IV + the
+    # underlying future) is implemented on the bulk path's extraction only.
+    # Production always wires the bulk reader; fail loudly rather than KeyError on
+    # the absent ``_STREAM_TO_ATTR`` entry or silently return a wrong series.
+    if stream == _BS_MID:
+        raise ValueError(
+            "bs_mid stream requires the bulk chain reader; the legacy per-date "
+            "path does not support the computed Black-76 price stream"
         )
 
     # Wrap the reader so every selector-emitted query carries the cycle.

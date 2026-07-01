@@ -26,7 +26,7 @@ from tcg.core.api._options_wiring import build_stream_resolver_wiring
 from tcg.data._utils import date_to_int
 from tcg.data.protocols import MarketDataService
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
-from tcg.types.options import OptionContractDoc
+from tcg.types.options import OptionContractDoc, expand_cycle
 
 
 # ---------------------------------------------------------------------------
@@ -166,16 +166,22 @@ async def materialise_option_streams(
         # types / cycles, causing the bulk resolver to pick expirations
         # that had no matching contracts -- empty chains -> spurious NaN
         # holes.
+        #
+        # ``expand_cycle`` broadens the "Monthly" filter ('M') to the full
+        # 3rd-Friday series ({'M','W3 Friday'}) so an option-stream series tracks
+        # the real monthly across eras (see expand_cycle); the same expanded value
+        # feeds the expiration list AND the chain fetch.  Other cycles unchanged.
+        _cycle = expand_cycle(ref.cycle)
         all_expirations = await svc.list_option_expirations_filtered(
             ref.collection,
             option_type=ref.option_type,
-            cycle=ref.cycle,
+            cycle=_cycle,
         )
         values, diagnostics, contracts = await resolve_option_stream(
             dates=trade_dates,
             collection=ref.collection,
             option_type=ref.option_type,
-            cycle=ref.cycle,
+            cycle=_cycle,
             maturity=_maturity_pydantic_to_dataclass(ref.maturity),
             selection=_criterion_pydantic_to_dataclass(ref.selection),
             stream=ref.stream,

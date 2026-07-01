@@ -70,8 +70,14 @@ class InstrumentContinuous:
 # Streams readable off a single option contract row.  Mirrors the engine
 # ``StreamLabel`` and the API ``OptionStreamLabel`` — redeclared here so
 # the types layer has no dependency on engine or core.
+#
+# ``bs_mid`` is a COMPUTED premium (not a row field): the contract's Black-76
+# theoretical price from its stored IV + the underlying FUTURE price (the Java
+# sim's price basis), intrinsic at expiry.  Like ``mid`` it is a price-like
+# premium (usable as a P&L series), unlike the iv/greek/volume LEVEL streams.
 OptionStreamLabel = Literal[
     "mid",
+    "bs_mid",
     "iv",
     "delta",
     "gamma",
@@ -110,6 +116,27 @@ class InstrumentOptionStream:
     # :class:`InstrumentContinuous` (futures), option streams carry NO
     # back-adjustment (the series is always the raw stitched stream).
     roll_offset: RollOffset = field(default_factory=RollOffset)
+    # SELECT-AND-HOLD (default False = current daily-reselect behaviour).  When
+    # True, the series resolver picks the contract ONCE per maturity roll, HOLDS
+    # it between rolls, and emits the per-date HELD-CONTRACT PREMIUM (mid) LEVEL +
+    # roll info; signal_exec then runs the FIXED-CONTRACT DOLLAR-P&L recurrence
+    # (size a held quantity once per roll off the compounding NAV and the roll
+    # premium, book qty·Δpremium daily, realise+resize at the next roll — the
+    # ground-truth Java sim, oracle-exact).  NOT a stitched level / no option
+    # ratio-adjust.  Fixes the meaningless P&L a ByDelta/ByMoneyness option signal
+    # otherwise gets (option %-returns EXPLODE as a held premium decays toward 0).
+    # The correct mode for backtesting a delta-selected option; the default stays
+    # the raw daily-reselect mid LEVEL (Data-page/chart display).
+    hold_between_rolls: bool = False
+    # PREMIUM-NOTIONAL MULTIPLE for the fixed-contract dollar-P&L sizing (hold mode
+    # only).  The held quantity at each roll is ``nav_times · NAV_at_roll /
+    # premium_at_roll`` (the Java ``AllocationProcessNavTimes`` multiple), so
+    # nav_times is the size and the DIRECTION (long/short) comes from the block
+    # WEIGHT SIGN as usual.  nav_times can exceed 1 (leverage on the premium
+    # notional), which the weight ∈ [-100, 100] cannot express — that is why it is
+    # a separate field.  Ignored when ``hold_between_rolls`` is False (the default
+    # daily-reselect / display path takes the ordinary weight-only price return).
+    nav_times: float = 1.0
     kind: Literal["option_stream"] = "option_stream"
 
 

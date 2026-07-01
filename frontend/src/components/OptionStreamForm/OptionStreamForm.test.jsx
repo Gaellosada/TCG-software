@@ -71,6 +71,23 @@ describe('<OptionStreamForm>', () => {
     expect(labels).toContain('Open interest');
   });
 
+  it('offers bs_mid ("BS mid (from IV)") in the Series options and selects it', () => {
+    const onChange = vi.fn();
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    renderForm({ value, onChange });
+    const seriesSelect = screen.getByLabelText('Series');
+    // The BS-from-IV option is present with its clear label.
+    const options = Array.from(seriesSelect.querySelectorAll('option'));
+    const bs = options.find((o) => o.value === 'bs_mid');
+    expect(bs).toBeTruthy();
+    expect(bs.textContent).toBe('BS mid (from IV)');
+    // Selecting it emits stream: 'bs_mid'.
+    fireEvent.change(seriesSelect, { target: { value: 'bs_mid' } });
+    expect(onChange).toHaveBeenCalled();
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.stream).toBe('bs_mid');
+  });
+
   // Issue #2 (D1): in the PORTFOLIO add-holding flow an option leg is just the
   // option's PRICE (mid). The stream concept (iv/delta/greeks/volume) is a
   // SIGNAL-level operand, not a portfolio concern — so when restricted to a
@@ -417,5 +434,82 @@ describe('validateOptionStream', () => {
     v.selection = { kind: 'by_delta', target: 0.25, tolerance: 0.05, strict: false };
     v.stream = 'delta';
     expect(validateOptionStream(v, ROOTS).code).toBe('TAUTOLOGICAL_OPTION_STREAM');
+  });
+});
+
+// ── Select-and-hold (fixed-contract dollar P&L) controls — SIGNALS-only ──
+describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
+  it('does NOT render the hold controls by default (Data/Portfolio pickers)', () => {
+    renderForm();
+    expect(screen.queryByTestId('hold-between-rolls')).toBeNull();
+    expect(screen.queryByTestId('nav-times')).toBeNull();
+  });
+
+  it('renders the hold toggle when showHoldControls is true; nav_times hidden until on', () => {
+    renderForm({ showHoldControls: true });
+    const toggle = screen.getByTestId('hold-between-rolls');
+    expect(toggle).toBeTruthy();
+    expect(toggle.checked).toBe(false);
+    // nav_times input only appears once hold is enabled.
+    expect(screen.queryByTestId('nav-times')).toBeNull();
+  });
+
+  it('enabling hold emits hold_between_rolls=true and seeds nav_times=1.0', () => {
+    const onChange = vi.fn();
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.click(screen.getByTestId('hold-between-rolls'));
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const emitted = onChange.mock.calls[0][0];
+    expect(emitted.hold_between_rolls).toBe(true);
+    expect(emitted.nav_times).toBe(1.0);
+  });
+
+  it('shows the nav_times input when hold is already on and edits it', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 1.0,
+    };
+    renderForm({ value, onChange, showHoldControls: true });
+    const navInput = screen.getByTestId('nav-times');
+    expect(navInput).toBeTruthy();
+    expect(String(navInput.value)).toBe('1');
+    // nav_times may exceed 1 (leverage the premium notional).
+    fireEvent.change(navInput, { target: { value: '2.5' } });
+    expect(onChange).toHaveBeenCalled();
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.nav_times).toBe(2.5);
+    expect(emitted.hold_between_rolls).toBe(true);
+  });
+
+  it('a non-positive / non-numeric nav_times falls back to 1.0 (backend also guards)', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 2.0,
+    };
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.nav_times).toBe(1.0);
+  });
+
+  it('turning hold OFF preserves the other fields and clears the toggle', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 2.5,
+    };
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.click(screen.getByTestId('hold-between-rolls'));
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.hold_between_rolls).toBe(false);
+    // Other option-stream fields are untouched by the toggle.
+    expect(emitted.collection).toBe(value.collection);
+    expect(emitted.stream).toBe(value.stream);
   });
 });

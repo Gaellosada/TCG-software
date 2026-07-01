@@ -7,7 +7,7 @@ Implementations are private; callers depend only on these interfaces.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -124,7 +124,7 @@ class MarketDataService(Protocol):
         self,
         root: str,
         option_type: Literal["C", "P"] | None = None,
-        cycle: str | None = None,
+        cycle: str | Sequence[str] | None = None,
     ) -> list[date]: ...
 
     # --- Futures contract lookup by expiration (Phase 2 VIX greeks) ---

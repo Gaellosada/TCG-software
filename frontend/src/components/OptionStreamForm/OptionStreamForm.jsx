@@ -43,7 +43,7 @@ import styles from './OptionStreamForm.module.css';
 
 const ALL_OPTION_TYPES = ['C', 'P'];
 const ALL_CYCLES = [null, 'M', 'W3 Friday', 'W1 Friday', 'W2 Friday', 'W4 Friday', 'W', 'Q'];
-const ALL_STREAMS = ['mid', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
+const ALL_STREAMS = ['mid', 'bs_mid', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
 const GREEK_STREAMS = new Set(['gamma', 'vega', 'theta']);
 // NOTE: option continuous series carry NO back-adjustment.  Ratio/difference are
 // conceptually ill-posed for option premia (a back-adjusted premium represents
@@ -69,6 +69,7 @@ const SELECTION_LABELS = {
 
 const STREAM_LABELS = {
   mid: 'Mid price',
+  bs_mid: 'BS mid (from IV)',
   iv: 'Implied volatility',
   delta: 'Delta',
   gamma: 'Gamma',
@@ -217,6 +218,14 @@ export default function OptionStreamForm({
   allowedOptionTypes = ALL_OPTION_TYPES,
   allowedCycles = ALL_CYCLES,
   disabled = false,
+  // SIGNALS-only: surface the backtest "Hold contract between rolls
+  // (fixed-contract P&L)" toggle + its ``nav_times`` premium-notional multiple.
+  // Default false so the Data-page chart and Portfolio holdings pickers (where a
+  // backtest-P&L knob is meaningless) are unchanged.  When a delta/moneyness-
+  // selected option signal enables it, the backend freezes the contract between
+  // rolls and books fixed-contract dollar P&L instead of a %-return (which
+  // explodes as a held premium decays toward zero).
+  showHoldControls = false,
 }) {
   // Per-instance stable id used to scope the option-type radio group's
   // `name` attribute.  Without this, two simultaneously-mounted forms
@@ -280,6 +289,30 @@ export default function OptionStreamForm({
   }, [emit]);
 
   const setStream = useCallback((stream) => emit({ stream }), [emit]);
+
+  // SELECT-AND-HOLD (fixed-contract dollar P&L) — SIGNALS backtest only.
+  // ``hold_between_rolls`` freezes the contract between maturity rolls; when on,
+  // ``nav_times`` is the premium-notional multiple used to size the held quantity
+  // (direction stays the block WEIGHT SIGN, so nav_times is the SIZE — it can
+  // exceed 1, which a weight ∈ [-100,100] cannot express).
+  const setHoldBetweenRolls = useCallback((checked) => {
+    // Seed a sensible nav_times default when turning hold on for the first time
+    // (so the emitted ref always carries a valid multiple once hold is enabled).
+    const patch = { hold_between_rolls: !!checked };
+    if (checked && !(typeof v.nav_times === 'number' && v.nav_times > 0)) {
+      patch.nav_times = 1.0;
+    }
+    emit(patch);
+  }, [emit, v.nav_times]);
+
+  const setNavTimes = useCallback((raw) => {
+    const parsed = parseFloat(raw);
+    // Keep the raw-ish value in state; clamp to a positive number (the backend
+    // validator also enforces finite > 0).  An empty / non-numeric entry falls
+    // back to 1.0 so the emitted ref stays valid.
+    const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 1.0;
+    emit({ nav_times: value });
+  }, [emit]);
 
   // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
   // as {value:int, unit:'days'}. Per-unit cap: days 0..30, months 0..12.
@@ -659,6 +692,53 @@ export default function OptionStreamForm({
       {/* No adjustment control: option continuous series carry no
           back-adjustment (ratio/difference are ill-posed for option premia).
           The series is always the raw stitched stream. */}
+
+      {/* SELECT-AND-HOLD (fixed-contract dollar P&L) — SIGNALS backtest only.
+          Freezes the contract between maturity rolls so a delta/moneyness-selected
+          option's P&L is a proper fixed-contract dollar P&L (qty·Δpremium, sized
+          off NAV at each roll) instead of a %-return that explodes as a held
+          premium decays.  nav_times (the premium-notional SIZE) shows only when
+          hold is on; direction stays the block weight sign. */}
+      {showHoldControls && (
+        <label className={styles.row}>
+          <span className={styles.label}>Backtest P&amp;L</span>
+          <div className={styles.subgroup}>
+            <label
+              className={styles.fieldInline}
+              title="Hold the selected contract between maturity rolls and book fixed-contract dollar P&L (qty·Δpremium, quantity sized off NAV at each roll). Off = the daily-reselected mid %-return, which is meaningless for a delta/moneyness-selected option (it explodes as a held premium decays toward zero)."
+            >
+              <input
+                type="checkbox"
+                checked={!!v.hold_between_rolls}
+                onChange={(e) => setHoldBetweenRolls(e.target.checked)}
+                disabled={disabled}
+                aria-label="Hold contract between rolls (fixed-contract P&L)"
+                data-testid="hold-between-rolls"
+              />
+              Hold contract between rolls (fixed-contract P&amp;L)
+            </label>
+            {v.hold_between_rolls && (
+              <label
+                className={styles.fieldInline}
+                title="Premium-notional multiple: the held quantity at each roll = nav_times × NAV_at_roll / premium_at_roll. This is the SIZE (direction is the block's long/short weight sign); it can exceed 1 to leverage the premium notional."
+              >
+                Notional × (nav_times)
+                <input
+                  type="number"
+                  className={styles.input}
+                  min={0}
+                  step="any"
+                  value={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
+                  onChange={(e) => setNavTimes(e.target.value)}
+                  disabled={disabled}
+                  aria-label="Notional multiple (nav_times)"
+                  data-testid="nav-times"
+                />
+              </label>
+            )}
+          </div>
+        </label>
+      )}
 
       {validation && (
         <div

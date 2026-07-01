@@ -65,7 +65,7 @@ class OptionsDataReader(Protocol):
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
-        expiration_cycle: str | None = None,
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         """Return one (contract, row) pair per option active on *date*.
 
@@ -90,7 +90,7 @@ class OptionsDataReader(Protocol):
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
-        expiration_cycle: str | None = None,
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         """Return ``(contract, row)`` pairs for ALL *dates* in one cursor pass.
 
@@ -121,7 +121,7 @@ class OptionsDataReader(Protocol):
         self,
         root: str,
         option_type: Literal["C", "P"] | None = None,
-        cycle: str | None = None,
+        cycle: str | Sequence[str] | None = None,
     ) -> list[date]:
         """Distinct expirations filtered by type and/or cycle."""
         ...

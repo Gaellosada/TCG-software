@@ -79,9 +79,13 @@ class ContinuousInstrumentRef(BaseModel):
 # Streams readable off a single option contract row.  Listed verbatim
 # from ``tcg.types.options.OptionDailyRow`` (numeric fields only); ``mid``
 # is the canonical mark.  The resolver maps each label to the matching
-# ``*_stored`` (or quote) field on the row.
+# ``*_stored`` (or quote) field on the row.  ``bs_mid`` is the exception: a
+# COMPUTED premium — the Black-76 theoretical price from the contract's stored
+# IV + the underlying FUTURE price (the Java sim's price basis), intrinsic at
+# expiry — not a row field.  It is price-like (a premium), like ``mid``.
 OptionStreamLabel = Literal[
     "mid",
+    "bs_mid",
     "iv",
     "delta",
     "gamma",
@@ -144,6 +148,26 @@ class OptionStreamRef(BaseModel):
     # maturity rule (which makes the resolver hold one contract per month).  The
     # former separate ``roll_schedule`` field was removed (it duplicated that).
     roll_offset: RollOffset = Field(default_factory=RollOffset)
+    # SELECT-AND-HOLD (default False = current daily-reselect behaviour).  When
+    # True, the resolver picks the contract ONCE per maturity roll, HOLDS it
+    # between rolls, and emits the per-date HELD-CONTRACT MID LEVEL (the OLD
+    # contract's mid on the roll day) plus an is_roll/roll_premium side-channel;
+    # signal_exec then books FIXED-CONTRACT DOLLAR P&L (a quantity sized once per
+    # roll off the compounding NAV and the roll premium, qty·Δpremium daily) —
+    # oracle-exact, and NOT a stitched level (so no option ratio-adjust).  Fixes
+    # the meaningless P&L a delta/moneyness-selected option signal gets from the
+    # daily strike churn AND from %-returns that explode as a held premium decays
+    # toward zero.  The correct mode for BACKTESTING a delta-selected option; the
+    # default (raw daily-reselect mid LEVEL) remains the Data-page/chart display
+    # series.  Ignored by the display-only stream materialiser.
+    hold_between_rolls: bool = False
+    # PREMIUM-NOTIONAL MULTIPLE for the fixed-contract dollar-P&L sizing (hold mode
+    # only).  Held quantity at each roll = ``nav_times · NAV_at_roll /
+    # premium_at_roll``; DIRECTION (long/short) comes from the block WEIGHT SIGN.
+    # ``nav_times`` may exceed 1 (leverage on the premium notional) which the
+    # weight ∈ [-100, 100] cannot express — hence a separate field.  Must be finite
+    # and > 0.  Ignored when ``hold_between_rolls`` is False.
+    nav_times: float = 1.0
 
     @field_validator("cycle", mode="before")
     @classmethod
@@ -151,6 +175,19 @@ class OptionStreamRef(BaseModel):
         if isinstance(v, str) and not v.strip():
             return None
         return v
+
+    @field_validator("nav_times")
+    @classmethod
+    def _check_nav_times(cls, v: float) -> float:
+        # A non-finite or non-positive premium multiple makes the fixed-contract
+        # sizing (nav_times·NAV/premium) meaningless — reject at the boundary
+        # rather than emit NaN/inf P&L.  (Only consulted in hold mode, but a bad
+        # value is always a spec error, so validate unconditionally.)
+        import math
+
+        if not math.isfinite(v) or v <= 0.0:
+            raise ValueError("nav_times must be a finite number > 0")
+        return float(v)
 
 
 # Per-asset-class strict mapping from the basket's declared ``asset_class``

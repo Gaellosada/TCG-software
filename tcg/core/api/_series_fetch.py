@@ -34,6 +34,7 @@ from tcg.core.api._models import (
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import SignalDataError, SignalValidationError
 from tcg.types.errors import DataNotFoundError
+from tcg.types.options import expand_cycle
 from tcg.types.signal import (
     InputInstrument,
     InstrumentBasket,
@@ -91,6 +92,19 @@ def _materialise_leg_instrument(
                 f"input {input_id!r}: basket leg {leg_index} option_stream "
                 f"instrument requires collection"
             )
+        # Reject select-and-hold on a BASKET LEG (single-place guard).  The
+        # fixed-contract dollar-P&L accounting sizes a held quantity off the whole
+        # signal's NAV per option leg and books qty·Δpremium — that is defined for
+        # a STANDALONE option input, not a leg blended into a basket's weighted
+        # composite (a multi-leg held book is a Phase-2 / delta-hedge concern).
+        # Fail loudly at parse rather than silently ignore the flag or emit
+        # meaningless P&L.
+        if instrument_ref.hold_between_rolls:
+            raise SignalValidationError(
+                f"input {input_id!r}: basket leg {leg_index} option_stream cannot "
+                f"use hold_between_rolls (fixed-contract dollar-P&L is a standalone "
+                f"option input; multi-leg held books are not supported)"
+            )
         from tcg.core.api.options import (
             _criterion_pydantic_to_dataclass,
             _maturity_pydantic_to_dataclass,
@@ -107,6 +121,8 @@ def _materialise_leg_instrument(
             selection=selection,
             stream=instrument_ref.stream,
             roll_offset=_roll_offset_pydantic_to_dataclass(instrument_ref.roll_offset),
+            hold_between_rolls=instrument_ref.hold_between_rolls,
+            nav_times=instrument_ref.nav_times,
         )
     raise SignalValidationError(
         f"input {input_id!r}: basket leg {leg_index} has unsupported "
@@ -254,10 +270,12 @@ async def _date_array_for_leaf_instrument(
         from tcg.core.api._options_materialise import _business_dates_in_range
         from tcg.data._utils import date_to_int
 
+        # Broaden 'M' to the full 3rd-Friday series so the date axis covers the
+        # real monthly across eras (see expand_cycle); other cycles unchanged.
         all_expirations = await svc.list_option_expirations_filtered(
             inst.collection,
             option_type=inst.option_type,
-            cycle=inst.cycle,
+            cycle=expand_cycle(inst.cycle),
         )
         if not all_expirations:
             raise SignalDataError(
@@ -372,6 +390,27 @@ def make_signal_fetcher(
     # option_stream fetch, then reused for all subsequent option_stream
     # inputs within this signal evaluation.
     _os_wiring_cache: dict[str, Any] = {}
+    # Per-signal cache of hold-mode option roll info, keyed by the instrument
+    # identity.  Populated during the normal ``fetch`` of a hold-mode option
+    # input (which runs FIRST, via operand resolution) and read by
+    # ``fetch_hold_roll_info`` (which ``signal_exec`` calls afterwards for the
+    # fixed-contract dollar-P&L path) — so the resolver runs ONCE per hold input.
+    _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any]] = {}
+
+    def _hold_key(instrument: InstrumentOptionStream) -> Any:
+        # Mirrors the engine's option-stream identity (collection/type/cycle/
+        # maturity/selection/stream/roll_offset) — the axes that determine the
+        # held-premium + roll structure.  nav_times is EXCLUDED (it is a sizing
+        # multiple applied downstream in signal_exec; the series is identical).
+        return (
+            instrument.collection,
+            instrument.option_type,
+            instrument.cycle or "",
+            repr(instrument.maturity),
+            repr(instrument.selection),
+            instrument.stream,
+            (int(instrument.roll_offset.value), instrument.roll_offset.unit),
+        )
 
     async def fetch(
         instrument: InputInstrument, field: str
@@ -435,20 +474,34 @@ def make_signal_fetcher(
             gate = get_dwh_concurrency_gate()
 
             # Pre-fetch available expirations filtered by type + cycle.
+            # ``expand_cycle`` broadens the "Monthly" filter ('M') to the full
+            # 3rd-Friday series ({'M','W3 Friday'}) so a ~2mo delta-selected option
+            # tracks the real monthly across ALL eras (later years tag the monthly
+            # 'W3 Friday' and leave 'M' for quarterlies).  Every other cycle passes
+            # through unchanged.  The SAME expanded value feeds the expiration list
+            # AND the chain fetch so the two never disagree.
+            _cycle = expand_cycle(instrument.cycle)
             all_expirations = await svc.list_option_expirations_filtered(
                 instrument.collection,
                 option_type=instrument.option_type,
-                cycle=instrument.cycle,
+                cycle=_cycle,
             )
 
-            # Signals path: rolls are not consumed here (PR scope is
-            # visualisation only — Phase 1).  Bind contracts to ``_``
-            # but do NOT drop the signature change; 3-tuple is canonical.
+            # Select-and-hold P&L for delta/moneyness-selected option signals:
+            # freeze the contract between rolls and book fixed-contract dollar P&L
+            # (default False = daily-reselect mid LEVEL).  In hold mode capture the
+            # resolver's roll structure (is_roll + roll_premium) into the per-signal
+            # cache so signal_exec's ``fetch_hold_roll_info`` reads it without a
+            # second resolve.  Contracts are bound to ``_`` (rolls are visualised
+            # via the options router, not the signals path).
+            roll_info_out: dict[str, Any] | None = (
+                {} if instrument.hold_between_rolls else None
+            )
             values, diagnostics, _contracts = await resolve_option_stream(
                 dates=trade_dates,
                 collection=instrument.collection,
                 option_type=instrument.option_type,
-                cycle=instrument.cycle,
+                cycle=_cycle,
                 maturity=instrument.maturity,
                 selection=instrument.selection,
                 stream=instrument.stream,
@@ -459,9 +512,17 @@ def make_signal_fetcher(
                 bulk_chain_reader=bulk_reader,
                 available_expirations=all_expirations,
                 concurrency_gate=gate,
+                hold_between_rolls=instrument.hold_between_rolls,
+                hold_roll_info_out=roll_info_out,
             )
 
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
+            if roll_info_out is not None:
+                _hold_roll_info_cache[_hold_key(instrument)] = (
+                    dates_arr,
+                    roll_info_out["is_roll"],
+                    roll_info_out["roll_premium"],
+                )
             return dates_arr, values
 
         if isinstance(instrument, InstrumentBasket):
@@ -543,4 +604,29 @@ def make_signal_fetcher(
         values = _pick_field(cseries.prices, field)
         return cseries.prices.dates, values
 
+    async def fetch_hold_roll_info(
+        instrument: InstrumentOptionStream,
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the hold-mode roll structure for ``signal_exec``'s dollar-P&L path.
+
+        ``(dates, is_roll, roll_premium)`` — populated during the normal ``fetch``
+        of this hold-mode option input (which runs first, so the cache is warm).
+        Falls back to a fresh resolve if, defensively, the cache is cold (e.g. a
+        caller ordering that fetches roll info before the operand series).
+        """
+        key = _hold_key(instrument)
+        cached = _hold_roll_info_cache.get(key)
+        if cached is not None:
+            return cached
+        # Cold cache (defensive): resolve once to populate it, then return.  Reuses
+        # the same code path as ``fetch`` so the wiring / gate / window match.
+        await fetch(instrument, "close")
+        cached = _hold_roll_info_cache.get(key)
+        if cached is None:  # pragma: no cover (only if instrument is not hold-mode)
+            raise SignalDataError(
+                "fetch_hold_roll_info called for a non-hold option instrument"
+            )
+        return cached
+
+    fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
     return fetch

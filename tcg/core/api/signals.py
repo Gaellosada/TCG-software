@@ -476,6 +476,8 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             selection=selection,
             stream=inst_in.stream,
             roll_offset=_roll_offset_pydantic_to_dataclass(inst_in.roll_offset),
+            hold_between_rolls=inst_in.hold_between_rolls,
+            nav_times=inst_in.nav_times,
         )
     else:
         if not inst_in.collection:
@@ -1083,6 +1085,13 @@ def _instrument_payload(inst: InputInstrument) -> dict:
                 "value": int(inst.roll_offset.value),
                 "unit": inst.roll_offset.unit,
             },
+            # Select-and-hold flag round-trips through ``OptionStreamRef`` (default
+            # False = current daily-reselect series).
+            "hold_between_rolls": bool(inst.hold_between_rolls),
+            # Premium-notional multiple for the fixed-contract dollar-P&L sizing
+            # (hold mode only); round-trips through ``OptionStreamRef`` (default
+            # 1.0).
+            "nav_times": float(inst.nav_times),
         }
     return {
         "type": "continuous",

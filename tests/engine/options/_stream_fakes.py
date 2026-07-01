@@ -27,6 +27,20 @@ from typing import Literal, Sequence
 from tcg.types.options import OptionContractDoc, OptionDailyRow
 
 
+def _cycle_matches(row_cycle: str, cycle_filter: object) -> bool:
+    """Mirror the real SQL ``_cycle_predicate`` semantics for the fakes.
+
+    ``None`` = no filter (match all); a scalar str = exact match; a
+    (non-str) sequence = membership (the monthly 3rd-Friday series expands to
+    ``('M','W3 Friday')`` at the wiring layer, so the engine may pass a tuple).
+    """
+    if cycle_filter is None:
+        return True
+    if isinstance(cycle_filter, str):
+        return row_cycle == cycle_filter
+    return row_cycle in tuple(cycle_filter)
+
+
 def _contract(
     *,
     strike: float,
@@ -128,7 +142,7 @@ class FakeBulkChainReader:
                 for (c, r) in chain
                 if (c.type == type or type == "both")
                 and expiration_min <= c.expiration <= expiration_max
-                and (expiration_cycle is None or c.expiration_cycle == expiration_cycle)
+                and _cycle_matches(c.expiration_cycle, expiration_cycle)
             ]
             if filtered:
                 result[d] = filtered
@@ -177,5 +191,5 @@ class FakeChainReader:
             for (c, r) in chain
             if (c.type == type or type == "both")
             and expiration_min <= c.expiration <= expiration_max
-            and (expiration_cycle is None or c.expiration_cycle == expiration_cycle)
+            and _cycle_matches(c.expiration_cycle, expiration_cycle)
         ]
