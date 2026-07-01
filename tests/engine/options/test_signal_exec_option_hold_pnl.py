@@ -31,6 +31,11 @@ a synthetic fetcher directly so they are dwh-free and deterministic.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from datetime import date
+from pathlib import Path
+
 import numpy as np
 
 import pytest
@@ -50,6 +55,48 @@ from tcg.types.signal import (
 )
 
 # Async tests auto-marked (asyncio_mode="auto").
+
+
+# ---------------------------------------------------------------------------
+# The REAL ground-truth oracle — loaded from the Wave-B validation output
+# (outside the ``tcg`` package, so imported by file path).  This is the actual
+# ``java_faithful_s1`` the engine is measured against — NOT an engine-mirror.
+# It touches no data source and imports only numpy.  Used by the interior-NaN
+# carry-forward test (review "TEST 4") so we assert against the oracle's OWN
+# carry-forward accounting, not the resolver-step mirror ``_oracle_ratio`` below.
+# ---------------------------------------------------------------------------
+
+
+def _load_java_faithful_s1():
+    """Import the real ``java_faithful_s1`` oracle by absolute file path.
+
+    The oracle lives in ``workspace/tasks/engine-groundtruth-validation/output/
+    waveB0/`` (a sibling of the TCG-software repo), so it is not on the package
+    path.  Registering the module in ``sys.modules`` BEFORE ``exec_module`` is
+    required on Python 3.14: the oracle's ``@dataclass`` with an ``npt.NDArray``
+    annotation makes the dataclass machinery look up ``cls.__module__`` in
+    ``sys.modules`` at class-creation time.
+    """
+    repo_root = Path(__file__).resolve().parents[3]  # …/TCG-software
+    oracle_path = (
+        repo_root.parent
+        / "workspace"
+        / "tasks"
+        / "engine-groundtruth-validation"
+        / "output"
+        / "waveB0"
+        / "java_faithful_s1.py"
+    )
+    if not oracle_path.is_file():
+        pytest.skip(f"ground-truth oracle not found at {oracle_path}")
+    spec = importlib.util.spec_from_file_location(
+        "java_faithful_s1_oracle", oracle_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # 3.14 dataclass-annotation fix (see docstring)
+    spec.loader.exec_module(module)
+    return module.java_faithful_s1
 
 
 # ---------------------------------------------------------------------------
@@ -345,3 +392,96 @@ async def test_hold_without_roll_info_fetcher_raises_loudly():
     # Same bare fetcher, hold OFF → no roll info needed → runs cleanly.
     res_off = await evaluate_signal(_short_put_signal(hold=False), {}, bare_fetch)
     assert np.all(np.isfinite(res_off.equity_ratio))
+
+
+# ---------------------------------------------------------------------------
+# Review TEST 4 — interior no-quote day inside a held segment. The oracle
+# CARRIES the last finite premium forward as the P&L base; the engine must too
+# (so the full move across the gap is booked, not dropped). Drives the REAL
+# ``java_faithful_s1`` oracle AND the real ``_compound_with_hold`` (via the full
+# ``evaluate_signal`` path) on the SAME single-segment interior-gap series.
+# ---------------------------------------------------------------------------
+
+# Single held segment (only the initial open is a roll), one interior NaN gap.
+# premium = [10, 9, NaN, 8, 7.5]; short.  For a single segment the engine's
+# owner-of-step premium series and the oracle's premium_used_for_pnl COINCIDE
+# (no OLD/NEW seam), so the two consume identical arrays and the mapping is 1:1.
+_GAP_PREMIUM = np.array([10.0, 9.0, np.nan, 8.0, 7.5])
+_GAP_IS_ROLL = np.array([1.0, 0.0, 0.0, 0.0, 0.0])
+_GAP_ROLL_PREMIUM = np.array([10.0, np.nan, np.nan, np.nan, np.nan])
+_GAP_DATES_INT = np.array(
+    [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
+)
+
+
+def _make_gap_fetcher():
+    """Fetcher for the 5-day interior-gap single-segment series (a short put +
+    an always-on spot input latching the entry from bar 0)."""
+    spx = np.full(len(_GAP_DATES_INT), 100.0, dtype=np.float64)
+
+    async def fetch(instrument, field):
+        if isinstance(instrument, InstrumentSpot):
+            return _GAP_DATES_INT, spx
+        if isinstance(instrument, InstrumentOptionStream):
+            return _GAP_DATES_INT, _GAP_PREMIUM.copy()
+        raise KeyError(f"no data for {instrument!r} ({field})")
+
+    async def fetch_hold_roll_info(instrument):
+        assert isinstance(instrument, InstrumentOptionStream)
+        return (
+            _GAP_DATES_INT,
+            _GAP_IS_ROLL.copy(),
+            _GAP_ROLL_PREMIUM.copy(),
+        )
+
+    fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
+    return fetch
+
+
+async def test_hold_pnl_interior_nan_gap_carries_forward_matches_real_oracle():
+    """Interior-NaN carry-forward (review N1 / TEST 4): the engine NAV ratio must
+    equal the REAL ``java_faithful_s1`` ``equity_base100/100`` to ~1e-12.
+
+    Before the fix the engine DROPPED the P&L across the gap: it produced
+    [1, 1.1, 1.1, 1.1, 1.15] vs the oracle [1, 1.1, 1.1, 1.2, 1.25].  After the
+    carry-forward fix (base = last finite premium on an interior day) they match.
+    """
+    java_faithful_s1 = _load_java_faithful_s1()
+
+    # Oracle: nav_times=1.0; the oracle's implicit direction is the short (falling
+    # premium → gain), which is exactly the engine's weight<0 (short) convention.
+    oracle = java_faithful_s1(
+        {
+            "date": [date(2024, 1, d) for d in (2, 3, 4, 5, 8)],
+            "premium_used_for_pnl": _GAP_PREMIUM.copy(),
+            "is_roll": _GAP_IS_ROLL.astype(bool),
+        },
+        nav_times=1.0,
+    )
+    oracle_ratio = oracle.equity_base100 / 100.0
+
+    # Engine: the full evaluate_signal path (drives the real _compound_with_hold).
+    fetch = _make_gap_fetcher()
+    res = await evaluate_signal(
+        _short_put_signal(hold=True, weight=-10.0, nav_times=1.0), {}, fetch
+    )
+
+    # The fix must reproduce the oracle's carry-forward EXACTLY.
+    np.testing.assert_allclose(res.equity_ratio, oracle_ratio, rtol=1e-12, atol=1e-14)
+    # Pin the concrete expected values (guards against a coincidental match).
+    np.testing.assert_allclose(
+        res.equity_ratio, np.array([1.0, 1.1, 1.1, 1.2, 1.25]), rtol=1e-12, atol=1e-14
+    )
+
+
+async def test_hold_pnl_interior_nan_gap_reconciliation_holds():
+    """Σ per-input realized_pnl == equity_ratio − 1 STILL holds across the gap
+    after the carry-forward change (the reconciliation invariant is preserved)."""
+    fetch = _make_gap_fetcher()
+    res = await evaluate_signal(
+        _short_put_signal(hold=True, weight=-10.0, nav_times=2.0), {}, fetch
+    )
+    total = np.zeros_like(res.equity_ratio)
+    for p in res.positions:
+        total = total + p.realized_pnl
+    np.testing.assert_allclose(total, res.equity_ratio - 1.0, rtol=1e-11, atol=1e-13)

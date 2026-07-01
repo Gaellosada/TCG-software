@@ -1037,6 +1037,14 @@ def _compound_with_hold(
     seg_premium: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
     seg_er: dict[str, float] = {spec.ref_id: 1.0 for spec in hold_specs}
     holding: dict[str, bool] = {spec.ref_id: False for spec in hold_specs}
+    # Last FINITE premium of the held contract, carried forward as the interior
+    # P&L base across a no-quote (NaN) day — matching the oracle ``java_faithful_s1``
+    # (its ``prev_premium`` only updates on a finite premium; a NaN books 0 but does
+    # NOT reset the base, so the first finite day after a gap captures the WHOLE
+    # move ``qty·(premium_t − last_finite_premium)``).  Reset to the segment open at
+    # each roll/open point.  On a gapless segment this equals ``premium[s]`` on every
+    # interior step, so the default (continuous-quote) path is byte-identical.
+    last_finite: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
 
     # Seed bar-0 sizing: the loop below sizes at bar s+1, so the initial open at
     # bar 0 (a leg latched at bar 0, whose first date is a segment open) must be
@@ -1052,6 +1060,7 @@ def _compound_with_hold(
                 seg_premium[rid] = float(open_prem)
                 seg_er[rid] = ratio[0]  # == 1.0
                 holding[rid] = True
+                last_finite[rid] = float(open_prem)  # carry-forward base seed
 
     wiped = False
     for s in range(n):
@@ -1077,8 +1086,15 @@ def _compound_with_hold(
                 and bool(spec.pos_active[s + 1])
                 and ratio[s] != 0.0
             ):
+                # Interior base = the LAST FINITE held premium (carried forward
+                # across a no-quote day), so a gap books its full move on the next
+                # finite day instead of dropping it (matches the oracle's
+                # ``prev_premium``).  A roll bar uses the NEW segment's open
+                # (roll_premium[s]) — the seam is exact, never carried across.  On a
+                # gapless segment ``last_finite`` == ``premium[s]`` here, so this is
+                # byte-identical to the prior behaviour.
                 base = (
-                    spec.roll_premium[s] if bool(spec.is_roll[s]) else spec.premium[s]
+                    spec.roll_premium[s] if bool(spec.is_roll[s]) else last_finite[rid]
                 )
                 cur = spec.premium[s + 1]
                 seg_p = seg_premium[rid]
@@ -1096,6 +1112,11 @@ def _compound_with_hold(
                         * dprem
                         / seg_p
                     )
+                # Carry the last FINITE held premium forward as the next interior
+                # step's base (the oracle updates ``prev_premium`` only on a finite
+                # premium — a NaN leaves the base unchanged).
+                if np.isfinite(cur):
+                    last_finite[rid] = float(cur)
             hold_contrib[rid][s] = contrib
             net += contrib
 
@@ -1135,6 +1156,10 @@ def _compound_with_hold(
                     seg_premium[rid] = float(open_prem)
                     seg_er[rid] = ratio[s + 1]
                     holding[rid] = True
+                    # A NEW segment's carry-forward base restarts at its OPEN premium
+                    # (the seam is exact — never carry the OLD segment's last finite,
+                    # nor the roll-day OLD mid that ``premium[s+1]`` holds, across).
+                    last_finite[rid] = float(open_prem)
                 elif not holding[rid]:
                     # Cannot size (no quotable open premium) → stay flat.
                     holding[rid] = False

@@ -175,7 +175,10 @@ def test_price_bs_mid_at_expiry_is_intrinsic_call():
 
 
 def test_price_bs_mid_missing_future_is_loud():
-    for bad in (None, 0.0, -1.0):
+    # NaN is included (review N3): ``nan <= 0.0`` is False, so a NaN future must be
+    # caught by the explicit non-finite guard and labelled ``missing_underlying_price``
+    # (it is a missing UNDERLYING, NOT a bad computed price ``missing_bs_price``).
+    for bad in (None, 0.0, -1.0, float("nan"), np.nan):
         price, code = _price_bs_mid(
             iv=0.2,
             future_price=bad,
@@ -184,7 +187,38 @@ def test_price_bs_mid_missing_future_is_loud():
             dte_days=30,
             kernel=_KERNEL,
         )
-        assert price is None and code == "missing_underlying_price"
+        assert price is None and code == "missing_underlying_price", f"future={bad!r}"
+
+
+def test_price_bs_mid_malformed_strike_degrades_not_raises():
+    """Review N2: a malformed strike ``K <= 0`` (or NaN) must degrade to
+    ``(None, "missing_bs_price")`` rather than let the Black-76 kernel raise
+    (``K=0`` → ZeroDivisionError, ``K<0`` → ValueError).  The hold path calls
+    ``_price_bs_mid`` WITHOUT a try/except (unlike Phase C), so an unguarded raise
+    would 500 the whole signal eval on malformed dwh data.  Real strikes are > 0.
+    """
+    for bad_k in (0.0, -5.0, -1e-9, float("nan"), np.nan):
+        # Would raise inside the kernel before the fix; must now degrade cleanly.
+        price, code = _price_bs_mid(
+            iv=0.2,
+            future_price=4500.0,
+            strike=bad_k,
+            option_type="P",
+            dte_days=30,
+            kernel=_KERNEL,
+        )
+        assert price is None and code == "missing_bs_price", f"strike={bad_k!r}"
+    # A malformed strike AT expiry (dte<=0) also degrades (intrinsic on a bad K is
+    # meaningless) — the K guard is checked before the expiry branch.
+    price, code = _price_bs_mid(
+        iv=None,
+        future_price=4500.0,
+        strike=0.0,
+        option_type="P",
+        dte_days=0,
+        kernel=_KERNEL,
+    )
+    assert price is None and code == "missing_bs_price"
 
 
 def test_price_bs_mid_missing_iv_before_expiry_is_loud_no_fabrication():

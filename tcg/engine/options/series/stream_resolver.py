@@ -202,10 +202,12 @@ def _price_bs_mid(
     bid-ask mid.  For deep-OTM 10Δ puts with wide quotes the two differ a lot.
 
     Returns ``(price, error_code)`` — exactly one non-None:
-      * ``future_price`` missing / ≤ 0 → ``(None, "missing_underlying_price")``
+      * ``future_price`` missing / ≤ 0 / NaN → ``(None, "missing_underlying_price")``
         (options are on the future, whose price comes from the underlying
         resolver — OPT_SP_500 greeks store NULL underlying_price, so a row field
         is not usable);
+      * malformed strike (``K ≤ 0`` or non-finite) → ``(None, "missing_bs_price")``
+        — degrade cleanly instead of letting the kernel raise (real strikes > 0);
       * at/after expiry (``dte_days <= 0``) → INTRINSIC value (``max(K−F,0)`` put
         / ``max(F−K,0)`` call), matching the Java expiry rule — needs only the
         future, NOT the IV (a fabricated-IV price at expiry would be wrong);
@@ -213,10 +215,20 @@ def _price_bs_mid(
         (no fabrication — a real diagnostic);
       * otherwise the Black-76 price at ``T = dte_days/365``.
     """
-    if future_price is None or future_price <= 0.0:
+    # A missing / non-positive / NaN future is an unusable underlying price.
+    # ``nan <= 0.0`` is False, so a NaN future must be caught explicitly here —
+    # otherwise it falls through and is mislabelled ``missing_bs_price`` at the
+    # non-finite-output guard below (it is a missing UNDERLYING, not a bad price).
+    if future_price is None or not np.isfinite(future_price) or future_price <= 0.0:
         return None, "missing_underlying_price"
     F = float(future_price)
     K = float(strike)
+    # A malformed strike (K ≤ 0 or non-finite) would make the Black-76 kernel
+    # raise (ZeroDivisionError / ValueError / domain error) — degrade cleanly to a
+    # missing price so the hold path (which does NOT wrap this, unlike Phase C)
+    # never 500s on bad dwh data.  Real strikes are always positive.
+    if not np.isfinite(K) or K <= 0.0:
+        return None, "missing_bs_price"
     # Expiry (or past): intrinsic value — independent of IV (Java expiry rule).
     if dte_days <= 0:
         intrinsic = max(K - F, 0.0) if option_type == "P" else max(F - K, 0.0)
