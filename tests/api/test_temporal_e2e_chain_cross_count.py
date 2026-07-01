@@ -70,19 +70,24 @@ BAR-BY-BAR HAND DERIVATION
     pos = [0,0,0,0,0,0, 1,1, 0,0,0,0,0]
     Round trip: trade opens @ t6, closes @ t8 (long, signed_weight +1.0).
 
-  realized_pnl (endpoint contract, signal_exec.py:1300-1311):
-    realized_pnl[t] = Σ_{s=1..t}  pos[s-1] * (px[s] - px[s-1]) / px[s-1]
-    i.e. the position from the PRIOR bar earns that bar's pct change; a simple
-    cumulative SUM (NON-compounding — see test_temporal_e2e_realized_pnl_is_not
-    _compounding below, which documents this as the engine's pre-existing
-    behaviour, not a defect introduced here).
+  realized_pnl (endpoint contract, Issue #4 — COMPOUNDED single-account equity):
+    net_step[s]     = Σ_i pos_i[s-1] * (px_i[s] - px_i[s-1]) / px_i[s-1]
+    equity_ratio[t] = Π_{s=1..t} (1 + net_step[s])            (clamped at 0)
+    realized_pnl[t] = equity_ratio[t] - 1     (single input → the whole ratio-1)
+    i.e. the signal is ONE account whose net per-bar exposure COMPOUNDS
+    bar-to-bar (Issue #4 — see test_temporal_e2e_realized_pnl_is_compounding
+    below, which pins this against the additive sum). The two features are
+    orthogonal: the temporal chain/cross_count decide the POSITION series
+    (unchanged); Issue #4 only changes how that position series is turned into
+    an equity curve.
     Only two steps carry a non-zero position (pos[5]=0 → step into t6 is 0):
-      step into t7 : pos[6]=1 * (109 - 113)/113 = -0.03539823008849557
-      step into t8 : pos[7]=1 * (104 - 109)/109 = -0.04587155963302752
-    cumulative:
+      step into t7 : r7 = pos[6]=1 * (109 - 113)/113 = -0.03539823008849557
+      step into t8 : r8 = pos[7]=1 * (104 - 109)/109 = -0.04587155963302752
+    compounded cumulative (equity_ratio - 1):
       pnl[0..6] = 0.0
-      pnl[7]    = -0.03539823008849557
-      pnl[8..12]= -0.08126978972152309   (= sum of the two steps; pos[8..]=0)
+      pnl[7]    = (1 + r7) - 1                       = -0.03539823008849557
+      pnl[8..12]= (1 + r7)*(1 + r8) - 1              = -0.07964601769911506
+                  (compounds the two steps; pos[8..]=0 so it holds flat after)
 """
 
 from __future__ import annotations
@@ -140,6 +145,12 @@ CLOSES = np.array(
 EXPECTED_POS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 _STEP_T7 = (109.0 - 113.0) / 113.0  # -0.03539823008849557
 _STEP_T8 = (104.0 - 109.0) / 109.0  # -0.04587155963302752
+# Issue #4: realized_pnl is the COMPOUNDED equity_ratio − 1, not the additive
+# sum. With the position open over exactly the two steps t6→t7 and t7→t8, the
+# equity ratio is (1 + r7) after t7 and (1 + r7)*(1 + r8) after t8; it then
+# holds flat (pos[8..]=0 → net_step 0 → factor 1). Derived by product, not typed.
+_RATIO_T7 = 1.0 + _STEP_T7
+_RATIO_T8 = _RATIO_T7 * (1.0 + _STEP_T8)
 EXPECTED_PNL = [
     0.0,  # t0
     0.0,  # t1
@@ -148,12 +159,12 @@ EXPECTED_PNL = [
     0.0,  # t4
     0.0,  # t5
     0.0,  # t6 (pos[5]=0 → no step into t6)
-    _STEP_T7,  # t7
-    _STEP_T7 + _STEP_T8,  # t8
-    _STEP_T7 + _STEP_T8,  # t9
-    _STEP_T7 + _STEP_T8,  # t10
-    _STEP_T7 + _STEP_T8,  # t11
-    _STEP_T7 + _STEP_T8,  # t12
+    _RATIO_T7 - 1.0,  # t7  = (1 + r7) − 1
+    _RATIO_T8 - 1.0,  # t8  = (1 + r7)*(1 + r8) − 1  (compounded)
+    _RATIO_T8 - 1.0,  # t9  (flat: pos=0 after close)
+    _RATIO_T8 - 1.0,  # t10
+    _RATIO_T8 - 1.0,  # t11
+    _RATIO_T8 - 1.0,  # t12
 ]
 
 
@@ -282,9 +293,11 @@ async def test_temporal_e2e_chain_cross_count_full_pipeline(
     pnl = data["realized_pnl"][0]
     assert len(pnl) == len(DATES)
     assert pnl == pytest.approx(EXPECTED_PNL)
-    # The two load-bearing steps, named explicitly so a reviewer can check them.
-    assert pnl[7] == pytest.approx(-0.03539823008849557)
-    assert pnl[12] == pytest.approx(-0.08126978972152309)
+    # The two load-bearing bars, named explicitly so a reviewer can check them
+    # against the compounded contract (Issue #4): the first step off ratio 1.0,
+    # then the compounded product of both steps.
+    assert pnl[7] == pytest.approx(_STEP_T7)  # = -0.03539823008849557
+    assert pnl[12] == pytest.approx((1.0 + _STEP_T7) * (1.0 + _STEP_T8) - 1.0)
     # The position is flat until the chain fires → zero P&L through t6.
     assert pnl[6] == pytest.approx(0.0)
 
@@ -317,28 +330,31 @@ async def test_temporal_e2e_chain_cross_count_full_pipeline(
     assert tr["input_id"] == "X"
 
 
-async def test_temporal_e2e_realized_pnl_is_not_compounding(
+async def test_temporal_e2e_realized_pnl_is_compounding(
     temporal_client: AsyncClient,
 ):
-    """Pins the endpoint's equity contract: ``realized_pnl`` is a simple
-    cumulative SUM of (lagged position * single-bar pct return), NOT a
-    compounded product. With the position open over exactly two bars (t6→t7 and
-    t7→t8), the final cumulative P&L equals the SUM of the two bar returns. For
-    two NEGATIVE returns the compounded product adds a positive cross term, so
-    the non-compounded sum the engine emits is the MORE-negative (larger
-    magnitude) value. This is the engine's pre-existing behaviour — documented
-    here so a future switch to compounding is caught, not silently absorbed."""
+    """Pins the endpoint's equity contract (Issue #4): ``realized_pnl`` is the
+    COMPOUNDED equity curve (``equity_ratio − 1``), NOT a simple cumulative sum
+    of per-bar returns. With the position open over exactly two bars (t6→t7 and
+    t7→t8), the final P&L equals the PRODUCT ``(1 + r7)*(1 + r8) − 1``. For two
+    NEGATIVE returns the compounded product carries a positive cross term, so it
+    is LESS negative (smaller magnitude) than the additive sum. This is the
+    post-#4 behaviour (Gael's reported bug fix: the signal is one compounding
+    account); this test is the inverted successor of the pre-#4 guard —
+    retained, pointed the right way, so a regression BACK to the additive sum is
+    caught, not silently absorbed."""
     resp = await temporal_client.post("/api/signals/compute", json=_signal_body())
     assert resp.status_code == 200, resp.text
     pnl = resp.json()["realized_pnl"][0]
 
     simple_sum = _STEP_T7 + _STEP_T8
     compounded = (1.0 + _STEP_T7) * (1.0 + _STEP_T8) - 1.0
-    # The engine emits the simple sum…
-    assert pnl[12] == pytest.approx(simple_sum)
-    # …which is NOT the compounded result (they differ by the +cross term).
-    assert simple_sum != pytest.approx(compounded)
+    # The engine emits the COMPOUNDED result…
+    assert pnl[12] == pytest.approx(compounded)
+    # …which is NOT the additive sum (they differ by the +cross term), so this
+    # assertion genuinely discriminates a regression to non-compounding.
+    assert compounded != pytest.approx(simple_sum)
     # Two negative returns → compounding is LESS negative (cross term > 0); the
-    # non-compounded sum the engine reports is therefore the more-negative one.
+    # compounded value the engine reports is therefore the less-negative one.
     assert compounded > simple_sum
-    assert pnl[12] == pytest.approx(simple_sum) and pnl[12] < compounded
+    assert pnl[12] == pytest.approx(compounded) and pnl[12] > simple_sum
