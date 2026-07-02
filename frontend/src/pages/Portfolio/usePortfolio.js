@@ -199,6 +199,9 @@ export default function usePortfolio() {
           // null for non-option legs. ("End of month" is the maturity, not a
           // separate roll_schedule — that field was removed.)
           roll_offset: leg.roll_offset ?? null,
+          // SELECT-AND-HOLD (fixed-contract dollar-P&L) — option_stream legs only.
+          hold_between_rolls: leg.hold_between_rolls ?? false,
+          nav_times: leg.nav_times ?? 1.0,
         },
       ];
     });
@@ -351,6 +354,12 @@ export default function usePortfolio() {
           selection: leg.selection,
           stream: leg.stream,
         };
+        // SELECT-AND-HOLD (fixed-contract dollar-P&L): send only when enabled so
+        // a non-hold option leg's body stays byte-identical to before.
+        if (leg.hold_between_rolls) {
+          apiLegs[leg.label].hold_between_rolls = true;
+          apiLegs[leg.label].nav_times = leg.nav_times ?? 1.0;
+        }
         // Roll offset is the unified {value, unit} object — send it only when
         // its value is non-zero (omit the no-op to keep the body minimal; the
         // BE defaults to value 0). Option streams carry NO back-adjustment, so

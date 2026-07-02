@@ -35,6 +35,11 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
           // back-adjustment, so there is no adjustment field (unlike continuous).
           // "Roll at end of month" is the EndOfMonth maturity, not a schedule.
           roll_offset: instrument.roll_offset,
+          // SELECT-AND-HOLD (fixed-contract dollar-P&L): reproduces a short
+          // option's held-contract PnL instead of a daily-reselect %-return.
+          // Surfaced by the shared OptionStreamForm hold control below.
+          hold_between_rolls: instrument.hold_between_rolls,
+          nav_times: instrument.nav_times,
           weight: 100,
         });
       } else if (instrument.type === 'continuous') {
@@ -69,6 +74,7 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
       onSelect={handleSelect}
       title="Add Holding"
       optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
+      showOptionHoldControls={true}
     />
   );
 }

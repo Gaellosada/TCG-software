@@ -122,6 +122,9 @@ function PortfolioPage() {
     // `adjustment` field applies to continuous (futures) legs only. ("End of
     // month" is the maturity, not a separate roll_schedule — that was removed.)
     roll_offset: l.roll_offset ?? null,
+    // SELECT-AND-HOLD (fixed-contract dollar-P&L) — option_stream legs only.
+    hold_between_rolls: l.hold_between_rolls ?? false,
+    nav_times: l.nav_times ?? 1.0,
   })), []);
 
   // Save current portfolio state to backend in the selected category.
