@@ -105,6 +105,44 @@ describe('Signals storage (v7)', () => {
     expect(storage.getItem(SIGNALS_STORAGE_KEY)).not.toBe(null);
   });
 
+  describe('input position_cap survives the localStorage round-trip', () => {
+    const CAP_INSTR = { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' };
+    const mk = (positionCap) => ({
+      signals: [{
+        id: 's1', name: 'S1', doc: '',
+        inputs: [{ id: 'X', instrument: CAP_INSTR, position_cap: positionCap }],
+        rules: emptyRules(),
+      }],
+    });
+
+    it('preserves a well-formed [low, high] cap through save/load', () => {
+      saveState(mk([0, 1]));
+      const [inp] = loadState().signals[0].inputs;
+      expect(inp).toEqual({ id: 'X', instrument: CAP_INSTR, position_cap: [0, 1] });
+    });
+
+    it('an input WITHOUT position_cap stays exactly {id, instrument}', () => {
+      saveState({
+        signals: [{
+          id: 's1', name: 'S1', doc: '',
+          inputs: [{ id: 'X', instrument: CAP_INSTR }],
+          rules: emptyRules(),
+        }],
+      });
+      const [inp] = loadState().signals[0].inputs;
+      expect(Object.keys(inp).sort()).toEqual(['id', 'instrument']);
+      expect('position_cap' in inp).toBe(false);
+    });
+
+    it('drops a malformed cap on the round-trip (no stray key)', () => {
+      for (const bad of [[1, 0], [0], [0, 1, 2], [0, '1'], [0, NaN], [false, true], null, 'x']) {
+        saveState(mk(bad));
+        const [inp] = loadState().signals[0].inputs;
+        expect('position_cap' in inp).toBe(false);
+      }
+    });
+  });
+
   it('round-trips a v5 signal with entries + exits referencing them', () => {
     const entryId = 'entry-uuid-1';
     const state = {

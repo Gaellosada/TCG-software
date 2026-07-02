@@ -218,6 +218,29 @@ function sanitiseInstrument(raw) {
   return sanitiseSpotInstrument(raw);
 }
 
+/**
+ * Field-local sanitiser for a per-input ``position_cap`` (net-position clamp).
+ *
+ * Preserves a well-formed ``[low, high]`` pair through the localStorage
+ * round-trip; drops anything malformed so a stored value never diverges from
+ * what the wire (``requestBuilder.normalisePositionCap``) and the backend
+ * (``_parse_position_cap``) accept: a 2-element array of FINITE numbers with
+ * ``low <= high``. ``typeof x === 'number'`` already excludes JS booleans.
+ * Returns ``undefined`` when absent/malformed so the caller OMITS the key
+ * (a normal input stays exactly ``{id, instrument}``).
+ *
+ * @param {*} raw
+ * @returns {[number, number]|undefined}
+ */
+function sanitisePositionCap(raw) {
+  if (!Array.isArray(raw) || raw.length !== 2) return undefined;
+  const [lo, hi] = raw;
+  if (typeof lo !== 'number' || typeof hi !== 'number') return undefined;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return undefined;
+  if (lo > hi) return undefined;
+  return [lo, hi];
+}
+
 function sanitiseInput(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = typeof raw.id === 'string' ? raw.id : '';
@@ -226,7 +249,8 @@ function sanitiseInput(raw) {
   // Inputs may exist without a fully-configured instrument (user is still
   // picking) — we keep them but signal via instrument=null. The Run-gate
   // checks configuration before submitting.
-  return { id, instrument };
+  const cap = sanitisePositionCap(raw.position_cap);
+  return { id, instrument, ...(cap !== undefined ? { position_cap: cap } : {}) };
 }
 
 /**

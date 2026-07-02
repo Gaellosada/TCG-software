@@ -125,6 +125,69 @@ describe('computeSignal request body shape (v4)', () => {
     expect(weights).toEqual([100, -100]);
   });
 
+  describe('input position_cap (net-position clamp) on the wire', () => {
+    const CAP_INSTR = { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' };
+
+    it('passes a well-formed [low, high] cap through to the wire input', () => {
+      const signal = {
+        id: 's1', name: 'S1',
+        inputs: [{ id: 'X', instrument: CAP_INSTR, position_cap: [0, 1] }],
+        rules: { entries: [], exits: [] },
+      };
+      const { body } = buildComputeRequestBody(signal, []);
+      expect(body.spec.inputs).toEqual([
+        { id: 'X', instrument: CAP_INSTR, position_cap: [0, 1] },
+      ]);
+    });
+
+    it('an input WITHOUT position_cap stays exactly {id, instrument} (no stray key)', () => {
+      const signal = {
+        id: 's1', name: 'S1',
+        inputs: [{ id: 'X', instrument: CAP_INSTR }],
+        rules: { entries: [], exits: [] },
+      };
+      const { body } = buildComputeRequestBody(signal, []);
+      const [inp] = body.spec.inputs;
+      expect(Object.keys(inp).sort()).toEqual(['id', 'instrument']);
+      expect('position_cap' in inp).toBe(false);
+      expect(inp).toEqual({ id: 'X', instrument: CAP_INSTR });
+    });
+
+    it('drops malformed caps (wrong length, non-number, non-finite, low>high, bool)', () => {
+      const cases = [
+        [0],            // too short
+        [0, 1, 2],      // too long
+        [0, '1'],       // string bound
+        [0, NaN],       // non-finite
+        [0, Infinity],  // non-finite
+        [1, 0],         // low > high
+        [false, true],  // booleans (typeof !== 'number')
+        'nope',         // not an array
+        null,           // explicit null
+      ];
+      for (const bad of cases) {
+        const signal = {
+          id: 's1', name: 'S1',
+          inputs: [{ id: 'X', instrument: CAP_INSTR, position_cap: bad }],
+          rules: { entries: [], exits: [] },
+        };
+        const { body } = buildComputeRequestBody(signal, []);
+        const [inp] = body.spec.inputs;
+        expect('position_cap' in inp).toBe(false);
+      }
+    });
+
+    it('preserves an equal-bounds cap [x, x] (low <= high holds)', () => {
+      const signal = {
+        id: 's1', name: 'S1',
+        inputs: [{ id: 'X', instrument: CAP_INSTR, position_cap: [-1, -1] }],
+        rules: { entries: [], exits: [] },
+      };
+      const { body } = buildComputeRequestBody(signal, []);
+      expect(body.spec.inputs[0].position_cap).toEqual([-1, -1]);
+    });
+  });
+
   it('cleans seriesMap: null entries become placeholders, filled entries lose `type`', () => {
     const signal = {
       id: 's1', name: 'S1', inputs: V4_INPUTS,
