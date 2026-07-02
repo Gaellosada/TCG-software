@@ -165,6 +165,12 @@ class _InputIn(BaseModel):
     # outer ``type`` and inner ``kind`` (basket-branch only) into a
     # single flat tag space, which keeps OpenAPI 3.0 emission valid.
     instrument: SeriesRef
+    # Optional per-input net-position clamp ``[low, high]`` in FRACTION units
+    # (Feature 1: long-or-flat / capped net exposure). Deliberately typed
+    # ``Any`` (not ``list[float]``) so a malformed value reaches
+    # ``_parse_input``'s validator and yields the uniform HTTP-400 envelope
+    # instead of a Pydantic 422. ``None``/absent ⇒ no clamp (byte-identical).
+    position_cap: Any = None
 
 
 class _OperandIn(BaseModel):
@@ -200,6 +206,12 @@ class _ConditionIn(BaseModel):
     # can emit the uniform HTTP-400 validation envelope.
     count: Any = None
     window: Any = None
+    # Count MODE for ``count`` (cross conditions only): "rolling" (default —
+    # trailing-window count, byte-identical) or "since_reset" (cumulative count
+    # since the owning block's bound reset fires; impulse on the Nth crossing).
+    # Typed ``Any`` so a bad value routes through ``_parse_condition``'s guard to
+    # the uniform HTTP-400 envelope. Absent ⇒ "rolling".
+    count_mode: Any = None
 
 
 class _BlockIn(BaseModel):
@@ -337,6 +349,9 @@ class _ResolvedBasketInput:
     ]
     basket_id: str | None = None
     asset_class: str | None = None
+    # Feature 1 per-input net-position clamp, carried through basket resolution
+    # (raw wire value; validated in ``_parse_input`` like the non-basket path).
+    position_cap: Any = None
 
 
 async def _resolve_basket_inputs(
@@ -396,6 +411,7 @@ async def _resolve_basket_inputs(
                     id=inp.id,
                     basket_id=basket_id,
                     legs=typed_legs,
+                    position_cap=inp.position_cap,
                 )
             )
         elif isinstance(inp.instrument, BasketRefInline):
@@ -414,6 +430,7 @@ async def _resolve_basket_inputs(
                     id=inp.id,
                     legs=typed_legs,
                     asset_class=inline.asset_class,
+                    position_cap=inp.position_cap,
                 )
             )
         else:
@@ -421,10 +438,46 @@ async def _resolve_basket_inputs(
     return out
 
 
+def _parse_position_cap(raw: Any, *, iid: str) -> tuple[float, float] | None:
+    """Validate a wire ``position_cap`` → ``(low, high)`` fraction tuple or None.
+
+    Accepts ``None``/absent (no clamp). Otherwise requires a 2-element
+    list/tuple of finite real numbers with ``low <= high``. All failures raise
+    :class:`SignalValidationError` (uniform HTTP-400 envelope). ``bool`` is
+    rejected (it subclasses ``int`` — a ``True`` bound is almost certainly a
+    client bug).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        raise SignalValidationError(
+            f"input {iid!r}: position_cap must be a [low, high] pair (got {raw!r})"
+        )
+    vals: list[float] = []
+    for x in raw:
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            raise SignalValidationError(
+                f"input {iid!r}: position_cap bounds must be numbers (got {raw!r})"
+            )
+        xf = float(x)
+        if not np.isfinite(xf):
+            raise SignalValidationError(
+                f"input {iid!r}: position_cap bounds must be finite (got {raw!r})"
+            )
+        vals.append(xf)
+    lo_cap, hi_cap = vals
+    if lo_cap > hi_cap:
+        raise SignalValidationError(
+            f"input {iid!r}: position_cap low ({lo_cap}) must be <= high ({hi_cap})"
+        )
+    return (lo_cap, hi_cap)
+
+
 def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
     iid = inp_in.id
     if not iid:
         raise SignalValidationError("input id must be non-empty")
+    cap = _parse_position_cap(inp_in.position_cap, iid=iid)
     # Pre-resolved basket — typed legs already materialised by
     # ``_resolve_basket_inputs``.  No I/O performed here.
     if isinstance(inp_in, _ResolvedBasketInput):
@@ -433,7 +486,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             basket_id=inp_in.basket_id,
             asset_class=inp_in.asset_class,
         )
-        return Input(id=iid, instrument=instrument)
+        return Input(id=iid, instrument=instrument, position_cap=cap)
     inst_in = inp_in.instrument
     if isinstance(inst_in, SpotInstrumentRef):
         if not inst_in.collection or not inst_in.instrument_id:
@@ -491,7 +544,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             roll_offset=int(inst_in.rollOffset),
             strategy=inst_in.strategy,
         )
-    return Input(id=iid, instrument=instrument)
+    return Input(id=iid, instrument=instrument, position_cap=cap)
 
 
 def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
@@ -568,12 +621,23 @@ def _parse_condition(c: _ConditionIn, *, path: str) -> Condition:
             raise SignalValidationError(
                 f"{path}: '{op}' window must be an integer >= 1 (got {c.window!r})"
             )
+        # count_mode: absent ⇒ "rolling" (byte-identical). Only "rolling" and
+        # "since_reset" are valid; anything else is a loud HTTP-400.
+        count_mode = (
+            "rolling" if "count_mode" not in c.model_fields_set else c.count_mode
+        )
+        if count_mode not in ("rolling", "since_reset"):
+            raise SignalValidationError(
+                f"{path}: '{op}' count_mode must be 'rolling' or 'since_reset' "
+                f"(got {c.count_mode!r})"
+            )
         return CrossCondition(
             op=op,  # type: ignore[arg-type]
             lhs=_parse_operand(c.lhs, path=f"{path}.lhs"),
             rhs=_parse_operand(c.rhs, path=f"{path}.rhs"),
             count=count,
             window=window,
+            count_mode=count_mode,  # type: ignore[arg-type]
         )
     if op == "in_range":
         return InRangeCondition(

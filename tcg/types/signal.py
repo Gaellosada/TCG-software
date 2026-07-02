@@ -205,10 +205,26 @@ class Input:
     fully-configured source; an unconfigured input (missing collection
     or instrument_id, missing cycle/adjustment for continuous) is not
     runnable.
+
+    ``position_cap`` OPTIONALLY clamps this input's NET latched position
+    (the sum over every currently-latched entry block bound to this input
+    of ``sign(weight)·|weight|/100``) to ``(low, high)`` EACH BAR, in
+    FRACTION units (``+1.0`` == +100 % of capital, matching the position
+    array). It is the "long-or-flat / capped net exposure" control: two
+    OR-entry blocks each at +100 would otherwise stack to a net +2.0; with
+    ``position_cap=(0.0, 1.0)`` the net is clamped to +1.0 (long-or-flat).
+    The clamp is applied to the POSITION before the per-bar return is
+    computed, so ``contrib_step`` / ``realized_pnl`` / the compounded
+    equity curve all see the clamped exposure. ``None`` (the default) means
+    NO clamp — the historical uncapped summation (ruin-floor at 0 only),
+    BYTE-IDENTICAL to before. ``low`` may be negative (short-or-flat, e.g.
+    ``(-1.0, 0.0)``) and the range is inclusive; ``low <= high`` is required
+    (validated at the API layer, HTTP 400).
     """
 
     id: str
     instrument: InputInstrument
+    position_cap: tuple[float, float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +309,21 @@ class CrossCondition:
     rhs: Operand
     count: int = 1
     window: int = 1
+    # Count MODE for ``count``:
+    #   * ``"rolling"`` (default) — the trailing-``window`` count documented
+    #     above (byte-identical to the historical behaviour: with
+    #     ``count=1, window=1`` this is the single-bar crossover pulse).
+    #   * ``"since_reset"`` — CUMULATIVE count of same-direction crossings SINCE
+    #     the last reset, firing as an IMPULSE on exactly the ``count``-th
+    #     crossing bar, then re-arming. The counter resets to 0 whenever the
+    #     OWNING block's bound reset block (``Block.requires_reset_block_id``)
+    #     FIRES (a reset-block firing bar, i.e. ``reset_truth & ~reset_nan``).
+    #     ``window`` is IGNORED in this mode (the count is cumulative-since-reset,
+    #     not windowed). Used to express an absolute reset-on-exit LADDER (fire on
+    #     the Nth crossing since the ladder was last reset). When the block carries
+    #     NO ``requires_reset_block_id`` the counter simply never resets (cumulative
+    #     from bar 0). Default ``"rolling"`` reproduces today's behaviour exactly.
+    count_mode: Literal["rolling", "since_reset"] = "rolling"
 
 
 @dataclass(frozen=True)

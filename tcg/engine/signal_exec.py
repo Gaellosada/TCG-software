@@ -388,6 +388,21 @@ def _block_operands(block: Block) -> list[Operand]:
     return out
 
 
+def _block_uses_since_reset(block: Block) -> bool:
+    """True iff any condition in the block is a ``since_reset`` cross count.
+
+    Used to gate the OPTIONAL reset-fire threading in ``evaluate_signal``: only
+    such a block needs its bound reset's firing array supplied to
+    :func:`_eval_block_activity`. Every default (rolling) block returns False, so
+    the reset-fire precompute never runs on the historical path.
+    """
+    return any(
+        isinstance(c, CrossCondition)
+        and getattr(c, "count_mode", "rolling") == "since_reset"
+        for c in block.conditions
+    )
+
+
 # ---------------------------------------------------------------------------
 # Operand resolution
 # ---------------------------------------------------------------------------
@@ -571,7 +586,17 @@ def _eval_condition(
     inputs: dict[str, Input],
     values_by_key: dict[tuple, npt.NDArray[np.float64]],
     T: int,
+    reset_fire: npt.NDArray[np.bool_] | None = None,
 ) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_]]:
+    """Evaluate one condition to ``(truth, nan_at_t)`` boolean arrays.
+
+    ``reset_fire`` is an OPTIONAL per-bar boolean of the owning block's bound
+    reset-block firing bars, consumed ONLY by a ``CrossCondition`` whose
+    ``count_mode == "since_reset"`` (to reset the crossing counter). It is
+    ``None`` in every default (rolling) path, so the historical code paths are
+    untouched (byte-identical).
+    """
+
     def k(o: Operand) -> tuple:
         return _operand_key(o, indicators, inputs)
 
@@ -605,6 +630,17 @@ def _eval_condition(
             truth[1:] = fired
         count = int(getattr(cond, "count", 1) or 1)
         window = int(getattr(cond, "window", 1) or 1)
+        count_mode = getattr(cond, "count_mode", "rolling")
+        if count_mode == "since_reset":
+            # ABSOLUTE reset-on-exit ladder: cumulative crossing count SINCE the
+            # last reset, firing an IMPULSE on the count-th crossing then
+            # re-arming.  ``truth`` (the single-bar cross pulses) feeds the
+            # stateful O(T) accumulator.  A missing ``reset_fire`` (block carries
+            # no bound reset, or a directly-constructed signal) means "never
+            # reset" — cumulative from bar 0.  ``window`` is deliberately unused.
+            rf = reset_fire if reset_fire is not None else np.zeros(T, dtype=np.bool_)
+            truth = _cross_since_reset(truth, rf, count)
+            return truth.astype(np.bool_, copy=False), nan_at_t
         if count == 1 and window == 1:
             # Default single-bar crossover: byte-identical to the historical
             # code path (a trailing window of one bar holds only bar t's
@@ -659,6 +695,42 @@ def _eval_condition(
         return truth, nan_at_t
 
     raise SignalValidationError(f"unknown condition type: {type(cond).__name__}")
+
+
+def _cross_since_reset(
+    pulses: npt.NDArray[np.bool_],
+    reset_fire: npt.NDArray[np.bool_],
+    count: int,
+) -> npt.NDArray[np.bool_]:
+    """Impulse on the ``count``-th crossing SINCE the last reset (Feature 2).
+
+    ``pulses[t]`` is a same-direction crossing at bar ``t`` (already NaN-guarded
+    by the caller — a NaN bar produces no pulse). ``reset_fire[t]`` is a bar on
+    which the owning block's bound reset FIRED. Semantics per bar, in order:
+
+      1. **reset**: if ``reset_fire[t]``, zero the running crossing counter
+         (the ladder restarts; any partial progress is lost).
+      2. **count + fire**: if ``pulses[t]``, increment the counter; when it
+         reaches ``count`` emit an IMPULSE True at ``t`` and reset the counter to
+         0 (consume, re-arm so the NEXT ``count`` crossings fire again).
+
+    Reset-before-count on a coincident bar means a reset that lands on the same
+    bar as a crossing wipes the counter first, so that crossing is the 1st of the
+    new ladder. ``count`` is clamped to ``>= 1`` defensively. O(T), O(1) state.
+    """
+    T = pulses.size
+    out = np.zeros(T, dtype=np.bool_)
+    n = max(1, int(count))
+    seen = 0
+    for t in range(T):
+        if reset_fire[t]:
+            seen = 0
+        if pulses[t]:
+            seen += 1
+            if seen >= n:
+                out[t] = True
+                seen = 0
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -869,14 +941,25 @@ def _eval_block_activity(
     inputs: dict[str, Input],
     values_by_key: dict[tuple, npt.NDArray[np.float64]],
     T: int,
+    reset_fire: npt.NDArray[np.bool_] | None = None,
 ) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_]]:
+    """Evaluate a block to ``(active, any_nan)``.
+
+    ``reset_fire`` (the block's bound reset-block firing bars) is threaded to
+    each condition's :func:`_eval_condition` and consumed ONLY by a
+    ``CrossCondition`` in ``count_mode="since_reset"``. It is ``None`` in every
+    default path (the caller supplies it only for a block that actually uses
+    ``since_reset``), so the historical CNF / chain code paths are unchanged.
+    """
     windows = _chain_window_list(block)
     if windows is None:
         # Zero-link CNF — the LITERAL historical path. Do not refactor.
         active = np.ones(T, dtype=np.bool_)
         any_nan = np.zeros(T, dtype=np.bool_)
         for cond in block.conditions:
-            c_truth, c_nan = _eval_condition(cond, indicators, inputs, values_by_key, T)
+            c_truth, c_nan = _eval_condition(
+                cond, indicators, inputs, values_by_key, T, reset_fire
+            )
             active &= c_truth
             any_nan |= c_nan
         return active, any_nan
@@ -888,7 +971,9 @@ def _eval_block_activity(
     stage_nan: list[npt.NDArray[np.bool_]] = []
     any_nan = np.zeros(T, dtype=np.bool_)
     for cond in block.conditions:
-        c_truth, c_nan = _eval_condition(cond, indicators, inputs, values_by_key, T)
+        c_truth, c_nan = _eval_condition(
+            cond, indicators, inputs, values_by_key, T, reset_fire
+        )
         stage_truth.append(c_truth)
         stage_nan.append(c_nan)
         any_nan |= c_nan
@@ -1396,11 +1481,39 @@ async def evaluate_signal(
         )
 
     # ── 4. Per-block condition truth + nan-poison ──
+    #
+    # OPTIONAL reset-fire side-channel for ``count_mode="since_reset"`` cross
+    # counts (Feature 2). A since_reset block's crossing counter resets when its
+    # BOUND reset block (``requires_reset_block_id``) fires. We compute each such
+    # reset's firing array ONCE (cached by reset id) and thread it into that
+    # block's activity eval. Reset firing = ``reset_active & ~reset_nan`` (the
+    # same ``reset_fired`` semantics used in the sequential loop) and is a pure
+    # function of ``values_by_key`` — independent of entry/exit results — so it is
+    # safe to evaluate here. This whole block is skipped unless a block actually
+    # uses since_reset, keeping the default path byte-identical.
+    usable_reset_by_id: dict[str, Block] = {b.id: b for b in reset_blocks}
+    reset_fire_cache: dict[str, npt.NDArray[np.bool_]] = {}
+
+    def _reset_fire_for(block: Block) -> npt.NDArray[np.bool_] | None:
+        if not _block_uses_since_reset(block):
+            return None
+        rid = block.requires_reset_block_id
+        if not rid or rid not in usable_reset_by_id:
+            # since_reset with no usable bound reset → "never reset" (None lets
+            # _eval_condition fall back to an all-False reset_fire).
+            return None
+        if rid not in reset_fire_cache:
+            r_active, r_nan = _eval_block_activity(
+                usable_reset_by_id[rid], indicators, inputs, values_by_key, T
+            )
+            reset_fire_cache[rid] = r_active & ~r_nan
+        return reset_fire_cache[rid]
+
     entry_truth: dict[str, npt.NDArray[np.bool_]] = {}
     entry_nan: dict[str, npt.NDArray[np.bool_]] = {}
     for blk in entry_blocks:
         active, blk_nan = _eval_block_activity(
-            blk, indicators, inputs, values_by_key, T
+            blk, indicators, inputs, values_by_key, T, _reset_fire_for(blk)
         )
         entry_truth[blk.id] = active
         entry_nan[blk.id] = blk_nan
@@ -1409,7 +1522,7 @@ async def evaluate_signal(
     exit_nan: dict[str, npt.NDArray[np.bool_]] = {}
     for blk in exit_blocks:
         active, blk_nan = _eval_block_activity(
-            blk, indicators, inputs, values_by_key, T
+            blk, indicators, inputs, values_by_key, T, _reset_fire_for(blk)
         )
         exit_truth[blk.id] = active
         exit_nan[blk.id] = blk_nan
@@ -1652,6 +1765,16 @@ async def evaluate_signal(
         inp = inputs[ref_id]
 
         pos = position[ref_id]
+        # Feature 1 — OPTIONAL per-input net-position clamp. Applied to the RAW
+        # net latched position (before the no-quote NaN masking below) so a
+        # positive lower bound never fabricates exposure on a flat/no-data bar,
+        # and BEFORE the return calc so contrib_step / realized_pnl / the equity
+        # curve all see the clamped exposure. ``position_cap is None`` (default)
+        # skips the clip entirely → BYTE-IDENTICAL to the historical path.
+        cap = getattr(inp, "position_cap", None)
+        if cap is not None:
+            lo_cap, hi_cap = float(cap[0]), float(cap[1])
+            pos = np.clip(pos, lo_cap, hi_cap)
         pos = np.where(nan_poison[ref_id], 0.0, pos)
 
         price_label: str | None = None
