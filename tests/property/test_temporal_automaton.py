@@ -4,8 +4,9 @@ Properties proven here:
   * P1 zero-link ≡ CNF/AND: a block with empty/None ``links`` yields exactly
     the elementwise AND of its conditions (the byte-identical gate is the
     golden-master test; this is the algebraic statement on the automaton).
-  * P2 W=0 link ≡ AND: a link window of 0 folds to a non-link (``_chain_window_list``
-    returns None) — verified directly + via the AND equivalence.
+  * P2 W=0 link ≡ AND: a link window of 0 folds to a non-link; with no THEN
+    boundary the block is one conjunction group (``_link_groups`` returns None)
+    — verified directly + via the AND equivalence.
   * P3 cross_count(count=1, window=1) ≡ the historical single-bar crossover,
     byte-identical for arbitrary price series (incl. NaN).
   * P4 no spurious same-bar drop / no missed completion: for a single linear
@@ -29,7 +30,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tcg.engine.signal_exec as se
-from tcg.engine.signal_exec import _chain_window_list, _eval_condition, _sequence_active
+from tcg.engine.signal_exec import _eval_condition, _link_groups, _sequence_active
 from tcg.types.signal import (
     Block,
     CompareCondition,
@@ -310,11 +311,12 @@ def _block(n_conds, links):
 @settings(max_examples=100, deadline=None)
 @given(st.integers(min_value=2, max_value=5))
 def test_w0_and_empty_links_fold_to_none(n):
-    assert _chain_window_list(_block(n, None)) is None
-    assert _chain_window_list(_block(n, {})) is None
+    # No THEN boundary ⇒ one conjunction group ⇒ CNF ⇒ _link_groups is None.
+    assert _link_groups(_block(n, None)) is None
+    assert _link_groups(_block(n, {})) is None
     # all-zero windows -> no positive links -> None (folds to AND)
     zero_links = {i: 0 for i in range(1, n)}
-    assert _chain_window_list(_block(n, zero_links)) is None
+    assert _link_groups(_block(n, zero_links)) is None
 
 
 # --------------------------------------------------------------------------- #

@@ -425,7 +425,29 @@ class Block:
     # window; the block fires as an IMPULSE on the completion bar; a single
     # forward-only in-flight candidate; NaN on any chain operand aborts the
     # candidate.
+    #
+    # GROUP semantics (v5): ``links`` no longer needs to be a FULL contiguous
+    # chain. A gap present in ``links`` (successor index -> window) is a THEN
+    # boundary; a gap absent is AND. The block is a sequence of conjunction
+    # GROUPS separated by THEN boundaries: ``(A AND B) THEN (C AND D)`` is
+    # ``links={2: W}`` on four conditions. Zero links ⇒ one group ⇒ pure CNF
+    # (the literal historical path, byte-identical). A window of 0 folds to AND
+    # (non-link).
     links: dict[int, int] | None = None
+    # Level → pulse conversion of the block's per-bar ``active`` (entries/exits
+    # only — reset blocks MUST keep the default; the API rejects otherwise).
+    #   * ``"sustained"`` (default) — ``active`` is emitted as-is (LEVEL: true on
+    #     every bar the block's condition/group logic holds). This is the
+    #     historical behaviour; the dataclass default AND the hydration of a
+    #     stored signal that lacks the field MUST both be ``"sustained"`` so the
+    #     zero-link CNF corpus stays byte-identical.
+    #   * ``"pulse"`` — rising-edge conversion: fires only on the bar ``active``
+    #     first goes true (``active[t] & ~active[t-1]``, with ``active[0]``
+    #     passed through), then re-arms when ``active`` drops false. A THEN-chain
+    #     ``active`` is already a single-bar impulse, so pulse is idempotent
+    #     there. "Pulse by default for NEW blocks" is a FRONTEND UX default; the
+    #     backend never defaults to pulse.
+    fire_mode: Literal["pulse", "sustained"] = "sustained"
 
 
 @dataclass(frozen=True)
