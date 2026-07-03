@@ -5,6 +5,8 @@ import OptionStreamForm, {
   buildDefaultOptionStream,
   validateOptionStream,
   MID_TOOLTIP,
+  navFractionToPercent,
+  navPercentToFraction,
 } from './OptionStreamForm';
 
 afterEach(cleanup);
@@ -465,7 +467,7 @@ describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
     expect(emitted.nav_times).toBe(1.0);
   });
 
-  it('shows the nav_times input when hold is already on and edits it', () => {
+  it('shows the nav_times input as a PERCENT when hold is already on and edits it', () => {
     const onChange = vi.fn();
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
@@ -475,9 +477,10 @@ describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
     renderForm({ value, onChange, showHoldControls: true });
     const navInput = screen.getByTestId('nav-times');
     expect(navInput).toBeTruthy();
-    expect(String(navInput.value)).toBe('1');
-    // nav_times may exceed 1 (leverage the premium notional).
-    fireEvent.change(navInput, { target: { value: '2.5' } });
+    // The wire fraction 1.0 (full notional) DISPLAYS as 100 (%).
+    expect(String(navInput.value)).toBe('100');
+    // Entering a percent > 100 emits the corresponding fraction > 1 (leverage).
+    fireEvent.change(navInput, { target: { value: '250' } });
     expect(onChange).toHaveBeenCalled();
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(emitted.nav_times).toBe(2.5);
@@ -546,7 +549,7 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
     expect(emitted.cycle).toBe('M');
   });
 
-  it('keeps nav_times editable (always shown, no toggle gating)', () => {
+  it('keeps nav_times editable as a PERCENT (always shown, no toggle gating)', () => {
     const onChange = vi.fn();
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
@@ -554,8 +557,47 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
       nav_times: 1.0,
     };
     renderForm({ value, onChange, holdRequired: true });
-    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0.0045' } });
+    // Enter 0.45% → stored fraction 0.0045 (÷100 boundary conversion).
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0.45' } });
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(emitted.nav_times).toBe(0.0045);
+  });
+
+  it('displays a small stored fraction as a clean percent (0.0045 → "0.45", no float dust)', () => {
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 0.0045,
+    };
+    renderForm({ value, holdRequired: true });
+    expect(String(screen.getByTestId('nav-times').value)).toBe('0.45');
+  });
+});
+
+// ── UI percent ↔ wire fraction conversion is a stable fixed point ──────────
+describe('nav_times percent↔fraction conversion (presentation seam)', () => {
+  it('display rounds ×100 without float dust', () => {
+    expect(navFractionToPercent(0.0045)).toBe(0.45);
+    expect(navFractionToPercent(1.0)).toBe(100);
+    expect(navFractionToPercent(2.5)).toBe(250);
+    expect(navFractionToPercent(0.1)).toBe(10);
+  });
+
+  it('parse rounds ÷100 without float dust', () => {
+    expect(navPercentToFraction(0.45)).toBe(0.0045);
+    expect(navPercentToFraction(100)).toBe(1.0);
+    expect(navPercentToFraction(250)).toBe(2.5);
+    expect(navPercentToFraction(10)).toBe(0.1);
+  });
+
+  it('is a fixed point across load→display→edit→save round-trips', () => {
+    // Loaded fraction → percent → back to the SAME fraction.
+    for (const frac of [0.0045, 0.1, 1.0, 2.5, 0.5]) {
+      expect(navPercentToFraction(navFractionToPercent(frac))).toBe(frac);
+    }
+    // Freshly entered percent → fraction → back to the SAME percent.
+    for (const pct of [0.45, 10, 100, 250, 50]) {
+      expect(navFractionToPercent(navPercentToFraction(pct))).toBe(pct);
+    }
   });
 });

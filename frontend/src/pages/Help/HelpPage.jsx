@@ -196,11 +196,12 @@ function HelpPage() {
           </p>
           <p>
             Direction is the sign of the leg&apos;s weight (a short option
-            profits as its premium decays). Size is <strong>nav_times</strong>
-            &nbsp;&mdash; the premium notional you hold as a percentage of NAV
-            (100% = full notional); because a short option&apos;s premium can
-            multiply on a sell-off, a full-size short can wipe out, so use a
-            small percentage.
+            profits as its premium decays). Size is the leg&apos;s
+            &nbsp;<strong>Size (% of NAV)</strong>&nbsp; field (the underlying
+            <code> nav_times</code> parameter) &mdash; the premium notional you
+            hold as a percentage of NAV (100% = full notional); because a short
+            option&apos;s premium can multiply on a sell-off, a full-size short
+            can wipe out, so use a small percentage.
           </p>
         </Details>
       </section>
