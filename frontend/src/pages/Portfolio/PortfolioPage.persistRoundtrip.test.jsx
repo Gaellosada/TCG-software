@@ -137,6 +137,49 @@ describe('<PortfolioPage> — backend hydrate + autosave', () => {
     });
   });
 
+  it('coerces a legacy option PRICE leg (no hold_between_rolls) to hold-ON on load (backward-compat)', async () => {
+    // A portfolio saved BEFORE option price legs became hold-ON-only: a `mid`
+    // option leg with NO hold_between_rolls key. On load it must be coerced to
+    // hold=true (+ nav_times default) so it stays computable — the backend now
+    // rejects a mid/bs_mid option leg with hold off, and the portfolio UI has no
+    // toggle to re-enable it.
+    const legacyDoc = {
+      ...PERSISTED_DOC,
+      id: 'ptf-legacy',
+      legs: [
+        {
+          label: 'OPT_SP_500 P mid',
+          type: 'option_stream',
+          collection: 'OPT_SP_500',
+          option_type: 'P',
+          cycle: 'W3 Friday',
+          stream: 'mid',
+          maturity: { kind: 'next_third_friday', offset_months: 0 },
+          selection: { kind: 'by_delta', target: -0.1, tolerance: 0.05, strict: false },
+          weight: -100,
+          // NOTE: intentionally NO hold_between_rolls / nav_times (legacy shape).
+        },
+      ],
+    };
+    mockListPortfolios.mockResolvedValue([legacyDoc]);
+    await act(async () => {
+      render(<PortfolioPage />);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId('load-portfolio-ptf-legacy')).not.toBeNull();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('load-portfolio-ptf-legacy'));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('leg-count').textContent).toBe('1');
+    });
+    const optLeg = capturedHoldings.find((l) => l.type === 'option_stream');
+    expect(optLeg).toBeTruthy();
+    expect(optLeg.hold_between_rolls).toBe(true); // coerced on load
+    expect(optLeg.nav_times).toBe(1.0); // seeded default
+  });
+
   it('PUTs the edited legs to the backend within ~3100ms', async () => {
     vi.useFakeTimers();
     try {

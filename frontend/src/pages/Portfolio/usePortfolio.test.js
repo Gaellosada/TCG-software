@@ -221,6 +221,11 @@ describe('usePortfolio — signal leg support', () => {
       maturity: { kind: 'nearest_to_target', target_days: 30 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'mid',
+      // A mid (premium) option leg is ALWAYS sent hold-ON ($-P&L): the backend
+      // rejects a mid/bs_mid option leg with hold off, so the compute body
+      // carries hold_between_rolls + nav_times for every premium leg.
+      hold_between_rolls: true,
+      nav_times: 1.0,
       roll_offset: { value: 2, unit: 'months' },
     });
     // The stray adjustment was dropped — option streams carry no back-adjustment.

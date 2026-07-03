@@ -278,7 +278,21 @@ export default function usePortfolio() {
     // Stamp local-only id onto each leg so React keys remain unique.
     // We do NOT round-trip the id back to the backend — the id is
     // assigned per-load, not stored.
-    const restoredLegs = backendLegs.map((l) => ({ ...l, id: nextId++ }));
+    const restoredLegs = backendLegs.map((l) => {
+      const leg = { ...l, id: nextId++ };
+      // Backward-compat: an option PRICE leg (mid/bs_mid) is now hold-ON-only
+      // (the backend rejects hold-off). A portfolio saved BEFORE that rule has
+      // no hold_between_rolls, so coerce it on load — otherwise an old portfolio
+      // loads fine but 400s on Compute with no in-UI way to enable hold.
+      if (
+        leg.type === 'option_stream'
+        && (leg.stream === 'mid' || leg.stream === 'bs_mid')
+      ) {
+        leg.hold_between_rolls = true;
+        if (typeof leg.nav_times !== 'number') leg.nav_times = 1.0;
+      }
+      return leg;
+    });
     abortCalculate();
     setLegs(restoredLegs);
     setRebalance(typeof doc.rebalance === 'string' ? doc.rebalance : 'none');
@@ -354,9 +368,13 @@ export default function usePortfolio() {
           selection: leg.selection,
           stream: leg.stream,
         };
-        // SELECT-AND-HOLD (fixed-contract dollar-P&L): send only when enabled so
-        // a non-hold option leg's body stays byte-identical to before.
-        if (leg.hold_between_rolls) {
+        // SELECT-AND-HOLD (fixed-contract dollar-P&L). An option PRICE leg
+        // (mid/bs_mid) is hold-ON-only — the backend rejects hold-off — so ALWAYS
+        // send hold for a premium leg, which also covers legacy legs persisted
+        // before that rule (otherwise the whole /compute request 400s). Level
+        // streams (iv/greeks) never carry hold.
+        const isPremiumLeg = leg.stream === 'mid' || leg.stream === 'bs_mid';
+        if (isPremiumLeg || leg.hold_between_rolls) {
           apiLegs[leg.label].hold_between_rolls = true;
           apiLegs[leg.label].nav_times = leg.nav_times ?? 1.0;
         }
