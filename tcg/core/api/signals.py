@@ -267,9 +267,17 @@ class _BlockIn(BaseModel):
     # accepting a nonsense window. Keeping it permissive routes EVERY malformed
     # window through ``_parse_links`` (the authoritative validator) which raises
     # ``SignalValidationError`` → HTTP 400 ``error_type='validation'``. Validated
-    # in ``_parse_blocks``: finite int windows >= 1, single contiguous forward
-    # chain over indices 1..len-1, no nesting. ``None``/empty ⇒ zero-link CNF.
+    # in ``_parse_blocks``: finite int windows >= 1, keys a subset of
+    # 1..len-1 (partial maps allowed — a gap present is a THEN boundary, absent
+    # is AND). ``None``/empty ⇒ zero-link CNF.
     links: dict[str, Any] | None = None
+    # Level → pulse conversion of the block's ``active`` (entries/exits only —
+    # rejected on resets). ``"sustained"`` (default) is the historical LEVEL
+    # behaviour; ``"pulse"`` fires only on the rising edge. Typed ``Any`` so a
+    # bad value routes through ``_parse_blocks``'s guard to the uniform HTTP-400
+    # envelope rather than a Pydantic 422. Absent ⇒ ``"sustained"`` (so stored
+    # signals lacking the field hydrate to the byte-identical default).
+    fire_mode: Any = None
 
 
 class _SignalRulesIn(BaseModel):
@@ -650,15 +658,18 @@ def _parse_links(
 ) -> dict[int, int] | None:
     """Validate and normalise a block's temporal ``links`` (HTTP 400 on error).
 
-    Enforces the bounded-state invariants (G3) at the API layer:
+    Under the GROUP semantics (v5) ``links`` marks the THEN boundaries between
+    conjunction groups; a gap present is a THEN, a gap absent is AND. The keys
+    may therefore be ANY subset of ``{1..n_conditions-1}`` — a partial map is
+    valid (relaxed from the former full-contiguous-chain invariant G3).
+
+    Enforces the remaining bounded-state invariants at the API layer:
       * keys parse as integers in ``1..n_conditions-1`` (no index 0 — the head
         carries no link; no out-of-range index);
       * windows are integers ``>= 1`` (finite, positive — reject None/missing
         and ``<= 0``; a window of 0 would be a non-link, so it is rejected at
-        authoring to keep the chain unambiguous);
-      * the keys form ONE contiguous forward chain covering EVERY successor —
-        exactly ``{1, 2, ..., n_conditions-1}`` (linear-chain-only, no gaps,
-        no nesting, spans the whole block).
+        authoring to keep the boundary unambiguous);
+      * no duplicate keys.
 
     Returns the normalised ``dict[int, int]`` (int keys) or ``None`` when no
     links are supplied (empty/absent ⇒ zero-link CNF).
@@ -690,13 +701,6 @@ def _parse_links(
         if key in out:
             raise SignalValidationError(f"{path}: duplicate links key {key}")
         out[key] = raw_win
-    expected = set(range(1, n_conditions))
-    if set(out) != expected:
-        raise SignalValidationError(
-            f"{path}: links must form one contiguous forward chain over "
-            f"every condition — expected successor indices "
-            f"{sorted(expected)!r}, got {sorted(out)!r}"
-        )
     return out
 
 
@@ -765,9 +769,13 @@ def _parse_blocks(
         rrb = blk.requires_reset_block_id or None
         rrc = blk.requires_reset_count
         raw_links = blk.links or None
+        raw_fire_mode = blk.fire_mode
         # Validated temporal chain (entries/exits only). Stays None for
         # placeholders and resets (resets reject non-empty links above).
         parsed_links: dict[int, int] | None = None
+        # Level→pulse mode (entries/exits only). Default "sustained" (historical
+        # behaviour); resets reject any non-default value below.
+        parsed_fire_mode: str = "sustained"
 
         # Placeholder blocks (no conditions + no input) are accepted
         # as sentinels; they skip evaluation. Otherwise full validation.
@@ -820,6 +828,14 @@ def _parse_blocks(
                 if raw_links:
                     raise SignalValidationError(
                         f"{path}: reset blocks must not set links"
+                    )
+                # ``fire_mode`` is a level→pulse control on an entry/exit's
+                # firing; a reset block's firing feeds the re-arm/since_reset
+                # machinery, where a pulse conversion would be meaningless.
+                # Reject any explicit value (mirror the links rejection).
+                if raw_fire_mode is not None:
+                    raise SignalValidationError(
+                        f"{path}: reset blocks must not set fire_mode"
                     )
             elif is_entry:
                 if has_target:
@@ -933,6 +949,20 @@ def _parse_blocks(
             # the block's conditions (validated; HTTP 400 on malformed input).
             if not is_reset:
                 parsed_links = _parse_links(raw_links, len(conds), path=path)
+            # Level→pulse mode (entries/exits only — resets reject above). Absent
+            # ⇒ "sustained" (byte-identical historical default). Any other value
+            # is a malformed payload → uniform HTTP-400 envelope. ``bool`` is
+            # rejected explicitly (it must not sneak through as a truthy string).
+            if not is_reset and raw_fire_mode is not None:
+                if isinstance(raw_fire_mode, bool) or raw_fire_mode not in (
+                    "pulse",
+                    "sustained",
+                ):
+                    raise SignalValidationError(
+                        f"{path}: fire_mode must be 'pulse' or 'sustained' "
+                        f"(got {raw_fire_mode!r})"
+                    )
+                parsed_fire_mode = raw_fire_mode
 
         out.append(
             Block(
@@ -947,6 +977,7 @@ def _parse_blocks(
                 requires_reset_block_id=rrb,
                 requires_reset_count=int(rrc),
                 links=parsed_links,
+                fire_mode=parsed_fire_mode,  # type: ignore[arg-type]
             )
         )
     return tuple(out)

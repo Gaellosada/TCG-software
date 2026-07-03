@@ -819,22 +819,27 @@ def _exit_input_ids(exit_block: Block, entries_by_name: dict[str, Block]) -> lis
     return out
 
 
-def _chain_window_list(block: Block) -> list[int] | None:
-    """Return the per-link window list for a temporal chain, or ``None`` for a
-    zero-link (pure-CNF) block.
+def _link_groups(
+    block: Block,
+) -> tuple[list[tuple[int, ...]], list[int]] | None:
+    """Partition a block's conditions into conjunction GROUPS separated by THEN
+    boundaries, or ``None`` for a zero-link / single-group (pure-CNF) block.
 
-    ``block.links`` maps successor-condition index → ``within`` window in bars.
-    A valid v1 chain is ONE contiguous forward chain over indices
-    ``1..len(conditions)-1`` (keys ``{1, 2, ..., m-1}``) with finite windows
-    ``>= 1``; a window of 0 is treated as a non-link (W=0 folds to plain AND).
-    The API layer validates and rejects malformed ``links`` (HTTP 400); here we
-    defensively treat anything that is not a clean full forward chain of
-    positive windows as "no chain" so a directly-constructed Signal degrades to
-    CNF rather than misbehaving.
+    ``block.links`` maps a SUCCESSOR condition index (``1..len-1``) → ``within``
+    window in bars. Under the GROUP semantics (v5) a gap PRESENT in ``links``
+    (with a positive window) is a THEN boundary — it starts a new conjunction
+    group and records its window; a gap ABSENT is AND (same group). A window of
+    ``0`` folds to a non-link (plain AND), matching the pre-existing W=0 rule.
+    The API layer validates ``links`` (HTTP 400); here we defensively ignore
+    out-of-range keys and non-positive windows so a directly-constructed Signal
+    degrades cleanly.
 
-    Returns a list ``W`` of length ``m-1`` where ``W[i]`` is the window from
-    condition ``i`` to condition ``i+1`` (``i`` in ``0..m-2``). Returns ``None``
-    when there are no usable links.
+    Returns ``(groups, windows)`` where ``groups[r]`` is the tuple of condition
+    indices in group ``r`` (in order) and ``windows`` has length
+    ``len(groups) - 1`` (``windows[r]`` = window from group ``r`` to group
+    ``r+1``). Returns ``None`` when there is NO THEN boundary — one group / pure
+    CNF — including the degenerate ``m < 2`` case; the caller then takes the
+    literal historical CNF path (byte-identical).
     """
     links = block.links
     if not links:
@@ -842,24 +847,46 @@ def _chain_window_list(block: Block) -> list[int] | None:
     m = len(block.conditions)
     if m < 2:
         return None
-    # Drop W<=0 entries (W=0 == non-link). Keep only positive windows.
-    pos = {int(kk): int(vv) for kk, vv in links.items() if int(vv) >= 1}
-    if not pos:
+    # THEN boundaries = successor indices with a positive window, in range.
+    # W<=0 or out-of-range keys fold to AND (no boundary). Anything left is a
+    # boundary between conjunction groups; zero boundaries ⇒ CNF (None).
+    boundaries = {
+        int(kk): int(vv)
+        for kk, vv in links.items()
+        if int(vv) >= 1 and 1 <= int(kk) < m
+    }
+    if not boundaries:
         return None
-    # Must be a single contiguous forward chain starting at index 1:
-    # keys exactly {1, 2, ..., k} for some k in 1..m-1 (no gaps, no index 0,
-    # no index >= m). Anything else degrades to CNF here (API rejects upstream).
-    keys = sorted(pos)
-    if keys[0] != 1 or keys[-1] >= m:
-        return None
-    if keys != list(range(1, keys[-1] + 1)):
-        return None
-    # Build the window list; links only cover indices 1..keys[-1]. A chain that
-    # stops short of the last condition is not a single linear chain over the
-    # whole block, so require it to reach the final condition.
-    if keys[-1] != m - 1:
-        return None
-    return [pos[i + 1] for i in range(m - 1)]
+    groups: list[tuple[int, ...]] = []
+    windows: list[int] = []
+    cur: list[int] = [0]
+    for i in range(1, m):
+        if i in boundaries:
+            groups.append(tuple(cur))
+            windows.append(boundaries[i])  # window from prev group to this one
+            cur = [i]
+        else:
+            cur.append(i)
+    groups.append(tuple(cur))
+    return groups, windows
+
+
+def _to_pulse(active: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
+    """Rising-edge conversion of a level array (Item 3a ``fire_mode="pulse"``).
+
+    ``pulsed[t] = active[t] & ~active[t-1]`` with ``pulsed[0] = active[0]`` — the
+    block fires only on the bar ``active`` first goes true, then must drop false
+    before it can fire again ("re-arm"). Applied AFTER NaN-poison is baked into
+    ``active`` (a NaN bar is already False, so a rising edge out of a gap is
+    intentional and fine). Idempotent on an already-single-bar impulse.
+    """
+    pulsed = np.zeros_like(active)
+    if active.size == 0:
+        return pulsed
+    pulsed[0] = active[0]
+    if active.size > 1:
+        pulsed[1:] = active[1:] & ~active[:-1]
+    return pulsed
 
 
 def _sequence_active(
@@ -867,14 +894,22 @@ def _sequence_active(
     stage_nan: list[npt.NDArray[np.bool_]],
     windows: list[int],
     T: int,
+    chain_reset: npt.NDArray[np.bool_] | None = None,
 ) -> npt.NDArray[np.bool_]:
-    """Single forward-only candidate automaton for one linear chain.
+    """Single forward-only candidate automaton for one linear chain of STAGES.
 
-    ``stage_truth[r][t]`` = condition ``r`` matched at bar ``t`` (already
-    NaN-poisoned: a NaN bar is never a match). ``windows[r]`` = bars allowed
-    from stage ``r``'s match to stage ``r+1``'s match (inclusive, strictly
-    after — the successor must land on a LATER bar). Returns ``active[T]`` with
-    an IMPULSE True only on the bar the final stage completes.
+    Each stage is a conjunction GROUP: ``stage_truth[r][t]`` = every condition in
+    group ``r`` matched at bar ``t`` (already NaN-poisoned: a NaN bar is never a
+    match). A group of one condition reduces to that condition, so a full chain
+    (every gap a THEN) is the special case of one condition per stage.
+    ``windows[r]`` = bars allowed from stage ``r``'s match to stage ``r+1``'s
+    match (inclusive, strictly after — the successor must land on a LATER bar).
+    Returns ``active[T]`` with an IMPULSE True only on the bar the final stage
+    completes.
+
+    ``chain_reset`` (Item 3b) is an optional always-on exit-reset array; when
+    supplied, a True bar aborts the in-flight candidate BEFORE it can advance at
+    that bar (step 2b below). ``None`` on every historical path.
 
     Per-bar STRICT ORDER (load-bearing — see redteam Findings 1 & 6):
       1. **expire**: if a candidate is in flight and ``t - tau > windows[r]``
@@ -919,6 +954,13 @@ def _sequence_active(
             if bool(stage_nan[stage + 1][t]):
                 stage = -1
                 tau = -1
+        # 2b. exit-reset abort (Item 3b): a targeting exit firing at ``t``
+        # aborts any in-flight candidate BEFORE it can advance/complete at this
+        # bar. ``chain_reset`` is None on every historical path. A fresh head at
+        # the same bar may still re-arm below (step 4) — that is a NEW candidate.
+        if chain_reset is not None and bool(chain_reset[t]):
+            stage = -1
+            tau = -1
         # 3. advance against the PRE-ARM tau (strictly-after >= 1 bar).
         if stage >= 0 and stage < m - 1:
             nxt = stage + 1
@@ -943,6 +985,7 @@ def _eval_block_activity(
     values_by_key: dict[tuple, npt.NDArray[np.float64]],
     T: int,
     reset_fire: npt.NDArray[np.bool_] | None = None,
+    chain_reset: npt.NDArray[np.bool_] | None = None,
 ) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_]]:
     """Evaluate a block to ``(active, any_nan)``.
 
@@ -951,34 +994,72 @@ def _eval_block_activity(
     ``CrossCondition`` in ``count_mode="since_reset"``. It is ``None`` in every
     default path (the caller supplies it only for a block that actually uses
     ``since_reset``), so the historical CNF / chain code paths are unchanged.
+
+    ``chain_reset`` (Item 3b, always-on exit reset) is the OR of the firing bars
+    of the exits that TARGET this entry. It is ``None`` on every historical path
+    (no exits, or exits not targeting this block). When supplied it (a) aborts
+    any in-flight temporal candidate at that bar via :func:`_sequence_active`,
+    and (b) is OR-ed into the reset threaded to ``since_reset`` cross counters so
+    a targeting exit zeroes the tap ladder — independently of the block's own
+    ``requires_reset_block_id``. Combining it at this level (rather than adding a
+    parameter to :func:`_cross_since_reset`) is behaviourally identical:
+    ``_cross_since_reset`` already zeroes ``seen`` on any ``reset_fire[t]`` bar.
     """
-    windows = _chain_window_list(block)
-    if windows is None:
-        # Zero-link CNF — the LITERAL historical path. Do not refactor.
+    # Combined per-condition reset for ``since_reset`` counters: the block's
+    # bound reset OR the always-on exit reset. None only when BOTH are None
+    # (the historical default), so ``_eval_condition`` sees an unchanged input.
+    if chain_reset is None:
+        cond_reset = reset_fire
+    elif reset_fire is None:
+        cond_reset = chain_reset
+    else:
+        cond_reset = reset_fire | chain_reset
+
+    groups_windows = _link_groups(block)
+    if groups_windows is None:
+        # Zero-link / single-group CNF — the LITERAL historical path. Do not
+        # refactor. (``cond_reset`` equals ``reset_fire`` unless an exit targets
+        # this block; non-``since_reset`` conditions ignore it either way.)
         active = np.ones(T, dtype=np.bool_)
         any_nan = np.zeros(T, dtype=np.bool_)
         for cond in block.conditions:
             c_truth, c_nan = _eval_condition(
-                cond, indicators, inputs, values_by_key, T, reset_fire
+                cond, indicators, inputs, values_by_key, T, cond_reset
             )
             active &= c_truth
             any_nan |= c_nan
+        if block.fire_mode == "pulse":
+            active = _to_pulse(active)
         return active, any_nan
-    # Temporal chain: per-condition truths feed the single-candidate automaton.
-    # ``any_nan`` stays the OR over ALL conditions (G2: NaN-poison preserved —
-    # the downstream nan_poison mask and the per-input position zeroing are
-    # unchanged). The automaton only READS already-poisoned truth/nan.
-    stage_truth: list[npt.NDArray[np.bool_]] = []
-    stage_nan: list[npt.NDArray[np.bool_]] = []
+    # Temporal grouping: per-condition truths are AND-reduced within each
+    # conjunction group, and the GROUP arrays feed the single-candidate
+    # automaton (one stage per group). ``any_nan`` stays the OR over ALL
+    # conditions (G2: NaN-poison preserved — the downstream nan_poison mask and
+    # the per-input position zeroing are unchanged).
+    groups, windows = groups_windows
+    cond_truth: list[npt.NDArray[np.bool_]] = []
+    cond_nan: list[npt.NDArray[np.bool_]] = []
     any_nan = np.zeros(T, dtype=np.bool_)
     for cond in block.conditions:
         c_truth, c_nan = _eval_condition(
-            cond, indicators, inputs, values_by_key, T, reset_fire
+            cond, indicators, inputs, values_by_key, T, cond_reset
         )
-        stage_truth.append(c_truth)
-        stage_nan.append(c_nan)
+        cond_truth.append(c_truth)
+        cond_nan.append(c_nan)
         any_nan |= c_nan
-    active = _sequence_active(stage_truth, stage_nan, windows, T)
+    stage_truth: list[npt.NDArray[np.bool_]] = []
+    stage_nan: list[npt.NDArray[np.bool_]] = []
+    for grp in groups:
+        gt = np.ones(T, dtype=np.bool_)
+        gn = np.zeros(T, dtype=np.bool_)
+        for i in grp:
+            gt = gt & cond_truth[i]
+            gn = gn | cond_nan[i]
+        stage_truth.append(gt)
+        stage_nan.append(gn)
+    active = _sequence_active(stage_truth, stage_nan, windows, T, chain_reset)
+    if block.fire_mode == "pulse":
+        active = _to_pulse(active)
     return active, any_nan
 
 
@@ -1289,15 +1370,11 @@ async def evaluate_signal(
             reset_fire_cache[rid] = r_active & ~r_nan
         return reset_fire_cache[rid]
 
-    entry_truth: dict[str, npt.NDArray[np.bool_]] = {}
-    entry_nan: dict[str, npt.NDArray[np.bool_]] = {}
-    for blk in entry_blocks:
-        active, blk_nan = _eval_block_activity(
-            blk, indicators, inputs, values_by_key, T, _reset_fire_for(blk)
-        )
-        entry_truth[blk.id] = active
-        entry_nan[blk.id] = blk_nan
-
+    # Exits are evaluated FIRST (Item 3b): an exit's own ``active`` does not
+    # depend on any entry's chain state, so we can build each targeted entry's
+    # always-on ``chain_reset`` (OR of the firing bars of the exits targeting it)
+    # before evaluating the entries. ``chain_reset`` is None for any entry no
+    # exit targets, so signals without exits keep the byte-identical path.
     exit_truth: dict[str, npt.NDArray[np.bool_]] = {}
     exit_nan: dict[str, npt.NDArray[np.bool_]] = {}
     for blk in exit_blocks:
@@ -1306,6 +1383,36 @@ async def evaluate_signal(
         )
         exit_truth[blk.id] = active
         exit_nan[blk.id] = blk_nan
+
+    # Per-entry exit-reset array: OR of ``exit_active & ~exit_nan`` over every
+    # exit whose ``target_entry_block_names`` includes this entry's name. A
+    # NaN-guarded firing (matching the reset_fire convention) — NOT gated by the
+    # exit's own arm; the exit reset is unconditional/always-on per spec. None
+    # when no exit targets the entry.
+    entry_chain_reset: dict[str, npt.NDArray[np.bool_] | None] = {}
+    for entry in entry_blocks:
+        acc: npt.NDArray[np.bool_] | None = None
+        if entry.name:
+            for xb in exit_blocks:
+                if entry.name in xb.target_entry_block_names:
+                    fire = exit_truth[xb.id] & ~exit_nan[xb.id]
+                    acc = fire if acc is None else (acc | fire)
+        entry_chain_reset[entry.id] = acc
+
+    entry_truth: dict[str, npt.NDArray[np.bool_]] = {}
+    entry_nan: dict[str, npt.NDArray[np.bool_]] = {}
+    for blk in entry_blocks:
+        active, blk_nan = _eval_block_activity(
+            blk,
+            indicators,
+            inputs,
+            values_by_key,
+            T,
+            _reset_fire_for(blk),
+            entry_chain_reset[blk.id],
+        )
+        entry_truth[blk.id] = active
+        entry_nan[blk.id] = blk_nan
 
     # Reset blocks evaluate the same condition vocabulary. Their nan-mask
     # poisons the resets' own ``fired``/``latched`` traces but is NOT
