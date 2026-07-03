@@ -181,6 +181,28 @@ function HelpPage() {
             where a roll jump is not meaningful.
           </p>
         </Details>
+
+        <Details title="How option backtests are priced">
+          <p>
+            When you add an option to a signal or portfolio you select it by a
+            rule &mdash; e.g. &ldquo;the 10-delta put&rdquo; &mdash; not a
+            fixed contract, so the contract you hold is rolled to a new one at
+            each expiry. The backtest holds one selected contract between
+            rolls and books its daily P&amp;L from the change in that
+            contract&apos;s own premium, as a percentage of your capital,
+            compounding it into the equity curve; at each roll it closes the
+            expiring contract and opens the newly-selected one, so a roll is
+            never counted as a price jump.
+          </p>
+          <p>
+            Direction is the sign of the leg&apos;s weight (a short option
+            profits as its premium decays). Size is <strong>nav_times</strong>
+            &nbsp;&mdash; the premium notional you hold as a percentage of NAV
+            (100% = full notional); because a short option&apos;s premium can
+            multiply on a sell-off, a full-size short can wipe out, so use a
+            small percentage.
+          </p>
+        </Details>
       </section>
 
       {/* ── Portfolio ── */}
@@ -311,6 +333,26 @@ function HelpPage() {
           <strong> 1.0</strong> apply leverage. Set initial capital in the right panel
           before running.
         </p>
+
+        <Details title="Block composition: AND / THEN and fire modes">
+          <p>
+            Conditions in a block can be organized into groups: conditions
+            joined by <strong>AND</strong> form a conjunction group, and{' '}
+            <strong>THEN</strong> separates groups in sequence. So{' '}
+            <code>(A AND B) THEN (C AND D)</code> means both A and B become
+            true, then both C and D become true within the THEN window
+            (strictly after). Each connector is set independently per gap, so
+            a block can mix AND and THEN freely along its condition list.
+          </p>
+          <p>
+            Every block also has a fire mode. <strong>Pulse</strong> (the
+            default for new blocks) fires only on the bar the block&apos;s
+            condition completes, then re-arms. <strong>Sustained</strong>{' '}
+            (legacy behavior, still available per block) stays true for as
+            long as the condition holds. A triggered exit always resets any
+            in-progress THEN-sequence or tap count on the entries it targets.
+          </p>
+        </Details>
 
         <Details title="Position model: latched entries">
           <p>

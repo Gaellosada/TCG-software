@@ -80,4 +80,17 @@ describe('HelpPage', () => {
     // <details><summary> renders the title text directly
     expect(screen.getByText(/per-block reset binding/i)).toBeTruthy();
   });
+
+  it('documents how option backtests are priced', () => {
+    render(<HelpPage />);
+    expect(screen.getByText(/how option backtests are priced/i)).toBeTruthy();
+    expect(screen.getByText(/nav_times/)).toBeTruthy();
+  });
+
+  it('documents block composition (AND / THEN and fire modes)', () => {
+    render(<HelpPage />);
+    expect(screen.getByText(/AND \/ THEN and fire modes/i)).toBeTruthy();
+    expect(screen.getByText(/Pulse/)).toBeTruthy();
+    expect(screen.getByText(/Sustained/)).toBeTruthy();
+  });
 });
