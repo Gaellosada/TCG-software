@@ -422,3 +422,48 @@ class TestQueryChainBulkPartitionPruning:
             expiration_max=date(2024, 6, 21),
         )
         assert len(result[d0]) == 1 and len(result[d1]) == 1
+
+
+class TestListExpirationsByDate:
+    """Unit contract for ``list_expirations_by_date`` (Issue #2 fix): the
+    per-trade-date LISTED-expiration map used by the stream resolver to snap
+    NearestToTarget to an expiration actually quoted that day."""
+
+    def _make_reader(self, rows: list[dict]):
+        def responder(sql: str, params: Any) -> list[dict]:
+            return rows
+
+        cur = _FakeCursor(responder)
+        pool = _FakePool(cur)
+        reader = SqlOptionsDataReader(pool)  # type: ignore[arg-type]
+        return reader, cur, pool
+
+    @pytest.mark.asyncio
+    async def test_groups_expirations_by_trade_date(self):
+        d1, d2 = date(2021, 1, 5), date(2021, 1, 6)
+        rows = [
+            {"trade_date": d1, "expiration": date(2021, 1, 29)},
+            {"trade_date": d1, "expiration": date(2021, 2, 26)},
+            {"trade_date": d2, "expiration": date(2021, 1, 29)},
+        ]
+        reader, cur, _pool = self._make_reader(rows)
+        out = await reader.list_expirations_by_date(
+            "OPT_BTC", date(2021, 1, 5), date(2021, 1, 6), option_type="C"
+        )
+        assert out == {
+            d1: [date(2021, 1, 29), date(2021, 2, 26)],
+            d2: [date(2021, 1, 29)],
+        }
+        # Partition-pruning: a CONSTANT trade_date BETWEEN must be in the SQL
+        # (a runtime-only join fans out over all yearly partitions -> 60s timeout).
+        main_sql = cur.calls[-1][0]
+        assert "trade_date BETWEEN" in main_sql
+        assert "fact_price_eod" in main_sql
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_rows(self):
+        reader, _cur, _pool = self._make_reader([])
+        out = await reader.list_expirations_by_date(
+            "OPT_BTC", date(2021, 1, 5), date(2021, 1, 6)
+        )
+        assert out == {}

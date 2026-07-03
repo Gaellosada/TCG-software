@@ -125,3 +125,20 @@ class OptionsDataReader(Protocol):
     ) -> list[date]:
         """Distinct expirations filtered by type and/or cycle."""
         ...
+
+    async def list_expirations_by_date(
+        self,
+        root: str,
+        start: date,
+        end: date,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[date]]:
+        """Per-trade-date map of expirations actually LISTED (price-quoted).
+
+        ``{trade_date: [expirations listed that day]}`` — a price-row join, not
+        the dim-only global set.  Consumed by the stream resolver so
+        ``NearestToTarget`` snaps to an expiration listed on each date (fixes the
+        daily-expiration ``no_chain_for_date`` global-snap bug).
+        """
+        ...

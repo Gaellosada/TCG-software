@@ -27,6 +27,34 @@ function singleLegBasket(assetClass, leg) {
 // so the traces useMemo doesn't re-run on every render (N2).
 const combineLegData = (results) => results.map((r) => r.data ?? null);
 
+// Human-readable cause for a resolver error_code (Issue #1: explain gaps
+// rather than draw a silently broken line).
+const COVERAGE_CAUSE = {
+  missing_mid: 'no two-sided quote',
+  no_chain_for_date: 'no chain listed on date',
+  missing_underlying_price: 'no underlying price',
+  missing_iv: 'no implied vol',
+  missing_delta_no_compute: 'no delta',
+  past_last_trade_date: 'past last trade date',
+  maturity_resolution_failed: 'maturity unresolved',
+};
+
+// Build the per-leg gap messages from the response ``coverage`` block.  Only
+// option legs (which resolve per-date and can have data holes) contribute.
+function coverageMessages(coverage) {
+  if (!coverage || !Array.isArray(coverage.legs)) return [];
+  const msgs = [];
+  coverage.legs.forEach((leg) => {
+    if (!leg || !leg.n_holes) return;
+    const pct = leg.n ? Math.round((leg.n_holes / leg.n) * 1000) / 10 : 0;
+    const cause = COVERAGE_CAUSE[leg.dominant_code] || leg.dominant_code || 'unknown';
+    const range =
+      leg.first_gap && leg.last_gap ? ` (${leg.first_gap} to ${leg.last_gap})` : '';
+    msgs.push(`${leg.descriptor}: ${pct}% missing — ${cause}${range}`);
+  });
+  return msgs;
+}
+
 // A short human label for a leg, derived from its instrument ref.
 function legLabel(leg, i) {
   const inst = leg?.instrument || {};
@@ -109,6 +137,8 @@ function BasketChart({ basket, name, assetClass, legs }) {
     return t;
   }, [data, name, showLegs, canBreakdown, legData, legs]);
 
+  const coverageMsgs = useMemo(() => coverageMessages(data?.coverage), [data]);
+
   const layoutOverrides = useMemo(
     () => ({
       yaxis: {
@@ -164,6 +194,15 @@ function BasketChart({ basket, name, assetClass, legs }) {
           </label>
         )}
       </div>
+
+      {coverageMsgs.length > 0 && (
+        <div className={styles.snapNotice} role="status">
+          <strong>Coverage:</strong>
+          {coverageMsgs.map((m, i) => (
+            <div key={i}>{m}</div>
+          ))}
+        </div>
+      )}
 
       <div className={styles.chartCard}>
         {loading ? (

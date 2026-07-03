@@ -80,6 +80,7 @@ async def get_basket_series(
         asset_class = body.basket.asset_class
         legs = body.basket.legs
 
+    coverage: dict = {}
     try:
         dates, values = await compute_basket_series(
             svc=svc,
@@ -90,6 +91,7 @@ async def get_basket_series(
             start=start_date,
             end=end_date,
             field=body.field,
+            coverage_out=coverage,
         )
     except (SignalValidationError, SignalDataError) as exc:
         # Both surface as a 400 on the Data page: an unknown/empty basket,
@@ -97,7 +99,10 @@ async def get_basket_series(
         # explicit window are all client-input problems (never a 500).
         raise ValidationError(str(exc)) from exc
 
-    return {"dates": dates.tolist(), "values": values.tolist()}
+    # ``coverage`` explains missing points (option legs with no two-sided quote,
+    # no chain on a date, …) so the chart can annotate gaps instead of drawing a
+    # silently broken line.  Empty for spot/continuous-only baskets.
+    return {"dates": dates.tolist(), "values": values.tolist(), "coverage": coverage}
 
 
 @router.get("/collections")
