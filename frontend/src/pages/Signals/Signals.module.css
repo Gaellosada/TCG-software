@@ -657,6 +657,53 @@
   height: 18px;
 }
 
+/* ---------- Conjunction-group rendering (per-gap AND/THEN) ----------
+ * A run of AND'd conditions is bounded in one .conditionGroup box (left accent
+ * stripe = "these fire together"); a .conditionThenConnector separates ordered
+ * groups so ``(A AND B) THEN (C AND D)`` reads as two bounded groups joined by
+ * THEN. The box is only applied when a block actually has >1 group — a plain
+ * CNF block stays visually flat. */
+.conditionGroup {
+  border: 1px solid var(--border-secondary);
+  border-left: 2px solid var(--accent, #2563eb);
+  border-radius: var(--radius-sm);
+  padding: 0 8px 4px;
+  margin-top: 2px;
+}
+
+.conditionThenConnector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+
+/* Leading accent tick so the THEN boundary reads as an ordered step, not just
+   another AND chip. */
+.conditionThenConnector::before {
+  content: '';
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent, #2563eb);
+}
+
+/* Static reminder on entry blocks that carry a sequence / tap counter. */
+.exitResetNote {
+  margin-top: 8px;
+  font-size: 0.66rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+/* Per-block "fire: pulse | sustained" control in the block header. */
+.blockFireCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* ---------- cross ×N / within W controls (shown only when count > 1) ----------
  * A plain crossover (count == 1) shows just a small "×N" toggle button so the
  * row stays visually identical to a pre-feature crossover; clicking it reveals

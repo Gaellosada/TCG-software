@@ -77,7 +77,7 @@
 
 import { SIGNALS_STORAGE_KEY } from './storageKeys';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /** Canonical list of rule sections. */
 export const SECTIONS = Object.freeze(['entries', 'exits', 'resets']);
@@ -366,16 +366,17 @@ export function coerceCrossField(raw) {
  * Field-local sanitiser for a block's temporal ``links`` map.
  *
  * ``links`` is a flat { "<successorIdx>": <withinBars> } map keyed by the
- * SUCCESSOR condition's index within the block. A block is EITHER pure CNF OR
- * one full linear chain — the backend (HTTP 400) requires the keys to cover
- * EXACTLY every successor gap ``{1..condCount-1}`` (no partial chain). So this
- * sanitiser is all-or-nothing:
- *   - every key must parse to an integer in [1, condCount-1] with a window
- *     that is a finite integer ≥ 1, AND
- *   - the key set must equal exactly ``{1..condCount-1}`` (full coverage).
- * If ANY of that fails (a stray key, a bad window, a missing gap, or < 2
- * conditions), it returns ``undefined`` ⇒ the field is omitted and the block
- * falls back to CNF — never a half-formed chain the backend would reject.
+ * SUCCESSOR condition's index within the block. It records the set of gaps that
+ * are THEN boundaries between conjunction groups: a gap present ⇒ THEN (a new
+ * group starts there), a gap absent ⇒ AND (same group). PARTIAL maps are valid
+ * — ``(A AND B) THEN (C AND D)`` is a 4-condition block with ``links={2:W}``.
+ * An empty map ⇒ one group ⇒ CNF (byte-identical to a pre-feature payload).
+ *
+ * The map is cleaned, not rejected wholesale: each key must parse to an integer
+ * in [1, condCount-1] with a finite integer window ≥ 1; any stray / malformed
+ * entry is DROPPED (not fatal, since a partial map is legitimate). If nothing
+ * survives (or < 2 conditions), it returns ``undefined`` ⇒ the field is omitted
+ * (CNF).
  *
  * @param {*} raw            the raw links value
  * @param {number} condCount the block's condition count
@@ -387,16 +388,26 @@ export function sanitiseLinks(raw, condCount) {
   const out = {};
   for (const [k, v] of Object.entries(raw)) {
     const idx = Number(k);
-    if (!Number.isInteger(idx) || idx < 1 || idx >= condCount) return undefined;
+    if (!Number.isInteger(idx) || idx < 1 || idx >= condCount) continue;
     const w = typeof v === 'number' ? v : Number(v);
-    if (!Number.isFinite(w) || w < 1) return undefined;
+    if (!Number.isFinite(w) || w < 1) continue;
     out[String(idx)] = Math.floor(w);
   }
-  // Require FULL coverage of every successor gap {1..condCount-1}.
-  for (let i = 1; i < condCount; i += 1) {
-    if (!(String(i) in out)) return undefined;
-  }
-  return out;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Field-local sanitiser for a block's ``fire_mode`` (entries + exits only).
+ *
+ * ``"pulse"`` = fire once on the trigger bar then re-arm; ``"sustained"`` = stay
+ * active every bar the condition holds. The backend dataclass default and the
+ * hydration of stored blocks lacking the field are BOTH ``"sustained"`` (the
+ * historical behaviour — this preserves the golden master). New blocks stamp
+ * ``"pulse"`` in ``blockShape.defaultBlock``. Anything but the literal
+ * ``"pulse"`` collapses to ``"sustained"``.
+ */
+export function sanitiseFireMode(raw) {
+  return raw === 'pulse' ? 'pulse' : 'sustained';
 }
 
 /**
@@ -463,6 +474,10 @@ function sanitiseBlock(raw, section) {
       // No binding → force the single-fire default so a stale count can't
       // ride in storage.
       requires_reset_count: exitReset ? coerceResetCount(raw.requires_reset_count) : 1,
+      // Missing fire_mode folds to "sustained" (the historical behaviour) so
+      // stored signals that predate the field are unchanged; new blocks carry
+      // "pulse" (stamped by defaultBlock).
+      fire_mode: sanitiseFireMode(raw.fire_mode),
       // Only stored when there is a real chain (≥2 conditions + valid map).
       ...(links !== undefined ? { links } : {}),
     };
@@ -481,6 +496,9 @@ function sanitiseBlock(raw, section) {
     requires_reset_block_id: entryReset,
     // Orphan-kill (see exits above).
     requires_reset_count: entryReset ? coerceResetCount(raw.requires_reset_count) : 1,
+    // Missing fire_mode folds to "sustained" (historical behaviour); new
+    // blocks carry "pulse" (stamped by defaultBlock).
+    fire_mode: sanitiseFireMode(raw.fire_mode),
     // Only stored when there is a real chain (≥2 conditions + valid map).
     ...(links !== undefined ? { links } : {}),
   };
@@ -575,7 +593,51 @@ export function migrateV5ToV6(parsed) {
  * @returns {object}       a v7-shaped payload
  */
 export function migrateV6ToV7(parsed) {
+  return { ...parsed, version: 7 };
+}
+
+/**
+ * Migrate a parsed v7 payload to v8 (returns a new object graph).
+ *
+ * v8 adds one purely-additive, behaviour-preserving field: block-level
+ * ``fire_mode`` on entries + exits. Every v7 payload lacks it; ``sanitiseBlock``
+ * folds a missing value to ``"sustained"`` (the historical firing behaviour),
+ * so a v7 payload IS a v8 payload minus the new field. Pure version stamp —
+ * the sanitiser fills the default. (v8 also relaxes ``links`` from
+ * full-coverage-only to arbitrary THEN-boundary subsets, but that is a
+ * validation change, not a shape change: existing full-coverage maps stay
+ * valid, so no data rewrite is needed here either.)
+ *
+ * Pure — does not mutate the input.
+ *
+ * @param {object} parsed  parsed localStorage payload with ``version === 7``
+ * @returns {object}       a v8-shaped payload
+ */
+export function migrateV7ToV8(parsed) {
   return { ...parsed, version: SCHEMA_VERSION };
+}
+
+/**
+ * Produce a duplicate of a signal doc: a deep clone with a fresh signal id,
+ * a "(copy)" name suffix, and forced ``locked: false``. Pure.
+ *
+ * Block ids are DELIBERATELY preserved (not regenerated): they are latch keys
+ * scoped to ONE signal's evaluation, so they never collide across signals, and
+ * ``requires_reset_block_id`` references them by id — regenerating would break
+ * those intra-signal bindings. Category is a persistence concern owned by the
+ * caller's create call, not part of this shape.
+ *
+ * @param {object} doc   source signal (editor shape)
+ * @param {{newId?: string, nameSuffix?: string}} [opts]
+ * @returns {object|null}
+ */
+export function duplicateSignal(doc, { newId, nameSuffix = ' (copy)' } = {}) {
+  if (!doc || typeof doc !== 'object') return null;
+  const clone = JSON.parse(JSON.stringify(doc));
+  clone.id = (typeof newId === 'string' && newId) ? newId : newBlockId();
+  clone.name = `${doc.name || 'Untitled'}${nameSuffix}`;
+  clone.locked = false;
+  return clone;
 }
 
 export function loadState() {
@@ -607,6 +669,9 @@ export function loadState() {
   }
   if (parsed.version === 6) {
     parsed = migrateV6ToV7(parsed);
+  }
+  if (parsed.version === 7) {
+    parsed = migrateV7ToV8(parsed);
   }
   if (parsed.version !== SCHEMA_VERSION) {
     if (!incompatibleVersionWarned) {

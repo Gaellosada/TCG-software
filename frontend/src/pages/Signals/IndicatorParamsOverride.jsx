@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { parseIndicatorSpec } from '../Indicators/paramParser';
 import { isInputConfigured } from './blockShape';
+import AnchoredPortal from './AnchoredPortal';
 import styles from './Signals.module.css';
 
 /**
@@ -74,6 +75,7 @@ export function coerceParamInput(type, rawValue) {
 
 function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange, readOnly = false }) {
   const [expanded, setExpanded] = useState(false);
+  const anchorRef = useRef(null);
 
   const spec = useMemo(() => {
     if (!indicator || typeof indicator.code !== 'string') {
@@ -200,7 +202,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange, 
     + Object.keys(seriesOverride).length;
 
   return (
-    <div className={styles.indicatorOverride} data-testid="indicator-override">
+    <div className={styles.indicatorOverride} data-testid="indicator-override" ref={anchorRef}>
       <button
         type="button"
         className={styles.indicatorOverrideSummary}
@@ -220,7 +222,12 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange, 
         )}
       </button>
       {expanded && indicator && (
-        <div className={styles.indicatorOverrideGrid}>
+        <AnchoredPortal
+          anchorRef={anchorRef}
+          align="right"
+          className={styles.indicatorOverrideGrid}
+          testId="indicator-override-grid"
+        >
           {spec.params.map((p) => {
             const baseV = (p.name in baseParams) ? baseParams[p.name] : p.default;
             const overrideV = paramsOverride[p.name];
@@ -326,7 +333,7 @@ function IndicatorParamsOverride({ indicator, operand, inputs, onOperandChange, 
               Reset all overrides
             </button>
           )}
-        </div>
+        </AnchoredPortal>
       )}
     </div>
   );

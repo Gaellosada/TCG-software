@@ -69,16 +69,23 @@ export function defaultBlock(section = 'entries') {
     base.requires_reset_block_id = null;
     // Reset fires required before re-arm; 1 == single-fire (current behavior).
     base.requires_reset_count = 1;
+    // NEW blocks default to pulse (fire once on the trigger bar, then re-arm).
+    // This is where the "pulse by default" UX lives — the backend dataclass /
+    // hydration default stays "sustained" so stored signals are unchanged.
+    base.fire_mode = 'pulse';
   } else if (section === 'resets') {
     // Reset blocks are signal-global: no input_id, no weight, no target,
-    // no requires_reset_block_id (a reset cannot gate itself), and no
-    // requires_reset_count (the count lives on the binder, not the reset).
+    // no requires_reset_block_id (a reset cannot gate itself), no
+    // requires_reset_count (the count lives on the binder, not the reset), and
+    // no fire_mode (a reset only ever fires an impulse; backend rejects it).
   } else {
     base.input_id = '';
     base.weight = 0;
     base.requires_reset_block_id = null;
     // Reset fires required before re-arm; 1 == single-fire (current behavior).
     base.requires_reset_count = 1;
+    // NEW blocks default to pulse (see exits above).
+    base.fire_mode = 'pulse';
   }
   return base;
 }
