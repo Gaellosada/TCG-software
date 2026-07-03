@@ -653,7 +653,8 @@
   color: var(--text-primary);
   font-size: 0.7rem;
   padding: 0 4px;
-  width: 44px;
+  /* Doubled from 44px for legibility (misc-batch follow-up ask #1). */
+  width: 88px;
   height: 18px;
 }
 
@@ -818,15 +819,16 @@
   min-height: var(--signal-control-height);
 }
 
-/* Each operand occupies a compact cell. ``flex-basis: 100px`` is the PREFERRED
-   width (≈⅓ narrower than the former 150px) and ``flex-grow: 0`` keeps the
-   dropdown at that width instead of stretching to fill the column — a
-   deliberately narrow control. The row's ``flex-wrap: wrap`` still drops an
-   operand that can't fit onto the next line, and ``min-width: 0`` (the PR #61
-   precedent) lets the cell shrink below the basis at sub-floor widths so it
-   reflows / the panel scrolls instead of overflowing the column. */
+/* Each operand occupies a cell. ``flex-basis: 200px`` is the PREFERRED width
+   (doubled from 100px in the misc-batch follow-up ask #2 so the instrument /
+   constant operand fields read clearly) and ``flex-grow: 0`` keeps the control
+   at that width instead of stretching to fill the column. The row's
+   ``flex-wrap: wrap`` still drops an operand that can't fit onto the next line,
+   and ``min-width: 0`` (the PR #61 precedent) lets the cell shrink below the
+   basis at sub-floor widths so it reflows / the panel scrolls instead of
+   overflowing the column. */
 .conditionOperandCell {
-  flex: 0 1 100px;
+  flex: 0 1 200px;
   min-width: 0;
   display: flex;
 }
@@ -1041,13 +1043,14 @@
   min-width: 0;
 }
 
-/* ``flex-basis: 73px`` = preferred per-select width (≈⅓ narrower than the
-   former 110px); ``flex-grow: 0`` keeps each select compact rather than
+/* ``flex-basis: 146px`` = preferred per-select width (doubled from 73px in the
+   misc-batch follow-up ask #2 so the indicator name and its input binding read
+   clearly); ``flex-grow: 0`` keeps each select at that width rather than
    stretching, and the wrap above stacks two that can't share a line
    one-per-line. ``min-width: 0`` lets them shrink at sub-floor widths instead
    of overflowing the cell. */
 .operandIndicator > select {
-  flex: 0 1 73px;
+  flex: 0 1 146px;
   min-width: 0;
 }
 

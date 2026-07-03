@@ -87,10 +87,17 @@ describe('HelpPage', () => {
     expect(screen.getByText(/nav_times/)).toBeTruthy();
   });
 
-  it('documents block composition (AND / THEN and fire modes)', () => {
+  it('documents block composition (AND / THEN groups)', () => {
     render(<HelpPage />);
-    expect(screen.getByText(/AND \/ THEN and fire modes/i)).toBeTruthy();
-    expect(screen.getByText(/Pulse/)).toBeTruthy();
-    expect(screen.getByText(/Sustained/)).toBeTruthy();
+    expect(screen.getByText(/AND \/ THEN groups/i)).toBeTruthy();
+  });
+
+  it('documents fire mode (pulse vs. sustained) in its own section with an example', () => {
+    render(<HelpPage />);
+    expect(screen.getByText(/Fire mode: pulse vs\. sustained/i)).toBeTruthy();
+    expect(screen.getAllByText(/Pulse/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Sustained/).length).toBeGreaterThan(0);
+    // The concrete worked example (3 taps within 30 bars) must be present.
+    expect(screen.getByText(/3 taps within 30 bars/i)).toBeTruthy();
   });
 });

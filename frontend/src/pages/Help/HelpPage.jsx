@@ -334,7 +334,7 @@ function HelpPage() {
           before running.
         </p>
 
-        <Details title="Block composition: AND / THEN and fire modes">
+        <Details title="Block composition: AND / THEN groups">
           <p>
             Conditions in a block can be organized into groups: conditions
             joined by <strong>AND</strong> form a conjunction group, and{' '}
@@ -344,13 +344,48 @@ function HelpPage() {
             (strictly after). Each connector is set independently per gap, so
             a block can mix AND and THEN freely along its condition list.
           </p>
+        </Details>
+
+        <Details title="Fire mode: pulse vs. sustained">
           <p>
-            Every block also has a fire mode. <strong>Pulse</strong> (the
-            default for new blocks) fires only on the bar the block&apos;s
-            condition completes, then re-arms. <strong>Sustained</strong>{' '}
-            (legacy behavior, still available per block) stays true for as
-            long as the condition holds. A triggered exit always resets any
-            in-progress THEN-sequence or tap count on the entries it targets.
+            Every block has a <strong>fire mode</strong> that decides how often
+            it signals while its condition is met. New blocks default to{' '}
+            <strong>pulse</strong>.
+          </p>
+          <ul>
+            <li>
+              <strong>Pulse</strong> fires once, on the single bar the
+              block&apos;s condition completes, then <em>re-arms</em> only after
+              the condition drops false again — so it never re-fires while the
+              same trigger stays true.
+            </li>
+            <li>
+              <strong>Sustained</strong> stays true on every bar for as long as
+              the condition still holds (legacy behavior, still selectable per
+              block).
+            </li>
+          </ul>
+          <p>
+            <strong>Concrete example.</strong> Take a condition of{' '}
+            <em>3 taps within 30 bars</em> (a cross <code>×3 within 30</code>).
+            Suppose the 3rd tap lands on bar 40.
+          </p>
+          <ul>
+            <li>
+              <strong>Pulse:</strong> fires exactly once, on bar 40 (the bar the
+              3rd tap completes the count). It will not fire again until the
+              condition first goes false and a fresh run of 3 taps completes.
+            </li>
+            <li>
+              <strong>Sustained:</strong> keeps firing on bar 40 and every later
+              bar for as long as the trailing 30-bar window still contains 3
+              taps; it stops only once the window no longer holds 3.
+            </li>
+          </ul>
+          <p>
+            A triggered exit always <strong>resets</strong> any in-progress
+            THEN-sequence or tap count on the entry blocks it targets, so an
+            in-flight sequence starts over after the position closes.
           </p>
         </Details>
 
