@@ -806,3 +806,15 @@ describe('isBlockRunnable (v6 — exits, plural targets)', () => {
     )).toBe(false);
   });
 });
+
+describe('defaultBlock — fire_mode (v8, per-block pulse|sustained)', () => {
+  it('stamps fire_mode:"pulse" on NEW entry blocks (pulse-by-default UX)', () => {
+    expect(defaultBlock('entries').fire_mode).toBe('pulse');
+  });
+  it('stamps fire_mode:"pulse" on NEW exit blocks', () => {
+    expect(defaultBlock('exits').fire_mode).toBe('pulse');
+  });
+  it('reset blocks carry NO fire_mode (backend rejects it there)', () => {
+    expect('fire_mode' in defaultBlock('resets')).toBe(false);
+  });
+});

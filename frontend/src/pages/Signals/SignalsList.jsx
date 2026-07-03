@@ -33,6 +33,7 @@ function SignalsList({
   onSelect,
   onAdd,
   onDelete,
+  onDuplicate,
   onRename,
   search,
   onSearchChange,
@@ -128,6 +129,20 @@ function SignalsList({
             >
               ✎
             </button>
+            {/* Duplicate is allowed even on a LOCKED signal — cloning doesn't
+                mutate the original, and the copy always lands unlocked. */}
+            {onDuplicate && (
+              <button
+                type="button"
+                className={styles.iconBtn}
+                onClick={(e) => { e.stopPropagation(); onDuplicate(sig.id); }}
+                title="Duplicate"
+                aria-label={`Duplicate ${sig.name}`}
+                data-testid={`signal-duplicate-${sig.id}`}
+              >
+                ⧉
+              </button>
+            )}
             {onChangeItemCat && (
               <select
                 className={styles.categoryChipSelect}

@@ -277,3 +277,29 @@ describe('IndicatorParamsOverride — pure helpers', () => {
     expect(effectiveParamValue(spec, { window: 20 }, { window: 30 })).toBe(30);
   });
 });
+
+describe('Parameter overlay is PORTALED to document.body (overflow-clip fix)', () => {
+  it('the expanded params grid renders as a child of document.body, not inside the component root', () => {
+    render(
+      <IndicatorParamsOverride
+        indicator={twoParamIndicator()}
+        operand={baseOperand({ indicator_id: 'ind-2' })}
+        inputs={[SPX_INPUT]}
+        onOperandChange={vi.fn()}
+      />,
+    );
+    // Expand the dropdown.
+    fireEvent.click(screen.getByTestId('indicator-override-toggle'));
+    const grid = screen.getByTestId('indicator-override-grid');
+    // Portaled: the grid lives under document.body and is fixed-positioned so
+    // it escapes the scrollable editor panel's overflow clip.
+    expect(document.body.contains(grid)).toBe(true);
+    expect(grid.style.position).toBe('fixed');
+    // It is NOT a descendant of the in-flow component root (that is what caused
+    // the clip); the root only holds the toggle button.
+    const root = screen.getByTestId('indicator-override');
+    expect(root.contains(grid)).toBe(false);
+    // The param inputs are reachable inside the portaled grid.
+    expect(screen.getByTestId('override-param-window')).toBeDefined();
+  });
+});

@@ -891,3 +891,66 @@ describe('normaliseCondition — cross count/window flow through (SC5)', () => {
     expect(cond.window).toBe(10);
   });
 });
+
+describe('wire contract — partial links + fire_mode (v8)', () => {
+  const BASE_INPUTS = [
+    { id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
+  ];
+  function threeCondEntry(over = {}) {
+    return {
+      id: 'e1', input_id: 'X', weight: 50, name: '', conditions: [
+        { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+        { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+        { op: 'gt', lhs: { kind: 'constant', value: 3 }, rhs: { kind: 'constant', value: 0 } },
+      ], ...over,
+    };
+  }
+
+  it('a PARTIAL links map {1:5} round-trips through the request normaliser (not dropped)', () => {
+    const spec = { id: 's', name: 'S', inputs: BASE_INPUTS, rules: { entries: [threeCondEntry({ links: { 1: 5 } })], exits: [], resets: [] } };
+    const wire = normaliseSpecForRequest(spec);
+    expect(wire.rules.entries[0].links).toEqual({ 1: 5 });
+  });
+
+  it('another partial map {2:5} (A AND B) THEN C survives', () => {
+    const spec = { id: 's', name: 'S', inputs: BASE_INPUTS, rules: { entries: [threeCondEntry({ links: { 2: 5 } })], exits: [], resets: [] } };
+    const wire = normaliseSpecForRequest(spec);
+    expect(wire.rules.entries[0].links).toEqual({ 2: 5 });
+  });
+
+  it('entry + exit block literals carry fire_mode; a new-block "pulse" survives', () => {
+    const spec = {
+      id: 's', name: 'S', inputs: BASE_INPUTS,
+      rules: {
+        entries: [threeCondEntry({ fire_mode: 'pulse' })],
+        exits: [{ id: 'x1', name: '', target_entry_block_names: [], conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }], fire_mode: 'pulse' }],
+        resets: [],
+      },
+    };
+    const wire = normaliseSpecForRequest(spec);
+    expect(wire.rules.entries[0].fire_mode).toBe('pulse');
+    expect(wire.rules.exits[0].fire_mode).toBe('pulse');
+  });
+
+  it('a block WITHOUT fire_mode defaults to "sustained" on the wire (backend default)', () => {
+    const spec = { id: 's', name: 'S', inputs: BASE_INPUTS, rules: { entries: [threeCondEntry()], exits: [], resets: [] } };
+    const wire = normaliseSpecForRequest(spec);
+    expect(wire.rules.entries[0].fire_mode).toBe('sustained');
+  });
+
+  it('reset blocks NEVER carry fire_mode OR links on the wire', () => {
+    const spec = {
+      id: 's', name: 'S', inputs: BASE_INPUTS,
+      rules: {
+        entries: [], exits: [],
+        resets: [{ id: 'r1', name: 'Arm', conditions: [
+          { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+          { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+        ], links: { 1: 5 }, fire_mode: 'pulse' }],
+      },
+    };
+    const wire = normaliseSpecForRequest(spec);
+    expect('fire_mode' in wire.rules.resets[0]).toBe(false);
+    expect('links' in wire.rules.resets[0]).toBe(false);
+  });
+});

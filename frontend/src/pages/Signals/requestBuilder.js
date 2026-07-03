@@ -112,18 +112,19 @@ function clampWeight(w) {
  * Normalise a block-level temporal ``links`` map for the wire.
  *
  * ``links`` is a flat map { "<successor_condition_index>": <within_bars_int> }
- * keyed by the SUCCESSOR condition's index within the block. A block is EITHER
- * pure CNF OR one FULL linear chain: the backend (HTTP 400, gate G3) requires
- * the keys to cover EXACTLY every successor gap ``{1..condCount-1}`` — no
- * partial chain, no stray key, every window a finite integer ≥ 1. So this is
- * all-or-nothing: any deviation returns ``undefined`` and the caller OMITS the
- * field, falling back to CNF (which keeps a non-chained block byte-identical
- * to a pre-feature payload, gate G1). Defence-in-depth alongside the storage
- * sanitiser — the wire never ships a chain the backend would reject.
+ * keyed by the SUCCESSOR condition's index within the block. It records the set
+ * of gaps that are THEN boundaries between conjunction groups: present ⇒ THEN,
+ * absent ⇒ AND, empty/missing ⇒ CNF. PARTIAL maps are VALID (the backend
+ * accepts any subset of ``{1..condCount-1}``) — ``(A AND B) THEN (C AND D)`` is
+ * ``links={2:W}`` on a 4-condition block. Each key must be an integer in
+ * [1, condCount-1] with a finite window ≥ 1; a stray / malformed entry is
+ * DROPPED (not fatal). An empty result ⇒ ``undefined`` so the caller OMITS the
+ * field (CNF — byte-identical to a pre-feature payload). Defence-in-depth
+ * alongside the storage sanitiser.
  *
  * @param {*} raw
  * @param {number} condCount the block's condition count
- * @returns {Object|undefined} full-coverage links map, or undefined to omit.
+ * @returns {Object|undefined} THEN-boundary links map, or undefined to omit.
  */
 function normaliseLinks(raw, condCount) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
@@ -131,16 +132,19 @@ function normaliseLinks(raw, condCount) {
   const out = {};
   for (const [k, v] of Object.entries(raw)) {
     const idx = Number(k);
-    if (!Number.isInteger(idx) || idx < 1 || idx >= condCount) return undefined;
+    if (!Number.isInteger(idx) || idx < 1 || idx >= condCount) continue;
     const w = typeof v === 'number' ? v : Number(v);
-    if (!Number.isFinite(w) || w < 1) return undefined;
+    if (!Number.isFinite(w) || w < 1) continue;
     out[String(idx)] = Math.floor(w);
   }
-  // Require FULL coverage of every successor gap {1..condCount-1}.
-  for (let i = 1; i < condCount; i += 1) {
-    if (!(String(i) in out)) return undefined;
-  }
-  return out;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Normalise a block's ``fire_mode`` for the wire — "pulse" or "sustained"
+ *  (default). Emitted on entries + exits, omitted on resets (backend rejects
+ *  it there). */
+function normaliseFireMode(raw) {
+  return raw === 'pulse' ? 'pulse' : 'sustained';
 }
 
 function normaliseBlock(block, section) {
@@ -192,6 +196,9 @@ function normaliseBlock(block, section) {
       target_entry_block_names: targetNames,
       requires_reset_block_id: resetBlockId,
       requires_reset_count: resetCount,
+      // fire_mode rides on entries + exits (default sustained); resets reject
+      // it (HTTP 400) so the reset literal above omits it.
+      fire_mode: normaliseFireMode(block.fire_mode),
       // Only present when there is a real chain — see normaliseLinks.
       ...(links !== undefined ? { links } : {}),
     };
@@ -206,6 +213,8 @@ function normaliseBlock(block, section) {
     conditions,
     requires_reset_block_id: resetBlockId,
     requires_reset_count: resetCount,
+    // fire_mode rides on entries + exits (default sustained); resets omit it.
+    fire_mode: normaliseFireMode(block.fire_mode),
     // Only present when there is a real chain — see normaliseLinks.
     ...(links !== undefined ? { links } : {}),
   };

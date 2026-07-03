@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import IndicatorParamsOverride from './IndicatorParamsOverride';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import AnchoredPortal from './AnchoredPortal';
 import { defaultIndicatorOperand, defaultInstrumentOperand } from './conditionOps';
 import { isInputConfigured } from './blockShape';
 import styles from './Signals.module.css';
@@ -35,12 +36,18 @@ function OperandSlot({ operand, onChange, indicators, inputs, slotLabel, readOnl
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const rootRef = useRef(null);
+  // The add-menu is portaled to document.body (so it escapes the scroll
+  // container's overflow clip), so it is NOT inside rootRef — the click-outside
+  // check must treat clicks inside the portaled node as "inside" too.
+  const menuRef = useRef(null);
 
   // Close the add-menu when clicking outside.
   useEffect(() => {
     if (!menuOpen) return undefined;
     function onDoc(e) {
-      if (rootRef.current && !rootRef.current.contains(e.target)) {
+      const inRoot = rootRef.current && rootRef.current.contains(e.target);
+      const inMenu = menuRef.current && menuRef.current.contains(e.target);
+      if (!inRoot && !inMenu) {
         setMenuOpen(false);
       }
     }
@@ -80,7 +87,14 @@ function OperandSlot({ operand, onChange, indicators, inputs, slotLabel, readOnl
           +
         </button>
         {menuOpen && (
-          <div className={styles.operandMenu} role="menu" data-testid="operand-menu">
+          <AnchoredPortal
+            anchorRef={rootRef}
+            align="left"
+            contentRef={menuRef}
+            className={styles.operandMenu}
+            testId="operand-menu"
+            role="menu"
+          >
             <button
               type="button"
               role="menuitem"
@@ -108,7 +122,7 @@ function OperandSlot({ operand, onChange, indicators, inputs, slotLabel, readOnl
             >
               Constant
             </button>
-          </div>
+          </AnchoredPortal>
         )}
       </div>
     );

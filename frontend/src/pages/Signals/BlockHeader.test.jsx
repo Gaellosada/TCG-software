@@ -716,3 +716,57 @@ describe('BlockHeader — exit multi-target picker', () => {
     expect(screen.getByTestId('target-entry-select-0-2').value).toBe('');
   });
 });
+
+describe('BlockHeader — fire_mode toggle (v8, pulse | sustained)', () => {
+  it('renders a fire-mode select on an entry block reflecting the block value', () => {
+    render(
+      <BlockHeader
+        block={{ ...entryBlock(50), fire_mode: 'pulse' }}
+        section="entries"
+        inputs={NO_INPUTS}
+        onChange={noop}
+        onDelete={noop}
+        blockIndex={1}
+      />,
+    );
+    const sel = screen.getByTestId('fire-mode-select-0');
+    expect(sel.value).toBe('pulse');
+  });
+
+  it('defaults the select to "sustained" when the block has no fire_mode', () => {
+    render(
+      <BlockHeader block={entryBlock(50)} section="entries" inputs={NO_INPUTS} onChange={noop} onDelete={noop} blockIndex={1} />,
+    );
+    expect(screen.getByTestId('fire-mode-select-0').value).toBe('sustained');
+  });
+
+  it('writes the chosen fire_mode back through onChange', () => {
+    const onChange = vi.fn();
+    render(
+      <BlockHeader block={{ ...entryBlock(50), fire_mode: 'pulse' }} section="entries" inputs={NO_INPUTS} onChange={onChange} onDelete={noop} blockIndex={1} />,
+    );
+    fireEvent.change(screen.getByTestId('fire-mode-select-0'), { target: { value: 'sustained' } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ fire_mode: 'sustained' }));
+  });
+
+  it('is present on exit blocks too', () => {
+    render(
+      <BlockHeader block={{ ...exitBlock(), fire_mode: 'pulse' }} section="exits" inputs={NO_INPUTS} entryBlocks={[]} onChange={noop} onDelete={noop} blockIndex={1} />,
+    );
+    expect(screen.getByTestId('fire-mode-select-0')).toBeDefined();
+  });
+
+  it('is NOT rendered on reset blocks (backend rejects fire_mode there)', () => {
+    render(
+      <BlockHeader block={{ id: 'r1', conditions: [] }} section="resets" inputs={NO_INPUTS} onChange={noop} onDelete={noop} blockIndex={1} />,
+    );
+    expect(screen.queryByTestId('fire-mode-select-0')).toBeNull();
+  });
+
+  it('is disabled in readOnly mode', () => {
+    render(
+      <BlockHeader block={{ ...entryBlock(50), fire_mode: 'pulse' }} section="entries" inputs={NO_INPUTS} onChange={noop} onDelete={noop} blockIndex={1} readOnly />,
+    );
+    expect(screen.getByTestId('fire-mode-select-0').disabled).toBe(true);
+  });
+});

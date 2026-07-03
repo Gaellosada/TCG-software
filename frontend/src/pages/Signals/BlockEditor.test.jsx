@@ -7,7 +7,7 @@ import BlockEditor, { reindexLinksAfterRemoval } from './BlockEditor';
 import { emptyRules, newBlockId } from './storage';
 import { normaliseSpecForRequest } from './requestBuilder';
 
-describe('reindexLinksAfterRemoval (pure) — re-chains to FULL coverage or CNF', () => {
+describe('reindexLinksAfterRemoval (pure) — merges gaps, keeps partial maps', () => {
   // A chained block must stay a FULL chain over the survivors (backend rejects
   // a partial chain), so removal RE-CHAINS rather than leaving gaps.
   it('returns undefined for a missing / non-object / empty map', () => {
@@ -34,12 +34,11 @@ describe('reindexLinksAfterRemoval (pure) — re-chains to FULL coverage or CNF'
     // gap1 ← old 2 (6); gap2 ← old 3 (8). Full coverage {1,2}.
     expect(reindexLinksAfterRemoval({ 1: 4, 2: 6, 3: 8 }, 0, 3)).toEqual({ 1: 6, 2: 8 });
   });
-  it('defaults a new/unmappable gap window to the default', () => {
-    // A chain {1:4, 2:6} over 3 conds; remove cond 1 → 2 remain. new gap1 ←
-    // old 1 (4). (No unmappable gap here, but verify default path:)
-    // chain {2:6} only (a hypothetically sparse map) over 3 conds, remove 0 →
-    // gap1 ← old 2 (6); gap2 ← old 3 (missing → default 5).
-    expect(reindexLinksAfterRemoval({ 2: 6 }, 0, 3)).toEqual({ 1: 6, 2: 5 });
+  it('shifts a partial map down without re-seeding missing gaps', () => {
+    // A PARTIAL map {2:6} (only gap 2 is a THEN boundary) over 3 conds; remove
+    // cond 0 → the later endpoint of gap 2 slides left to new index 1, keeping
+    // its window. NO gap is re-seeded — absent gaps stay AND.
+    expect(reindexLinksAfterRemoval({ 2: 6 }, 0, 3)).toEqual({ 1: 6 });
   });
 });
 
@@ -483,7 +482,7 @@ describe('BlockEditor (v4 / two-section model)', () => {
   // block-temporal-composition v1 — AND⇄THEN link toggle, cross ×N/within W,
   // legacy rolling chip, and readOnly gating.
   // ----------------------------------------------------------------------
-  describe('Temporal links — AND ⇄ THEN toggle (all-or-nothing chain)', () => {
+  describe('Temporal links — per-gap AND ⇄ THEN toggle (partial maps valid)', () => {
     function twoCondEntry(over = {}) {
       return seededEntry({
         conditions: [
@@ -518,23 +517,46 @@ describe('BlockEditor (v4 / two-section model)', () => {
       expect(next.entries[0].links).toEqual({ 1: 5 });
     });
 
-    it('all-or-nothing: toggling ANY gap on a 3-condition block fills EVERY gap', () => {
+    it('per-gap: toggling ONE gap on a 3-condition block sets only THAT gap (partial map)', () => {
       const { onRulesChange } = renderEditor({ entries: [threeCondEntry()], exits: [] });
-      // Toggle the SECOND gap (successor index 2) — the whole block becomes a
-      // chain, so BOTH gaps {1,2} get the default window (backend needs full
-      // coverage; a partial chain would 400).
+      // Toggle ONLY the SECOND gap (successor index 2) → a partial map {2:5}
+      // = (A AND B) THEN C. Gap 1 stays AND (absent). No full-coverage fill.
       fireEvent.click(screen.getByTestId('link-toggle-0-2'));
       const next = onRulesChange.mock.calls.pop()[0];
-      expect(next.entries[0].links).toEqual({ 1: 5, 2: 5 });
+      expect(next.entries[0].links).toEqual({ 2: 5 });
     });
 
-    it('all-or-nothing: toggling any THEN gap back reverts the WHOLE block to CNF', () => {
-      const { onRulesChange } = renderEditor({ entries: [threeCondEntry({ links: { 1: 4, 2: 6 } })], exits: [] });
-      // Both gaps show THEN.
-      expect(screen.getByTestId('link-toggle-0-1').textContent).toBe('THEN');
-      expect(screen.getByTestId('link-toggle-0-2').textContent).toBe('THEN');
-      // Revert via the FIRST gap → all links cleared.
+    it('per-gap: gaps are independent — toggle gap1 THEN, gap2 stays AND; toggle gap2 THEN independently; toggle gap1 back, gap2 stays THEN', () => {
+      // Start from a rules object we thread through re-renders (controlled).
+      let rules = { entries: [threeCondEntry()], exits: [] };
+      const onRulesChange = vi.fn((next) => { rules = next; });
+      const { rerender } = render(
+        <BlockEditor rules={rules} onRulesChange={onRulesChange} inputs={[SPX_INPUT]} indicators={[]} />,
+      );
+      const reRender = () => rerender(
+        <BlockEditor rules={rules} onRulesChange={onRulesChange} inputs={[SPX_INPUT]} indicators={[]} />,
+      );
+      // Toggle gap 1 → THEN. Gap 2 must stay AND.
       fireEvent.click(screen.getByTestId('link-toggle-0-1'));
+      expect(rules.entries[0].links).toEqual({ 1: 5 });
+      reRender();
+      // Gap 2 still shows an AND toggle (not THEN).
+      expect(screen.getByTestId('link-toggle-0-2').textContent).toBe('AND');
+      // Toggle gap 2 → THEN independently. Gap 1 stays THEN.
+      fireEvent.click(screen.getByTestId('link-toggle-0-2'));
+      expect(rules.entries[0].links).toEqual({ 1: 5, 2: 5 });
+      reRender();
+      // Toggle gap 1 back to AND → gap 2 stays THEN.
+      fireEvent.click(screen.getByTestId('link-toggle-0-1'));
+      expect(rules.entries[0].links).toEqual({ 2: 5 });
+    });
+
+    it('toggling the last remaining THEN gap back reverts the block to CNF (links omitted)', () => {
+      const { onRulesChange } = renderEditor({ entries: [threeCondEntry({ links: { 2: 6 } })], exits: [] });
+      // Only gap 2 is a THEN boundary.
+      expect(screen.getByTestId('link-toggle-0-2').textContent).toBe('THEN');
+      // Toggle it back → no links left ⇒ CNF.
+      fireEvent.click(screen.getByTestId('link-toggle-0-2'));
       const next = onRulesChange.mock.calls.pop()[0];
       expect(next.entries[0].links).toBeUndefined();
     });
@@ -704,16 +726,14 @@ describe('BlockEditor (v4 / two-section model)', () => {
   });
 });
 
-// Regression for the MAJOR data-integrity bug (PR #69 review B): adding a
-// condition to a block that is ALREADY a chain must EXTEND ``links`` so the
-// block stays a FULL contiguous chain. Otherwise the editor renders an all-THEN
-// chain but ``normaliseLinks`` (full-coverage-or-omit) drops the partial map and
-// the block silently ships as CNF — the prior-cycle "runs as CNF, no error"
-// failure. DEFAULT_LINK_WINDOW is 5 (private to BlockEditor.jsx).
+// Per-gap AND/THEN (v8): links is a set of THEN-boundary gaps and PARTIAL maps
+// are valid. Adding a condition appends it with AND (no new THEN boundary);
+// existing links keep their meaning. Removing merges gaps (no re-seeding). The
+// wire ships partial maps verbatim (no longer dropped to CNF).
 const DEFAULT_LINK_WINDOW = 5;
 
-describe('handleAddCondition — chain links stay FULL-coverage (no silent CNF degradation)', () => {
-  // Build a 2-condition chain: two conditions AND a single linked gap {1:W}.
+describe('handleAddCondition / removal — partial THEN-boundary maps (per-gap)', () => {
+  // A 2-condition block with a single THEN boundary {1:W}.
   function chainedEntry(window = DEFAULT_LINK_WINDOW, overrides = {}) {
     return seededEntry({
       id: 'chain-1',
@@ -726,29 +746,26 @@ describe('handleAddCondition — chain links stay FULL-coverage (no silent CNF d
     });
   }
 
-  it('adding a 3rd condition to a 2-condition chain extends links to FULL coverage {1:W, 2:DEFAULT}', () => {
+  it('adding a 3rd condition leaves existing links UNCHANGED (new gap defaults to AND)', () => {
     const seeded = { entries: [chainedEntry(7)], exits: [] };
     const { onRulesChange } = renderEditor(seeded);
     fireEvent.click(screen.getByTestId('add-condition-0'));
     const next = onRulesChange.mock.calls.pop()[0];
     const block = next.entries[0];
     expect(block.conditions).toHaveLength(3);
-    // (a) links extends to cover EVERY successor gap {1,2}; existing window kept,
-    //     the NEW trailing gap seeded with the default.
-    expect(block.links).toEqual({ 1: 7, 2: DEFAULT_LINK_WINDOW });
+    // The new trailing gap (2) is NOT seeded — it stays AND. Existing gap kept.
+    expect(block.links).toEqual({ 1: 7 });
   });
 
-  it('the WIRE payload (real normaliseSpecForRequest) ships the FULL links, NOT dropped to CNF', () => {
+  it('the WIRE payload (real normaliseSpecForRequest) ships the PARTIAL links verbatim', () => {
     const seeded = { entries: [chainedEntry(7)], exits: [] };
     const { onRulesChange } = renderEditor(seeded);
     fireEvent.click(screen.getByTestId('add-condition-0'));
     const next = onRulesChange.mock.calls.pop()[0];
-    // Run the ACTUAL request normaliser the compute call uses. A partial chain
-    // would be dropped to ``undefined`` (CNF); a full chain survives verbatim.
+    // A partial THEN-boundary map is now VALID and survives normalisation.
     const wire = normaliseSpecForRequest({ inputs: [], rules: next });
     const wireBlock = wire.rules.entries[0];
-    expect(wireBlock.links).toEqual({ 1: 7, 2: DEFAULT_LINK_WINDOW });
-    // (b) NOT undefined — the bug shipped this as CNF (links omitted).
+    expect(wireBlock.links).toEqual({ 1: 7 });
     expect(wireBlock.links).not.toBeUndefined();
   });
 
@@ -768,9 +785,8 @@ describe('handleAddCondition — chain links stay FULL-coverage (no silent CNF d
     expect(wire.rules.entries[0].links).toBeUndefined();
   });
 
-  it('remove-then-add stays a consistent FULL chain (re-chain on remove, extend on add)', () => {
-    // Start a 3-condition chain {1:4, 2:6}. The component is controlled, so we
-    // re-render it with each emitted rules object to feed the next interaction.
+  it('remove-then-add preserves the partial map (merge on remove, AND on add)', () => {
+    // Start a 3-condition block with only gap 2 as a THEN boundary: {2:6}.
     const start = {
       entries: [
         seededEntry({
@@ -780,23 +796,22 @@ describe('handleAddCondition — chain links stay FULL-coverage (no silent CNF d
             { op: 'gt', lhs: null, rhs: null },
             { op: 'gt', lhs: null, rhs: null },
           ],
-          links: { 1: 4, 2: 6 },
+          links: { 2: 6 },
         }),
       ],
       exits: [],
     };
     const { onRulesChange, rerender } = renderEditor(start);
 
-    // Remove the LAST condition (index 2). reindexLinksAfterRemoval → 2 conds
-    // remain, full chain {1:4}.
+    // Remove the LAST condition (index 2). Gap 2 (the boundary into it) is
+    // dropped → no links survive ⇒ CNF over the 2 remaining conditions.
     fireEvent.click(screen.getByTestId('remove-condition-0-2'));
     fireEvent.click(screen.getByTestId('confirm-dialog-confirm'));
     let next = onRulesChange.mock.calls.pop()[0];
     expect(next.entries[0].conditions).toHaveLength(2);
-    expect(next.entries[0].links).toEqual({ 1: 4 });
+    expect(next.entries[0].links).toBeUndefined();
 
-    // Re-render with the new rules, then ADD a condition back. The chain must
-    // re-extend to FULL coverage {1:4, 2:DEFAULT} — not degrade to a partial map.
+    // Re-render, then ADD a condition back. It joins with AND — still CNF.
     rerender(
       <BlockEditor
         rules={next}
@@ -808,9 +823,84 @@ describe('handleAddCondition — chain links stay FULL-coverage (no silent CNF d
     fireEvent.click(screen.getByTestId('add-condition-0'));
     next = onRulesChange.mock.calls.pop()[0];
     expect(next.entries[0].conditions).toHaveLength(3);
-    expect(next.entries[0].links).toEqual({ 1: 4, 2: DEFAULT_LINK_WINDOW });
-    // And the wire ships the FULL chain.
-    const wire = normaliseSpecForRequest({ inputs: [], rules: next });
-    expect(wire.rules.entries[0].links).toEqual({ 1: 4, 2: DEFAULT_LINK_WINDOW });
+    expect(next.entries[0].links).toBeUndefined();
+  });
+});
+
+describe('Explicit conjunction-group rendering (per-gap AND/THEN)', () => {
+  function fourCondEntry(over = {}) {
+    return seededEntry({
+      conditions: [
+        { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+        { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+        { op: 'gt', lhs: { kind: 'constant', value: 3 }, rhs: { kind: 'constant', value: 0 } },
+        { op: 'gt', lhs: { kind: 'constant', value: 4 }, rhs: { kind: 'constant', value: 0 } },
+      ],
+      ...over,
+    });
+  }
+
+  it('(A AND B) THEN (C AND D): renders TWO bounded groups joined by one THEN connector', () => {
+    // links {2:5} = a THEN boundary before condition index 2.
+    renderEditor({ entries: [fourCondEntry({ links: { 2: 5 } })], exits: [] });
+    // Two groups.
+    expect(screen.getByTestId('condition-group-0-0')).toBeDefined();
+    expect(screen.getByTestId('condition-group-0-1')).toBeDefined();
+    expect(screen.queryByTestId('condition-group-0-2')).toBeNull();
+    // The bounded-group class is applied (multi-group visual grouping).
+    expect(screen.getByTestId('condition-group-0-0').className).toContain('conditionGroup');
+    // Exactly one THEN connector, at the boundary (successor index 2).
+    expect(screen.getByTestId('then-connector-0-2')).toBeDefined();
+    expect(screen.getByTestId('link-toggle-0-2').textContent).toBe('THEN');
+    // Within-group gaps (1 and 3) are AND toggles, not THEN connectors.
+    expect(screen.getByTestId('link-toggle-0-1').textContent).toBe('AND');
+    expect(screen.getByTestId('link-toggle-0-3').textContent).toBe('AND');
+    expect(screen.queryByTestId('then-connector-0-1')).toBeNull();
+  });
+
+  it('a plain CNF block (no links) renders ONE group and NO bounded-group box', () => {
+    renderEditor({ entries: [fourCondEntry()], exits: [] });
+    expect(screen.getByTestId('condition-group-0-0')).toBeDefined();
+    expect(screen.queryByTestId('condition-group-0-1')).toBeNull();
+    // Single group ⇒ no group border (stays visually flat).
+    expect(screen.getByTestId('condition-group-0-0').className || '').not.toContain('conditionGroup');
+  });
+});
+
+describe('Exit-reset note on entry blocks (Item 3b)', () => {
+  it('shown on an entry that carries a THEN chain', () => {
+    renderEditor({ entries: [seededEntry({
+      conditions: [
+        { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+        { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+      ],
+      links: { 1: 5 },
+    })], exits: [] });
+    expect(screen.getByTestId('exit-reset-note-0')).toBeDefined();
+  });
+
+  it('shown on an entry that carries a cross ×N / within-W tap counter', () => {
+    renderEditor({ entries: [seededEntry({
+      conditions: [{ op: 'cross_above', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 }, count: 2, window: 10 }],
+    })], exits: [] });
+    expect(screen.getByTestId('exit-reset-note-0')).toBeDefined();
+  });
+
+  it('NOT shown on a plain CNF entry with a single-bar crossover', () => {
+    renderEditor({ entries: [seededEntry({
+      conditions: [{ op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } }],
+    })], exits: [] });
+    expect(screen.queryByTestId('exit-reset-note-0')).toBeNull();
+  });
+
+  it('NOT shown on an EXIT block even if it carries a chain (note is entry-only)', () => {
+    renderEditor({ entries: [], exits: [seededExit({
+      conditions: [
+        { op: 'gt', lhs: { kind: 'constant', value: 1 }, rhs: { kind: 'constant', value: 0 } },
+        { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+      ],
+      links: { 1: 5 },
+    })] }, { section: 'exits' });
+    expect(screen.queryByTestId('exit-reset-note-0')).toBeNull();
   });
 });

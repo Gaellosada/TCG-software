@@ -320,6 +320,27 @@ function BlockHeader({ block, section, inputs, entryBlocks, resetBlocks, onChang
         </div>
       )}
 
+      {!isReset && (
+        <div className={styles.blockFireCell}>
+          <label className={styles.blockDirectionLabel} htmlFor={`fire-mode-${blockIndex}`}>
+            fire
+          </label>
+          <select
+            id={`fire-mode-${blockIndex}`}
+            className={styles.blockInputSelect}
+            value={block.fire_mode === 'pulse' ? 'pulse' : 'sustained'}
+            onChange={(e) => onChange({ ...block, fire_mode: e.target.value })}
+            aria-label={`Fire mode for block ${blockIndex}`}
+            title="Pulse: fires once on the trigger bar, then re-arms (must go false before firing again). Sustained: stays active every bar the condition holds."
+            data-testid={`fire-mode-select-${blockIndex - 1}`}
+            disabled={readOnly}
+          >
+            <option value="pulse">pulse</option>
+            <option value="sustained">sustained</option>
+          </select>
+        </div>
+      )}
+
       <button
         type="button"
         className={styles.blockDeleteBtn}

@@ -13,8 +13,11 @@ import {
   coerceResetCount,
   coerceCrossField,
   sanitiseLinks,
+  sanitiseFireMode,
   migrateV5ToV6,
   migrateV6ToV7,
+  migrateV7ToV8,
+  duplicateSignal,
   __resetIncompatibleVersionWarnedForTests,
 } from './storage';
 import { coerceResetCount as coerceFromBlockShape } from './blockShape';
@@ -47,9 +50,9 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-describe('Signals storage (v7)', () => {
-  it('SCHEMA_VERSION is 7', () => {
-    expect(SCHEMA_VERSION).toBe(7);
+describe('Signals storage (v8)', () => {
+  it('SCHEMA_VERSION is 8', () => {
+    expect(SCHEMA_VERSION).toBe(8);
   });
 
   it('storage key is tcg.signals.v5 (key unchanged; v5→v6→v7 migrates in place)', () => {
@@ -183,6 +186,9 @@ describe('Signals storage (v7)', () => {
                 description: '',
                 requires_reset_block_id: null,
                 requires_reset_count: 1,
+                // v8: entries + exits carry fire_mode; missing folds to
+                // "sustained" (the historical firing behaviour).
+                fire_mode: 'sustained',
               },
             ],
             exits: [
@@ -206,6 +212,7 @@ describe('Signals storage (v7)', () => {
                 description: '',
                 requires_reset_block_id: null,
                 requires_reset_count: 1,
+                fire_mode: 'sustained',
               },
             ],
             resets: [],
@@ -1084,8 +1091,8 @@ describe('migrateV6ToV7 (pure)', () => {
   });
 });
 
-describe('loadState — a v5 payload walks the whole v5→v6→v7 chain', () => {
-  it('a v5 signal loads as v7 (not dropped) with the plural exit array', () => {
+describe('loadState — a v5 payload walks the whole v5→v6→v7→v8 chain', () => {
+  it('a v5 signal loads as v8 (not dropped) with the plural exit array', () => {
     storage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify({
       version: 5,
       signals: [{
@@ -1102,10 +1109,10 @@ describe('loadState — a v5 payload walks the whole v5→v6→v7 chain', () => 
     expect(out.signals[0].rules.exits[0].target_entry_block_names).toEqual(['Alpha']);
     // The chain reached the current version — no incompatible-version warn.
     expect(warnSpy).not.toHaveBeenCalled();
-    // And it persists as v7.
+    // And it persists as v8.
     saveState(out);
     const stored = JSON.parse(storage._store.get(SIGNALS_STORAGE_KEY));
-    expect(stored.version).toBe(7);
+    expect(stored.version).toBe(8);
   });
 
   it('an old v6 signal lacking links loads cleanly (folds to CNF, no links key)', () => {
@@ -1158,18 +1165,22 @@ describe('sanitiseLinks — field-local temporal-links cleaner', () => {
   it('floors fractional windows and coerces numeric-string windows', () => {
     expect(sanitiseLinks({ 1: 4.9, 2: '6' }, 3)).toEqual({ 1: 4, 2: 6 });
   });
-  it('all-or-nothing: an out-of-range / index-0 key invalidates the WHOLE map (→ undefined)', () => {
-    // condCount=2 → only index 1 is a valid successor; a stray 0 or 2 is not a
-    // valid linear chain, so the whole thing folds to CNF (no partial chain).
-    expect(sanitiseLinks({ 0: 5, 1: 4, 2: 9 }, 2)).toBeUndefined();
+  it('drops out-of-range / index-0 keys but KEEPS the valid subset', () => {
+    // condCount=2 → only index 1 is a valid successor; the stray 0 and 2 are
+    // dropped, the valid {1:4} survives (partial maps are now legitimate).
+    expect(sanitiseLinks({ 0: 5, 1: 4, 2: 9 }, 2)).toEqual({ 1: 4 });
   });
-  it('all-or-nothing: a PARTIAL chain (missing a gap) folds to CNF', () => {
-    // condCount=3 needs {1,2}; only {1} present ⇒ undefined.
-    expect(sanitiseLinks({ 1: 5 }, 3)).toBeUndefined();
+  it('a PARTIAL map (a THEN-boundary subset) is VALID — kept verbatim', () => {
+    // condCount=3, only gap 1 is a THEN boundary: (A THEN B) AND C.
+    expect(sanitiseLinks({ 1: 5 }, 3)).toEqual({ 1: 5 });
+    // Only gap 2: (A AND B) THEN C.
+    expect(sanitiseLinks({ 2: 5 }, 3)).toEqual({ 2: 5 });
   });
-  it('drops the whole map when any window is non-positive / non-finite', () => {
+  it('drops individual entries with a non-positive / non-finite window, keeping the rest', () => {
+    // A bad window drops just that gap, not the whole map.
+    expect(sanitiseLinks({ 1: 5, 2: NaN }, 3)).toEqual({ 1: 5 });
+    // If nothing valid survives ⇒ undefined (CNF).
     expect(sanitiseLinks({ 1: 0, 2: -3 }, 3)).toBeUndefined();
-    expect(sanitiseLinks({ 1: 5, 2: NaN }, 3)).toBeUndefined();
   });
   it('returns undefined for a block with < 2 conditions (no gap to link)', () => {
     expect(sanitiseLinks({ 1: 5 }, 1)).toBeUndefined();
@@ -1877,5 +1888,105 @@ describe('Signals storage — per-block requires_reset_count (v5)', () => {
     }));
     const out = loadState();
     expect('requires_reset_count' in out.signals[0].rules.resets[0]).toBe(false);
+  });
+});
+
+describe('fire_mode (v8) — sanitise + migration', () => {
+  it('sanitiseFireMode: only literal "pulse" is pulse; everything else sustained', () => {
+    expect(sanitiseFireMode('pulse')).toBe('pulse');
+    expect(sanitiseFireMode('sustained')).toBe('sustained');
+    expect(sanitiseFireMode(undefined)).toBe('sustained');
+    expect(sanitiseFireMode('garbage')).toBe('sustained');
+  });
+
+  it('an entry/exit block MISSING fire_mode folds to "sustained" through save/load', () => {
+    const state = {
+      signals: [{
+        id: 's1', name: 'S', doc: '', inputs: [],
+        rules: {
+          entries: [{ id: 'e1', input_id: 'X', weight: 10, name: '', conditions: [], enabled: true, description: '', requires_reset_block_id: null, requires_reset_count: 1 }],
+          exits: [{ id: 'x1', name: '', target_entry_block_names: [], conditions: [], enabled: true, description: '', requires_reset_block_id: null, requires_reset_count: 1 }],
+          resets: [],
+        },
+        settings: { dont_repeat: true },
+      }],
+    };
+    saveState(state);
+    const loaded = loadState();
+    expect(loaded.signals[0].rules.entries[0].fire_mode).toBe('sustained');
+    expect(loaded.signals[0].rules.exits[0].fire_mode).toBe('sustained');
+  });
+
+  it('a NEW block with fire_mode:"pulse" survives save/load', () => {
+    const state = {
+      signals: [{
+        id: 's1', name: 'S', doc: '', inputs: [],
+        rules: { entries: [{ id: 'e1', input_id: 'X', weight: 10, name: '', conditions: [], enabled: true, description: '', requires_reset_block_id: null, requires_reset_count: 1, fire_mode: 'pulse' }], exits: [], resets: [] },
+        settings: { dont_repeat: true },
+      }],
+    };
+    saveState(state);
+    expect(loadState().signals[0].rules.entries[0].fire_mode).toBe('pulse');
+  });
+
+  it('reset blocks NEVER gain a fire_mode key on load', () => {
+    const state = {
+      signals: [{
+        id: 's1', name: 'S', doc: '', inputs: [],
+        rules: { entries: [], exits: [], resets: [{ id: 'r1', name: 'Arm', conditions: [], enabled: true, description: '', fire_mode: 'pulse' }] },
+        settings: { dont_repeat: true },
+      }],
+    };
+    saveState(state);
+    expect('fire_mode' in loadState().signals[0].rules.resets[0]).toBe(false);
+  });
+
+  it('migrateV7ToV8 is a pure version stamp (7 → 8), no shape rewrite', () => {
+    const v7 = { version: 7, signals: [{ id: 's1', name: 'S', rules: { entries: [], exits: [], resets: [] } }] };
+    const out = migrateV7ToV8(v7);
+    expect(out.version).toBe(8);
+    expect(out.signals).toEqual(v7.signals);
+    expect(v7.version).toBe(7); // input not mutated
+  });
+});
+
+describe('duplicateSignal (v8) — clone with new id, (copy) name, unlocked', () => {
+  const SRC = {
+    id: 'src-1', name: 'My Signal', locked: true, doc: 'notes',
+    inputs: [{ id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } }],
+    rules: {
+      entries: [{ id: 'e1', input_id: 'X', weight: 50, name: 'A', conditions: [{ op: 'gt', lhs: null, rhs: null }], links: { 1: 5 } }],
+      exits: [{ id: 'x1', name: '', target_entry_block_names: ['A'], conditions: [], requires_reset_block_id: 'r1' }],
+      resets: [{ id: 'r1', name: 'Arm', conditions: [] }],
+    },
+    settings: { dont_repeat: true },
+  };
+
+  it('assigns a NEW id, suffixes the name, and forces locked:false', () => {
+    const copy = duplicateSignal(SRC, { newId: 'new-1' });
+    expect(copy.id).toBe('new-1');
+    expect(copy.name).toBe('My Signal (copy)');
+    expect(copy.locked).toBe(false);
+  });
+
+  it('deep-clones rules (no shared references) and PRESERVES block ids + reset bindings', () => {
+    const copy = duplicateSignal(SRC, { newId: 'new-1' });
+    expect(copy.rules).toEqual(SRC.rules); // structurally equal
+    expect(copy.rules).not.toBe(SRC.rules); // but a distinct object graph
+    expect(copy.rules.entries[0]).not.toBe(SRC.rules.entries[0]);
+    // Block ids + the exit's requires_reset_block_id binding survive intact.
+    expect(copy.rules.exits[0].requires_reset_block_id).toBe('r1');
+    expect(copy.rules.resets[0].id).toBe('r1');
+  });
+
+  it('generates its own id when newId is omitted', () => {
+    const copy = duplicateSignal(SRC);
+    expect(typeof copy.id).toBe('string');
+    expect(copy.id.length).toBeGreaterThan(0);
+    expect(copy.id).not.toBe('src-1');
+  });
+
+  it('returns null for a non-object', () => {
+    expect(duplicateSignal(null)).toBeNull();
   });
 });
