@@ -43,6 +43,7 @@ remain free of.  ``persistence.py`` redefines the same shape file-local
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import (
@@ -56,6 +57,21 @@ from pydantic import (
 )
 
 from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
+
+
+def _validate_nav_times(v: float) -> float:
+    """Shared field-validator body for the hold-mode premium-notional multiple.
+
+    A non-finite or non-positive ``nav_times`` makes the fixed-contract sizing
+    (``nav_times·NAV/premium``) meaningless — reject at the boundary rather than
+    emit NaN/inf P&L.  ONE source of truth shared by :class:`OptionStreamRef`
+    (signals / baskets) and ``portfolio.LegSpec`` (portfolio legs) so the two
+    can't drift.  (Only consulted in hold mode, but a bad value is always a spec
+    error, so both models validate it unconditionally.)
+    """
+    if not math.isfinite(v) or v <= 0.0:
+        raise ValueError("nav_times must be a finite number > 0")
+    return float(v)
 
 
 class SpotInstrumentRef(BaseModel):
@@ -179,15 +195,7 @@ class OptionStreamRef(BaseModel):
     @field_validator("nav_times")
     @classmethod
     def _check_nav_times(cls, v: float) -> float:
-        # A non-finite or non-positive premium multiple makes the fixed-contract
-        # sizing (nav_times·NAV/premium) meaningless — reject at the boundary
-        # rather than emit NaN/inf P&L.  (Only consulted in hold mode, but a bad
-        # value is always a spec error, so validate unconditionally.)
-        import math
-
-        if not math.isfinite(v) or v <= 0.0:
-            raise ValueError("nav_times must be a finite number > 0")
-        return float(v)
+        return _validate_nav_times(v)
 
 
 # Per-asset-class strict mapping from the basket's declared ``asset_class``

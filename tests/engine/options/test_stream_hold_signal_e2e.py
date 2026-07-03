@@ -48,6 +48,13 @@ from tcg.types.signal import (
 )
 
 from _stream_fakes import FakeBulkChainReader, FakeChainReader, _contract, _row
+from _hold_pnl_oracle import (
+    IS_ROLL as _IS_ROLL,
+    OWNER_CUR as _OWNER_CUR,
+    OWNER_PREV as _OWNER_PREV,
+    ROLL_PREMIUM as _ROLL_PREMIUM,
+    oracle_ratio as _oracle_ratio,
+)
 
 # Async tests are auto-marked via ``asyncio_mode = "auto"`` (pyproject).
 
@@ -217,23 +224,6 @@ def _short_put_signal(*, hold: bool, nav_times: float = 1.0) -> Signal:
     )
 
 
-def _oracle_ratio(owner_prev, owner_cur, is_roll, roll_premium, *, nav_times, sign):
-    """Java-faithful fixed-contract dollar-P&L NAV → base-1 ratio (see the oracle
-    ``java_faithful_s1``); ``sign`` = direction (short short-put = -1)."""
-    T = len(owner_cur)
-    nav = np.empty(T)
-    nav[0] = 1_000_000.0
-    qty = nav_times * nav[0] / roll_premium[0]
-    for t in range(1, T):
-        dprem = owner_cur[t] - owner_prev[t]
-        if not np.isfinite(dprem):
-            dprem = 0.0
-        nav[t] = nav[t - 1] + sign * qty * dprem
-        if bool(is_roll[t]):
-            qty = nav_times * nav[t] / roll_premium[t]
-    return nav / nav[0]
-
-
 async def test_hold_signal_equity_matches_oracle_and_differs_from_default():
     chains = _build_chains()
     spx = np.full(len(_DATES), 100.0, dtype=np.float64)  # always > 0 → latched
@@ -249,12 +239,9 @@ async def test_hold_signal_equity_matches_oracle_and_differs_from_default():
     # Held APR K4400 30,28,26,24(roll-day OLD mid); MAY K4450 18(open),20,19.
     #   step owners: t1 APR 30->28, t2 28->26, t3 26->24 (OLD into roll),
     #                t4 MAY 18->20, t5 20->19 ; roll_premium = [30,·,·,18,·,·]
-    owner_prev = np.array([np.nan, 30.0, 28.0, 26.0, 18.0, 20.0])
-    owner_cur = np.array([np.nan, 28.0, 26.0, 24.0, 20.0, 19.0])
-    is_roll = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-    roll_premium = np.array([30.0, np.nan, np.nan, 18.0, np.nan, np.nan])
+    # Uses the SHARED APR→MAY fixture; weight<0 = the short direction (sign -1).
     expected_equity = _oracle_ratio(
-        owner_prev, owner_cur, is_roll, roll_premium, nav_times=1.0, sign=-1.0
+        _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=1.0, weight=-10.0
     )
 
     np.testing.assert_allclose(
@@ -285,12 +272,8 @@ async def test_hold_signal_navtimes_scales_pnl_matches_oracle():
         {},
         _make_fetcher(chains, spx_series=spx),
     )
-    owner_prev = np.array([np.nan, 30.0, 28.0, 26.0, 18.0, 20.0])
-    owner_cur = np.array([np.nan, 28.0, 26.0, 24.0, 20.0, 19.0])
-    is_roll = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-    roll_premium = np.array([30.0, np.nan, np.nan, 18.0, np.nan, np.nan])
     expected = _oracle_ratio(
-        owner_prev, owner_cur, is_roll, roll_premium, nav_times=2.5, sign=-1.0
+        _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=2.5, weight=-10.0
     )
     np.testing.assert_allclose(res.equity_ratio, expected, rtol=1e-9, atol=1e-12)
 

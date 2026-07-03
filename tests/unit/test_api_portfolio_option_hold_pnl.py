@@ -36,65 +36,32 @@ from tcg.core.api.portfolio import (
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.engine import compute_weighted_portfolio
 from tcg.types.errors import TCGError, ValidationError
-from tcg.types.signal import InstrumentOptionStream
+
+from _hold_pnl_oracle import (
+    DATES_INT as _DATES_INT,
+    HELD_PREMIUM as _HELD_PREMIUM,
+    IS_ROLL as _IS_ROLL,
+    OWNER_CUR as _OWNER_CUR,
+    OWNER_PREV as _OWNER_PREV,
+    ROLL_PREMIUM as _ROLL_PREMIUM,
+    make_hold_fetch,
+    oracle_ratio as _oracle_ratio,
+)
 
 # Async tests auto-marked (asyncio_mode="auto").
 
-# ── The SAME APR→MAY hold fixture + dollar-NAV oracle the signal test pins.
-#   APR K4400 held mids: 30,28,26,24(roll-day OLD mid); MAY K4450: 18(open),20,19
-#   values[t] = owner-of-step mid LEVEL (OLD on roll day) = [30,28,26,24,20,19]
-#   is_roll = [1,0,0,1,0,0]; roll_premium = [30,·,·,18,·,·]
-_DATES_INT = np.array(
-    [20240327, 20240328, 20240329, 20240401, 20240402, 20240403], dtype=np.int64
-)
-_HELD_PREMIUM = np.array([30.0, 28.0, 26.0, 24.0, 20.0, 19.0])
-_IS_ROLL = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-_ROLL_PREMIUM = np.array([30.0, np.nan, np.nan, 18.0, np.nan, np.nan])
-_OWNER_PREV = np.array([np.nan, 30.0, 28.0, 26.0, 18.0, 20.0])
-_OWNER_CUR = np.array([np.nan, 28.0, 26.0, 24.0, 20.0, 19.0])
-
-
-def _oracle_ratio(
-    owner_prev,
-    owner_cur,
-    is_roll,
-    roll_premium,
-    *,
-    nav_times,
-    weight,
-    base_nav=1_000_000.0,
-):
-    """Dollar-NAV oracle → base-1 ratio (verbatim from the signal-side test)."""
-    T = len(owner_cur)
-    nav = np.empty(T, dtype=np.float64)
-    nav[0] = base_nav
-    sign = 1.0 if weight > 0 else -1.0
-    qty = nav_times * base_nav / roll_premium[0]
-    for t in range(1, T):
-        dprem = owner_cur[t] - owner_prev[t]
-        if not np.isfinite(dprem):
-            dprem = 0.0
-        nav[t] = nav[t - 1] + sign * qty * dprem
-        if bool(is_roll[t]):
-            qty = nav_times * nav[t] / roll_premium[t]
-    return nav / nav[0]
+# The APR→MAY hold fixture (``_DATES_INT`` / ``_HELD_PREMIUM`` / ``_IS_ROLL`` /
+# ``_ROLL_PREMIUM`` / ``_OWNER_PREV`` / ``_OWNER_CUR``), the dollar-NAV
+# ``_oracle_ratio``, and the synthetic ``make_hold_fetch`` builder are the SHARED
+# hold-P&L helpers (``tests/_hold_pnl_oracle``) — the same fixture the signal-side
+# oracle tests pin, so the portfolio path is measured against the same reference.
 
 
 def _fake_make_signal_fetcher(svc, start, end):
-    """Synthetic fetcher over the APR→MAY fixture (dwh-free), matching the real
-    ``make_signal_fetcher`` shape: a callable + ``.fetch_hold_roll_info``."""
-
-    async def fetch(instrument, field):
-        assert isinstance(instrument, InstrumentOptionStream)
-        assert instrument.hold_between_rolls is True
-        return _DATES_INT, _HELD_PREMIUM.copy()
-
-    async def fetch_hold_roll_info(instrument):
-        assert isinstance(instrument, InstrumentOptionStream)
-        return _DATES_INT, _IS_ROLL.copy(), _ROLL_PREMIUM.copy()
-
-    fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
-    return fetch
+    """Synthetic fetcher over the shared APR→MAY fixture (dwh-free), matching the
+    real ``make_signal_fetcher`` shape (a callable + ``.fetch_hold_roll_info``).
+    ``require_hold`` proves the portfolio path passes hold=True to the fetcher."""
+    return make_hold_fetch(require_hold=True)
 
 
 def _hold_put_leg(*, stream: str = "bs_mid", nav_times: float = 1.0) -> dict:
@@ -300,17 +267,12 @@ def test_legspec_level_stream_accepts_hold_off(stream):
 
 async def test_all_nan_premium_rejected_loudly(monkeypatch):
     """An empty resolve (all-NaN premium) fails with a leg-context error rather
-    than a misleading flat-100 leg."""
+    than a misleading flat-100 leg.  This fetcher exposes NO diagnostics
+    side-channel, so the message is the base one (``_diagnostic_hint`` adds
+    nothing when diagnostics are absent)."""
 
     def _nan_fetcher(svc, start, end):
-        async def fetch(instrument, field):
-            return _DATES_INT, np.full(_DATES_INT.shape, np.nan)
-
-        async def fetch_hold_roll_info(instrument):
-            return _DATES_INT, _IS_ROLL.copy(), _ROLL_PREMIUM.copy()
-
-        fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
-        return fetch
+        return make_hold_fetch(held_premium=np.full(_DATES_INT.shape, np.nan))
 
     monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _nan_fetcher)
     leg = LegSpec(**_hold_put_leg())
@@ -319,3 +281,81 @@ async def test_all_nan_premium_rejected_loudly(monkeypatch):
             "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
         )
     assert "all option stream values are NaN" in str(ei.value)
+
+
+async def test_all_nan_premium_error_names_dominant_cause(monkeypatch):
+    """The hold-path all-NaN error THREADS the resolver's per-date diagnostics
+    (surfaced by the fetcher's ``fetch_hold_diagnostics`` side-channel) and names
+    the dominant cause + an actionable hint (reusing ``_diagnostic_hint``) — so a
+    ByDelta leg with no stored deltas is steered to ByMoneyness rather than getting
+    a blunt message."""
+
+    def _diag_fetcher(svc, start, end):
+        # All-NaN premium + diagnostics dominated by missing stored deltas.
+        return make_hold_fetch(
+            held_premium=np.full(_DATES_INT.shape, np.nan),
+            diagnostics=["missing_delta_no_compute"] * 5 + ["missing_mid"],
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _diag_fetcher)
+    leg = LegSpec(**_hold_put_leg())
+    with pytest.raises(TCGError) as ei:
+        await _evaluate_option_stream_leg(
+            "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
+        )
+    msg = str(ei.value)
+    assert "all option stream values are NaN" in msg
+    # Dominant cause named (5 of 6 dates) + the actionable ByMoneyness hint.
+    assert "dominant cause: missing_delta_no_compute (5/6 dates)" in msg
+    assert "By Moneyness" in msg
+
+
+# ── Findings 8 & 9: incompatible knobs rejected for a hold-mode price leg ────
+
+
+@pytest.mark.parametrize(
+    "rebalance", ["daily", "weekly", "monthly", "quarterly", "annually"]
+)
+async def test_hold_leg_rejects_rebalance_not_none(client, rebalance):
+    """A hold-mode option price leg forbids rebalance != 'none': a wiped leg would
+    be silently re-funded to its target weight at each boundary, draining the
+    survivors (``metrics._compute_periodic_rebalance`` re-funds a 0-valued leg)."""
+    body = {
+        "legs": {"P": _hold_put_leg()},
+        "weights": {"P": -100},
+        "rebalance": rebalance,
+        "return_type": "normal",
+        "start": "2024-03-01",
+        "end": "2024-04-30",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    j = resp.json()
+    assert j["error_type"] == "validation_error"
+    assert "rebalance='none'" in j["message"]
+
+
+async def test_hold_leg_rejects_log_return_type(client):
+    """A hold-mode option price leg forbids return_type='log': a leg wiped to zero
+    (ln(0) = -inf) is held FLAT instead of going to zero, overstating equity."""
+    body = {
+        "legs": {"P": _hold_put_leg()},
+        "weights": {"P": -100},
+        "rebalance": "none",
+        "return_type": "log",
+        "start": "2024-03-01",
+        "end": "2024-04-30",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    j = resp.json()
+    assert j["error_type"] == "validation_error"
+    assert "return_type='normal'" in j["message"]
+
+
+async def test_hold_leg_allows_rebalance_none_and_normal(client):
+    """The guard is scoped: the SAME hold leg with rebalance='none' + return
+    'normal' still computes (200) — proves findings 8/9 reject only the
+    incompatible knobs, not the hold leg itself."""
+    data = await _compute(client, -100)
+    assert len(data["portfolio_equity"]) == len(_DATES_INT)

@@ -105,25 +105,13 @@ def _materialise_leg_instrument(
                 f"use hold_between_rolls (fixed-contract dollar-P&L is a standalone "
                 f"option input; multi-leg held books are not supported)"
             )
-        from tcg.core.api.options import (
-            _criterion_pydantic_to_dataclass,
-            _maturity_pydantic_to_dataclass,
-            _roll_offset_pydantic_to_dataclass,
-        )
+        # ONE shared ref→dataclass converter (see options.py) — identical field
+        # mapping to signals._parse_input and the portfolio hold path.  The
+        # hold-on-a-basket-leg rejection above runs FIRST (this path is only ever
+        # reached with hold OFF).
+        from tcg.core.api.options import option_stream_ref_to_instrument
 
-        maturity = _maturity_pydantic_to_dataclass(instrument_ref.maturity)
-        selection = _criterion_pydantic_to_dataclass(instrument_ref.selection)
-        return InstrumentOptionStream(
-            collection=instrument_ref.collection,
-            option_type=instrument_ref.option_type,
-            cycle=instrument_ref.cycle,
-            maturity=maturity,
-            selection=selection,
-            stream=instrument_ref.stream,
-            roll_offset=_roll_offset_pydantic_to_dataclass(instrument_ref.roll_offset),
-            hold_between_rolls=instrument_ref.hold_between_rolls,
-            nav_times=instrument_ref.nav_times,
-        )
+        return option_stream_ref_to_instrument(instrument_ref)
     raise SignalValidationError(
         f"input {input_id!r}: basket leg {leg_index} has unsupported "
         f"instrument shape {type(instrument_ref).__name__!r}"
@@ -396,6 +384,12 @@ def make_signal_fetcher(
     # ``fetch_hold_roll_info`` (which ``signal_exec`` calls afterwards for the
     # fixed-contract dollar-P&L path) — so the resolver runs ONCE per hold input.
     _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any]] = {}
+    # Companion cache: the resolver's per-date diagnostics (``error_codes``) for a
+    # hold-mode option input, keyed the same way and populated during the SAME
+    # ``fetch``.  Read by the portfolio all-NaN error path via
+    # ``fetch_hold_diagnostics`` so a failed hold resolve can name the dominant
+    # cause without a second resolve.
+    _hold_diag_cache: dict[Any, list[str | None]] = {}
 
     def _hold_key(instrument: InstrumentOptionStream) -> Any:
         # Mirrors the engine's option-stream identity (collection/type/cycle/
@@ -518,11 +512,15 @@ def make_signal_fetcher(
 
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
             if roll_info_out is not None:
-                _hold_roll_info_cache[_hold_key(instrument)] = (
+                key = _hold_key(instrument)
+                _hold_roll_info_cache[key] = (
                     dates_arr,
                     roll_info_out["is_roll"],
                     roll_info_out["roll_premium"],
                 )
+                # Companion: stash the per-date diagnostics so the portfolio hold
+                # path can name the dominant cause on an all-NaN resolve.
+                _hold_diag_cache[key] = diagnostics
             return dates_arr, values
 
         if isinstance(instrument, InstrumentBasket):
@@ -628,5 +626,16 @@ def make_signal_fetcher(
             )
         return cached
 
+    async def fetch_hold_diagnostics(
+        instrument: InstrumentOptionStream,
+    ) -> list[str | None] | None:
+        """Return the cached per-date resolver diagnostics for a hold-mode option
+        input (``error_codes``: ``missing_delta_no_compute`` / ``missing_mid`` /
+        ``no_chain_for_date`` / …), or ``None`` if this input was never fetched in
+        hold mode.  Populated during the normal ``fetch`` of the hold input (which
+        runs first, so the cache is warm).  Purely diagnostic — never resolves."""
+        return _hold_diag_cache.get(_hold_key(instrument))
+
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
+    fetch.fetch_hold_diagnostics = fetch_hold_diagnostics  # type: ignore[attr-defined]
     return fetch

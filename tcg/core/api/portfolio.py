@@ -15,12 +15,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from tcg.core.api._dates import parse_iso_range
-from tcg.core.api._models import OptionStreamLabel, OptionStreamRef
-from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
-from tcg.core.api._options_materialise import (
-    PRICE_LIKE_STREAMS,
-    materialise_option_streams,
+from tcg.core.api._models import (
+    OptionStreamLabel,
+    OptionStreamRef,
+    _validate_nav_times,
 )
+from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
+from tcg.core.api._options_materialise import materialise_option_streams
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.api.common import get_market_data
 from tcg.core.api._persistence_wiring import get_write_repository
@@ -178,15 +179,9 @@ class LegSpec(BaseModel):
     @field_validator("nav_times")
     @classmethod
     def _check_nav_times(cls, v: float) -> float:
-        # A non-finite or non-positive premium multiple makes the fixed-contract
-        # sizing (nav_times·NAV/premium) meaningless — reject at the boundary
-        # rather than emit NaN/inf P&L.  Mirrors ``OptionStreamRef._check_nav_times``
-        # (validated unconditionally; only consulted in hold mode).
-        import math
-
-        if not math.isfinite(v) or v <= 0.0:
-            raise ValueError("nav_times must be a finite number > 0")
-        return float(v)
+        # Delegate to the ONE shared validator in ``_models`` so this leg field
+        # and ``OptionStreamRef.nav_times`` can never drift.
+        return _validate_nav_times(v)
 
     @field_validator("type")
     @classmethod
@@ -605,11 +600,27 @@ def _diagnostic_hint(diagnostics: list[str | None] | None) -> str:
 # A hold-mode option leg books fixed-contract dollar P&L only for a PREMIUM
 # stream.  Both ``mid`` and ``bs_mid`` are premia (bs_mid is the Black-76
 # theoretical premium — the S1 oracle's price basis) and the resolver's hold
-# path supports both.  (The display constant ``PRICE_LIKE_STREAMS`` is a narrower
-# {"mid"} set governing the NON-hold display leg's price/level split; it is left
-# untouched so that path stays byte-identical.)  Levels (iv/greeks/volume/oi)
-# are NOT premia — hold does not apply, they keep the display-only path.
+# path supports both.  A premium leg WITHOUT hold is rejected at construction
+# (``validate_option_price_leg_requires_hold``), so a premium always takes the
+# hold path.  Levels (iv/greeks/volume/oi) are NOT premia — hold does not apply,
+# they keep the display-only (tracking-overlay) path.
 _HOLD_PREMIUM_STREAMS: frozenset[str] = frozenset({"mid", "bs_mid"})
+
+
+def _is_hold_mode_price_leg(leg: LegSpec) -> bool:
+    """True iff ``leg`` is a hold-mode option PRICE leg (a mid/bs_mid premium with
+    ``hold_between_rolls``), i.e. one whose equity is the fixed-contract $-P&L
+    synthetic — which can wipe to an absorbing 0 (a fully-decayed / blown-up
+    short) and then emit NaN returns.  Level streams (iv/greeks/volume/oi) and
+    non-option legs are never hold-mode price legs.  Static (reads only the leg
+    spec), so ``compute_portfolio`` can gate incompatible rebalance/return knobs
+    BEFORE evaluating any leg.
+    """
+    return (
+        leg.type == "option_stream"
+        and leg.hold_between_rolls
+        and leg.stream in _HOLD_PREMIUM_STREAMS
+    )
 
 
 async def _evaluate_option_stream_leg(
@@ -622,9 +633,11 @@ async def _evaluate_option_stream_leg(
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], str]:
     """Resolve an option_stream leg and return (dates, values, stream_mode).
 
-    ``stream_mode`` is "price" (a non-hold premium display leg → %-return),
-    "price_hold" (the hold-mode synthetic $-P&L equity leg; caller must apply
-    |weight| — direction is already baked in), or "level" (greeks/IV overlay).
+    ``stream_mode`` is either "price_hold" (the hold-mode synthetic $-P&L equity
+    leg; caller must apply |weight| — direction is already baked in) or "level" (a
+    greeks/IV/volume/oi display overlay, NOT part of the equity curve).  A non-hold
+    premium ("price") leg is impossible — mid/bs_mid REQUIRE hold-mode
+    (``validate_option_price_leg_requires_hold``) — so only those two modes occur.
 
     SELECT-AND-HOLD: when ``leg.hold_between_rolls`` is True AND the stream is a
     PREMIUM (mid/bs_mid), the leg is resolved through the SAME hold-mode resolver
@@ -632,10 +645,10 @@ async def _evaluate_option_stream_leg(
     its fixed-contract dollar P&L is booked via the SHARED accumulator
     (:func:`tcg.engine.hold_pnl._compound_with_hold`).  ``values`` is then the
     leg's SYNTHETIC equity curve ``100·equity_ratio`` with DIRECTION (the sign of
-    ``weight``) and ``nav_times`` already baked in — returned as a "price" leg
-    exactly like a signal leg's synthetic.  The caller must therefore feed the
-    leg's |weight| (not the signed weight) to ``compute_weighted_portfolio`` so
-    the short is applied ONCE.  ``weight`` is consulted only on this hold path.
+    ``weight``) and ``nav_times`` already baked in — a "price_hold" leg, exactly
+    like a signal leg's synthetic.  The caller must therefore feed the leg's
+    |weight| (not the signed weight) to ``compute_weighted_portfolio`` so the short
+    is applied ONCE.  ``weight`` is consulted only on this hold path.
 
     Returns:
         Tuple of (YYYYMMDD int dates, values array, stream_mode).
@@ -679,26 +692,16 @@ async def _evaluate_option_stream_leg(
     #     rolling code).  Direction (sign of ``weight``) + ``nav_times`` are baked
     #     into the returned synthetic ``100·equity_ratio``.
     if is_hold_premium:
-        # Convert the validated ref → engine InstrumentOptionStream (hold ON),
-        # mirroring signals._parse_input's option branch.  The heavy option
-        # rolling/selection wiring is reused verbatim via make_signal_fetcher.
-        from tcg.core.api.options import (
-            _criterion_pydantic_to_dataclass,
-            _maturity_pydantic_to_dataclass,
-            _roll_offset_pydantic_to_dataclass,
-        )
+        # Convert the validated ref → engine InstrumentOptionStream via the ONE
+        # shared converter (also used by signals._parse_input and _series_fetch),
+        # so the ref→dataclass field mapping can't drift.  ``ref`` was built with
+        # ``hold_between_rolls=is_hold_premium`` (True on this branch) and
+        # ``nav_times=leg.nav_times``, so the converter yields hold ON with the
+        # same nav_times.  The heavy option rolling/selection wiring is then
+        # reused verbatim via make_signal_fetcher.
+        from tcg.core.api.options import option_stream_ref_to_instrument
 
-        instrument = InstrumentOptionStream(
-            collection=ref.collection,
-            option_type=ref.option_type,
-            cycle=ref.cycle,
-            maturity=_maturity_pydantic_to_dataclass(ref.maturity),
-            selection=_criterion_pydantic_to_dataclass(ref.selection),
-            stream=ref.stream,
-            roll_offset=_roll_offset_pydantic_to_dataclass(ref.roll_offset),
-            hold_between_rolls=True,
-            nav_times=float(leg.nav_times),
-        )
+        instrument = option_stream_ref_to_instrument(ref)
         fetcher = make_signal_fetcher(svc, start_date, end_date)
         try:
             dates_arr, premium = await fetcher(instrument, "close")
@@ -708,9 +711,23 @@ async def _evaluate_option_stream_leg(
 
         premium = np.asarray(premium, dtype=np.float64)
         if not np.any(np.isfinite(premium)):
-            # Mirror the display path's all-NaN guard so an empty resolve fails
-            # loudly instead of returning a misleading flat-100 leg.
-            raise ValidationError(f"Leg '{label}': all option stream values are NaN")
+            # An empty resolve fails LOUDLY instead of returning a misleading
+            # flat-100 leg.  Thread the resolver's per-date diagnostics (surfaced
+            # by the fetcher's optional ``fetch_hold_diagnostics`` side-channel —
+            # the same additive pattern as ``fetch_hold_roll_info``) into the
+            # message via ``_diagnostic_hint``, so it names the dominant cause
+            # (missing_delta / missing_mid / no_chain / …) and steers the user
+            # (ByDelta→ByMoneyness), exactly like the display path did.  A fetcher
+            # without the accessor (e.g. a bare test double) degrades cleanly to
+            # the base message.
+            hold_diagnostics: list[str | None] | None = None
+            diag_fn = getattr(fetcher, "fetch_hold_diagnostics", None)
+            if diag_fn is not None:
+                hold_diagnostics = await diag_fn(instrument)
+            raise ValidationError(
+                f"Leg '{label}': all option stream values are NaN"
+                f"{_diagnostic_hint(hold_diagnostics)}"
+            )
         T = int(premium.shape[0])
         # DIRECTION is the leg weight SIGN (a portfolio leg is always held, so
         # ``pos_active`` is all True); ``nav_times`` is the premium-notional SIZE.
@@ -741,33 +758,17 @@ async def _evaluate_option_stream_leg(
     if isinstance(result, str):
         raise ValidationError(f"Leg '{label}': {result}")
 
-    dates_arr, values, diagnostics, _contracts = result["_leg"]
+    dates_arr, values, _diagnostics, _contracts = result["_leg"]
 
-    # 3. Determine stream mode
-    stream_mode = "price" if leg.stream in PRICE_LIKE_STREAMS else "level"
-
-    # 4. Forward-fill NaN for price streams (needed for returns/equity)
-    if stream_mode == "price":
-        nan_mask = np.isnan(values)
-        if nan_mask.all():
-            # Fold the per-date diagnostics (the resolver's ``error_codes``)
-            # into the message so the all-NaN failure is actionable instead of
-            # blunt.  ``snapped_to:*`` notes are informational, not failures —
-            # exclude them from the cause tally.
-            raise ValidationError(
-                f"Leg '{label}': all option stream values are NaN"
-                f"{_diagnostic_hint(diagnostics)}"
-            )
-        # Forward fill
-        for i in range(1, len(values)):
-            if nan_mask[i]:
-                values[i] = values[i - 1]
-        # If first value is NaN, backfill from first valid
-        if nan_mask[0]:
-            first_valid = int(np.argmax(~nan_mask))
-            values[:first_valid] = values[first_valid]
-
-    return dates_arr, values, stream_mode
+    # 3. Only display-only LEVEL streams reach this point.  A PREMIUM leg
+    #    (mid/bs_mid) either took the hold branch above (early return
+    #    "price_hold") or was rejected at LegSpec construction
+    #    (``validate_option_price_leg_requires_hold``), and ``PRICE_LIKE_STREAMS``
+    #    ({"mid"}) ⊆ the premium set — so no %-return "price" leg can reach here.
+    #    A level leg (iv/greeks/volume/oi) is a tracking overlay, NOT part of the
+    #    equity curve, so it needs no forward-fill or all-NaN guard here (an
+    #    all-NaN level leg is surfaced downstream as an empty tracking series).
+    return dates_arr, values, "level"
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +810,35 @@ async def compute_portfolio(
     if body.return_type not in ("normal", "log"):
         raise ValidationError(
             f"return_type must be 'normal' or 'log', got {body.return_type!r}"
+        )
+
+    # A hold-mode option PRICE leg's synthetic can hit an absorbing 0 (a wiped
+    # short) and then emit NaN returns.  Two SHARED, pre-existing engine behaviours
+    # silently corrupt such a leg, so reject the incompatible knobs at the boundary
+    # rather than emit a misleading curve:
+    #   * rebalance != 'none' re-funds a wiped (0-valued) leg back to its target
+    #     share at each boundary (``metrics._compute_periodic_rebalance``) →
+    #     idle capital drains the surviving legs;
+    #   * return_type='log' maps a finite→0 transition to ln(0) = -inf → the leg
+    #     is held FLAT (``metrics._compute_buy_and_hold``) instead of going to 0,
+    #     overstating equity.
+    # Both are correct for ordinary price legs; only a hold-mode option leg (meant
+    # to be held to expiry — its direction + nav_times live in the synthetic)
+    # breaks them.  Guard here (contained) rather than editing the shared engine.
+    has_hold_option_leg = any(
+        _is_hold_mode_price_leg(leg) for leg in body.legs.values()
+    )
+    if has_hold_option_leg and rebalance_freq != RebalanceFreq.NONE:
+        raise ValidationError(
+            "hold-mode option price legs require rebalance='none'; a wiped leg "
+            "would be silently re-funded to its target weight at each rebalance "
+            "boundary, draining the surviving legs"
+        )
+    if has_hold_option_leg and body.return_type == "log":
+        raise ValidationError(
+            "hold-mode option price legs require return_type='normal'; under log "
+            "returns a leg wiped to zero (ln(0) = -inf) is held flat instead of "
+            "going to zero, overstating the equity"
         )
 
     try:

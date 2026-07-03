@@ -531,7 +531,9 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
     expect(screen.getByTestId('nav-hint')).toBeTruthy();
   });
 
-  it('forces hold_between_rolls=true and defaults cycle to "M" on mount', () => {
+  it('defaults cycle to "M" on mount', () => {
+    // The hold flag is forced on by AddHoldingModal (the single authority), NOT by
+    // this form's one-shot effect — which now only defaults the cycle to 'M'.
     const onChange = vi.fn();
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
@@ -541,7 +543,6 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
     renderForm({ value, onChange, holdRequired: true });
     expect(onChange).toHaveBeenCalled();
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
-    expect(emitted.hold_between_rolls).toBe(true);
     expect(emitted.cycle).toBe('M');
   });
 

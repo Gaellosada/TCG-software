@@ -54,6 +54,17 @@ from tcg.types.signal import (
     SignalRules,
 )
 
+from _hold_pnl_oracle import (
+    DATES_INT as _DATES_INT,
+    HELD_PREMIUM as _HELD_PREMIUM,
+    IS_ROLL as _IS_ROLL,
+    OWNER_CUR as _OWNER_CUR,
+    OWNER_PREV as _OWNER_PREV,
+    ROLL_PREMIUM as _ROLL_PREMIUM,
+    make_hold_fetch,
+    oracle_ratio as _oracle_ratio,
+)
+
 # Async tests auto-marked (asyncio_mode="auto").
 
 
@@ -100,71 +111,15 @@ def _load_java_faithful_s1():
 
 
 # ---------------------------------------------------------------------------
-# Reference oracle — the Java-faithful fixed-contract dollar-P&L accounting.
-# Byte-for-byte the accounting of ``java_faithful_s1`` (recon §1-§5): size once
-# per roll off the compounding NAV, hold fixed, book qty·(premium_{t-1}-premium_t)
-# for a SHORT, realise+resize at each roll, normalise NAV to a base-1 ratio.
-# ``sign`` folds direction: the Java model books qty·(prev-cur) which is the SHORT
-# pnl; a LONG is the mirror qty·(cur-prev).  We pass sign=+1 for the short (to
-# match java_faithful_s1's implicit short) and -1 for a long — see the mapping to
-# the engine's weight sign in ``_oracle_ratio``.
+# The reference oracle (``_oracle_ratio``) and the APR→MAY roll fixture
+# (``_HELD_PREMIUM`` / ``_IS_ROLL`` / ``_ROLL_PREMIUM`` / ``_OWNER_PREV`` /
+# ``_OWNER_CUR``) are the SHARED hold-P&L helpers imported from
+# ``tests/_hold_pnl_oracle`` (byte-for-byte the Java-faithful ``java_faithful_s1``
+# accounting: size once per roll off the compounding NAV, hold fixed, book
+# ``sign(weight)·qty·(cur-prev)`` daily, realise+resize at each roll, normalise to
+# a base-1 ratio).  Expressed as the resolver's hold-mode OUTPUT (held premium
+# LEVEL + is_roll + roll_premium) so these tests drive ``signal_exec`` directly.
 # ---------------------------------------------------------------------------
-
-
-def _oracle_ratio(
-    owner_prev: np.ndarray,
-    owner_cur: np.ndarray,
-    is_roll: np.ndarray,
-    roll_premium: np.ndarray,
-    *,
-    nav_times: float,
-    weight: float,
-    base_nav: float = 1_000_000.0,
-) -> np.ndarray:
-    """Dollar-NAV oracle → base-1 ratio, from the resolver's step representation.
-
-    ``owner_prev[t]`` / ``owner_cur[t]`` are the step-owner contract's mids on
-    days t-1 / t (same contract per step; OLD contract for the step ending on a
-    roll day).  ``roll_premium`` at each ``is_roll`` date is the NEW segment's
-    roll-day open mid.  The engine weight sign maps to the oracle's dollar P&L as:
-    a LONG (weight>0) gains on rising premium → dPnL = +qty·(cur-prev); a SHORT
-    (weight<0) gains on falling premium → dPnL = qty·(prev-cur).  Both are
-    ``sign(weight)·qty·(cur-prev)``.
-    """
-    T = len(owner_cur)
-    nav = np.empty(T, dtype=np.float64)
-    nav[0] = base_nav
-    sign = 1.0 if weight > 0 else -1.0
-    qty = nav_times * base_nav / roll_premium[0]
-    for t in range(1, T):
-        dprem = owner_cur[t] - owner_prev[t]
-        if not np.isfinite(dprem):
-            dprem = 0.0
-        nav[t] = nav[t - 1] + sign * qty * dprem
-        if bool(is_roll[t]):
-            qty = nav_times * nav[t] / roll_premium[t]
-    return nav / nav[0]
-
-
-# ---------------------------------------------------------------------------
-# Fixture — the SAME APR→MAY roll fixture the resolver tests use, but expressed
-# as the resolver's hold-mode OUTPUT (held premium LEVEL + is_roll + roll_premium)
-# so we drive signal_exec directly.
-#   APR K4400 held mids: 30,28,26,24(roll-day OLD mid)
-#   MAY K4450 held mids: 18(roll-day open),20,19
-#   values[t] = owner-of-step mid LEVEL (OLD on roll day) = [30,28,26,24,20,19]
-#   is_roll = [1,0,0,1,0,0]; roll_premium = [30,·,·,18,·,·]
-# ---------------------------------------------------------------------------
-_DATES_INT = np.array(
-    [20240327, 20240328, 20240329, 20240401, 20240402, 20240403], dtype=np.int64
-)
-_HELD_PREMIUM = np.array([30.0, 28.0, 26.0, 24.0, 20.0, 19.0])
-_IS_ROLL = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-_ROLL_PREMIUM = np.array([30.0, np.nan, np.nan, 18.0, np.nan, np.nan])
-# Owner arrays for the oracle (same contract per step; OLD into the roll):
-#   t1 APR 30->28, t2 28->26, t3 26->24 (OLD into roll), t4 MAY 18->20, t5 20->19
-_OWNER_PREV = np.array([np.nan, 30.0, 28.0, 26.0, 18.0, 20.0])
-_OWNER_CUR = np.array([np.nan, 28.0, 26.0, 24.0, 20.0, 19.0])
 
 
 def _opt(*, hold: bool, nav_times: float = 1.0) -> InstrumentOptionStream:
@@ -183,30 +138,13 @@ def _opt(*, hold: bool, nav_times: float = 1.0) -> InstrumentOptionStream:
 def _make_fetcher(*, held_premium, is_roll, roll_premium, spx=None):
     """Synthetic fetcher for a hold-mode option input + a spot 'always-on' input.
 
-    ``fetch`` returns the held premium LEVEL as the option's close series.
-    ``fetch.fetch_hold_roll_info`` returns the (dates, is_roll, roll_premium)
-    side-channel signal_exec consults for hold-mode option inputs.
-    """
-    if spx is None:
-        spx = np.full(len(_DATES_INT), 100.0, dtype=np.float64)
-
-    async def fetch(instrument, field):
-        if isinstance(instrument, InstrumentSpot):
-            return _DATES_INT, spx
-        if isinstance(instrument, InstrumentOptionStream):
-            return _DATES_INT, np.asarray(held_premium, dtype=np.float64)
-        raise KeyError(f"no data for {instrument!r} ({field})")
-
-    async def fetch_hold_roll_info(instrument):
-        assert isinstance(instrument, InstrumentOptionStream)
-        return (
-            _DATES_INT,
-            np.asarray(is_roll, dtype=np.float64),
-            np.asarray(roll_premium, dtype=np.float64),
-        )
-
-    fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
-    return fetch
+    Delegates to the shared ``make_hold_fetch`` builder: ``fetch`` returns the held
+    premium LEVEL as the option's close series, and ``fetch.fetch_hold_roll_info``
+    returns the (dates, is_roll, roll_premium) side-channel signal_exec consults for
+    hold-mode option inputs (spot defaults to a flat 100.0 series)."""
+    return make_hold_fetch(
+        held_premium=held_premium, is_roll=is_roll, roll_premium=roll_premium, spx=spx
+    )
 
 
 def _short_put_signal(*, hold: bool, weight: float = -10.0, nav_times: float = 1.0):

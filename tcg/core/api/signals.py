@@ -502,12 +502,8 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             raise SignalValidationError(
                 f"input {iid!r}: option_stream instrument requires collection"
             )
-        # Lazy imports to avoid circular deps (same pattern as indicators.py)
-        from tcg.core.api.options import (
-            _criterion_pydantic_to_dataclass,
-            _maturity_pydantic_to_dataclass,
-            _roll_offset_pydantic_to_dataclass,
-        )
+        # Lazy import to avoid circular deps (same pattern as indicators.py)
+        from tcg.core.api.options import option_stream_ref_to_instrument
 
         # Reject tautological: by_delta selection + delta stream
         if (
@@ -519,19 +515,9 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
                 f"input {iid!r}: by_delta selection with delta stream is tautological"
             )
 
-        maturity = _maturity_pydantic_to_dataclass(inst_in.maturity)
-        selection = _criterion_pydantic_to_dataclass(inst_in.selection)
-        instrument = InstrumentOptionStream(
-            collection=inst_in.collection,
-            option_type=inst_in.option_type,
-            cycle=inst_in.cycle,
-            maturity=maturity,
-            selection=selection,
-            stream=inst_in.stream,
-            roll_offset=_roll_offset_pydantic_to_dataclass(inst_in.roll_offset),
-            hold_between_rolls=inst_in.hold_between_rolls,
-            nav_times=inst_in.nav_times,
-        )
+        # ONE shared ref→dataclass converter (see options.py) — the field mapping
+        # is identical across signals / baskets / portfolio hold legs.
+        instrument = option_stream_ref_to_instrument(inst_in)
     else:
         if not inst_in.collection:
             raise SignalValidationError(

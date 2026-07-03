@@ -275,18 +275,16 @@ export default function OptionStreamForm({
   }, [singleStream, allowedStreams, v, onChange]);
 
   // PORTFOLIO hold-required flow: option price legs are ALWAYS held (no toggle).
-  // One-shot on mount — force hold on + default the cycle to 'M' (the backend's
-  // expand_cycle broadens 'M' to the monthly 3rd-Friday series, which reproduces a
-  // monthly option roll). One-shot so the user can still change the cycle after;
-  // hold stays on (there is no control to turn it off, and the backend rejects off).
+  // The hold flag itself is forced on by AddHoldingModal at leg-build time (the
+  // SINGLE authority for it — the backend also rejects hold-off), so this one-shot
+  // only defaults the cycle to 'M' (the backend's expand_cycle broadens 'M' to the
+  // monthly 3rd-Friday series, reproducing a monthly option roll). One-shot so the
+  // user can still change the cycle afterwards.
   const heldInit = useRef(false);
   useEffect(() => {
     if (!holdRequired || heldInit.current) return;
     heldInit.current = true;
-    const patch = {};
-    if (!v.hold_between_rolls) patch.hold_between_rolls = true;
-    if (v.cycle == null || v.cycle === 'W3 Friday') patch.cycle = 'M';
-    if (Object.keys(patch).length) onChange({ ...v, ...patch });
+    if (v.cycle == null || v.cycle === 'W3 Friday') onChange({ ...v, cycle: 'M' });
   }, [holdRequired, v, onChange]);
 
   const setRoot = useCallback((collection) => emit({ collection }), [emit]);

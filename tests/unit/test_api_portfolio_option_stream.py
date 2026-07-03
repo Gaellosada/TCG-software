@@ -36,9 +36,12 @@ from httpx import ASGITransport, AsyncClient
 from tcg.core.api.errors import tcg_error_handler
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.data._mongo.registry import CollectionRegistry
+from tcg.engine import compute_weighted_portfolio
 from tcg.types.errors import TCGError
 from tcg.types.market import PriceSeries
 from tcg.types.signal import InstrumentOptionStream
+
+from _hold_pnl_oracle import oracle_ratio
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -327,6 +330,62 @@ class TestPortfolioOptionStream:
         # Level leg in tracking_series
         assert "OPT_IV" in data["tracking_series"]
         assert "OPT_IV" not in data["leg_equities"]
+
+    async def test_multi_leg_direction_applied_once_numeric(self, client):
+        """A short hold-option price leg (weight -100) blended with a SIGNED price
+        co-leg (a SHORT instrument leg, weight -50): the hold leg must enter with
+        |weight| (direction already baked into its synthetic) while the co-leg keeps
+        its SIGNED weight.  Asserts ``portfolio_equity`` NUMERICALLY equals the
+        |weight|-normalized blend — and that an abs-ALL variant (co-leg wrongly
+        abs'd) and an abs-NONE variant (hold leg double-shorted) both DIFFER.  The
+        negative co-leg weight is what makes an abs-all regression visible (the
+        status-200-only multi-leg tests all use positive co-leg weights)."""
+        w_opt, w_spx = -100, -50
+        body = {
+            "legs": {"SPX": SPX_LEG, "OPT_MID": HOLD_MID_LEG},
+            "weights": {"SPX": w_spx, "OPT_MID": w_opt},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        equity = np.array(resp.json()["portfolio_equity"], dtype=np.float64)
+
+        # Independent oracle: the hold synthetic (direction baked in via the weight
+        # SIGN) over the single-segment HOLD_PREMIUM fixture, blended with the SPX
+        # closes.  ``owner_prev/cur`` are the step-owner mids of HOLD_PREMIUM.
+        owner_prev = np.array([np.nan, 5.0, 5.1, 5.2, 5.3])
+        owner_cur = np.array([np.nan, 5.1, 5.2, 5.3, 5.4])
+        hold_synth = 100.0 * oracle_ratio(
+            owner_prev,
+            owner_cur,
+            np.array(HOLD_IS_ROLL, dtype=np.float64),
+            np.array(HOLD_ROLL_PREMIUM, dtype=np.float64),
+            nav_times=1.0,
+            weight=float(w_opt),
+        )
+        closes = {
+            "OPT_MID": hold_synth,
+            "SPX": np.array(SPX_CLOSES, dtype=np.float64),
+        }
+        dates = np.array(DATES, dtype=np.int64)
+
+        def _blend(weights: dict[str, float]) -> np.ndarray:
+            return compute_weighted_portfolio(
+                closes, weights, "none", "normal", dates
+            ).portfolio_equity
+
+        # Correct wiring: hold leg gets |weight|, the co-leg keeps its signed weight.
+        expected = _blend({"OPT_MID": abs(float(w_opt)), "SPX": float(w_spx)})
+        np.testing.assert_allclose(equity, expected, rtol=1e-9, atol=1e-9)
+
+        # Regression guards: neither an abs-ALL nor an abs-NONE blend equals it.
+        abs_all = _blend({"OPT_MID": abs(float(w_opt)), "SPX": abs(float(w_spx))})
+        abs_none = _blend({"OPT_MID": float(w_opt), "SPX": float(w_spx)})
+        assert not np.allclose(equity, abs_all)
+        assert not np.allclose(equity, abs_none)
 
     async def test_hold_mid_all_nan_rejected(self, client, monkeypatch):
         """A hold-mode mid leg whose premium resolves all-NaN fails loudly at the
