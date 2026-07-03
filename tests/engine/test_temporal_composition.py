@@ -686,3 +686,172 @@ async def test_exit_reset_zeroes_since_reset_ladder():
     v = withx.positions[0].values
     assert v[3] == 0.0  # ladder was reset @2 -> @3 is only the 1st new tap
     assert v[5] == 1.0  # 2nd new tap fires @5
+
+
+# --------------------------------------------------------------------------- #
+# PINS (Iteration 2, tests-only): lock in two load-bearing semantics.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_fire_mode_default_is_sustained_and_hydrates_level():
+    # PIN — ``Block.fire_mode`` default is "sustained" (LEVEL), NOT "pulse".
+    #
+    # WHY THIS MATTERS: the golden-master corpus (test_golden_master_cnf) was
+    # captured with LEVEL firing. If this dataclass default — or the hydration
+    # of a stored block payload that predates the field — ever flips to
+    # "pulse", every stored/legacy signal silently re-fires on rising edges
+    # only and the golden byte-identity gate breaks. The "pulse-by-default for
+    # NEW blocks" UX default lives ONLY in the FRONTEND (blockShape.js
+    # defaultBlock sets fire_mode="pulse"); the backend must never default to
+    # pulse. If the backend default is ever intentionally changed, this is the
+    # test to update — deliberately, alongside a golden-master decision.
+
+    # (a) dataclass default.
+    assert Block().fire_mode == "sustained"
+    assert (
+        Block(id="e", name="long", input_id="X", weight=100.0).fire_mode == "sustained"
+    )
+
+    # (b) a STORED block payload LACKING ``fire_mode`` parses to "sustained"
+    #     AND evaluates with LEVEL behaviour (fires every bar the condition
+    #     holds — not just rising edges). Reuses the sustained-vs-pulse
+    #     discriminator from ``test_pulse_fired_indices_are_edges_of_sustained``.
+    from tcg.core.api.signals import SignalIn, parse_signal
+
+    raw = SignalIn.model_validate(
+        {
+            "id": "s",
+            "name": "s",
+            "inputs": [
+                {
+                    "id": "X",
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "I",
+                        "instrument_id": "X",
+                    },
+                }
+            ],
+            "rules": {
+                "entries": [
+                    {
+                        "id": "e",
+                        "name": "long",
+                        "input_id": "X",
+                        "weight": 100.0,
+                        # NO "fire_mode" key — simulates a pre-fire_mode payload.
+                        "conditions": [
+                            {
+                                "op": "gt",
+                                "lhs": {"kind": "instrument", "input_id": "X"},
+                                "rhs": {"kind": "constant", "value": 100.0},
+                            }
+                        ],
+                    }
+                ],
+                "exits": [],
+                "resets": [],
+            },
+        }
+    )
+    sig = parse_signal(raw)
+    assert sig.rules.entries[0].fire_mode == "sustained"
+
+    dates = np.arange(20240101, 20240101 + 5, dtype=np.int64)
+    prices = np.array([150.0, 160.0, 90.0, 170.0, 180.0])  # >100 at 0,1,3,4
+    result = await evaluate_signal(sig, {}, _make_fetcher(prices, dates))
+    fired = next(e for e in result.events if e.kind == "entry").fired_indices
+    assert fired == (0, 1, 3, 4)  # LEVEL: every bar close>100 (sustained)
+
+
+def _bound_disarmed_exit_signal():
+    # Entry "long": since_reset ladder (2nd cross_above 100 since last reset
+    # fires). Exit "ex": BOUND to reset "r" and targets "long"; "r" never fires
+    # (cross_above 1e9) so once "ex" disarms it stays disarmed. cross_below 95
+    # is the exit trigger.
+    return Signal(
+        id="s",
+        name="s",
+        inputs=(_input("X"),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="e",
+                    name="long",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(
+                        CrossCondition(
+                            op="cross_above",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=100.0),
+                            count=2,
+                            count_mode="since_reset",
+                        ),
+                    ),
+                ),
+            ),
+            exits=(
+                Block(
+                    id="x",
+                    name="ex",
+                    target_entry_block_names=("long",),
+                    requires_reset_block_id="r",
+                    conditions=(
+                        CrossCondition(
+                            op="cross_below",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=95.0),
+                        ),
+                    ),
+                ),
+            ),
+            resets=(
+                Block(
+                    id="r",
+                    name="rst",
+                    conditions=(
+                        CrossCondition(
+                            op="cross_above",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=1_000_000_000.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_bound_disarmed_exit_still_resets_since_reset_ladder():
+    # PIN — a BOUND exit whose arm-gate is False (disarmed → it would NOT clear
+    # a latch) STILL resets an in-flight entry since_reset tap ladder, because
+    # the always-on exit-reset uses UN-gated exit truth (``exit_truth &
+    # ~exit_nan``), independent of the exit's bound-reset arm.
+    #
+    # Pins current unconditional-reset semantics (assumption A4); pending
+    # explicit product confirmation whether a disarmed exit should be fully
+    # inert — if that is decided, this test is the one to flip.
+    #
+    # Timeline (cross_above 100 = up-cross; cross_below 95 = exit trigger):
+    #   b1 up-cross (tap1); b3 up-cross (tap2) -> ENTRY LATCHES @3.
+    #   b4 cross_below -> exit ARMED, clears the @3 latch (EFFECTIVE) -> DISARMS
+    #      "ex" (reset "r" never fires, so "ex" stays disarmed forever).
+    #   b5 up-cross (tap1 of a fresh ladder).
+    #   b6 cross_below -> "ex" is DISARMED: it clears nothing, but its un-gated
+    #      exit truth STILL resets the entry ladder (counter -> 0).  <-- PIN
+    #   b7 up-cross (fresh tap1); b9 up-cross (tap2) -> ENTRY LATCHES @9.
+    # If a disarmed exit were inert (A4 flipped), b5's tap would survive and the
+    # entry would re-latch at b7 instead of b9.
+    dates = np.arange(20240101, 20240101 + 10, dtype=np.int64)
+    prices = np.array([96.0, 101.0, 96.0, 101.0, 90.0, 101.0, 90.0, 101.0, 96.0, 101.0])
+    result = await evaluate_signal(
+        _bound_disarmed_exit_signal(), {}, _make_fetcher(prices, dates)
+    )
+    v = result.positions[0].values
+    assert v[3] == 1.0  # first latch (2nd up-cross)
+    assert v[4] == 0.0  # armed exit EFFECTIVELY cleared the latch -> disarmed
+    assert v[7] == 0.0  # PIN: disarmed exit @6 reset the ladder, so no fire @7
+    assert v[9] == 1.0  # two fresh up-crosses after the @6 reset -> latch @9
