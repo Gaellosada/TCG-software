@@ -35,6 +35,10 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
           // back-adjustment, so there is no adjustment field (unlike continuous).
           // "Roll at end of month" is the EndOfMonth maturity, not a schedule.
           roll_offset: instrument.roll_offset,
+          // PORTFOLIO option price legs are ALWAYS held (fixed-contract $-P&L);
+          // the backend requires it, so force it on regardless of form state.
+          hold_between_rolls: true,
+          nav_times: instrument.nav_times ?? 1.0,
           weight: 100,
         });
       } else if (instrument.type === 'continuous') {
@@ -69,6 +73,7 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
       onSelect={handleSelect}
       title="Add Holding"
       optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
+      optionHoldRequired={true}
     />
   );
 }

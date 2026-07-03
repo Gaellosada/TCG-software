@@ -74,6 +74,7 @@ from tcg.types.options import (
     OptionContractSeries,
     OptionDailyRow,
 )
+from tcg.types.signal import InstrumentOptionStream
 
 
 router = APIRouter(prefix="/api/options", tags=["options"])
@@ -735,6 +736,37 @@ def _roll_offset_pydantic_to_dataclass(value: Any) -> Any:
         return RollOffsetDC(value=value, unit="days")
     # Pydantic RollOffset (duck-typed: has .value + .unit).
     return RollOffsetDC(value=int(value.value), unit=value.unit)
+
+
+def option_stream_ref_to_instrument(
+    ref: OptionStreamRef,
+) -> InstrumentOptionStream:
+    """Convert a validated Pydantic :class:`OptionStreamRef` → engine
+    :class:`~tcg.types.signal.InstrumentOptionStream`.
+
+    The SINGLE source of truth for the ref→dataclass field mapping (maturity /
+    selection / roll_offset via the ``*_pydantic_to_dataclass`` converters above,
+    plus the scalar fields ``collection`` / ``option_type`` / ``cycle`` / ``stream``
+    / ``hold_between_rolls`` / ``nav_times``).  Used by the signals path
+    (``signals._parse_input``), the basket-leg path (``_series_fetch``) and the
+    portfolio hold path (``portfolio._evaluate_option_stream_leg``) so the mapping
+    can never drift between them.
+
+    This performs NO validation — callers do their own pre-checks (collection
+    presence, the by_delta+delta tautology, hold-on-a-basket-leg rejection)
+    BEFORE calling it; it only translates the already-validated ref's fields.
+    """
+    return InstrumentOptionStream(
+        collection=ref.collection,
+        option_type=ref.option_type,
+        cycle=ref.cycle,
+        maturity=_maturity_pydantic_to_dataclass(ref.maturity),
+        selection=_criterion_pydantic_to_dataclass(ref.selection),
+        stream=ref.stream,
+        roll_offset=_roll_offset_pydantic_to_dataclass(ref.roll_offset),
+        hold_between_rolls=ref.hold_between_rolls,
+        nav_times=ref.nav_times,
+    )
 
 
 # ---------------------------------------------------------------------------
