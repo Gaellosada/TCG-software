@@ -662,7 +662,7 @@ function Condition({
           type="number"
           min="1"
           step="1"
-          className={styles.crossCountInput}
+          className={`${styles.crossCountInput} ${styles.crossWindowInput}`}
           value={crossWindow}
           onChange={(e) => updateCrossField('window', e.target.value)}
           aria-label="Within window (bars)"

@@ -48,7 +48,11 @@ const SEEDED_SIGNAL = {
             rhs: { kind: 'constant', value: 0 },
           },
           {
-            op: 'gt',
+            // A cross ×N / within W condition so the N + W inputs render (W is
+            // the doubled one).
+            op: 'cross_above',
+            count: 2,
+            window: 30,
             lhs: { kind: 'instrument', input_id: 'X', field: 'close' },
             rhs: { kind: 'constant', value: 42 },
           },
@@ -128,6 +132,16 @@ test.describe('misc width tweaks + Help fire mode', () => {
     const instrField = page.getByTestId('operand-instrument-field').first();
     const instrBox = await instrField.boundingBox();
     expect(instrBox.width, `instrument field ${instrBox.width}`).toBeGreaterThanOrEqual(150);
+
+    // follow-up — cross "within [W] bars" window input, doubled 46 -> 92px,
+    // while the N count next to it stays narrow (46px).
+    const crossW = page.getByTestId('cross-window-0-1');
+    await expect(crossW).toBeVisible();
+    const crossWBox = await crossW.boundingBox();
+    expect(crossWBox.width, `cross W input width ${crossWBox.width}`).toBeGreaterThanOrEqual(80);
+    const crossN = page.getByTestId('cross-count-0-1');
+    const crossNBox = await crossN.boundingBox();
+    expect(crossNBox.width, `cross N input width ${crossNBox.width} (should stay narrow)`).toBeLessThan(70);
 
     // ask #4 — inputs-panel id (name) field, doubled 56 -> 112px. The panel is
     // collapsed by default when it already has inputs, so expand it first.

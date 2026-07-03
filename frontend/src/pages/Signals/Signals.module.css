@@ -728,6 +728,15 @@
   height: var(--signal-control-height);
 }
 
+/* The "within [W] bars" window input in a cross ×N/within-W condition. Doubled
+   from the 46px base (misc-batch follow-up) to match the THEN "within [W] bars"
+   treatment — W can be 2-3 digits, so it needs the room; the N count next to it
+   stays 46px (single-digit, keeps the row compact). Applied ALONGSIDE
+   .crossCountInput; defined after it so this width wins the cascade. */
+.crossWindowInput {
+  width: 92px;
+}
+
 /* Small "×N" reveal button for a plain (count == 1) crossover. */
 .crossExpandBtn {
   flex: 0 0 auto;
