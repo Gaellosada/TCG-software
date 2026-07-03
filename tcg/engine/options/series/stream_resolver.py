@@ -74,7 +74,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Callable, Literal, Protocol, Sequence, runtime_checkable
+from typing import Callable, Literal, Mapping, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -812,6 +812,7 @@ async def _resolve_bulk(
     last_trade_date: date | None,
     progress_callback: Callable[[], None] | None,
     available_expirations: Sequence[date] | None,
+    available_expirations_by_date: Mapping[date, Sequence[date]] | None = None,
     concurrency_gate: "asyncio.Semaphore | None" = None,
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
@@ -926,7 +927,27 @@ async def _resolve_bulk(
                 available = sorted({c.expiration for c, _r in probe_rows})
 
             for idx, d in queryable:
-                if not available:
+                # Issue #2 (daily-expiration global-snap bug): NearestToTarget
+                # must snap to an expiration that is actually LISTED on THIS trade
+                # date, not to the nearest in the whole-window global set.  When a
+                # per-date listing map is supplied (``available_expirations_by_date``
+                # — one distinct scan over the window in the caller), pick from the
+                # expirations quoted on ``d``; otherwise fall back to the global
+                # ``available`` (unchanged legacy behaviour, and what sparse
+                # monthly/weekly roots like SPX already got right because the
+                # global-nearest coincides with a listed expiration there).
+                avail_for_d = available
+                if available_expirations_by_date is not None:
+                    day_listed = available_expirations_by_date.get(d)
+                    if day_listed:
+                        windowed = [
+                            e for e in day_listed if lower_bound <= e <= far_future
+                        ]
+                        # Defensive: if every listed expiration falls outside the
+                        # probe window, still prefer the date's real listings over
+                        # a global pick that cannot exist on this date.
+                        avail_for_d = windowed if windowed else sorted(day_listed)
+                if not avail_for_d:
                     expirations[idx] = None
                 else:
                     # roll_offset (ROLL-EARLY axis): resolve maturity as of
@@ -935,7 +956,7 @@ async def _resolve_bulk(
                     expirations[idx] = maturity_resolver.resolve_with_chain(
                         ref_date=ref,
                         rule=maturity,
-                        available_expirations=available,
+                        available_expirations=avail_for_d,
                     )
                     if coverage_aware and isinstance(selection, ByDelta):
                         # Build the ordered candidate list for the coverage-aware
@@ -946,7 +967,7 @@ async def _resolve_bulk(
                         # "coverage" notion (ByStrike is exact; ByMoneyness support
                         # is a later pass, see the design note).
                         candidates[idx] = _coverage_candidates(
-                            ref, maturity.target_dte_days, available
+                            ref, maturity.target_dte_days, avail_for_d
                         )
     else:
         # Pure date-arithmetic rules (EndOfMonth / PlusNDays / FixedDate /
@@ -1681,6 +1702,7 @@ async def resolve_option_stream(
     progress_callback: Callable[[], None] | None = None,
     bulk_chain_reader: _CycleAwareBulkReader | None = None,
     available_expirations: Sequence[date] | None = None,
+    available_expirations_by_date: Mapping[date, Sequence[date]] | None = None,
     concurrency_gate: "asyncio.Semaphore | None" = None,
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
@@ -1865,6 +1887,7 @@ async def resolve_option_stream(
             last_trade_date=last_trade_date,
             progress_callback=progress_callback,
             available_expirations=available_expirations,
+            available_expirations_by_date=available_expirations_by_date,
             concurrency_gate=concurrency_gate,
             hold_between_rolls=hold_between_rolls,
             hold_roll_info_out=hold_roll_info_out,

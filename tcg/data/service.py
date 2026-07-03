@@ -352,6 +352,18 @@ class DefaultMarketDataService:
             root, option_type=option_type, cycle=cycle
         )
 
+    async def list_option_expirations_by_date(
+        self,
+        root: str,
+        start: date,
+        end: date,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[date]]:
+        return await self._options.list_expirations_by_date(
+            root, start, end, option_type=option_type, cycle=cycle
+        )
+
     # --- Futures contract lookup by expiration ---
 
     async def find_futures_contract_by_expiration(

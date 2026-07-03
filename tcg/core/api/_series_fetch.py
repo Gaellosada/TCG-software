@@ -373,7 +373,14 @@ def make_signal_fetcher(
     svc: MarketDataService,
     start: date | None,
     end: date | None,
+    *,
+    diag_sink: list[dict[str, Any]] | None = None,
 ) -> Any:
+    # ``diag_sink`` (opt-in): when a list is supplied, every option_stream fetch
+    # appends a per-leg coverage record ``{descriptor, dates, error_codes}`` so a
+    # caller (the Data-page basket path) can explain WHY points are missing rather
+    # than draw a silently broken line.  ``None`` (signals / portfolio) = no
+    # collection, and the ``fetch`` return signature is unchanged.
     # Lazy-init cache for option_stream wiring — built once on first
     # option_stream fetch, then reused for all subsequent option_stream
     # inputs within this signal evaluation.
@@ -481,6 +488,24 @@ def make_signal_fetcher(
                 cycle=_cycle,
             )
 
+            # Issue #2 fix: for NearestToTarget, fetch the per-date LISTED
+            # expiration map (one distinct scan over the window) so the resolver
+            # snaps to an expiration actually quoted on each trade date instead of
+            # the whole-window global nearest.  Only NearestToTarget consults it
+            # (arithmetic rules snap via _snap_to_listed already), so skip the
+            # scan for every other maturity rule.
+            from tcg.types.options import NearestToTarget
+
+            available_by_date: dict | None = None
+            if isinstance(instrument.maturity, NearestToTarget) and trade_dates:
+                available_by_date = await svc.list_option_expirations_by_date(
+                    instrument.collection,
+                    trade_dates[0],
+                    trade_dates[-1],
+                    option_type=instrument.option_type,
+                    cycle=_cycle,
+                )
+
             # Select-and-hold P&L for delta/moneyness-selected option signals:
             # freeze the contract between rolls and book fixed-contract dollar P&L
             # (default False = daily-reselect mid LEVEL).  In hold mode capture the
@@ -505,12 +530,29 @@ def make_signal_fetcher(
                 underlying_price_resolver=ul_resolver,
                 bulk_chain_reader=bulk_reader,
                 available_expirations=all_expirations,
+                available_expirations_by_date=available_by_date,
                 concurrency_gate=gate,
                 hold_between_rolls=instrument.hold_between_rolls,
                 hold_roll_info_out=roll_info_out,
             )
 
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
+            if diag_sink is not None:
+                # Per-leg coverage record for the Data-page basket path.  The
+                # descriptor names the leg in the UI; error_codes/dates let the
+                # caller aggregate a dominant-cause summary + gap date ranges.
+                sel = instrument.selection
+                descriptor = (
+                    f"{instrument.collection} {instrument.option_type} "
+                    f"{type(sel).__name__}"
+                )
+                diag_sink.append(
+                    {
+                        "descriptor": descriptor,
+                        "dates": dates_arr,
+                        "error_codes": diagnostics,
+                    }
+                )
             if roll_info_out is not None:
                 key = _hold_key(instrument)
                 _hold_roll_info_cache[key] = (

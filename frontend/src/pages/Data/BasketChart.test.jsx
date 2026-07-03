@@ -112,4 +112,54 @@ describe('BasketChart', () => {
     await waitFor(() => expect(capturedChartProps).not.toBeNull());
     expect(screen.queryByLabelText('Show legs')).toBeNull();
   });
+
+  it('shows a coverage notice explaining leg gaps (Issue #1)', async () => {
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [NaN, 101, NaN],
+        coverage: {
+          composite: { n: 3, n_holes: 2 },
+          legs: [
+            {
+              descriptor: 'OPT_BTC C ByDelta',
+              n: 3,
+              n_holes: 2,
+              counts: { missing_mid: 2 },
+              dominant_code: 'missing_mid',
+              first_gap: '2024-01-02',
+              last_gap: '2024-01-04',
+            },
+          ],
+        },
+      }),
+    );
+    render(
+      <BasketChart
+        basket={{ kind: 'saved', basket_id: 'b1' }}
+        name="BTC straddle"
+        assetClass="option"
+      />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(screen.getByText(/Coverage:/)).toBeTruthy();
+    expect(
+      screen.getByText(/OPT_BTC C ByDelta: 66.7% missing — no two-sided quote/),
+    ).toBeTruthy();
+  });
+
+  it('shows no coverage notice when there are no gaps', async () => {
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [100, 101, 102],
+        coverage: { composite: { n: 3, n_holes: 0 }, legs: [] },
+      }),
+    );
+    render(
+      <BasketChart basket={{ kind: 'saved', basket_id: 'b1' }} name="Clean" assetClass="equity" />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(screen.queryByText(/Coverage:/)).toBeNull();
+  });
 });

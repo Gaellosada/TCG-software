@@ -613,6 +613,80 @@ class SqlOptionsDataReader:
                 f"SQL error listing filtered expirations on '{root}': {exc}"
             ) from exc
 
+    async def list_expirations_by_date(
+        self,
+        root: str,
+        start: date,
+        end: date,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[date]]:
+        """Per-trade-date map of expirations that are actually LISTED (quoted).
+
+        Unlike :meth:`list_expirations_filtered` (a DISTINCT scan of
+        ``dim_instrument`` = every expiration that ever existed for the root),
+        this joins to ``fact_price_eod`` so an expiration only appears on a
+        ``trade_date`` when a contract of that expiration has a price row that
+        day.  Returns ``{trade_date: [expirations listed that day, sorted]}``.
+
+        WHY: ``NearestToTarget`` on a daily-expiration root (OPT_BTC) snaps to
+        the nearest expiration in the whole-window global set, which may not be
+        listed yet on early trade dates → a systematic ``no_chain_for_date``.
+        The stream resolver consumes this map to snap to an expiration actually
+        listed on each date.  ONE distinct scan for the whole window (not a
+        per-date query).
+
+        PUSHDOWN + partition pruning: resolve matching option ``instrument_id``s
+        via the indexed ``source_collection`` dim lookup (type / cycle /
+        ``expiration >= start`` pushed), then join ``fact_price_eod`` on a
+        CONSTANT ``trade_date BETWEEN start AND end`` so the planner prunes to
+        the spanned year partitions (the same gotcha the bulk chain reader
+        honours; a runtime-only join fans out across all ~71 partitions).
+        Price-row based (the tradeable universe) — matches what ``mid`` and the
+        bulk chain reader can actually return.
+        """
+        try:
+            dim_where = [
+                "source_collection = %s",
+                "asset_class = 'option'",
+                "expiration IS NOT NULL",
+                "expiration >= %s",
+            ]
+            params: list[Any] = [root, start]
+            if option_type is not None:
+                dim_where.append("option_type = %s")
+                params.append(option_type.upper())
+            _cycle_frag, _cycle_val = _cycle_predicate(cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                params.append(_cycle_val)
+            sql = f"""
+                WITH ids AS (
+                    SELECT instrument_id, expiration
+                    FROM {SCHEMA}.dim_instrument
+                    WHERE {" AND ".join(dim_where)}
+                )
+                SELECT DISTINCT p.trade_date, i.expiration
+                FROM ids i
+                JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = i.instrument_id
+                      AND p.trade_date BETWEEN %s AND %s
+                ORDER BY p.trade_date, i.expiration
+            """
+            params.extend([start, end])
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    rows = await cur.fetchall()
+            out: dict[date, list[date]] = {}
+            for r in rows:
+                out.setdefault(r["trade_date"], []).append(r["expiration"])
+            return out
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error listing per-date expirations on '{root}': {exc}"
+            ) from exc
+
     # ------------------------------------------------------------------
     # Internal: DTO builders
     # ------------------------------------------------------------------

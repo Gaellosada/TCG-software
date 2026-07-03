@@ -127,6 +127,15 @@ class MarketDataService(Protocol):
         cycle: str | Sequence[str] | None = None,
     ) -> list[date]: ...
 
+    async def list_option_expirations_by_date(
+        self,
+        root: str,
+        start: date,
+        end: date,
+        option_type: Literal["C", "P"] | None = None,
+        cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[date]]: ...
+
     # --- Futures contract lookup by expiration (Phase 2 VIX greeks) ---
 
     async def find_futures_contract_by_expiration(

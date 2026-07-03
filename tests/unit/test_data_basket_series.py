@@ -462,3 +462,105 @@ async def test_compute_basket_series_option_leg_parity_with_in_signal_path(
     # And it actually produced the option leg's values (not empty / spot path).
     assert out_values.shape[0] == ref_values.shape[0]
     assert out_values.shape[0] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Coverage surfacing (Issue #1 fix): explain missing points, never silent
+# ---------------------------------------------------------------------------
+
+
+def test_leg_coverage_summarises_gappy_diagnostics() -> None:
+    """A synthetic gappy option leg → correct counts / dominant / gap range."""
+    from tcg.core.api._basket_compute import _leg_coverage
+
+    record = {
+        "descriptor": "OPT_BTC C ByStrike",
+        "dates": np.array(
+            [20210105, 20210106, 20210107, 20210108, 20210111], dtype=np.int64
+        ),
+        "error_codes": [
+            "no_chain_for_date",
+            "no_chain_for_date",
+            None,
+            "missing_mid",
+            "no_chain_for_date",
+        ],
+    }
+    cov = _leg_coverage(record)
+    assert cov["n"] == 5
+    assert cov["n_holes"] == 4
+    assert cov["counts"] == {"no_chain_for_date": 3, "missing_mid": 1}
+    assert cov["dominant_code"] == "no_chain_for_date"
+    assert cov["first_gap"] == "2021-01-05"
+    assert cov["last_gap"] == "2021-01-11"
+    assert cov["descriptor"] == "OPT_BTC C ByStrike"
+
+
+def test_leg_coverage_no_holes() -> None:
+    from tcg.core.api._basket_compute import _leg_coverage
+
+    cov = _leg_coverage(
+        {"descriptor": "x", "dates": np.array([20240101]), "error_codes": [None]}
+    )
+    assert cov["n_holes"] == 0
+    assert cov["counts"] == {}
+    assert cov["dominant_code"] is None
+    assert cov["first_gap"] is None
+
+
+@pytest.mark.asyncio
+async def test_compute_basket_series_populates_composite_coverage(
+    fake_market_data: MagicMock, basket_repo: _BasketRepo
+) -> None:
+    """A spot basket (no option legs) still reports composite coverage: full
+    coverage, zero holes, empty per-leg list."""
+    from tcg.core.api._basket_compute import compute_basket_series
+
+    coverage: dict = {}
+    legs = [
+        {
+            "instrument": {"type": "spot", "collection": "ETF", "instrument_id": "SPY"},
+            "weight": 1.0,
+        },
+    ]
+    _, values = await compute_basket_series(
+        svc=fake_market_data,
+        repo=basket_repo,
+        basket_id=None,
+        asset_class="equity",
+        legs=legs,
+        start=None,
+        end=None,
+        field="close",
+        coverage_out=coverage,
+    )
+    assert coverage["composite"] == {"n": int(values.size), "n_holes": 0}
+    assert coverage["legs"] == []
+
+
+def test_basket_series_endpoint_carries_coverage(client: TestClient) -> None:
+    """The Data-page endpoint response includes a ``coverage`` block."""
+    resp = client.post(
+        "/api/data/basket/series",
+        json={
+            "basket": {
+                "kind": "inline",
+                "asset_class": "equity",
+                "legs": [
+                    {
+                        "instrument": {
+                            "type": "spot",
+                            "collection": "ETF",
+                            "instrument_id": "SPY",
+                        },
+                        "weight": 1.0,
+                    }
+                ],
+            },
+            "field": "close",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "coverage" in body
+    assert body["coverage"]["composite"]["n_holes"] == 0
