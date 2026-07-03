@@ -133,15 +133,15 @@ test.describe('misc width tweaks + Help fire mode', () => {
     const instrBox = await instrField.boundingBox();
     expect(instrBox.width, `instrument field ${instrBox.width}`).toBeGreaterThanOrEqual(150);
 
-    // follow-up — cross "within [W] bars" window input, doubled 46 -> 92px,
-    // while the N count next to it stays narrow (46px).
+    // follow-up — BOTH the cross N (×count) and W (within-bars) inputs doubled
+    // 46 -> 92px.
     const crossW = page.getByTestId('cross-window-0-1');
     await expect(crossW).toBeVisible();
     const crossWBox = await crossW.boundingBox();
     expect(crossWBox.width, `cross W input width ${crossWBox.width}`).toBeGreaterThanOrEqual(80);
     const crossN = page.getByTestId('cross-count-0-1');
     const crossNBox = await crossN.boundingBox();
-    expect(crossNBox.width, `cross N input width ${crossNBox.width} (should stay narrow)`).toBeLessThan(70);
+    expect(crossNBox.width, `cross N input width ${crossNBox.width}`).toBeGreaterThanOrEqual(80);
 
     // ask #4 — inputs-panel id (name) field, doubled 56 -> 112px. The panel is
     // collapsed by default when it already has inputs, so expand it first.

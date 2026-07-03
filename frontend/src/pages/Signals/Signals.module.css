@@ -717,6 +717,9 @@
   min-height: var(--signal-control-height);
 }
 
+/* Both the N count and the W window input in a cross ×N/within-W condition.
+   Doubled from 46px to 92px (misc-batch follow-up) for legibility, matching the
+   THEN "within [W] bars" treatment. */
 .crossCountInput {
   background: var(--bg-tertiary);
   border: 1px solid var(--border-primary);
@@ -724,17 +727,8 @@
   color: var(--text-primary);
   font-size: 0.78rem;
   padding: 0 4px;
-  width: 46px;
-  height: var(--signal-control-height);
-}
-
-/* The "within [W] bars" window input in a cross ×N/within-W condition. Doubled
-   from the 46px base (misc-batch follow-up) to match the THEN "within [W] bars"
-   treatment — W can be 2-3 digits, so it needs the room; the N count next to it
-   stays 46px (single-digit, keeps the row compact). Applied ALONGSIDE
-   .crossCountInput; defined after it so this width wins the cascade. */
-.crossWindowInput {
   width: 92px;
+  height: var(--signal-control-height);
 }
 
 /* Small "×N" reveal button for a plain (count == 1) crossover. */
