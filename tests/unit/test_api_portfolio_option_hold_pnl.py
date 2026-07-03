@@ -35,7 +35,7 @@ from tcg.core.api.portfolio import (
 )
 from tcg.core.api.portfolio import router as portfolio_router
 from tcg.engine import compute_weighted_portfolio
-from tcg.types.errors import TCGError
+from tcg.types.errors import TCGError, ValidationError
 from tcg.types.signal import InstrumentOptionStream
 
 # Async tests auto-marked (asyncio_mode="auto").
@@ -257,17 +257,45 @@ def test_legspec_nav_times_must_be_positive_finite(bad):
 
 
 def test_legspec_hold_defaults_off_and_navtimes_one():
-    """Back-compat: a non-hold option leg keeps hold OFF / nav_times 1.0."""
+    """Back-compat: the hold/nav_times field DEFAULTS are still off/1.0.  A
+    premium (mid/bs_mid) leg now requires hold, so this is exercised through a
+    LEVEL stream (iv) — the only option stream that legitimately runs hold-off."""
     leg = LegSpec(
         type="option_stream",
         collection="OPT_SP_500",
         option_type="P",
         maturity={"kind": "end_of_month", "offset_months": 0},
         selection={"kind": "by_delta", "target": -0.10},
-        stream="mid",
+        stream="iv",
     )
     assert leg.hold_between_rolls is False
     assert leg.nav_times == 1.0
+
+
+@pytest.mark.parametrize("stream", ["mid", "bs_mid"])
+def test_legspec_premium_leg_without_hold_rejected(stream):
+    """A portfolio option PRICE leg (premium stream) without hold-mode is
+    rejected at construction: a rolled option's daily-reselect %-return is not a
+    valid equity series (``validate_option_price_leg_requires_hold``)."""
+    with pytest.raises(ValidationError) as ei:
+        LegSpec(**{**_hold_put_leg(stream=stream), "hold_between_rolls": False})
+    assert ei.value.error_type == "validation_error"
+    assert "hold" in ei.value.message.lower()
+
+
+@pytest.mark.parametrize("stream", ["iv", "delta", "gamma", "vega", "theta", "volume"])
+def test_legspec_level_stream_accepts_hold_off(stream):
+    """A LEVEL stream (iv/greeks/volume) is a display-only overlay, exempt from
+    the hold requirement — it constructs fine with hold off."""
+    leg = LegSpec(
+        type="option_stream",
+        collection="OPT_SP_500",
+        option_type="P",
+        maturity={"kind": "end_of_month", "offset_months": 0},
+        selection={"kind": "by_delta", "target": -0.10},
+        stream=stream,
+    )
+    assert leg.hold_between_rolls is False
 
 
 async def test_all_nan_premium_rejected_loudly(monkeypatch):

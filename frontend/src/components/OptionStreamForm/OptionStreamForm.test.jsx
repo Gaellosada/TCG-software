@@ -513,3 +513,48 @@ describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
     expect(emitted.stream).toBe(value.stream);
   });
 });
+
+// ── Portfolio ON-only: hold is required for an option price leg (no toggle) ──
+describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
+  it('renders NO on/off toggle, but shows the held note + nav_times + wipeout hint', () => {
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 1.0,
+    };
+    renderForm({ value, holdRequired: true });
+    // A rolled option price leg is ALWAYS held — there is no interactive off.
+    expect(screen.queryByTestId('hold-between-rolls')).toBeNull();
+    expect(screen.getByTestId('hold-required-note')).toBeTruthy();
+    // nav_times is always visible (not gated behind a toggle) + a wipeout hint.
+    expect(screen.getByTestId('nav-times')).toBeTruthy();
+    expect(screen.getByTestId('nav-hint')).toBeTruthy();
+  });
+
+  it('forces hold_between_rolls=true and defaults cycle to "M" on mount', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: false,
+      cycle: 'W3 Friday',
+    };
+    renderForm({ value, onChange, holdRequired: true });
+    expect(onChange).toHaveBeenCalled();
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.hold_between_rolls).toBe(true);
+    expect(emitted.cycle).toBe('M');
+  });
+
+  it('keeps nav_times editable (always shown, no toggle gating)', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 1.0,
+    };
+    renderForm({ value, onChange, holdRequired: true });
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0.0045' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.nav_times).toBe(0.0045);
+  });
+});

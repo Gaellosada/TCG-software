@@ -205,6 +205,38 @@ class LegSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_option_price_leg_requires_hold(self) -> LegSpec:
+        """An option PRICE leg (mid/bs_mid) MUST use hold-mode fixed-contract P&L.
+
+        A rolled option's daily-reselect %-return is not a valid equity series:
+        the resolver picks a DIFFERENT contract each day (delta/moneyness drift +
+        the roll itself), so its day-over-day %-change mixes the real premium move
+        with contract-switch jumps (e.g. a near-expiry ~$5 premium → a fresh ~$50
+        contract reads as a +900% "return") → nonsensical, even NEGATIVE, equity.
+        Hold-mode ``qty·Δpremium`` is the only sound accounting. Option LEVEL
+        streams (iv/greeks/volume/oi) are display-only overlays, not equity, so
+        they are exempt. Non-option legs are unaffected.
+        """
+        # ``_HOLD_PREMIUM_STREAMS`` (defined below at module scope) is the SINGLE
+        # source of truth for which streams are premia — the same set the hold
+        # resolver keys off — so this requirement can never drift from the set of
+        # streams the hold path actually accepts.  Raise the codebase
+        # ``ValidationError`` (the dominant idiom in this module): it surfaces the
+        # message verbatim through the 400 ``validation_error`` envelope the
+        # frontend reads, both at request parse and on direct construction.
+        if (
+            self.type == "option_stream"
+            and self.stream in _HOLD_PREMIUM_STREAMS
+            and not self.hold_between_rolls
+        ):
+            raise ValidationError(
+                "option price legs (mid/bs_mid) require hold-mode fixed-contract "
+                "P&L — enable 'Hold contract between rolls'; a rolled option's "
+                "daily-reselect %-return is not a valid equity series"
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_option_stream_has_fields(self) -> LegSpec:
         """Ensure option_stream legs carry all required option fields."""
         if self.type != "option_stream":

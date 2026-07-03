@@ -1,13 +1,27 @@
 """Tests for POST /api/portfolio/compute with option_stream legs.
 
 Covers:
-- Mid-stream leg (price-like) participates in equity curve
-- Level-stream leg (iv/greeks) goes to tracking_series
-- Mixed price + level legs
-- All-NaN rejection
-- NaN forward-fill
+- Hold-mode mid (premium) leg participates in the equity curve (the hold path)
+- A mid/bs_mid (premium) leg WITHOUT hold is REJECTED (a rolled option's
+  daily-reselect %-return is not a valid equity series — see the LegSpec
+  ``validate_option_price_leg_requires_hold`` model validator)
+- Level-stream leg (iv/greeks) goes to tracking_series WITH hold off (unchanged)
+- Mixed hold-price + level legs
 - Level-only portfolio rejected
-- Date requirement for option_stream legs
+- roll_offset / adjustment field threading into the OptionStreamRef
+
+NOTE on the removed "premium DISPLAY path" tests
+-------------------------------------------------
+A premium stream (``mid``/``bs_mid``) in a portfolio leg now REQUIRES hold-mode
+(``hold_between_rolls=True``): the model validator rejects the no-hold case at
+parse, so the non-hold price DISPLAY branch of ``_evaluate_option_stream_leg``
+(forward-fill + the all-NaN ``_diagnostic_hint`` enrichment) is unreachable via a
+valid portfolio request.  The former ``TestPortfolioOptionStreamAllNanDiagnostics``
+and the ``test_nan_forward_fill`` tests exercised exactly that dead branch and
+could no longer even construct their input LegSpec, so they were removed.  The
+hold path has its own loud all-NaN guard, covered by
+``test_api_portfolio_option_hold_pnl.py::test_all_nan_premium_rejected_loudly``
+and (at the HTTP layer) by ``test_hold_mid_all_nan_rejected`` below.
 """
 
 from __future__ import annotations
@@ -24,12 +38,20 @@ from tcg.core.api.portfolio import router as portfolio_router
 from tcg.data._mongo.registry import CollectionRegistry
 from tcg.types.errors import TCGError
 from tcg.types.market import PriceSeries
+from tcg.types.signal import InstrumentOptionStream
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
 DATES = [20240102, 20240103, 20240104, 20240105, 20240108]
 SPX_CLOSES = [100.0, 101.0, 102.0, 103.0, 104.0]
+
+# Hold-mode fixture: a simple monotone premium with a single roll on day 0, so a
+# hold-mode mid leg resolves to a well-formed fixed-contract equity curve that
+# overlaps the SPX dates above.
+HOLD_PREMIUM = [5.0, 5.1, 5.2, 5.3, 5.4]
+HOLD_IS_ROLL = [1.0, 0.0, 0.0, 0.0, 0.0]
+HOLD_ROLL_PREMIUM = [5.0, np.nan, np.nan, np.nan, np.nan]
 
 
 def _price_series(dates: list[int], close_vals: list[float]) -> PriceSeries:
@@ -46,14 +68,35 @@ def _price_series(dates: list[int], close_vals: list[float]) -> PriceSeries:
     )
 
 
-def _fake_materialise_result(values, dates=None):
-    """Build a synthetic materialise result for a single leg."""
-    d = np.array(dates or DATES, dtype=np.int64)
-    v = np.array(values, dtype=np.float64)
-    diagnostics: list[str | None] = [None] * len(values)
-    return {"_leg": (d, v, diagnostics)}
+def _make_hold_fetcher(*, dates=None, premium=None, is_roll=None, roll_premium=None):
+    """Build a synthetic ``make_signal_fetcher`` replacement (dwh-free) matching
+    the real shape: a callable + ``.fetch_hold_roll_info``.  Overridable per test
+    (e.g. all-NaN premium, or disjoint dates)."""
+    d = np.array(dates if dates is not None else DATES, dtype=np.int64)
+    prem = np.array(premium if premium is not None else HOLD_PREMIUM, dtype=np.float64)
+    isr = np.array(is_roll if is_roll is not None else HOLD_IS_ROLL, dtype=np.float64)
+    rollp = np.array(
+        roll_premium if roll_premium is not None else HOLD_ROLL_PREMIUM,
+        dtype=np.float64,
+    )
+
+    def factory(svc, start, end):
+        async def fetch(instrument, field):
+            assert isinstance(instrument, InstrumentOptionStream)
+            assert instrument.hold_between_rolls is True
+            return d, prem.copy()
+
+        async def fetch_hold_roll_info(instrument):
+            assert isinstance(instrument, InstrumentOptionStream)
+            return d, isr.copy(), rollp.copy()
+
+        fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
+        return fetch
+
+    return factory
 
 
+# A mid (premium) leg WITHOUT hold — now REJECTED by the LegSpec model validator.
 OPT_MID_LEG = {
     "type": "option_stream",
     "collection": "OPT_SP_500",
@@ -69,6 +112,14 @@ OPT_MID_LEG = {
     "stream": "mid",
 }
 
+# The valid premium leg for a portfolio: mid + hold-mode fixed-contract P&L.
+HOLD_MID_LEG = {
+    **OPT_MID_LEG,
+    "hold_between_rolls": True,
+    "nav_times": 1.0,
+}
+
+# A level (iv) leg — display-only overlay, valid WITH hold off (unchanged).
 OPT_IV_LEG = {
     **OPT_MID_LEG,
     "stream": "iv",
@@ -83,7 +134,8 @@ SPX_LEG = {
 
 @pytest.fixture
 def mock_app(monkeypatch):
-    """FastAPI app with mocked data service and option materialisation."""
+    """FastAPI app with mocked data service + option materialisation (level legs)
+    + a synthetic hold-mode fetcher (premium hold legs)."""
     registry = CollectionRegistry(["INDEX", "OPT_SP_500"])
 
     common_dates = np.array(DATES, dtype=np.int64)
@@ -95,7 +147,7 @@ def mock_app(monkeypatch):
     svc._registry = registry
     svc.get_aligned_prices = AsyncMock(return_value=(common_dates, aligned_series))
 
-    # Default materialise mock — returns mid price data
+    # Level (iv/greeks) legs still go through the display materialiser.
     async def fake_materialise(
         refs_with_labels, *, svc, start_date, end_date, progress_callback=None
     ):
@@ -115,6 +167,11 @@ def mock_app(monkeypatch):
     monkeypatch.setattr(
         "tcg.core.api.portfolio.materialise_option_streams",
         fake_materialise,
+    )
+    # Premium hold legs resolve through make_signal_fetcher (the hold path).
+    monkeypatch.setattr(
+        "tcg.core.api.portfolio.make_signal_fetcher",
+        _make_hold_fetcher(),
     )
 
     app = FastAPI()
@@ -138,12 +195,13 @@ async def client(mock_app):
 
 
 class TestPortfolioOptionStream:
-    async def test_mid_leg_in_equity_curve(self, client):
-        """Mid-stream option leg participates in the portfolio equity curve."""
+    async def test_hold_mid_leg_in_equity_curve(self, client):
+        """A hold-mode mid (premium) option leg participates in the portfolio
+        equity curve (via the fixed-contract $-P&L hold path)."""
         body = {
             "legs": {
                 "SPX": SPX_LEG,
-                "OPT_MID": OPT_MID_LEG,
+                "OPT_MID": HOLD_MID_LEG,
             },
             "weights": {"SPX": 60, "OPT_MID": 40},
             "rebalance": "none",
@@ -159,12 +217,50 @@ class TestPortfolioOptionStream:
         assert "OPT_MID" in data["leg_equities"]
         assert "metrics" in data
 
-    async def test_iv_leg_in_tracking_series(self, client):
-        """IV-stream option leg goes to tracking_series, not equity curve."""
+    async def test_mid_leg_without_hold_rejected(self, client):
+        """A mid (premium) option leg WITHOUT hold-mode is rejected: a rolled
+        option's daily-reselect %-return is not a valid equity series."""
         body = {
             "legs": {
                 "SPX": SPX_LEG,
-                "OPT_IV": OPT_IV_LEG,
+                "OPT_MID": OPT_MID_LEG,  # mid, hold_between_rolls defaults False
+            },
+            "weights": {"SPX": 60, "OPT_MID": 40},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 400, resp.text
+        body_json = resp.json()
+        assert body_json["error_type"] == "validation_error"
+        msg = body_json["message"].lower()
+        assert "hold" in msg
+        assert "mid" in msg or "price" in msg
+
+    @pytest.mark.parametrize("stream", ["mid", "bs_mid"])
+    async def test_premium_leg_without_hold_rejected_both_streams(self, client, stream):
+        """Both premium streams (mid, bs_mid) are rejected without hold-mode."""
+        body = {
+            "legs": {"OPT": {**OPT_MID_LEG, "stream": stream}},
+            "weights": {"OPT": 100},
+            "rebalance": "none",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_type"] == "validation_error"
+
+    async def test_iv_leg_in_tracking_series_hold_off(self, client):
+        """A level (iv) option leg goes to tracking_series and STILL works with
+        hold off — level streams are display-only overlays, exempt from the
+        hold-mode requirement."""
+        body = {
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT_IV": OPT_IV_LEG,  # iv, hold off
             },
             "weights": {"SPX": 100, "OPT_IV": 100},
             "rebalance": "none",
@@ -189,12 +285,31 @@ class TestPortfolioOptionStream:
         # IV leg should NOT be in equity curve
         assert "OPT_IV" not in data["leg_equities"]
 
-    async def test_mixed_price_and_level_legs(self, client):
-        """Mid leg in equity curve, iv leg in tracking_series, spot in equity curve."""
+    @pytest.mark.parametrize("stream", ["iv", "delta", "gamma", "vega", "theta"])
+    async def test_level_streams_accept_hold_off(self, client, stream):
+        """Every level stream (iv/greeks) validates and resolves with hold off."""
         body = {
             "legs": {
                 "SPX": SPX_LEG,
-                "OPT_MID": OPT_MID_LEG,
+                "OPT": {**OPT_MID_LEG, "stream": stream},
+            },
+            "weights": {"SPX": 100, "OPT": 100},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        assert stream == resp.json()["tracking_series"]["OPT"]["stream"]
+
+    async def test_mixed_hold_price_and_level_legs(self, client):
+        """Hold mid leg in equity curve, iv leg in tracking_series, spot in
+        equity curve."""
+        body = {
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT_MID": HOLD_MID_LEG,
                 "OPT_IV": OPT_IV_LEG,
             },
             "weights": {"SPX": 50, "OPT_MID": 30, "OPT_IV": 20},
@@ -213,68 +328,26 @@ class TestPortfolioOptionStream:
         assert "OPT_IV" in data["tracking_series"]
         assert "OPT_IV" not in data["leg_equities"]
 
-    async def test_all_nan_rejected(self, client, monkeypatch):
-        """All-NaN option stream values raises validation error."""
-
-        async def nan_materialise(
-            refs_with_labels, *, svc, start_date, end_date, progress_callback=None
-        ):
-            label = refs_with_labels[0][0]
-            d = np.array(DATES, dtype=np.int64)
-            v = np.full(len(DATES), np.nan, dtype=np.float64)
-            return {label: (d, v, [None] * len(DATES), [None] * len(DATES))}
-
+    async def test_hold_mid_all_nan_rejected(self, client, monkeypatch):
+        """A hold-mode mid leg whose premium resolves all-NaN fails loudly at the
+        HTTP layer (the hold path's all-NaN guard)."""
         monkeypatch.setattr(
-            "tcg.core.api.portfolio.materialise_option_streams",
-            nan_materialise,
+            "tcg.core.api.portfolio.make_signal_fetcher",
+            _make_hold_fetcher(premium=[np.nan] * len(DATES)),
         )
         body = {
-            "legs": {"OPT_MID": OPT_MID_LEG},
+            "legs": {"OPT_MID": HOLD_MID_LEG},
             "weights": {"OPT_MID": 100},
             "rebalance": "none",
             "start": "2024-01-01",
             "end": "2024-12-31",
         }
         resp = await client.post("/api/portfolio/compute", json=body)
-        assert resp.status_code in (400, 422), resp.text
-
-    async def test_nan_forward_fill(self, client, monkeypatch):
-        """NaN gaps in mid-stream values are forward-filled."""
-
-        async def gap_materialise(
-            refs_with_labels, *, svc, start_date, end_date, progress_callback=None
-        ):
-            label = refs_with_labels[0][0]
-            d = np.array(DATES, dtype=np.int64)
-            v = np.array([5.0, np.nan, np.nan, 5.3, 5.4], dtype=np.float64)
-            return {label: (d, v, [None] * len(DATES), [None] * len(DATES))}
-
-        monkeypatch.setattr(
-            "tcg.core.api.portfolio.materialise_option_streams",
-            gap_materialise,
-        )
-        body = {
-            "legs": {
-                "SPX": SPX_LEG,
-                "OPT_MID": OPT_MID_LEG,
-            },
-            "weights": {"SPX": 50, "OPT_MID": 50},
-            "rebalance": "none",
-            "return_type": "normal",
-            "start": "2024-01-01",
-            "end": "2024-12-31",
-        }
-        resp = await client.post("/api/portfolio/compute", json=body)
-        assert resp.status_code == 200, resp.text
-        data = resp.json()
-        # Equity curve should have no NaN (forward-fill applied)
-        equity = data["portfolio_equity"]
-        assert all(
-            v is not None and not (isinstance(v, float) and np.isnan(v)) for v in equity
-        )
+        assert resp.status_code == 400, resp.text
+        assert "all option stream values are NaN" in resp.json()["message"]
 
     async def test_level_only_rejected(self, client):
-        """Portfolio with only level (non-price) legs is rejected."""
+        """Portfolio with only level (non-price) legs is rejected (no equity)."""
         body = {
             "legs": {"OPT_IV": OPT_IV_LEG},
             "weights": {"OPT_IV": 100},
@@ -305,129 +378,28 @@ class TestPortfolioOptionStream:
         assert expected_keys <= set(metrics.keys())
 
 
-# ── Actionable all-NaN diagnostics (Issue #2 seam 1b) ───────────────────
-
-
-class TestPortfolioOptionStreamAllNanDiagnostics:
-    """When a price-like option leg is all-NaN, the 400 must fold in the
-    DISCARDED per-date diagnostics (the ``error_codes`` list) so the user
-    learns WHY — the dominant cause + an actionable hint — instead of a blunt
-    'all option stream values are NaN'."""
-
-    def _nan_with_diags(self, diags):
-        async def _materialise(
-            refs_with_labels, *, svc, start_date, end_date, progress_callback=None
-        ):
-            label = refs_with_labels[0][0]
-            d = np.array(DATES, dtype=np.int64)
-            v = np.full(len(DATES), np.nan, dtype=np.float64)
-            return {label: (d, v, list(diags), [None] * len(DATES))}
-
-        return _materialise
-
-    async def _post_optmid_only(self, client):
-        body = {
-            "legs": {"OPT_MID": OPT_MID_LEG},
-            "weights": {"OPT_MID": 100},
-            "rebalance": "none",
-            "start": "2024-01-01",
-            "end": "2024-12-31",
-        }
-        return await client.post("/api/portfolio/compute", json=body)
-
-    async def test_all_nan_message_names_dominant_missing_delta(
-        self, client, monkeypatch
-    ):
-        """ByDelta over a no-stored-greeks range: every date is
-        ``missing_delta_no_compute`` -> the 400 names that cause and steers the
-        user to By Moneyness / By Strike or a range with greeks."""
-        diags = ["missing_delta_no_compute"] * len(DATES)
-        monkeypatch.setattr(
-            "tcg.core.api.portfolio.materialise_option_streams",
-            self._nan_with_diags(diags),
-        )
-        resp = await self._post_optmid_only(client)
-        assert resp.status_code == 400, resp.text
-        msg = resp.json()["message"]
-        # Keeps the original phrase as a prefix...
-        assert "all option stream values are NaN" in msg
-        # ...and adds the dominant cause + an actionable hint.
-        assert "missing_delta_no_compute" in msg
-        assert "greeks" in msg.lower()
-        assert ("moneyness" in msg.lower()) or ("strike" in msg.lower())
-
-    async def test_all_nan_message_names_dominant_missing_mid(
-        self, client, monkeypatch
-    ):
-        """Sparse quotes: every date is ``missing_mid`` -> the 400 names that
-        cause and mentions bid/ask quotes."""
-        diags = ["missing_mid"] * len(DATES)
-        monkeypatch.setattr(
-            "tcg.core.api.portfolio.materialise_option_streams",
-            self._nan_with_diags(diags),
-        )
-        resp = await self._post_optmid_only(client)
-        assert resp.status_code == 400, resp.text
-        msg = resp.json()["message"]
-        assert "all option stream values are NaN" in msg
-        assert "missing_mid" in msg
-        assert ("bid" in msg.lower()) or ("quote" in msg.lower())
-
-    async def test_all_nan_message_handles_no_chain(self, client, monkeypatch):
-        """Maturity rule whose (post-snap) expiration still isn't listed:
-        ``no_chain_for_date`` -> the 400 names that cause and mentions the
-        expiration not being listed for the root."""
-        diags = ["no_chain_for_date"] * len(DATES)
-        monkeypatch.setattr(
-            "tcg.core.api.portfolio.materialise_option_streams",
-            self._nan_with_diags(diags),
-        )
-        resp = await self._post_optmid_only(client)
-        assert resp.status_code == 400, resp.text
-        msg = resp.json()["message"]
-        assert "no_chain_for_date" in msg
-        assert ("expiration" in msg.lower()) or ("listed" in msg.lower())
-
-    async def test_all_nan_message_robust_when_no_diagnostics(
-        self, client, monkeypatch
-    ):
-        """Defensive: an all-None diagnostics list (no per-date code) still
-        produces the base message without crashing."""
-        diags = [None] * len(DATES)
-        monkeypatch.setattr(
-            "tcg.core.api.portfolio.materialise_option_streams",
-            self._nan_with_diags(diags),
-        )
-        resp = await self._post_optmid_only(client)
-        assert resp.status_code == 400, resp.text
-        assert "all option stream values are NaN" in resp.json()["message"]
-
-
 class TestPortfolioOptionStreamDisjointDates:
     """When an option leg's dates don't overlap the other legs', the
     'No overlapping dates' 400 must name option legs as a common cause
-    (Issue #2 seam 1c) — the old message mentioned only instrument/signal."""
+    (Issue #2 seam 1c).  Exercised via a hold-mode mid leg (the valid way an
+    option leg enters the equity curve), whose resolved dates are disjoint."""
 
     async def test_disjoint_option_dates_message_mentions_options(
         self, client, monkeypatch
     ):
-        # Option leg materialises on dates far from the instrument's DATES.
+        # Hold leg resolves on dates far from the instrument's 2024 DATES.
         disjoint = [20200102, 20200103, 20200106]
-
-        async def disjoint_materialise(
-            refs_with_labels, *, svc, start_date, end_date, progress_callback=None
-        ):
-            label = refs_with_labels[0][0]
-            d = np.array(disjoint, dtype=np.int64)
-            v = np.array([5.0, 5.1, 5.2], dtype=np.float64)
-            return {label: (d, v, [None] * 3, [None] * 3)}
-
         monkeypatch.setattr(
-            "tcg.core.api.portfolio.materialise_option_streams",
-            disjoint_materialise,
+            "tcg.core.api.portfolio.make_signal_fetcher",
+            _make_hold_fetcher(
+                dates=disjoint,
+                premium=[5.0, 5.1, 5.2],
+                is_roll=[1.0, 0.0, 0.0],
+                roll_premium=[5.0, np.nan, np.nan],
+            ),
         )
         body = {
-            "legs": {"SPX": SPX_LEG, "OPT_MID": OPT_MID_LEG},
+            "legs": {"SPX": SPX_LEG, "OPT_MID": HOLD_MID_LEG},
             "weights": {"SPX": 50, "OPT_MID": 50},
             "rebalance": "none",
             "return_type": "normal",
@@ -448,14 +420,22 @@ class TestPortfolioOptionStreamRollFields:
     """A portfolio option leg threads ``roll_offset`` into the
     ``OptionStreamRef`` it builds (mirroring the continuous-leg precedent).
     Unlike futures, option streams carry NO back-adjustment: a stray ``adjustment``
-    leg key is ignored (never reaches the ref, never changes the curve).
+    leg key is ignored (never reaches the ref, never changes the series).
+
+    The ref is built in ``_evaluate_option_stream_leg`` BEFORE the hold/display
+    branch, so the threading is identical for every stream.  These tests exercise
+    it through a LEVEL (iv) leg (the display path that captures the ref); the leg
+    lands in ``tracking_series`` while SPX carries the equity curve.
     """
+
+    # Level leg so the display materialiser (which captures the ref) runs.
+    OPT_LEVEL_LEG = {**OPT_MID_LEG, "stream": "iv"}
 
     @pytest.fixture
     def capture_app(self, mock_app, monkeypatch):
         """Patch materialise to (a) record the ref it received and
-        (b) return a series whose level encodes ``roll_offset`` — so an
-        equity-curve difference proves that field reached the resolver, not
+        (b) return a series whose level encodes ``roll_offset`` — so a
+        tracking-series difference proves that field reached the resolver, not
         just the constructor.  The ref has no ``adjustment`` attribute."""
         captured: dict = {}
 
@@ -486,7 +466,9 @@ class TestPortfolioOptionStreamRollFields:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac, captured
 
-    async def _equity(self, client, leg):
+    async def _tracking_values(self, client, leg):
+        """Post {SPX + option leg} and return the option leg's resolved
+        tracking-series values (SPX supplies the equity curve)."""
         body = {
             "legs": {"SPX": SPX_LEG, "OPT": leg},
             "weights": {"SPX": 50, "OPT": 50},
@@ -497,7 +479,7 @@ class TestPortfolioOptionStreamRollFields:
         }
         resp = await client.post("/api/portfolio/compute", json=body)
         assert resp.status_code == 200, resp.text
-        return resp.json()["portfolio_equity"]
+        return resp.json()["tracking_series"]["OPT"]["values"]
 
     async def test_adjustment_not_threaded_into_ref(self, capture_client):
         """A stray ``adjustment`` leg key is ignored: the built OptionStreamRef
@@ -506,8 +488,8 @@ class TestPortfolioOptionStreamRollFields:
         from tcg.core.api._models_options import RollOffset
 
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "adjustment": "ratio"}
-        await self._equity(client, leg)
+        leg = {**self.OPT_LEVEL_LEG, "adjustment": "ratio"}
+        await self._tracking_values(client, leg)
         assert not hasattr(captured["ref"], "adjustment")
         assert captured["ref"].roll_offset == RollOffset()
 
@@ -515,8 +497,8 @@ class TestPortfolioOptionStreamRollFields:
         from tcg.core.api._models_options import RollOffset
 
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "roll_offset": {"value": 5, "unit": "days"}}
-        await self._equity(client, leg)
+        leg = {**self.OPT_LEVEL_LEG, "roll_offset": {"value": 5, "unit": "days"}}
+        await self._tracking_values(client, leg)
         assert captured["ref"].roll_offset == RollOffset(value=5, unit="days")
         assert not hasattr(captured["ref"], "adjustment")
 
@@ -524,8 +506,8 @@ class TestPortfolioOptionStreamRollFields:
         from tcg.core.api._models_options import RollOffset
 
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "roll_offset": {"value": 2, "unit": "months"}}
-        await self._equity(client, leg)
+        leg = {**self.OPT_LEVEL_LEG, "roll_offset": {"value": 2, "unit": "months"}}
+        await self._tracking_values(client, leg)
         assert captured["ref"].roll_offset == RollOffset(value=2, unit="months")
 
     async def test_legacy_int_roll_offset_reads_as_days(self, capture_client):
@@ -533,40 +515,45 @@ class TestPortfolioOptionStreamRollFields:
         from tcg.core.api._models_options import RollOffset
 
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "roll_offset": 7}
-        await self._equity(client, leg)
+        leg = {**self.OPT_LEVEL_LEG, "roll_offset": 7}
+        await self._tracking_values(client, leg)
         assert captured["ref"].roll_offset == RollOffset(value=7, unit="days")
 
     async def test_defaults_when_absent(self, capture_client):
         from tcg.core.api._models_options import RollOffset
 
         client, captured = capture_client
-        await self._equity(client, OPT_MID_LEG)
+        await self._tracking_values(client, self.OPT_LEVEL_LEG)
         assert not hasattr(captured["ref"], "adjustment")
         assert captured["ref"].roll_offset == RollOffset()
 
     async def test_stray_adjustment_does_not_change_series(self, capture_client):
-        """A stray ``adjustment`` leg key must NOT change the equity curve —
-        option streams are raw stitched mids, so the field is inert."""
+        """A stray ``adjustment`` leg key must NOT change the resolved series —
+        option streams are raw stitched values, so the field is inert."""
         client, _captured = capture_client
-        eq_default = await self._equity(client, OPT_MID_LEG)
-        eq_stray = await self._equity(client, {**OPT_MID_LEG, "adjustment": "ratio"})
-        assert eq_default == eq_stray
+        v_default = await self._tracking_values(client, self.OPT_LEVEL_LEG)
+        v_stray = await self._tracking_values(
+            client, {**self.OPT_LEVEL_LEG, "adjustment": "ratio"}
+        )
+        assert v_default == v_stray
 
     async def test_roll_offset_series_differs_from_default(self, capture_client):
         client, _captured = capture_client
-        eq_default = await self._equity(client, OPT_MID_LEG)
-        eq_rolled = await self._equity(
-            client, {**OPT_MID_LEG, "roll_offset": {"value": 7, "unit": "days"}}
+        v_default = await self._tracking_values(client, self.OPT_LEVEL_LEG)
+        v_rolled = await self._tracking_values(
+            client, {**self.OPT_LEVEL_LEG, "roll_offset": {"value": 7, "unit": "days"}}
         )
-        assert eq_default != eq_rolled
+        assert v_default != v_rolled
 
     async def test_roll_offset_days_out_of_range_rejected(self, capture_client):
         client, _captured = capture_client
         body = {
             "legs": {
                 "SPX": SPX_LEG,
-                "OPT": {**OPT_MID_LEG, "roll_offset": {"value": 31, "unit": "days"}},
+                "OPT": {
+                    **self.OPT_LEVEL_LEG,
+                    "roll_offset": {"value": 31, "unit": "days"},
+                },
             },
             "weights": {"SPX": 50, "OPT": 50},
             "rebalance": "none",
@@ -582,7 +569,10 @@ class TestPortfolioOptionStreamRollFields:
         body = {
             "legs": {
                 "SPX": SPX_LEG,
-                "OPT": {**OPT_MID_LEG, "roll_offset": {"value": 13, "unit": "months"}},
+                "OPT": {
+                    **self.OPT_LEVEL_LEG,
+                    "roll_offset": {"value": 13, "unit": "months"},
+                },
             },
             "weights": {"SPX": 50, "OPT": 50},
             "rebalance": "none",
@@ -600,7 +590,7 @@ class TestPortfolioOptionStreamRollFields:
         body = {
             "legs": {
                 "SPX": SPX_LEG,
-                "OPT": {**OPT_MID_LEG, "adjustment": "bogus"},
+                "OPT": {**self.OPT_LEVEL_LEG, "adjustment": "bogus"},
             },
             "weights": {"SPX": 50, "OPT": 50},
             "rebalance": "none",
@@ -618,8 +608,11 @@ class TestPortfolioOptionStreamRollFields:
         the OptionStreamRef (the monthly-hold roll trigger); there is no
         ``roll_schedule`` attribute on the ref any more."""
         client, captured = capture_client
-        leg = {**OPT_MID_LEG, "maturity": {"kind": "end_of_month", "offset_months": 1}}
-        await self._equity(client, leg)
+        leg = {
+            **self.OPT_LEVEL_LEG,
+            "maturity": {"kind": "end_of_month", "offset_months": 1},
+        }
+        await self._tracking_values(client, leg)
         assert captured["ref"].maturity.kind == "end_of_month"
         assert captured["ref"].maturity.offset_months == 1
         assert not hasattr(captured["ref"], "roll_schedule")

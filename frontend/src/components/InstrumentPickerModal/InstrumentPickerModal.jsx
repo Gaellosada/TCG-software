@@ -98,6 +98,10 @@ export default function InstrumentPickerModal({
   // rejects hold_between_rolls on a basket leg — multi-leg held books are
   // Phase-2), so a basket option leg never shows these controls.
   showOptionHoldControls = false,
+  // PORTFOLIO option price legs: hold-mode ON only (no toggle; the backend
+  // requires it). Forwarded to OptionStreamForm as ``holdRequired``. Never passed
+  // to the basket-leg sub-picker (basket held books are unsupported).
+  optionHoldRequired = false,
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -441,6 +445,7 @@ export default function InstrumentPickerModal({
                     onChange={setOptionStreamValue}
                     availableRoots={optionRoots}
                     showHoldControls={showOptionHoldControls}
+                    holdRequired={optionHoldRequired}
                     {...(optionStreamAllowedStreams
                       ? { allowedStreams: optionStreamAllowedStreams }
                       : {})}

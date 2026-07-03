@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useId, useEffect } from 'react';
+import { useMemo, useCallback, useId, useEffect, useRef } from 'react';
 import styles from './OptionStreamForm.module.css';
 
 /**
@@ -226,6 +226,11 @@ export default function OptionStreamForm({
   // rolls and books fixed-contract dollar P&L instead of a %-return (which
   // explodes as a held premium decays toward zero).
   showHoldControls = false,
+  // PORTFOLIO option price legs: hold-mode is ON ONLY (the backend REQUIRES it —
+  // a rolled option's daily-reselect %-return is not a valid equity series). When
+  // set: render NO on/off toggle; force hold on + default cycle 'M' once, and
+  // always show the nav_times input + a wipeout hint. Signals keep the toggle.
+  holdRequired = false,
 }) {
   // Per-instance stable id used to scope the option-type radio group's
   // `name` attribute.  Without this, two simultaneously-mounted forms
@@ -268,6 +273,21 @@ export default function OptionStreamForm({
     }
     // Re-run when the restriction or current stream changes.
   }, [singleStream, allowedStreams, v, onChange]);
+
+  // PORTFOLIO hold-required flow: option price legs are ALWAYS held (no toggle).
+  // One-shot on mount — force hold on + default the cycle to 'M' (the backend's
+  // expand_cycle broadens 'M' to the monthly 3rd-Friday series, which reproduces a
+  // monthly option roll). One-shot so the user can still change the cycle after;
+  // hold stays on (there is no control to turn it off, and the backend rejects off).
+  const heldInit = useRef(false);
+  useEffect(() => {
+    if (!holdRequired || heldInit.current) return;
+    heldInit.current = true;
+    const patch = {};
+    if (!v.hold_between_rolls) patch.hold_between_rolls = true;
+    if (v.cycle == null || v.cycle === 'W3 Friday') patch.cycle = 'M';
+    if (Object.keys(patch).length) onChange({ ...v, ...patch });
+  }, [holdRequired, v, onChange]);
 
   const setRoot = useCallback((collection) => emit({ collection }), [emit]);
 
@@ -699,7 +719,41 @@ export default function OptionStreamForm({
           off NAV at each roll) instead of a %-return that explodes as a held
           premium decays.  nav_times (the premium-notional SIZE) shows only when
           hold is on; direction stays the block weight sign. */}
-      {showHoldControls && (
+      {holdRequired ? (
+        /* PORTFOLIO option price leg: hold ON only — no on/off toggle. Static
+           note + always-visible nav_times + wipeout hint. The backend REQUIRES
+           hold for an option price leg (mid/bs_mid), so there is no valid "off". */
+        <label className={styles.row}>
+          <span className={styles.label}>Backtest P&amp;L</span>
+          <div className={styles.subgroup}>
+            <span className={styles.fieldInline} data-testid="hold-required-note">
+              Held between rolls — fixed-contract $-P&amp;L (required for option legs)
+            </span>
+            <label
+              className={styles.fieldInline}
+              title="Premium-notional multiple: the held quantity at each roll = nav_times × NAV_at_roll / premium_at_roll. Direction is the leg's long/short weight sign."
+            >
+              Notional × (nav_times)
+              <input
+                type="number"
+                className={styles.input}
+                min={0}
+                step="any"
+                value={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
+                onChange={(e) => setNavTimes(e.target.value)}
+                disabled={disabled}
+                aria-label="Notional multiple (nav_times)"
+                data-testid="nav-times"
+              />
+            </label>
+            <span data-testid="nav-hint" style={{ fontSize: '0.85em', opacity: 0.8 }}>
+              A short/naked option at full notional can wipe out (a 10Δ put premium
+              can triple on a selloff → &gt;100% loss). Use a small nav_times to size
+              the premium notional.
+            </span>
+          </div>
+        </label>
+      ) : showHoldControls ? (
         <label className={styles.row}>
           <span className={styles.label}>Backtest P&amp;L</span>
           <div className={styles.subgroup}>
@@ -738,7 +792,7 @@ export default function OptionStreamForm({
             )}
           </div>
         </label>
-      )}
+      ) : null}
 
       {validation && (
         <div
