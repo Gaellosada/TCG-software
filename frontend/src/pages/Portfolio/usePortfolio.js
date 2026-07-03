@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { queryKeys } from '../../queryKeys';
-import { formatDateInt } from '../../utils/format';
+import { formatDateInt, defaultDateRange } from '../../utils/format';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { fetchSignalLegRange } from './signalLegRange';
@@ -150,6 +150,13 @@ export default function usePortfolio() {
         } else {
           setOverlapRange(null);
         }
+      } else if (legs.some((l) => l.type === 'option_stream')) {
+        // No priced leg to anchor on, but an option_stream leg needs an
+        // explicit window. Seed the platform-standard 5-year default so the
+        // slider has concrete min/max (PortfolioPage binds them to
+        // overlapRange) and Compute can resolve the option leg without a
+        // manual drag.
+        setOverlapRange(defaultDateRange());
       } else {
         setOverlapRange(null);
       }
@@ -186,10 +193,11 @@ export default function usePortfolio() {
           maturity: leg.maturity || null,
           selection: leg.selection || null,
           stream: leg.stream || null,
-          // option_stream roll offset (snake_case — matches OptionStreamForm's
-          // emitted field + the OptionStreamRef wire field; distinct from the
-          // futures leg's camelCase `rollOffset` above). null for non-option
-          // legs. `adjustment` above is shared with the continuous leg.
+          // option_stream roll offset — the unified {value, unit} object
+          // (snake_case, matches OptionStreamForm + the OptionStreamRef wire
+          // field; distinct from the futures leg's camelCase `rollOffset`).
+          // null for non-option legs. ("End of month" is the maturity, not a
+          // separate roll_schedule — that field was removed.)
           roll_offset: leg.roll_offset ?? null,
         },
       ];
@@ -301,9 +309,20 @@ export default function usePortfolio() {
       return;
     }
 
-    // Option stream legs require explicit dates (the backend can't infer range)
+    // Effective compute window: an explicit slider selection takes priority;
+    // otherwise fall back to the available range (the overlap of the priced
+    // legs, or the 5-year default seeded for option-only portfolios). This
+    // lets an option leg resolve over the portfolio's available window without
+    // forcing a manual slider drag — the slider already renders '' as the full
+    // range, so the request now matches what the user sees.
+    const effectiveStart = startDate || overlapRange?.start;
+    const effectiveEnd = endDate || overlapRange?.end;
+
+    // Option stream legs require an explicit window (the backend can't infer
+    // their date range). With the fallback above this is normally satisfied;
+    // the guard remains as a safety net (e.g. ranges not yet settled).
     const hasOptionStreamLegs = legs.some((l) => l.type === 'option_stream');
-    if (hasOptionStreamLegs && (!startDate || !endDate)) {
+    if (hasOptionStreamLegs && (!effectiveStart || !effectiveEnd)) {
       setError('Option stream legs require explicit start and end dates. Please set a date range.');
       return;
     }
@@ -332,12 +351,17 @@ export default function usePortfolio() {
           selection: leg.selection,
           stream: leg.stream,
         };
-        // Additive roll_offset — omit when at its default (0) to keep the
-        // request body minimal (the BE defaults roll_offset=0).  Option streams
-        // carry NO back-adjustment, so no `adjustment` is sent (unlike the
-        // continuous leg below).
-        if (leg.roll_offset > 0) {
-          apiLegs[leg.label].roll_offset = leg.roll_offset;
+        // Roll offset is the unified {value, unit} object — send it only when
+        // its value is non-zero (omit the no-op to keep the body minimal; the
+        // BE defaults to value 0). Option streams carry NO back-adjustment, so
+        // no `adjustment` is sent. ("End of month" is the maturity, not a
+        // separate roll_schedule — that field was removed.)
+        const ro = leg.roll_offset;
+        if (ro && typeof ro === 'object' && ro.value > 0) {
+          apiLegs[leg.label].roll_offset = { value: ro.value, unit: ro.unit || 'days' };
+        } else if (typeof ro === 'number' && ro > 0) {
+          // Legacy in-memory int (days) — forward in the unified shape.
+          apiLegs[leg.label].roll_offset = { value: ro, unit: 'days' };
         }
       } else if (leg.type === 'continuous') {
         apiLegs[leg.label] = {
@@ -374,8 +398,8 @@ export default function usePortfolio() {
           weights: apiWeights,
           rebalance,
           returnType: 'normal',
-          start: startDate || undefined,
-          end: endDate || undefined,
+          start: effectiveStart || undefined,
+          end: effectiveEnd || undefined,
           signal,
         });
         if (!signal.aborted) {
@@ -386,7 +410,7 @@ export default function usePortfolio() {
         setError(err.message || 'Computation failed');
       }
     });
-  }, [legs, rebalance, startDate, endDate, runAbortable]);
+  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable]);
 
   const clearError = useCallback(() => setError(null), []);
 

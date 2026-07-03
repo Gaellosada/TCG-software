@@ -14,12 +14,15 @@ import AddHoldingModal from './AddHoldingModal';
 afterEach(cleanup);
 
 // Mock the picker so a click invokes its onSelect with a chosen instrument.
-// The captured `onSelect` is the contract AddHoldingModal wires up.
+// The captured `onSelect` is the contract AddHoldingModal wires up; the
+// captured props let us assert the option-stream restriction is threaded.
 let capturedOnSelect = null;
+let capturedPickerProps = null;
 vi.mock('../../components/InstrumentPickerModal/InstrumentPickerModal', () => ({
   // eslint-disable-next-line react/prop-types
-  default: ({ onSelect }) => {
-    capturedOnSelect = onSelect;
+  default: (props) => {
+    capturedOnSelect = props.onSelect;
+    capturedPickerProps = props;
     return <div data-testid="picker-stub" />;
   },
 }));
@@ -59,6 +62,15 @@ describe('AddHoldingModal — option_stream leg mapping', () => {
     });
     expect('adjustment' in leg).toBe(false);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('restricts the picker option leg to the mid (price) stream', () => {
+    // Issue #2 (D1): a portfolio option leg is the option PRICE only. The modal
+    // must tell the picker to pin the option stream to mid (hiding the Series
+    // selector); iv/greeks/volume are signal-level operands, not portfolio legs.
+    renderModal();
+    expect(capturedPickerProps).not.toBeNull();
+    expect(capturedPickerProps.optionStreamAllowedStreams).toEqual(['mid']);
   });
 
   it('passes through a default roll_offset (0) and never adds adjustment', () => {

@@ -48,7 +48,11 @@ _log = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from tcg.core.api._models_options import MaturityRule, SelectionCriterion
+from tcg.core.api._models_options import (
+    MaturityRule,
+    RollOffset,
+    SelectionCriterion,
+)
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.persistence import (
     ConcurrentUpdateError,
@@ -526,17 +530,27 @@ class _OptionStreamRefLocal(BaseModel):
     # NOTE: option streams carry NO back-adjustment (ratio/difference are
     # ill-posed for option premia), so — unlike the continuous mirror — there is
     # no ``adjustment`` field.  Baskets persisted before this change still carry
-    # an ``adjustment`` key in their JSONB; ``_drop_legacy_adjustment`` strips it
+    # an ``adjustment`` key in their JSONB; ``_drop_legacy_fields`` strips it
     # before validation so ``extra="forbid"`` does not reject those reads.
-    roll_offset: int = Field(default=0, ge=0, le=30)
+    #
+    # ``roll_offset`` is the unified ``RollOffset`` ``{value, unit:days|months}``;
+    # a persisted bare int (the old days-only field) is coerced to
+    # ``{value:int, unit:'days'}`` by the model's read-shim.
+    roll_offset: RollOffset = Field(default_factory=RollOffset)
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_legacy_adjustment(cls, data: object) -> object:
-        # Tolerate (and discard) a legacy ``adjustment`` key on persisted
-        # option legs without weakening ``extra="forbid"`` for any other field.
-        if isinstance(data, dict) and "adjustment" in data:
-            data = {k: v for k, v in data.items() if k != "adjustment"}
+    def _drop_legacy_fields(cls, data: object) -> object:
+        # Tolerate (and discard) legacy keys on persisted option legs without
+        # weakening ``extra="forbid"`` for any other field:
+        #   * ``adjustment`` — option streams never had back-adjustment.
+        #   * ``roll_schedule`` — the short-lived #3 cadence field (unreleased,
+        #     superseded by the EndOfMonth maturity); strip if a test-era basket
+        #     persisted it.
+        if isinstance(data, dict):
+            drop = {"adjustment", "roll_schedule"}
+            if drop & data.keys():
+                data = {k: v for k, v in data.items() if k not in drop}
         return data
 
     @field_validator("cycle", mode="before")

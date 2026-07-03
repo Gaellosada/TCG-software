@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from typing import Callable, Literal
@@ -11,10 +12,11 @@ import numpy as np
 import numpy.typing as npt
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import ValidationError as PydanticValidationError
 
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import OptionStreamLabel, OptionStreamRef
-from tcg.core.api._models_options import MaturityRule, SelectionCriterion
+from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
 from tcg.core.api._options_materialise import (
     PRICE_LIKE_STREAMS,
     materialise_option_streams,
@@ -147,9 +149,13 @@ class LegSpec(BaseModel):
     # a legacy value on a persisted option leg is accepted and has no effect.
     adjustment: str | None = None
     cycle: str | None = None  # Optional for "continuous" and "option_stream"
-    # Optional for "continuous" AND "option_stream" (days before expiration to
-    # roll early); range 0..30, default 0.
-    roll_offset: int | None = None
+    # Roll-early offset.  "continuous" (futures) uses a bare int = DAYS (0..30).
+    # "option_stream" uses the unified ``RollOffset`` ``{value, unit:days|months}``
+    # — though a bare int is still accepted for it and read as days (legacy
+    # shim).  None = no shift.  ("Roll at end of month" for options is the
+    # EndOfMonth maturity, not a roll value — the former ``roll_schedule`` field
+    # was removed.)
+    roll_offset: int | RollOffset | None = None
     signal_spec: SignalLegSpec | None = None  # Required for "signal"
     # Option-stream fields (required when type == "option_stream")
     option_type: Literal["C", "P"] | None = None
@@ -271,13 +277,26 @@ def _parse_legs(
                         f"Must be one of: {', '.join(e.value for e in AdjustmentMethod)}"
                     )
 
+            # Continuous (futures) legs roll in DAYS only. Accept a bare int or a
+            # RollOffset with unit='days'; reject months (futures EOM is the
+            # separate RollStrategy.END_OF_MONTH, not a roll-offset unit).
             roll_offset_days = 0
             if leg.roll_offset is not None:
-                if not (0 <= leg.roll_offset <= 30):
+                if isinstance(leg.roll_offset, RollOffset):
+                    if leg.roll_offset.unit != "days":
+                        raise ValidationError(
+                            f"Leg '{label}': continuous legs only support a "
+                            f"roll_offset in days, got unit "
+                            f"{leg.roll_offset.unit!r}"
+                        )
+                    raw_days = leg.roll_offset.value
+                else:
+                    raw_days = leg.roll_offset
+                if not (0 <= raw_days <= 30):
                     raise ValidationError(
                         f"Leg '{label}': roll_offset must be between 0 and 30"
                     )
-                roll_offset_days = leg.roll_offset
+                roll_offset_days = raw_days
 
             legs_spec[label] = ContinuousLegSpec(
                 collection=leg.collection,
@@ -472,6 +491,60 @@ def _compute_level_metrics(values: npt.NDArray[np.float64]) -> dict:
     }
 
 
+# Actionable hint per dominant per-date diagnostic code, appended to the
+# all-NaN option-leg error so the user learns WHY and what to change.
+_DIAGNOSTIC_HINTS: dict[str, str] = {
+    "missing_delta_no_compute": (
+        "no stored greeks/deltas over this range — By Delta needs stored deltas; "
+        "use By Moneyness or By Strike, or pick a date range that has greeks"
+    ),
+    "missing_mid": (
+        "no valid bid/ask quotes (mid needs both bid and ask > 0) on these dates — "
+        "quotes may be too sparse for this contract"
+    ),
+    "no_chain_for_date": (
+        "the targeted expiration is not listed for this root on these dates"
+    ),
+    "maturity_resolution_failed": (
+        "the maturity rule could not be resolved on these dates "
+        "(check the rule's parameters)"
+    ),
+    "no_match_within_tolerance": (
+        "no contract within the delta tolerance — widen the tolerance or "
+        "disable strict matching"
+    ),
+    "past_last_trade_date": (
+        "the requested dates are past this root's last trade date"
+    ),
+    "missing_underlying_price": (
+        "no underlying price available to evaluate moneyness on these dates"
+    ),
+}
+
+
+def _diagnostic_hint(diagnostics: list[str | None] | None) -> str:
+    """Summarise the per-date ``error_codes`` into an actionable suffix.
+
+    Returns a string beginning with ``"; "`` (so it appends cleanly to the
+    base all-NaN message) naming the dominant failure code and an actionable
+    hint, or ``""`` when there is nothing useful to add.  ``snapped_to:*``
+    notes are informational (a successful substitution), not failures, so they
+    are excluded from the cause tally.
+    """
+    if not diagnostics:
+        return ""
+    causes = Counter(
+        c for c in diagnostics if c is not None and not c.startswith("snapped_to:")
+    )
+    if not causes:
+        return ""
+    dominant, count = causes.most_common(1)[0]
+    total = sum(causes.values())
+    hint = _DIAGNOSTIC_HINTS.get(dominant)
+    detail = f" — {hint}" if hint else ""
+    return f"; dominant cause: {dominant} ({count}/{total} dates){detail}"
+
+
 async def _evaluate_option_stream_leg(
     label: str,
     leg: LegSpec,
@@ -496,23 +569,24 @@ async def _evaluate_option_stream_leg(
     #    Option streams carry NO back-adjustment (ratio/difference are ill-posed
     #    for option premia), so ``leg.adjustment`` is ignored on this path — the
     #    shared ``LegSpec.adjustment`` field applies only to continuous legs.
-    roll_offset = 0
-    if leg.roll_offset is not None:
-        if not (0 <= leg.roll_offset <= 30):
-            raise ValidationError(
-                f"Leg '{label}': roll_offset must be between 0 and 30"
-            )
-        roll_offset = leg.roll_offset
-    ref = OptionStreamRef(
-        type="option_stream",
-        collection=leg.collection,
-        option_type=leg.option_type,
-        cycle=leg.cycle,
-        maturity=leg.maturity,
-        selection=leg.selection,
-        stream=leg.stream,
-        roll_offset=roll_offset,
-    )
+    # ``roll_offset`` is the unified {value, unit} (a bare int reads as days).
+    # OptionStreamRef's RollOffset model validates the per-unit range and raises
+    # a structured error; default a missing value to the no-op.  ("end of month"
+    # is the EndOfMonth maturity, not a roll value — no roll_schedule here.)
+    roll_offset = RollOffset() if leg.roll_offset is None else leg.roll_offset
+    try:
+        ref = OptionStreamRef(
+            type="option_stream",
+            collection=leg.collection,
+            option_type=leg.option_type,
+            cycle=leg.cycle,
+            maturity=leg.maturity,
+            selection=leg.selection,
+            stream=leg.stream,
+            roll_offset=roll_offset,
+        )
+    except PydanticValidationError as exc:
+        raise ValidationError(f"Leg '{label}': {exc}") from exc
 
     # 2. Materialise via shared infrastructure
     result = await materialise_option_streams(
@@ -524,7 +598,7 @@ async def _evaluate_option_stream_leg(
     if isinstance(result, str):
         raise ValidationError(f"Leg '{label}': {result}")
 
-    dates_arr, values, _diagnostics, _contracts = result["_leg"]
+    dates_arr, values, diagnostics, _contracts = result["_leg"]
 
     # 3. Determine stream mode
     stream_mode = "price" if leg.stream in PRICE_LIKE_STREAMS else "level"
@@ -533,7 +607,14 @@ async def _evaluate_option_stream_leg(
     if stream_mode == "price":
         nan_mask = np.isnan(values)
         if nan_mask.all():
-            raise ValidationError(f"Leg '{label}': all option stream values are NaN")
+            # Fold the per-date diagnostics (the resolver's ``error_codes``)
+            # into the message so the all-NaN failure is actionable instead of
+            # blunt.  ``snapped_to:*`` notes are informational, not failures —
+            # exclude them from the cause tally.
+            raise ValidationError(
+                f"Leg '{label}': all option stream values are NaN"
+                f"{_diagnostic_hint(diagnostics)}"
+            )
         # Forward fill
         for i in range(1, len(values)):
             if nan_mask[i]:
@@ -724,8 +805,9 @@ async def compute_portfolio(
 
     if len(common_dates) == 0:
         raise ValidationError(
-            "No overlapping dates across all legs — "
-            "instrument and signal date ranges are disjoint"
+            "No overlapping dates across all legs — the instrument, signal, "
+            "and option date ranges are disjoint (an option leg's available "
+            "dates often differ from the spot/continuous legs')"
         )
 
     # Slice instrument closes to common dates

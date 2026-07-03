@@ -355,6 +355,43 @@ class SqlInstrumentReader:
                 f"(expiration={expiration_int}): {exc}"
             ) from exc
 
+    async def find_front_contract_on_or_after(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the ``symbol`` of the FRONT contract in *collection* — the one
+        with the smallest ``expiration`` that is >= *expiration_int* (YYYYMMDD
+        integer) — or ``None`` when none expires on/after that date.
+
+        Used by the option-on-future underlying resolver: index/commodity futures
+        are quarterly while options also list serial months + weeklies, so a
+        serial/weekly option settles against the FRONT quarterly future (nearest
+        expiration >= the option's).  ``ORDER BY expiration ASC LIMIT 1`` selects
+        it; ``symbol`` tie-breaks a (hypothetical) same-expiration duplicate
+        deterministically.
+        """
+        try:
+            exp_date = int_to_date(expiration_int)
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT symbol FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s AND expiration >= %s
+                            ORDER BY expiration ASC, symbol ASC
+                            LIMIT 1""",
+                        (collection, exp_date),
+                    )
+                    row = await cur.fetchone()
+                    return row["symbol"] if row else None
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"SQL error finding front contract on/after expiration in "
+                f"'{collection}' (expiration={expiration_int}): {exc}"
+            ) from exc
+
     async def fetch_available_cycles(self, collection: str) -> list[str]:
         """Return distinct non-empty ``expiration_cycle`` values for a collection."""
         try:

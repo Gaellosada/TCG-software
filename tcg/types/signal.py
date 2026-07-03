@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from tcg.types.options import MaturitySpec, SelectionCriterion
+from tcg.types.options import MaturitySpec, RollOffset, SelectionCriterion
 
 
 # ---------------------------------------------------------------------------
@@ -61,15 +61,23 @@ class InstrumentContinuous:
     adjustment: Literal["none", "ratio", "difference"] = "none"
     cycle: str | None = None  # e.g. "HMUZ" quarterly
     roll_offset: int = 0
-    strategy: Literal["front_month"] = "front_month"
+    # Issue #3: ``end_of_month`` rolls on the last trading day of each month
+    # regardless of expiry; default ``front_month`` keeps existing specs valid.
+    strategy: Literal["front_month", "end_of_month"] = "front_month"
     kind: Literal["continuous"] = "continuous"
 
 
 # Streams readable off a single option contract row.  Mirrors the engine
 # ``StreamLabel`` and the API ``OptionStreamLabel`` — redeclared here so
 # the types layer has no dependency on engine or core.
+#
+# ``bs_mid`` is a COMPUTED premium (not a row field): the contract's Black-76
+# theoretical price from its stored IV + the underlying FUTURE price (the Java
+# sim's price basis), intrinsic at expiry.  Like ``mid`` it is a price-like
+# premium (usable as a P&L series), unlike the iv/greek/volume LEVEL streams.
 OptionStreamLabel = Literal[
     "mid",
+    "bs_mid",
     "iv",
     "delta",
     "gamma",
@@ -97,16 +105,38 @@ class InstrumentOptionStream:
     maturity: MaturitySpec
     selection: SelectionCriterion
     stream: OptionStreamLabel
-    # Roll offset for the rolled stream, mirroring :class:`InstrumentContinuous`
-    # (futures convention).  Additive, defaults ``0`` so existing specs are
-    # unchanged.  ``roll_offset`` resolves the maturity rule as of
-    # ``date + roll_offset`` so every roll happens that many calendar days
-    # earlier.  See ``stream_resolver.resolve_option_stream``.
+    # Roll offset — the ROLL-EARLY axis: ``RollOffset(value, unit='days'|'months')``.
+    # The resolver evaluates the maturity rule as of ``date + offset`` so every
+    # roll fires that much earlier.  Default ``RollOffset()`` (value 0) = no shift.
+    # DISTINCT from the maturity's ``offset_months`` (TARGET-month axis).
     #
-    # NOTE: unlike :class:`InstrumentContinuous` (futures), option streams carry
-    # NO back-adjustment — ratio/difference are conceptually ill-posed for option
-    # premia, so the series is always the raw stitched stream.
-    roll_offset: int = 0
+    # NOTE: "roll at end of month" is the ``EndOfMonth`` maturity (which makes the
+    # resolver hold one contract per month), NOT a roll-offset value — the former
+    # separate ``roll_schedule`` field was removed.  And unlike
+    # :class:`InstrumentContinuous` (futures), option streams carry NO
+    # back-adjustment (the series is always the raw stitched stream).
+    roll_offset: RollOffset = field(default_factory=RollOffset)
+    # SELECT-AND-HOLD (default False = current daily-reselect behaviour).  When
+    # True, the series resolver picks the contract ONCE per maturity roll, HOLDS
+    # it between rolls, and emits the per-date HELD-CONTRACT PREMIUM (mid) LEVEL +
+    # roll info; signal_exec then runs the FIXED-CONTRACT DOLLAR-P&L recurrence
+    # (size a held quantity once per roll off the compounding NAV and the roll
+    # premium, book qty·Δpremium daily, realise+resize at the next roll — the
+    # ground-truth Java sim, oracle-exact).  NOT a stitched level / no option
+    # ratio-adjust.  Fixes the meaningless P&L a ByDelta/ByMoneyness option signal
+    # otherwise gets (option %-returns EXPLODE as a held premium decays toward 0).
+    # The correct mode for backtesting a delta-selected option; the default stays
+    # the raw daily-reselect mid LEVEL (Data-page/chart display).
+    hold_between_rolls: bool = False
+    # PREMIUM-NOTIONAL MULTIPLE for the fixed-contract dollar-P&L sizing (hold mode
+    # only).  The held quantity at each roll is ``nav_times · NAV_at_roll /
+    # premium_at_roll`` (the Java ``AllocationProcessNavTimes`` multiple), so
+    # nav_times is the size and the DIRECTION (long/short) comes from the block
+    # WEIGHT SIGN as usual.  nav_times can exceed 1 (leverage on the premium
+    # notional), which the weight ∈ [-100, 100] cannot express — that is why it is
+    # a separate field.  Ignored when ``hold_between_rolls`` is False (the default
+    # daily-reselect / display path takes the ordinary weight-only price return).
+    nav_times: float = 1.0
     kind: Literal["option_stream"] = "option_stream"
 
 
@@ -175,10 +205,26 @@ class Input:
     fully-configured source; an unconfigured input (missing collection
     or instrument_id, missing cycle/adjustment for continuous) is not
     runnable.
+
+    ``position_cap`` OPTIONALLY clamps this input's NET latched position
+    (the sum over every currently-latched entry block bound to this input
+    of ``sign(weight)·|weight|/100``) to ``(low, high)`` EACH BAR, in
+    FRACTION units (``+1.0`` == +100 % of capital, matching the position
+    array). It is the "long-or-flat / capped net exposure" control: two
+    OR-entry blocks each at +100 would otherwise stack to a net +2.0; with
+    ``position_cap=(0.0, 1.0)`` the net is clamped to +1.0 (long-or-flat).
+    The clamp is applied to the POSITION before the per-bar return is
+    computed, so ``contrib_step`` / ``realized_pnl`` / the compounded
+    equity curve all see the clamped exposure. ``None`` (the default) means
+    NO clamp — the historical uncapped summation (ruin-floor at 0 only),
+    BYTE-IDENTICAL to before. ``low`` may be negative (short-or-flat, e.g.
+    ``(-1.0, 0.0)``) and the range is inclusive; ``low <= high`` is required
+    (validated at the API layer, HTTP 400).
     """
 
     id: str
     instrument: InputInstrument
+    position_cap: tuple[float, float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +309,21 @@ class CrossCondition:
     rhs: Operand
     count: int = 1
     window: int = 1
+    # Count MODE for ``count``:
+    #   * ``"rolling"`` (default) — the trailing-``window`` count documented
+    #     above (byte-identical to the historical behaviour: with
+    #     ``count=1, window=1`` this is the single-bar crossover pulse).
+    #   * ``"since_reset"`` — CUMULATIVE count of same-direction crossings SINCE
+    #     the last reset, firing as an IMPULSE on exactly the ``count``-th
+    #     crossing bar, then re-arming. The counter resets to 0 whenever the
+    #     OWNING block's bound reset block (``Block.requires_reset_block_id``)
+    #     FIRES (a reset-block firing bar, i.e. ``reset_truth & ~reset_nan``).
+    #     ``window`` is IGNORED in this mode (the count is cumulative-since-reset,
+    #     not windowed). Used to express an absolute reset-on-exit LADDER (fire on
+    #     the Nth crossing since the ladder was last reset). When the block carries
+    #     NO ``requires_reset_block_id`` the counter simply never resets (cumulative
+    #     from bar 0). Default ``"rolling"`` reproduces today's behaviour exactly.
+    count_mode: Literal["rolling", "since_reset"] = "rolling"
 
 
 @dataclass(frozen=True)

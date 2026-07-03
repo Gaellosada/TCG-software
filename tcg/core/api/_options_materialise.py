@@ -26,7 +26,7 @@ from tcg.core.api._options_wiring import build_stream_resolver_wiring
 from tcg.data._utils import date_to_int
 from tcg.data.protocols import MarketDataService
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
-from tcg.types.options import OptionContractDoc
+from tcg.types.options import OptionContractDoc, expand_cycle
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +127,29 @@ async def materialise_option_streams(
     from tcg.core.api.options import (
         _criterion_pydantic_to_dataclass,
         _maturity_pydantic_to_dataclass,
+        _roll_offset_pydantic_to_dataclass,
     )
 
     trade_dates = _business_dates_in_range(start_date, end_date)
     if not trade_dates:
         return "option_stream requires explicit ISO 'start' and 'end' dates"
 
+    # Pass the resolve window so the futures adapter memoizes the underlying: one
+    # ranged fetch per distinct future over the window instead of one single-date
+    # fetch per trade date (the ByMoneyness/ByDelta Phase-C N+1).  Result-invariant.
+    # trade_dates is non-empty here, so the window spans every date we look up.
+    _prefetch = (trade_dates[0], trade_dates[-1])
     chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
-        svc
+        svc, underlying_prefetch_window=_prefetch
     )
+
+    # Process-wide dwh-pool concurrency gate: streams here resolve sequentially,
+    # but OTHER requests (basket series, a second chart panel) may resolve
+    # concurrently against the SAME 4-slot pool — the shared gate bounds the SUM
+    # so the pool is never over-subscribed (see _options_concurrency).
+    from tcg.core.api._options_concurrency import get_dwh_concurrency_gate
+
+    gate = get_dwh_concurrency_gate()
 
     results: dict[
         str,
@@ -152,26 +166,33 @@ async def materialise_option_streams(
         # types / cycles, causing the bulk resolver to pick expirations
         # that had no matching contracts -- empty chains -> spurious NaN
         # holes.
+        #
+        # ``expand_cycle`` broadens the "Monthly" filter ('M') to the full
+        # 3rd-Friday series ({'M','W3 Friday'}) so an option-stream series tracks
+        # the real monthly across eras (see expand_cycle); the same expanded value
+        # feeds the expiration list AND the chain fetch.  Other cycles unchanged.
+        _cycle = expand_cycle(ref.cycle)
         all_expirations = await svc.list_option_expirations_filtered(
             ref.collection,
             option_type=ref.option_type,
-            cycle=ref.cycle,
+            cycle=_cycle,
         )
         values, diagnostics, contracts = await resolve_option_stream(
             dates=trade_dates,
             collection=ref.collection,
             option_type=ref.option_type,
-            cycle=ref.cycle,
+            cycle=_cycle,
             maturity=_maturity_pydantic_to_dataclass(ref.maturity),
             selection=_criterion_pydantic_to_dataclass(ref.selection),
             stream=ref.stream,
-            roll_offset=ref.roll_offset,
+            roll_offset=_roll_offset_pydantic_to_dataclass(ref.roll_offset),
             chain_reader=chain_reader,
             maturity_resolver=mat_resolver,
             underlying_price_resolver=ul_resolver,
             progress_callback=progress_callback,
             bulk_chain_reader=bulk_reader,
             available_expirations=all_expirations,
+            concurrency_gate=gate,
         )
         dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
         results[label] = (dates_arr, values, diagnostics, contracts)

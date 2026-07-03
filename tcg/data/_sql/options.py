@@ -73,6 +73,33 @@ _COIN_USD_BY_COLLECTION: dict[str, str] = {
 }
 
 
+def _cycle_predicate(
+    expiration_cycle: "str | Sequence[str] | None",
+) -> tuple[str | None, Any]:
+    """Build the ``expiration_cycle`` WHERE fragment + bound value.
+
+    A SCALAR (or ``None``) preserves the historical single-equality binding
+    exactly — ``("expiration_cycle = %s", "M")`` — so existing callers/tests are
+    byte-identical.  A SEQUENCE (the monthly 3rd-Friday series expands to two
+    tags, see :func:`tcg.types.options.expand_cycle`) binds a list via
+    ``= ANY(%s)`` so all its tags match in one query.  Returns ``(None, None)``
+    when no cycle filter applies.
+
+    A str is a ``Sequence[str]`` too, so the scalar test comes first.
+    """
+    if expiration_cycle is None:
+        return None, None
+    if isinstance(expiration_cycle, str):
+        return "expiration_cycle = %s", expiration_cycle
+    tags = list(expiration_cycle)
+    if not tags:
+        return None, None
+    if len(tags) == 1:
+        # Collapse a 1-element sequence to the scalar form (identical SQL/bind).
+        return "expiration_cycle = %s", tags[0]
+    return "expiration_cycle = ANY(%s)", tags
+
+
 def _display_name(collection: str) -> str:
     if collection in _ROOT_DISPLAY_NAMES:
         return _ROOT_DISPLAY_NAMES[collection]
@@ -215,7 +242,7 @@ class SqlOptionsDataReader:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
-        expiration_cycle: str | None = None,
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         """One-day chain (one row per contract active that day).
 
@@ -253,9 +280,10 @@ class SqlOptionsDataReader:
             if strike_max is not None:
                 dim_where.append("strike <= %s")
                 params.append(float(strike_max))
-            if expiration_cycle is not None:
-                dim_where.append("expiration_cycle = %s")
-                params.append(expiration_cycle)
+            _cycle_frag, _cycle_val = _cycle_predicate(expiration_cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                params.append(_cycle_val)
 
             # Three positional %s for the date appear AFTER the dim filters:
             # one in each fact join's ON, then the trade_date for partition
@@ -319,7 +347,7 @@ class SqlOptionsDataReader:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
-        expiration_cycle: str | None = None,
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         """Multi-date chain in ONE query (drop-in for the roll resolver).
 
@@ -378,12 +406,31 @@ class SqlOptionsDataReader:
             if strike_max is not None:
                 dim_where.append("strike <= %s")
                 params.append(float(strike_max))
-            if expiration_cycle is not None:
-                dim_where.append("expiration_cycle = %s")
-                params.append(expiration_cycle)
+            _cycle_frag, _cycle_val = _cycle_predicate(expiration_cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                params.append(_cycle_val)
 
-            # The date list is bound twice (once per fact in the key-set
-            # UNION); both reference the same Python list object.
+            # Partition-pruning bound (CRITICAL): the fact tables are RANGE-
+            # partitioned by ``trade_date`` (yearly, 1980..2050).  The LEFT JOINs
+            # match ``p.trade_date = k.trade_date`` where ``k.trade_date`` is a
+            # RUNTIME value from the ``keyset`` CTE — the planner cannot prune on a
+            # runtime value, so without help it fans the join out across ALL ~71
+            # yearly partitions of BOTH facts (~142 partition scans + locks per
+            # call; EXPLAIN-confirmed planning 34ms and a 60s statement_timeout
+            # blow-out under a cold cache → the OPT_SP_500 PoolTimeout).  Adding a
+            # REDUNDANT CONSTANT ``trade_date BETWEEN <min> AND <max>`` on each join
+            # gives the planner a plan-time range to prune on (collapsing to just
+            # the spanned year partitions); ``= k.trade_date`` keeps correctness.
+            # The bound is redundant — every row matching ``= k.trade_date`` already
+            # lies within [min, max] — so the result is byte-identical (verified on
+            # live dwh: rows identical, partitions 142→2, exec 98ms→10ms).  This is
+            # the same constant-pushdown ``query_chain`` relies on (see :237).
+            date_lo, date_hi = min(date_list), max(date_list)
+
+            # The date list is bound twice (once per fact in the key-set UNION);
+            # both reference the same Python list object.  The (lo, hi) pair is
+            # bound once per fact LEFT JOIN.
             sql = f"""
                 WITH ids AS (
                     SELECT instrument_id, symbol AS option_symbol, root_symbol,
@@ -416,12 +463,14 @@ class SqlOptionsDataReader:
                 LEFT JOIN {SCHEMA}.fact_price_eod p
                        ON p.instrument_id = k.instrument_id
                       AND p.trade_date = k.trade_date
+                      AND p.trade_date BETWEEN %s AND %s
                 LEFT JOIN {SCHEMA}.fact_option_greeks g
                        ON g.instrument_id = k.instrument_id
                       AND g.trade_date = k.trade_date
+                      AND g.trade_date BETWEEN %s AND %s
                 ORDER BY k.trade_date, i.instrument_id
             """
-            params.extend([date_list, date_list])
+            params.extend([date_list, date_list, date_lo, date_hi, date_lo, date_hi])
 
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
@@ -531,18 +580,25 @@ class SqlOptionsDataReader:
         self,
         root: str,
         option_type: Literal["C", "P"] | None = None,
-        cycle: str | None = None,
+        cycle: str | Sequence[str] | None = None,
     ) -> list[date]:
-        """Distinct expirations on *root* filtered by type and/or cycle."""
+        """Distinct expirations on *root* filtered by type and/or cycle.
+
+        ``cycle`` accepts a scalar (single tag, byte-identical to before) or a
+        sequence of tags (the monthly 3rd-Friday series spans two — see
+        :func:`tcg.types.options.expand_cycle`); ``DISTINCT expiration`` de-dupes
+        a double-tagged expiration automatically.
+        """
         try:
             where = ["source_collection = %s", "expiration IS NOT NULL"]
             params: list[Any] = [root]
             if option_type is not None:
                 where.append("option_type = %s")
                 params.append(option_type.upper())
-            if cycle is not None:
-                where.append("expiration_cycle = %s")
-                params.append(cycle)
+            _cycle_frag, _cycle_val = _cycle_predicate(cycle)
+            if _cycle_frag is not None:
+                where.append(_cycle_frag)
+                params.append(_cycle_val)
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(

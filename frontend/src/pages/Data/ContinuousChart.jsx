@@ -16,6 +16,8 @@ function ContinuousChart({ collection }) {
   const [adjustment, setAdjustment] = useState('none');
   const [cycle, setCycle] = useState('');
   const [rollOffset, setRollOffset] = useState(2);
+  // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
+  const [strategy, setStrategy] = useState('front_month');
   const [chartType, setChartType] = useState(preference);
 
   // Sync local state when global preference changes
@@ -36,7 +38,7 @@ function ContinuousChart({ collection }) {
   const { data: cyclesData } = useAvailableCycles(collection);
 
   const { data, loading, error } = useContinuousSeries(collection, {
-    strategy: 'front_month',
+    strategy,
     adjustment,
     cycle,
     rollOffset,
@@ -208,6 +210,18 @@ function ContinuousChart({ collection }) {
             </select>
           </label>
         )}
+
+        <label className={styles.controlLabel}>
+          Roll strategy
+          <select
+            className={styles.select}
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value)}
+          >
+            <option value="front_month">Front month (at expiry)</option>
+            <option value="end_of_month">End of month</option>
+          </select>
+        </label>
 
         <label className={styles.controlLabel}>
           Adjustment

@@ -128,8 +128,24 @@ _OPTION_STREAM_LEG = st.fixed_dictionaries(
                 ),
                 "stream": st.sampled_from(["mid", "iv", "delta"]),
                 # roll_offset is threaded and must survive serde unchanged.
+                # Mix the unified {value, unit} shape with a legacy bare int (the
+                # JSON doc stores it opaquely, so both forms must round-trip).
                 # Option streams carry NO back-adjustment (no ``adjustment`` key).
-                "roll_offset": st.integers(min_value=0, max_value=30),
+                "roll_offset": st.one_of(
+                    st.integers(min_value=0, max_value=30),
+                    st.fixed_dictionaries(
+                        {
+                            "value": st.integers(min_value=0, max_value=30),
+                            "unit": st.just("days"),
+                        }
+                    ),
+                    st.fixed_dictionaries(
+                        {
+                            "value": st.integers(min_value=0, max_value=12),
+                            "unit": st.just("months"),
+                        }
+                    ),
+                ),
             }
         ),
         "weight": st.floats(min_value=0.01, max_value=1.0, allow_nan=False),

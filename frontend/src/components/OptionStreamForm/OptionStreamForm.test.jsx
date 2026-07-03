@@ -71,6 +71,57 @@ describe('<OptionStreamForm>', () => {
     expect(labels).toContain('Open interest');
   });
 
+  it('offers bs_mid ("BS mid (from IV)") in the Series options and selects it', () => {
+    const onChange = vi.fn();
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    renderForm({ value, onChange });
+    const seriesSelect = screen.getByLabelText('Series');
+    // The BS-from-IV option is present with its clear label.
+    const options = Array.from(seriesSelect.querySelectorAll('option'));
+    const bs = options.find((o) => o.value === 'bs_mid');
+    expect(bs).toBeTruthy();
+    expect(bs.textContent).toBe('BS mid (from IV)');
+    // Selecting it emits stream: 'bs_mid'.
+    fireEvent.change(seriesSelect, { target: { value: 'bs_mid' } });
+    expect(onChange).toHaveBeenCalled();
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.stream).toBe('bs_mid');
+  });
+
+  // Issue #2 (D1): in the PORTFOLIO add-holding flow an option leg is just the
+  // option's PRICE (mid). The stream concept (iv/delta/greeks/volume) is a
+  // SIGNAL-level operand, not a portfolio concern — so when restricted to a
+  // single stream the form must NOT render a (pointless 1-item) Series
+  // selector at all.
+  describe('single-stream restriction (portfolio price-only)', () => {
+    it('renders NO Series selector when allowedStreams is just [mid]', () => {
+      renderForm({ allowedStreams: ['mid'] });
+      // No Series <select> / control, and no advanced disclosure.
+      expect(screen.queryByLabelText('Series')).toBeNull();
+      expect(screen.queryByTestId('stream-advanced')).toBeNull();
+      // The rest of the form is intact.
+      expect(screen.getByLabelText('Root')).toBeTruthy();
+      expect(screen.getByLabelText('Maturity rule')).toBeTruthy();
+      expect(screen.getByLabelText('Selection criterion')).toBeTruthy();
+    });
+
+    it('forces the value stream to the single allowed stream', () => {
+      // Parent passes a stale value with stream='iv'; the restricted form must
+      // coerce it back to the only allowed stream (mid) via onChange.
+      const onChange = vi.fn();
+      const stale = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'iv' };
+      renderForm({ value: stale, allowedStreams: ['mid'], onChange });
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ stream: 'mid' }),
+      );
+    });
+
+    it('still renders the Series selector for the default (all streams)', () => {
+      renderForm();
+      expect(screen.getByLabelText('Series')).toBeTruthy();
+    });
+  });
+
   it('exposes the exact Mid bid-ask tooltip on the Series control', () => {
     renderForm();
     const tip = screen.getByTestId('mid-tooltip');
@@ -136,30 +187,64 @@ describe('<OptionStreamForm>', () => {
     expect(onChange.mock.calls[0][0].maturity).toEqual({ kind: 'plus_n_days', n: 30 });
   });
 
-  it('renders the Roll offset input defaulting to 0', () => {
+  // ── Unified roll offset {value, unit} (replaces days-only + roll_schedule) ──
+
+  it('renders the Roll offset value+unit defaulting to {0, days}', () => {
     renderForm();
-    const input = screen.getByLabelText('Roll offset days');
-    expect(input).toBeTruthy();
-    expect(input.value).toBe('0');
+    const value = screen.getByLabelText('Roll offset value');
+    const unit = screen.getByLabelText('Roll offset unit');
+    expect(value.value).toBe('0');
+    expect(unit.value).toBe('days');
   });
 
-  it('emits roll_offset on change, clamped to 0..30', () => {
+  it('does NOT render a Roll schedule control (removed — EOM is the maturity)', () => {
+    renderForm();
+    expect(screen.queryByLabelText('Roll schedule')).toBeNull();
+  });
+
+  it('emits roll_offset {value, unit:days} on value change, clamped 0..30', () => {
     const { onChange } = renderForm();
-    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '5' } });
     expect(onChange).toHaveBeenCalledOnce();
-    expect(onChange.mock.calls[0][0]).toMatchObject({ roll_offset: 5 });
+    expect(onChange.mock.calls[0][0]).toMatchObject({
+      roll_offset: { value: 5, unit: 'days' },
+    });
     onChange.mockClear();
-    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: '99' } });
-    expect(onChange.mock.calls[0][0].roll_offset).toBe(30);
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '99' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 30, unit: 'days' });
   });
 
-  // Clamp every malformed / out-of-range input into the integer range 0..30.
-  // The setRollOffset handler does parseInt → NaN?0 → clamp(0,30). Each case
-  // must emit an integer roll_offset (never a string / float / negative).
-  // Note: the input defaults to 0, so a change event whose target value is
-  // '0' is a no-op for the controlled input and fires no onChange — it would
-  // test nothing about clamping, so it is intentionally excluded. The cases
-  // below all change the rendered string value, so onChange always fires.
+  it('switches unit to months and re-clamps the value to 0..12', () => {
+    // Start from a days value of 20, switch to months → re-clamp to 12.
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.roll_offset = { value: 20, unit: 'days' };
+    const { onChange } = renderForm({ value });
+    fireEvent.change(screen.getByLabelText('Roll offset unit'), { target: { value: 'months' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 12, unit: 'months' });
+  });
+
+  it('emits a months value within 0..12', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.roll_offset = { value: 0, unit: 'months' };
+    const { onChange } = renderForm({ value });
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '3' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 3, unit: 'months' });
+    onChange.mockClear();
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '50' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 12, unit: 'months' });
+  });
+
+  it('reads a legacy bare-int roll_offset as {value, unit:days}', () => {
+    // A persisted spec from before the unification carries a bare int.
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    value.roll_offset = 7;  // legacy days-only int
+    renderForm({ value });
+    expect(screen.getByLabelText('Roll offset value').value).toBe('7');
+    expect(screen.getByLabelText('Roll offset unit').value).toBe('days');
+  });
+
+  // Clamp malformed / out-of-range value input into the unit's range (days
+  // 0..30). Each case emits an integer value (never a string / float / negative).
   it.each([
     ['empty string', '', 0],
     ['negative', '-5', 0],
@@ -167,15 +252,13 @@ describe('<OptionStreamForm>', () => {
     ['above max', '99', 30],
     ['exactly max', '30', 30],
     ['in range', '7', 7],
-  ])('clamps Roll offset input (%s) into 0..30 as an int', (_label, raw, expected) => {
+  ])('clamps Roll offset value (%s) into 0..30 (days) as an int', (_label, raw, expected) => {
     const { onChange } = renderForm();
-    fireEvent.change(screen.getByLabelText('Roll offset days'), { target: { value: raw } });
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: raw } });
     expect(onChange).toHaveBeenCalledOnce();
     const emitted = onChange.mock.calls[0][0].roll_offset;
-    expect(emitted).toBe(expected);
-    // Emitted as a real integer (parseInt result), not a string or float.
-    expect(typeof emitted).toBe('number');
-    expect(Number.isInteger(emitted)).toBe(true);
+    expect(emitted).toEqual({ value: expected, unit: 'days' });
+    expect(Number.isInteger(emitted.value)).toBe(true);
   });
 
   it('respects allowedSelectionKinds — only by_moneyness rendered', () => {
@@ -351,5 +434,82 @@ describe('validateOptionStream', () => {
     v.selection = { kind: 'by_delta', target: 0.25, tolerance: 0.05, strict: false };
     v.stream = 'delta';
     expect(validateOptionStream(v, ROOTS).code).toBe('TAUTOLOGICAL_OPTION_STREAM');
+  });
+});
+
+// ── Select-and-hold (fixed-contract dollar P&L) controls — SIGNALS-only ──
+describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
+  it('does NOT render the hold controls by default (Data/Portfolio pickers)', () => {
+    renderForm();
+    expect(screen.queryByTestId('hold-between-rolls')).toBeNull();
+    expect(screen.queryByTestId('nav-times')).toBeNull();
+  });
+
+  it('renders the hold toggle when showHoldControls is true; nav_times hidden until on', () => {
+    renderForm({ showHoldControls: true });
+    const toggle = screen.getByTestId('hold-between-rolls');
+    expect(toggle).toBeTruthy();
+    expect(toggle.checked).toBe(false);
+    // nav_times input only appears once hold is enabled.
+    expect(screen.queryByTestId('nav-times')).toBeNull();
+  });
+
+  it('enabling hold emits hold_between_rolls=true and seeds nav_times=1.0', () => {
+    const onChange = vi.fn();
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS });
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.click(screen.getByTestId('hold-between-rolls'));
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const emitted = onChange.mock.calls[0][0];
+    expect(emitted.hold_between_rolls).toBe(true);
+    expect(emitted.nav_times).toBe(1.0);
+  });
+
+  it('shows the nav_times input when hold is already on and edits it', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 1.0,
+    };
+    renderForm({ value, onChange, showHoldControls: true });
+    const navInput = screen.getByTestId('nav-times');
+    expect(navInput).toBeTruthy();
+    expect(String(navInput.value)).toBe('1');
+    // nav_times may exceed 1 (leverage the premium notional).
+    fireEvent.change(navInput, { target: { value: '2.5' } });
+    expect(onChange).toHaveBeenCalled();
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.nav_times).toBe(2.5);
+    expect(emitted.hold_between_rolls).toBe(true);
+  });
+
+  it('a non-positive / non-numeric nav_times falls back to 1.0 (backend also guards)', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 2.0,
+    };
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.nav_times).toBe(1.0);
+  });
+
+  it('turning hold OFF preserves the other fields and clears the toggle', () => {
+    const onChange = vi.fn();
+    const value = {
+      ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+      hold_between_rolls: true,
+      nav_times: 2.5,
+    };
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.click(screen.getByTestId('hold-between-rolls'));
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.hold_between_rolls).toBe(false);
+    // Other option-stream fields are untouched by the toggle.
+    expect(emitted.collection).toBe(value.collection);
+    expect(emitted.stream).toBe(value.stream);
   });
 });

@@ -8,7 +8,7 @@ unchanged ``ContinuousSeriesBuilder`` fed SQL-sourced contracts.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Literal, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -346,7 +346,7 @@ class DefaultMarketDataService:
         self,
         root: str,
         option_type: Literal["C", "P"] | None = None,
-        cycle: str | None = None,
+        cycle: str | Sequence[str] | None = None,
     ) -> list[date]:
         return await self._options.list_expirations_filtered(
             root, option_type=option_type, cycle=cycle
@@ -367,6 +367,23 @@ class DefaultMarketDataService:
         expiration to the matching FUT_VIX contract.
         """
         return await self._sql.find_contract_by_expiration(collection, expiration_int)
+
+    async def find_front_futures_contract_on_or_after(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the symbol of the FRONT futures contract in *collection* — the
+        nearest one whose expiration is >= *expiration_int* (YYYYMMDD int), or
+        None.
+
+        Used by the option-on-future underlying resolver to map a serial/weekly
+        option (no listed future of its own expiration) to the front-quarterly
+        future (the Black-76 forward).
+        """
+        return await self._sql.find_front_contract_on_or_after(
+            collection, expiration_int
+        )
 
     # --- Internal ---
 

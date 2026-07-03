@@ -324,27 +324,27 @@ describe('resolveOptionStream', () => {
 
     const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
     expect(body.streams[0].ref.adjustment).toBe('ratio');
-    // roll_offset is the field the helper defaults.
-    expect(body.streams[0].ref.roll_offset).toBe(0);
+    // roll_offset is the field the helper defaults — now the unified {value, unit}.
+    expect(body.streams[0].ref.roll_offset).toEqual({ value: 0, unit: 'days' });
   });
 
-  it('forwards the ref roll_offset field', async () => {
+  it('forwards the ref roll_offset {value, unit} field', async () => {
     mockSuccess(RESOLVE_RESP);
-    const ref = optionRef({ roll_offset: 5 });
+    const ref = optionRef({ roll_offset: { value: 5, unit: 'months' } });
     await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
 
     const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
-    expect(body.streams[0].ref.roll_offset).toBe(5);
+    expect(body.streams[0].ref.roll_offset).toEqual({ value: 5, unit: 'months' });
   });
 
-  it('defaults roll_offset to 0 when a ref omits it', async () => {
+  it('defaults roll_offset to {0, days} when a ref omits it', async () => {
     mockSuccess(RESOLVE_RESP);
     const ref = optionRef();
     delete ref.roll_offset; // legacy / hand-built ref
     await resolveOptionStream([{ ref, label: 'Mid' }], '2024-01-01', '2025-01-01');
 
     const body = JSON.parse(vi.mocked(fetchApi).mock.calls[0][1].body);
-    expect(body.streams[0].ref.roll_offset).toBe(0);
+    expect(body.streams[0].ref.roll_offset).toEqual({ value: 0, unit: 'days' });
   });
 });
 

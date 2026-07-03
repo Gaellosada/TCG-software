@@ -78,3 +78,20 @@ export async function getAvailableCycles(collection) {
   const res = await fetchClassified(`/data/continuous/${encodeURIComponent(collection)}/cycles`);
   return res.cycles || [];
 }
+
+// Compute a basket's composite weighted-sum series for Data-page exploration.
+// ``basket`` is the discriminated wire shape the BE expects:
+//   { kind: 'saved', basket_id }  OR  { kind: 'inline', asset_class, legs }
+// (the SAME shape the Signals-page basket composer emits).  ``start``/``end``
+// are ISO YYYY-MM-DD; required when any leg is an option_stream.
+export async function getBasketSeries(basket, { start, end, field = 'close', signal } = {}) {
+  const payload = { basket, field };
+  if (start) payload.start = start;
+  if (end) payload.end = end;
+  const res = await fetchClassified('/data/basket/series', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+  return res; // { dates, values }
+}

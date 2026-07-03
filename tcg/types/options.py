@@ -23,12 +23,57 @@ from typing import Any, Literal, Mapping, Optional
 
 
 # ---------------------------------------------------------------------------
+# Cycle-tag normalisation (the "monthly 3rd-Friday series" spans two tags)
+# ---------------------------------------------------------------------------
+#
+# The dwh tags the SAME economic series — the standard monthly option, expiring
+# the 3rd Friday of the month — under DIFFERENT ``expiration_cycle`` values
+# across eras / providers: early E-mini (``OPT_SP_500``) history tags it ``"M"``;
+# later history tags the very same 3rd-Friday contract ``"W3 Friday"`` and leaves
+# ``"M"`` for the QUARTERLIES only.  A selection filtered on ``"M"`` alone
+# therefore tracks the monthly in early years but silently falls back to sparse
+# quarterlies in later years — the direct cause of the delta-selected option
+# landing on a poorly-covered expiry (garbage strike) in 2022+.
+#
+# ``"M"`` is the UI's "Monthly" choice, so its ROBUST meaning is "the monthly
+# 3rd-Friday series across all eras" = the union of both tags.  ``expand_cycle``
+# maps ``"M"`` → both tags and passes every other value through unchanged, so the
+# monthly filter is complete without disturbing any other cycle (``"W"``, ``"Q"``,
+# the specific ``"W1/2/4 Friday"`` weeklies) or the ``None`` all-cycles case.
+
+#: The ``expiration_cycle`` tags that together make up the standard MONTHLY
+#: (3rd-Friday) series.  ``"W3 Friday"`` IS the 3rd-Friday weekly = the monthly;
+#: on dates where a contract is double-tagged (both ``"M"`` and ``"W3 Friday"``
+#: for the same expiration) the caller de-dupes by expiration / contract id.
+MONTHLY_CYCLE_TAGS: tuple[str, ...] = ("M", "W3 Friday")
+
+
+def expand_cycle(cycle: str | None) -> str | tuple[str, ...] | None:
+    """Expand a cycle filter to its full tag set for option-STREAM selection.
+
+    ``"M"`` → :data:`MONTHLY_CYCLE_TAGS` (the monthly 3rd-Friday series spans two
+    dwh tags across eras — see the module note).  Every other value (a specific
+    cycle, or ``None`` for all-cycles) is returned unchanged, so only the
+    "Monthly" filter is broadened.  The result is a scalar / ``None`` (pass
+    through) or a tuple (query all of them); the data layer accepts both.
+
+    This is applied ONLY on the stream-selection path (signals / option-stream
+    series), NOT on the raw chain browser — a user inspecting the ``"M"`` chain
+    still sees exactly the ``"M"``-tagged contracts.
+    """
+    if cycle == "M":
+        return MONTHLY_CYCLE_TAGS
+    return cycle
+
+
+# ---------------------------------------------------------------------------
 # Enumeration types
 # ---------------------------------------------------------------------------
 
 
 class GreekKind(StrEnum):
     """The five Greek/vol quantities that Module 2 can compute or retrieve."""
+
     DELTA = "delta"
     GAMMA = "gamma"
     THETA = "theta"
@@ -50,6 +95,7 @@ class ComputeResult:
     - source="computed" → model and inputs_used non-null
     - source="missing"  → value=None, error_code non-null, missing_inputs non-null
     """
+
     value: float | None
     source: Literal["stored", "computed", "missing"]
     model: str | None = None
@@ -67,36 +113,38 @@ class ComputeResult:
 @dataclass(frozen=True)
 class OptionContractDoc:
     """Static metadata of one option contract."""
-    collection: str                         # "OPT_SP_500"
-    contract_id: str                        # internalSymbol|expirationCycle joined
-    root_underlying: str                    # e.g. "IND_SP_500", "GOLD"
-    underlying_ref: str | None             # FUT_*._id when option-on-future; None for OPT_VIX
-    underlying_symbol: str | None          # provider ticker, display only
+
+    collection: str  # "OPT_SP_500"
+    contract_id: str  # internalSymbol|expirationCycle joined
+    root_underlying: str  # e.g. "IND_SP_500", "GOLD"
+    underlying_ref: str | None  # FUT_*._id when option-on-future; None for OPT_VIX
+    underlying_symbol: str | None  # provider ticker, display only
     expiration: date
-    expiration_cycle: str                  # "M", "W3 Friday", "D", ...
+    expiration_cycle: str  # "M", "W3 Friday", "D", ...
     strike: float
     type: Literal["C", "P"]
     contract_size: float | None
     currency: str | None
-    provider: str                          # "IVOLATILITY" | "INTERNAL" | ...
-    strike_factor_verified: bool           # see spec §4.7
+    provider: str  # "IVOLATILITY" | "INTERNAL" | ...
+    strike_factor_verified: bool  # see spec §4.7
 
 
 @dataclass(frozen=True)
 class OptionDailyRow:
     """One trading day for one contract — quote + stored greeks (no computation)."""
+
     date: date
     open: float | None
     high: float | None
     low: float | None
-    close: float | None                    # often 0.0 on iVolatility — see DB §3.1
+    close: float | None  # often 0.0 on iVolatility — see DB §3.1
     bid: float | None
     ask: float | None
     bid_size: float | None
     ask_size: float | None
     volume: float | None
     open_interest: float | None
-    mid: float | None                      # derived: (bid+ask)/2 if both present
+    mid: float | None  # derived: (bid+ask)/2 if both present
     # Stored greeks — None when absent, never silently filled.
     iv_stored: float | None
     delta_stored: float | None
@@ -109,17 +157,19 @@ class OptionDailyRow:
 @dataclass(frozen=True)
 class OptionContractSeries:
     """A contract with its full time-series of daily rows."""
+
     contract: OptionContractDoc
-    rows: tuple[OptionDailyRow, ...]       # chronological; use list(rows) for pandas
+    rows: tuple[OptionDailyRow, ...]  # chronological; use list(rows) for pandas
 
 
 @dataclass(frozen=True)
 class OptionRootInfo:
     """Per-root metadata returned by /api/options/roots (§5)."""
-    collection: str                        # "OPT_SP_500"
-    name: str                             # display: "SP 500"
-    has_greeks: bool                      # stored_greeks_ratio > 0 OR has_computed_greeks
-    providers: tuple[str, ...]            # e.g. ("IVOLATILITY",)
+
+    collection: str  # "OPT_SP_500"
+    name: str  # display: "SP 500"
+    has_greeks: bool  # stored_greeks_ratio > 0 OR has_computed_greeks
+    providers: tuple[str, ...]  # e.g. ("IVOLATILITY",)
     expiration_first: date | None
     expiration_last: date | None
     doc_count_estimated: int
@@ -149,6 +199,7 @@ class OptionRootInfo:
 @dataclass(frozen=True)
 class ComputedGreeks:
     """Set of five computed/stored greeks for one contract-row."""
+
     iv: ComputeResult
     delta: ComputeResult
     gamma: ComputeResult
@@ -164,21 +215,24 @@ class ComputedGreeks:
 @dataclass(frozen=True)
 class ByDelta:
     """Select the contract whose stored (or computed) delta is nearest target."""
-    target_delta: float                   # signed; -0.10 for 10Δ put, +0.50 for 50Δ call
-    tolerance: float = 0.05              # accept |delta - target| <= tolerance
-    strict: bool = False                 # if True: raise on no-match; else closest
+
+    target_delta: float  # signed; -0.10 for 10Δ put, +0.50 for 50Δ call
+    tolerance: float = 0.05  # accept |delta - target| <= tolerance
+    strict: bool = False  # if True: raise on no-match; else closest
 
 
 @dataclass(frozen=True)
 class ByMoneyness:
     """Select by K/S ratio."""
-    target_K_over_S: float               # e.g. 1.02 for 2% OTM call
+
+    target_K_over_S: float  # e.g. 1.02 for 2% OTM call
     tolerance: float = 0.01
 
 
 @dataclass(frozen=True)
 class ByStrike:
     """Select by exact strike value."""
+
     strike: float
 
 
@@ -188,9 +242,10 @@ SelectionCriterion = ByDelta | ByMoneyness | ByStrike
 @dataclass(frozen=True)
 class SelectionResult:
     """Outcome of a Module 3 selection call."""
+
     contract: OptionContractDoc | None
-    matched_value: float | None          # the actual delta / K/S / strike found
-    error_code: str | None              # "no_chain_for_date" | "no_match_within_tolerance" | ...
+    matched_value: float | None  # the actual delta / K/S / strike found
+    error_code: str | None  # "no_chain_for_date" | "no_match_within_tolerance" | ...
     diagnostic: str | None
 
 
@@ -202,31 +257,36 @@ class SelectionResult:
 @dataclass(frozen=True)
 class NextThirdFriday:
     """Roll to the third Friday of the offset month."""
-    offset_months: int = 1              # 0 = current month, 1 = next month, ...
+
+    offset_months: int = 1  # 0 = current month, 1 = next month, ...
 
 
 @dataclass(frozen=True)
 class EndOfMonth:
     """Roll to the last business day of the offset month."""
+
     offset_months: int = 0
 
 
 @dataclass(frozen=True)
 class PlusNDays:
     """Roll to ref_date + n calendar days."""
+
     n: int
 
 
 @dataclass(frozen=True)
 class FixedDate:
     """Use a fixed absolute date as the target expiration."""
+
     date: date
 
 
 @dataclass(frozen=True)
 class NearestToTarget:
     """Find the available expiration nearest to target_dte_days from ref_date."""
-    target_dte_days: int                # find the available expiration nearest target DTE
+
+    target_dte_days: int  # find the available expiration nearest target DTE
 
 
 MaturityRule = NextThirdFriday | EndOfMonth | PlusNDays | FixedDate | NearestToTarget
@@ -242,30 +302,70 @@ MaturitySpec = MaturityRule
 @dataclass(frozen=True)
 class AtExpiry:
     """Roll into a new contract when the held contract expires."""
+
     pass
 
 
 @dataclass(frozen=True)
 class NDaysBeforeExpiry:
     """Roll n calendar days before expiry (Phase 2 only)."""
+
     n: int
 
 
 @dataclass(frozen=True)
 class DeltaCross:
     """Roll when |delta| crosses a threshold (Phase 2 only)."""
+
     threshold: float
 
 
 RollRule = AtExpiry | NDaysBeforeExpiry | DeltaCross
 
 
+# ---------------------------------------------------------------------------
+# Roll offset — the ROLL-EARLY axis (how early to roll), in days OR months
+# ---------------------------------------------------------------------------
+#
+# This is ONE of the two distinct roll/maturity axes; keep them straight:
+#   * TARGET-month  — the ``MaturityRule``'s ``offset_months`` (NextThirdFriday /
+#     EndOfMonth): WHICH expiration to aim at (this month, next month, ...).
+#   * ROLL-EARLY    — ``RollOffset`` below: resolve the maturity rule as of
+#     ``date + offset`` so every roll happens that much EARLIER.
+# They are NOT the same concept (target vs roll-early), so both legitimately
+# speak in months; what was redundant — and is now removed — was the separate
+# ``roll_schedule`` cadence (its "end of month" duplicated the EndOfMonth
+# maturity).  "Roll at end of month" is now expressed ONLY by the EndOfMonth
+# maturity, which the resolver detects to hold one contract per month.
+#
+# ``unit`` carries days or months so a single control covers both granularities
+# (replaces the old days-only ``roll_offset: int``).  A shipped int (days) reads
+# back as ``RollOffset(value=int, unit="days")`` via the API read-shim.
+
+
+RollOffsetUnit = Literal["days", "months"]
+
+
+@dataclass(frozen=True)
+class RollOffset:
+    """How early to roll (the ROLL-EARLY axis), in ``days`` or ``months``.
+
+    The resolver shifts the maturity-resolution ref date forward by this amount
+    (``date + offset``) so each roll fires that much sooner.  ``value == 0`` is
+    the no-op default (roll at the maturity rule's natural time).  No-op for
+    ``FixedDate`` maturity (a single absolute expiration)."""
+
+    value: int = 0
+    unit: RollOffsetUnit = "days"
+
+
 @dataclass(frozen=True)
 class RollResult:
     """Outcome of a Module 5 roll evaluation."""
+
     new_contract: OptionContractDoc | None
     roll_date: date | None
-    reason: str                          # human-readable: "expired" / "delta crossed 0.30"
+    reason: str  # human-readable: "expired" / "delta crossed 0.30"
     error_code: str | None
 
 
@@ -277,11 +377,12 @@ class RollResult:
 @dataclass(frozen=True)
 class ChainRow:
     """One row in the chain table for a given date."""
+
     contract_id: str
     expiration: date
     type: Literal["C", "P"]
     strike: float
-    K_over_S: float | None              # computed: strike / underlying_price
+    K_over_S: float | None  # computed: strike / underlying_price
     bid: float | None
     ask: float | None
     mid: float | None
@@ -300,11 +401,14 @@ class ChainRow:
 @dataclass(frozen=True)
 class ChainSnapshot:
     """Full chain for a (root, date) pair (Module 6 output)."""
+
     root: str
     date: date
-    underlying_price: float | None      # float | None per Decision B; router wraps to ComputeResult
+    underlying_price: (
+        float | None
+    )  # float | None per Decision B; router wraps to ComputeResult
     rows: tuple[ChainRow, ...]
-    notes: tuple[str, ...]             # e.g. "T_NOTE strikeFactor unverified"
+    notes: tuple[str, ...]  # e.g. "T_NOTE strikeFactor unverified"
 
 
 # ---------------------------------------------------------------------------
@@ -315,19 +419,21 @@ class ChainSnapshot:
 @dataclass(frozen=True)
 class PnLPoint:
     """Daily mark and cumulative P&L for one contract on one date."""
+
     date: date
-    mark: float | None                  # mid (or close fallback if specified)
-    pnl_cumulative: float              # qty * sign * (mark_t - entry_price) * contract_size
-    pnl_daily: float                   # delta_cum from t-1
+    mark: float | None  # mid (or close fallback if specified)
+    pnl_cumulative: float  # qty * sign * (mark_t - entry_price) * contract_size
+    pnl_daily: float  # delta_cum from t-1
 
 
 @dataclass(frozen=True)
 class PnLSeries:
     """Full P&L replay for a held contract."""
+
     contract: OptionContractDoc
     entry_date: date
     entry_price: float
-    qty: float                          # signed: + buy, - sell
+    qty: float  # signed: + buy, - sell
     points: tuple[PnLPoint, ...]
     exit_reason: Literal["held_to_expiry", "exit_date", "contract_data_ended"] | None
     notes: tuple[str, ...]

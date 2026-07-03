@@ -158,9 +158,12 @@ function sanitiseContinuousInstrument(raw) {
     ? raw.adjustment : 'none';
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
   const rollOffset = Number.isFinite(raw.rollOffset) ? raw.rollOffset : 0;
-  // Only one strategy is supported today — the sanitiser hard-codes it so
-  // a tampered payload can't smuggle in a rogue value.
-  return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy: 'front_month' };
+  // Issue #3: two roll strategies are supported. Validate against the known set
+  // (a rogue value still collapses to the default) and PRESERVE end_of_month so
+  // a saved signal doesn't silently lose it on load.
+  const strategy = ['front_month', 'end_of_month'].includes(raw.strategy)
+    ? raw.strategy : 'front_month';
+  return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy };
 }
 
 function sanitiseOptionStreamInstrument(raw) {
@@ -179,13 +182,32 @@ function sanitiseOptionStreamInstrument(raw) {
   const stream = VALID_STREAMS.includes(raw.stream) ? raw.stream : null;
   if (!stream) return null;
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
-  // roll_offset rolls the maturity that many calendar days earlier (clamped
-  // 0..30). Legacy payloads lack the key — default 0 (the BE defaults it too).
-  // NOTE: option streams carry NO back-adjustment (ratio/difference are
-  // ill-posed for option premia), so any legacy `adjustment` key is dropped.
-  const roll_offset = Number.isFinite(raw.roll_offset)
-    ? Math.min(30, Math.max(0, Math.trunc(raw.roll_offset))) : 0;
-  return { type: 'option_stream', collection, option_type, cycle, maturity, selection, stream, roll_offset };
+  // roll_offset is the unified {value, unit:'days'|'months'} — the ROLL-EARLY
+  // axis. Per-unit clamp: days 0..30, months 0..12. A legacy bare int (the old
+  // days-only field) reads as {value:int, unit:'days'}. Absent → {0, days}.
+  // NOTE: option streams carry NO back-adjustment, so any legacy `adjustment`
+  // key is dropped; "roll at end of month" is the EndOfMonth MATURITY, so the
+  // former `roll_schedule` field is dropped here too (no pass-through).
+  const roll_offset = sanitiseRollOffset(raw.roll_offset);
+  return {
+    type: 'option_stream', collection, option_type, cycle, maturity, selection,
+    stream, roll_offset,
+  };
+}
+
+function sanitiseRollOffset(raw) {
+  const cap = (unit) => (unit === 'months' ? 12 : 30);
+  // Legacy bare int → days.
+  if (Number.isFinite(raw)) {
+    return { value: Math.min(30, Math.max(0, Math.trunc(raw))), unit: 'days' };
+  }
+  if (raw && typeof raw === 'object') {
+    const unit = raw.unit === 'months' ? 'months' : 'days';
+    const value = Number.isFinite(raw.value)
+      ? Math.min(cap(unit), Math.max(0, Math.trunc(raw.value))) : 0;
+    return { value, unit };
+  }
+  return { value: 0, unit: 'days' };
 }
 
 function sanitiseInstrument(raw) {
@@ -196,6 +218,29 @@ function sanitiseInstrument(raw) {
   return sanitiseSpotInstrument(raw);
 }
 
+/**
+ * Field-local sanitiser for a per-input ``position_cap`` (net-position clamp).
+ *
+ * Preserves a well-formed ``[low, high]`` pair through the localStorage
+ * round-trip; drops anything malformed so a stored value never diverges from
+ * what the wire (``requestBuilder.normalisePositionCap``) and the backend
+ * (``_parse_position_cap``) accept: a 2-element array of FINITE numbers with
+ * ``low <= high``. ``typeof x === 'number'`` already excludes JS booleans.
+ * Returns ``undefined`` when absent/malformed so the caller OMITS the key
+ * (a normal input stays exactly ``{id, instrument}``).
+ *
+ * @param {*} raw
+ * @returns {[number, number]|undefined}
+ */
+function sanitisePositionCap(raw) {
+  if (!Array.isArray(raw) || raw.length !== 2) return undefined;
+  const [lo, hi] = raw;
+  if (typeof lo !== 'number' || typeof hi !== 'number') return undefined;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return undefined;
+  if (lo > hi) return undefined;
+  return [lo, hi];
+}
+
 function sanitiseInput(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = typeof raw.id === 'string' ? raw.id : '';
@@ -204,7 +249,8 @@ function sanitiseInput(raw) {
   // Inputs may exist without a fully-configured instrument (user is still
   // picking) — we keep them but signal via instrument=null. The Run-gate
   // checks configuration before submitting.
-  return { id, instrument };
+  const cap = sanitisePositionCap(raw.position_cap);
+  return { id, instrument, ...(cap !== undefined ? { position_cap: cap } : {}) };
 }
 
 /**

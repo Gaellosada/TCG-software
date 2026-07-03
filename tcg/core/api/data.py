@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from typing import Annotated, Union
 
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, ConfigDict, Field
+
+from tcg.core.api._basket_compute import compute_basket_series
 from tcg.core.api._dates import parse_iso_range
+from tcg.core.api._models import BasketRefInline, BasketRefSaved
+from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.common import get_market_data
 from tcg.data.protocols import MarketDataService
+from tcg.engine.signal_exec import SignalDataError, SignalValidationError
+from tcg.persistence import WriteRepository
 from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.market import (
     AssetClass,
@@ -18,9 +26,85 @@ from tcg.types.market import (
 router = APIRouter(prefix="/api/data", tags=["data"])
 
 
+# --- Basket series (Data-page exploration) ---
+
+
+class BasketSeriesRequest(BaseModel):
+    """Request body for ``POST /api/data/basket/series``.
+
+    The basket itself is a discriminated union over the SAME wire models
+    the signals path uses — ``{kind:"saved", basket_id}`` or
+    ``{kind:"inline", asset_class, legs}`` — so the Data-page composer
+    and the signals composer emit an identical basket shape.  ``start`` /
+    ``end`` (ISO ``YYYY-MM-DD``) are optional for spot/continuous-only
+    baskets (the leaf resolvers borrow the date axis from the price
+    series) but REQUIRED when any leg is an option-stream (the
+    option_stream resolver needs a concrete date window).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    basket: Annotated[
+        Union[BasketRefSaved, BasketRefInline],
+        Field(discriminator="kind"),
+    ]
+    start: str | None = Field(None, description="Start date YYYY-MM-DD")
+    end: str | None = Field(None, description="End date YYYY-MM-DD")
+    field: str = Field("close", description="Price field: close/open/high/low/volume")
+
+
+@router.post("/basket/series")
+async def get_basket_series(
+    body: BasketSeriesRequest,
+    svc: MarketDataService = Depends(get_market_data),
+    repo: WriteRepository = Depends(get_write_repository),
+) -> dict:
+    """Compute a basket's composite weighted-sum series as ``{dates, values}``.
+
+    Serves BOTH saved baskets (``{kind:"saved", basket_id}``) and inline
+    baskets (``{kind:"inline", asset_class, legs}``).  Reuses the same
+    materialisers + fetcher the in-signal basket path uses, so the
+    series is identical (parity-tested).
+    """
+    try:
+        start_date, end_date = parse_iso_range(body.start, body.end)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    if isinstance(body.basket, BasketRefSaved):
+        basket_id: str | None = body.basket.basket_id
+        asset_class: str | None = None
+        legs = None
+    else:
+        basket_id = None
+        asset_class = body.basket.asset_class
+        legs = body.basket.legs
+
+    try:
+        dates, values = await compute_basket_series(
+            svc=svc,
+            repo=repo,
+            basket_id=basket_id,
+            asset_class=asset_class,
+            legs=legs,
+            start=start_date,
+            end=end_date,
+            field=body.field,
+        )
+    except (SignalValidationError, SignalDataError) as exc:
+        # Both surface as a 400 on the Data page: an unknown/empty basket,
+        # a disjoint leg date range, or an option-stream leg missing an
+        # explicit window are all client-input problems (never a 500).
+        raise ValidationError(str(exc)) from exc
+
+    return {"dates": dates.tolist(), "values": values.tolist()}
+
+
 @router.get("/collections")
 async def list_collections(
-    asset_class: str | None = Query(None, description="Filter by asset class (equity, index, future)"),
+    asset_class: str | None = Query(
+        None, description="Filter by asset class (equity, index, future)"
+    ),
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict:
     """List available data collections, optionally filtered by asset class."""
@@ -41,9 +125,13 @@ async def list_collections(
 async def get_continuous_series(
     collection: str,
     strategy: str = Query("front_month", description="Roll strategy"),
-    adjustment: str = Query("none", description="Adjustment method: none, ratio, difference"),
+    adjustment: str = Query(
+        "none", description="Adjustment method: none, ratio, difference"
+    ),
     cycle: str | None = Query(None, description="Expiration cycle filter (e.g. HMUZ)"),
-    roll_offset: int = Query(0, ge=0, le=30, description="Days before expiration to roll"),
+    roll_offset: int = Query(
+        0, ge=0, le=30, description="Days before expiration to roll"
+    ),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),
     svc: MarketDataService = Depends(get_market_data),
@@ -75,7 +163,9 @@ async def get_continuous_series(
         roll_offset_days=roll_offset,
     )
 
-    series = await svc.get_continuous(collection, roll_config, start=start_date, end=end_date)
+    series = await svc.get_continuous(
+        collection, roll_config, start=start_date, end=end_date
+    )
     if series is None:
         raise DataNotFoundError(
             f"No continuous series found for collection '{collection}'"

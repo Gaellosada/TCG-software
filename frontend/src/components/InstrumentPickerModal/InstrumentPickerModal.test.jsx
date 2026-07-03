@@ -128,6 +128,35 @@ describe('<InstrumentPickerModal>', () => {
     expect(screen.getByTestId('option-stream-confirm')).toBeTruthy();
   });
 
+  it('optionStreamAllowedStreams=[mid] hides the Series selector in the drill-down', async () => {
+    // Issue #2 (D1): a PORTFOLIO option leg is the option PRICE only — the
+    // picker pins the stream to mid and hides the (pointless) Series selector.
+    render(
+      <InstrumentPickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        onSelect={vi.fn()}
+        optionStreamAllowedStreams={['mid']}
+      />,
+    );
+    await flushAsync();
+    await waitFor(() => expect(screen.getByText('Options')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('picker-options-toggle'));
+    await waitFor(() => expect(screen.getByTestId('option-stream-form')).toBeTruthy());
+    // Rest of the form present, but NO Series selector.
+    expect(screen.getByLabelText('Root')).toBeTruthy();
+    expect(screen.queryByLabelText('Series')).toBeNull();
+  });
+
+  it('without optionStreamAllowedStreams the Series selector is shown (default)', async () => {
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={vi.fn()} />);
+    await flushAsync();
+    await waitFor(() => expect(screen.getByText('Options')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('picker-options-toggle'));
+    await waitFor(() => expect(screen.getByTestId('option-stream-form')).toBeTruthy());
+    expect(screen.getByLabelText('Series')).toBeTruthy();
+  });
+
   it('confirming emits an option_stream-shaped object via onSelect and closes', async () => {
     const onSelect = vi.fn();
     const onClose = vi.fn();
@@ -212,6 +241,33 @@ describe('<InstrumentPickerModal>', () => {
       rollOffset: 7,
     });
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('futures drill-down emits strategy=end_of_month when chosen (Issue #3)', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(getAvailableCycles).mockResolvedValue(['H', 'M']);
+    const onSelect = vi.fn();
+    const onClose = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={onClose} onSelect={onSelect} />);
+    await flushAsync();
+
+    await waitFor(() => expect(screen.getByText('Futures')).toBeTruthy());
+    fireEvent.click(screen.getByText('Futures'));
+    await waitFor(() => expect(screen.getByText('FUT_ES')).toBeTruthy());
+    fireEvent.click(screen.getByText('FUT_ES'));
+    await waitFor(() => expect(screen.getByTestId('continuous-spec-picker')).toBeTruthy());
+
+    // Pick the END_OF_MONTH roll strategy via the new select.
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-strategy'), {
+      target: { value: 'end_of_month' },
+    });
+    fireEvent.click(screen.getByText('Select Continuous Series'));
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onSelect.mock.calls[0][0]).toMatchObject({
+      type: 'continuous',
+      collection: 'FUT_ES',
+      strategy: 'end_of_month',
+    });
   });
 
   it('still emits a spot selection from the existing flow (regression)', async () => {
@@ -408,6 +464,58 @@ describe('<InstrumentPickerModal>', () => {
       cycle: 'M',
       rollOffset: 5,
       strategy: 'front_month',
+    });
+  });
+
+  // ── Issue #3 (review r1 MAJOR): basket future leg must round-trip the roll
+  // strategy through ContinuousLegPicker (it previously hardcoded front_month).
+  it('basket future leg emits strategy=end_of_month when chosen', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    fireEvent.change(screen.getByTestId('basket-leg-0-collection-select'), { target: { value: 'FUT_ES' } });
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-strategy'), { target: { value: 'end_of_month' } });
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '1' } });
+
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+    expect(onSelect.mock.calls[0][0].legs[0].instrument).toMatchObject({
+      type: 'continuous',
+      collection: 'FUT_ES',
+      strategy: 'end_of_month',
+    });
+  });
+
+  it('basket future leg strategy=end_of_month SURVIVES a non-strategy field edit (no silent revert)', async () => {
+    // The r1 MAJOR: ContinuousLegPicker hardcoded strategy in the value it fed
+    // ContinuousSpecPicker, whose emit spreads `value` — so editing adjustment
+    // (or any non-strategy field) reverted end_of_month back to front_month.
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(getAvailableCycles).mockResolvedValue(['H', 'M']);
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} allowBaskets={true} />);
+    await flushAsync();
+    fireEvent.click(await screen.findByTestId('picker-baskets-toggle'));
+    await waitFor(() => expect(screen.getByTestId('basket-composer')).toBeTruthy());
+
+    fireEvent.change(screen.getByTestId('basket-leg-0-collection-select'), { target: { value: 'FUT_ES' } });
+    // 1) choose end_of_month, THEN 2) edit a DIFFERENT field.
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-strategy'), { target: { value: 'end_of_month' } });
+    // The select must DISPLAY end_of_month after the choice (not revert).
+    await waitFor(() =>
+      expect(screen.getByTestId('continuous-spec-picker-strategy').value).toBe('end_of_month'),
+    );
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-adjustment'), { target: { value: 'ratio' } });
+    fireEvent.change(screen.getByTestId('basket-leg-0-weight-input'), { target: { value: '1' } });
+
+    fireEvent.click(screen.getByTestId('basket-use-btn'));
+    // strategy MUST still be end_of_month despite the adjustment edit.
+    expect(onSelect.mock.calls[0][0].legs[0].instrument).toMatchObject({
+      adjustment: 'ratio',
+      strategy: 'end_of_month',
     });
   });
 

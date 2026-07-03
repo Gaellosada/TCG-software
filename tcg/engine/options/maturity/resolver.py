@@ -140,6 +140,18 @@ def _last_business_day_of_month(year: int, month: int, cal) -> date:
     return vd[-1].date()
 
 
+def last_trading_day_of_month(d: date, calendar: str = "CME") -> date:
+    """Public convenience: last trading day of ``d``'s month on ``calendar``.
+
+    Wraps :func:`_last_business_day_of_month` + the cached calendar alias so the
+    Issue-#3 EOM-roll sweep in ``stream_resolver`` can compute month-ends
+    without re-deriving the "CME"→"CME_TradeDate" plumbing.  (The futures side
+    in ``tcg.data._rolling.calendar`` keeps its OWN duplicate — the import-linter
+    ``engine-data-isolation`` contract forbids ``tcg.data`` importing this.)
+    """
+    return _last_business_day_of_month(d.year, d.month, _calendar(calendar))
+
+
 # ---------------------------------------------------------------------------
 # DefaultMaturityResolver
 # ---------------------------------------------------------------------------

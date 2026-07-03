@@ -64,11 +64,39 @@ export function normaliseSpecForRequest(signal) {
   return { ...signal, inputs, rules: outRules };
 }
 
+/**
+ * Normalise a per-input ``position_cap`` for the wire.
+ *
+ * ``position_cap`` is a net-position clamp ``[low, high]`` (fractions, e.g.
+ * ``[0, 1]`` = long-or-flat). Mirrors the backend contract in
+ * ``tcg/core/api/signals.py::_parse_position_cap``: a 2-element array of
+ * FINITE numbers with ``low <= high``. ``typeof x === 'number'`` already
+ * excludes JS booleans (which the backend also rejects). Anything else →
+ * ``undefined`` so the caller OMITS the key, keeping a normal input
+ * byte-identical to a pre-feature payload (matches how links/params_override
+ * are handled — present only when well-formed).
+ *
+ * @param {*} raw
+ * @returns {[number, number]|undefined}
+ */
+function normalisePositionCap(raw) {
+  if (!Array.isArray(raw) || raw.length !== 2) return undefined;
+  const [lo, hi] = raw;
+  if (typeof lo !== 'number' || typeof hi !== 'number') return undefined;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return undefined;
+  if (lo > hi) return undefined;
+  return [lo, hi];
+}
+
 function normaliseInput(input) {
   if (!input || typeof input !== 'object') return input;
+  // Only emit position_cap when present + well-formed — otherwise a normal
+  // input stays exactly {id, instrument} (no stray key on the wire).
+  const cap = normalisePositionCap(input.position_cap);
   return {
     id: typeof input.id === 'string' ? input.id : '',
     instrument: input.instrument ?? null,
+    ...(cap !== undefined ? { position_cap: cap } : {}),
   };
 }
 

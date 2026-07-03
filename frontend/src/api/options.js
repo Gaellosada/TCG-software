@@ -191,15 +191,17 @@ export async function selectOption(selectQuery) {
 //   Returns: { done: number, total: number, fraction: number }
 // ---------------------------------------------------------------------------
 
-// Ensure each option_stream ref carries the additive ``roll_offset`` (default
-// 0) field before it goes on the wire. The picker emits it, but legacy /
-// hand-built refs may omit it; the backend defaults it too, but we send it
-// explicitly so the request body is unambiguous (and testable). ``roll_offset``
-// rolls the maturity that many calendar days earlier (0 = no shift).
+// Ensure each option_stream ref carries the ``roll_offset`` (the unified
+// {value, unit} ROLL-EARLY object, default {0, days}) before it goes on the
+// wire. The picker emits it, but legacy / hand-built refs may omit it; the
+// backend defaults it too, but we send it explicitly so the request body is
+// unambiguous (and testable). A shipped bare int is still accepted by the
+// backend (read as days), but we normalise to the object here.
 //
 // NOTE: option streams carry NO back-adjustment (ratio/difference are ill-posed
 // for option premia), so there is no ``adjustment`` field. A stray ``adjustment``
-// key on a legacy ref is harmless — the backend ignores unknown fields.
+// key on a legacy ref is harmless — the backend ignores unknown fields. "Roll at
+// end of month" is the EndOfMonth maturity, not a roll_offset value.
 function withOptionStreamDefaults(streams) {
   if (!Array.isArray(streams)) return streams;
   return streams.map((entry) => {
@@ -213,7 +215,7 @@ function withOptionStreamDefaults(streams) {
         ...entry,
         ref: {
           ...ref,
-          roll_offset: 0,
+          roll_offset: { value: 0, unit: 'days' },
         },
       };
     }

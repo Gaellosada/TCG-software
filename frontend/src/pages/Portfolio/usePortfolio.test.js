@@ -179,7 +179,7 @@ describe('usePortfolio — signal leg support', () => {
     expect(range.end).toBeTruthy();
   });
 
-  it('handleCalculate forwards option_stream roll_offset (no adjustment) to the API', async () => {
+  it('handleCalculate forwards option_stream roll_offset {value, unit} to the API', async () => {
     const { result } = renderHook(() => usePortfolio());
 
     act(() => {
@@ -194,7 +194,7 @@ describe('usePortfolio — signal leg support', () => {
         stream: 'mid',
         // A stray adjustment must NOT be forwarded — option streams have none.
         adjustment: 'ratio',
-        roll_offset: 5,
+        roll_offset: { value: 2, unit: 'months' },
         weight: 100,
       });
     });
@@ -221,13 +221,42 @@ describe('usePortfolio — signal leg support', () => {
       maturity: { kind: 'nearest_to_target', target_days: 30 },
       selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
       stream: 'mid',
-      roll_offset: 5,
+      roll_offset: { value: 2, unit: 'months' },
     });
     // The stray adjustment was dropped — option streams carry no back-adjustment.
     expect('adjustment' in leg).toBe(false);
+    // "End of month" is the maturity, not a separate roll_schedule.
+    expect('roll_schedule' in leg).toBe(false);
   });
 
-  it('handleCalculate omits option_stream roll fields when at defaults (none/0)', async () => {
+  it('handleCalculate forwards a legacy bare-int roll_offset as {value, days}', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => {
+      result.current.addLeg({
+        label: 'OPT_SP_500 C mid',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'nearest_to_target', target_days: 30 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'mid',
+        roll_offset: 5,  // legacy in-memory int
+        weight: 100,
+      });
+    });
+    act(() => {
+      result.current.setStartDate('2024-01-01');
+      result.current.setEndDate('2024-12-31');
+    });
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+    const leg = computePortfolio.mock.calls[0][0].legs[result.current.legs[0].label];
+    expect(leg.roll_offset).toEqual({ value: 5, unit: 'days' });
+  });
+
+  it('handleCalculate omits option_stream roll fields when at defaults', async () => {
     const { result } = renderHook(() => usePortfolio());
 
     act(() => {
@@ -241,7 +270,7 @@ describe('usePortfolio — signal leg support', () => {
         selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
         stream: 'iv',
         adjustment: 'none',
-        roll_offset: 0,
+        roll_offset: { value: 0, unit: 'days' },
         weight: 100,
       });
     });
@@ -259,6 +288,333 @@ describe('usePortfolio — signal leg support', () => {
     // Minimal request body — defaults are omitted (BE defaults them).
     expect(leg).not.toHaveProperty('adjustment');
     expect(leg).not.toHaveProperty('roll_offset');
+    expect(leg).not.toHaveProperty('roll_schedule');
+  });
+
+  // ── Cleanup: roll_offset {value, unit} must SURVIVE the persist round-trip
+  // for a direct portfolio option leg (savePortfolio → loadPortfolio).
+  it('roll_offset {value, unit} survives the portfolio persist round-trip', async () => {
+    const { savePortfolio, loadPortfolio } = await import('./storage');
+    const legs = [
+      {
+        label: 'OPT',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'C',
+        cycle: null,
+        maturity: { kind: 'end_of_month', offset_months: 1 },
+        selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+        stream: 'mid',
+        roll_offset: { value: 3, unit: 'months' },
+        weight: 100,
+      },
+    ];
+    savePortfolio('rt-opt', { legs, rebalance: 'none' });
+    const loaded = loadPortfolio('rt-opt');
+    expect(loaded.legs[0].roll_offset).toEqual({ value: 3, unit: 'months' });
+  });
+
+  // ── Issue #3: a direct portfolio CONTINUOUS leg's strategy must reach the
+  // compute wire AND survive persistence.
+  it('handleCalculate forwards continuous strategy=end_of_month to the API', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => {
+      result.current.addLeg({
+        label: 'FUT_ES',
+        type: 'continuous',
+        collection: 'FUT_ES',
+        strategy: 'end_of_month',
+        adjustment: 'ratio',
+        cycle: 'HMUZ',
+        rollOffset: 0,
+        weight: 100,
+      });
+    });
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+    const leg = computePortfolio.mock.calls[0][0].legs[result.current.legs[0].label];
+    expect(leg.strategy).toBe('end_of_month');
+  });
+
+  it('continuous strategy survives the portfolio persist round-trip', async () => {
+    const { savePortfolio, loadPortfolio } = await import('./storage');
+    const legs = [
+      {
+        label: 'FUT',
+        type: 'continuous',
+        collection: 'FUT_ES',
+        strategy: 'end_of_month',
+        adjustment: 'none',
+        cycle: null,
+        rollOffset: 0,
+        weight: 100,
+      },
+    ];
+    savePortfolio('rt-fut', { legs, rebalance: 'none' });
+    const loaded = loadPortfolio('rt-fut');
+    expect(loaded.legs[0].strategy).toBe('end_of_month');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BUG (PR #67 runtime): a portfolio option leg is blocked by the
+// "Option stream legs require explicit start and end dates" guard even in the
+// normal flow where the user never drags the TimeRangeSlider. The slider
+// treats empty startDate/endDate as "use full min/max" and VISUALLY shows a
+// complete range, but handleCalculate treats '' as "no dates" and rejects.
+// So the user sees a full-range timeframe yet Compute fails with a confusing
+// "please set a date range". A portfolio option leg should resolve over the
+// portfolio's available/backtest window without forcing a manual drag.
+//
+// These tests are RED on the current code and define the acceptance criterion
+// for the fix.
+// ---------------------------------------------------------------------------
+
+describe('usePortfolio — option leg date window (PR #67 bug)', () => {
+  const optionLeg = {
+    label: 'OPT_SP_500 C mid',
+    type: 'option_stream',
+    collection: 'OPT_SP_500',
+    option_type: 'C',
+    cycle: null,
+    maturity: { kind: 'nearest_to_target', target_days: 30 },
+    selection: { kind: 'by_delta', target: -0.1, tolerance: 0.05, strict: false },
+    stream: 'mid',
+    weight: 100,
+  };
+
+  it('computes an OPTION-ONLY portfolio without a manual slider drag', async () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(optionLeg);
+    });
+
+    // Let the per-leg date-range useEffect settle (mirrors the real UI: the
+    // user adds a leg, the ranges load, the slider renders showing a full
+    // range, then the user clicks Compute WITHOUT dragging).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    // Expected: the request goes through (BE resolves over the window) and no
+    // "set a date range" guard error is surfaced.
+    expect(result.current.error).toBeNull();
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const body = computePortfolio.mock.calls[0][0];
+    // The portfolio MUST supply a concrete window for the option leg.
+    expect(body.start).toBeTruthy();
+    expect(body.end).toBeTruthy();
+  });
+
+  it('seeds the platform-standard 5-year default window for an option-only portfolio', async () => {
+    // Option-only portfolios have no priced leg to anchor on, so the window
+    // must default to ~5 years back from today (matching the basket default),
+    // and that window must reach both the slider (via overlapRange) and the
+    // compute request.
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(optionLeg);
+    });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    // Expected window computed the same way defaultDateRange() (utils/format)
+    // does — kept inline so the test is decoupled from the helper's internals.
+    const end = new Date();
+    const start = new Date();
+    start.setFullYear(start.getFullYear() - 5);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const expectedStart = iso(start);
+    const expectedEnd = iso(end);
+
+    // The slider min/max are bound to overlapRange (PortfolioPage), so it must
+    // carry the default window.
+    expect(result.current.overlapRange).toEqual({ start: expectedStart, end: expectedEnd });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const body = computePortfolio.mock.calls[0][0];
+    expect(body.start).toBe(expectedStart);
+    expect(body.end).toBe(expectedEnd);
+  });
+
+  it('computes an OPTION + INSTRUMENT portfolio without a manual slider drag', async () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg({
+        label: 'SPX',
+        type: 'instrument',
+        collection: 'INDEX',
+        symbol: 'SPX',
+        weight: 100,
+      });
+      result.current.addLeg(optionLeg);
+    });
+
+    // Ranges settle: the instrument leg yields a real overlapRange, so the
+    // slider shows that full window — but startDate/endDate are still ''.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const body = computePortfolio.mock.calls[0][0];
+    // The window falls back to the available overlap (the instrument's
+    // 2020-01-01..2020-12-31 from the getInstrumentPrices mock) — NOT the 5y
+    // default — so the BE can enumerate the option leg's trade dates and the
+    // window matches what the slider shows.
+    expect(body.start).toBe('2020-01-01');
+    expect(body.end).toBe('2020-12-31');
+  });
+
+  it('an explicit slider selection overrides the fallback window', async () => {
+    // The auto-window is only a FALLBACK: when the user has narrowed the range
+    // via the slider, those exact dates must be sent (not the overlap/default).
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg(optionLeg);
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    act(() => {
+      result.current.setStartDate('2022-03-01');
+      result.current.setEndDate('2022-09-30');
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    const body = computePortfolio.mock.calls[0][0];
+    expect(body.start).toBe('2022-03-01');
+    expect(body.end).toBe('2022-09-30');
+  });
+
+  // ── Edge cases (review hardening) ──
+
+  it('sends the overlap window when only ONE of start/end is set (the other falls back)', async () => {
+    // The slider always emits both dates, but the effective-window logic must
+    // also handle a half-set window programmatically: the unset side falls
+    // back to the overlap (here the instrument's 2020-01-01..2020-12-31).
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg({
+        label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100,
+      });
+      result.current.addLeg(optionLeg);
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    // Only the start is set; the end is left empty.
+    act(() => {
+      result.current.setStartDate('2020-06-01');
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    const body = computePortfolio.mock.calls[0][0];
+    expect(body.start).toBe('2020-06-01');        // explicit start preserved
+    expect(body.end).toBe('2020-12-31');          // end fell back to overlap end
+  });
+
+  it('guard fires (safety net) when priced legs are disjoint so no overlap exists', async () => {
+    // Two instrument legs with non-overlapping ranges → overlapStart > overlapEnd
+    // → overlapRange is null (the option-stream default branch is NOT reached,
+    // since validStarts is non-empty). With an option leg present and no
+    // derivable window, the guard correctly fires instead of sending an
+    // undefined window to the backend.
+    const prev = getInstrumentPrices.getMockImplementation();
+    getInstrumentPrices.mockImplementation((_collection, symbol) => {
+      if (symbol === 'EARLY') return Promise.resolve({ dates: [20180101, 20181231] });
+      if (symbol === 'LATE') return Promise.resolve({ dates: [20230101, 20231231] });
+      return Promise.resolve({ dates: [20200101, 20201231] });
+    });
+    try {
+      const { result } = renderHook(() => usePortfolio());
+
+      act(() => {
+        result.current.addLeg({
+          label: 'EARLY', type: 'instrument', collection: 'INDEX', symbol: 'EARLY', weight: 50,
+        });
+        result.current.addLeg({
+          label: 'LATE', type: 'instrument', collection: 'INDEX', symbol: 'LATE', weight: 50,
+        });
+        result.current.addLeg(optionLeg);
+      });
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      // Disjoint priced legs → no overlap.
+      expect(result.current.overlapRange).toBeNull();
+
+      await act(async () => {
+        await result.current.handleCalculate();
+      });
+
+      expect(result.current.error).toBe(
+        'Option stream legs require explicit start and end dates. Please set a date range.',
+      );
+      expect(computePortfolio).not.toHaveBeenCalled();
+    } finally {
+      getInstrumentPrices.mockImplementation(prev);
+    }
+  });
+
+  it('a spot/futures-only portfolio also sends the effective (overlap) window', async () => {
+    // Non-option portfolios were never blocked, but they must still send the
+    // effective window (the overlap), not undefined — confirms the fix did not
+    // change the happy path for instrument/continuous-only portfolios.
+    const { result } = renderHook(() => usePortfolio());
+
+    act(() => {
+      result.current.addLeg({
+        label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100,
+      });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    const body = computePortfolio.mock.calls[0][0];
+    // Window = the instrument's overlap (2020-01-01..2020-12-31), not undefined.
+    expect(body.start).toBe('2020-01-01');
+    expect(body.end).toBe('2020-12-31');
   });
 });
 

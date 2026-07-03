@@ -117,10 +117,10 @@ function PortfolioPage() {
     maturity: l.maturity || null,
     selection: l.selection || null,
     stream: l.stream || null,
-    // option_stream roll offset (snake_case — distinct from the futures
-    // leg's `rollOffset` above; matches OptionStreamForm + the wire field).
-    // The shared `adjustment` field above applies to continuous (futures) legs
-    // only; option streams carry no back-adjustment, so it stays null for them.
+    // option_stream roll offset — the unified {value, unit} object (snake_case,
+    // distinct from the futures leg's camelCase `rollOffset` above). The shared
+    // `adjustment` field applies to continuous (futures) legs only. ("End of
+    // month" is the maturity, not a separate roll_schedule — that was removed.)
     roll_offset: l.roll_offset ?? null,
   })), []);
 

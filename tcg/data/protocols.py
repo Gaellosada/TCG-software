@@ -7,7 +7,7 @@ Implementations are private; callers depend only on these interfaces.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -124,7 +124,7 @@ class MarketDataService(Protocol):
         self,
         root: str,
         option_type: Literal["C", "P"] | None = None,
-        cycle: str | None = None,
+        cycle: str | Sequence[str] | None = None,
     ) -> list[date]: ...
 
     # --- Futures contract lookup by expiration (Phase 2 VIX greeks) ---
@@ -137,6 +137,21 @@ class MarketDataService(Protocol):
         """Return the ``_id`` string of the futures contract whose
         ``expiration`` field equals *expiration_int* (YYYYMMDD int).
         Returns ``None`` when no contract matches.
+        """
+        ...
+
+    async def find_front_futures_contract_on_or_after(
+        self,
+        collection: str,
+        expiration_int: int,
+    ) -> str | None:
+        """Return the ``_id`` of the FRONT futures contract — the nearest one in
+        *collection* whose ``expiration`` is >= *expiration_int* (YYYYMMDD int).
+
+        Used to resolve the front-quarterly future for an option-on-future whose
+        own expiration has no listed future (serial/weekly months on a quarterly
+        futures curve).  Returns ``None`` when no contract expires on/after the
+        date.
         """
         ...
 

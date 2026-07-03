@@ -397,6 +397,7 @@ async def _batch_underlying_prices(
     from tcg.engine.options.chain._join import (
         _futures_collection_for,
         _is_btc,
+        _is_crypto,
     )
 
     # BTC: underlying price lives on the row — no Mongo call.
@@ -440,8 +441,34 @@ async def _batch_underlying_prices(
         if fut_collection is None:
             return {}
         collection, instrument_id = fut_collection, contract.underlying_ref
+    elif not _is_crypto(contract):
+        # Option-on-future with NO per-contract ``underlying_ref`` (the dwh SQL
+        # reader does not preserve it) — mirror the _join Branch-3 fallback:
+        # resolve the FRONT-QUARTERLY future (nearest FUT_* expiration >= the
+        # option's), the Black-76 forward, then bulk-fetch its prices.  ``>=``
+        # (not exact) so serial/weekly option months — which have no own future
+        # on a quarterly curve — map to the front quarterly (e.g. a July ES
+        # option → the September future).  Crypto roots are excluded above
+        # (spot/perp-settled, not option-on-future).
+        fut_collection = _futures_collection_for(contract.collection)
+        if fut_collection is None:
+            return {}
+        exp = contract.expiration
+        exp_int = exp.year * 10000 + exp.month * 100 + exp.day
+        try:
+            fut_id = await svc.find_front_futures_contract_on_or_after(
+                fut_collection, exp_int
+            )
+        except Exception:  # noqa: BLE001
+            # Same policy as VIX: don't 502 on a missing underlying.
+            return {}
+        if fut_id is None:
+            # No future expires on/after the option (past the last listed future).
+            return {}
+        collection, instrument_id = fut_collection, fut_id
     else:
-        # No underlying ref and not BTC/VIX — cannot join.
+        # Crypto (ETH; BTC handled above) — spot/perp-settled, no listed-future
+        # forward; cannot join here.
         return {}
 
     try:
@@ -689,6 +716,25 @@ def _maturity_pydantic_to_dataclass(maturity: Any) -> Any:
     if kind == "nearest_to_target":
         return NearestToTarget(target_dte_days=maturity.target_dte_days)
     raise OptionsValidationError(f"Unknown maturity kind {kind!r}")
+
+
+def _roll_offset_pydantic_to_dataclass(value: Any) -> Any:
+    """Convert the Pydantic ``RollOffset`` (or a legacy int) to its dataclass twin.
+
+    Accepts the validated Pydantic ``RollOffset`` model (``.value`` / ``.unit``)
+    OR a bare int (legacy days) for robustness on internally-constructed refs.
+    ``None`` → the no-op default ``RollOffset(value=0, unit='days')``.
+    """
+    from tcg.types.options import RollOffset as RollOffsetDC
+
+    if value is None:
+        return RollOffsetDC()
+    if isinstance(value, bool):
+        raise OptionsValidationError(f"Invalid roll_offset {value!r}")
+    if isinstance(value, int):
+        return RollOffsetDC(value=value, unit="days")
+    # Pydantic RollOffset (duck-typed: has .value + .unit).
+    return RollOffsetDC(value=int(value.value), unit=value.unit)
 
 
 # ---------------------------------------------------------------------------
