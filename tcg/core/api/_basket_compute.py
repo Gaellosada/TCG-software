@@ -146,13 +146,31 @@ async def _resolve_window(
     return win_start, win_end
 
 
+# Resolver ``error_code`` prefixes that are SUCCESS-side annotations, NOT
+# failures: ``snapped_to:<iso>`` (a non-NearestToTarget arithmetic target was
+# snapped to the nearest listed expiration) and ``coverage_skipped:<iso>`` (a
+# strictly-nearer expiration was skipped for a covered one).  Both coexist with
+# a REAL value — the value array is the source of truth for NaN-ness — so they
+# must NOT be tallied as holes (see stream_resolver's error_codes contract, and
+# portfolio.py ``_diagnostic_hint`` which excludes them the same way).
+_SUCCESS_SIDE_CODE_PREFIXES: tuple[str, ...] = ("snapped_to:", "coverage_skipped:")
+
+
+def _is_hole_code(code: str | None) -> bool:
+    """True iff ``code`` marks a genuine coverage hole (a missing/NaN value),
+    False for ``None`` and for the success-side annotation prefixes."""
+    return code is not None and not code.startswith(_SUCCESS_SIDE_CODE_PREFIXES)
+
+
 def _leg_coverage(record: dict) -> dict:
     """Summarise one option leg's per-date diagnostics into a coverage block.
 
     ``{descriptor, n, n_holes, counts, dominant_code, first_gap, last_gap}`` —
-    ``counts`` maps each ``error_code`` to its occurrence count; the dominant
-    code is the most frequent; ``first_gap``/``last_gap`` bound the affected
-    trade-date range (ISO).  A hole is any date with a non-null error_code.
+    ``counts`` maps each hole ``error_code`` to its occurrence count; the
+    dominant code is the most frequent; ``first_gap``/``last_gap`` bound the
+    affected trade-date range (ISO).  A hole is any date whose error_code names
+    a genuine failure; success-side notes (``snapped_to:``/``coverage_skipped:``)
+    coexist with a real value and are NOT counted (see ``_is_hole_code``).
     """
     codes: list[str | None] = record.get("error_codes") or []
     dates_arr = record.get("dates")
@@ -160,7 +178,7 @@ def _leg_coverage(record: dict) -> dict:
     counts: dict[str, int] = {}
     gap_ints: list[int] = []
     for i, c in enumerate(codes):
-        if c is not None:
+        if c is not None and _is_hole_code(c):
             counts[c] = counts.get(c, 0) + 1
             if dates_arr is not None and i < len(dates_arr):
                 gap_ints.append(int(dates_arr[i]))

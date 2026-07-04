@@ -15,7 +15,8 @@ Public API
 
 from __future__ import annotations
 
-from datetime import date
+from collections.abc import Sequence
+from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
@@ -26,7 +27,12 @@ from tcg.core.api._options_wiring import build_stream_resolver_wiring
 from tcg.data._utils import date_to_int
 from tcg.data.protocols import MarketDataService
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
-from tcg.types.options import OptionContractDoc, expand_cycle
+from tcg.types.options import (
+    MaturityRule,
+    NearestToTarget,
+    OptionContractDoc,
+    expand_cycle,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +63,51 @@ standalone portfolio legs without explicit conversion logic."""
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def fetch_nearest_target_expirations_by_date(
+    *,
+    svc: MarketDataService,
+    maturity: MaturityRule,
+    collection: str,
+    option_type: str,
+    cycle: str | Sequence[str] | None,
+    trade_dates: list[date],
+) -> dict[date, list[date]] | None:
+    """Per-date LISTED-expiration map for a ``NearestToTarget`` option stream.
+
+    ONE shared fetch used by every option-stream materialisation path
+    (``materialise_option_streams`` — the /api/options/stream chart, Indicators,
+    and portfolio level legs — plus the signals/basket fetcher in
+    ``_series_fetch``) so the daily-expiration global-snap fix (Issue #2) is
+    applied uniformly instead of only on the signals path.
+
+    Only ``NearestToTarget`` consults the map (arithmetic maturity rules snap
+    via the resolver's ``_snap_to_listed`` on the global list already), so for
+    every other rule — and for an empty window — this returns ``None`` and the
+    caller skips the scan.
+
+    ``cycle`` MUST already be ``expand_cycle``-broadened by the caller (the same
+    expanded value feeds the expiration list AND the chain fetch, so the two
+    never disagree).
+
+    The scan is capped at ``trade_dates[-1] + max(3*target_dte_days, 180)`` — the
+    SAME upper bound the resolver's own probe window uses (``far_future``), so no
+    expiration the resolver could pick is dropped, while far-dated LEAPS no
+    longer inflate the price-join scan.
+    """
+    if not isinstance(maturity, NearestToTarget) or not trade_dates:
+        return None
+    probe_days = max(maturity.target_dte_days * 3, 180)
+    expiration_max = trade_dates[-1] + timedelta(days=probe_days)
+    return await svc.list_option_expirations_by_date(
+        collection,
+        trade_dates[0],
+        trade_dates[-1],
+        option_type=option_type,
+        cycle=cycle,
+        expiration_max=expiration_max,
+    )
 
 
 def _business_dates_in_range(start: date | None, end: date | None) -> list[date] | None:
@@ -177,12 +228,26 @@ async def materialise_option_streams(
             option_type=ref.option_type,
             cycle=_cycle,
         )
+        _maturity = _maturity_pydantic_to_dataclass(ref.maturity)
+        # Issue #2 fix (was signals-path-only): for NearestToTarget, fetch the
+        # per-date LISTED-expiration map so the resolver snaps to an expiration
+        # actually quoted on each trade date instead of the whole-window global
+        # nearest.  Applies now to /api/options/stream, Indicators and portfolio
+        # level legs — every consumer of this shared materialiser.
+        available_by_date = await fetch_nearest_target_expirations_by_date(
+            svc=svc,
+            maturity=_maturity,
+            collection=ref.collection,
+            option_type=ref.option_type,
+            cycle=_cycle,
+            trade_dates=trade_dates,
+        )
         values, diagnostics, contracts = await resolve_option_stream(
             dates=trade_dates,
             collection=ref.collection,
             option_type=ref.option_type,
             cycle=_cycle,
-            maturity=_maturity_pydantic_to_dataclass(ref.maturity),
+            maturity=_maturity,
             selection=_criterion_pydantic_to_dataclass(ref.selection),
             stream=ref.stream,
             roll_offset=_roll_offset_pydantic_to_dataclass(ref.roll_offset),
@@ -192,6 +257,7 @@ async def materialise_option_streams(
             progress_callback=progress_callback,
             bulk_chain_reader=bulk_reader,
             available_expirations=all_expirations,
+            available_expirations_by_date=available_by_date,
             concurrency_gate=gate,
         )
         dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)

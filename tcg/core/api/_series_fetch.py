@@ -491,20 +491,22 @@ def make_signal_fetcher(
             # Issue #2 fix: for NearestToTarget, fetch the per-date LISTED
             # expiration map (one distinct scan over the window) so the resolver
             # snaps to an expiration actually quoted on each trade date instead of
-            # the whole-window global nearest.  Only NearestToTarget consults it
-            # (arithmetic rules snap via _snap_to_listed already), so skip the
-            # scan for every other maturity rule.
-            from tcg.types.options import NearestToTarget
+            # the whole-window global nearest.  ONE shared helper (also used by
+            # materialise_option_streams) returns None for every other maturity
+            # rule (arithmetic rules snap via _snap_to_listed already) and bounds
+            # the scan by expiration_max, so the LEAPS scan can't blow up.
+            from tcg.core.api._options_materialise import (
+                fetch_nearest_target_expirations_by_date,
+            )
 
-            available_by_date: dict | None = None
-            if isinstance(instrument.maturity, NearestToTarget) and trade_dates:
-                available_by_date = await svc.list_option_expirations_by_date(
-                    instrument.collection,
-                    trade_dates[0],
-                    trade_dates[-1],
-                    option_type=instrument.option_type,
-                    cycle=_cycle,
-                )
+            available_by_date = await fetch_nearest_target_expirations_by_date(
+                svc=svc,
+                maturity=instrument.maturity,
+                collection=instrument.collection,
+                option_type=instrument.option_type,
+                cycle=_cycle,
+                trade_dates=trade_dates,
+            )
 
             # Select-and-hold P&L for delta/moneyness-selected option signals:
             # freeze the contract between rolls and book fixed-contract dollar P&L

@@ -133,6 +133,7 @@ class OptionsDataReader(Protocol):
         end: date,
         option_type: Literal["C", "P"] | None = None,
         cycle: str | Sequence[str] | None = None,
+        expiration_max: date | None = None,
     ) -> dict[date, list[date]]:
         """Per-trade-date map of expirations actually LISTED (price-quoted).
 
@@ -140,5 +141,8 @@ class OptionsDataReader(Protocol):
         the dim-only global set.  Consumed by the stream resolver so
         ``NearestToTarget`` snaps to an expiration listed on each date (fixes the
         daily-expiration ``no_chain_for_date`` global-snap bug).
+
+        ``expiration_max`` (optional) caps the expirations considered, bounding
+        the LEAPS scan; ``None`` = no upper bound.
         """
         ...
