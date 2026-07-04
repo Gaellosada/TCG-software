@@ -878,7 +878,13 @@ def _to_pulse(active: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
     block fires only on the bar ``active`` first goes true, then must drop false
     before it can fire again ("re-arm"). Applied AFTER NaN-poison is baked into
     ``active`` (a NaN bar is already False, so a rising edge out of a gap is
-    intentional and fine). Idempotent on an already-single-bar impulse.
+    intentional and fine).
+
+    Applied ONLY to the LEVEL-shaped ``active`` of the CNF / cross_count path
+    (:func:`_eval_block_activity`). The THEN-chain path is NOT run through this:
+    ``_sequence_active`` already emits one impulse per completion, and collapsing
+    ADJACENT completions would silently drop a real fire — so pulse is a no-op
+    (idempotent by construction) on a chain.
     """
     pulsed = np.zeros_like(active)
     if active.size == 0:
@@ -1058,8 +1064,16 @@ def _eval_block_activity(
         stage_truth.append(gt)
         stage_nan.append(gn)
     active = _sequence_active(stage_truth, stage_nan, windows, T, chain_reset)
-    if block.fire_mode == "pulse":
-        active = _to_pulse(active)
+    # No ``_to_pulse`` on the chain path. ``_sequence_active`` already emits an
+    # IMPULSE (one True bar per completion) — which IS what ``fire_mode="pulse"``
+    # means for a THEN-chain — so a rising-edge pass would be redundant AND
+    # wrong: two completions on ADJACENT bars (a coincident head re-arms and the
+    # next stage matches the very next bar) form ``[..,1,1,..]``, and
+    # ``_to_pulse`` would collapse the second, silently dropping a real
+    # completion. Pulse is therefore idempotent on a chain BY CONSTRUCTION, and
+    # pulse/sustained coincide here (a discrete completion has no LEVEL to
+    # sustain). ``_to_pulse`` is applied ONLY on the level-shaped CNF /
+    # cross_count path above, where rising-edge of a sustained level is correct.
     return active, any_nan
 
 

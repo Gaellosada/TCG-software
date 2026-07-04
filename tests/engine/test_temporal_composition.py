@@ -539,6 +539,65 @@ async def test_pulse_fired_indices_are_edges_of_sustained():
     assert pulse == (0, 3)  # rising edges only (t0 edge, t3 after the t2 drop)
 
 
+def test_pulse_on_chain_keeps_adjacent_completions():
+    # PIN — pulse must NOT collapse two THEN-chain completions on ADJACENT bars.
+    # head=[T,T,F] / stage2=[F,T,T], W=1: head@0->compl@1 fires, head@1 re-arms
+    # and completes @2 -> ``_sequence_active`` emits [F,T,T]. A blanket rising-edge
+    # pass (``_to_pulse``) would collapse that to [F,T,F], silently dropping the
+    # SECOND completion. The chain path is already impulse-per-completion, so
+    # pulse is a no-op there and both completions survive.
+    import tcg.engine.signal_exec as se
+
+    condA = CompareCondition(op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0))
+    condB = CompareCondition(op="gt", lhs=_close("Y"), rhs=ConstantOperand(value=100.0))
+    block = Block(
+        id="e",
+        input_id="X",
+        weight=100.0,
+        conditions=(condA, condB),
+        links={1: 1},  # one THEN boundary, W=1
+        fire_mode="pulse",
+    )
+    inputs = {"X": _input("X"), "Y": _input("Y")}
+    kA = se._operand_key(condA.lhs, {}, inputs)
+    kB = se._operand_key(condB.lhs, {}, inputs)
+    kconstA = se._operand_key(condA.rhs, {}, inputs)
+    kconstB = se._operand_key(condB.rhs, {}, inputs)
+    vbk = {
+        kA: np.array([150.0, 150.0, 50.0]),  # X>100 -> head [T,T,F]
+        kB: np.array([50.0, 150.0, 150.0]),  # Y>100 -> stage2 [F,T,T]
+        kconstA: np.full(3, 100.0),
+        kconstB: np.full(3, 100.0),
+    }
+    # sanity: the raw automaton produces two ADJACENT completions.
+    assert _sequence_active(
+        [vbk[kA] > 100.0, vbk[kB] > 100.0],
+        [np.zeros(3, dtype=np.bool_), np.zeros(3, dtype=np.bool_)],
+        [1],
+        3,
+    ).astype(int).tolist() == [0, 1, 1]
+    # a blanket rising-edge pass would WRONGLY collapse the second completion:
+    assert _to_pulse(np.array([0, 1, 1], dtype=np.bool_)).astype(int).tolist() == [
+        0,
+        1,
+        0,
+    ]
+    # the fix: pulse on a chain keeps BOTH completions.
+    active, _ = se._eval_block_activity(block, {}, inputs, vbk, 3)
+    assert active.astype(int).tolist() == [0, 1, 1]
+    # sustained on the same chain is identical (chain is impulse either way).
+    block_sustained = Block(
+        id="e",
+        input_id="X",
+        weight=100.0,
+        conditions=(condA, condB),
+        links={1: 1},
+        fire_mode="sustained",
+    )
+    active_s, _ = se._eval_block_activity(block_sustained, {}, inputs, vbk, 3)
+    assert active_s.astype(int).tolist() == [0, 1, 1]
+
+
 # --------------------------------------------------------------------------- #
 # exit-reset (always-on): aborts in-flight chain / zeroes since_reset ladder
 # --------------------------------------------------------------------------- #

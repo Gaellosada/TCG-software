@@ -409,30 +409,26 @@ class Block:
     # countdown is re-seeded on every disarm. Default ``1`` reproduces the
     # original single-flip re-arm exactly.
     requires_reset_count: int = 1
-    # Optional bounded TEMPORAL chain over this block's conditions
+    # Optional bounded TEMPORAL composition over this block's conditions
     # (entries/exits only — reset blocks MUST keep this None; the API rejects
-    # otherwise). ``links`` maps the index of a SUCCESSOR condition (1..len-1,
-    # in the block's ``conditions`` order) to the ``within`` window in BARS,
-    # measured from the immediately-preceding matched event. A non-empty
-    # ``links`` turns the block from simultaneous CNF into ONE linear chain
-    # A -(W1)-> B -(W2)-> C: the keys must form a single contiguous forward
-    # chain (e.g. {1: W1, 2: W2}), windows must be finite and > 0, and no
-    # nesting is allowed (validated at the API layer, HTTP 400). ``None``/empty
-    # ⇒ today's zero-link CNF (the engine takes the literal unchanged latch
-    # path). A link window of 0 is rejected at the API layer (W=0 folds to
-    # plain AND, i.e. a non-link). Strictly-after semantics: the successor must
-    # match on a LATER bar (>=1 after) the predecessor's match, within the
-    # window; the block fires as an IMPULSE on the completion bar; a single
-    # forward-only in-flight candidate; NaN on any chain operand aborts the
-    # candidate.
+    # otherwise). GROUP semantics (v5): ``links`` marks the THEN boundaries
+    # between conjunction GROUPS. It maps a SUCCESSOR condition index (in the
+    # block's ``conditions`` order) to the ``within`` window in BARS from the
+    # preceding group's match. Keys may be ANY subset of ``{1 .. len-1}`` — a
+    # gap PRESENT in ``links`` starts a new group (a THEN boundary); a gap
+    # ABSENT keeps the successor in the same conjunction group (plain AND). So
+    # ``(A AND B) THEN (C AND D)`` on four conditions is ``links={2: W}``, and a
+    # full chain ``A -(W1)-> B -(W2)-> C`` is the special case ``{1: W1, 2: W2}``
+    # (one condition per group). Windows are integers ``>= 1``; a window of 0
+    # folds to AND (non-link). ``None`` / empty ⇒ one group ⇒ pure CNF — the
+    # engine takes the literal unchanged latch path (byte-identical). Resets on
+    # any bound reset keep this None.
     #
-    # GROUP semantics (v5): ``links`` no longer needs to be a FULL contiguous
-    # chain. A gap present in ``links`` (successor index -> window) is a THEN
-    # boundary; a gap absent is AND. The block is a sequence of conjunction
-    # GROUPS separated by THEN boundaries: ``(A AND B) THEN (C AND D)`` is
-    # ``links={2: W}`` on four conditions. Zero links ⇒ one group ⇒ pure CNF
-    # (the literal historical path, byte-identical). A window of 0 folds to AND
-    # (non-link).
+    # Strictly-after / impulse semantics: each successor group must match on a
+    # LATER bar (>=1 after) the predecessor group's match, within the window;
+    # the block fires as an IMPULSE on the completion bar; a single forward-only
+    # in-flight candidate; NaN on any operand of an awaited group aborts the
+    # candidate.
     links: dict[int, int] | None = None
     # Level → pulse conversion of the block's per-bar ``active`` (entries/exits
     # only — reset blocks MUST keep the default; the API rejects otherwise).
@@ -441,12 +437,15 @@ class Block:
     #     historical behaviour; the dataclass default AND the hydration of a
     #     stored signal that lacks the field MUST both be ``"sustained"`` so the
     #     zero-link CNF corpus stays byte-identical.
-    #   * ``"pulse"`` — rising-edge conversion: fires only on the bar ``active``
-    #     first goes true (``active[t] & ~active[t-1]``, with ``active[0]``
-    #     passed through), then re-arms when ``active`` drops false. A THEN-chain
-    #     ``active`` is already a single-bar impulse, so pulse is idempotent
-    #     there. "Pulse by default for NEW blocks" is a FRONTEND UX default; the
-    #     backend never defaults to pulse.
+    #   * ``"pulse"`` — rising-edge conversion of a LEVEL ``active``: fires only
+    #     on the bar ``active`` first goes true (``active[t] & ~active[t-1]``,
+    #     with ``active[0]`` passed through), then re-arms when ``active`` drops
+    #     false. This applies to the CNF / cross_count (level-shaped) path only.
+    #     On a THEN-chain the engine does NOT run the conversion: the chain
+    #     already fires as one impulse per completion, so pulse is a no-op there
+    #     and coincides with "sustained" (collapsing adjacent completions would
+    #     silently drop a real fire). "Pulse by default for NEW blocks" is a
+    #     FRONTEND UX default; the backend never defaults to pulse.
     fire_mode: Literal["pulse", "sustained"] = "sustained"
 
 
