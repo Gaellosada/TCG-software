@@ -933,9 +933,23 @@ async def _resolve_bulk(
                 # per-date listing map is supplied (``available_expirations_by_date``
                 # — one distinct scan over the window in the caller), pick from the
                 # expirations quoted on ``d``; otherwise fall back to the global
-                # ``available`` (unchanged legacy behaviour, and what sparse
-                # monthly/weekly roots like SPX already got right because the
-                # global-nearest coincides with a listed expiration there).
+                # ``available`` (legacy behaviour).
+                #
+                # NOT just a daily-root (OPT_BTC) fix: sparse monthly/weekly roots
+                # like SPX (OPT_SP_500) carry the SAME latent hole.  SPX lists
+                # weeklies with the same listing-lag — an expiration exists in the
+                # global set (dim scan) before it is ever quoted (price row) on
+                # early trade dates.  When the global-nearest is one of those
+                # not-yet-listed expirations, the legacy path snaps to it, Phase B
+                # finds 0 rows on ``d`` → a silent ``no_chain_for_date`` NaN.  The
+                # per-date map moves the pick to an expiration actually listed on
+                # ``d`` → a real value.  This is strictly NaN→value: the per-date
+                # pick differs from the global pick ONLY when the global pick is
+                # unlisted that day, so an already-valid global pick is never
+                # changed to a different value (verified live on OPT_SP_500 P,
+                # target_dte=30, 2023-01..03: 7/47 dates changed, all NaN→value,
+                # zero value→value — e.g. 2023-03-02 global pick 2023-04-07 had 0
+                # price rows, per-date pick 2023-03-24 had 222).
                 avail_for_d = available
                 if available_expirations_by_date is not None:
                     day_listed = available_expirations_by_date.get(d)

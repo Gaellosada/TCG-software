@@ -1733,14 +1733,20 @@ async def test_nearest_to_target_snaps_to_expiration_listed_that_date():
 
     # d1 chain lists near_exp and far_exp2 (NOT far_exp); d2 lists far_exp.
     chain_d1 = [
-        (_contract(strike=100, expiration=near_exp, collection="OPT_BTC"),
-         _row(row_date=d1, mid=2.0)),
-        (_contract(strike=100, expiration=far_exp2, collection="OPT_BTC"),
-         _row(row_date=d1, mid=4.0)),
+        (
+            _contract(strike=100, expiration=near_exp, collection="OPT_BTC"),
+            _row(row_date=d1, mid=2.0),
+        ),
+        (
+            _contract(strike=100, expiration=far_exp2, collection="OPT_BTC"),
+            _row(row_date=d1, mid=4.0),
+        ),
     ]
     chain_d2 = [
-        (_contract(strike=100, expiration=far_exp, collection="OPT_BTC"),
-         _row(row_date=d2, mid=3.0)),
+        (
+            _contract(strike=100, expiration=far_exp, collection="OPT_BTC"),
+            _row(row_date=d2, mid=3.0),
+        ),
     ]
     reader = FakeChainReader({d1: chain_d1, d2: chain_d2})
     bulk = FakeBulkChainReader({d1: chain_d1, d2: chain_d2})
@@ -1788,39 +1794,75 @@ async def test_nearest_to_target_snaps_to_expiration_listed_that_date():
     assert contracts_fix[0].expiration == near_exp
 
 
-async def test_nearest_to_target_sparse_root_unchanged_by_per_date_map():
-    """Sparse monthly root (SPX-like): the global-nearest expiration IS listed on
-    the trade date, so supplying the per-date map picks the SAME expiration as
-    the global path — behaviour is unchanged for sparse roots.
+async def test_nearest_to_target_sparse_root_weekly_listing_lag_nan_to_value():
+    """Sparse monthly/weekly root (SPX / OPT_SP_500) has the SAME latent
+    ``no_chain_for_date`` hole as the daily-expiration root (OPT_BTC).
+
+    SPX is not immune to the global-snap bug: it carries weeklies with the same
+    listing-lag, so an expiration can exist in the GLOBAL set (a dim scan of
+    every expiration that ever existed) while it is not yet quoted (no price
+    row) on early trade dates.  When that not-yet-listed weekly is the
+    global-nearest to the DTE target, the legacy path snaps to it → Phase B
+    finds 0 rows → a silent ``no_chain_for_date`` NaN.  The per-date map moves
+    the pick to an expiration actually listed on the date → a real value.
+
+    Live repro (read-only dwh) that this synthetic mirrors: OPT_SP_500 P,
+    target_dte=30, 2023-01-03..2023-03-10 — 7/47 trade dates changed, ALL
+    NaN→value, zero value→value.  Concretely on 2023-03-02 the global-nearest
+    2023-04-07 (a weekly) had 0 price rows while the per-date pick 2023-03-24
+    had 222.  This test pins that NaN→value direction so the sparse-root case is
+    no longer mislabelled "unchanged".
     """
-    d = date(2024, 3, 18)
-    exp_near = date(2024, 4, 19)  # ~32d — nearest to 30d target
-    exp_far = date(2024, 5, 17)  # next monthly
+    d = date(2023, 3, 2)
+    exp_near = date(2023, 3, 24)  # listed on d (weekly, ~22d out)
+    exp_glob = date(2023, 4, 7)  # global-nearest to 30d, NOT listed on d
+    exp_month = date(2023, 4, 21)  # listed on d (monthly, ~50d out)
 
-    chain = [
-        (_contract(strike=4500, expiration=exp_near), _row(row_date=d, mid=5.0)),
-        (_contract(strike=4500, expiration=exp_far), _row(row_date=d, mid=9.0)),
+    # d's chain quotes exp_near and exp_month (NOT exp_glob).
+    chain_d = [
+        (
+            _contract(
+                strike=4000, expiration=exp_near, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=12.0),
+        ),
+        (
+            _contract(
+                strike=4000, expiration=exp_month, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=30.0),
+        ),
     ]
-    global_exps = [exp_near, exp_far]
+    # exp_glob is nearest to the 30d target (2023-04-01) among the global set,
+    # so the legacy path snaps to it — but no contract of it is quoted on d.
+    global_exps = [exp_near, exp_glob, exp_month]
+    per_date = {d: [exp_near, exp_month]}
 
-    async def _run(per_date):
+    async def _run(per_date_map):
         return await resolve_option_stream(
             dates=[d],
             collection="OPT_SP_500",
-            option_type="C",
+            option_type="P",
             cycle=None,
             maturity=NearestToTarget(target_dte_days=30),
-            selection=ByStrike(strike=4500),
+            selection=ByStrike(strike=4000),
             stream="mid",
-            chain_reader=FakeChainReader({d: chain}),
+            chain_reader=FakeChainReader({d: chain_d}),
             maturity_resolver=DefaultMaturityResolver(),
             underlying_price_resolver=None,
-            bulk_chain_reader=FakeBulkChainReader({d: chain}),
+            bulk_chain_reader=FakeBulkChainReader({d: chain_d}),
             available_expirations=global_exps,
-            available_expirations_by_date=per_date,
+            available_expirations_by_date=per_date_map,
         )
 
-    vals_none, _, contracts_none = await _run(None)
-    vals_map, _, contracts_map = await _run({d: [exp_near, exp_far]})
-    assert vals_none[0] == pytest.approx(vals_map[0])
-    assert contracts_none[0].expiration == contracts_map[0].expiration == exp_near
+    # WITHOUT the per-date map: snaps to exp_glob → 0 rows on d → NaN hole.
+    vals_blind, errs_blind, _ = await _run(None)
+    assert np.isnan(vals_blind[0])
+    assert errs_blind[0] == "no_chain_for_date"
+
+    # WITH the per-date map: snaps to exp_near (listed on d) → resolves 12.0.
+    vals_fix, errs_fix, contracts_fix = await _run(per_date)
+    assert errs_fix[0] is None
+    assert vals_fix[0] == pytest.approx(12.0)
+    assert contracts_fix[0] is not None
+    assert contracts_fix[0].expiration == exp_near

@@ -29,14 +29,30 @@ const combineLegData = (results) => results.map((r) => r.data ?? null);
 
 // Human-readable cause for a resolver error_code (Issue #1: explain gaps
 // rather than draw a silently broken line).
+// Codes mirror tcg/engine/options/series/stream_resolver.py (per-date holes +
+// the missing_<stream> family) and selection/_match.py (selection failures).
+// Anything still unmapped falls through to the raw slug below.
 const COVERAGE_CAUSE = {
-  missing_mid: 'no two-sided quote',
+  // chain / maturity / date resolution
   no_chain_for_date: 'no chain listed on date',
-  missing_underlying_price: 'no underlying price',
-  missing_iv: 'no implied vol',
-  missing_delta_no_compute: 'no delta',
-  past_last_trade_date: 'past last trade date',
   maturity_resolution_failed: 'maturity unresolved',
+  past_last_trade_date: 'past last trade date',
+  data_access_error: 'data source error',
+  // selection failures
+  no_match_within_tolerance: 'no contract within tolerance',
+  strike_not_in_chain: 'strike not listed',
+  missing_delta_no_compute: 'no delta to select on',
+  // per-stream value holes (missing_<stream>)
+  missing_mid: 'no two-sided quote',
+  missing_bs_mid: 'cannot price (Black-76)',
+  missing_iv: 'no implied vol',
+  missing_delta: 'no delta on contract',
+  missing_gamma: 'no gamma',
+  missing_vega: 'no vega',
+  missing_theta: 'no theta',
+  missing_open_interest: 'no open interest',
+  missing_volume: 'no volume',
+  missing_underlying_price: 'no underlying price',
 };
 
 // Build the per-leg gap messages from the response ``coverage`` block.  Only

@@ -148,6 +148,40 @@ describe('BasketChart', () => {
     ).toBeTruthy();
   });
 
+  it('maps a resolver hole code that is not the common missing_mid to a friendly label (DEBT-8)', async () => {
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [NaN, NaN, NaN],
+        coverage: {
+          composite: { n: 3, n_holes: 3 },
+          legs: [
+            {
+              descriptor: 'OPT_BTC C ByDelta',
+              n: 3,
+              n_holes: 3,
+              counts: { strike_not_in_chain: 3 },
+              dominant_code: 'strike_not_in_chain',
+              first_gap: '2024-01-02',
+              last_gap: '2024-01-04',
+            },
+          ],
+        },
+      }),
+    );
+    render(
+      <BasketChart
+        basket={{ kind: 'saved', basket_id: 'b1' }}
+        name="BTC straddle"
+        assetClass="option"
+      />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(
+      screen.getByText(/OPT_BTC C ByDelta: 100% missing — strike not listed/),
+    ).toBeTruthy();
+  });
+
   it('shows no coverage notice when there are no gaps', async () => {
     mockGetBasketSeries.mockImplementation(() =>
       Promise.resolve({

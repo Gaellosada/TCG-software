@@ -669,9 +669,10 @@ export function loadState() {
   // Migration chain, run BEFORE sanitisation so the sanitiser only ever sees
   // the current shape. v5 → v6: loss-free exit-target singular→plural. v6 → v7:
   // pure version stamp (links/cross defaults are applied by the sanitiser).
-  // Each step is gated on the running version so a v5 payload walks the whole
-  // chain (v5→v6→v7). Anything that isn't the current version after the chain
-  // is dropped.
+  // v7 → v8: pure version stamp for the additive block-level fire_mode field
+  // (the sanitiser folds a missing value to "sustained"). Each step is gated on
+  // the running version so a v5 payload walks the whole chain (v5→v6→v7→v8).
+  // Anything that isn't the current version after the chain is dropped.
   if (parsed.version === 5) {
     parsed = migrateV5ToV6(parsed);
   }
