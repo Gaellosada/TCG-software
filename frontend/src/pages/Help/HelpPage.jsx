@@ -174,11 +174,11 @@ function HelpPage() {
           <p>
             <strong>Roll offset</strong> rolls to the next contract a chosen
             number of calendar days early (0 = roll at the rule&apos;s normal
-            time). <strong>Back-adjustment</strong> (None / Ratio / Difference,
-            the same methods as continuous futures) smooths the jump at each roll
-            and applies to the <strong>mid-price</strong> stream only &mdash; it
-            is ignored for IV, the Greeks, and the volume/open-interest streams,
-            where a roll jump is not meaningful.
+            time). Unlike continuous futures, an option stream carries{' '}
+            <strong>no back-adjustment</strong>: ratio/difference smoothing is
+            ill-posed for option premia, so the series is always the raw stitched
+            stream and each roll steps straight to the newly-selected
+            contract&apos;s own value.
           </p>
         </Details>
 
@@ -332,15 +332,19 @@ function HelpPage() {
         <h3 className={styles.conceptTitle}>Structure</h3>
         <p className={styles.conceptText}>
           Conditions within a block are <strong>AND</strong>&rsquo;d. Blocks within a
-          direction are <strong>OR</strong>&rsquo;d. Four direction types exist: long
-          entry, long exit, short entry, short exit.
+          section are <strong>OR</strong>&rsquo;d. A signal has three block sections
+          &mdash; <strong>Entries</strong>, <strong>Exits</strong> and{' '}
+          <strong>Resets</strong>; direction (long vs. short) is not a separate section
+          but comes from the sign of each block&rsquo;s weight.
         </p>
 
         <h3 className={styles.conceptTitle}>Weights and capital</h3>
         <p className={styles.conceptText}>
-          Entry blocks carry a weight that controls capital allocation. Weights above
-          <strong> 1.0</strong> apply leverage. Set initial capital in the right panel
-          before running.
+          Each entry block carries a <strong>weight</strong> &mdash; a percent of
+          capital, entered with a &ldquo;%&rdquo; suffix and clamped to{' '}
+          <strong>-100 to +100</strong>. Its sign sets direction (positive = long,
+          negative = short) and its magnitude the share of capital allocated. Set
+          initial capital in the right panel before running.
         </p>
 
         <Details title="Block composition: AND / THEN groups">

@@ -55,7 +55,7 @@ describe('Signals storage (v8)', () => {
     expect(SCHEMA_VERSION).toBe(8);
   });
 
-  it('storage key is tcg.signals.v5 (key unchanged; v5→v6→v7 migrates in place)', () => {
+  it('storage key is tcg.signals.v5 (key unchanged; v5→v6→v7→v8 migrates in place)', () => {
     expect(SIGNALS_STORAGE_KEY).toBe('tcg.signals.v5');
   });
 
