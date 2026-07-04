@@ -970,9 +970,16 @@ def _sequence_active(
          coincident head+completion advances the OLDER candidate rather than
          silently dropping it.
 
-    Single candidate, forward-only (``tau`` only advances), so for a single
-    linear chain it cannot miss a completion that a multi-candidate scan would
-    catch (redteam Finding 1 honest assessment). State is O(1): ``(stage, tau)``.
+    Single candidate, forward-only (``tau`` only advances). This is a
+    RESTRICTION of the maximal multi-candidate semantics, not an equivalent of
+    it: every fire it produces is also a multi-candidate fire (it never fires
+    spuriously), but it MAY MISS a completion on 3+-stage chains when the head
+    group re-matches mid-chain — the in-flight candidate has already advanced
+    past stage 0, so a fresh head arm overwrites it and the older partial
+    progress that a multi-candidate scan would have completed is lost. 2-stage
+    chains coincide with multi-candidate (only one link, so nothing to drop).
+    See ``tests/property/test_temporal_automaton.py`` (subset + 2-stage
+    equality). State is O(1): ``(stage, tau)``.
     """
     m = len(stage_truth)
     active = np.zeros(T, dtype=np.bool_)

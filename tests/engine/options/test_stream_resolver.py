@@ -1866,3 +1866,90 @@ async def test_nearest_to_target_sparse_root_weekly_listing_lag_nan_to_value():
     assert vals_fix[0] == pytest.approx(12.0)
     assert contracts_fix[0] is not None
     assert contracts_fix[0].expiration == exp_near
+
+
+async def test_nearest_to_target_per_date_map_leaves_valid_global_pick_unchanged():
+    """SAFETY invariant (the other half of the sweep-2 NaN→value pin): when the
+    global-nearest expiration IS listed on the trade date, supplying the per-date
+    map must yield the IDENTICAL contract — value==value, no change.
+
+    The per-date snapping (stream_resolver.py Issue-#2 fix) is a strictly
+    corrective move: it only differs from the global pick when the global pick is
+    NOT quoted that day.  The two sweep-2 tests pin the corrective direction
+    (unlisted global pick → NaN without the map, real value with it).  This pins
+    the complementary guarantee — that an ALREADY-VALID global pick is never
+    perturbed by the map — so a future resolver edit that changed a valid pick
+    (e.g. always re-snapping to the date's nearest-listed even when the global
+    pick is listed) would be caught here rather than silently altering series.
+
+    Setup: target_dte=30 on 2023-03-02 (target date 2023-04-01).  Three
+    expirations, ALL quoted on the date:
+      exp_near  2023-03-24  DTE 22  |22-30| = 8
+      exp_glob  2023-04-03  DTE 32  |32-30| = 2   ← global-nearest, and listed
+      exp_month 2023-04-21  DTE 50  |50-30| = 20
+    The global-nearest (exp_glob) is listed on the date, so the map — which
+    includes exp_glob — must resolve to the exact same contract/value.
+    """
+    d = date(2023, 3, 2)
+    exp_near = date(2023, 3, 24)  # listed, ~22d out
+    exp_glob = date(2023, 4, 3)  # global-nearest to 30d, ALSO listed on d
+    exp_month = date(2023, 4, 21)  # listed, ~50d out
+
+    # d's chain quotes ALL THREE expirations (distinct mids identify the pick).
+    chain_d = [
+        (
+            _contract(
+                strike=4000, expiration=exp_near, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=12.0),
+        ),
+        (
+            _contract(
+                strike=4000, expiration=exp_glob, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=15.0),
+        ),
+        (
+            _contract(
+                strike=4000, expiration=exp_month, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=30.0),
+        ),
+    ]
+    global_exps = [exp_near, exp_glob, exp_month]
+    # The per-date map lists exactly the same expirations as the global set for
+    # this date (the global pick is genuinely quoted here).
+    per_date = {d: [exp_near, exp_glob, exp_month]}
+
+    async def _run(per_date_map):
+        return await resolve_option_stream(
+            dates=[d],
+            collection="OPT_SP_500",
+            option_type="P",
+            cycle=None,
+            maturity=NearestToTarget(target_dte_days=30),
+            selection=ByStrike(strike=4000),
+            stream="mid",
+            chain_reader=FakeChainReader({d: chain_d}),
+            maturity_resolver=DefaultMaturityResolver(),
+            underlying_price_resolver=None,
+            bulk_chain_reader=FakeBulkChainReader({d: chain_d}),
+            available_expirations=global_exps,
+            available_expirations_by_date=per_date_map,
+        )
+
+    # WITHOUT the per-date map: global path snaps to exp_glob → 15.0 (valid).
+    vals_global, errs_global, contracts_global = await _run(None)
+    assert errs_global[0] is None
+    assert vals_global[0] == pytest.approx(15.0)
+    assert contracts_global[0] is not None
+    assert contracts_global[0].expiration == exp_glob
+
+    # WITH the per-date map: the identical (already-valid) pick — no change.
+    vals_map, errs_map, contracts_map = await _run(per_date)
+    assert errs_map[0] is None
+    assert vals_map[0] == pytest.approx(15.0)
+    assert vals_map[0] == vals_global[0]  # value==value: pick unchanged
+    assert contracts_map[0] is not None
+    assert contracts_map[0].expiration == exp_glob
+    assert contracts_map[0].contract_id == contracts_global[0].contract_id
