@@ -1710,3 +1710,246 @@ async def test_nearest_to_target_fallback_probe_uses_loosened_lower_bound():
         f"Probe query expiration_min should be {expected_lower}, "
         f"got {probe_call['expiration_min']}"
     )
+
+
+# ── Issue #2: NearestToTarget per-date listed-expiration snapping ───────
+
+
+async def test_nearest_to_target_snaps_to_expiration_listed_that_date():
+    """Daily-expiration root: NearestToTarget must pick an expiration LISTED on
+    the trade date, not the global-window nearest that is only listed later.
+
+    Repro of the OPT_BTC ``no_chain_for_date`` bug: on ``d1`` only near-dated
+    expirations are quoted; the 30-day-nearest in the GLOBAL set (``far_exp``)
+    is not listed until ``d2``.  Without the per-date map the resolver snaps to
+    ``far_exp`` → Phase B finds 0 rows on ``d1`` → ``no_chain_for_date``.  With
+    the map it snaps to the nearest expiration actually listed on ``d1``.
+    """
+    d1 = date(2021, 1, 5)
+    d2 = date(2021, 2, 10)
+    near_exp = date(2021, 1, 29)  # listed on d1, ~24d out
+    far_exp = date(2021, 2, 4)  # global-nearest to 30d, NOT listed on d1
+    far_exp2 = date(2021, 2, 26)  # listed on d1 too, ~52d out
+
+    # d1 chain lists near_exp and far_exp2 (NOT far_exp); d2 lists far_exp.
+    chain_d1 = [
+        (
+            _contract(strike=100, expiration=near_exp, collection="OPT_BTC"),
+            _row(row_date=d1, mid=2.0),
+        ),
+        (
+            _contract(strike=100, expiration=far_exp2, collection="OPT_BTC"),
+            _row(row_date=d1, mid=4.0),
+        ),
+    ]
+    chain_d2 = [
+        (
+            _contract(strike=100, expiration=far_exp, collection="OPT_BTC"),
+            _row(row_date=d2, mid=3.0),
+        ),
+    ]
+    reader = FakeChainReader({d1: chain_d1, d2: chain_d2})
+    bulk = FakeBulkChainReader({d1: chain_d1, d2: chain_d2})
+
+    global_exps = [near_exp, far_exp, far_exp2]
+    per_date = {d1: [near_exp, far_exp2], d2: [far_exp]}
+
+    # WITHOUT the per-date map: snaps to far_exp on d1 → no rows → NaN.
+    vals_blind, errs_blind, _ = await resolve_option_stream(
+        dates=[d1],
+        collection="OPT_BTC",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=30),
+        selection=ByStrike(strike=100),
+        stream="mid",
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=bulk,
+        available_expirations=global_exps,
+    )
+    assert np.isnan(vals_blind[0])
+    assert errs_blind[0] == "no_chain_for_date"
+
+    # WITH the per-date map: snaps to near_exp (listed on d1) → resolves 2.0.
+    vals_fix, errs_fix, contracts_fix = await resolve_option_stream(
+        dates=[d1],
+        collection="OPT_BTC",
+        option_type="C",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=30),
+        selection=ByStrike(strike=100),
+        stream="mid",
+        chain_reader=FakeChainReader({d1: chain_d1, d2: chain_d2}),
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=FakeBulkChainReader({d1: chain_d1, d2: chain_d2}),
+        available_expirations=global_exps,
+        available_expirations_by_date=per_date,
+    )
+    assert errs_fix[0] is None
+    assert vals_fix[0] == pytest.approx(2.0)
+    assert contracts_fix[0] is not None
+    assert contracts_fix[0].expiration == near_exp
+
+
+async def test_nearest_to_target_sparse_root_weekly_listing_lag_nan_to_value():
+    """Sparse monthly/weekly root (SPX / OPT_SP_500) has the SAME latent
+    ``no_chain_for_date`` hole as the daily-expiration root (OPT_BTC).
+
+    SPX is not immune to the global-snap bug: it carries weeklies with the same
+    listing-lag, so an expiration can exist in the GLOBAL set (a dim scan of
+    every expiration that ever existed) while it is not yet quoted (no price
+    row) on early trade dates.  When that not-yet-listed weekly is the
+    global-nearest to the DTE target, the legacy path snaps to it → Phase B
+    finds 0 rows → a silent ``no_chain_for_date`` NaN.  The per-date map moves
+    the pick to an expiration actually listed on the date → a real value.
+
+    Live repro (read-only dwh) that this synthetic mirrors: OPT_SP_500 P,
+    target_dte=30, 2023-01-03..2023-03-10 — 7/47 trade dates changed, ALL
+    NaN→value, zero value→value.  Concretely on 2023-03-02 the global-nearest
+    2023-04-07 (a weekly) had 0 price rows while the per-date pick 2023-03-24
+    had 222.  This test pins that NaN→value direction so the sparse-root case is
+    no longer mislabelled "unchanged".
+    """
+    d = date(2023, 3, 2)
+    exp_near = date(2023, 3, 24)  # listed on d (weekly, ~22d out)
+    exp_glob = date(2023, 4, 7)  # global-nearest to 30d, NOT listed on d
+    exp_month = date(2023, 4, 21)  # listed on d (monthly, ~50d out)
+
+    # d's chain quotes exp_near and exp_month (NOT exp_glob).
+    chain_d = [
+        (
+            _contract(
+                strike=4000, expiration=exp_near, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=12.0),
+        ),
+        (
+            _contract(
+                strike=4000, expiration=exp_month, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=30.0),
+        ),
+    ]
+    # exp_glob is nearest to the 30d target (2023-04-01) among the global set,
+    # so the legacy path snaps to it — but no contract of it is quoted on d.
+    global_exps = [exp_near, exp_glob, exp_month]
+    per_date = {d: [exp_near, exp_month]}
+
+    async def _run(per_date_map):
+        return await resolve_option_stream(
+            dates=[d],
+            collection="OPT_SP_500",
+            option_type="P",
+            cycle=None,
+            maturity=NearestToTarget(target_dte_days=30),
+            selection=ByStrike(strike=4000),
+            stream="mid",
+            chain_reader=FakeChainReader({d: chain_d}),
+            maturity_resolver=DefaultMaturityResolver(),
+            underlying_price_resolver=None,
+            bulk_chain_reader=FakeBulkChainReader({d: chain_d}),
+            available_expirations=global_exps,
+            available_expirations_by_date=per_date_map,
+        )
+
+    # WITHOUT the per-date map: snaps to exp_glob → 0 rows on d → NaN hole.
+    vals_blind, errs_blind, _ = await _run(None)
+    assert np.isnan(vals_blind[0])
+    assert errs_blind[0] == "no_chain_for_date"
+
+    # WITH the per-date map: snaps to exp_near (listed on d) → resolves 12.0.
+    vals_fix, errs_fix, contracts_fix = await _run(per_date)
+    assert errs_fix[0] is None
+    assert vals_fix[0] == pytest.approx(12.0)
+    assert contracts_fix[0] is not None
+    assert contracts_fix[0].expiration == exp_near
+
+
+async def test_nearest_to_target_per_date_map_leaves_valid_global_pick_unchanged():
+    """SAFETY invariant (the other half of the sweep-2 NaN→value pin): when the
+    global-nearest expiration IS listed on the trade date, supplying the per-date
+    map must yield the IDENTICAL contract — value==value, no change.
+
+    The per-date snapping (stream_resolver.py Issue-#2 fix) is a strictly
+    corrective move: it only differs from the global pick when the global pick is
+    NOT quoted that day.  The two sweep-2 tests pin the corrective direction
+    (unlisted global pick → NaN without the map, real value with it).  This pins
+    the complementary guarantee — that an ALREADY-VALID global pick is never
+    perturbed by the map — so a future resolver edit that changed a valid pick
+    (e.g. always re-snapping to the date's nearest-listed even when the global
+    pick is listed) would be caught here rather than silently altering series.
+
+    Setup: target_dte=30 on 2023-03-02 (target date 2023-04-01).  Three
+    expirations, ALL quoted on the date:
+      exp_near  2023-03-24  DTE 22  |22-30| = 8
+      exp_glob  2023-04-03  DTE 32  |32-30| = 2   ← global-nearest, and listed
+      exp_month 2023-04-21  DTE 50  |50-30| = 20
+    The global-nearest (exp_glob) is listed on the date, so the map — which
+    includes exp_glob — must resolve to the exact same contract/value.
+    """
+    d = date(2023, 3, 2)
+    exp_near = date(2023, 3, 24)  # listed, ~22d out
+    exp_glob = date(2023, 4, 3)  # global-nearest to 30d, ALSO listed on d
+    exp_month = date(2023, 4, 21)  # listed, ~50d out
+
+    # d's chain quotes ALL THREE expirations (distinct mids identify the pick).
+    chain_d = [
+        (
+            _contract(
+                strike=4000, expiration=exp_near, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=12.0),
+        ),
+        (
+            _contract(
+                strike=4000, expiration=exp_glob, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=15.0),
+        ),
+        (
+            _contract(
+                strike=4000, expiration=exp_month, type_="P", collection="OPT_SP_500"
+            ),
+            _row(row_date=d, mid=30.0),
+        ),
+    ]
+    global_exps = [exp_near, exp_glob, exp_month]
+    # The per-date map lists exactly the same expirations as the global set for
+    # this date (the global pick is genuinely quoted here).
+    per_date = {d: [exp_near, exp_glob, exp_month]}
+
+    async def _run(per_date_map):
+        return await resolve_option_stream(
+            dates=[d],
+            collection="OPT_SP_500",
+            option_type="P",
+            cycle=None,
+            maturity=NearestToTarget(target_dte_days=30),
+            selection=ByStrike(strike=4000),
+            stream="mid",
+            chain_reader=FakeChainReader({d: chain_d}),
+            maturity_resolver=DefaultMaturityResolver(),
+            underlying_price_resolver=None,
+            bulk_chain_reader=FakeBulkChainReader({d: chain_d}),
+            available_expirations=global_exps,
+            available_expirations_by_date=per_date_map,
+        )
+
+    # WITHOUT the per-date map: global path snaps to exp_glob → 15.0 (valid).
+    vals_global, errs_global, contracts_global = await _run(None)
+    assert errs_global[0] is None
+    assert vals_global[0] == pytest.approx(15.0)
+    assert contracts_global[0] is not None
+    assert contracts_global[0].expiration == exp_glob
+
+    # WITH the per-date map: the identical (already-valid) pick — no change.
+    vals_map, errs_map, contracts_map = await _run(per_date)
+    assert errs_map[0] is None
+    assert vals_map[0] == pytest.approx(15.0)
+    assert vals_map[0] == vals_global[0]  # value==value: pick unchanged
+    assert contracts_map[0] is not None
+    assert contracts_map[0].expiration == exp_glob
+    assert contracts_map[0].contract_id == contracts_global[0].contract_id

@@ -3,9 +3,12 @@
 Covers the new optional wire fields:
   * ``CrossCondition`` ``count``/``window`` (cross_count) — defaults, threading,
     and HTTP-400 rejections;
-  * block-level ``links`` (temporal chain) — threading onto ``Block.links``,
-    reset-block rejection, and the bounded-state validation (finite positive
-    windows, single contiguous forward chain, no out-of-range index).
+  * block-level ``links`` (THEN boundaries between conjunction groups) —
+    threading onto ``Block.links``, reset-block rejection, and the bounded-state
+    validation (finite positive windows, keys a subset of 1..len-1 — partial
+    maps ARE valid under v5 group semantics, no out-of-range index);
+  * block-level ``fire_mode`` (level -> pulse) — default, threading, invalid
+    value + reset-block rejection.
 
 These assert the LOCKED error-message contract (mirroring the existing
 reset/input_id/weight rejections) and verify typed fields via ``parse_signal``.
@@ -186,32 +189,48 @@ def test_links_key_out_of_range_rejected():
         )
 
 
-def test_links_non_contiguous_chain_rejected():
-    # 3 conditions, link only on index 2 (missing index 1) -> not contiguous.
-    with pytest.raises(SignalValidationError, match="one contiguous forward chain"):
-        parse_signal(
-            _signal(
-                entries=[
-                    _entry_block(
-                        [_cross(100.0), _cross(95.0), _cross(90.0)], links={"2": 4}
-                    )
-                ]
-            )
+def test_links_partial_map_accepted_group_semantics():
+    # v5: a partial map is VALID (was 400 under G3). {"2": 4} on 3 conditions
+    # marks gap 2 a THEN boundary -> groups {0,1} THEN {2}.
+    sig = parse_signal(
+        _signal(
+            entries=[
+                _entry_block(
+                    [_cross(100.0), _cross(95.0), _cross(90.0)], links={"2": 4}
+                )
+            ]
         )
+    )
+    assert sig.rules.entries[0].links == {2: 4}
 
 
-def test_links_partial_chain_rejected():
-    # 3 conditions, link only on index 1 -> does not span the whole block.
-    with pytest.raises(SignalValidationError, match="one contiguous forward chain"):
-        parse_signal(
-            _signal(
-                entries=[
-                    _entry_block(
-                        [_cross(100.0), _cross(95.0), _cross(90.0)], links={"1": 3}
-                    )
-                ]
-            )
+def test_links_partial_map_first_gap_accepted():
+    # {"1": 3} on 3 conditions -> group {0} THEN {1,2}. Also valid now.
+    sig = parse_signal(
+        _signal(
+            entries=[
+                _entry_block(
+                    [_cross(100.0), _cross(95.0), _cross(90.0)], links={"1": 3}
+                )
+            ]
         )
+    )
+    assert sig.rules.entries[0].links == {1: 3}
+
+
+def test_links_partial_map_four_conditions_and_then_and():
+    # (A AND B) THEN (C AND D): only gap 2 is a boundary on a 4-condition block.
+    sig = parse_signal(
+        _signal(
+            entries=[
+                _entry_block(
+                    [_cross(100.0), _cross(95.0), _cross(90.0), _cross(85.0)],
+                    links={"2": 5},
+                )
+            ]
+        )
+    )
+    assert sig.rules.entries[0].links == {2: 5}
 
 
 def test_parse_links_helper_defensive_checks():
@@ -230,6 +249,62 @@ def test_parse_links_helper_defensive_checks():
     assert _parse_links({"1": 5}, 2, path="p") == {1: 5}
     assert _parse_links(None, 2, path="p") is None
     assert _parse_links({}, 2, path="p") is None
+
+
+# --------------------------------------------------------------------------- #
+# fire_mode (level -> pulse)
+# --------------------------------------------------------------------------- #
+
+
+def _entry_with_fire_mode(fire_mode) -> dict:
+    blk = _entry_block([_cross(100.0)])
+    blk["fire_mode"] = fire_mode
+    return blk
+
+
+def test_fire_mode_defaults_to_sustained_when_absent():
+    sig = parse_signal(_signal(entries=[_entry_block([_cross(100.0)])]))
+    assert sig.rules.entries[0].fire_mode == "sustained"
+
+
+@pytest.mark.parametrize("mode", ["pulse", "sustained"])
+def test_fire_mode_threads_through(mode):
+    sig = parse_signal(_signal(entries=[_entry_with_fire_mode(mode)]))
+    assert sig.rules.entries[0].fire_mode == mode
+
+
+def test_fire_mode_threads_onto_exit_block():
+    entry = _entry_block([_cross(100.0)], name="Entry")
+    exit_blk = {
+        "id": "XB",
+        "name": "x",
+        "conditions": [_cross(95.0)],
+        "target_entry_block_names": ["Entry"],
+        "fire_mode": "pulse",
+    }
+    sig = parse_signal(_signal(entries=[entry], exits=[exit_blk]))
+    assert sig.rules.exits[0].fire_mode == "pulse"
+
+
+@pytest.mark.parametrize("bad", ["PULSE", "level", "", 1, True, False, 1.5, [1]])
+def test_fire_mode_invalid_value_rejected(bad):
+    with pytest.raises(
+        SignalValidationError, match="fire_mode must be 'pulse' or 'sustained'"
+    ):
+        parse_signal(_signal(entries=[_entry_with_fire_mode(bad)]))
+
+
+def test_fire_mode_rejected_on_reset_block():
+    reset = {
+        "id": "R1",
+        "name": "r",
+        "conditions": [_cross(100.0)],
+        "fire_mode": "pulse",
+    }
+    with pytest.raises(
+        SignalValidationError, match="reset blocks must not set fire_mode"
+    ):
+        parse_signal(_signal(resets=[reset]))
 
 
 # --------------------------------------------------------------------------- #

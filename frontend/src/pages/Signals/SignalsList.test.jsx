@@ -242,3 +242,32 @@ describe('<SignalsList>', () => {
     expect(screen.queryByRole('textbox', { name: /rename locked one/i })).toBeNull();
   });
 });
+
+describe('<SignalsList> — duplicate action (v8)', () => {
+  it('renders a duplicate button in the row action cluster when onDuplicate is provided', () => {
+    render(<SignalsList {...defaultProps({ onDuplicate: vi.fn() })} />);
+    expect(screen.getByTestId('signal-duplicate-s1')).toBeTruthy();
+  });
+
+  it('invokes onDuplicate(id) when the duplicate button is clicked', () => {
+    const onDuplicate = vi.fn();
+    render(<SignalsList {...defaultProps({ onDuplicate })} />);
+    fireEvent.click(screen.getByTestId('signal-duplicate-s1'));
+    expect(onDuplicate).toHaveBeenCalledWith('s1');
+  });
+
+  it('duplicate is NOT gated on lock — a locked signal can still be duplicated', () => {
+    const onDuplicate = vi.fn();
+    const signals = [{ id: 's1', name: 'Locked One', category: 'RESEARCH', locked: true }];
+    render(<SignalsList {...defaultProps({ signals, onDuplicate })} />);
+    const btn = screen.getByTestId('signal-duplicate-s1');
+    expect(btn.disabled).toBe(false);
+    fireEvent.click(btn);
+    expect(onDuplicate).toHaveBeenCalledWith('s1');
+  });
+
+  it('omits the duplicate button when onDuplicate is not provided', () => {
+    render(<SignalsList {...defaultProps()} />);
+    expect(screen.queryByTestId('signal-duplicate-s1')).toBeNull();
+  });
+});

@@ -59,4 +59,4 @@ Press `Ctrl+C` to stop. The tunnel URL becomes unreachable immediately.
 - The password is hashed (SHA-256) before comparison — plaintext is never stored in memory beyond initial setup.
 - The auth cookie is `HttpOnly` and `SameSite=Strict`.
 - Cloudflare's free quick tunnels have no uptime guarantee and are meant for temporary use, not production.
-- The MongoDB connection stays local — clients access data only through the backend's API, same as in normal development.
+- The dwh database connection stays local — clients access data only through the backend's API, same as in normal development.

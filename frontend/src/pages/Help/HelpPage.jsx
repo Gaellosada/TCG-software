@@ -174,11 +174,42 @@ function HelpPage() {
           <p>
             <strong>Roll offset</strong> rolls to the next contract a chosen
             number of calendar days early (0 = roll at the rule&apos;s normal
-            time). <strong>Back-adjustment</strong> (None / Ratio / Difference,
-            the same methods as continuous futures) smooths the jump at each roll
-            and applies to the <strong>mid-price</strong> stream only &mdash; it
-            is ignored for IV, the Greeks, and the volume/open-interest streams,
-            where a roll jump is not meaningful.
+            time). Unlike continuous futures, an option stream carries{' '}
+            <strong>no back-adjustment</strong>: ratio/difference smoothing is
+            ill-posed for option premia, so the series is always the raw stitched
+            stream and each roll steps straight to the newly-selected
+            contract&apos;s own value.
+          </p>
+        </Details>
+
+        <Details title="How option backtests are priced">
+          <p>
+            When you add an option to a signal or portfolio you select it by a
+            rule &mdash; e.g. &ldquo;the 10-delta put&rdquo; &mdash; not a
+            fixed contract, so the contract you hold is rolled to a new one at
+            each expiry. The backtest holds one selected contract between
+            rolls and books its daily P&amp;L from the change in that
+            contract&apos;s own premium, as a percentage of your capital,
+            compounding it into the equity curve; at each roll it closes the
+            expiring contract and opens the newly-selected one, so a roll is
+            never counted as a price jump.
+          </p>
+          <p>
+            Direction is the sign of the leg&apos;s weight (a short option
+            profits as its premium decays). Size is the leg&apos;s
+            &nbsp;<strong>Size (% of NAV)</strong>&nbsp; field (the underlying
+            <code> nav_times</code> parameter) &mdash; the premium notional you
+            hold as a percentage of NAV (100% = full notional); because a short
+            option&apos;s premium can multiply on a sell-off, a full-size short
+            can wipe out, so use a small percentage.
+          </p>
+          <p>
+            This is the <strong>Hold between rolls</strong> model, and it is
+            always on for a portfolio price leg. A default signal option stream
+            leaves it off: it re-selects the matching contract every day and
+            prices it mid-to-mid on that day&apos;s quote (a level, not a
+            held-contract P&amp;L), and the <strong>Size (% of NAV)</strong>
+            field only appears once hold is turned on.
           </p>
         </Details>
       </section>
@@ -301,16 +332,76 @@ function HelpPage() {
         <h3 className={styles.conceptTitle}>Structure</h3>
         <p className={styles.conceptText}>
           Conditions within a block are <strong>AND</strong>&rsquo;d. Blocks within a
-          direction are <strong>OR</strong>&rsquo;d. Four direction types exist: long
-          entry, long exit, short entry, short exit.
+          section are <strong>OR</strong>&rsquo;d. A signal has three block sections
+          &mdash; <strong>Entries</strong>, <strong>Exits</strong> and{' '}
+          <strong>Resets</strong>; direction (long vs. short) is not a separate section
+          but comes from the sign of each block&rsquo;s weight.
         </p>
 
         <h3 className={styles.conceptTitle}>Weights and capital</h3>
         <p className={styles.conceptText}>
-          Entry blocks carry a weight that controls capital allocation. Weights above
-          <strong> 1.0</strong> apply leverage. Set initial capital in the right panel
-          before running.
+          Each entry block carries a <strong>weight</strong> &mdash; a percent of
+          capital, entered with a &ldquo;%&rdquo; suffix and clamped to{' '}
+          <strong>-100 to +100</strong>. Its sign sets direction (positive = long,
+          negative = short) and its magnitude the share of capital allocated. Set
+          initial capital in the right panel before running.
         </p>
+
+        <Details title="Block composition: AND / THEN groups">
+          <p>
+            Conditions in a block can be organized into groups: conditions
+            joined by <strong>AND</strong> form a conjunction group, and{' '}
+            <strong>THEN</strong> separates groups in sequence. So{' '}
+            <code>(A AND B) THEN (C AND D)</code> means both A and B become
+            true, then both C and D become true within the THEN window
+            (strictly after). Each connector is set independently per gap, so
+            a block can mix AND and THEN freely along its condition list.
+          </p>
+        </Details>
+
+        <Details title="Fire mode: pulse vs. sustained">
+          <p>
+            Entry and exit blocks have a <strong>fire mode</strong> that decides
+            how often they signal while their condition is met (reset blocks
+            have none). New blocks default to <strong>pulse</strong>.
+          </p>
+          <ul>
+            <li>
+              <strong>Pulse</strong> fires once, on the single bar the
+              block&apos;s condition completes, then <em>re-arms</em> only after
+              the condition drops false again — so it never re-fires while the
+              same trigger stays true.
+            </li>
+            <li>
+              <strong>Sustained</strong> stays true on every bar for as long as
+              the condition still holds (legacy behavior, still selectable per
+              block).
+            </li>
+          </ul>
+          <p>
+            <strong>Concrete example.</strong> Take a condition of{' '}
+            <em>3 taps within 30 bars</em> (a cross <code>×3 within 30</code>).
+            Suppose the 3rd tap lands on bar 40.
+          </p>
+          <ul>
+            <li>
+              <strong>Pulse:</strong> fires exactly once, on bar 40 (the bar the
+              3rd tap completes the count). It will not fire again until the
+              condition first goes false and a fresh run of 3 taps completes.
+            </li>
+            <li>
+              <strong>Sustained:</strong> keeps firing on bar 40 and every later
+              bar for as long as the trailing 30-bar window still contains 3
+              taps; it stops only once the window no longer holds 3.
+            </li>
+          </ul>
+          <p>
+            A triggered exit always <strong>resets</strong> any in-progress
+            THEN-sequence on the entry blocks it targets: an in-flight sequence
+            starts over whenever a targeting exit block fires (its exit condition
+            becomes true), whether or not a position was actually open at the time.
+          </p>
+        </Details>
 
         <Details title="Position model: latched entries">
           <p>

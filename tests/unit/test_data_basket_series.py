@@ -462,3 +462,340 @@ async def test_compute_basket_series_option_leg_parity_with_in_signal_path(
     # And it actually produced the option leg's values (not empty / spot path).
     assert out_values.shape[0] == ref_values.shape[0]
     assert out_values.shape[0] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Coverage surfacing (Issue #1 fix): explain missing points, never silent
+# ---------------------------------------------------------------------------
+
+
+def test_leg_coverage_summarises_gappy_diagnostics() -> None:
+    """A synthetic gappy option leg → correct counts / dominant / gap range."""
+    from tcg.core.api._basket_compute import _leg_coverage
+
+    record = {
+        "descriptor": "OPT_BTC C ByStrike",
+        "dates": np.array(
+            [20210105, 20210106, 20210107, 20210108, 20210111], dtype=np.int64
+        ),
+        "error_codes": [
+            "no_chain_for_date",
+            "no_chain_for_date",
+            None,
+            "missing_mid",
+            "no_chain_for_date",
+        ],
+    }
+    cov = _leg_coverage(record)
+    assert cov["n"] == 5
+    assert cov["n_holes"] == 4
+    assert cov["counts"] == {"no_chain_for_date": 3, "missing_mid": 1}
+    assert cov["dominant_code"] == "no_chain_for_date"
+    assert cov["first_gap"] == "2021-01-05"
+    assert cov["last_gap"] == "2021-01-11"
+    assert cov["descriptor"] == "OPT_BTC C ByStrike"
+
+
+def test_leg_coverage_no_holes() -> None:
+    from tcg.core.api._basket_compute import _leg_coverage
+
+    cov = _leg_coverage(
+        {"descriptor": "x", "dates": np.array([20240101]), "error_codes": [None]}
+    )
+    assert cov["n_holes"] == 0
+    assert cov["counts"] == {}
+    assert cov["dominant_code"] is None
+    assert cov["first_gap"] is None
+
+
+@pytest.mark.asyncio
+async def test_compute_basket_series_populates_composite_coverage(
+    fake_market_data: MagicMock, basket_repo: _BasketRepo
+) -> None:
+    """A spot basket (no option legs) still reports composite coverage: full
+    coverage, zero holes, empty per-leg list."""
+    from tcg.core.api._basket_compute import compute_basket_series
+
+    coverage: dict = {}
+    legs = [
+        {
+            "instrument": {"type": "spot", "collection": "ETF", "instrument_id": "SPY"},
+            "weight": 1.0,
+        },
+    ]
+    _, values = await compute_basket_series(
+        svc=fake_market_data,
+        repo=basket_repo,
+        basket_id=None,
+        asset_class="equity",
+        legs=legs,
+        start=None,
+        end=None,
+        field="close",
+        coverage_out=coverage,
+    )
+    assert coverage["composite"] == {"n": int(values.size), "n_holes": 0}
+    assert coverage["legs"] == []
+
+
+def test_leg_coverage_success_side_notes_are_not_holes() -> None:
+    """MAJOR-2 regression: the resolver's SUCCESS-side annotations
+    (``snapped_to:`` / ``coverage_skipped:``) coexist with a REAL value — they
+    must NOT be tallied as coverage holes (a snapped date resolved fine).
+    """
+    from tcg.core.api._basket_compute import _leg_coverage
+
+    record = {
+        "descriptor": "OPT_SP_500 P NearestToTarget",
+        "dates": np.array([20240102, 20240103, 20240104, 20240105], dtype=np.int64),
+        "error_codes": [
+            "snapped_to:2024-01-19",  # success-side note, real value
+            None,
+            "coverage_skipped:2024-02-16",  # success-side note, real value
+            "no_chain_for_date",  # the ONLY genuine hole
+        ],
+    }
+    cov = _leg_coverage(record)
+    assert cov["n"] == 4
+    # Only the no_chain_for_date date is a hole; the two annotations are not.
+    assert cov["n_holes"] == 1
+    assert cov["counts"] == {"no_chain_for_date": 1}
+    assert cov["dominant_code"] == "no_chain_for_date"
+    assert cov["first_gap"] == cov["last_gap"] == "2024-01-05"
+
+
+def test_leg_coverage_all_success_side_notes_zero_holes() -> None:
+    """A leg whose only non-None codes are success-side notes has ZERO holes."""
+    from tcg.core.api._basket_compute import _leg_coverage
+
+    cov = _leg_coverage(
+        {
+            "descriptor": "x",
+            "dates": np.array([20240101, 20240102], dtype=np.int64),
+            "error_codes": ["snapped_to:2024-01-19", "coverage_skipped:2024-02-16"],
+        }
+    )
+    assert cov["n_holes"] == 0
+    assert cov["counts"] == {}
+    assert cov["dominant_code"] is None
+    assert cov["first_gap"] is None and cov["last_gap"] is None
+
+
+@pytest.mark.asyncio
+async def test_materialise_option_streams_threads_per_date_map_for_nearest_target(
+    monkeypatch,
+) -> None:
+    """MAJOR-1 regression: the shared ``materialise_option_streams`` (behind
+    /api/options/stream, Indicators and portfolio level legs) must fetch the
+    per-date LISTED-expiration map for a NearestToTarget ref and thread it into
+    the resolver as ``available_expirations_by_date`` — the daily-expiration
+    global-snap fix was previously applied ONLY on the signals path.
+    """
+    from tcg.core.api._models import OptionStreamRef
+    from tcg.core.api._options_materialise import materialise_option_streams
+
+    svc = MagicMock()
+    svc.list_option_expirations_filtered = AsyncMock(return_value=_OPT_EXPIRATIONS)
+    per_date_map = {date(2021, 1, 5): [date(2021, 1, 29)]}
+    svc.list_option_expirations_by_date = AsyncMock(return_value=per_date_map)
+
+    monkeypatch.setattr(
+        "tcg.core.api._options_materialise.build_stream_resolver_wiring",
+        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+    )
+
+    captured: dict = {}
+
+    async def fake_resolve(*, dates, **kw):
+        captured.update(kw)
+        vals = np.zeros(len(dates), dtype=np.float64)
+        return vals, [None] * len(dates), [None] * len(dates)
+
+    monkeypatch.setattr(
+        "tcg.core.api._options_materialise.resolve_option_stream", fake_resolve
+    )
+
+    ref = OptionStreamRef.model_validate(
+        {
+            "type": "option_stream",
+            "collection": "OPT_BTC",
+            "option_type": "C",
+            "cycle": None,
+            "maturity": {"kind": "nearest_to_target", "target_dte_days": 30},
+            "selection": {"kind": "by_strike", "strike": 100.0},
+            "stream": "mid",
+        }
+    )
+    result = await materialise_option_streams(
+        [("_x", ref)],
+        svc=svc,
+        start_date=date(2021, 1, 5),
+        end_date=date(2021, 1, 6),
+    )
+    assert not isinstance(result, str)
+    # The per-date map was fetched ONCE and threaded through verbatim.
+    svc.list_option_expirations_by_date.assert_awaited_once()
+    assert captured["available_expirations_by_date"] is per_date_map
+    # And the scan was bounded (expiration_max passed as a kwarg).
+    _, call_kwargs = svc.list_option_expirations_by_date.call_args
+    assert call_kwargs["expiration_max"] is not None
+
+
+@pytest.mark.asyncio
+async def test_signal_fetcher_nearest_target_awaits_per_date_map_expanded_cycle(
+    monkeypatch,
+) -> None:
+    """MINOR-7(a): a NearestToTarget option input drives ``make_signal_fetcher``
+    to fetch the per-date map with the EXPANDED cycle and thread it into the
+    resolver as ``available_expirations_by_date``."""
+    from tcg.core.api._series_fetch import make_signal_fetcher
+    from tcg.types.options import ByStrike, NearestToTarget
+    from tcg.types.signal import InstrumentOptionStream
+
+    svc = MagicMock()
+    svc.list_option_expirations_filtered = AsyncMock(return_value=_OPT_EXPIRATIONS)
+    per_date_map = {date(2024, 1, 2): [date(2024, 1, 19)]}
+    svc.list_option_expirations_by_date = AsyncMock(return_value=per_date_map)
+
+    monkeypatch.setattr(
+        "tcg.core.api._options_wiring.build_stream_resolver_wiring",
+        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+    )
+
+    captured: dict = {}
+
+    async def fake_resolve(*, dates, **kw):
+        captured.update(kw)
+        return (
+            np.zeros(len(dates), dtype=np.float64),
+            [None] * len(dates),
+            [None] * len(dates),
+        )
+
+    monkeypatch.setattr(
+        "tcg.engine.options.series.stream_resolver.resolve_option_stream",
+        fake_resolve,
+    )
+
+    inst = InstrumentOptionStream(
+        collection="OPT_SP_500",
+        option_type="C",
+        cycle="M",  # expand_cycle('M') broadens to the 3rd-Friday series
+        maturity=NearestToTarget(target_dte_days=30),
+        selection=ByStrike(strike=4500.0),
+        stream="mid",
+    )
+    fetcher = make_signal_fetcher(svc, date(2024, 1, 2), date(2024, 1, 4))
+    await fetcher(inst, "close")
+
+    svc.list_option_expirations_by_date.assert_awaited_once()
+    _, call_kwargs = svc.list_option_expirations_by_date.call_args
+    # Expanded cycle used for BOTH the list and the resolver.
+    from tcg.types.options import expand_cycle
+
+    assert call_kwargs["cycle"] == expand_cycle("M")
+    assert call_kwargs["expiration_max"] is not None
+    assert captured["available_expirations_by_date"] is per_date_map
+
+
+@pytest.mark.asyncio
+async def test_compute_basket_series_option_leg_populates_leg_coverage(
+    monkeypatch, basket_repo: _BasketRepo
+) -> None:
+    """MINOR-7(b): an OPTION-leg basket populates ``coverage["legs"][0]`` with a
+    per-leg coverage block derived from the resolver's per-date diagnostics."""
+    from tcg.core.api._basket_compute import compute_basket_series
+
+    svc = MagicMock()
+    svc.list_option_expirations_filtered = AsyncMock(return_value=_OPT_EXPIRATIONS)
+
+    monkeypatch.setattr(
+        "tcg.core.api._options_wiring.build_stream_resolver_wiring",
+        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+    )
+
+    async def fake_resolve(*, dates, **_kw):
+        n = len(dates)
+        vals = np.full(n, 0.25, dtype=np.float64)
+        codes: list = [None] * n
+        if n >= 2:
+            vals[0] = np.nan
+            codes[0] = "no_chain_for_date"
+            codes[1] = "snapped_to:2024-01-19"  # success-side, NOT a hole
+        return vals, codes, [None] * n
+
+    monkeypatch.setattr(
+        "tcg.engine.options.series.stream_resolver.resolve_option_stream",
+        fake_resolve,
+    )
+
+    legs = [
+        {
+            "instrument": {
+                "type": "option_stream",
+                "collection": "OPT_SP_500",
+                "option_type": "C",
+                "cycle": None,
+                "maturity": {"kind": "next_third_friday"},
+                "selection": {"kind": "by_moneyness", "target": 1.0},
+                "stream": "mid",
+            },
+            "weight": 1.0,
+        }
+    ]
+    coverage: dict = {}
+    await compute_basket_series(
+        svc=svc,
+        repo=basket_repo,
+        basket_id=None,
+        asset_class="option",
+        legs=legs,
+        start=date(2024, 1, 15),
+        end=date(2024, 2, 20),
+        field="close",
+        coverage_out=coverage,
+    )
+    assert len(coverage["legs"]) == 1
+    leg = coverage["legs"][0]
+    assert set(leg) == {
+        "descriptor",
+        "n",
+        "n_holes",
+        "counts",
+        "dominant_code",
+        "first_gap",
+        "last_gap",
+    }
+    # Exactly ONE genuine hole (the snapped_to note is not counted).
+    assert leg["n_holes"] == 1
+    assert leg["counts"] == {"no_chain_for_date": 1}
+    assert leg["dominant_code"] == "no_chain_for_date"
+    assert "OPT_SP_500" in leg["descriptor"]
+
+
+def test_basket_series_endpoint_carries_coverage(client: TestClient) -> None:
+    """The Data-page endpoint response includes a ``coverage`` block."""
+    resp = client.post(
+        "/api/data/basket/series",
+        json={
+            "basket": {
+                "kind": "inline",
+                "asset_class": "equity",
+                "legs": [
+                    {
+                        "instrument": {
+                            "type": "spot",
+                            "collection": "ETF",
+                            "instrument_id": "SPY",
+                        },
+                        "weight": 1.0,
+                    }
+                ],
+            },
+            "field": "close",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "coverage" in body
+    assert body["coverage"]["composite"]["n_holes"] == 0

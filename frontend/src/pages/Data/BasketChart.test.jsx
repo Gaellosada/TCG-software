@@ -112,4 +112,164 @@ describe('BasketChart', () => {
     await waitFor(() => expect(capturedChartProps).not.toBeNull());
     expect(screen.queryByLabelText('Show legs')).toBeNull();
   });
+
+  it('shows a coverage notice explaining leg gaps (Issue #1)', async () => {
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [NaN, 101, NaN],
+        coverage: {
+          composite: { n: 3, n_holes: 2 },
+          legs: [
+            {
+              descriptor: 'OPT_BTC C ByDelta',
+              n: 3,
+              n_holes: 2,
+              counts: { missing_mid: 2 },
+              dominant_code: 'missing_mid',
+              first_gap: '2024-01-02',
+              last_gap: '2024-01-04',
+            },
+          ],
+        },
+      }),
+    );
+    render(
+      <BasketChart
+        basket={{ kind: 'saved', basket_id: 'b1' }}
+        name="BTC straddle"
+        assetClass="option"
+      />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(screen.getByText(/Coverage:/)).toBeTruthy();
+    expect(
+      screen.getByText(/OPT_BTC C ByDelta: 66.7% missing — no two-sided quote/),
+    ).toBeTruthy();
+  });
+
+  it('maps a resolver hole code that is not the common missing_mid to a friendly label (DEBT-8)', async () => {
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [NaN, NaN, NaN],
+        coverage: {
+          composite: { n: 3, n_holes: 3 },
+          legs: [
+            {
+              descriptor: 'OPT_BTC C ByDelta',
+              n: 3,
+              n_holes: 3,
+              counts: { strike_not_in_chain: 3 },
+              dominant_code: 'strike_not_in_chain',
+              first_gap: '2024-01-02',
+              last_gap: '2024-01-04',
+            },
+          ],
+        },
+      }),
+    );
+    render(
+      <BasketChart
+        basket={{ kind: 'saved', basket_id: 'b1' }}
+        name="BTC straddle"
+        assetClass="option"
+      />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(
+      screen.getByText(/OPT_BTC C ByDelta: 100% missing — strike not listed/),
+    ).toBeTruthy();
+  });
+
+  // The computed bs_mid stream degrades to the ACTUAL resolver codes
+  // ``missing_bs_price`` / ``missing_bs_iv`` (stream_resolver.py _price_bs_mid) —
+  // NOT the phantom ``missing_bs_mid`` the map used to key. Lock the real codes.
+  it.each([
+    ['missing_bs_price', 'cannot price \\(Black-76\\)'],
+    ['missing_bs_iv', 'no implied vol'],
+  ])('maps the real bs_mid failure code %s to its friendly label', async (code, label) => {
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [NaN, NaN, NaN],
+        coverage: {
+          composite: { n: 3, n_holes: 3 },
+          legs: [
+            {
+              descriptor: 'OPT_SP_500 P ByDelta',
+              n: 3,
+              n_holes: 3,
+              counts: { [code]: 3 },
+              dominant_code: code,
+              first_gap: '2024-01-02',
+              last_gap: '2024-01-04',
+            },
+          ],
+        },
+      }),
+    );
+    render(
+      <BasketChart
+        basket={{ kind: 'saved', basket_id: 'b1' }}
+        name="SPX put"
+        assetClass="option"
+      />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(
+      screen.getByText(new RegExp(`OPT_SP_500 P ByDelta: 100% missing — ${label}`)),
+    ).toBeTruthy();
+  });
+
+  it('does NOT map the phantom missing_bs_mid code (falls through to the raw slug)', async () => {
+    // The resolver never emits ``missing_bs_mid``; if it ever appeared it must
+    // NOT silently render as a friendly label, so it falls through to the slug.
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [NaN, NaN, NaN],
+        coverage: {
+          composite: { n: 3, n_holes: 3 },
+          legs: [
+            {
+              descriptor: 'OPT_SP_500 P ByDelta',
+              n: 3,
+              n_holes: 3,
+              counts: { missing_bs_mid: 3 },
+              dominant_code: 'missing_bs_mid',
+              first_gap: '2024-01-02',
+              last_gap: '2024-01-04',
+            },
+          ],
+        },
+      }),
+    );
+    render(
+      <BasketChart
+        basket={{ kind: 'saved', basket_id: 'b1' }}
+        name="SPX put"
+        assetClass="option"
+      />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(
+      screen.getByText(/OPT_SP_500 P ByDelta: 100% missing — missing_bs_mid/),
+    ).toBeTruthy();
+  });
+
+  it('shows no coverage notice when there are no gaps', async () => {
+    mockGetBasketSeries.mockImplementation(() =>
+      Promise.resolve({
+        dates: DATES,
+        values: [100, 101, 102],
+        coverage: { composite: { n: 3, n_holes: 0 }, legs: [] },
+      }),
+    );
+    render(
+      <BasketChart basket={{ kind: 'saved', basket_id: 'b1' }} name="Clean" assetClass="equity" />,
+    );
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+    expect(screen.queryByText(/Coverage:/)).toBeNull();
+  });
 });

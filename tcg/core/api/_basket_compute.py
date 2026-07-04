@@ -146,6 +146,59 @@ async def _resolve_window(
     return win_start, win_end
 
 
+# Resolver ``error_code`` prefixes that are SUCCESS-side annotations, NOT
+# failures: ``snapped_to:<iso>`` (a non-NearestToTarget arithmetic target was
+# snapped to the nearest listed expiration) and ``coverage_skipped:<iso>`` (a
+# strictly-nearer expiration was skipped for a covered one).  Both coexist with
+# a REAL value — the value array is the source of truth for NaN-ness — so they
+# must NOT be tallied as holes (see stream_resolver's error_codes contract, and
+# portfolio.py ``_diagnostic_hint`` which excludes them the same way).
+_SUCCESS_SIDE_CODE_PREFIXES: tuple[str, ...] = ("snapped_to:", "coverage_skipped:")
+
+
+def _is_hole_code(code: str | None) -> bool:
+    """True iff ``code`` marks a genuine coverage hole (a missing/NaN value),
+    False for ``None`` and for the success-side annotation prefixes."""
+    return code is not None and not code.startswith(_SUCCESS_SIDE_CODE_PREFIXES)
+
+
+def _leg_coverage(record: dict) -> dict:
+    """Summarise one option leg's per-date diagnostics into a coverage block.
+
+    ``{descriptor, n, n_holes, counts, dominant_code, first_gap, last_gap}`` —
+    ``counts`` maps each hole ``error_code`` to its occurrence count; the
+    dominant code is the most frequent; ``first_gap``/``last_gap`` bound the
+    affected trade-date range (ISO).  A hole is any date whose error_code names
+    a genuine failure; success-side notes (``snapped_to:``/``coverage_skipped:``)
+    coexist with a real value and are NOT counted (see ``_is_hole_code``).
+    """
+    codes: list[str | None] = record.get("error_codes") or []
+    dates_arr = record.get("dates")
+    n = len(codes)
+    counts: dict[str, int] = {}
+    gap_ints: list[int] = []
+    for i, c in enumerate(codes):
+        if c is not None and _is_hole_code(c):
+            counts[c] = counts.get(c, 0) + 1
+            if dates_arr is not None and i < len(dates_arr):
+                gap_ints.append(int(dates_arr[i]))
+    n_holes = sum(counts.values())
+    dominant = max(counts, key=lambda k: counts[k]) if counts else None
+
+    def _iso(v: int) -> str:
+        return f"{v // 10000:04d}-{(v % 10000) // 100:02d}-{v % 100:02d}"
+
+    return {
+        "descriptor": record.get("descriptor", "option leg"),
+        "n": n,
+        "n_holes": n_holes,
+        "counts": counts,
+        "dominant_code": dominant,
+        "first_gap": _iso(min(gap_ints)) if gap_ints else None,
+        "last_gap": _iso(max(gap_ints)) if gap_ints else None,
+    }
+
+
 async def compute_basket_series(
     *,
     svc: MarketDataService,
@@ -156,6 +209,7 @@ async def compute_basket_series(
     start: date | None,
     end: date | None,
     field: str = "close",
+    coverage_out: dict | None = None,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Compute a basket's composite series as ``(dates, values)``.
 
@@ -163,6 +217,11 @@ async def compute_basket_series(
     weighted-sum of the legs' ``field`` series over the intersection of
     leg date axes.  Reuses the same materialisers + fetcher the in-signal
     basket path uses, so the result is identical (parity-tested).
+
+    When ``coverage_out`` is a dict, it is populated with a coverage summary
+    (``{composite:{n,n_holes}, legs:[per-option-leg blocks]}``) so the Data page
+    can explain WHY points are missing instead of drawing a silently broken
+    line.  The ``(dates, values)`` return is unchanged (parity-preserving).
     """
     basket = await _build_basket(
         svc=svc,
@@ -174,6 +233,12 @@ async def compute_basket_series(
     win_start, win_end = await _resolve_window(
         svc=svc, basket=basket, start=start, end=end
     )
-    fetcher = make_signal_fetcher(svc, win_start, win_end)
+    diag_sink: list[dict] | None = [] if coverage_out is not None else None
+    fetcher = make_signal_fetcher(svc, win_start, win_end, diag_sink=diag_sink)
     dates, values = await fetcher(basket, field)
+    if coverage_out is not None:
+        n = int(values.size)
+        n_holes = int(np.count_nonzero(np.isnan(values)))
+        coverage_out["composite"] = {"n": n, "n_holes": n_holes}
+        coverage_out["legs"] = [_leg_coverage(rec) for rec in (diag_sink or [])]
     return dates, values

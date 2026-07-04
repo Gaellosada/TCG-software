@@ -53,6 +53,24 @@ const GREEK_STREAMS = new Set(['gamma', 'vega', 'theta']);
 const ALL_MATURITY_KINDS = ['next_third_friday', 'nearest_to_target', 'end_of_month', 'plus_n_days', 'fixed'];
 const ALL_SELECTION_KINDS = ['by_moneyness', 'by_delta', 'by_strike'];
 
+// ── nav_times presentation seam (UI percent ↔ wire fraction) ──────────────
+// The wire / persisted `nav_times` is a raw FRACTION of NAV (1.0 = full premium
+// notional). Experienced users think in PERCENT, and the Help text documents it
+// that way (100% = full notional), so the control is presented as a percentage.
+// Conversion lives ONLY here on the boundary; the emitted/stored value stays the
+// fraction (NO backend change, NO migration). Both directions round to kill the
+// ×100 / ÷100 float dust (0.0045 → "0.45", not "0.45000000000000007") and to be
+// a stable fixed point across load→display→edit→save round-trips.
+// (Distinct from `delta`, which is a fraction with NO /100 conversion anywhere.)
+function navFractionToPercent(frac) {
+  if (typeof frac !== 'number' || !Number.isFinite(frac)) return '';
+  return Math.round(frac * 1e10) / 1e8;
+}
+function navPercentToFraction(pct) {
+  if (typeof pct !== 'number' || !Number.isFinite(pct)) return pct;
+  return Math.round(pct * 1e8) / 1e10;
+}
+
 const MATURITY_LABELS = {
   next_third_friday: 'Next 3rd Friday',
   nearest_to_target: 'Nearest to Target DTE',
@@ -308,7 +326,9 @@ export default function OptionStreamForm({
 
   const setStream = useCallback((stream) => emit({ stream }), [emit]);
 
-  // SELECT-AND-HOLD (fixed-contract dollar P&L) — SIGNALS backtest only.
+  // SELECT-AND-HOLD (fixed-contract dollar P&L) — used both by a SIGNALS
+  // backtest (optional toggle below) and by a PORTFOLIO option price leg (the
+  // ``holdRequired`` branch, where hold is always on).
   // ``hold_between_rolls`` freezes the contract between maturity rolls; when on,
   // ``nav_times`` is the premium-notional multiple used to size the held quantity
   // (direction stays the block WEIGHT SIGN, so nav_times is the SIZE — it can
@@ -323,12 +343,15 @@ export default function OptionStreamForm({
     emit(patch);
   }, [emit, v.nav_times]);
 
-  const setNavTimes = useCallback((raw) => {
-    const parsed = parseFloat(raw);
-    // Keep the raw-ish value in state; clamp to a positive number (the backend
-    // validator also enforces finite > 0).  An empty / non-numeric entry falls
-    // back to 1.0 so the emitted ref stays valid.
-    const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 1.0;
+  const setNavTimes = useCallback((rawPercent) => {
+    // The control is a PERCENT of NAV; convert to the stored fraction (÷100).
+    // Clamp to a positive number (the backend validator also enforces finite
+    // > 0). An empty / non-numeric / non-positive entry falls back to the
+    // fraction 1.0 (= 100% of NAV, full notional) so the emitted ref stays valid.
+    const parsedPct = parseFloat(rawPercent);
+    const value = Number.isFinite(parsedPct) && parsedPct > 0
+      ? navPercentToFraction(parsedPct)
+      : 1.0;
     emit({ nav_times: value });
   }, [emit]);
 
@@ -711,7 +734,9 @@ export default function OptionStreamForm({
           back-adjustment (ratio/difference are ill-posed for option premia).
           The series is always the raw stitched stream. */}
 
-      {/* SELECT-AND-HOLD (fixed-contract dollar P&L) — SIGNALS backtest only.
+      {/* SELECT-AND-HOLD (fixed-contract dollar P&L) — serves both a SIGNALS
+          backtest (optional toggle) and a PORTFOLIO option price leg (the
+          ``holdRequired`` branch just below, where hold is always required).
           Freezes the contract between maturity rolls so a delta/moneyness-selected
           option's P&L is a proper fixed-contract dollar P&L (qty·Δpremium, sized
           off NAV at each roll) instead of a %-return that explodes as a held
@@ -729,25 +754,26 @@ export default function OptionStreamForm({
             </span>
             <label
               className={styles.fieldInline}
-              title="Premium-notional multiple: the held quantity at each roll = nav_times × NAV_at_roll / premium_at_roll. Direction is the leg's long/short weight sign."
+              title="Premium notional held as a percentage of NAV (100% = full notional). The held quantity at each roll = (Size%/100) × NAV_at_roll / premium_at_roll. Direction is the leg's long/short weight sign."
             >
-              Notional × (nav_times)
+              Size (% of NAV)
               <input
                 type="number"
                 className={styles.input}
                 min={0}
                 step="any"
-                value={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
+                placeholder="100"
+                value={navFractionToPercent(typeof v.nav_times === 'number' ? v.nav_times : 1.0)}
                 onChange={(e) => setNavTimes(e.target.value)}
                 disabled={disabled}
-                aria-label="Notional multiple (nav_times)"
+                aria-label="Size (% of NAV)"
                 data-testid="nav-times"
               />
             </label>
             <span data-testid="nav-hint" style={{ fontSize: '0.85em', opacity: 0.8 }}>
-              A short/naked option at full notional can wipe out (a 10Δ put premium
-              can triple on a selloff → &gt;100% loss). Use a small nav_times to size
-              the premium notional.
+              A short/naked option at full notional (100%) can wipe out (a 10Δ put
+              premium can triple on a selloff → &gt;100% loss). Use a small percentage
+              to size the premium notional.
             </span>
           </div>
         </label>
@@ -772,18 +798,19 @@ export default function OptionStreamForm({
             {v.hold_between_rolls && (
               <label
                 className={styles.fieldInline}
-                title="Premium-notional multiple: the held quantity at each roll = nav_times × NAV_at_roll / premium_at_roll. This is the SIZE (direction is the block's long/short weight sign); it can exceed 1 to leverage the premium notional."
+                title="Premium notional held as a percentage of NAV (100% = full notional). The held quantity at each roll = (Size%/100) × NAV_at_roll / premium_at_roll. This is the SIZE (direction is the block's long/short weight sign); it can exceed 100% to leverage the premium notional."
               >
-                Notional × (nav_times)
+                Size (% of NAV)
                 <input
                   type="number"
                   className={styles.input}
                   min={0}
                   step="any"
-                  value={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
+                  placeholder="100"
+                  value={navFractionToPercent(typeof v.nav_times === 'number' ? v.nav_times : 1.0)}
                   onChange={(e) => setNavTimes(e.target.value)}
                   disabled={disabled}
-                  aria-label="Notional multiple (nav_times)"
+                  aria-label="Size (% of NAV)"
                   data-testid="nav-times"
                 />
               </label>
@@ -818,4 +845,6 @@ export {
   MID_TOOLTIP,
   defaultMaturity,
   defaultSelection,
+  navFractionToPercent,
+  navPercentToFraction,
 };

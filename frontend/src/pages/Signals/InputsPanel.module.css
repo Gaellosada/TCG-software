@@ -86,7 +86,8 @@
 }
 
 .idInput {
-  width: 56px;
+  /* Doubled from 56px for legibility (misc-batch follow-up ask #4). */
+  width: 112px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-sm);

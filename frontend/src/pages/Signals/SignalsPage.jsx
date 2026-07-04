@@ -9,7 +9,7 @@ import { buildSignalStatsInputs } from './signalStatsInputs';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import InputsPanel from './InputsPanel';
 import LockBanner from '../../components/LockBanner';
-import { emptyRules, defaultSettings } from './storage';
+import { emptyRules, defaultSettings, duplicateSignal } from './storage';
 import { AUTOSAVE_KEY } from './storageKeys';
 import { computeSignal } from '../../api/signals';
 import {
@@ -229,6 +229,48 @@ function SignalsPage() {
       setSelectedId((sel) => sel === id ? null : sel);
       // eslint-disable-next-line no-console
       console.error('createSignal failed:', err);
+    });
+  }, [persistedCategory, invalidate]);
+
+  // Duplicate a signal: clone its full payload with a new id + "(copy)" name,
+  // unlocked, in the current category. Mirrors handleAdd's create path (id
+  // generated OUTSIDE the state updater so React 18 StrictMode's double-invoke
+  // doesn't fire the create twice). Cloning uses the local editor-shape doc
+  // already in state — no fetch needed. A DELETED source never appears in the
+  // filtered list, so no explicit DELETED guard is required here.
+  const handleDuplicate = useCallback((id) => {
+    const source = signalsRef.current.find((s) => s.id === id);
+    if (!source) return;
+    const newId = (globalThis.crypto && globalThis.crypto.randomUUID)
+      ? globalThis.crypto.randomUUID()
+      : `sig-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const copy = duplicateSignal(source, { newId });
+    if (!copy) return;
+    setSignals((prev) => [...prev, copy]);
+    setSelectedId(newId);
+    setError(null);
+    setLastResult(null);
+    setOneshotStatus('saving');
+    createSignal({
+      id: newId,
+      name: copy.name,
+      category: persistedCategory,
+      inputs: copy.inputs || [],
+      rules: copy.rules || emptyRules(),
+      settings: copy.settings || defaultSettings(),
+      description: copy.doc || '',
+    }).then(() => {
+      setOneshotError(null);
+      setOneshotStatus('saved');
+      invalidate.signals(newId);
+    }).catch((err) => {
+      setOneshotError(describePersistenceError(err));
+      setOneshotStatus('error');
+      // Roll back the optimistic copy.
+      setSignals((prev) => prev.filter((s) => s.id !== newId));
+      setSelectedId((sel) => (sel === newId ? null : sel));
+      // eslint-disable-next-line no-console
+      console.error('duplicateSignal (create) failed:', err);
     });
   }, [persistedCategory, invalidate]);
 
@@ -607,6 +649,7 @@ function SignalsPage() {
           onSelect={handleSelect}
           onAdd={handleAdd}
           onDelete={handleDelete}
+          onDuplicate={handleDuplicate}
           onRename={handleRename}
           search={search}
           onSearchChange={setSearch}

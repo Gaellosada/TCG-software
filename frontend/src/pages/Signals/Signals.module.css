@@ -653,8 +653,56 @@
   color: var(--text-primary);
   font-size: 0.7rem;
   padding: 0 4px;
-  width: 44px;
+  /* Doubled from 44px for legibility (misc-batch follow-up ask #1). */
+  width: 88px;
   height: 18px;
+}
+
+/* ---------- Conjunction-group rendering (per-gap AND/THEN) ----------
+ * A run of AND'd conditions is bounded in one .conditionGroup box (left accent
+ * stripe = "these fire together"); a .conditionThenConnector separates ordered
+ * groups so ``(A AND B) THEN (C AND D)`` reads as two bounded groups joined by
+ * THEN. The box is only applied when a block actually has >1 group — a plain
+ * CNF block stays visually flat. */
+.conditionGroup {
+  border: 1px solid var(--border-secondary);
+  border-left: 2px solid var(--accent, #2563eb);
+  border-radius: var(--radius-sm);
+  padding: 0 8px 4px;
+  margin-top: 2px;
+}
+
+.conditionThenConnector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+
+/* Leading accent tick so the THEN boundary reads as an ordered step, not just
+   another AND chip. */
+.conditionThenConnector::before {
+  content: '';
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent, #2563eb);
+}
+
+/* Static reminder on entry blocks that carry a sequence / tap counter. */
+.exitResetNote {
+  margin-top: 8px;
+  font-size: 0.66rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+/* Per-block "fire: pulse | sustained" control in the block header. */
+.blockFireCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* ---------- cross ×N / within W controls (shown only when count > 1) ----------
@@ -669,6 +717,9 @@
   min-height: var(--signal-control-height);
 }
 
+/* Both the N count and the W window input in a cross ×N/within-W condition.
+   Doubled from 46px to 92px (misc-batch follow-up) for legibility, matching the
+   THEN "within [W] bars" treatment. */
 .crossCountInput {
   background: var(--bg-tertiary);
   border: 1px solid var(--border-primary);
@@ -676,7 +727,7 @@
   color: var(--text-primary);
   font-size: 0.78rem;
   padding: 0 4px;
-  width: 46px;
+  width: 92px;
   height: var(--signal-control-height);
 }
 
@@ -771,15 +822,16 @@
   min-height: var(--signal-control-height);
 }
 
-/* Each operand occupies a compact cell. ``flex-basis: 100px`` is the PREFERRED
-   width (≈⅓ narrower than the former 150px) and ``flex-grow: 0`` keeps the
-   dropdown at that width instead of stretching to fill the column — a
-   deliberately narrow control. The row's ``flex-wrap: wrap`` still drops an
-   operand that can't fit onto the next line, and ``min-width: 0`` (the PR #61
-   precedent) lets the cell shrink below the basis at sub-floor widths so it
-   reflows / the panel scrolls instead of overflowing the column. */
+/* Each operand occupies a cell. ``flex-basis: 200px`` is the PREFERRED width
+   (doubled from 100px in the misc-batch follow-up ask #2 so the instrument /
+   constant operand fields read clearly) and ``flex-grow: 0`` keeps the control
+   at that width instead of stretching to fill the column. The row's
+   ``flex-wrap: wrap`` still drops an operand that can't fit onto the next line,
+   and ``min-width: 0`` (the PR #61 precedent) lets the cell shrink below the
+   basis at sub-floor widths so it reflows / the panel scrolls instead of
+   overflowing the column. */
 .conditionOperandCell {
-  flex: 0 1 100px;
+  flex: 0 1 200px;
   min-width: 0;
   display: flex;
 }
@@ -915,10 +967,9 @@
 }
 
 .operandMenu {
-  position: absolute;
-  top: calc(100% + 2px);
-  left: 0;
-  z-index: 20;
+  /* Positioning (fixed / top / left / z-index) is applied inline by
+     AnchoredPortal, which renders this menu into document.body; only the box
+     styling lives here. */
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-sm);
@@ -994,13 +1045,14 @@
   min-width: 0;
 }
 
-/* ``flex-basis: 73px`` = preferred per-select width (≈⅓ narrower than the
-   former 110px); ``flex-grow: 0`` keeps each select compact rather than
+/* ``flex-basis: 146px`` = preferred per-select width (doubled from 73px in the
+   misc-batch follow-up ask #2 so the indicator name and its input binding read
+   clearly); ``flex-grow: 0`` keeps each select at that width rather than
    stretching, and the wrap above stacks two that can't share a line
    one-per-line. ``min-width: 0`` lets them shrink at sub-floor widths instead
    of overflowing the cell. */
 .operandIndicator > select {
-  flex: 0 1 73px;
+  flex: 0 1 146px;
   min-width: 0;
 }
 
@@ -1070,17 +1122,13 @@
 }
 
 .indicatorOverrideGrid {
+  /* Positioning (fixed / top / right / z-index) is applied inline by
+     AnchoredPortal, which renders this overlay into document.body; only the
+     box styling lives here. */
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 8px;
-  /* iter-5 ask #3: float the expanded params panel to the right of the
-     summary button rather than pushing it below. Right-anchored so it
-     never overflows off the right edge of the block. */
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 40;
   min-width: 240px;
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
@@ -1171,45 +1219,6 @@
   position: relative;
   flex: 0 1 87px;
   min-width: 0;
-}
-
-.blockInstrumentBtn {
-  width: 100%;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 0.78rem;
-  padding: 4px 8px;
-  text-align: left;
-  height: var(--signal-control-height);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.blockInstrumentBtnEmpty {
-  color: var(--text-secondary);
-  font-style: italic;
-  border-style: dashed;
-}
-
-.blockInstrumentBtn:hover {
-  border-color: var(--accent, #2563eb);
-}
-
-.blockInstrumentPopover {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 30;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-  padding: 6px;
-  min-width: 240px;
 }
 
 /* A simple select bound to the signal's declared inputs. */

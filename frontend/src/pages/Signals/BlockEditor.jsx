@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, Fragment } from 'react';
 import OperandSlot from './OperandSlot';
 import BlockHeader from './BlockHeader';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -29,39 +29,69 @@ const ADD_BLOCK_LABELS = {
   resets: '+ Add reset block',
 };
 
-// Default window (bars) seeded when a block is first switched AND → THEN.
+// Default window (bars) seeded when a gap is switched AND → THEN.
 const DEFAULT_LINK_WINDOW = 5;
 
 /**
- * Re-chain a block's temporal ``links`` after the condition at ``removedIdx``
- * is removed. The backend requires a chain to cover EVERY successor gap
- * (``{1..n-1}``) or none, so a chained block must stay a FULL chain over the
- * surviving conditions — never a partial one.
+ * Re-index a block's temporal ``links`` (the set of THEN-boundary gaps) after
+ * the condition at ``removedIdx`` (0-based) is removed. ``links`` is a subset of
+ * ``{1..n-1}`` keyed by SUCCESSOR index; partial maps are valid (each present
+ * gap = a THEN boundary; absent = AND). Removing a condition MERGES the two gaps
+ * on either side of it, so:
+ *   - a gap ``k < removedIdx`` is untouched (both endpoints survive at the same
+ *     index);
+ *   - the gap ``k == removedIdx`` (the boundary INTO the removed condition) is
+ *     dropped;
+ *   - a gap ``k > removedIdx`` shifts down by one (its later endpoint slides
+ *     left), keeping its window. The merged gap therefore inherits the window
+ *     of the boundary that led OUT of the removed condition.
+ * Windows are preserved verbatim — no re-seeding. Returns ``undefined`` (CNF)
+ * when nothing survives or < 2 conditions remain.
  *
- * Strategy: if the block was a chain (any links) and ≥2 conditions remain,
- * rebuild a full chain over the ``remainingCount`` conditions, preserving the
- * window of each surviving gap where it can be mapped back and defaulting any
- * new/ambiguous gap to ``defaultWindow``. If <2 conditions remain, or it
- * wasn't a chain, return ``undefined`` (CNF).
- *
- * Window mapping: a surviving gap at new successor index ``j`` (1-based)
- * corresponds to the OLD successor index of the condition that now sits at new
- * position ``j`` — i.e. old index ``j`` if ``j < removedIdx`` else ``j+1``. If
- * that old key had a window, reuse it; otherwise default.
- *
- * Pure. Defensive against a missing/garbage map.
+ * Pure. Defensive against a missing / garbage map.
  */
-export function reindexLinksAfterRemoval(links, removedIdx, remainingCount, defaultWindow = DEFAULT_LINK_WINDOW) {
+export function reindexLinksAfterRemoval(links, removedIdx, remainingCount) {
   if (!links || typeof links !== 'object' || Object.keys(links).length === 0) return undefined;
   if (!Number.isInteger(remainingCount) || remainingCount < 2) return undefined;
   const out = {};
-  for (let j = 1; j < remainingCount; j += 1) {
-    // The new condition at position j came from old position (j < removedIdx ? j : j+1).
-    const oldKey = j < removedIdx ? j : j + 1;
-    const w = links[oldKey];
-    out[j] = (Number.isFinite(w) && w >= 1) ? Math.floor(w) : defaultWindow;
+  for (const [k, v] of Object.entries(links)) {
+    const idx = Number(k);
+    if (!Number.isInteger(idx) || idx < 1) continue;
+    const w = (Number.isFinite(v) && v >= 1) ? Math.floor(v) : null;
+    if (w === null) continue;
+    if (idx < removedIdx) {
+      out[String(idx)] = w;
+    } else if (idx === removedIdx) {
+      // Boundary into the removed condition — dropped (gaps merge).
+      continue;
+    } else {
+      const newIdx = idx - 1;
+      if (newIdx >= 1 && newIdx < remainingCount) out[String(newIdx)] = w;
+    }
   }
-  return out;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Partition a block's conditions into conjunction groups from its THEN
+ * boundaries. A gap present in ``links`` (keyed by the later condition's
+ * successor index) starts a new group; absent = same group. Returns an array of
+ * arrays of 0-based condition indices. Zero links ⇒ one group ⇒ CNF.
+ *
+ * Pure.
+ */
+export function partitionGroups(condCount, links) {
+  const groups = [];
+  let current = [];
+  for (let i = 0; i < condCount; i += 1) {
+    if (i > 0 && links && (i in links)) {
+      groups.push(current);
+      current = [];
+    }
+    current.push(i);
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
 }
 
 /**
@@ -175,18 +205,12 @@ function BlockEditor({
   function handleAddCondition(blockIdx) {
     const next = blocks.map((b, i) => {
       if (i !== blockIdx) return b;
-      const prevConds = b.conditions || [];
-      const conditions = [...prevConds, defaultCondition('gt')];
-      // A CNF block (no links) stays CNF on add. A CHAINED block must stay a
-      // FULL contiguous chain (the backend rejects a partial chain, gate G3),
-      // so EXTEND the map: the appended condition opens a new successor gap
-      // whose key == the pre-append condition count (1-based successor index).
-      // Seed its window with the default — existing windows are kept. Mirrors
-      // ``reindexLinksAfterRemoval`` which keeps links consistent on removal.
-      const isChain = b.links && typeof b.links === 'object' && Object.keys(b.links).length > 0;
-      if (!isChain) return { ...b, conditions };
-      const links = { ...b.links, [prevConds.length]: DEFAULT_LINK_WINDOW };
-      return { ...b, conditions, links };
+      const conditions = [...(b.conditions || []), defaultCondition('gt')];
+      // The appended condition joins the last group with AND by default (no new
+      // THEN boundary). Existing links keep their meaning — their keys are all
+      // < the old condition count, so they stay in range. The user can promote
+      // the new gap to THEN with its connector.
+      return { ...b, conditions };
     });
     updateBlocks(next);
   }
@@ -195,9 +219,11 @@ function BlockEditor({
     const next = blocks.map((b, i) => {
       if (i !== blockIdx) return b;
       const nextConds = (b.conditions || []).filter((_, j) => j !== condIdx);
-      // A chained block must stay a FULL chain over the surviving conditions
-      // (the backend rejects a partial chain). Re-chain: preserve surviving
-      // gap windows, default any new gap, drop to CNF if <2 conditions remain.
+      // Links are a partial THEN-boundary map, so removing a condition just
+      // merges the two gaps around it: the boundary INTO the removed condition
+      // is dropped and later gaps shift down by one, each keeping its window
+      // verbatim (no re-seeding). Falls back to CNF (links omitted) when
+      // nothing survives or < 2 conditions remain.
       const nextLinks = reindexLinksAfterRemoval(b.links, condIdx, nextConds.length);
       return {
         ...b,
@@ -219,32 +245,24 @@ function BlockEditor({
     updateBlocks(next);
   }
 
-  // Switch the WHOLE block between an ordered chain and plain CNF.
+  // Toggle a SINGLE gap (successor index ``condIdx``) between AND and THEN.
   //
-  // The backend (G3) requires a block's links to cover EVERY successor gap
-  // ``{1..n-1}`` or none — a partial chain is rejected (HTTP 400). So toggling
-  // ANY gap to THEN converts the whole block to a chain: every gap gets a link
-  // (existing windows kept, unset gaps seeded with the default window).
-  // Toggling any THEN gap back to AND reverts the WHOLE block to CNF (clears
-  // all links). This keeps the per-gap chip UX while only ever emitting a
-  // backend-valid full chain. Per-link windows stay individually editable via
+  // The backend now accepts any subset of ``{1..n-1}`` as THEN boundaries, so
+  // each gap is independent: presenting a key = THEN (seed the default window),
+  // deleting it = AND. When the last key is removed the block falls back to CNF
+  // (links omitted). Per-gap windows stay individually editable via
   // ``handleUpdateLinkWindow``.
-  function handleSetChainMode(blockIdx, on) {
+  function handleToggleLink(blockIdx, condIdx) {
     const next = blocks.map((b, i) => {
       if (i !== blockIdx) return b;
-      const nConds = (b.conditions || []).length;
-      if (!on || nConds < 2) {
-        // Revert to CNF (or nothing to chain).
-        return { ...b, links: undefined };
+      const prev = (b.links && typeof b.links === 'object') ? { ...b.links } : {};
+      if (condIdx in prev) {
+        delete prev[condIdx]; // THEN → AND
+      } else {
+        prev[condIdx] = DEFAULT_LINK_WINDOW; // AND → THEN
       }
-      const prev = (b.links && typeof b.links === 'object') ? b.links : {};
-      const nextLinks = {};
-      for (let k = 1; k < nConds; k += 1) {
-        const existing = prev[k];
-        nextLinks[k] = (Number.isFinite(existing) && existing >= 1)
-          ? Math.floor(existing) : DEFAULT_LINK_WINDOW;
-      }
-      return { ...b, links: nextLinks };
+      const links = Object.keys(prev).length > 0 ? prev : undefined;
+      return { ...b, links };
     });
     updateBlocks(next);
   }
@@ -313,7 +331,7 @@ function BlockEditor({
       ) : (
         <>
           <div className={styles.directionHint}>
-            Blocks are <strong>OR</strong>&rsquo;d. Conditions in a block are <strong>AND</strong>&rsquo;d.
+            Blocks are <strong>OR</strong>&rsquo;d. Within a block, conditions in a group are <strong>AND</strong>&rsquo;d; <strong>THEN</strong> sequences the groups in order.
           </div>
 
           {section === 'exits' && cascadeNotice && (
@@ -351,7 +369,7 @@ function BlockEditor({
                   onAddCondition={() => handleAddCondition(blockIdx)}
                   onRemoveCondition={(condIdx) => handleRemoveCondition(blockIdx, condIdx)}
                   onUpdateCondition={(condIdx, next) => handleUpdateCondition(blockIdx, condIdx, next)}
-                  onSetChainMode={(on) => handleSetChainMode(blockIdx, on)}
+                  onToggleLink={(condIdx) => handleToggleLink(blockIdx, condIdx)}
                   onUpdateLinkWindow={(condIdx, within) => handleUpdateLinkWindow(blockIdx, condIdx, within)}
                   onRemoveBlock={() => handleRemoveBlock(blockIdx)}
                   inputs={inputs}
@@ -388,7 +406,7 @@ function Block({
   onAddCondition,
   onRemoveCondition,
   onUpdateCondition,
-  onSetChainMode,
+  onToggleLink,
   onUpdateLinkWindow,
   onRemoveBlock,
   inputs,
@@ -398,11 +416,28 @@ function Block({
   const [descOpen, setDescOpen] = useState(false);
   const conditions = block.conditions || [];
   const enabled = block.enabled !== false;
-  const links = (block.links && typeof block.links === 'object') ? block.links : null;
-  // The block is a chain iff it has any link. Backend enforces full coverage,
-  // so when chained every gap is linked (all-or-nothing). A reset block is
-  // never a chain (links are rejected there) — guard defensively.
-  const isChain = section !== 'resets' && !!links && Object.keys(links).length > 0;
+  // Reset blocks never carry a sequence (backend rejects links there), so a
+  // reset block is always pure CNF (one group). Elsewhere ``links`` is the set
+  // of THEN-boundary gaps.
+  const links = (section !== 'resets' && block.links && typeof block.links === 'object')
+    ? block.links
+    : null;
+  const sequenceable = section !== 'resets';
+  // Partition conditions into conjunction groups from the THEN boundaries. One
+  // group ⇒ plain CNF (rendered flat); >1 group ⇒ each group is visually bound
+  // and separated by a THEN connector so ``(A AND B) THEN (C AND D)`` reads
+  // unambiguously.
+  const groups = partitionGroups(conditions.length, links);
+  const multiGroup = groups.length > 1;
+  // Static reminder shown on ENTRY blocks that carry an in-progress THEN chain:
+  // a targeting exit resets that in-flight sequence. Always-on backend
+  // behaviour; surfaced as a note. Scoped to chains ONLY — the UI can author
+  // only ``rolling``-mode cross-counts (no count_mode control; the API folds an
+  // absent count_mode to "rolling"), and a rolling count's trailing window
+  // ages out on its own rather than being reset by an exit, so claiming a
+  // tap-count reset would be false for every block a user can build here.
+  const hasChain = sequenceable && !!links && Object.keys(links).length > 0;
+  const showExitResetNote = section === 'entries' && hasChain;
 
   const handleToggleEnabled = useCallback((e) => {
     onUpdateBlock({ ...block, enabled: e.target.checked });
@@ -450,30 +485,55 @@ function Block({
           Empty block — add a condition below.
         </div>
       ) : (
-        conditions.map((cond, condIdx) => (
-          <Condition
-            key={condIdx}
-            blockIdx={blockIdx}
-            condIdx={condIdx}
-            isFirst={condIdx === 0}
-            condition={cond}
-            onChange={(next) => onUpdateCondition(condIdx, next)}
-            onRemove={() => onRemoveCondition(condIdx)}
-            // Reset blocks never carry a sequence (backend rejects links there),
-            // so the THEN toggle is suppressed and they stay pure CNF.
-            sequenceable={section !== 'resets'}
-            onSetChainMode={onSetChainMode}
-            onUpdateLinkWindow={onUpdateLinkWindow}
-            // Whole-block chain mode (all-or-nothing: every gap is linked when
-            // chained). Each gap's chip flips the whole block.
-            isChain={isChain}
-            // This gap's individual window (keyed by SUCCESSOR index = condIdx).
-            linkWithin={links && Number.isFinite(links[condIdx]) ? links[condIdx] : null}
-            inputs={inputs}
-            indicators={indicators}
-            readOnly={readOnly}
-          />
-        ))
+        groups.map((group, groupIdx) => {
+          // Successor index of this group's first condition == the THEN
+          // boundary that opens it (0 for the first group, which has none).
+          const boundaryIdx = group[0];
+          return (
+            <Fragment key={`grp-${boundaryIdx}`}>
+              {groupIdx > 0 && (
+                <ThenConnector
+                  blockIdx={blockIdx}
+                  condIdx={boundaryIdx}
+                  within={links && Number.isFinite(links[boundaryIdx]) ? links[boundaryIdx] : null}
+                  onToggle={() => onToggleLink(boundaryIdx)}
+                  onUpdateWindow={onUpdateLinkWindow}
+                  readOnly={readOnly}
+                />
+              )}
+              <div
+                className={multiGroup ? styles.conditionGroup : undefined}
+                data-testid={`condition-group-${blockIdx}-${groupIdx}`}
+              >
+                {group.map((condIdx, idxInGroup) => (
+                  <Condition
+                    key={condIdx}
+                    blockIdx={blockIdx}
+                    condIdx={condIdx}
+                    isFirstInGroup={idxInGroup === 0}
+                    condition={conditions[condIdx]}
+                    onChange={(next) => onUpdateCondition(condIdx, next)}
+                    onRemove={() => onRemoveCondition(condIdx)}
+                    // Reset blocks never carry a sequence (backend rejects links
+                    // there), so the AND↔THEN toggle is suppressed — plain AND.
+                    sequenceable={sequenceable}
+                    // Promote THIS gap (the one before this condition) to THEN,
+                    // splitting the group here.
+                    onToggleLink={onToggleLink}
+                    inputs={inputs}
+                    indicators={indicators}
+                    readOnly={readOnly}
+                  />
+                ))}
+              </div>
+            </Fragment>
+          );
+        })
+      )}
+      {showExitResetNote && (
+        <div className={styles.exitResetNote} data-testid={`exit-reset-note-${blockIdx}`}>
+          In-progress sequence resets when a targeting exit fires.
+        </div>
       )}
       <div className={styles.blockFooter}>
         <button
@@ -516,15 +576,12 @@ function Block({
 function Condition({
   blockIdx,
   condIdx,
-  isFirst,
+  isFirstInGroup,
   condition,
   onChange,
   onRemove,
   sequenceable = true,
-  onSetChainMode,
-  onUpdateLinkWindow,
-  isChain = false,
-  linkWithin = null,
+  onToggleLink,
   inputs,
   indicators,
   readOnly = false,
@@ -556,19 +613,6 @@ function Condition({
   function updateCrossField(field, raw) {
     const n = parseInt(raw, 10);
     onChange({ ...condition, [field]: Number.isFinite(n) && n >= 1 ? n : 1 });
-  }
-
-  // Flip the WHOLE block between an ordered chain and CNF. The backend requires
-  // every successor gap linked or none (no partial chain), so each gap's chip
-  // toggles the block-wide mode — not just this one gap.
-  function toggleChain() {
-    onSetChainMode(!isChain);
-  }
-
-  // Edit just THIS gap's window (bars); chain membership is unchanged.
-  function updateLinkWindow(raw) {
-    const n = parseInt(raw, 10);
-    onUpdateLinkWindow(condIdx, Number.isFinite(n) && n >= 1 ? n : 1);
   }
 
   // The op selector is replaced by a static label for retired (legacy) ops —
@@ -644,54 +688,26 @@ function Condition({
     )
   ) : null;
 
-  // The separator chip between this condition and the previous one. For a
-  // sequenceable section it is an AND ⇄ THEN toggle that flips the whole block
-  // between CNF and one ordered chain (all gaps linked or none). When chained,
-  // each gap also exposes its own "within [W] bars" window. Reset blocks (not
-  // sequenceable) keep the plain static AND label.
+  // The separator chip above this condition. A condition that OPENS a group
+  // (isFirstInGroup) has no in-group separator: either it is the block's very
+  // first condition, or a THEN connector (rendered by the parent Block between
+  // groups) already precedes it. Within a group, every non-opening condition
+  // sits on an AND gap: for a sequenceable section that AND is a toggle
+  // (click ⇒ THEN, splitting the group here); reset blocks (not sequenceable)
+  // keep a static AND label.
   let separator = null;
-  if (!isFirst) {
+  if (!isFirstInGroup) {
     if (!sequenceable) {
       separator = <div className={styles.conditionAndLabel}>AND</div>;
-    } else if (isChain) {
-      separator = (
-        <div className={styles.conditionLinkChip} data-testid={`link-chip-${blockIdx}-${condIdx}`}>
-          <button
-            type="button"
-            className={`${styles.conditionLinkToggle} ${styles.conditionLinkToggleActive}`}
-            onClick={toggleChain}
-            disabled={readOnly}
-            title="Ordered: this condition must fire AFTER the previous one, within the window. Click to revert the whole block to AND."
-            data-testid={`link-toggle-${blockIdx}-${condIdx}`}
-          >
-            THEN
-          </button>
-          <span className={styles.linkWindowWrap}>
-            within
-            <input
-              type="number"
-              min="1"
-              step="1"
-              className={styles.linkWindowInput}
-              value={linkWithin ?? DEFAULT_LINK_WINDOW}
-              onChange={(e) => updateLinkWindow(e.target.value)}
-              aria-label="Within window (bars)"
-              data-testid={`link-window-${blockIdx}-${condIdx}`}
-              readOnly={readOnly}
-            />
-            bars
-          </span>
-        </div>
-      );
     } else {
       separator = (
         <div className={styles.conditionLinkChip} data-testid={`link-chip-${blockIdx}-${condIdx}`}>
           <button
             type="button"
             className={styles.conditionLinkToggle}
-            onClick={toggleChain}
+            onClick={() => onToggleLink(condIdx)}
             disabled={readOnly}
-            title="AND (simultaneous). Click to make the whole block an ordered sequence (each condition must fire AFTER the previous, within a window)."
+            title="AND (simultaneous with the group). Click to make this an ordered THEN step — the conditions after it must fire AFTER this group, within a window."
             data-testid={`link-toggle-${blockIdx}-${condIdx}`}
           >
             AND
@@ -836,6 +852,52 @@ function Condition({
         onConfirm={() => { setConfirmRemove(false); onRemove(); }}
         onCancel={() => setConfirmRemove(false)}
       />
+    </div>
+  );
+}
+
+/**
+ * The THEN boundary rendered BETWEEN two conjunction groups. Carries the
+ * ordered-sequence toggle (click ⇒ merge the groups back to one AND group) and
+ * the per-boundary "within [W] bars" window. Keyed by the successor index of
+ * the group it opens (``condIdx``) so its ``link-toggle`` / ``link-window``
+ * testids are unique per gap — the same gap never also renders an AND chip.
+ */
+function ThenConnector({ blockIdx, condIdx, within, onToggle, onUpdateWindow, readOnly = false }) {
+  function updateWindow(raw) {
+    const n = parseInt(raw, 10);
+    onUpdateWindow(condIdx, Number.isFinite(n) && n >= 1 ? n : 1);
+  }
+  return (
+    <div
+      className={styles.conditionThenConnector}
+      data-testid={`then-connector-${blockIdx}-${condIdx}`}
+    >
+      <button
+        type="button"
+        className={`${styles.conditionLinkToggle} ${styles.conditionLinkToggleActive}`}
+        onClick={onToggle}
+        disabled={readOnly}
+        title="Ordered: the group below must fire AFTER the group above, within the window. Click to merge back into one AND group."
+        data-testid={`link-toggle-${blockIdx}-${condIdx}`}
+      >
+        THEN
+      </button>
+      <span className={styles.linkWindowWrap}>
+        within
+        <input
+          type="number"
+          min="1"
+          step="1"
+          className={styles.linkWindowInput}
+          value={within ?? DEFAULT_LINK_WINDOW}
+          onChange={(e) => updateWindow(e.target.value)}
+          aria-label="Within window (bars)"
+          data-testid={`link-window-${blockIdx}-${condIdx}`}
+          readOnly={readOnly}
+        />
+        bars
+      </span>
     </div>
   );
 }

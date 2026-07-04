@@ -17,9 +17,10 @@ import numpy as np
 import pytest
 
 from tcg.engine.signal_exec import (
-    _chain_window_list,
     _eval_condition,
+    _link_groups,
     _sequence_active,
+    _to_pulse,
     evaluate_signal,
 )
 from tcg.types.signal import (
@@ -253,7 +254,7 @@ def test_automaton_re_arm_after_fire():
 
 
 # --------------------------------------------------------------------------- #
-# _chain_window_list validation / degradation
+# _link_groups partitioning (group semantics)
 # --------------------------------------------------------------------------- #
 
 
@@ -262,33 +263,46 @@ def _two_cond_block(links):
     return Block(id="e", input_id="X", weight=1.0, conditions=(c, c), links=links)
 
 
-def test_chain_window_list_none_for_zero_link():
-    assert _chain_window_list(_two_cond_block(None)) is None
-    assert _chain_window_list(_two_cond_block({})) is None
-
-
-def test_chain_window_list_w0_folds_to_none():
-    assert _chain_window_list(_two_cond_block({1: 0})) is None
-
-
-def test_chain_window_list_valid():
-    assert _chain_window_list(_two_cond_block({1: 5})) == [5]
-
-
-def test_chain_window_list_three_conditions():
+def _n_cond_block(n, links):
     c = CompareCondition(op="gt", lhs=_close("X"), rhs=ConstantOperand(value=1.0))
-    b = Block(
-        id="e", input_id="X", weight=1.0, conditions=(c, c, c), links={1: 3, 2: 4}
+    return Block(
+        id="e", input_id="X", weight=1.0, conditions=tuple([c] * n), links=links
     )
-    assert _chain_window_list(b) == [3, 4]
 
 
-def test_chain_window_list_partial_chain_degrades():
-    # a chain that does not reach the final condition is not a single linear
-    # chain over the whole block -> degrade to CNF (None).
-    c = CompareCondition(op="gt", lhs=_close("X"), rhs=ConstantOperand(value=1.0))
-    b = Block(id="e", input_id="X", weight=1.0, conditions=(c, c, c), links={1: 3})
-    assert _chain_window_list(b) is None
+def test_link_groups_none_for_zero_link():
+    # No THEN boundary ⇒ one conjunction group ⇒ CNF ⇒ None.
+    assert _link_groups(_two_cond_block(None)) is None
+    assert _link_groups(_two_cond_block({})) is None
+
+
+def test_link_groups_w0_folds_to_none():
+    assert _link_groups(_two_cond_block({1: 0})) is None
+
+
+def test_link_groups_valid_full_chain():
+    # every gap a boundary -> each condition its own group (old full-chain case).
+    assert _link_groups(_two_cond_block({1: 5})) == ([(0,), (1,)], [5])
+
+
+def test_link_groups_three_conditions_full_chain():
+    assert _link_groups(_n_cond_block(3, {1: 3, 2: 4})) == ([(0,), (1,), (2,)], [3, 4])
+
+
+def test_link_groups_partial_map_forms_two_groups():
+    # {1: 3} on 3 conditions: gap 1 is a THEN boundary, gap 2 is AND ->
+    # groups {0} THEN {1,2}. (Was rejected as a "partial chain" before v5.)
+    assert _link_groups(_n_cond_block(3, {1: 3})) == ([(0,), (1, 2)], [3])
+
+
+def test_link_groups_and_then_and_on_four_conditions():
+    # (A AND B) THEN (C AND D): only gap 2 is a boundary.
+    assert _link_groups(_n_cond_block(4, {2: 5})) == ([(0, 1), (2, 3)], [5])
+
+
+def test_link_groups_trailing_group_after_boundary():
+    # {1: 2} on 4 conds -> {0} THEN {1,2,3}.
+    assert _link_groups(_n_cond_block(4, {1: 2})) == ([(0,), (1, 2, 3)], [2])
 
 
 # --------------------------------------------------------------------------- #
@@ -399,3 +413,569 @@ async def test_exit_block_chain_clears_latch():
         f"exit chain did not complete @3; latched_indices={exit_event.latched_indices}"
     )
     assert pos[0] == 1.0 and pos[2] == 1.0  # always-on entry stays latched
+
+
+# --------------------------------------------------------------------------- #
+# group semantics: (A AND B) THEN (C AND D)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_group_and_then_and_full_path():
+    # (close>100 AND close<200) THEN (close>300 AND close<400) within 5 bars.
+    # group1 true @0 (150 in (100,200)); group2 true @1 (350 in (300,400)),
+    # 1 bar after -> fire @1; entry latches and holds.
+    prices = [150.0, 350.0, 50.0, 50.0, 50.0]
+    pos = await _run_single_entry_positions(
+        (
+            CompareCondition(
+                op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0)
+            ),
+            CompareCondition(
+                op="lt", lhs=_close("X"), rhs=ConstantOperand(value=200.0)
+            ),
+            CompareCondition(
+                op="gt", lhs=_close("X"), rhs=ConstantOperand(value=300.0)
+            ),
+            CompareCondition(
+                op="lt", lhs=_close("X"), rhs=ConstantOperand(value=400.0)
+            ),
+        ),
+        prices,
+        links={2: 5},  # gap 2 is the ONLY THEN boundary -> groups {0,1} THEN {2,3}
+    )
+    assert pos.tolist() == [0.0, 1.0, 1.0, 1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_group2_completion_strictly_after_group1():
+    # If group2 is true on the SAME bar group1 arms, it must NOT complete
+    # (strictly-after semantics carries over to groups). Here both groups are
+    # only ever co-true at the same bar -> never fires.
+    prices = [150.0, 150.0, 150.0]  # group1 true every bar; group2 never true
+    pos = await _run_single_entry_positions(
+        (
+            CompareCondition(
+                op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0)
+            ),
+            CompareCondition(
+                op="lt", lhs=_close("X"), rhs=ConstantOperand(value=200.0)
+            ),
+            CompareCondition(
+                op="gt", lhs=_close("X"), rhs=ConstantOperand(value=300.0)
+            ),
+            CompareCondition(
+                op="lt", lhs=_close("X"), rhs=ConstantOperand(value=400.0)
+            ),
+        ),
+        prices,
+        links={2: 5},
+    )
+    assert pos.tolist() == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_all_and_links_empty_equals_cnf():
+    # links={} must take the SAME literal CNF path as links=None (one group).
+    conds = (
+        CompareCondition(op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0)),
+        CompareCondition(op="gt", lhs=_close("X"), rhs=ConstantOperand(value=50.0)),
+        CompareCondition(op="gt", lhs=_close("X"), rhs=ConstantOperand(value=10.0)),
+    )
+    prices = [150.0, 5.0, 150.0]
+    pos_none = await _run_single_entry_positions(conds, prices, links=None)
+    pos_empty = await _run_single_entry_positions(conds, prices, links={})
+    assert pos_none.tolist() == pos_empty.tolist()
+    assert pos_none[0] == 1.0  # non-degenerate: CNF true @0
+
+
+# --------------------------------------------------------------------------- #
+# fire_mode pulse
+# --------------------------------------------------------------------------- #
+
+
+def test_to_pulse_rising_edge():
+    a = np.array([0, 1, 1, 0, 1, 1], dtype=np.bool_)
+    assert _to_pulse(a).astype(int).tolist() == [0, 1, 0, 0, 1, 0]
+    # active[0] is passed through as the first edge.
+    b = np.array([1, 1, 0], dtype=np.bool_)
+    assert _to_pulse(b).astype(int).tolist() == [1, 0, 0]
+    assert _to_pulse(np.zeros(0, dtype=np.bool_)).tolist() == []
+
+
+async def _entry_fired_indices(fire_mode: str) -> tuple[int, ...]:
+    dates = np.arange(20240101, 20240101 + 5, dtype=np.int64)
+    prices = np.array([150.0, 160.0, 90.0, 170.0, 180.0])  # >100 at 0,1,3,4
+    sig = Signal(
+        id="s",
+        name="s",
+        inputs=(_input("X"),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="e",
+                    name="long",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(
+                        CompareCondition(
+                            op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0)
+                        ),
+                    ),
+                    fire_mode=fire_mode,
+                ),
+            )
+        ),
+    )
+    result = await evaluate_signal(sig, {}, _make_fetcher(prices, dates))
+    return next(e for e in result.events if e.kind == "entry").fired_indices
+
+
+@pytest.mark.asyncio
+async def test_pulse_fired_indices_are_edges_of_sustained():
+    sustained = await _entry_fired_indices("sustained")
+    pulse = await _entry_fired_indices("pulse")
+    assert sustained == (0, 1, 3, 4)  # LEVEL: every bar close>100
+    assert pulse == (0, 3)  # rising edges only (t0 edge, t3 after the t2 drop)
+
+
+def test_pulse_on_chain_keeps_adjacent_completions():
+    # PIN — pulse must NOT collapse two THEN-chain completions on ADJACENT bars.
+    # head=[T,T,F] / stage2=[F,T,T], W=1: head@0->compl@1 fires, head@1 re-arms
+    # and completes @2 -> ``_sequence_active`` emits [F,T,T]. A blanket rising-edge
+    # pass (``_to_pulse``) would collapse that to [F,T,F], silently dropping the
+    # SECOND completion. The chain path is already impulse-per-completion, so
+    # pulse is a no-op there and both completions survive.
+    import tcg.engine.signal_exec as se
+
+    condA = CompareCondition(op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0))
+    condB = CompareCondition(op="gt", lhs=_close("Y"), rhs=ConstantOperand(value=100.0))
+    block = Block(
+        id="e",
+        input_id="X",
+        weight=100.0,
+        conditions=(condA, condB),
+        links={1: 1},  # one THEN boundary, W=1
+        fire_mode="pulse",
+    )
+    inputs = {"X": _input("X"), "Y": _input("Y")}
+    kA = se._operand_key(condA.lhs, {}, inputs)
+    kB = se._operand_key(condB.lhs, {}, inputs)
+    kconstA = se._operand_key(condA.rhs, {}, inputs)
+    kconstB = se._operand_key(condB.rhs, {}, inputs)
+    vbk = {
+        kA: np.array([150.0, 150.0, 50.0]),  # X>100 -> head [T,T,F]
+        kB: np.array([50.0, 150.0, 150.0]),  # Y>100 -> stage2 [F,T,T]
+        kconstA: np.full(3, 100.0),
+        kconstB: np.full(3, 100.0),
+    }
+    # sanity: the raw automaton produces two ADJACENT completions.
+    assert _sequence_active(
+        [vbk[kA] > 100.0, vbk[kB] > 100.0],
+        [np.zeros(3, dtype=np.bool_), np.zeros(3, dtype=np.bool_)],
+        [1],
+        3,
+    ).astype(int).tolist() == [0, 1, 1]
+    # a blanket rising-edge pass would WRONGLY collapse the second completion:
+    assert _to_pulse(np.array([0, 1, 1], dtype=np.bool_)).astype(int).tolist() == [
+        0,
+        1,
+        0,
+    ]
+    # the fix: pulse on a chain keeps BOTH completions.
+    active, _ = se._eval_block_activity(block, {}, inputs, vbk, 3)
+    assert active.astype(int).tolist() == [0, 1, 1]
+    # sustained on the same chain is identical (chain is impulse either way).
+    block_sustained = Block(
+        id="e",
+        input_id="X",
+        weight=100.0,
+        conditions=(condA, condB),
+        links={1: 1},
+        fire_mode="sustained",
+    )
+    active_s, _ = se._eval_block_activity(block_sustained, {}, inputs, vbk, 3)
+    assert active_s.astype(int).tolist() == [0, 1, 1]
+
+
+def test_to_pulse_nan_gap_does_not_rearm():
+    # MINOR-1 (sweep 2): an INTERIOR NaN gap must NOT be read as a level drop.
+    # active poisoned to False on the gap bar; without the nan_mask the bar AFTER
+    # the gap reads as a rising edge and manufactures a phantom entry.
+    active = np.array([1, 1, 1, 1, 0, 1], dtype=np.bool_)  # bar 4 is a data gap
+    nan_mask = np.array([0, 0, 0, 0, 1, 0], dtype=np.bool_)
+    # legacy (no mask) still collapses to the phantom re-arm at bar 5 — PIN the bug.
+    assert _to_pulse(active).astype(int).tolist() == [1, 0, 0, 0, 0, 1]
+    # fixed: carry the last valid level (bar 3 == True) across the gap -> no fire.
+    assert _to_pulse(active, nan_mask).astype(int).tolist() == [1, 0, 0, 0, 0, 0]
+
+
+def test_to_pulse_genuine_edge_still_fires_with_mask():
+    # A genuine present-data False->True transition MUST still fire under the mask.
+    active = np.array([1, 0, 1], dtype=np.bool_)
+    nan_mask = np.zeros(3, dtype=np.bool_)  # all data present
+    assert _to_pulse(active, nan_mask).astype(int).tolist() == [1, 0, 1]
+    # a genuine drop that HAPPENS to sit next to a later gap still re-arms once
+    # real data returns after a real drop (gap only suppresses the gap-edge).
+    active2 = np.array([1, 0, 1, 1, 0, 1], dtype=np.bool_)  # bar 4 gap
+    mask2 = np.array([0, 0, 0, 0, 1, 0], dtype=np.bool_)
+    # bar 2 is a genuine False->True edge (fires); bar 5 is a gap re-arm (suppressed)
+    assert _to_pulse(active2, mask2).astype(int).tolist() == [1, 0, 1, 0, 0, 0]
+
+
+def test_to_pulse_leading_gap_keeps_behavior():
+    # A leading NaN gap: first real True still fires (no prior valid level).
+    active = np.array([0, 0, 1, 1], dtype=np.bool_)
+    nan_mask = np.array([1, 1, 0, 0], dtype=np.bool_)
+    assert _to_pulse(active, nan_mask).astype(int).tolist() == [0, 0, 1, 0]
+
+
+@pytest.mark.asyncio
+async def test_pulse_interior_nan_gap_no_phantom_entry():
+    # End-to-end: a union-grid data hole (NaN price) inside a sustained-true run
+    # must not fire a second entry under fire_mode="pulse".
+    dates = np.arange(20240101, 20240101 + 6, dtype=np.int64)
+    prices = np.array([150.0, 160.0, 170.0, 180.0, np.nan, 190.0])  # bar 4 = gap
+    sig = Signal(
+        id="s",
+        name="s",
+        inputs=(_input("X"),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="e",
+                    name="long",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(
+                        CompareCondition(
+                            op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0)
+                        ),
+                    ),
+                    fire_mode="pulse",
+                ),
+            )
+        ),
+    )
+    result = await evaluate_signal(sig, {}, _make_fetcher(prices, dates))
+    fired = next(e for e in result.events if e.kind == "entry").fired_indices
+    # ONLY the genuine t0 rising edge — NOT a phantom entry at bar 5 after the gap.
+    assert fired == (0,)
+
+
+# --------------------------------------------------------------------------- #
+# exit-reset (always-on): aborts in-flight chain / zeroes since_reset ladder
+# --------------------------------------------------------------------------- #
+
+
+def _chain_entry_with_optional_exit(prices, *, with_exit: bool):
+    exits = ()
+    if with_exit:
+        exits = (
+            Block(
+                id="x",
+                name="ex",
+                target_entry_block_names=("long",),
+                conditions=(
+                    # true only @2 (150 in (140,160)); other bars fall outside.
+                    CompareCondition(
+                        op="gt", lhs=_close("X"), rhs=ConstantOperand(value=140.0)
+                    ),
+                    CompareCondition(
+                        op="lt", lhs=_close("X"), rhs=ConstantOperand(value=160.0)
+                    ),
+                ),
+            ),
+        )
+    return Signal(
+        id="s",
+        name="s",
+        inputs=(_input("X"),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="e",
+                    name="long",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(
+                        CrossCondition(
+                            op="cross_above",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=100.0),
+                        ),
+                        CrossCondition(
+                            op="cross_above",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=200.0),
+                        ),
+                    ),
+                    links={1: 5},
+                ),
+            ),
+            exits=exits,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_exit_reset_aborts_inflight_chain():
+    # head cross_above 100 @1 (90->101); exit fires @2 (150); completion
+    # cross_above 200 @3 (150->250). WITHOUT the exit the chain completes @3;
+    # WITH the exit the in-flight candidate is aborted @2 so it never completes.
+    dates = np.arange(20240101, 20240101 + 4, dtype=np.int64)
+    prices = np.array([90.0, 101.0, 150.0, 250.0])
+
+    ctrl = await evaluate_signal(
+        _chain_entry_with_optional_exit(prices, with_exit=False),
+        {},
+        _make_fetcher(prices, dates),
+    )
+    assert ctrl.positions[0].values[3] == 1.0  # completes @3 without the exit
+
+    withx = await evaluate_signal(
+        _chain_entry_with_optional_exit(prices, with_exit=True),
+        {},
+        _make_fetcher(prices, dates),
+    )
+    assert withx.positions[0].values.tolist() == [0.0, 0.0, 0.0, 0.0]
+
+
+def _since_reset_entry_with_optional_exit(prices, *, with_exit: bool):
+    exits = ()
+    if with_exit:
+        exits = (
+            Block(
+                id="x",
+                name="ex",
+                target_entry_block_names=("long",),
+                conditions=(
+                    # cross_below 95 fires only @2 (101->90).
+                    CrossCondition(
+                        op="cross_below",
+                        lhs=_close("X"),
+                        rhs=ConstantOperand(value=95.0),
+                    ),
+                ),
+            ),
+        )
+    return Signal(
+        id="s",
+        name="s",
+        inputs=(_input("X"),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="e",
+                    name="long",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(
+                        CrossCondition(
+                            op="cross_above",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=100.0),
+                            count=2,
+                            count_mode="since_reset",
+                        ),
+                    ),
+                ),
+            ),
+            exits=exits,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_exit_reset_zeroes_since_reset_ladder():
+    # cross_above 100 crossings @1,@3,@5 (count=2, since_reset). The exit
+    # (cross_below 95) fires ONCE @2. WITHOUT the exit the 2nd crossing @3 fires;
+    # WITH the exit @2 the tap counter zeroes, so @3 is the 1st of a NEW ladder
+    # and firing waits for the 2nd new crossing @5.
+    dates = np.arange(20240101, 20240101 + 6, dtype=np.int64)
+    prices = np.array([90.0, 101.0, 90.0, 101.0, 96.0, 101.0])
+
+    ctrl = await evaluate_signal(
+        _since_reset_entry_with_optional_exit(prices, with_exit=False),
+        {},
+        _make_fetcher(prices, dates),
+    )
+    assert ctrl.positions[0].values[3] == 1.0  # 2nd crossing fires @3
+
+    withx = await evaluate_signal(
+        _since_reset_entry_with_optional_exit(prices, with_exit=True),
+        {},
+        _make_fetcher(prices, dates),
+    )
+    v = withx.positions[0].values
+    assert v[3] == 0.0  # ladder was reset @2 -> @3 is only the 1st new tap
+    assert v[5] == 1.0  # 2nd new tap fires @5
+
+
+# --------------------------------------------------------------------------- #
+# PINS (Iteration 2, tests-only): lock in two load-bearing semantics.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_fire_mode_default_is_sustained_and_hydrates_level():
+    # PIN — ``Block.fire_mode`` default is "sustained" (LEVEL), NOT "pulse".
+    #
+    # WHY THIS MATTERS: the golden-master corpus (test_golden_master_cnf) was
+    # captured with LEVEL firing. If this dataclass default — or the hydration
+    # of a stored block payload that predates the field — ever flips to
+    # "pulse", every stored/legacy signal silently re-fires on rising edges
+    # only and the golden byte-identity gate breaks. The "pulse-by-default for
+    # NEW blocks" UX default lives ONLY in the FRONTEND (blockShape.js
+    # defaultBlock sets fire_mode="pulse"); the backend must never default to
+    # pulse. If the backend default is ever intentionally changed, this is the
+    # test to update — deliberately, alongside a golden-master decision.
+
+    # (a) dataclass default.
+    assert Block().fire_mode == "sustained"
+    assert (
+        Block(id="e", name="long", input_id="X", weight=100.0).fire_mode == "sustained"
+    )
+
+    # (b) a STORED block payload LACKING ``fire_mode`` parses to "sustained"
+    #     AND evaluates with LEVEL behaviour (fires every bar the condition
+    #     holds — not just rising edges). Reuses the sustained-vs-pulse
+    #     discriminator from ``test_pulse_fired_indices_are_edges_of_sustained``.
+    from tcg.core.api.signals import SignalIn, parse_signal
+
+    raw = SignalIn.model_validate(
+        {
+            "id": "s",
+            "name": "s",
+            "inputs": [
+                {
+                    "id": "X",
+                    "instrument": {
+                        "type": "spot",
+                        "collection": "I",
+                        "instrument_id": "X",
+                    },
+                }
+            ],
+            "rules": {
+                "entries": [
+                    {
+                        "id": "e",
+                        "name": "long",
+                        "input_id": "X",
+                        "weight": 100.0,
+                        # NO "fire_mode" key — simulates a pre-fire_mode payload.
+                        "conditions": [
+                            {
+                                "op": "gt",
+                                "lhs": {"kind": "instrument", "input_id": "X"},
+                                "rhs": {"kind": "constant", "value": 100.0},
+                            }
+                        ],
+                    }
+                ],
+                "exits": [],
+                "resets": [],
+            },
+        }
+    )
+    sig = parse_signal(raw)
+    assert sig.rules.entries[0].fire_mode == "sustained"
+
+    dates = np.arange(20240101, 20240101 + 5, dtype=np.int64)
+    prices = np.array([150.0, 160.0, 90.0, 170.0, 180.0])  # >100 at 0,1,3,4
+    result = await evaluate_signal(sig, {}, _make_fetcher(prices, dates))
+    fired = next(e for e in result.events if e.kind == "entry").fired_indices
+    assert fired == (0, 1, 3, 4)  # LEVEL: every bar close>100 (sustained)
+
+
+def _bound_disarmed_exit_signal():
+    # Entry "long": since_reset ladder (2nd cross_above 100 since last reset
+    # fires). Exit "ex": BOUND to reset "r" and targets "long"; "r" never fires
+    # (cross_above 1e9) so once "ex" disarms it stays disarmed. cross_below 95
+    # is the exit trigger.
+    return Signal(
+        id="s",
+        name="s",
+        inputs=(_input("X"),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="e",
+                    name="long",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(
+                        CrossCondition(
+                            op="cross_above",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=100.0),
+                            count=2,
+                            count_mode="since_reset",
+                        ),
+                    ),
+                ),
+            ),
+            exits=(
+                Block(
+                    id="x",
+                    name="ex",
+                    target_entry_block_names=("long",),
+                    requires_reset_block_id="r",
+                    conditions=(
+                        CrossCondition(
+                            op="cross_below",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=95.0),
+                        ),
+                    ),
+                ),
+            ),
+            resets=(
+                Block(
+                    id="r",
+                    name="rst",
+                    conditions=(
+                        CrossCondition(
+                            op="cross_above",
+                            lhs=_close("X"),
+                            rhs=ConstantOperand(value=1_000_000_000.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_bound_disarmed_exit_still_resets_since_reset_ladder():
+    # PIN — a BOUND exit whose arm-gate is False (disarmed → it would NOT clear
+    # a latch) STILL resets an in-flight entry since_reset tap ladder, because
+    # the always-on exit-reset uses UN-gated exit truth (``exit_truth &
+    # ~exit_nan``), independent of the exit's bound-reset arm.
+    #
+    # Pins current unconditional-reset semantics (assumption A4); pending
+    # explicit product confirmation whether a disarmed exit should be fully
+    # inert — if that is decided, this test is the one to flip.
+    #
+    # Timeline (cross_above 100 = up-cross; cross_below 95 = exit trigger):
+    #   b1 up-cross (tap1); b3 up-cross (tap2) -> ENTRY LATCHES @3.
+    #   b4 cross_below -> exit ARMED, clears the @3 latch (EFFECTIVE) -> DISARMS
+    #      "ex" (reset "r" never fires, so "ex" stays disarmed forever).
+    #   b5 up-cross (tap1 of a fresh ladder).
+    #   b6 cross_below -> "ex" is DISARMED: it clears nothing, but its un-gated
+    #      exit truth STILL resets the entry ladder (counter -> 0).  <-- PIN
+    #   b7 up-cross (fresh tap1); b9 up-cross (tap2) -> ENTRY LATCHES @9.
+    # If a disarmed exit were inert (A4 flipped), b5's tap would survive and the
+    # entry would re-latch at b7 instead of b9.
+    dates = np.arange(20240101, 20240101 + 10, dtype=np.int64)
+    prices = np.array([96.0, 101.0, 96.0, 101.0, 90.0, 101.0, 90.0, 101.0, 96.0, 101.0])
+    result = await evaluate_signal(
+        _bound_disarmed_exit_signal(), {}, _make_fetcher(prices, dates)
+    )
+    v = result.positions[0].values
+    assert v[3] == 1.0  # first latch (2nd up-cross)
+    assert v[4] == 0.0  # armed exit EFFECTIVELY cleared the latch -> disarmed
+    assert v[7] == 0.0  # PIN: disarmed exit @6 reset the ladder, so no fire @7
+    assert v[9] == 1.0  # two fresh up-crosses after the @6 reset -> latch @9
