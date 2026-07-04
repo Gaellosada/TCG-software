@@ -1133,68 +1133,80 @@ async def _resolve_bulk(
             if exp is not None:
                 prev_exp = exp
 
-    # ── Strike-window narrowing ────────────────────────────────────
-    # Pre-compute a strike range from the selection criterion so that
-    # Phase B bulk queries download only the contracts near the target
-    # instead of the full chain (2000→20-50 docs for ATM on SPX).
-    strike_min: float | None = None
-    strike_max: float | None = None
+    # ── Per-expiration-group strike-window narrowing ─────────────────
+    # Narrow each Phase-B bulk query to the strikes near the target so it
+    # downloads ~20-50 contracts instead of the full chain (~2000 on SPX).  The
+    # window MUST be computed PER EXPIRATION GROUP from THAT group's own (first)
+    # date's spot: deriving ONE global window from the FIRST trade date's spot
+    # (the prior behaviour) capped every later date at the first date's band, so
+    # on a multi-decade resolve with large spot drift (SPX ~1250 → ~5000+) the
+    # true ByDelta/ByMoneyness strike fell OUTSIDE the window and match_by_delta
+    # (strict=False) collapsed to the deepest-OTM admitted strike (the window
+    # top, |delta|≈0) — wiping a short-put bs_mid P&L and flat-lining mid.
+    # ByStrike is date-invariant (the requested strike).  If a group's spot cannot
+    # be resolved (some wirings return None) we pass NO strike bounds (full chain)
+    # for that group — never a None/degenerate-bounded window that would silently
+    # cap or error.
+    _probe_reader = _CycleInjectingReader(chain_reader, cycle)
 
-    if isinstance(selection, ByStrike):
-        strike_min = selection.strike
-        strike_max = selection.strike
-    elif (
-        isinstance(selection, (ByMoneyness, ByDelta))
-        and underlying_price_resolver is not None
-    ):
-        # Need the spot price to compute the strike window.  The
-        # underlying_price_resolver requires a real contract (with
-        # underlying_ref for option-on-futures routing).  Do one
-        # lightweight probe query to get a contract from the first
-        # date+expiration, then resolve the spot.
-        if queryable and exp_groups:
-            _repr_date = queryable[0][1]
-            _first_exp = next(iter(exp_groups))
-            _probe_reader = _CycleInjectingReader(chain_reader, cycle)
+    async def _strike_window_for(
+        exp: date, group: list[tuple[int, date]]
+    ) -> tuple[float | None, float | None]:
+        if isinstance(selection, ByStrike):
+            return selection.strike, selection.strike
+        if (
+            not isinstance(selection, (ByMoneyness, ByDelta))
+            or underlying_price_resolver is None
+            or not group
+        ):
+            return None, None
+        # Resolve the spot on THIS group's first date via a probe (the underlying
+        # resolver needs a real contract for option-on-future routing), then centre
+        # the band on it.
+        # PERF (follow-up): this issues a full single-expiration query_chain but
+        # uses only one contract (probe_rows[0][0]).  A row-limited query (LIMIT 1)
+        # or a spot-by-expiration resolver would avoid the full-chain fetch per
+        # group; both need a data-layer/protocol capability beyond this fix's scope
+        # (ChainReaderPort has no limit), so they are deferred.  The probe is cached
+        # once per expiration group.
+        repr_date = group[0][1]
+        try:
+            probe_rows = await _probe_reader.query_chain(
+                root=collection,
+                date=repr_date,
+                type=option_type,
+                expiration_min=exp,
+                expiration_max=exp,
+            )
+        except Exception:  # noqa: BLE001
+            probe_rows = []
+        spot: float | None = None
+        if probe_rows:
             try:
-                _probe_rows = await _probe_reader.query_chain(
-                    root=collection,
-                    date=_repr_date,
-                    type=option_type,
-                    expiration_min=_first_exp,
-                    expiration_max=_first_exp,
-                )
+                spot = await underlying_price_resolver(probe_rows[0][0], repr_date)
             except Exception:  # noqa: BLE001
-                _probe_rows = []
-            _spot: float | None = None
-            if _probe_rows:
-                try:
-                    _spot = await underlying_price_resolver(
-                        _probe_rows[0][0], _repr_date
-                    )
-                except Exception:  # noqa: BLE001
-                    _spot = None
-            if _spot is not None and _spot > 0:
-                if isinstance(selection, ByMoneyness):
-                    # Margin (10%) on top of tolerance for spot drift.
-                    _margin = 0.10
-                    _lo = selection.target_K_over_S - selection.tolerance - _margin
-                    _hi = selection.target_K_over_S + selection.tolerance + _margin
-                    strike_min = _spot * max(_lo, 0.01)
-                    strike_max = _spot * _hi
-                else:
-                    # ByDelta: wide moneyness proxy band.  Base ±30%
-                    # around the first-date spot price, widened
-                    # proportionally to the date range so that spot
-                    # drift over long ranges doesn't push correct
-                    # strikes outside the window.
-                    _first_d = queryable[0][1]
-                    _last_d = queryable[-1][1]
-                    _span_days = (_last_d - _first_d).days
-                    _extra = min(_span_days / 365.0 * 0.15, 0.30)
-                    _margin = 0.30 + _extra
-                    strike_min = _spot * (1 - _margin)
-                    strike_max = _spot * (1 + _margin)
+                spot = None
+        if spot is None or spot <= 0.0:
+            # No usable spot → do NOT narrow (full chain for this group).
+            return None, None
+        if isinstance(selection, ByMoneyness):
+            # Bounds are centred on the TARGET K/S (± tolerance + 10% for intra-
+            # group spot drift), so they bracket even a deep target regardless of
+            # spot.
+            _lo = selection.target_K_over_S - selection.tolerance - 0.10
+            _hi = selection.target_K_over_S + selection.tolerance + 0.10
+            return spot * max(_lo, 0.01), spot * _hi
+        # ByDelta: the strike of interest sits on ONE side of spot, so a band
+        # symmetric around spot mis-fits BOTH wings — it clips the deep-OTM strike
+        # in extreme vol (an Oct-2008 10Δ PUT strike ≈0.65·spot) AND a deep-ITM
+        # target (a −0.90 put ≈1.15·spot / a +0.90 call ≈0.88·spot).  Make the band
+        # OPTION-TYPE-AWARE and span BOTH wings for that type, keyed on
+        # ``option_type`` (the contract type actually being fetched): a put's
+        # strikes of interest run from deep-OTM (well below spot) to deep-ITM (above
+        # spot); a call's are the mirror.
+        if option_type == "P":
+            return spot * 0.40, spot * 1.30
+        return spot * 0.70, spot * 1.60
 
     # One bulk query per unique expiration, run concurrently but with a
     # semaphore so the concurrent dwh-connection fan-out stays within the pool
@@ -1223,6 +1235,8 @@ async def _resolve_bulk(
         group_dates = [d for _idx, d in group]
         try:
             async with _bulk_sem:
+                # Per-group strike window (tracks THIS expiration's era spot).
+                strike_min, strike_max = await _strike_window_for(exp, group)
                 result = await bulk_reader.query_chain_bulk(
                     root=collection,
                     dates=group_dates,
