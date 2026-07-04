@@ -871,14 +871,39 @@ def _link_groups(
     return groups, windows
 
 
-def _to_pulse(active: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
+def _to_pulse(
+    active: npt.NDArray[np.bool_],
+    nan_mask: npt.NDArray[np.bool_] | None = None,
+) -> npt.NDArray[np.bool_]:
     """Rising-edge conversion of a level array (Item 3a ``fire_mode="pulse"``).
 
-    ``pulsed[t] = active[t] & ~active[t-1]`` with ``pulsed[0] = active[0]`` — the
-    block fires only on the bar ``active`` first goes true, then must drop false
-    before it can fire again ("re-arm"). Applied AFTER NaN-poison is baked into
-    ``active`` (a NaN bar is already False, so a rising edge out of a gap is
-    intentional and fine).
+    ``pulsed[t] = active[t] & ~prev_level`` with ``pulsed[0] = active[0]`` — the
+    block fires only on the bar its level first goes true, then must drop false
+    before it can fire again ("re-arm").
+
+    ``prev_level`` is the level of the most recent NON-GAP bar, not literally
+    ``active[t-1]``. This matters because ``active`` is NaN-poisoned: a bar with
+    missing data (``nan_mask[t]`` True) has ``active`` forced to False, which is
+    indistinguishable from the condition genuinely going false. The engine grid
+    is a UNION of every input's calendar, so an interior data hole (e.g. a
+    VIX-holiday bar that quotes for one input and is NaN for another) is common.
+    Reading such a hole as a level drop manufactured a PHANTOM re-arm on the
+    first bar after the gap (sweep-2 MINOR-1: ``[T,T,T,T,gap,T]`` wrongly fired
+    at the trailing bar). So a gap bar neither fires nor updates ``prev_level`` —
+    the last valid level is carried across the hole. A genuine present-data
+    False->True transition still fires. The very first bar and a LEADING gap keep
+    the historical behavior (no prior valid level == not armed, so the first real
+    True fires).
+
+    NOTE (accepted approximation): the mask is the BLOCK-level ``any_nan`` (OR
+    over conditions). On a bar where one operand is NaN while another present
+    operand already makes the AND-conjunction genuinely False, the drop is
+    treated as a gap (carried) rather than a confirmed drop. This is the
+    option-(a) design: prefer suppressing phantom re-arms over registering a drop
+    that cannot be fully confirmed under missing data.
+
+    When ``nan_mask`` is ``None`` the historical ``active[t-1]`` semantics are
+    used verbatim (callers that never poison, and the direct golden/unit tests).
 
     Applied ONLY to the LEVEL-shaped ``active`` of the CNF / cross_count path
     (:func:`_eval_block_activity`). The THEN-chain path is NOT run through this:
@@ -889,9 +914,22 @@ def _to_pulse(active: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
     pulsed = np.zeros_like(active)
     if active.size == 0:
         return pulsed
-    pulsed[0] = active[0]
-    if active.size > 1:
-        pulsed[1:] = active[1:] & ~active[:-1]
+    if nan_mask is None:
+        pulsed[0] = active[0]
+        if active.size > 1:
+            pulsed[1:] = active[1:] & ~active[:-1]
+        return pulsed
+    # Carry the last valid (non-gap) level across NaN holes. ``prev_level`` starts
+    # False (== "not armed"), so the first real True fires (matches leading-gap /
+    # first-bar historical behavior).
+    prev_level = False
+    for t in range(active.size):
+        if bool(nan_mask[t]):
+            # Data gap: never a fire, and does not disturb the carried level.
+            continue
+        cur = bool(active[t])
+        pulsed[t] = cur and not prev_level
+        prev_level = cur
     return pulsed
 
 
@@ -1035,7 +1073,9 @@ def _eval_block_activity(
             active &= c_truth
             any_nan |= c_nan
         if block.fire_mode == "pulse":
-            active = _to_pulse(active)
+            # Thread the block's per-bar NaN mask so an interior data gap is not
+            # read as a level drop / phantom re-arm (sweep-2 MINOR-1).
+            active = _to_pulse(active, any_nan)
         return active, any_nan
     # Temporal grouping: per-condition truths are AND-reduced within each
     # conjunction group, and the GROUP arrays feed the single-candidate

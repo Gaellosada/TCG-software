@@ -598,6 +598,71 @@ def test_pulse_on_chain_keeps_adjacent_completions():
     assert active_s.astype(int).tolist() == [0, 1, 1]
 
 
+def test_to_pulse_nan_gap_does_not_rearm():
+    # MINOR-1 (sweep 2): an INTERIOR NaN gap must NOT be read as a level drop.
+    # active poisoned to False on the gap bar; without the nan_mask the bar AFTER
+    # the gap reads as a rising edge and manufactures a phantom entry.
+    active = np.array([1, 1, 1, 1, 0, 1], dtype=np.bool_)  # bar 4 is a data gap
+    nan_mask = np.array([0, 0, 0, 0, 1, 0], dtype=np.bool_)
+    # legacy (no mask) still collapses to the phantom re-arm at bar 5 — PIN the bug.
+    assert _to_pulse(active).astype(int).tolist() == [1, 0, 0, 0, 0, 1]
+    # fixed: carry the last valid level (bar 3 == True) across the gap -> no fire.
+    assert _to_pulse(active, nan_mask).astype(int).tolist() == [1, 0, 0, 0, 0, 0]
+
+
+def test_to_pulse_genuine_edge_still_fires_with_mask():
+    # A genuine present-data False->True transition MUST still fire under the mask.
+    active = np.array([1, 0, 1], dtype=np.bool_)
+    nan_mask = np.zeros(3, dtype=np.bool_)  # all data present
+    assert _to_pulse(active, nan_mask).astype(int).tolist() == [1, 0, 1]
+    # a genuine drop that HAPPENS to sit next to a later gap still re-arms once
+    # real data returns after a real drop (gap only suppresses the gap-edge).
+    active2 = np.array([1, 0, 1, 1, 0, 1], dtype=np.bool_)  # bar 4 gap
+    mask2 = np.array([0, 0, 0, 0, 1, 0], dtype=np.bool_)
+    # bar 2 is a genuine False->True edge (fires); bar 5 is a gap re-arm (suppressed)
+    assert _to_pulse(active2, mask2).astype(int).tolist() == [1, 0, 1, 0, 0, 0]
+
+
+def test_to_pulse_leading_gap_keeps_behavior():
+    # A leading NaN gap: first real True still fires (no prior valid level).
+    active = np.array([0, 0, 1, 1], dtype=np.bool_)
+    nan_mask = np.array([1, 1, 0, 0], dtype=np.bool_)
+    assert _to_pulse(active, nan_mask).astype(int).tolist() == [0, 0, 1, 0]
+
+
+@pytest.mark.asyncio
+async def test_pulse_interior_nan_gap_no_phantom_entry():
+    # End-to-end: a union-grid data hole (NaN price) inside a sustained-true run
+    # must not fire a second entry under fire_mode="pulse".
+    dates = np.arange(20240101, 20240101 + 6, dtype=np.int64)
+    prices = np.array([150.0, 160.0, 170.0, 180.0, np.nan, 190.0])  # bar 4 = gap
+    sig = Signal(
+        id="s",
+        name="s",
+        inputs=(_input("X"),),
+        rules=SignalRules(
+            entries=(
+                Block(
+                    id="e",
+                    name="long",
+                    input_id="X",
+                    weight=100.0,
+                    conditions=(
+                        CompareCondition(
+                            op="gt", lhs=_close("X"), rhs=ConstantOperand(value=100.0)
+                        ),
+                    ),
+                    fire_mode="pulse",
+                ),
+            )
+        ),
+    )
+    result = await evaluate_signal(sig, {}, _make_fetcher(prices, dates))
+    fired = next(e for e in result.events if e.kind == "entry").fired_indices
+    # ONLY the genuine t0 rising edge — NOT a phantom entry at bar 5 after the gap.
+    assert fired == (0,)
+
+
 # --------------------------------------------------------------------------- #
 # exit-reset (always-on): aborts in-flight chain / zeroes since_reset ladder
 # --------------------------------------------------------------------------- #
