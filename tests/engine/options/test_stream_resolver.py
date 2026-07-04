@@ -1344,7 +1344,7 @@ async def test_bulk_by_moneyness_passes_strike_window():
 
 
 async def test_bulk_by_delta_passes_wide_strike_window():
-    """ByDelta selection uses a wide moneyness proxy band (±30% of spot)."""
+    """ByDelta on CALLS uses an option-type-aware band shifted ABOVE spot."""
     d = date(2024, 3, 22)
     expiration = date(2024, 4, 19)
     spot = 4500.0
@@ -1373,8 +1373,9 @@ async def test_bulk_by_delta_passes_wide_strike_window():
     call = bulk_reader.bulk_calls[0]
     assert call["strike_min"] is not None
     assert call["strike_max"] is not None
+    # CALL window is option-type-aware: shifted ABOVE spot where OTM calls live.
     assert call["strike_min"] == pytest.approx(spot * 0.70, rel=0.01)
-    assert call["strike_max"] == pytest.approx(spot * 1.30, rel=0.01)
+    assert call["strike_max"] == pytest.approx(spot * 1.60, rel=0.01)
 
 
 async def test_bulk_no_underlying_resolver_no_strike_window():
@@ -1405,11 +1406,13 @@ async def test_bulk_no_underlying_resolver_no_strike_window():
     assert call["strike_max"] is None
 
 
-# ── Widened strike window tests (date-range-proportional margin) ──────
+# ── Per-group strike window tests (option-type-aware band; span no longer widens) ──
+# NOTE: these use CALLS (target_delta=0.50, option_type="C"), so the band sits
+# ABOVE spot: [0.90, 1.60]·spot (puts sit below — see test_stream_strike_window.py).
 
 
 async def test_bulk_by_delta_strike_window_1day_base_margin():
-    """1-day range (span=0 days): ByDelta uses the base 30% margin."""
+    """1-day range (span=0): ByDelta CALL window is [0.90, 1.60]·spot."""
     d = date(2024, 3, 22)
     expiration = date(2024, 4, 19)
     spot = 4500.0
@@ -1436,19 +1439,20 @@ async def test_bulk_by_delta_strike_window_1day_base_margin():
     )
     assert len(bulk_reader.bulk_calls) == 1
     call = bulk_reader.bulk_calls[0]
-    # span=0 → extra=0 → margin=0.30: spot * 0.70 .. spot * 1.30
+    # CALL window (option-type-aware): spot * 0.70 .. spot * 1.60 (spans both wings).
     assert call["strike_min"] == pytest.approx(spot * 0.70, rel=0.001)
-    assert call["strike_max"] == pytest.approx(spot * 1.30, rel=0.001)
+    assert call["strike_max"] == pytest.approx(spot * 1.60, rel=0.001)
 
 
-async def test_bulk_by_delta_strike_window_6month_wider_margin():
-    """6-month range (~183 days): ByDelta widens to ~37.5% margin.
+async def test_bulk_by_delta_strike_window_6month_span_no_widen():
+    """Per-group window is a FIXED-width option-type-aware band from the group's
+    spot; the overall resolve SPAN no longer widens it (the prior date-range-
+    proportional widening was a workaround for the single global first-date window
+    — removed: each expiration group derives its own window from its own first-date
+    spot).
 
-    extra = min(183/365 * 0.15, 0.30) ≈ 0.0752
-    margin = 0.30 + 0.0752 ≈ 0.3752
-
-    Uses NearestToTarget + available_expirations to force both dates
-    onto one expiration so there is exactly one bulk call to inspect.
+    Both dates map onto ONE expiration (NearestToTarget + available_expirations),
+    so there is exactly one bulk call; a ~6-month span still yields the base band.
     """
     first_d = date(2024, 1, 2)
     last_d = date(2024, 7, 3)  # ~183 days later
@@ -1485,23 +1489,17 @@ async def test_bulk_by_delta_strike_window_6month_wider_margin():
     )
     assert len(bulk_reader.bulk_calls) == 1
     call = bulk_reader.bulk_calls[0]
-    expected_extra = min(span_days / 365.0 * 0.15, 0.30)
-    expected_margin = 0.30 + expected_extra
-    assert call["strike_min"] == pytest.approx(spot * (1 - expected_margin), rel=0.001)
-    assert call["strike_max"] == pytest.approx(spot * (1 + expected_margin), rel=0.001)
-    # Margin should be ~37.5%, noticeably wider than the base 30%.
-    assert expected_margin > 0.37
-    assert expected_margin < 0.39
+    # CALL window (option-type-aware); span no longer widens it.
+    assert call["strike_min"] == pytest.approx(spot * 0.70, rel=0.001)
+    assert call["strike_max"] == pytest.approx(spot * 1.60, rel=0.001)
 
 
-async def test_bulk_by_delta_strike_window_2year_capped_margin():
-    """2-year range (730 days): ByDelta caps the extra at +30% → total 60%.
+async def test_bulk_by_delta_strike_window_2year_span_no_widen():
+    """A 2-year span likewise yields the base per-group window — the prior
+    cap-to-60% span widening was removed with the per-group fix.
 
-    extra = min(730/365 * 0.15, 0.30) = min(0.30, 0.30) = 0.30
-    margin = 0.30 + 0.30 = 0.60
-
-    Uses NearestToTarget + available_expirations to force both dates
-    onto one expiration so there is exactly one bulk call to inspect.
+    Uses NearestToTarget + available_expirations to force both dates onto one
+    expiration so there is exactly one bulk call to inspect.
     """
     first_d = date(2022, 3, 22)
     last_d = date(2024, 3, 22)  # exactly 2 years (731 days with leap year)
@@ -1538,8 +1536,8 @@ async def test_bulk_by_delta_strike_window_2year_capped_margin():
     )
     assert len(bulk_reader.bulk_calls) == 1
     call = bulk_reader.bulk_calls[0]
-    # Capped: margin = 0.60
-    assert call["strike_min"] == pytest.approx(spot * 0.40, rel=0.001)
+    # CALL window (option-type-aware); no span-proportional cap anymore.
+    assert call["strike_min"] == pytest.approx(spot * 0.70, rel=0.001)
     assert call["strike_max"] == pytest.approx(spot * 1.60, rel=0.001)
 
 
