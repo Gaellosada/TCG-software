@@ -1,17 +1,34 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // misc-batch follow-up — VISUAL verification of the width tweaks (asks #1/#2/#4)
 // and the Help fire-mode section (ask #3). Read-only: every persistence call is
-// mocked (no real app-data DB touched). Screenshots land in the task output dir.
+// mocked (no real app-data DB touched).
+//
+// The REAL test value here is the numeric boundingBox width assertions below;
+// the screenshots are an OPT-IN diagnostic aid. They are only written when
+// ``TCG_SHOT_DIR`` is set (an explicit out dir) — otherwise nothing is written
+// and no directory is created. When taken, they default to a repo-relative,
+// gitignored location (``frontend/e2e/screenshots/``) rather than a developer's
+// task path, so a checkout never accumulates stray artifacts.
 // ---------------------------------------------------------------------------
 
 const BASE = process.env.TCG_E2E_BASE || 'http://localhost:5173';
-const OUT_DIR =
-  process.env.TCG_SHOT_DIR ||
-  '/home/gael/claude_workspace/trajectoire_cap/workspace/tasks/misc-batch-fixes-jul03/output';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Repo-relative gitignored default (see frontend/.. .gitignore: e2e/screenshots/).
+const DEFAULT_SHOT_DIR = path.join(__dirname, 'screenshots');
+const OUT_DIR = process.env.TCG_SHOT_DIR || DEFAULT_SHOT_DIR;
+// Opt-in: only capture (and only then create the dir) when explicitly requested.
+const SHOTS_ENABLED = Boolean(process.env.TCG_SHOT_DIR);
+
+async function maybeShot(page, filename) {
+  if (!SHOTS_ENABLED) return;
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  await page.screenshot({ path: path.join(OUT_DIR, filename), fullPage: false });
+}
 
 // A signal with a THEN chain (links) so the ThenConnector "within [W] bars"
 // input renders, an indicator-LHS binary (widened indicator + input selects),
@@ -159,8 +176,7 @@ test.describe('misc width tweaks + Help fire mode', () => {
     const overflow = await editorPanel.evaluate((el) => el.scrollWidth - el.clientWidth);
     expect(overflow, `editor overflow ${overflow}px`).toBeLessThanOrEqual(1);
 
-    fs.mkdirSync(OUT_DIR, { recursive: true });
-    await page.screenshot({ path: path.join(OUT_DIR, 'widths-signal-block.png'), fullPage: false });
+    await maybeShot(page, 'widths-signal-block.png');
   });
 
   test('help page: fire mode section is its own titled block with an example', async ({ page }) => {
@@ -179,7 +195,6 @@ test.describe('misc width tweaks + Help fire mode', () => {
     // (pulse/sustained bullets + worked example) is fully in frame.
     await fire.evaluate((el) => el.scrollIntoView({ block: 'start' }));
     await page.mouse.wheel(0, -40);
-    fs.mkdirSync(OUT_DIR, { recursive: true });
-    await page.screenshot({ path: path.join(OUT_DIR, 'help-fire-mode.png'), fullPage: false });
+    await maybeShot(page, 'help-fire-mode.png');
   });
 });

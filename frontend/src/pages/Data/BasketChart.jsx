@@ -31,6 +31,9 @@ const combineLegData = (results) => results.map((r) => r.data ?? null);
 // rather than draw a silently broken line).
 // Codes mirror tcg/engine/options/series/stream_resolver.py (per-date holes +
 // the missing_<stream> family) and selection/_match.py (selection failures).
+// The computed ``bs_mid`` stream degrades to ``missing_bs_price`` (bad strike /
+// non-finite Black-76 output) or ``missing_bs_iv`` (no usable stored IV) — plus
+// ``missing_underlying_price`` when the future price is missing.
 // Anything still unmapped falls through to the raw slug below.
 const COVERAGE_CAUSE = {
   // chain / maturity / date resolution
@@ -44,7 +47,8 @@ const COVERAGE_CAUSE = {
   missing_delta_no_compute: 'no delta to select on',
   // per-stream value holes (missing_<stream>)
   missing_mid: 'no two-sided quote',
-  missing_bs_mid: 'cannot price (Black-76)',
+  missing_bs_price: 'cannot price (Black-76)',
+  missing_bs_iv: 'no implied vol',
   missing_iv: 'no implied vol',
   missing_delta: 'no delta on contract',
   missing_gamma: 'no gamma',

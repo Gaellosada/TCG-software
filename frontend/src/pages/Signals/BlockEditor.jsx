@@ -331,7 +331,7 @@ function BlockEditor({
       ) : (
         <>
           <div className={styles.directionHint}>
-            Blocks are <strong>OR</strong>&rsquo;d. Conditions in a block are <strong>AND</strong>&rsquo;d.
+            Blocks are <strong>OR</strong>&rsquo;d. Within a block, conditions in a group are <strong>AND</strong>&rsquo;d; <strong>THEN</strong> sequences the groups in order.
           </div>
 
           {section === 'exits' && cascadeNotice && (
