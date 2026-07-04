@@ -1,11 +1,11 @@
-// Local persistence for the Signals page state — schema v6.
+// Local persistence for the Signals page state — schema v8.
 //
 // All direct ``localStorage`` access for signals lives in this module —
 // other modules MUST go through load/save here.
 //
-// Schema v6:
+// Schema v8:
 //   {
-//     "version": 6,
+//     "version": 8,
 //     "signals": [
 //       {
 //         "id", "name", "doc",
@@ -53,12 +53,18 @@
 //   - constant:    { kind:'constant', value }
 //
 // Migration policy:
-//   - v7 (current): the canonical version. Adds block-level temporal
-//     ``links`` (a flat { successorIdx: withinBars } map; absent ⇒ CNF) and
-//     cross ``count``/``window`` scalars (defaults 1/1 ⇒ today's single-bar
-//     crossover). Both are purely additive with behaviour-preserving
-//     defaults, so a v6 payload is structurally a v7 payload minus the new
-//     optional fields.
+//   - v8 (current): the canonical version. Adds block-level ``fire_mode`` on
+//     entries + exits (``"pulse"`` = fire once then re-arm; ``"sustained"`` =
+//     stay firing while true). It is purely additive with a behaviour-
+//     preserving default (a missing value folds to ``"sustained"``, the
+//     historical firing behaviour), so a v7 payload is structurally a v8
+//     payload minus the field. v8 also relaxes ``links`` from full-coverage-
+//     only to arbitrary THEN-boundary subsets — a validation change only, not
+//     a shape change (existing full-coverage maps stay valid).
+//   - v7: added block-level temporal ``links`` (a flat { successorIdx:
+//     withinBars } map; absent ⇒ CNF) and cross ``count``/``window`` scalars
+//     (defaults 1/1 ⇒ single-bar crossover). Both additive with behaviour-
+//     preserving defaults, so a v6 payload is a v7 payload minus the fields.
 //   - v5 → v6: in-place migration of exit blocks. The singular
 //     ``target_entry_block_name`` (string) is folded into the plural
 //     ``target_entry_block_names`` (string[]): a non-empty name becomes
@@ -69,10 +75,12 @@
 //     all v6 payloads (⇒ CNF), crosses gain their count/window defaults at
 //     sanitise time, and retired rolling conditions stay (rendered as a
 //     read-only legacy chip; the op dropdown just no longer offers them).
+//   - v7 → v8: a pure version stamp. No shape change — fire_mode is absent
+//     in all v7 payloads and the sanitiser fills it with "sustained".
 //   - any OTHER version: DROPPED on load (single console.warn per page load).
 //
 // The migrations run on the raw parsed payload BEFORE per-signal
-// sanitisation, chained v5→v6→v7, so the sanitiser only ever sees the
+// sanitisation, chained v5→v6→v7→v8, so the sanitiser only ever sees the
 // current shape.
 
 import { SIGNALS_STORAGE_KEY } from './storageKeys';

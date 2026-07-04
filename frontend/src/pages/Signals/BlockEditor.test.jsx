@@ -8,8 +8,10 @@ import { emptyRules, newBlockId } from './storage';
 import { normaliseSpecForRequest } from './requestBuilder';
 
 describe('reindexLinksAfterRemoval (pure) — merges gaps, keeps partial maps', () => {
-  // A chained block must stay a FULL chain over the survivors (backend rejects
-  // a partial chain), so removal RE-CHAINS rather than leaving gaps.
+  // Links are a partial THEN-boundary map, so removing a condition MERGES the
+  // two gaps around it (the boundary into the removed condition is dropped,
+  // later gaps slide left keeping their window verbatim). No re-chaining and no
+  // re-seeding of absent gaps; falls back to CNF when < 2 conditions remain.
   it('returns undefined for a missing / non-object / empty map', () => {
     expect(reindexLinksAfterRemoval(undefined, 1, 2)).toBeUndefined();
     expect(reindexLinksAfterRemoval(null, 1, 2)).toBeUndefined();
@@ -18,20 +20,20 @@ describe('reindexLinksAfterRemoval (pure) — merges gaps, keeps partial maps', 
   it('drops to CNF when < 2 conditions remain', () => {
     expect(reindexLinksAfterRemoval({ 1: 5 }, 1, 1)).toBeUndefined();
   });
-  it('removing the MIDDLE condition re-chains over the survivors, preserving mappable windows', () => {
-    // conds 0..3 (4), full chain {1:4, 2:6, 3:8}. Remove cond 1 → 3 remain.
-    // Rule: new gap j inherits the window LEADING INTO the condition now at
-    // position j (old key = j < removedIdx ? j : j+1). removedIdx=1:
-    //   new gap1 ← old key 2 (6); new gap2 ← old key 3 (8). Full coverage {1,2}.
+  it('removing the MIDDLE condition merges the gaps around it, preserving surviving windows', () => {
+    // conds 0..3 (4), all-gaps map {1:4, 2:6, 3:8}. Remove cond 1 → 3 remain.
+    // The boundary INTO cond 1 (old key 1) is dropped; later gaps slide left
+    // keeping their window: new gap1 ← old key 2 (6); new gap2 ← old key 3 (8).
     expect(reindexLinksAfterRemoval({ 1: 4, 2: 6, 3: 8 }, 1, 3)).toEqual({ 1: 6, 2: 8 });
   });
-  it('removing the LAST condition keeps the remaining full chain', () => {
-    // conds 0..2 (3), {1:4, 2:6}. Remove cond 2 → 2 remain; new gap 1 ← old 1 (4).
+  it('removing the LAST condition drops its boundary, keeping the earlier gaps', () => {
+    // conds 0..2 (3), {1:4, 2:6}. Remove cond 2 → 2 remain; gap 2 (the boundary
+    // into the removed last cond) is dropped, gap 1 (4) survives unchanged.
     expect(reindexLinksAfterRemoval({ 1: 4, 2: 6 }, 2, 2)).toEqual({ 1: 4 });
   });
-  it('removing condition 0 re-chains and maps surviving windows by new position', () => {
-    // {1:4, 2:6, 3:8}, remove cond 0 → 3 remain. new gap j ← old key j+1.
-    // gap1 ← old 2 (6); gap2 ← old 3 (8). Full coverage {1,2}.
+  it('removing condition 0 slides surviving gaps down by one, keeping their windows', () => {
+    // {1:4, 2:6, 3:8}, remove cond 0 → 3 remain. gap 1 (into removed cond 0) is
+    // dropped; later gaps slide left: new gap1 ← old 2 (6); new gap2 ← old 3 (8).
     expect(reindexLinksAfterRemoval({ 1: 4, 2: 6, 3: 8 }, 0, 3)).toEqual({ 1: 6, 2: 8 });
   });
   it('shifts a partial map down without re-seeding missing gaps', () => {
@@ -879,9 +881,23 @@ describe('Exit-reset note on entry blocks (Item 3b)', () => {
     expect(screen.getByTestId('exit-reset-note-0')).toBeDefined();
   });
 
-  it('shown on an entry that carries a cross ×N / within-W tap counter', () => {
+  it('NOT shown on an entry that carries ONLY a cross ×N / within-W tap counter', () => {
+    // The UI can author only rolling-mode cross-counts, and a rolling count's
+    // trailing window ages out on its own — a targeting exit does NOT reset it —
+    // so the note (which claims a reset) must NOT appear for a bare counter.
     renderEditor({ entries: [seededEntry({
       conditions: [{ op: 'cross_above', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 }, count: 2, window: 10 }],
+    })], exits: [] });
+    expect(screen.queryByTestId('exit-reset-note-0')).toBeNull();
+  });
+
+  it('shown on an entry that carries BOTH a THEN chain and a cross counter (for the chain)', () => {
+    renderEditor({ entries: [seededEntry({
+      conditions: [
+        { op: 'cross_above', lhs: { kind: 'instrument', input_id: 'X', field: 'close' }, rhs: { kind: 'constant', value: 0 }, count: 2, window: 10 },
+        { op: 'gt', lhs: { kind: 'constant', value: 2 }, rhs: { kind: 'constant', value: 0 } },
+      ],
+      links: { 1: 5 },
     })], exits: [] });
     expect(screen.getByTestId('exit-reset-note-0')).toBeDefined();
   });

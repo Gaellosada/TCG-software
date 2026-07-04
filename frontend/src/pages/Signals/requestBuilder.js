@@ -175,7 +175,9 @@ function normaliseBlock(block, section) {
   // Block-level temporal chain. Entry+exit blocks may carry it; resets reject
   // it (HTTP 400) so it is omitted from the reset literal above. Undefined ⇒
   // omit the key (zero-link == CNF, byte-identical to a pre-feature payload).
-  // Full-coverage-or-nothing, keyed against the normalised condition count.
+  // Partial THEN-boundary map (any subset of the gaps); malformed entries are
+  // dropped and an empty result is omitted (CNF), keyed against the normalised
+  // condition count.
   const links = normaliseLinks(block.links, conditions.length);
   if (section === 'exits') {
     // Exit blocks omit block-level input_id entirely (not empty-string)
