@@ -62,6 +62,43 @@ describe('buildInputTraces', () => {
     const traces = buildInputTraces(positions, dates);
     expect(traces[0].yaxis).toBeUndefined();
   });
+
+  it('plots a trace on its OWN quoted dates, dropping union-grid null holes', () => {
+    // Middle union date is a hole for this input (e.g. a VIX-only holiday
+    // the S&P future is correctly closed on) → rendered as null.
+    const positions = [positionWithPrice('X', [100, null, 102])];
+    const traces = buildInputTraces(positions, dates);
+    expect(traces[0].y).toEqual([100, 102]);
+    expect(traces[0].x).toEqual([dates[0], dates[2]]);
+  });
+
+  it('leaves a fully-quoted trace unchanged (all dates kept, in order)', () => {
+    const positions = [positionWithPrice('X', [100, 101, 102])];
+    const traces = buildInputTraces(positions, dates);
+    expect(traces[0].y).toEqual([100, 101, 102]);
+    expect(traces[0].x).toEqual(dates);
+  });
+
+  it('drops undefined and NaN gaps too (all render as gaps today)', () => {
+    const positions = [positionWithPrice('X', [NaN, 101, undefined])];
+    const traces = buildInputTraces(positions, dates);
+    expect(traces[0].y).toEqual([101]);
+    expect(traces[0].x).toEqual([dates[1]]);
+  });
+
+  it('markers stay aligned to their bar when the price line is own-date filtered', () => {
+    // Price has a hole at index 1; a marker fires at index 2. Filtering the
+    // price LINE must not move the marker: it still lands on dates[2]/102.
+    const positions = [positionWithPrice('X', [100, null, 102])];
+    const lineTraces = buildInputTraces(positions, dates);
+    expect(lineTraces[0].x).toEqual([dates[0], dates[2]]); // line skips the hole
+    const events = [{
+      input_id: 'X', block_id: 'b1', kind: 'entry', fired_indices: [2],
+    }];
+    const markerTraces = buildEventMarkerTraces(events, positions, dates, 'y2', {});
+    expect(markerTraces[0].x).toEqual([dates[2]]);
+    expect(markerTraces[0].y).toEqual([102]);
+  });
 });
 
 describe('aggregateRealizedPnl', () => {

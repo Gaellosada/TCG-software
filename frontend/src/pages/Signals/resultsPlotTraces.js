@@ -170,6 +170,38 @@ function toDates(timestamps) {
 }
 
 /**
+ * Keep only the (date, value) pairs a series actually quotes.
+ *
+ * Price/level series are emitted on the engine's shared UNION date grid,
+ * so a union date the input does not quote is filled with ``null``. Since
+ * that date was contributed by a *different* input (e.g. IND_VIX quotes US
+ * market holidays that the S&P future is correctly closed on), the null is
+ * a display-only artifact of the shared grid, not a real gap in THIS
+ * series — yet under ``connectgaps:false`` it renders as a visible hole.
+ * Plotting each price trace on its own quoted dates removes those holes
+ * with zero engine impact.
+ *
+ * A value counts as quoted iff it is a finite number; null / undefined /
+ * NaN all render as a gap today, so dropping them is purely a display
+ * change. Markers are unaffected — ``buildEventMarkerTraces`` builds its
+ * own x/y from indices into the original (unfiltered) arrays, so a marker
+ * stays pinned to its bar regardless of what the price line drops.
+ */
+function filterOwnDates(dates, values) {
+  const x = [];
+  const y = [];
+  const n = Math.min(dates.length, values.length);
+  for (let i = 0; i < n; i++) {
+    const v = values[i];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      x.push(dates[i]);
+      y.push(v);
+    }
+  }
+  return { x, y };
+}
+
+/**
  * Build the per-input price traces shared by both plots. Skips inputs
  * without a price payload rather than synthesizing dummy data.
  *
@@ -185,9 +217,12 @@ export function buildInputTraces(positions, dates, opts = {}) {
   positions.forEach((p, idx) => {
     if (!p || !p.price || !Array.isArray(p.price.values)) return;
     const color = TRACE_COLORS[idx % TRACE_COLORS.length];
+    // Plot on this input's own quoted dates so union-grid null holes
+    // (dates only a *different* input quotes) don't render as gaps.
+    const { x, y } = filterOwnDates(dates, p.price.values);
     const trace = {
-      x: dates,
-      y: p.price.values,
+      x,
+      y,
       type: 'scatter',
       mode: 'lines',
       name: `${p.input_id} — ${p.price.label || 'price'}`,
