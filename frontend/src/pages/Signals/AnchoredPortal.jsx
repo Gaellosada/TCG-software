@@ -50,7 +50,12 @@ function AnchoredPortal({ anchorRef, align = 'left', contentRef, className, test
 
   if (rect === null) return null;
 
-  const style = { position: 'fixed', top: `${rect.top}px`, zIndex: 1000 };
+  // Layering: this portal is appended to document.body, so it wins ties by DOM
+  // order. Keep it BELOW the modal/dialog layer (ConfirmDialog / picker modals
+  // all sit at z-index 1000) or a dropdown paints over — and stays interactive
+  // above — an open dialog. 900 sits above all in-page content (Signals panels
+  // top out at z-index 40; the sidebar at 100) and below every modal.
+  const style = { position: 'fixed', top: `${rect.top}px`, zIndex: 900 };
   if (align === 'right') style.right = `${rect.right}px`;
   else style.left = `${rect.left}px`;
 

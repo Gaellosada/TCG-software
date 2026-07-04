@@ -203,6 +203,14 @@ function HelpPage() {
             option&apos;s premium can multiply on a sell-off, a full-size short
             can wipe out, so use a small percentage.
           </p>
+          <p>
+            This is the <strong>Hold between rolls</strong> model, and it is
+            always on for a portfolio price leg. A default signal option stream
+            leaves it off: it re-selects the matching contract every day and
+            prices it mid-to-mid on that day&apos;s quote (a level, not a
+            held-contract P&amp;L), and the <strong>Size (% of NAV)</strong>
+            field only appears once hold is turned on.
+          </p>
         </Details>
       </section>
 
@@ -385,8 +393,8 @@ function HelpPage() {
           </ul>
           <p>
             A triggered exit always <strong>resets</strong> any in-progress
-            THEN-sequence or tap count on the entry blocks it targets, so an
-            in-flight sequence starts over after the position closes.
+            THEN-sequence on the entry blocks it targets, so an in-flight
+            sequence starts over after the position closes.
           </p>
         </Details>
 

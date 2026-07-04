@@ -219,9 +219,11 @@ function BlockEditor({
     const next = blocks.map((b, i) => {
       if (i !== blockIdx) return b;
       const nextConds = (b.conditions || []).filter((_, j) => j !== condIdx);
-      // A chained block must stay a FULL chain over the surviving conditions
-      // (the backend rejects a partial chain). Re-chain: preserve surviving
-      // gap windows, default any new gap, drop to CNF if <2 conditions remain.
+      // Links are a partial THEN-boundary map, so removing a condition just
+      // merges the two gaps around it: the boundary INTO the removed condition
+      // is dropped and later gaps shift down by one, each keeping its window
+      // verbatim (no re-seeding). Falls back to CNF (links omitted) when
+      // nothing survives or < 2 conditions remain.
       const nextLinks = reindexLinksAfterRemoval(b.links, condIdx, nextConds.length);
       return {
         ...b,
@@ -427,15 +429,15 @@ function Block({
   // unambiguously.
   const groups = partitionGroups(conditions.length, links);
   const multiGroup = groups.length > 1;
-  // Static reminder shown on ENTRY blocks that carry an in-progress sequence
-  // (a THEN chain) or a cross ×N/within-W tap counter: a targeting exit resets
-  // that in-flight state. Always-on backend behaviour; surfaced as a note.
+  // Static reminder shown on ENTRY blocks that carry an in-progress THEN chain:
+  // a targeting exit resets that in-flight sequence. Always-on backend
+  // behaviour; surfaced as a note. Scoped to chains ONLY — the UI can author
+  // only ``rolling``-mode cross-counts (no count_mode control; the API folds an
+  // absent count_mode to "rolling"), and a rolling count's trailing window
+  // ages out on its own rather than being reset by an exit, so claiming a
+  // tap-count reset would be false for every block a user can build here.
   const hasChain = sequenceable && !!links && Object.keys(links).length > 0;
-  const hasCrossCount = conditions.some(
-    (c) => (Number.isInteger(c?.count) && c.count > 1)
-      || (Number.isInteger(c?.window) && c.window > 1),
-  );
-  const showExitResetNote = section === 'entries' && (hasChain || hasCrossCount);
+  const showExitResetNote = section === 'entries' && hasChain;
 
   const handleToggleEnabled = useCallback((e) => {
     onUpdateBlock({ ...block, enabled: e.target.checked });

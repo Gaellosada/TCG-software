@@ -1171,7 +1171,8 @@ describe('sanitiseLinks — field-local temporal-links cleaner', () => {
     expect(sanitiseLinks({ 0: 5, 1: 4, 2: 9 }, 2)).toEqual({ 1: 4 });
   });
   it('a PARTIAL map (a THEN-boundary subset) is VALID — kept verbatim', () => {
-    // condCount=3, only gap 1 is a THEN boundary: (A THEN B) AND C.
+    // condCount=3, only gap 1 is a THEN boundary (gap 2 absent ⇒ AND):
+    // A THEN (B AND C).
     expect(sanitiseLinks({ 1: 5 }, 3)).toEqual({ 1: 5 });
     // Only gap 2: (A AND B) THEN C.
     expect(sanitiseLinks({ 2: 5 }, 3)).toEqual({ 2: 5 });
