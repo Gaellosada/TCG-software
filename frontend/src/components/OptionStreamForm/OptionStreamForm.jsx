@@ -326,7 +326,9 @@ export default function OptionStreamForm({
 
   const setStream = useCallback((stream) => emit({ stream }), [emit]);
 
-  // SELECT-AND-HOLD (fixed-contract dollar P&L) — SIGNALS backtest only.
+  // SELECT-AND-HOLD (fixed-contract dollar P&L) — used both by a SIGNALS
+  // backtest (optional toggle below) and by a PORTFOLIO option price leg (the
+  // ``holdRequired`` branch, where hold is always on).
   // ``hold_between_rolls`` freezes the contract between maturity rolls; when on,
   // ``nav_times`` is the premium-notional multiple used to size the held quantity
   // (direction stays the block WEIGHT SIGN, so nav_times is the SIZE — it can
@@ -732,7 +734,9 @@ export default function OptionStreamForm({
           back-adjustment (ratio/difference are ill-posed for option premia).
           The series is always the raw stitched stream. */}
 
-      {/* SELECT-AND-HOLD (fixed-contract dollar P&L) — SIGNALS backtest only.
+      {/* SELECT-AND-HOLD (fixed-contract dollar P&L) — serves both a SIGNALS
+          backtest (optional toggle) and a PORTFOLIO option price leg (the
+          ``holdRequired`` branch just below, where hold is always required).
           Freezes the contract between maturity rolls so a delta/moneyness-selected
           option's P&L is a proper fixed-contract dollar P&L (qty·Δpremium, sized
           off NAV at each roll) instead of a %-return that explodes as a held

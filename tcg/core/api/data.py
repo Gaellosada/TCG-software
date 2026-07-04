@@ -101,7 +101,9 @@ async def get_basket_series(
 
     # ``coverage`` explains missing points (option legs with no two-sided quote,
     # no chain on a date, …) so the chart can annotate gaps instead of drawing a
-    # silently broken line.  Empty for spot/continuous-only baskets.
+    # silently broken line.  Always populated (a ``composite`` summary plus a
+    # per-leg ``legs`` list); only the ``legs`` list is empty for
+    # spot/continuous-only baskets, which emit no per-leg diagnostics.
     return {"dates": dates.tolist(), "values": values.tolist(), "coverage": coverage}
 
 

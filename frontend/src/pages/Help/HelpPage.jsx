@@ -397,8 +397,9 @@ function HelpPage() {
           </ul>
           <p>
             A triggered exit always <strong>resets</strong> any in-progress
-            THEN-sequence on the entry blocks it targets, so an in-flight
-            sequence starts over after the position closes.
+            THEN-sequence on the entry blocks it targets: an in-flight sequence
+            starts over whenever a targeting exit block fires (its exit condition
+            becomes true), whether or not a position was actually open at the time.
           </p>
         </Details>
 
