@@ -467,3 +467,31 @@ class TestListExpirationsByDate:
             "OPT_BTC", date(2021, 1, 5), date(2021, 1, 6)
         )
         assert out == {}
+
+    @pytest.mark.asyncio
+    async def test_expiration_max_pushed_as_upper_bound(self):
+        """MINOR-6: when ``expiration_max`` is supplied it is pushed into the dim
+        WHERE as ``expiration <= %s`` so the LEAPS scan is bounded, and the
+        bound value is passed as a param."""
+        reader, cur, _pool = self._make_reader([])
+        cap = date(2021, 7, 4)
+        await reader.list_expirations_by_date(
+            "OPT_BTC",
+            date(2021, 1, 5),
+            date(2021, 1, 6),
+            option_type="C",
+            expiration_max=cap,
+        )
+        sql, params = cur.calls[-1]
+        assert "expiration <= %s" in sql
+        assert cap in list(params)
+
+    @pytest.mark.asyncio
+    async def test_no_upper_bound_when_expiration_max_none(self):
+        """Legacy behaviour: no ``expiration_max`` ⇒ no upper-bound predicate."""
+        reader, cur, _pool = self._make_reader([])
+        await reader.list_expirations_by_date(
+            "OPT_BTC", date(2021, 1, 5), date(2021, 1, 6)
+        )
+        sql, _params = cur.calls[-1]
+        assert "expiration <= %s" not in sql

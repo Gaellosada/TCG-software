@@ -944,9 +944,12 @@ def _parse_blocks(
                     f"{path}: requires_reset_count must be an integer "
                     f">= 1 (got {rrc!r})"
                 )
-            # Temporal chain (entries/exits only — resets reject above). A
-            # non-empty links map must form one contiguous forward chain over
-            # the block's conditions (validated; HTTP 400 on malformed input).
+            # Temporal links (entries/exits only — resets reject above). Under
+            # v5 group semantics a non-empty links map may describe ANY subset of
+            # THEN-boundary gaps (the conditions split into sequenced groups at
+            # the linked gaps; unlinked gaps are AND-grouped) — it need NOT be one
+            # contiguous chain. Keys and per-gap windows are validated here
+            # (HTTP 400 on malformed input).
             if not is_reset:
                 parsed_links = _parse_links(raw_links, len(conds), path=path)
             # Level→pulse mode (entries/exits only — resets reject above). Absent

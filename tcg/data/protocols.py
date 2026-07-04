@@ -134,6 +134,7 @@ class MarketDataService(Protocol):
         end: date,
         option_type: Literal["C", "P"] | None = None,
         cycle: str | Sequence[str] | None = None,
+        expiration_max: date | None = None,
     ) -> dict[date, list[date]]: ...
 
     # --- Futures contract lookup by expiration (Phase 2 VIX greeks) ---

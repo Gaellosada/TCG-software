@@ -620,6 +620,7 @@ class SqlOptionsDataReader:
         end: date,
         option_type: Literal["C", "P"] | None = None,
         cycle: str | Sequence[str] | None = None,
+        expiration_max: date | None = None,
     ) -> dict[date, list[date]]:
         """Per-trade-date map of expirations that are actually LISTED (quoted).
 
@@ -636,14 +637,27 @@ class SqlOptionsDataReader:
         listed on each date.  ONE distinct scan for the whole window (not a
         per-date query).
 
+        ``expiration_max`` (optional) caps the expirations considered.  A
+        ``NearestToTarget`` caller passes ``end + max(3*target_dte_days, 180)``
+        — the SAME upper bound the resolver's own probe window uses (see
+        ``stream_resolver`` ``far_future``), so no expiration the resolver could
+        pick is dropped, but far-dated LEAPS (which are never nearest-to-target)
+        no longer inflate the scan (measured up to ~9s/leg on a wide window).
+        ``None`` = no upper bound (legacy behaviour).
+
         PUSHDOWN + partition pruning: resolve matching option ``instrument_id``s
         via the indexed ``source_collection`` dim lookup (type / cycle /
-        ``expiration >= start`` pushed), then join ``fact_price_eod`` on a
-        CONSTANT ``trade_date BETWEEN start AND end`` so the planner prunes to
-        the spanned year partitions (the same gotcha the bulk chain reader
-        honours; a runtime-only join fans out across all ~71 partitions).
-        Price-row based (the tradeable universe) — matches what ``mid`` and the
-        bulk chain reader can actually return.
+        ``expiration >= start`` [+ optional ``expiration <= expiration_max``]
+        pushed), then join ``fact_price_eod`` on a CONSTANT ``trade_date BETWEEN
+        start AND end`` so the planner prunes to the spanned year partitions
+        (the same gotcha the bulk chain reader honours; a runtime-only join fans
+        out across all ~71 partitions).  Price-row based (the tradeable
+        universe): the ``fact_price_eod`` join means an expiration appears only
+        when a contract of it has an EOD price row that day.  (A greeks-only
+        listing — a row present in ``fact_option_greeks`` but not
+        ``fact_price_eod`` — would be excluded; none are observed in dwh today,
+        and the bulk chain reader's keyset UNIONs greeks so it could in
+        principle surface one this listing would miss.)
         """
         try:
             dim_where = [
@@ -653,6 +667,9 @@ class SqlOptionsDataReader:
                 "expiration >= %s",
             ]
             params: list[Any] = [root, start]
+            if expiration_max is not None:
+                dim_where.append("expiration <= %s")
+                params.append(expiration_max)
             if option_type is not None:
                 dim_where.append("option_type = %s")
                 params.append(option_type.upper())
