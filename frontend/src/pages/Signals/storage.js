@@ -592,8 +592,9 @@ export function migrateV5ToV6(parsed) {
  * new optional fields, which ``sanitiseBlock``/``sanitiseCondition`` fill in
  * with their behaviour-preserving defaults. So this migration is a pure
  * version stamp: bump ``version`` to 7 and let the sanitiser do the rest. (We
- * stamp the literal SCHEMA_VERSION = 7; the per-signal sanitisation runs after
- * in ``loadState``.)
+ * stamp the bare literal 7 here — NOT ``SCHEMA_VERSION`` (currently 8) — so the
+ * chain continues into ``migrateV7ToV8`` rather than jumping straight to the
+ * head; the per-signal sanitisation runs after in ``loadState``.)
  *
  * Pure — does not mutate the input.
  *

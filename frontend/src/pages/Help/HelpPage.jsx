@@ -361,9 +361,9 @@ function HelpPage() {
 
         <Details title="Fire mode: pulse vs. sustained">
           <p>
-            Every block has a <strong>fire mode</strong> that decides how often
-            it signals while its condition is met. New blocks default to{' '}
-            <strong>pulse</strong>.
+            Entry and exit blocks have a <strong>fire mode</strong> that decides
+            how often they signal while their condition is met (reset blocks
+            have none). New blocks default to <strong>pulse</strong>.
           </p>
           <ul>
             <li>

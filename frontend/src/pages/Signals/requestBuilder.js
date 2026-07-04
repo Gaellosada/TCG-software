@@ -33,7 +33,13 @@
 // ``normaliseBlock`` AND a new round-trip test in ``requestShape.test.js``.
 
 import { collectIndicatorIds } from '../../api/signals';
-import { MAX_ABS_WEIGHT, SECTIONS, coerceResetCount } from './storage';
+import {
+  MAX_ABS_WEIGHT,
+  SECTIONS,
+  coerceResetCount,
+  sanitiseLinks,
+  sanitiseFireMode,
+} from './storage';
 
 // Re-exported under a test-only name so the cross-module identity test in
 // storage.test.js can assert the wire path uses the SAME coercion as storage
@@ -108,44 +114,11 @@ function clampWeight(w) {
   return n;
 }
 
-/**
- * Normalise a block-level temporal ``links`` map for the wire.
- *
- * ``links`` is a flat map { "<successor_condition_index>": <within_bars_int> }
- * keyed by the SUCCESSOR condition's index within the block. It records the set
- * of gaps that are THEN boundaries between conjunction groups: present ⇒ THEN,
- * absent ⇒ AND, empty/missing ⇒ CNF. PARTIAL maps are VALID (the backend
- * accepts any subset of ``{1..condCount-1}``) — ``(A AND B) THEN (C AND D)`` is
- * ``links={2:W}`` on a 4-condition block. Each key must be an integer in
- * [1, condCount-1] with a finite window ≥ 1; a stray / malformed entry is
- * DROPPED (not fatal). An empty result ⇒ ``undefined`` so the caller OMITS the
- * field (CNF — byte-identical to a pre-feature payload). Defence-in-depth
- * alongside the storage sanitiser.
- *
- * @param {*} raw
- * @param {number} condCount the block's condition count
- * @returns {Object|undefined} THEN-boundary links map, or undefined to omit.
- */
-function normaliseLinks(raw, condCount) {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  if (!Number.isInteger(condCount) || condCount < 2) return undefined;
-  const out = {};
-  for (const [k, v] of Object.entries(raw)) {
-    const idx = Number(k);
-    if (!Number.isInteger(idx) || idx < 1 || idx >= condCount) continue;
-    const w = typeof v === 'number' ? v : Number(v);
-    if (!Number.isFinite(w) || w < 1) continue;
-    out[String(idx)] = Math.floor(w);
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-/** Normalise a block's ``fire_mode`` for the wire — "pulse" or "sustained"
- *  (default). Emitted on entries + exits, omitted on resets (backend rejects
- *  it there). */
-function normaliseFireMode(raw) {
-  return raw === 'pulse' ? 'pulse' : 'sustained';
-}
+// Block-level ``links`` and ``fire_mode`` are normalised for the wire by the
+// SAME field sanitisers the storage layer and UI use — ``sanitiseLinks`` /
+// ``sanitiseFireMode`` (imported from ./storage). One helper each, no drift:
+// the wire path and the persisted path fold identically. (These were formerly
+// byte-identical copies here; de-duped in PR #72.)
 
 function normaliseBlock(block, section) {
   if (!block || typeof block !== 'object') return block;
@@ -178,7 +151,7 @@ function normaliseBlock(block, section) {
   // Partial THEN-boundary map (any subset of the gaps); malformed entries are
   // dropped and an empty result is omitted (CNF), keyed against the normalised
   // condition count.
-  const links = normaliseLinks(block.links, conditions.length);
+  const links = sanitiseLinks(block.links, conditions.length);
   if (section === 'exits') {
     // Exit blocks omit block-level input_id entirely (not empty-string)
     // so the backend invariant "exits must not carry input_id" is met.
@@ -200,8 +173,8 @@ function normaliseBlock(block, section) {
       requires_reset_count: resetCount,
       // fire_mode rides on entries + exits (default sustained); resets reject
       // it (HTTP 400) so the reset literal above omits it.
-      fire_mode: normaliseFireMode(block.fire_mode),
-      // Only present when there is a real chain — see normaliseLinks.
+      fire_mode: sanitiseFireMode(block.fire_mode),
+      // Only present when there is a real chain — see sanitiseLinks.
       ...(links !== undefined ? { links } : {}),
     };
   }
@@ -216,8 +189,8 @@ function normaliseBlock(block, section) {
     requires_reset_block_id: resetBlockId,
     requires_reset_count: resetCount,
     // fire_mode rides on entries + exits (default sustained); resets omit it.
-    fire_mode: normaliseFireMode(block.fire_mode),
-    // Only present when there is a real chain — see normaliseLinks.
+    fire_mode: sanitiseFireMode(block.fire_mode),
+    // Only present when there is a real chain — see sanitiseLinks.
     ...(links !== undefined ? { links } : {}),
   };
 }
