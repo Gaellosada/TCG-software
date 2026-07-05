@@ -645,6 +645,16 @@ class SelectResponse(BaseModel):
     matched_value: float | None
     error_code: str | None
     diagnostic: str | None
+    # Representative bid-ask mid (option premium mark) for the resolved
+    # contract on the query ``date``.  Optional + backward-compatible
+    # (defaults None): populated only when a contract is resolved AND the
+    # targeted single-expiration chain read yields a mid for it.  Powers the
+    # option-leg implied-leverage readout (leverage = nav_times x
+    # strike / premium_mid) on the frontend hold form.  ``None`` when the
+    # contract is unresolved, the row has no mid (missing bid/ask), or the
+    # supplementary read failed — the frontend falls back to the qualitative
+    # wipeout hint in that case.
+    premium_mid: float | None = None
 
 
 class SmilePoint(BaseModel):

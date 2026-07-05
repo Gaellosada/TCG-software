@@ -1,5 +1,6 @@
-import { useMemo, useCallback, useId, useEffect, useRef } from 'react';
+import { useMemo, useCallback, useId, useEffect, useRef, useState } from 'react';
 import styles from './OptionStreamForm.module.css';
+import ImpliedLeverageReadout, { BAND_COLORS } from './ImpliedLeverageReadout';
 
 /**
  * Standalone, side-effect-free form for picking every field needed to
@@ -338,6 +339,11 @@ export default function OptionStreamForm({
   // set: render NO on/off toggle; force hold on + default cycle 'M' once, and
   // always show the nav_times input + a wipeout hint. Signals keep the toggle.
   holdRequired = false,
+  // Optional reference date (YYYY-MM-DD string or Date) at which to probe the
+  // representative (strike, premium) for the implied-leverage readout on the
+  // hold form. When omitted, the readout falls back to the selected root's
+  // last_trade_date. Read-only side-effect (a GET) — never mutates the value.
+  referenceDate = null,
 }) {
   // Per-instance stable id used to scope the option-type radio group's
   // `name` attribute.  Without this, two simultaneously-mounted forms
@@ -346,6 +352,10 @@ export default function OptionStreamForm({
   // clicking "Put" on one form to visually deselect "Call" on the
   // sibling — see Bug 1 regression in InstrumentPickerModal.test.jsx.
   const formId = useId();
+
+  // Colour band for the implied-leverage readout (green/amber/red). Set by the
+  // <ImpliedLeverageReadout> child so the Size% input can be tinted to match.
+  const [navBand, setNavBand] = useState(null);
 
   // Resolve a usable value: if the parent supplies null we still render
   // safely against a sensible default. Exposing onChange below means the
@@ -894,13 +904,16 @@ export default function OptionStreamForm({
                 disabled={disabled}
                 aria-label="Size (% of NAV)"
                 data-testid="nav-times"
+                style={navBand ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
               />
             </label>
-            <span data-testid="nav-hint" style={{ fontSize: '0.85em', opacity: 0.8 }}>
-              A short/naked option at full notional (100%) can wipe out (a 10Δ put
-              premium can triple on a selloff → &gt;100% loss). Use a small percentage
-              to size the premium notional.
-            </span>
+            <ImpliedLeverageReadout
+              streamValue={v}
+              navFraction={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
+              availableRoots={availableRoots}
+              referenceDate={referenceDate}
+              onBand={setNavBand}
+            />
           </div>
         </label>
       ) : showHoldControls ? (
@@ -938,8 +951,18 @@ export default function OptionStreamForm({
                   disabled={disabled}
                   aria-label="Size (% of NAV)"
                   data-testid="nav-times"
+                  style={navBand ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
                 />
               </label>
+            )}
+            {v.hold_between_rolls && (
+              <ImpliedLeverageReadout
+                streamValue={v}
+                navFraction={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
+                availableRoots={availableRoots}
+                referenceDate={referenceDate}
+                onBand={setNavBand}
+              />
             )}
           </div>
         </label>

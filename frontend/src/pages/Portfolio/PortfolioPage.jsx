@@ -777,6 +777,7 @@ function PortfolioPage() {
         isOpen={modalOpen}
         onClose={handleCloseModal}
         onAddLeg={portfolio.addLeg}
+        referenceDate={portfolio.startDate}
       />
 
       {/* ── Add Signal Modal ── */}

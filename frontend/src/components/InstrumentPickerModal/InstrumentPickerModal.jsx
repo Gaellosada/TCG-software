@@ -102,6 +102,11 @@ export default function InstrumentPickerModal({
   // requires it). Forwarded to OptionStreamForm as ``holdRequired``. Never passed
   // to the basket-leg sub-picker (basket held books are unsupported).
   optionHoldRequired = false,
+  // Optional reference date (YYYY-MM-DD string or Date) forwarded to
+  // OptionStreamForm as ``referenceDate`` — the date at which the implied-
+  // leverage readout probes the representative (strike, premium). Falls back to
+  // the root's last_trade_date when null.
+  optionReferenceDate = null,
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -446,6 +451,7 @@ export default function InstrumentPickerModal({
                     availableRoots={optionRoots}
                     showHoldControls={showOptionHoldControls}
                     holdRequired={optionHoldRequired}
+                    referenceDate={optionReferenceDate}
                     {...(optionStreamAllowedStreams
                       ? { allowedStreams: optionStreamAllowedStreams }
                       : {})}

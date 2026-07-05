@@ -151,9 +151,9 @@ export async function getOptionContract(collection, contractId, { computeMissing
 // criterion/maturity discriminated-union shapes must be valid JSON.
 // ---------------------------------------------------------------------------
 
-export async function selectOption(selectQuery) {
+export async function selectOption(selectQuery, { signal } = {}) {
   const q = encodeURIComponent(JSON.stringify(selectQuery));
-  return fetchClassified(`/options/select?q=${q}`);
+  return fetchClassified(`/options/select?q=${q}`, signal ? { signal } : {});
 }
 
 // ---------------------------------------------------------------------------

@@ -13,11 +13,15 @@ const PORTFOLIO_OPTION_STREAMS = ['mid'];
  * (adds label, weight, maps type names).
  *
  * Props:
- *   isOpen   {boolean}
- *   onClose  {Function}  () => void
- *   onAddLeg {Function}  (leg) => void
+ *   isOpen        {boolean}
+ *   onClose       {Function}  () => void
+ *   onAddLeg      {Function}  (leg) => void
+ *   referenceDate {string|Date|null}  optional — the portfolio's start date,
+ *                 forwarded to the option-leg implied-leverage readout as the
+ *                 probe reference date (falls back to the root's last trade
+ *                 date when null).
  */
-export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
+export default function AddHoldingModal({ isOpen, onClose, onAddLeg, referenceDate = null }) {
   const handleSelect = useCallback(
     (instrument) => {
       if (instrument.type === 'option_stream') {
@@ -74,6 +78,7 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg }) {
       title="Add Holding"
       optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
       optionHoldRequired={true}
+      optionReferenceDate={referenceDate}
     />
   );
 }

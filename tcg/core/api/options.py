@@ -52,6 +52,7 @@ from tcg.core.api._options_wiring import (
     build_options_chain,
     build_options_pricer,
     build_options_selector,
+    get_options_reader,
 )
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import (
@@ -686,6 +687,21 @@ async def select_contract(
             f"diagnostic={result.diagnostic!r}"
         )
 
+    # Best-effort representative premium (bid-ask mid) for the resolved
+    # contract on the query date — powers the frontend implied-leverage
+    # readout (leverage = nav_times x strike / premium_mid).  Soft: any
+    # failure / absent mid degrades to None and never affects the /select
+    # contract or status.
+    premium_mid: float | None = None
+    if result.contract is not None:
+        premium_mid = await _representative_premium_mid(
+            svc,
+            root=payload.root,
+            on_date=payload.date,
+            type=payload.type,
+            contract=result.contract,
+        )
+
     response = SelectResponse.model_validate(
         {
             "contract": (
@@ -696,9 +712,50 @@ async def select_contract(
             "matched_value": result.matched_value,
             "error_code": result.error_code,
             "diagnostic": result.diagnostic,
+            "premium_mid": premium_mid,
         }
     )
     return response.model_dump()
+
+
+async def _representative_premium_mid(
+    svc: MarketDataService,
+    *,
+    root: str,
+    on_date: date,
+    type: Literal["C", "P"],  # noqa: A002 — mirrors the SelectQuery field name
+    contract: OptionContractDoc,
+) -> float | None:
+    """Best-effort bid-ask mid (option premium mark) for *contract* on *on_date*.
+
+    Targeted single-expiration chain read (READ-ONLY; the equal
+    ``expiration_min == expiration_max`` bound keeps it partition-pruned),
+    matched back to the resolved contract by ``contract_id``.  Returns
+    ``None`` — never raises — when the row is absent, has no mid (missing
+    bid/ask), or the read fails, so the ``/select`` response stays unchanged
+    and the frontend falls back to the qualitative leverage hint.
+    """
+    try:
+        reader = get_options_reader(svc)
+        rows = await reader.query_chain(
+            root=root,
+            date=on_date,
+            type=type,
+            expiration_min=contract.expiration,
+            expiration_max=contract.expiration,
+        )
+    except Exception:  # noqa: BLE001 — soft augmentation; any failure → None
+        logger.warning(
+            "representative premium probe failed for %s on %s",
+            root,
+            on_date,
+            exc_info=True,
+        )
+        return None
+    for c, r in rows:
+        if c.contract_id == contract.contract_id:
+            return r.mid
+    return None
 
 
 def _criterion_pydantic_to_dataclass(criterion: Any) -> Any:
