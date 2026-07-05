@@ -37,9 +37,21 @@ from typing import Any, Literal, Mapping, Optional
 #
 # ``"M"`` is the UI's "Monthly" choice, so its ROBUST meaning is "the monthly
 # 3rd-Friday series across all eras" = the union of both tags.  ``expand_cycle``
-# maps ``"M"`` → both tags and passes every other value through unchanged, so the
-# monthly filter is complete without disturbing any other cycle (``"W"``, ``"Q"``,
-# the specific ``"W1/2/4 Friday"`` weeklies) or the ``None`` all-cycles case.
+# maps ``"M"`` → both tags and passes most other values through unchanged, so the
+# monthly filter is complete without disturbing another cycle (``"Q"``, the
+# specific ``"W1/2/4 Friday"`` weeklies) or the ``None`` all-cycles case.
+#
+# ``"W"`` (the UI's generic "Weekly") is the SAME shape of problem across a
+# DIFFERENT tagging split: crypto/VIX roots (``OPT_BTC``/``OPT_ETH``/``OPT_VIX``)
+# tag every weekly under the literal ``"W"``, whereas the index roots
+# (``OPT_SP_500`` …) tag their weeklies per-week as ``"W1/W2/W3/W4 Friday"`` and
+# have NO literal ``"W"`` at all.  So a ``"W"`` filter returns the crypto/VIX
+# weeklies but ZERO rows for S&P — the reported "weekly S&P put" build failure.
+# The ROBUST meaning of "Weekly" is therefore the union of BOTH conventions
+# (:data:`WEEKLY_CYCLE_TAGS`).  Because each tag is a no-op for the other root
+# family — crypto has only ``"W"``; S&P has only the ``"W# Friday"`` tags — the
+# union is exactly the literal ``"W"`` for crypto/VIX and exactly the four
+# Friday tags for S&P, so crypto/VIX weekly results are UNCHANGED.
 
 #: The ``expiration_cycle`` tags that together make up the standard MONTHLY
 #: (3rd-Friday) series.  ``"W3 Friday"`` IS the 3rd-Friday weekly = the monthly;
@@ -47,14 +59,30 @@ from typing import Any, Literal, Mapping, Optional
 #: for the same expiration) the caller de-dupes by expiration / contract id.
 MONTHLY_CYCLE_TAGS: tuple[str, ...] = ("M", "W3 Friday")
 
+#: The ``expiration_cycle`` tags that together make up ALL weekly contracts,
+#: spanning both tagging conventions: the literal ``"W"`` (crypto/VIX generic
+#: weekly) and the per-week ``"W1/W2/W3/W4 Friday"`` tags (index roots such as
+#: ``OPT_SP_500``).  A root uses only one convention, so the union is a no-op
+#: for whichever tags it lacks — see the module note.
+WEEKLY_CYCLE_TAGS: tuple[str, ...] = (
+    "W",
+    "W1 Friday",
+    "W2 Friday",
+    "W3 Friday",
+    "W4 Friday",
+)
+
 
 def expand_cycle(cycle: str | None) -> str | tuple[str, ...] | None:
     """Expand a cycle filter to its full tag set for option-STREAM selection.
 
     ``"M"`` → :data:`MONTHLY_CYCLE_TAGS` (the monthly 3rd-Friday series spans two
-    dwh tags across eras — see the module note).  Every other value (a specific
-    cycle, or ``None`` for all-cycles) is returned unchanged, so only the
-    "Monthly" filter is broadened.  The result is a scalar / ``None`` (pass
+    dwh tags across eras) and ``"W"`` → :data:`WEEKLY_CYCLE_TAGS` (the generic
+    "Weekly" spans two tagging conventions — literal ``"W"`` for crypto/VIX and
+    per-week ``"W# Friday"`` for index roots — see the module note).  Every other
+    value (a specific cycle such as ``"Q"`` / ``"W3 Friday"``, or ``None`` for
+    all-cycles) is returned unchanged, so only the "Monthly" and "Weekly"
+    umbrella filters are broadened.  The result is a scalar / ``None`` (pass
     through) or a tuple (query all of them); the data layer accepts both.
 
     This is applied ONLY on the stream-selection path (signals / option-stream
@@ -63,6 +91,8 @@ def expand_cycle(cycle: str | None) -> str | tuple[str, ...] | None:
     """
     if cycle == "M":
         return MONTHLY_CYCLE_TAGS
+    if cycle == "W":
+        return WEEKLY_CYCLE_TAGS
     return cycle
 
 

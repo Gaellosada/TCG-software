@@ -153,6 +153,21 @@ class StubOptionsReader:
         self.get_contract_side_effect: BaseException | None = None
         self.list_roots_side_effect: BaseException | None = None
         self.list_expirations_side_effect: BaseException | None = None
+        # Per-root available expiration_cycle tags, keyed by collection. Backs
+        # the ``svc.get_available_cycles`` the /roots endpoint now calls to
+        # attach ``cycles`` to each root. Default empty → ``cycles: []``.
+        self.available_cycles_result: dict[str, list[str]] = {}
+        # Per-collection cycle-query failures, keyed by collection. Lets a test
+        # make ONE root's cycle metadata query raise (e.g. a transient
+        # DataAccessError) to prove the /roots listing degrades that root to
+        # ``cycles: []`` instead of failing the whole listing.
+        self.available_cycles_side_effect: dict[str, BaseException] = {}
+
+    async def available_cycles(self, collection: str) -> list[str]:
+        exc = self.available_cycles_side_effect.get(collection)
+        if exc is not None:
+            raise exc
+        return list(self.available_cycles_result.get(collection, []))
 
     async def query_chain(
         self,
@@ -255,10 +270,14 @@ async def client(options_reader: StubOptionsReader):
     async def _query_options_chain(*args: Any, **kwargs: Any):
         return await options_reader.query_chain(*args, **kwargs)
 
+    async def _get_available_cycles(collection: str) -> list[str]:
+        return await options_reader.available_cycles(collection)
+
     mock_svc.list_option_roots = AsyncMock(side_effect=_list_option_roots)
     mock_svc.list_option_expirations = AsyncMock(side_effect=_list_option_expirations)
     mock_svc.get_option_contract = AsyncMock(side_effect=_get_option_contract)
     mock_svc.query_options_chain = AsyncMock(side_effect=_query_options_chain)
+    mock_svc.get_available_cycles = AsyncMock(side_effect=_get_available_cycles)
 
     # Default: get_prices returns the SP_500 index close.
     mock_svc.get_prices = AsyncMock(return_value=make_index_close_series())

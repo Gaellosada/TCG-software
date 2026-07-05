@@ -32,11 +32,15 @@ from datetime import date
 
 import numpy as np
 
+from hypothesis import given
+from hypothesis import strategies as st
+
 from tcg.data._sql.options import _cycle_predicate
 from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
 from tcg.types.options import (
     MONTHLY_CYCLE_TAGS,
+    WEEKLY_CYCLE_TAGS,
     ByDelta,
     NearestToTarget,
     expand_cycle,
@@ -55,12 +59,63 @@ def test_expand_cycle_M_expands_to_series():
     assert set(MONTHLY_CYCLE_TAGS) == {"M", "W3 Friday"}
 
 
+def test_expand_cycle_W_expands_to_union():
+    # 'W' is the generic-weekly UI choice.  Its ROBUST meaning is "all weeklies
+    # across BOTH tagging conventions": crypto/VIX literal 'W' + the index-root
+    # per-week 'W1/2/3/4 Friday' tags.  Each tag is a no-op for the other root
+    # family, so this is safe for every root.
+    assert expand_cycle("W") == WEEKLY_CYCLE_TAGS
+    assert set(WEEKLY_CYCLE_TAGS) == {
+        "W",
+        "W1 Friday",
+        "W2 Friday",
+        "W3 Friday",
+        "W4 Friday",
+    }
+    # The literal 'W' tag (crypto/VIX) is preserved in the union, so a crypto
+    # weekly stream still matches its 'W'-tagged contracts unchanged.
+    assert "W" in WEEKLY_CYCLE_TAGS
+
+
 def test_expand_cycle_passes_through_others():
     assert expand_cycle(None) is None
     assert expand_cycle("W3 Friday") == "W3 Friday"
     assert expand_cycle("Q") == "Q"
-    assert expand_cycle("W") == "W"
     assert expand_cycle("W1 Friday") == "W1 Friday"
+    assert expand_cycle("D") == "D"
+    assert expand_cycle("") == ""
+
+
+@given(
+    st.sampled_from(
+        [
+            None,
+            "",
+            "M",
+            "W",
+            "Q",
+            "D",
+            "W1 Friday",
+            "W2 Friday",
+            "W3 Friday",
+            "W4 Friday",
+            "X",
+            "weekly",
+            "m",
+        ]
+    )
+)
+def test_expand_cycle_property(cycle):
+    """Property: only 'M' and 'W' are broadened (to their exact tag unions);
+    every other value — including None — is returned IDENTICALLY."""
+    result = expand_cycle(cycle)
+    if cycle == "M":
+        assert result == MONTHLY_CYCLE_TAGS
+    elif cycle == "W":
+        assert result == WEEKLY_CYCLE_TAGS
+    else:
+        assert result == cycle
+        assert result is cycle  # untouched pass-through, not a copy
 
 
 # ---------------------------------------------------------------------------

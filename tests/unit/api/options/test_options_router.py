@@ -57,6 +57,79 @@ async def test_roots_happy_path(client: AsyncClient, options_reader: StubOptions
     assert body["roots"][0]["providers"] == ["IVOLATILITY"]
 
 
+async def test_roots_carries_per_root_cycles(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Each root entry carries ``cycles`` = the real (non-empty) expiration_cycle
+    tags for that root, in the order ``get_available_cycles`` returns.  This is
+    what lets the frontend scope its cycle dropdown to what the dwh actually has
+    (so it never offers a phantom ``W``/``Q`` for OPT_SP_500)."""
+    options_reader.list_roots_result = [
+        make_root_info("OPT_SP_500"),
+        make_root_info("OPT_BTC"),
+    ]
+    options_reader.available_cycles_result = {
+        "OPT_SP_500": ["M", "W1 Friday", "W2 Friday", "W3 Friday", "W4 Friday"],
+        "OPT_BTC": ["D", "M", "Q", "W"],
+    }
+    resp = await client.get("/api/options/roots")
+    assert resp.status_code == 200
+    roots = {r["collection"]: r for r in resp.json()["roots"]}
+    assert roots["OPT_SP_500"]["cycles"] == [
+        "M",
+        "W1 Friday",
+        "W2 Friday",
+        "W3 Friday",
+        "W4 Friday",
+    ]
+    assert roots["OPT_BTC"]["cycles"] == ["D", "M", "Q", "W"]
+    # OPT_SP_500 genuinely has no bare 'W' or 'Q' tag — the phantom cycles that
+    # produced the reported weekly-put build failure are absent from its list.
+    assert "W" not in roots["OPT_SP_500"]["cycles"]
+    assert "Q" not in roots["OPT_SP_500"]["cycles"]
+
+
+async def test_roots_cycles_defaults_empty_when_none(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """A root with no configured cycles reports ``cycles: []`` (never errors)."""
+    options_reader.list_roots_result = [make_root_info("OPT_SP_500")]
+    resp = await client.get("/api/options/roots")
+    assert resp.status_code == 200
+    assert resp.json()["roots"][0]["cycles"] == []
+
+
+async def test_roots_one_cycle_query_failure_degrades_that_root_only(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """Robustness: a SINGLE root's cycle-metadata query raising (e.g. a transient
+    DataAccessError) must NOT 502 the whole /roots listing — it degrades that
+    root to ``cycles: []`` while the others keep their real tags.  Guards against
+    the per-root ``asyncio.gather`` failure surface introduced by the root-scoped
+    cycle dropdown (robustness > simplicity)."""
+    options_reader.list_roots_result = [
+        make_root_info("OPT_SP_500"),
+        make_root_info("OPT_BTC"),
+    ]
+    options_reader.available_cycles_result = {
+        "OPT_BTC": ["D", "M", "Q", "W"],
+    }
+    # OPT_SP_500's cycle query blows up — the listing must still succeed.
+    options_reader.available_cycles_side_effect = {
+        "OPT_SP_500": OptionsDataAccessError("transient cycle-metadata timeout"),
+    }
+    resp = await client.get("/api/options/roots")
+    assert resp.status_code == 200
+    roots = {r["collection"]: r for r in resp.json()["roots"]}
+    # The failing root degrades to an empty cycles list (contractually valid —
+    # the FE falls back to the static superset for an empty/absent cycles field).
+    assert roots["OPT_SP_500"]["cycles"] == []
+    # The healthy root is untouched.
+    assert roots["OPT_BTC"]["cycles"] == ["D", "M", "Q", "W"]
+    # And both roots are still present with their other metadata intact.
+    assert set(roots) == {"OPT_SP_500", "OPT_BTC"}
+
+
 async def test_roots_data_access_error_502(
     client: AsyncClient, options_reader: StubOptionsReader
 ):
