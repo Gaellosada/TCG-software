@@ -20,6 +20,9 @@
 // are trivial to tune.  green < amber-threshold ; amber up to red-threshold ;
 // red beyond.  (A 10-delta put premium is ~0.3-0.6% of strike, so a full-
 // notional short at Size%=100 lands deep in the red at ~150-300x.)
+// NOTE: the Help page ("Implied leverage on the Size % field" in
+// pages/Help/HelpPage.jsx) mirrors these thresholds (2×, 10×) in prose — keep
+// both in sync if you tune them (HelpPage.test.jsx derives its assertion here).
 export const LEVERAGE_BANDS = { amber: 2, red: 10 };
 
 /**

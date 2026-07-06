@@ -261,7 +261,12 @@ async def list_roots(
             # but any other per-root cycle-query failure degrades to ``[]``.
             if isinstance(cycles, asyncio.CancelledError):
                 raise cycles
-            logger.debug("get_available_cycles failed for %s: %r", r.collection, cycles)
+            # WARNING (not DEBUG): a systemic dwh outage degrades EVERY root
+            # to ``cycles=[]``, silently removing the cycle chips app-wide.
+            # Surface it in normal logs so a persistent failure is visible.
+            logger.warning(
+                "get_available_cycles failed for %s: %r", r.collection, cycles
+            )
             d["cycles"] = []
         else:
             # ``get_available_cycles`` already filters the empty-string tag and

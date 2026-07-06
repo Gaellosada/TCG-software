@@ -216,14 +216,16 @@ function HelpPage() {
         <Details title="Implied leverage on the Size % field">
           <p>
             Next to <strong>Size (% of NAV)</strong> the hold form shows a live
-            readout, e.g. <em>&ldquo;&asymp; 8.5&times; underlying notional (at
-            2020-01-02)&rdquo;</em>. It answers a single question: how much{' '}
+            readout, e.g. <em>&ldquo;&asymp; 8&times; underlying notional (at
+            &lt;date&gt;)&rdquo;</em>. It answers a single question: how much{' '}
             <strong>underlying</strong> market exposure the option leg actually
-            controls per dollar of portfolio NAV. On a $100k portfolio,
-            8.5&times; is roughly $850k of S&amp;P index notional &mdash; even
-            though the premium you deploy is a small fraction of that. The leg
-            is small in premium but large in exposure, and that gap is the
-            leverage.
+            controls per dollar of portfolio NAV. For example, a 10&Delta; put
+            whose premium is &asymp; 0.5% of strike, held at{' '}
+            <strong>Size % = 4%</strong>, reads <strong>&asymp; 8&times;</strong>{' '}
+            (that is 4 &divide; 0.5) &mdash; on a $100k portfolio, roughly $800k
+            of S&amp;P index notional, even though the premium you deploy is a
+            small fraction of that. The leg is small in premium but large in
+            exposure, and that gap is the leverage.
           </p>
           <p>
             <strong>How it&apos;s computed &mdash; and how to check it.</strong>{' '}
@@ -237,17 +239,30 @@ function HelpPage() {
           <p>
             The <strong>Size %</strong> is your input; the{' '}
             <strong>premium as % of strike</strong> is shown on the readout&apos;s
-            sub-line (<em>&ldquo;premium &asymp; 0.45% of strike for this 10&Delta;
-            put&rdquo;</em>). Both <em>strike</em> and <em>premium</em> come from a
-            live probe of the actually-selected contract &mdash; the same root,
-            selection (delta / moneyness / strike) and maturity rule the leg uses
-            &mdash; at a reference date. That date is shown as{' '}
-            <em>(at &lt;date&gt;)</em> so you know which snapshot day it used: on
-            the <strong>Portfolio</strong> page it is the backtest start date; on
-            the <strong>Signals</strong> page it is the root&apos;s last trade
-            date. Changing Size % rescales the number instantly (no re-probe);
-            changing the contract or date re-probes.
+            sub-line (<em>&ldquo;premium &asymp; 0.5% of strike for this 10&Delta;
+            put&rdquo;</em> &mdash; the same 0.5% used in the example above). Both{' '}
+            <em>strike</em> and <em>premium</em> come from a live probe of the
+            actually-selected contract &mdash; the same root, selection (delta /
+            moneyness / strike) and maturity rule the leg uses &mdash; at a
+            reference date. That date is shown as <em>(at &lt;date&gt;)</em> so
+            you know which snapshot day it used: on the{' '}
+            <strong>Portfolio</strong> page it is the backtest start date; on the{' '}
+            <strong>Signals</strong> page it is the root&apos;s last trade date.
+            Changing Size % rescales the number instantly (no re-probe); changing
+            the contract or date re-probes.
           </p>
+          <p>
+            <strong>Indicative, not exact.</strong> The probe reads the market{' '}
+            bid-ask <em>mid</em> for the premium. If the leg is priced{' '}
+            <code>bs_mid</code> (theoretical Black-76), the backtest actually
+            books P&amp;L off the <em>model</em> premium, which differs from the
+            market mid &mdash; so for a <code>bs_mid</code> leg the leverage
+            figure is indicative, not the exact multiple the sim uses.
+          </p>
+          {/* The 2× / 10× thresholds below MIRROR `LEVERAGE_BANDS`
+              ({ amber: 2, red: 10 }) in
+              components/OptionStreamForm/leverage.js — keep both in sync (the
+              HelpPage.test.jsx assertion derives its regex from that constant). */}
           <p>
             <strong>Colour bands.</strong> The readout dot and the Size % field
             are tinted by the leverage: 🟢 green below 2&times; · 🟠 amber

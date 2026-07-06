@@ -153,11 +153,14 @@ const WEEK_FRIDAY_RE = /^W\d+ Friday$/;
  * @returns {Array<{value: string|null, label: string}>}
  */
 function deriveCycleOptions(rootCycles, allowedCycles = null) {
+  // Single source of truth for the two weekly-tag predicates, at function
+  // scope so the label loop below can reuse them (a synthetic 'W' is one the
+  // root doesn't carry literally → label it as the synthetic weekly).
+  const hasBareW = Array.isArray(rootCycles) && rootCycles.includes('W');
+  const hasWeekFriday = Array.isArray(rootCycles) && rootCycles.some((c) => WEEK_FRIDAY_RE.test(c));
   let base;
   if (Array.isArray(rootCycles) && rootCycles.length > 0) {
     base = rootCycles.slice();
-    const hasWeekFriday = base.some((c) => WEEK_FRIDAY_RE.test(c));
-    const hasBareW = base.includes('W');
     if (hasWeekFriday && !hasBareW) base.push('W');
   } else {
     // Legacy / missing cycles → the historical static superset (minus null,
@@ -176,7 +179,7 @@ function deriveCycleOptions(rootCycles, allowedCycles = null) {
   const options = [];
   if (allowsAny) options.push({ value: null, label: CYCLE_LABELS._any });
   for (const c of base) {
-    const label = (c === 'W' && !(Array.isArray(rootCycles) && rootCycles.includes('W')))
+    const label = (c === 'W' && !hasBareW)
       ? SYNTHETIC_WEEKLY_LABEL
       : (CYCLE_LABELS[c] || c);
     options.push({ value: c, label });
@@ -307,6 +310,53 @@ export function validateOptionStream(value, availableRoots) {
     };
   }
   return null;
+}
+
+/**
+ * Shared "Size (% of NAV)" input + implied-leverage readout, rendered
+ * identically by both the ``holdRequired`` (portfolio price-leg) and the
+ * ``hold_between_rolls`` (signals-toggle) branches — they differ ONLY in the
+ * input's ``title`` tooltip. Extracted to kill the near-verbatim duplication
+ * (one future-drift hazard). Behaviour is identical; test IDs are preserved.
+ */
+function SizeAndLeverage({
+  title,
+  streamValue,
+  availableRoots,
+  referenceDate,
+  navBand,
+  setNavBand,
+  onNavTimes,
+  disabled,
+}) {
+  const navTimes = typeof streamValue.nav_times === 'number' ? streamValue.nav_times : 1.0;
+  return (
+    <>
+      <label className={styles.fieldInline} title={title}>
+        Size (% of NAV)
+        <input
+          type="number"
+          className={styles.input}
+          min={0}
+          step="any"
+          placeholder="100"
+          value={navFractionToPercent(navTimes)}
+          onChange={(e) => onNavTimes(e.target.value)}
+          disabled={disabled}
+          aria-label="Size (% of NAV)"
+          data-testid="nav-times"
+          style={navBand ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
+        />
+      </label>
+      <ImpliedLeverageReadout
+        streamValue={streamValue}
+        navFraction={navTimes}
+        availableRoots={availableRoots}
+        referenceDate={referenceDate}
+        onBand={setNavBand}
+      />
+    </>
+  );
 }
 
 /**
@@ -450,6 +500,10 @@ export default function OptionStreamForm({
     if (checked && !(typeof v.nav_times === 'number' && v.nav_times > 0)) {
       patch.nav_times = 1.0;
     }
+    // Reset the leverage tint on hold-off: the readout unmounts without
+    // clearing the parent-held band, so a stale colour would flash on the
+    // Size% input's border for one frame when hold is re-enabled.
+    if (!checked) setNavBand(null);
     emit(patch);
   }, [emit, v.nav_times]);
 
@@ -888,31 +942,15 @@ export default function OptionStreamForm({
             <span className={styles.fieldInline} data-testid="hold-required-note">
               Held between rolls — fixed-contract $-P&amp;L (required for option legs)
             </span>
-            <label
-              className={styles.fieldInline}
+            <SizeAndLeverage
               title="Premium notional held as a percentage of NAV (100% = full notional). The held quantity at each roll = (Size%/100) × NAV_at_roll / premium_at_roll. Direction is the leg's long/short weight sign."
-            >
-              Size (% of NAV)
-              <input
-                type="number"
-                className={styles.input}
-                min={0}
-                step="any"
-                placeholder="100"
-                value={navFractionToPercent(typeof v.nav_times === 'number' ? v.nav_times : 1.0)}
-                onChange={(e) => setNavTimes(e.target.value)}
-                disabled={disabled}
-                aria-label="Size (% of NAV)"
-                data-testid="nav-times"
-                style={navBand ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
-              />
-            </label>
-            <ImpliedLeverageReadout
               streamValue={v}
-              navFraction={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
               availableRoots={availableRoots}
               referenceDate={referenceDate}
-              onBand={setNavBand}
+              navBand={navBand}
+              setNavBand={setNavBand}
+              onNavTimes={setNavTimes}
+              disabled={disabled}
             />
           </div>
         </label>
@@ -935,33 +973,15 @@ export default function OptionStreamForm({
               Hold contract between rolls (fixed-contract P&amp;L)
             </label>
             {v.hold_between_rolls && (
-              <label
-                className={styles.fieldInline}
+              <SizeAndLeverage
                 title="Premium notional held as a percentage of NAV (100% = full notional). The held quantity at each roll = (Size%/100) × NAV_at_roll / premium_at_roll. This is the SIZE (direction is the block's long/short weight sign); it can exceed 100% to leverage the premium notional."
-              >
-                Size (% of NAV)
-                <input
-                  type="number"
-                  className={styles.input}
-                  min={0}
-                  step="any"
-                  placeholder="100"
-                  value={navFractionToPercent(typeof v.nav_times === 'number' ? v.nav_times : 1.0)}
-                  onChange={(e) => setNavTimes(e.target.value)}
-                  disabled={disabled}
-                  aria-label="Size (% of NAV)"
-                  data-testid="nav-times"
-                  style={navBand ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
-                />
-              </label>
-            )}
-            {v.hold_between_rolls && (
-              <ImpliedLeverageReadout
                 streamValue={v}
-                navFraction={typeof v.nav_times === 'number' ? v.nav_times : 1.0}
                 availableRoots={availableRoots}
                 referenceDate={referenceDate}
-                onBand={setNavBand}
+                navBand={navBand}
+                setNavBand={setNavBand}
+                onNavTimes={setNavTimes}
+                disabled={disabled}
               />
             )}
           </div>
