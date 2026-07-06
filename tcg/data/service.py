@@ -210,7 +210,11 @@ class DefaultMarketDataService:
         return result
 
     async def get_available_cycles(self, collection: str) -> list[str]:
-        """Return available expiration cycles for a futures collection."""
+        """Return available expiration cycles for a collection.
+
+        Used for both futures collections and option roots (the underlying
+        DISTINCT is on ``expiration_cycle``, which both carry).
+        """
         return await self._sql.fetch_available_cycles(collection)
 
     async def get_aligned_prices(

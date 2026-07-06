@@ -150,6 +150,13 @@ class StubOptionsReader:
         self.list_expirations_result: list[date] = []
         self.query_chain_calls: list[dict[str, Any]] = []
         self.query_chain_side_effect: BaseException | None = None
+        # Per-call overrides (1-based call index), used to distinguish the
+        # selector's chain read from the /select premium-probe re-read (which
+        # is a SECOND query_chain call). Empty by default → no effect.
+        self.query_chain_side_effect_by_call: dict[int, BaseException] = {}
+        self.query_chain_result_by_call: dict[
+            int, list[tuple[OptionContractDoc, OptionDailyRow]]
+        ] = {}
         self.get_contract_side_effect: BaseException | None = None
         self.list_roots_side_effect: BaseException | None = None
         self.list_expirations_side_effect: BaseException | None = None
@@ -192,8 +199,15 @@ class StubOptionsReader:
                 "expiration_cycle": expiration_cycle,
             }
         )
+        call_index = len(self.query_chain_calls)  # 1-based (append happened above)
+        per_call_exc = self.query_chain_side_effect_by_call.get(call_index)
+        if per_call_exc is not None:
+            raise per_call_exc
         if self.query_chain_side_effect is not None:
             raise self.query_chain_side_effect
+        result = self.query_chain_result_by_call.get(
+            call_index, self.query_chain_result
+        )
         # When the test sets `query_chain_result` to a fixed list and the
         # router supplies an expiration_cycle filter, mimic the
         # production behaviour by filtering the canned result. This lets
@@ -201,11 +215,9 @@ class StubOptionsReader:
         # keeping existing tests untouched.
         if expiration_cycle is not None:
             return [
-                (c, r)
-                for (c, r) in self.query_chain_result
-                if c.expiration_cycle == expiration_cycle
+                (c, r) for (c, r) in result if c.expiration_cycle == expiration_cycle
             ]
-        return self.query_chain_result
+        return result
 
     async def get_contract(
         self,

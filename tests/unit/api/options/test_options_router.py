@@ -768,6 +768,138 @@ async def test_select_malformed_json_400(client: AsyncClient):
     assert body["error_type"] == "options_validation_error"
 
 
+async def test_select_returns_premium_mid(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """A resolved contract carries the representative bid-ask mid (premium).
+
+    Powers the implied-leverage readout: the endpoint re-reads the resolved
+    contract's row on the query date and surfaces ``mid`` as ``premium_mid``.
+    make_row() has bid=85.5/ask=86.0 → mid=85.75.
+    """
+    options_reader.query_chain_result = [
+        (make_contract(strike=5100.0), make_row()),
+        (
+            make_contract(contract_id="SPX_C_5200_20240419|M", strike=5200.0),
+            make_row(bid=40.0, ask=41.0),
+        ),
+    ]
+
+    import json
+
+    payload = {
+        "root": "OPT_SP_500",
+        "date": "2024-03-15",
+        "type": "C",
+        "criterion": {"kind": "by_strike", "strike": 5100.0},
+        "maturity": {"kind": "fixed", "date": "2024-04-19"},
+        "compute_missing_for_delta_selection": False,
+    }
+    resp = await client.get("/api/options/select", params={"q": json.dumps(payload)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["contract"]["strike"] == 5100.0
+    # Mid of the RESOLVED contract (5100 strike), matched by contract_id.
+    assert body["premium_mid"] == pytest.approx(85.75)
+
+
+async def test_select_premium_mid_none_when_no_mid(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """When the resolved contract's row has no mid (missing bid/ask) the
+    endpoint returns ``premium_mid=None`` (soft — the /select contract and
+    status are unchanged)."""
+    options_reader.query_chain_result = [
+        (make_contract(strike=5100.0), make_row(bid=None, ask=None)),
+    ]
+
+    import json
+
+    payload = {
+        "root": "OPT_SP_500",
+        "date": "2024-03-15",
+        "type": "C",
+        "criterion": {"kind": "by_strike", "strike": 5100.0},
+        "maturity": {"kind": "fixed", "date": "2024-04-19"},
+        "compute_missing_for_delta_selection": False,
+    }
+    resp = await client.get("/api/options/select", params={"q": json.dumps(payload)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["contract"]["strike"] == 5100.0
+    assert body["premium_mid"] is None
+
+
+async def test_select_premium_mid_none_when_probe_read_fails(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """If the premium-probe chain re-read raises, /select still 200s with
+    ``premium_mid=None`` (soft — a probe failure must never disturb the
+    resolved contract or status).
+
+    The selector's chain read is query_chain call #1; the premium probe is
+    call #2. We fail ONLY call #2 so selection succeeds but the probe degrades.
+    """
+    options_reader.query_chain_result = [
+        (make_contract(strike=5100.0), make_row()),
+    ]
+    options_reader.query_chain_side_effect_by_call = {
+        2: OptionsDataAccessError("dwh timeout on premium probe"),
+    }
+
+    import json
+
+    payload = {
+        "root": "OPT_SP_500",
+        "date": "2024-03-15",
+        "type": "C",
+        "criterion": {"kind": "by_strike", "strike": 5100.0},
+        "maturity": {"kind": "fixed", "date": "2024-04-19"},
+        "compute_missing_for_delta_selection": False,
+    }
+    resp = await client.get("/api/options/select", params={"q": json.dumps(payload)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["contract"]["strike"] == 5100.0
+    assert body["error_code"] is None
+    assert body["premium_mid"] is None
+
+
+async def test_select_premium_mid_none_when_contract_absent_from_probe_rows(
+    client: AsyncClient, options_reader: StubOptionsReader
+):
+    """If the resolved contract_id is absent from the probe's returned rows,
+    /select still 200s with ``premium_mid=None`` (no match → soft None).
+
+    The selector resolves the 5100 contract from call #1's rows; call #2 (the
+    probe) returns a DIFFERENT contract, so the contract_id match fails.
+    """
+    resolved = make_contract(contract_id="SPX_C_5100_20240419|M", strike=5100.0)
+    other = make_contract(contract_id="SPX_C_9999_20240419|M", strike=9999.0)
+    options_reader.query_chain_result = [(resolved, make_row())]
+    # Probe re-read (call #2) returns only an unrelated contract.
+    options_reader.query_chain_result_by_call = {
+        2: [(other, make_row(bid=1.0, ask=2.0))],
+    }
+
+    import json
+
+    payload = {
+        "root": "OPT_SP_500",
+        "date": "2024-03-15",
+        "type": "C",
+        "criterion": {"kind": "by_strike", "strike": 5100.0},
+        "maturity": {"kind": "fixed", "date": "2024-04-19"},
+        "compute_missing_for_delta_selection": False,
+    }
+    resp = await client.get("/api/options/select", params={"q": json.dumps(payload)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["contract"]["contract_id"] == "SPX_C_5100_20240419|M"
+    assert body["error_code"] is None
+    assert body["premium_mid"] is None
+
+
 async def test_select_no_chain_returns_422(
     client: AsyncClient, options_reader: StubOptionsReader
 ):
