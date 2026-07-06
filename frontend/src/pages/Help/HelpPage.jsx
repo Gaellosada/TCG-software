@@ -212,6 +212,63 @@ function HelpPage() {
             field only appears once hold is turned on.
           </p>
         </Details>
+
+        <Details title="Implied leverage on the Size % field">
+          <p>
+            Next to <strong>Size (% of NAV)</strong> the hold form shows a live
+            readout, e.g. <em>&ldquo;&asymp; 8.5&times; underlying notional (at
+            2020-01-02)&rdquo;</em>. It answers a single question: how much{' '}
+            <strong>underlying</strong> market exposure the option leg actually
+            controls per dollar of portfolio NAV. On a $100k portfolio,
+            8.5&times; is roughly $850k of S&amp;P index notional &mdash; even
+            though the premium you deploy is a small fraction of that. The leg
+            is small in premium but large in exposure, and that gap is the
+            leverage.
+          </p>
+          <p>
+            <strong>How it&apos;s computed &mdash; and how to check it.</strong>{' '}
+            Both numbers the formula needs are on the form, so you can verify the
+            figure yourself:
+          </p>
+          <pre className={styles.codeBlock}><code>
+{`leverage = Size % ÷ (premium as % of strike)
+         = (Size % / 100) × (strike / premium)`}
+          </code></pre>
+          <p>
+            The <strong>Size %</strong> is your input; the{' '}
+            <strong>premium as % of strike</strong> is shown on the readout&apos;s
+            sub-line (<em>&ldquo;premium &asymp; 0.45% of strike for this 10&Delta;
+            put&rdquo;</em>). Both <em>strike</em> and <em>premium</em> come from a
+            live probe of the actually-selected contract &mdash; the same root,
+            selection (delta / moneyness / strike) and maturity rule the leg uses
+            &mdash; at a reference date. That date is shown as{' '}
+            <em>(at &lt;date&gt;)</em> so you know which snapshot day it used: on
+            the <strong>Portfolio</strong> page it is the backtest start date; on
+            the <strong>Signals</strong> page it is the root&apos;s last trade
+            date. Changing Size % rescales the number instantly (no re-probe);
+            changing the contract or date re-probes.
+          </p>
+          <p>
+            <strong>Colour bands.</strong> The readout dot and the Size % field
+            are tinted by the leverage: 🟢 green below 2&times; · 🟠 amber
+            2–10&times; · 🔴 red above 10&times;. Near-dated, deep out-of-the-money
+            options have a tiny premium relative to strike, which pushes leverage
+            high &mdash; a full-notional short can land in the hundreds of &times;.
+          </p>
+          <p>
+            <strong>Why it matters.</strong> A short (written) option&apos;s loss
+            scales against that large underlying notional, not against the small
+            premium you collect, so an adverse move can wipe out a large fraction
+            of capital. The readout spells this out:{' '}
+            <em>&ldquo;&#9888; If sold/written, a ~2.0&times; premium spike wipes
+            equity&rdquo;</em>. That wipeout multiple is{' '}
+            <code>f = 1 + 1 ÷ (Size % ÷ 100)</code> &mdash; it depends only on
+            Size %, not on which contract you picked (at Size % = 100 a mere
+            2&times; premium spike wipes out; at 33% it takes ~4&times;). A{' '}
+            <strong>bought</strong> leg is different: its most it can lose is the
+            premium paid. Practical rule: high leverage &rarr; keep Size % small.
+          </p>
+        </Details>
       </section>
 
       {/* ── Portfolio ── */}

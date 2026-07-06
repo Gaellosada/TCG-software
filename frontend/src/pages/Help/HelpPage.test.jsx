@@ -87,6 +87,20 @@ describe('HelpPage', () => {
     expect(screen.getByText(/nav_times/)).toBeTruthy();
   });
 
+  it('documents the implied-leverage readout on the option Size % field', () => {
+    render(<HelpPage />);
+    // The dedicated subsection exists…
+    expect(screen.getByText(/Implied leverage on the Size %/i)).toBeTruthy();
+    // …states the formula in the verifiable "Size% ÷ premium-%-of-strike" form…
+    expect(screen.getByText(/Size % ÷ \(premium as % of strike\)/i)).toBeTruthy();
+    // …and states the exact colour-band thresholds (from LEVERAGE_BANDS).
+    expect(screen.getByText(/green below 2×/i)).toBeTruthy();
+    expect(screen.getByText(/amber 2–10×/i)).toBeTruthy();
+    expect(screen.getByText(/red above 10×/i)).toBeTruthy();
+    // …and the short-leg wipeout multiple formula.
+    expect(screen.getByText(/1 \+ 1 ÷ \(Size % ÷ 100\)/i)).toBeTruthy();
+  });
+
   it('documents block composition (AND / THEN groups)', () => {
     render(<HelpPage />);
     expect(screen.getByText(/AND \/ THEN groups/i)).toBeTruthy();
