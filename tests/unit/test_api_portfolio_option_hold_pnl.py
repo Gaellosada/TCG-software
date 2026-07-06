@@ -20,7 +20,7 @@ test module is not importable as a package).
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
@@ -308,6 +308,58 @@ async def test_all_nan_premium_error_names_dominant_cause(monkeypatch):
     # Dominant cause named (5 of 6 dates) + the actionable ByMoneyness hint.
     assert "dominant cause: missing_delta_no_compute (5/6 dates)" in msg
     assert "By Moneyness" in msg
+
+
+async def test_all_nan_premium_error_names_missing_cycle(monkeypatch):
+    """When the empty resolve is caused by a cycle tag that doesn't exist for the
+    root (e.g. 'Q' for OPT_SP_500), the all-NaN error is REPLACED by a targeted
+    message that names the requested cycle and lists the root's real cycles —
+    steering the user instead of a generic no_chain hint."""
+
+    def _nan_fetcher(svc, start, end):
+        return make_hold_fetch(held_premium=np.full(_DATES_INT.shape, np.nan))
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _nan_fetcher)
+    svc = MagicMock()
+    svc.get_available_cycles = AsyncMock(
+        return_value=["M", "W1 Friday", "W2 Friday", "W3 Friday", "W4 Friday"]
+    )
+    leg = LegSpec(**{**_hold_put_leg(), "cycle": "Q"})
+    with pytest.raises(TCGError) as ei:
+        await _evaluate_option_stream_leg(
+            "P", leg, -100.0, svc, date(2024, 3, 1), date(2024, 4, 30)
+        )
+    msg = str(ei.value)
+    assert "Leg 'P': no contracts match cycle 'Q' for OPT_SP_500" in msg
+    assert "available cycles: M, W1 Friday, W2 Friday, W3 Friday, W4 Friday" in msg
+    # The generic all-NaN phrasing is REPLACED, not appended.
+    assert "all option stream values are NaN" not in msg
+
+
+async def test_all_nan_premium_weekly_union_is_not_flagged_as_missing_cycle(
+    monkeypatch,
+):
+    """A 'W' leg on OPT_SP_500 must NOT be blamed on the cycle: expand_cycle('W')
+    now includes the 'W# Friday' tags the root actually has, so the cycle IS
+    available.  On an (unrelated) empty resolve the error falls back to the
+    generic all-NaN message, never the 'no contracts match cycle W' hint."""
+
+    def _nan_fetcher(svc, start, end):
+        return make_hold_fetch(held_premium=np.full(_DATES_INT.shape, np.nan))
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _nan_fetcher)
+    svc = MagicMock()
+    svc.get_available_cycles = AsyncMock(
+        return_value=["M", "W1 Friday", "W2 Friday", "W3 Friday", "W4 Friday"]
+    )
+    leg = LegSpec(**{**_hold_put_leg(), "cycle": "W"})
+    with pytest.raises(TCGError) as ei:
+        await _evaluate_option_stream_leg(
+            "P", leg, -100.0, svc, date(2024, 3, 1), date(2024, 4, 30)
+        )
+    msg = str(ei.value)
+    assert "no contracts match cycle" not in msg
+    assert "all option stream values are NaN" in msg
 
 
 # ── Findings 8 & 9: incompatible knobs rejected for a hold-mode price leg ────

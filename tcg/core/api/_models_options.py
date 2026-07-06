@@ -127,6 +127,13 @@ class OptionRootInfo(BaseModel):
     stored_greeks_ratio: float = 0.0
     # True when the engine's Black-76 path is available for this root.
     has_computed_greeks: bool = False
+    # The DISTINCT real ``expiration_cycle`` tags present for this root
+    # (empty-string tag filtered out; stable sorted order). Lets the frontend
+    # scope the option cycle dropdown to what the dwh actually has for the
+    # selected root instead of a static superset — a phantom cycle (e.g. ``"W"``
+    # or ``"Q"`` for OPT_SP_500) otherwise resolves to zero rows. Defaults to
+    # ``()`` so legacy fixtures that don't populate it render no cycle chips.
+    cycles: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,10 @@ import OptionStreamForm, {
   buildDefaultOptionStream,
   validateOptionStream,
   MID_TOOLTIP,
+  SYNTHETIC_WEEKLY_LABEL,
+  CYCLE_LABELS,
+  deriveCycleOptions,
+  pickDefaultCycle,
   navFractionToPercent,
   navPercentToFraction,
 } from './OptionStreamForm';
@@ -409,6 +413,207 @@ describe('buildDefaultOptionStream', () => {
   it('falls back to empty collection when no roots are available', () => {
     const v = buildDefaultOptionStream({ availableRoots: [] });
     expect(v.collection).toBe('');
+  });
+});
+
+// ── Root-scoped cycle dropdown (fix A) ─────────────────────────────────────
+// The cycle dropdown is derived from the SELECTED root's real ``cycles`` tag-set
+// (GET /api/options/roots), not the static ALL_CYCLES superset — so a root never
+// offers a cycle it has no contracts for (which built an empty chain → HTTP 400).
+describe('deriveCycleOptions (root-scoped cycles)', () => {
+  const SP_CYCLES = ['M', 'W1 Friday', 'W2 Friday', 'W3 Friday', 'W4 Friday'];
+  const BTC_CYCLES = ['D', 'M', 'Q', 'W'];
+
+  const labels = (opts) => opts.map((o) => o.label);
+  const values = (opts) => opts.map((o) => o.value);
+
+  it('OPT_SP_500: Any + M + W1..W4 Friday + a SYNTHESISED generic Weekly, and NO Quarterly', () => {
+    const opts = deriveCycleOptions(SP_CYCLES);
+    expect(values(opts)).toEqual([
+      null, 'M', 'W1 Friday', 'W2 Friday', 'W3 Friday', 'W4 Friday', 'W',
+    ]);
+    // Generic weekly is synthesised (root has W# Friday but no literal 'W').
+    expect(labels(opts)).toContain(SYNTHETIC_WEEKLY_LABEL);
+    // Phantom exclusion: NO Quarterly for an index root.
+    expect(values(opts)).not.toContain('Q');
+  });
+
+  it('OPT_BTC: real set D/M/Q/W with the literal Weekly label, no synthetic duplicate', () => {
+    const opts = deriveCycleOptions(BTC_CYCLES);
+    expect(values(opts)).toEqual([null, 'D', 'M', 'Q', 'W']);
+    // Exactly one 'W' entry, labelled with the literal (not synthetic) copy.
+    expect(values(opts).filter((v) => v === 'W')).toHaveLength(1);
+    const wOpt = opts.find((o) => o.value === 'W');
+    expect(wOpt.label).toBe(CYCLE_LABELS.W);
+    expect(wOpt.label).not.toBe(SYNTHETIC_WEEKLY_LABEL);
+  });
+
+  it('monthly-only roots (gold/FX/bonds/NASDAQ) offer just Any + Monthly', () => {
+    const opts = deriveCycleOptions(['M']);
+    expect(values(opts)).toEqual([null, 'M']);
+    expect(values(opts)).not.toContain('W');
+    expect(values(opts)).not.toContain('Q');
+  });
+
+  it('OPT_VIX (real literal W, no W# Friday): Any + M + W, no synthetic', () => {
+    const opts = deriveCycleOptions(['M', 'W']);
+    expect(values(opts)).toEqual([null, 'M', 'W']);
+    expect(opts.find((o) => o.value === 'W').label).toBe(CYCLE_LABELS.W);
+  });
+
+  it('undefined / empty cycles falls back to the full static superset (legacy fixtures)', () => {
+    const fromUndef = values(deriveCycleOptions(undefined));
+    const fromEmpty = values(deriveCycleOptions([]));
+    // Same fallback: Any + the historical superset.
+    expect(fromUndef).toEqual(fromEmpty);
+    expect(fromUndef).toContain(null);
+    expect(fromUndef).toContain('W3 Friday');
+    expect(fromUndef).toContain('Q');
+  });
+
+  it('allowedCycles applies as a FURTHER restriction on top of the root set', () => {
+    const opts = deriveCycleOptions(SP_CYCLES, ['M', 'W3 Friday']);
+    // Any dropped (null not in the restriction), only the two survive.
+    expect(values(opts)).toEqual(['M', 'W3 Friday']);
+  });
+
+  it('allowedCycles including null keeps the Any sentinel', () => {
+    const opts = deriveCycleOptions(SP_CYCLES, [null, 'M']);
+    expect(values(opts)).toEqual([null, 'M']);
+  });
+});
+
+describe('pickDefaultCycle', () => {
+  it('prefers W3 Friday over M', () => {
+    expect(pickDefaultCycle(deriveCycleOptions(['M', 'W3 Friday']))).toBe('W3 Friday');
+  });
+  it('falls back to M when no W3 Friday', () => {
+    expect(pickDefaultCycle(deriveCycleOptions(['D', 'M', 'Q', 'W']))).toBe('M');
+  });
+  it('falls back to Any (null) when neither W3 nor M is present', () => {
+    expect(pickDefaultCycle(deriveCycleOptions(['D', 'Q']))).toBeNull();
+  });
+  it('falls back to the first concrete cycle when Any is not offered', () => {
+    expect(pickDefaultCycle(deriveCycleOptions(['D', 'Q'], ['D', 'Q']))).toBe('D');
+  });
+});
+
+describe('<OptionStreamForm> root-scoped cycle dropdown (render)', () => {
+  const ROOTS_WITH_CYCLES = [
+    {
+      collection: 'OPT_SP_500',
+      root_label: 'SP 500',
+      has_greeks: true,
+      cycles: ['M', 'W1 Friday', 'W2 Friday', 'W3 Friday', 'W4 Friday'],
+    },
+    {
+      collection: 'OPT_BTC',
+      root_label: 'BTC',
+      has_greeks: true,
+      cycles: ['D', 'M', 'Q', 'W'],
+    },
+    {
+      collection: 'OPT_GOLD',
+      root_label: 'Gold',
+      has_greeks: true,
+      cycles: ['M'],
+    },
+  ];
+
+  const cycleOptionValues = () => {
+    const sel = screen.getByLabelText('Cycle');
+    return Array.from(sel.querySelectorAll('option')).map((o) => o.value);
+  };
+  const cycleOptionLabels = () => {
+    const sel = screen.getByLabelText('Cycle');
+    return Array.from(sel.querySelectorAll('option')).map((o) => o.textContent);
+  };
+
+  it('OPT_SP_500 shows Any/M/W1-4 Friday + synthetic Weekly and NOT Quarterly', () => {
+    const value = buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES });
+    render(<OptionStreamForm value={value} onChange={vi.fn()} availableRoots={ROOTS_WITH_CYCLES} />);
+    expect(cycleOptionValues()).toEqual([
+      '_any', 'M', 'W1 Friday', 'W2 Friday', 'W3 Friday', 'W4 Friday', 'W',
+    ]);
+    expect(cycleOptionLabels()).toContain(SYNTHETIC_WEEKLY_LABEL);
+    expect(cycleOptionValues()).not.toContain('Q');
+  });
+
+  it('OPT_BTC shows its real D/M/Q/W set (no synthetic dup)', () => {
+    // Use a cycle that IS in BTC's real set ('M') so this asserts the pure
+    // derived set — otherwise the SP500 default 'W3 Friday' rides along and is
+    // (correctly) surfaced as an "(unavailable)" extra, which is a different case.
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES }), collection: 'OPT_BTC', cycle: 'M' };
+    render(<OptionStreamForm value={value} onChange={vi.fn()} availableRoots={ROOTS_WITH_CYCLES} />);
+    expect(cycleOptionValues()).toEqual(['_any', 'D', 'M', 'Q', 'W']);
+  });
+
+  it('coerces an invalid cycle to the root default when switching root (Q on BTC → Gold)', () => {
+    const onChange = vi.fn();
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES }), collection: 'OPT_BTC', cycle: 'Q' };
+    render(<OptionStreamForm value={value} onChange={onChange} availableRoots={ROOTS_WITH_CYCLES} />);
+    fireEvent.change(screen.getByLabelText('Root'), { target: { value: 'OPT_GOLD' } });
+    expect(onChange).toHaveBeenCalledOnce();
+    const next = onChange.mock.calls[0][0];
+    expect(next.collection).toBe('OPT_GOLD');
+    // Gold only has 'M' → 'Q' is invalid → snap to the root default (M).
+    expect(next.cycle).toBe('M');
+  });
+
+  it('keeps a still-valid cycle when switching root (M on BTC → Gold)', () => {
+    const onChange = vi.fn();
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES }), collection: 'OPT_BTC', cycle: 'M' };
+    render(<OptionStreamForm value={value} onChange={onChange} availableRoots={ROOTS_WITH_CYCLES} />);
+    fireEvent.change(screen.getByLabelText('Root'), { target: { value: 'OPT_GOLD' } });
+    const next = onChange.mock.calls[0][0];
+    expect(next.cycle).toBe('M');
+  });
+
+  it('buildDefaultOptionStream picks W3 Friday for OPT_SP_500 real cycles', () => {
+    const v = buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES });
+    expect(v.collection).toBe('OPT_SP_500');
+    expect(v.cycle).toBe('W3 Friday');
+  });
+
+  // ── Truthful display of a stale / out-of-list persisted cycle ──────────────
+  // A legacy signal saved with a cycle the selected root no longer offers (e.g.
+  // 'Q' on OPT_SP_500) must remain TRUTHFULLY visible: shown as an extra,
+  // clearly-labelled "(unavailable)" option — NEVER silently coerced on mount.
+  it('shows a persisted out-of-list cycle as an extra "(unavailable)" option', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES }), collection: 'OPT_SP_500', cycle: 'Q' };
+    render(<OptionStreamForm value={value} onChange={vi.fn()} availableRoots={ROOTS_WITH_CYCLES} />);
+    // The out-of-list value is present as an option and clearly flagged.
+    expect(cycleOptionValues()).toContain('Q');
+    expect(cycleOptionLabels().some((l) => /Q.*\(unavailable\)/.test(l))).toBe(true);
+    // The <select> shows exactly what was saved.
+    expect(screen.getByLabelText('Cycle').value).toBe('Q');
+  });
+
+  it('does NOT silently mutate a persisted out-of-list cycle on mount', () => {
+    const onChange = vi.fn();
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES }), collection: 'OPT_SP_500', cycle: 'Q' };
+    render(<OptionStreamForm value={value} onChange={onChange} availableRoots={ROOTS_WITH_CYCLES} />);
+    // Mount must not coerce the saved value — the user re-picks consciously.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('read-only (disabled) mode preserves the out-of-list value and never mutates it', () => {
+    const onChange = vi.fn();
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES }), collection: 'OPT_SP_500', cycle: 'Q' };
+    render(<OptionStreamForm value={value} onChange={onChange} availableRoots={ROOTS_WITH_CYCLES} disabled />);
+    const sel = screen.getByLabelText('Cycle');
+    expect(sel.value).toBe('Q');
+    expect(sel.disabled).toBe(true);
+    expect(cycleOptionLabels().some((l) => /Q.*\(unavailable\)/.test(l))).toBe(true);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('does NOT add an extra option when the persisted cycle is in-list', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS_WITH_CYCLES }), collection: 'OPT_BTC', cycle: 'M' };
+    render(<OptionStreamForm value={value} onChange={vi.fn()} availableRoots={ROOTS_WITH_CYCLES} />);
+    // OPT_BTC really has M → the dropdown is its plain real set, no "(unavailable)".
+    expect(cycleOptionValues()).toEqual(['_any', 'D', 'M', 'Q', 'W']);
+    expect(cycleOptionLabels().some((l) => /\(unavailable\)/.test(l))).toBe(false);
   });
 });
 

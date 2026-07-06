@@ -50,6 +50,7 @@ from tcg.engine.signal_exec import (
     evaluate_signal,
 )
 from tcg.types.errors import ValidationError
+from tcg.types.options import expand_cycle
 from tcg.types.market import (
     AdjustmentMethod,
     AssetClass,
@@ -597,6 +598,40 @@ def _diagnostic_hint(diagnostics: list[str | None] | None) -> str:
     return f"; dominant cause: {dominant} ({count}/{total} dates){detail}"
 
 
+async def _empty_cycle_hint(svc: MarketDataService, leg: LegSpec) -> str | None:
+    """Return a targeted "no contracts match this cycle" message, or ``None``.
+
+    Called ONLY on the all-NaN error path (so it never costs the happy path).
+    When the leg's requested ``cycle`` is non-null and — after ``expand_cycle``
+    broadening — matches NONE of the root's real ``expiration_cycle`` tags, the
+    empty chain is explained by an inapplicable cycle (e.g. ``"Q"`` for
+    OPT_SP_500).  Names the requested cycle and the root's available cycles.
+
+    Returns ``None`` (fall back to the generic diagnostic hint) when the cycle is
+    ``None`` (no filter), when the cycle IS available for the root (the empty
+    chain has some other cause — data gap, delta miss, …), or when the root's
+    cycle list can't be fetched (a bare test double / transient reader error) —
+    a hint is best-effort and must never mask the real error.
+    """
+    requested = leg.cycle
+    if requested is None:
+        return None
+    try:
+        available = await svc.get_available_cycles(leg.collection)
+    except Exception:  # noqa: BLE001 — best-effort hint; degrade to generic path
+        return None
+    if not available:
+        return None
+    expanded = expand_cycle(requested)
+    expanded_tags = (expanded,) if isinstance(expanded, str) else tuple(expanded)
+    if any(tag in available for tag in expanded_tags):
+        return None  # the cycle exists for this root — some other cause
+    return (
+        f"no contracts match cycle {requested!r} for {leg.collection} — "
+        f"available cycles: {', '.join(available)}"
+    )
+
+
 # A hold-mode option leg books fixed-contract dollar P&L only for a PREMIUM
 # stream.  Both ``mid`` and ``bs_mid`` are premia (bs_mid is the Black-76
 # theoretical premium — the S1 oracle's price basis) and the resolver's hold
@@ -724,6 +759,15 @@ async def _evaluate_option_stream_leg(
             diag_fn = getattr(fetcher, "fetch_hold_diagnostics", None)
             if diag_fn is not None:
                 hold_diagnostics = await diag_fn(instrument)
+            # Cycle-specific hint: the dominant empty-chain cause is often a
+            # cycle tag that simply doesn't exist for this root (e.g. "Q" for
+            # OPT_SP_500).  Only on this ERROR path (never the happy path) probe
+            # the root's real cycles; if the requested cycle — after expansion —
+            # matches NONE of them, say so and list what IS available.  This is
+            # cheap here and turns a generic no_chain hint into an actionable one.
+            cycle_hint = await _empty_cycle_hint(svc, leg)
+            if cycle_hint is not None:
+                raise ValidationError(f"Leg '{label}': {cycle_hint}")
             raise ValidationError(
                 f"Leg '{label}': all option stream values are NaN"
                 f"{_diagnostic_hint(hold_diagnostics)}"

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 from datetime import date
 from typing import Any, Literal
 
@@ -76,6 +77,8 @@ from tcg.types.options import (
 )
 from tcg.types.signal import InstrumentOptionStream
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/options", tags=["options"])
 
@@ -230,8 +233,21 @@ async def list_roots(
     """
     roots = await svc.list_option_roots()
     blocked = blocked_roots()
+    # The real (non-empty) ``expiration_cycle`` tags per root, so the frontend
+    # can scope its cycle dropdown to what the dwh actually has (a phantom cycle
+    # like ``"W"``/``"Q"`` for OPT_SP_500 otherwise resolves to zero rows).
+    # ``fetch_available_cycles`` is a lightweight metadata-only DISTINCT per
+    # root; gather them concurrently to avoid N sequential round-trips.
+    # ``return_exceptions=True`` isolates failures: a transient error on ONE
+    # root's cycle query must NOT fail the WHOLE listing (robustness >
+    # simplicity) — that root degrades to ``cycles=[]`` (a contractually valid
+    # fallback the frontend already handles) while the others stay intact.
+    cycles_per_root = await asyncio.gather(
+        *(svc.get_available_cycles(r.collection) for r in roots),
+        return_exceptions=True,
+    )
     out: list[dict[str, Any]] = []
-    for r in roots:
+    for r, cycles in zip(roots, cycles_per_root):
         d = dataclasses.asdict(r)
         has_computed = r.collection not in blocked
         d["has_computed_greeks"] = has_computed
@@ -239,6 +255,17 @@ async def list_roots(
         # downstream consumers (frontend badges, stream gating) rely on.
         stored_positive = (r.stored_greeks_ratio or 0.0) > 0.0
         d["has_greeks"] = stored_positive or has_computed
+        if isinstance(cycles, BaseException):
+            # Preserve cancellation semantics (never swallow a real cancel),
+            # but any other per-root cycle-query failure degrades to ``[]``.
+            if isinstance(cycles, asyncio.CancelledError):
+                raise cycles
+            logger.debug("get_available_cycles failed for %s: %r", r.collection, cycles)
+            d["cycles"] = []
+        else:
+            # ``get_available_cycles`` already filters the empty-string tag and
+            # returns a stable ORDER BY sort; keep that order verbatim.
+            d["cycles"] = list(cycles)
         out.append(d)
     payload = ListRootsResponse.model_validate({"roots": out})
     return payload.model_dump()

@@ -111,7 +111,92 @@ const CYCLE_LABELS = {
   'W4 Friday': '4th Friday (W4)',
   W: 'Weekly (W)',
   Q: 'Quarterly (Q)',
+  D: 'Daily (D)',
 };
+
+// Label for the SYNTHESISED generic-weekly entry — distinct from the literal
+// 'W' label above (crypto/VIX carry a real 'W' tag; index roots like OPT_SP_500
+// carry only per-week 'W# Friday' tags, so we synthesise a "cover all Fridays"
+// choice whose wire value is still 'W' — the backend's expand_cycle('W') unions
+// all the weekly Friday tags).  Never coexists with a literal-'W' root.
+const SYNTHETIC_WEEKLY_LABEL = 'Weekly — all Fridays (W)';
+
+// Matches a per-week Friday tag: 'W1 Friday' … 'W4 Friday' (any digit run).
+const WEEK_FRIDAY_RE = /^W\d+ Friday$/;
+
+/**
+ * Derive the cycle dropdown options for the SELECTED root from the real
+ * ``cycles`` tag-set the backend reports for that root (the ``cycles`` field on
+ * ``GET /api/options/roots`` — the distinct ``expiration_cycle`` tags, empty
+ * string filtered out, ascending).  This replaces the old static ``ALL_CYCLES``
+ * superset that offered phantom 'W'/'Q' for index roots (→ empty chain → HTTP
+ * 400).
+ *
+ * Rules:
+ *   - "Any" (wire ``null``) is always offered first (unless a caller-supplied
+ *     ``allowedCycles`` restriction drops it).
+ *   - Each real tag is offered verbatim in the backend's ascending order.
+ *   - A GENERIC weekly entry (wire ``'W'``) is synthesised — IN ADDITION to the
+ *     specific 'W# Friday' entries — for any root that has ≥1 'W# Friday' tag but
+ *     NO literal 'W' (e.g. OPT_SP_500), so the user can pick "all Fridays" in one
+ *     go.  Roots that literally carry 'W' (crypto/VIX) keep their real 'W' and are
+ *     NOT given a duplicate.
+ *   - ``allowedCycles`` (optional; ``null`` = no restriction) is a FURTHER
+ *     restriction applied on top — only cycles present in it survive (kept for
+ *     backward compatibility with callers that pin a subset).
+ *
+ * @param {string[]|undefined|null} rootCycles  the selected root's ``cycles``
+ *   (``undefined`` on a legacy/roots-less fixture → fall back to the full static
+ *   superset so nothing regresses; ``[]`` is treated the same way).
+ * @param {Array<string|null>|null} allowedCycles  optional further restriction.
+ * @returns {Array<{value: string|null, label: string}>}
+ */
+function deriveCycleOptions(rootCycles, allowedCycles = null) {
+  let base;
+  if (Array.isArray(rootCycles) && rootCycles.length > 0) {
+    base = rootCycles.slice();
+    const hasWeekFriday = base.some((c) => WEEK_FRIDAY_RE.test(c));
+    const hasBareW = base.includes('W');
+    if (hasWeekFriday && !hasBareW) base.push('W');
+  } else {
+    // Legacy / missing cycles → the historical static superset (minus null,
+    // which is prepended below as the "Any" sentinel).
+    base = ALL_CYCLES.filter((c) => c != null);
+  }
+
+  // Optional caller restriction (a pinned subset). null = no restriction.
+  let allowsAny = true;
+  if (Array.isArray(allowedCycles)) {
+    const allowSet = new Set(allowedCycles);
+    base = base.filter((c) => allowSet.has(c));
+    allowsAny = allowedCycles.includes(null);
+  }
+
+  const options = [];
+  if (allowsAny) options.push({ value: null, label: CYCLE_LABELS._any });
+  for (const c of base) {
+    const label = (c === 'W' && !(Array.isArray(rootCycles) && rootCycles.includes('W')))
+      ? SYNTHETIC_WEEKLY_LABEL
+      : (CYCLE_LABELS[c] || c);
+    options.push({ value: c, label });
+  }
+  return options;
+}
+
+/**
+ * Pick the default cycle wire-value from a derived option list.  Preference:
+ * 'W3 Friday' (the real monthly 3rd-Friday series) → 'M' → "Any" (null) if
+ * offered → the first concrete cycle.  Preserves the prior default bias while
+ * guaranteeing the chosen value is actually in the root-scoped list.
+ */
+function pickDefaultCycle(cycleOptions) {
+  const values = cycleOptions.map((o) => o.value);
+  const nonNull = values.filter((c) => c != null);
+  if (nonNull.includes('W3 Friday')) return 'W3 Friday';
+  if (nonNull.includes('M')) return 'M';
+  if (values.includes(null)) return null;
+  return nonNull.length > 0 ? nonNull[0] : null;
+}
 
 /**
  * Build a default-shaped MaturityRule for a given kind.
@@ -162,16 +247,17 @@ export function buildDefaultOptionStream({
   allowedSelectionKinds = ALL_SELECTION_KINDS,
   allowedStreams = ALL_STREAMS,
   allowedOptionTypes = ALL_OPTION_TYPES,
-  allowedCycles = ALL_CYCLES,
+  allowedCycles = null,
 }) {
   const root = availableRoots && availableRoots.length > 0 ? availableRoots[0] : null;
   // Canonical default: prefer W3 Friday (the real monthly cycle — every
   // month's 3rd Friday, PM-settled) over M (quarterly standard, AM-settled,
-  // Mar/Jun/Sep/Dec only). Falls back to M, then the first allowed cycle
-  // (often null = "Any") when neither is on the list.
-  const defaultCycle = allowedCycles.includes('W3 Friday')
-    ? 'W3 Friday'
-    : (allowedCycles.includes('M') ? 'M' : (allowedCycles.length === 0 ? null : allowedCycles[0] ?? null));
+  // Mar/Jun/Sep/Dec only). Falls back to M, then "Any", then the first cycle.
+  // The candidate list is now the ROOT-SCOPED cycle set (from root.cycles) so
+  // the default is never a cycle the root does not actually have.
+  const defaultCycle = pickDefaultCycle(
+    deriveCycleOptions(root ? root.cycles : undefined, allowedCycles),
+  );
   return {
     type: 'option_stream',
     collection: root ? root.collection : '',
@@ -234,7 +320,10 @@ export default function OptionStreamForm({
   allowedSelectionKinds = ALL_SELECTION_KINDS,
   allowedStreams = ALL_STREAMS,
   allowedOptionTypes = ALL_OPTION_TYPES,
-  allowedCycles = ALL_CYCLES,
+  // Optional FURTHER restriction of the cycle dropdown. Default null = derive
+  // the offered cycles purely from the SELECTED root's real ``cycles`` tag-set
+  // (see deriveCycleOptions). A non-null array pins the dropdown to that subset.
+  allowedCycles = null,
   disabled = false,
   // SIGNALS-only: surface the backtest "Hold contract between rolls
   // (fixed-contract P&L)" toggle + its ``nav_times`` premium-notional multiple.
@@ -305,7 +394,18 @@ export default function OptionStreamForm({
     if (v.cycle == null || v.cycle === 'W3 Friday') onChange({ ...v, cycle: 'M' });
   }, [holdRequired, v, onChange]);
 
-  const setRoot = useCallback((collection) => emit({ collection }), [emit]);
+  // Changing root must also keep ``cycle`` valid: the new root's real cycle
+  // tag-set may not contain the current cycle (e.g. picking 'Q' on OPT_BTC then
+  // switching to OPT_GOLD which only has 'M'). If the current cycle is no longer
+  // offered, snap to the root-scoped default; otherwise keep it.
+  const setRoot = useCallback((collection) => {
+    const nextRoot = (availableRoots || []).find((r) => r.collection === collection);
+    const opts = deriveCycleOptions(nextRoot ? nextRoot.cycles : undefined, allowedCycles);
+    const validValues = opts.map((o) => o.value);
+    const curCycle = v.cycle ?? null;
+    const nextCycle = validValues.includes(curCycle) ? curCycle : pickDefaultCycle(opts);
+    emit({ collection, cycle: nextCycle });
+  }, [availableRoots, allowedCycles, v.cycle, emit]);
 
   const setOptionType = useCallback((option_type) => {
     // When the side flips, also flip the sign of by_delta target so it
@@ -413,7 +513,32 @@ export default function OptionStreamForm({
   }, [v.selection, emit]);
 
   const cycleSelectValue = v.cycle == null ? '_any' : v.cycle;
-  const cycleAllowed = allowedCycles.map((c) => (c == null ? '_any' : c));
+  // Cycle dropdown is scoped to the SELECTED root's real ``cycles`` tag-set
+  // (see deriveCycleOptions), NOT the static superset — so a root never offers a
+  // cycle it has no contracts for (which built an empty chain → HTTP 400).
+  const selectedRoot = (availableRoots || []).find((r) => r.collection === v.collection);
+  const cycleOptions = useMemo(
+    () => deriveCycleOptions(selectedRoot ? selectedRoot.cycles : undefined, allowedCycles),
+    [selectedRoot, allowedCycles],
+  );
+  // Truthful display of a stale / out-of-list persisted cycle: if the current
+  // (persisted) cycle isn't among the derived options — e.g. a legacy signal
+  // saved with 'Q' on OPT_SP_500, which no longer offers 'Q' — surface it as an
+  // extra, clearly-labelled "(unavailable)" option so the <select> shows EXACTLY
+  // what was saved. This is a RENDER-ONLY augmentation: it never mutates v.cycle
+  // (no mount-time coercion), so it is uniformly safe in editable AND read-only
+  // (disabled) mode. In editable mode the user consciously re-picks; in the
+  // locked-signal read-only view the saved value is preserved verbatim. It is
+  // deliberately NOT folded into deriveCycleOptions (which feeds the root-switch
+  // coercion + default logic) — those must still treat the value as invalid.
+  // (Root SWITCH still coerces via setRoot — a deliberate user edit, not a mount.)
+  const renderedCycleOptions = useMemo(() => {
+    const cur = v.cycle ?? null;
+    if (cur == null) return cycleOptions;
+    if (cycleOptions.some((o) => o.value === cur)) return cycleOptions;
+    const label = `${CYCLE_LABELS[cur] || cur} (unavailable)`;
+    return [...cycleOptions, { value: cur, label }];
+  }, [cycleOptions, v.cycle]);
   // Legacy/absent roll_offset → {value:0, unit:'days'} (handles a shipped int).
   const rollOffset = _normOffset(v.roll_offset);
 
@@ -472,9 +597,10 @@ export default function OptionStreamForm({
           disabled={disabled}
           aria-label="Cycle"
         >
-          {cycleAllowed.map((c) => (
-            <option key={c} value={c}>{CYCLE_LABELS[c] || c}</option>
-          ))}
+          {renderedCycleOptions.map((opt) => {
+            const optValue = opt.value == null ? '_any' : opt.value;
+            return <option key={optValue} value={optValue}>{opt.label}</option>;
+          })}
         </select>
       </label>
 
@@ -843,8 +969,12 @@ export {
   ALL_SELECTION_KINDS,
   GREEK_STREAMS,
   MID_TOOLTIP,
+  SYNTHETIC_WEEKLY_LABEL,
+  CYCLE_LABELS,
   defaultMaturity,
   defaultSelection,
+  deriveCycleOptions,
+  pickDefaultCycle,
   navFractionToPercent,
   navPercentToFraction,
 };
