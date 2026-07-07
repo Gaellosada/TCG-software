@@ -58,9 +58,7 @@ async def client():
     # and the DefaultMarketDataService.get_available_cycles extension.
     mock_svc = AsyncMock()
     mock_svc.get_continuous = AsyncMock(return_value=_make_continuous_series())
-    mock_svc.get_available_cycles = AsyncMock(
-        return_value=["FGHJKMNQUVXZ", "HMUZ"]
-    )
+    mock_svc.get_available_cycles = AsyncMock(return_value=["FGHJKMNQUVXZ", "HMUZ"])
     mock_svc.list_collections = AsyncMock(return_value=["FUT_VIX", "INDEX"])
     mock_svc.list_instruments = AsyncMock()
     mock_svc.get_prices = AsyncMock()
@@ -143,6 +141,33 @@ async def test_continuous_series_with_params(client: AsyncClient, mock_svc):
 
     assert call_args[1]["start"] == date(2015, 1, 1)
     assert call_args[1]["end"] == date(2015, 12, 31)
+
+
+async def test_continuous_series_roll_offset_accepted_up_to_365(
+    client: AsyncClient, mock_svc
+):
+    """roll_offset is accepted up to the 365-day cap and forwarded to the roll
+    config (the cap was raised from 30 to let a series hold a contract 3+ months
+    from expiry)."""
+    mock_svc.get_continuous.return_value = _make_continuous_series()
+    for offset in (31, 90, 365):
+        resp = await client.get(
+            "/api/data/continuous/FUT_VIX",
+            params={"strategy": "end_of_month", "roll_offset": offset},
+        )
+        assert resp.status_code == 200, (offset, resp.text)
+        config = mock_svc.get_continuous.call_args[0][1]
+        assert config.roll_offset_days == offset
+
+
+async def test_continuous_series_roll_offset_over_cap_rejected(client: AsyncClient):
+    """roll_offset above 365 is rejected by request validation (422)."""
+    resp = await client.get(
+        "/api/data/continuous/FUT_VIX",
+        params={"strategy": "front_month", "roll_offset": 366},
+    )
+    # The app maps request-validation errors to its 400 envelope.
+    assert resp.status_code in (400, 422), resp.text
 
 
 async def test_continuous_series_invalid_strategy(client: AsyncClient):
@@ -236,7 +261,8 @@ async def test_cycles_endpoint_not_found(client: AsyncClient, mock_svc):
 
 
 async def test_continuous_route_not_captured_by_collection_catchall(
-    client: AsyncClient, mock_svc,
+    client: AsyncClient,
+    mock_svc,
 ):
     """Verify /continuous/FUT_VIX resolves to the continuous endpoint,
     not /{collection} with collection='continuous'."""

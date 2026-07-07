@@ -191,7 +191,7 @@ function sanitiseOptionStreamInstrument(raw) {
   if (!stream) return null;
   const cycle = (typeof raw.cycle === 'string' && raw.cycle) ? raw.cycle : null;
   // roll_offset is the unified {value, unit:'days'|'months'} — the ROLL-EARLY
-  // axis. Per-unit clamp: days 0..30, months 0..12. A legacy bare int (the old
+  // axis. Per-unit clamp: days 0..365, months 0..12. A legacy bare int (the old
   // days-only field) reads as {value:int, unit:'days'}. Absent → {0, days}.
   // NOTE: option streams carry NO back-adjustment, so any legacy `adjustment`
   // key is dropped; "roll at end of month" is the EndOfMonth MATURITY, so the
@@ -204,10 +204,10 @@ function sanitiseOptionStreamInstrument(raw) {
 }
 
 function sanitiseRollOffset(raw) {
-  const cap = (unit) => (unit === 'months' ? 12 : 30);
+  const cap = (unit) => (unit === 'months' ? 12 : 365);
   // Legacy bare int → days.
   if (Number.isFinite(raw)) {
-    return { value: Math.min(30, Math.max(0, Math.trunc(raw))), unit: 'days' };
+    return { value: Math.min(365, Math.max(0, Math.trunc(raw))), unit: 'days' };
   }
   if (raw && typeof raw === 'object') {
     const unit = raw.unit === 'months' ? 'months' : 'days';

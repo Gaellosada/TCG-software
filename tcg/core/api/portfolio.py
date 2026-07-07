@@ -152,7 +152,7 @@ class LegSpec(BaseModel):
     # a legacy value on a persisted option leg is accepted and has no effect.
     adjustment: str | None = None
     cycle: str | None = None  # Optional for "continuous" and "option_stream"
-    # Roll-early offset.  "continuous" (futures) uses a bare int = DAYS (0..30).
+    # Roll-early offset.  "continuous" (futures) uses a bare int = DAYS (0..365).
     # "option_stream" uses the unified ``RollOffset`` ``{value, unit:days|months}``
     # — though a bare int is still accepted for it and read as days (legacy
     # shim).  None = no shift.  ("Roll at end of month" for options is the
@@ -345,9 +345,9 @@ def _parse_legs(
                     raw_days = leg.roll_offset.value
                 else:
                     raw_days = leg.roll_offset
-                if not (0 <= raw_days <= 30):
+                if not (0 <= raw_days <= 365):
                     raise ValidationError(
-                        f"Leg '{label}': roll_offset must be between 0 and 30"
+                        f"Leg '{label}': roll_offset must be between 0 and 365"
                     )
                 roll_offset_days = raw_days
 

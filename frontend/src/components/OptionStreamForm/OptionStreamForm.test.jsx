@@ -208,7 +208,7 @@ describe('<OptionStreamForm>', () => {
     expect(screen.queryByLabelText('Roll schedule')).toBeNull();
   });
 
-  it('emits roll_offset {value, unit:days} on value change, clamped 0..30', () => {
+  it('emits roll_offset {value, unit:days} on value change, clamped 0..365', () => {
     const { onChange } = renderForm();
     fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '5' } });
     expect(onChange).toHaveBeenCalledOnce();
@@ -216,8 +216,12 @@ describe('<OptionStreamForm>', () => {
       roll_offset: { value: 5, unit: 'days' },
     });
     onChange.mockClear();
-    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '99' } });
-    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 30, unit: 'days' });
+    // 90 days (~3 months out) is now valid — the cap was raised from 30 to 365.
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '90' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 90, unit: 'days' });
+    onChange.mockClear();
+    fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: '999' } });
+    expect(onChange.mock.calls[0][0].roll_offset).toEqual({ value: 365, unit: 'days' });
   });
 
   it('switches unit to months and re-clamps the value to 0..12', () => {
@@ -250,15 +254,16 @@ describe('<OptionStreamForm>', () => {
   });
 
   // Clamp malformed / out-of-range value input into the unit's range (days
-  // 0..30). Each case emits an integer value (never a string / float / negative).
+  // 0..365). Each case emits an integer value (never a string / float / negative).
   it.each([
     ['empty string', '', 0],
     ['negative', '-5', 0],
     ['non-numeric', 'abc', 0],
-    ['above max', '99', 30],
-    ['exactly max', '30', 30],
+    ['above max', '999', 365],
+    ['exactly max', '365', 365],
+    ['three months out', '90', 90],
     ['in range', '7', 7],
-  ])('clamps Roll offset value (%s) into 0..30 (days) as an int', (_label, raw, expected) => {
+  ])('clamps Roll offset value (%s) into 0..365 (days) as an int', (_label, raw, expected) => {
     const { onChange } = renderForm();
     fireEvent.change(screen.getByLabelText('Roll offset value'), { target: { value: raw } });
     expect(onChange).toHaveBeenCalledOnce();
