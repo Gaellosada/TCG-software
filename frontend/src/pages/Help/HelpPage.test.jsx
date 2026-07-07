@@ -88,12 +88,12 @@ describe('HelpPage', () => {
     expect(screen.getByText(/nav_times/)).toBeTruthy();
   });
 
-  it('documents the implied-leverage readout on the option Size % field', () => {
+  it('documents the implied-leverage readout on the option Size field', () => {
     render(<HelpPage />);
     // The dedicated subsection exists…
-    expect(screen.getByText(/Implied leverage on the Size %/i)).toBeTruthy();
-    // …states the formula in the verifiable "Size% ÷ premium-%-of-strike" form…
-    expect(screen.getByText(/Size % ÷ \(premium as % of strike\)/i)).toBeTruthy();
+    expect(screen.getByText(/Implied leverage on the Size field/i)).toBeTruthy();
+    // …states the formula in the verifiable "Size × 100 ÷ premium-%-of-strike" form…
+    expect(screen.getByText(/Size × 100 ÷ \(premium as % of strike\)/i)).toBeTruthy();
     // …and states the exact colour-band thresholds, DERIVED from LEVERAGE_BANDS
     // so that tuning the constant without updating the Help prose fails here.
     expect(
@@ -108,11 +108,11 @@ describe('HelpPage', () => {
       screen.getByText(new RegExp(`red above ${LEVERAGE_BANDS.red}×`, 'i')),
     ).toBeTruthy();
     // …and the short-leg wipeout multiple formula.
-    expect(screen.getByText(/1 \+ 1 ÷ \(Size % ÷ 100\)/i)).toBeTruthy();
-    // …and ONE self-consistent worked example: Size % ÷ (premium % of strike)
-    // = the stated leverage (4 ÷ 0.5 = 8×).  Guards against the fragments
+    expect(screen.getByText(/1 \+ 1 ÷ Size/i)).toBeTruthy();
+    // …and ONE self-consistent worked example: Size × 100 ÷ (premium % of strike)
+    // = the stated leverage (0.04 × 100 ÷ 0.5 = 8×).  Guards against the fragments
     // drifting back apart.
-    expect(screen.getByText(/that is 4 ÷ 0\.5/i)).toBeTruthy();
+    expect(screen.getByText(/that is 0\.04 × 100 ÷ 0\.5/i)).toBeTruthy();
     expect(screen.getByText(/premium is ≈ 0\.5% of strike/i)).toBeTruthy();
     // …and the bs_mid indicative-not-exact caveat.
     expect(screen.getByText(/Indicative, not exact/i)).toBeTruthy();

@@ -54,23 +54,13 @@ const GREEK_STREAMS = new Set(['gamma', 'vega', 'theta']);
 const ALL_MATURITY_KINDS = ['next_third_friday', 'nearest_to_target', 'end_of_month', 'plus_n_days', 'fixed'];
 const ALL_SELECTION_KINDS = ['by_moneyness', 'by_delta', 'by_strike'];
 
-// ── nav_times presentation seam (UI percent ↔ wire fraction) ──────────────
-// The wire / persisted `nav_times` is a raw FRACTION of NAV (1.0 = full premium
-// notional). Experienced users think in PERCENT, and the Help text documents it
-// that way (100% = full notional), so the control is presented as a percentage.
-// Conversion lives ONLY here on the boundary; the emitted/stored value stays the
-// fraction (NO backend change, NO migration). Both directions round to kill the
-// ×100 / ÷100 float dust (0.0045 → "0.45", not "0.45000000000000007") and to be
-// a stable fixed point across load→display→edit→save round-trips.
-// (Distinct from `delta`, which is a fraction with NO /100 conversion anywhere.)
-function navFractionToPercent(frac) {
-  if (typeof frac !== 'number' || !Number.isFinite(frac)) return '';
-  return Math.round(frac * 1e10) / 1e8;
-}
-function navPercentToFraction(pct) {
-  if (typeof pct !== 'number' || !Number.isFinite(pct)) return pct;
-  return Math.round(pct * 1e8) / 1e10;
-}
+// ── nav_times presentation ────────────────────────────────────────────────
+// The wire / persisted `nav_times` is a raw MULTIPLIER (factor), default 1.0 =
+// unlevered. It is shown and typed VERBATIM — no ×100 / ÷100 conversion — so `1`
+// reads as the natural unlevered value, `2` as double, `0.5` as half. The stored
+// value is unchanged (NO backend change, NO migration); this file only decides
+// what the user sees/types. (Distinct from `delta`, likewise a factor with no
+// /100 conversion anywhere.)
 
 const MATURITY_LABELS = {
   next_third_friday: 'Next 3rd Friday',
@@ -332,26 +322,42 @@ const FUTURES_REFERENCE_LABELS = {
 // One-line description of the futures-notional sizing formula, surfaced as a
 // helper beneath the reference dropdown.
 const FUTURES_NOTIONAL_HELP =
-  'Futures-notional sizing: qty = Size% × NAV / (F_ref × M_fut) — the held '
+  'Futures-notional sizing: qty = Size × NAV / (F_ref × M_fut) — the held '
   + "quantity is sized off the reference future's dollar notional (F_ref = its "
   + 'price, M_fut = its contract multiplier), not the option premium.';
 
+// ── Size (nav_times multiplier) field labels + tooltips, mode-aware ─────────
+// nav_times is a plain FACTOR (default 1 = unlevered), NOT a percentage. The
+// label + tooltip read as a multiplier in both sizing modes.
+const SIZE_LABEL_FUTURES = 'Size (× futures notional)';
+const SIZE_LABEL_PREMIUM = 'Size (× NAV, premium)';
+const SIZE_TOOLTIP_FUTURES =
+  'Factor between the equivalent number of futures (NAV ÷ (F_ref × contract '
+  + 'multiplier)) and the number of option contracts held: '
+  + 'qty = Size × NAV/(F_ref×M_fut). 1 = one option per future you could buy; '
+  + '2 = 2×; 0.5 = half.';
+const SIZE_TOOLTIP_PREMIUM =
+  'Multiple of NAV deployed as option premium: qty = Size × NAV/premium. '
+  + '1 = the full NAV spent on premium.';
+
 /**
- * Shared "Sizing" mode + "Size (% of NAV)" input, rendered identically by both
- * the ``holdRequired`` (portfolio price-leg) and the ``hold_between_rolls``
- * (signals-toggle) branches — they differ ONLY in the Size input's ``title``
- * tooltip. Extracted to kill the near-verbatim duplication (one future-drift
- * hazard). Behaviour is identical; test IDs are preserved.
+ * Shared "Sizing" mode + "Size" (nav_times multiplier) input, rendered
+ * identically by both the ``holdRequired`` (portfolio price-leg) and the
+ * ``hold_between_rolls`` (signals-toggle) branches. Extracted to kill the
+ * near-verbatim duplication (one future-drift hazard). Test IDs are preserved.
+ *
+ * The Size field shows the RAW ``nav_times`` factor (default 1 = unlevered) —
+ * NOT a percentage — and its label + tooltip are mode-aware (see the SIZE_*
+ * constants above).
  *
  * SIZING MODE (Guardrail Sign 5): the implied-leverage readout is
  * premium-notional-specific (leverage = nav_times·strike/premium) and WRONG for
  * futures-notional sizing, so it is shown ONLY in ``premium_notional`` mode. In
  * ``futures_notional`` mode it is replaced by the Futures-reference dropdown +
- * the formula helper (no misleading leverage number). ``nav_times`` (Size %) is
+ * the formula helper (no misleading leverage number). The Size multiplier is
  * exposed in BOTH modes.
  */
 function SizeAndLeverage({
-  title,
   streamValue,
   availableRoots,
   referenceDate,
@@ -366,12 +372,14 @@ function SizeAndLeverage({
 }) {
   const navTimes = typeof streamValue.nav_times === 'number' ? streamValue.nav_times : 1.0;
   const isFutures = sizingMode === 'futures_notional';
+  const sizeLabel = isFutures ? SIZE_LABEL_FUTURES : SIZE_LABEL_PREMIUM;
+  const sizeTooltip = isFutures ? SIZE_TOOLTIP_FUTURES : SIZE_TOOLTIP_PREMIUM;
   return (
     <>
       {/* Sizing mode — Percentage (premium notional, default) vs Futures notional. */}
       <label
         className={styles.fieldInline}
-        title="How the held quantity is sized. Percentage: qty = Size% × NAV / premium (default). Futures notional: qty = Size% × NAV / (reference future's price × its contract multiplier)."
+        title="How the held quantity is sized. Premium notional: qty = Size × NAV / premium (default). Futures notional: qty = Size × NAV / (reference future's price × its contract multiplier)."
       >
         Sizing
         <select
@@ -386,18 +394,18 @@ function SizeAndLeverage({
           <option value="futures_notional">{SIZING_MODE_LABELS.futures_notional}</option>
         </select>
       </label>
-      <label className={styles.fieldInline} title={title}>
-        Size (% of NAV)
+      <label className={styles.fieldInline} title={sizeTooltip}>
+        {sizeLabel}
         <input
           type="number"
           className={styles.input}
           min={0}
           step="any"
-          placeholder="100"
-          value={navFractionToPercent(navTimes)}
+          placeholder="1"
+          value={navTimes}
           onChange={(e) => onNavTimes(e.target.value)}
           disabled={disabled}
-          aria-label="Size (% of NAV)"
+          aria-label={sizeLabel}
           data-testid="nav-times"
           style={navBand && !isFutures ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
         />
@@ -492,7 +500,7 @@ export default function OptionStreamForm({
   const formId = useId();
 
   // Colour band for the implied-leverage readout (green/amber/red). Set by the
-  // <ImpliedLeverageReadout> child so the Size% input can be tinted to match.
+  // <ImpliedLeverageReadout> child so the Size input can be tinted to match.
   const [navBand, setNavBand] = useState(null);
 
   // Resolve a usable value: if the parent supplies null we still render
@@ -592,20 +600,18 @@ export default function OptionStreamForm({
     }
     // Reset the leverage tint on hold-off: the readout unmounts without
     // clearing the parent-held band, so a stale colour would flash on the
-    // Size% input's border for one frame when hold is re-enabled.
+    // Size input's border for one frame when hold is re-enabled.
     if (!checked) setNavBand(null);
     emit(patch);
   }, [emit, v.nav_times]);
 
-  const setNavTimes = useCallback((rawPercent) => {
-    // The control is a PERCENT of NAV; convert to the stored fraction (÷100).
-    // Clamp to a positive number (the backend validator also enforces finite
-    // > 0). An empty / non-numeric / non-positive entry falls back to the
-    // fraction 1.0 (= 100% of NAV, full notional) so the emitted ref stays valid.
-    const parsedPct = parseFloat(rawPercent);
-    const value = Number.isFinite(parsedPct) && parsedPct > 0
-      ? navPercentToFraction(parsedPct)
-      : 1.0;
+  const setNavTimes = useCallback((raw) => {
+    // The control is the raw nav_times MULTIPLIER (factor, default 1 =
+    // unlevered) — stored VERBATIM, no ×100 / ÷100. Clamp to a positive number
+    // (the backend validator also enforces finite > 0); an empty / non-numeric /
+    // non-positive entry falls back to 1.0 so the emitted ref stays valid.
+    const parsed = parseFloat(raw);
+    const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 1.0;
     emit({ nav_times: value });
   }, [emit]);
 
@@ -1063,7 +1069,6 @@ export default function OptionStreamForm({
               Held between rolls — fixed-contract $-P&amp;L (required for option legs)
             </span>
             <SizeAndLeverage
-              title="Premium notional held as a percentage of NAV (100% = full notional). The held quantity at each roll = (Size%/100) × NAV_at_roll / premium_at_roll. Direction is the leg's long/short weight sign."
               streamValue={v}
               availableRoots={availableRoots}
               referenceDate={referenceDate}
@@ -1098,7 +1103,6 @@ export default function OptionStreamForm({
             </label>
             {v.hold_between_rolls && (
               <SizeAndLeverage
-                title="Premium notional held as a percentage of NAV (100% = full notional). The held quantity at each roll = (Size%/100) × NAV_at_roll / premium_at_roll. This is the SIZE (direction is the block's long/short weight sign); it can exceed 100% to leverage the premium notional."
                 streamValue={v}
                 availableRoots={availableRoots}
                 referenceDate={referenceDate}
@@ -1145,10 +1149,10 @@ export {
   SIZING_MODE_LABELS,
   FUTURES_REFERENCE_LABELS,
   FUTURES_NOTIONAL_HELP,
+  SIZE_LABEL_FUTURES,
+  SIZE_LABEL_PREMIUM,
   defaultMaturity,
   defaultSelection,
   deriveCycleOptions,
   pickDefaultCycle,
-  navFractionToPercent,
-  navPercentToFraction,
 };

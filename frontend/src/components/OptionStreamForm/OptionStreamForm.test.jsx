@@ -9,9 +9,9 @@ import OptionStreamForm, {
   CYCLE_LABELS,
   deriveCycleOptions,
   pickDefaultCycle,
-  navFractionToPercent,
-  navPercentToFraction,
   SIZING_MODE_LABELS,
+  SIZE_LABEL_FUTURES,
+  SIZE_LABEL_PREMIUM,
 } from './OptionStreamForm';
 
 afterEach(cleanup);
@@ -678,7 +678,7 @@ describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
     expect(emitted.nav_times).toBe(1.0);
   });
 
-  it('shows the nav_times input as a PERCENT when hold is already on and edits it', () => {
+  it('shows the nav_times input as the RAW multiplier when hold is on and edits it', () => {
     const onChange = vi.fn();
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
@@ -688,13 +688,13 @@ describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
     renderForm({ value, onChange, showHoldControls: true });
     const navInput = screen.getByTestId('nav-times');
     expect(navInput).toBeTruthy();
-    // The wire fraction 1.0 (full notional) DISPLAYS as 100 (%).
-    expect(String(navInput.value)).toBe('100');
-    // Entering a percent > 100 emits the corresponding fraction > 1 (leverage).
-    fireEvent.change(navInput, { target: { value: '250' } });
+    // The wire multiplier 1.0 (unlevered) DISPLAYS as the raw "1" (not 100).
+    expect(String(navInput.value)).toBe('1');
+    // Typing 2 stores nav_times = 2 VERBATIM (NOT 200, NOT 0.02).
+    fireEvent.change(navInput, { target: { value: '2' } });
     expect(onChange).toHaveBeenCalled();
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
-    expect(emitted.nav_times).toBe(2.5);
+    expect(emitted.nav_times).toBe(2);
     expect(emitted.hold_between_rolls).toBe(true);
   });
 
@@ -760,7 +760,7 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
     expect(emitted.cycle).toBe('M');
   });
 
-  it('keeps nav_times editable as a PERCENT (always shown, no toggle gating)', () => {
+  it('keeps nav_times editable as the RAW multiplier (always shown, no toggle gating)', () => {
     const onChange = vi.fn();
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
@@ -768,20 +768,20 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
       nav_times: 1.0,
     };
     renderForm({ value, onChange, holdRequired: true });
-    // Enter 0.45% → stored fraction 0.0045 (÷100 boundary conversion).
-    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0.45' } });
+    // Enter 0.5 → stored VERBATIM as 0.5 (no ×100/÷100 conversion).
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0.5' } });
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
-    expect(emitted.nav_times).toBe(0.0045);
+    expect(emitted.nav_times).toBe(0.5);
   });
 
-  it('displays a small stored fraction as a clean percent (0.0045 → "0.45", no float dust)', () => {
+  it('displays the stored multiplier verbatim (0.0045 → "0.0045", no ×100)', () => {
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
       hold_between_rolls: true,
       nav_times: 0.0045,
     };
     renderForm({ value, holdRequired: true });
-    expect(String(screen.getByTestId('nav-times').value)).toBe('0.45');
+    expect(String(screen.getByTestId('nav-times').value)).toBe('0.0045');
   });
 });
 
@@ -874,30 +874,53 @@ describe('<OptionStreamForm> sizing mode (premium vs futures notional)', () => {
   });
 });
 
-// ── UI percent ↔ wire fraction conversion is a stable fixed point ──────────
-describe('nav_times percent↔fraction conversion (presentation seam)', () => {
-  it('display rounds ×100 without float dust', () => {
-    expect(navFractionToPercent(0.0045)).toBe(0.45);
-    expect(navFractionToPercent(1.0)).toBe(100);
-    expect(navFractionToPercent(2.5)).toBe(250);
-    expect(navFractionToPercent(0.1)).toBe(10);
+// ── Size field is a raw multiplier (no ×100 / ÷100), mode-aware label ───────
+describe('nav_times Size multiplier presentation', () => {
+  const holdValue = (nav = 1.0) => ({
+    ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+    hold_between_rolls: true,
+    nav_times: nav,
   });
 
-  it('parse rounds ÷100 without float dust', () => {
-    expect(navPercentToFraction(0.45)).toBe(0.0045);
-    expect(navPercentToFraction(100)).toBe(1.0);
-    expect(navPercentToFraction(250)).toBe(2.5);
-    expect(navPercentToFraction(10)).toBe(0.1);
+  it('default nav_times 1.0 displays as the raw "1"', () => {
+    renderForm({ value: holdValue(1.0), showHoldControls: true });
+    expect(String(screen.getByTestId('nav-times').value)).toBe('1');
   });
 
-  it('is a fixed point across load→display→edit→save round-trips', () => {
-    // Loaded fraction → percent → back to the SAME fraction.
-    for (const frac of [0.0045, 0.1, 1.0, 2.5, 0.5]) {
-      expect(navPercentToFraction(navFractionToPercent(frac))).toBe(frac);
-    }
-    // Freshly entered percent → fraction → back to the SAME percent.
-    for (const pct of [0.45, 10, 100, 250, 50]) {
-      expect(navFractionToPercent(navPercentToFraction(pct))).toBe(pct);
-    }
+  it('typing 2 stores nav_times = 2 verbatim (NOT 0.02, NOT 200)', () => {
+    const onChange = vi.fn();
+    renderForm({ value: holdValue(1.0), onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '2' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.nav_times).toBe(2);
+  });
+
+  it('supports leverage > 1 and fractions < 1 verbatim', () => {
+    const onChange = vi.fn();
+    renderForm({ value: holdValue(1.0), onChange, showHoldControls: true });
+    const input = screen.getByTestId('nav-times');
+    fireEvent.change(input, { target: { value: '3.5' } });
+    expect(onChange.mock.calls[onChange.mock.calls.length - 1][0].nav_times).toBe(3.5);
+    fireEvent.change(input, { target: { value: '0.25' } });
+    expect(onChange.mock.calls[onChange.mock.calls.length - 1][0].nav_times).toBe(0.25);
+  });
+
+  it('labels the Size field as a factor — premium mode by default, futures mode when set', () => {
+    // Premium-notional (default) mode.
+    const { unmount } = renderForm({ value: holdValue(1.0), showHoldControls: true });
+    let input = screen.getByTestId('nav-times');
+    expect(input.getAttribute('aria-label')).toBe(SIZE_LABEL_PREMIUM);
+    expect(SIZE_LABEL_PREMIUM).toMatch(/×/); // reads as a multiplier, not a %
+    expect(SIZE_LABEL_PREMIUM).not.toMatch(/%/);
+    unmount();
+    // Futures-notional mode.
+    renderForm({
+      value: { ...holdValue(1.0), sizing_mode: 'futures_notional' },
+      showHoldControls: true,
+    });
+    input = screen.getByTestId('nav-times');
+    expect(input.getAttribute('aria-label')).toBe(SIZE_LABEL_FUTURES);
+    expect(SIZE_LABEL_FUTURES).toMatch(/×/);
+    expect(SIZE_LABEL_FUTURES).not.toMatch(/%/);
   });
 });
