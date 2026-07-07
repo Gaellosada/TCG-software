@@ -284,6 +284,48 @@ function HelpPage() {
             premium paid. Practical rule: high leverage &rarr; keep Size % small.
           </p>
         </Details>
+
+        <Details title="Futures-notional sizing">
+          <p>
+            By default an option leg is sized in <strong>premium notional</strong>:
+            the held quantity is <code>Size % &times; NAV &divide; premium</code>, so
+            the dollars you deploy equal the premium. The <strong>Sizing</strong>{' '}
+            dropdown on the hold form offers a second mode, <strong>Futures
+            notional</strong>, which sizes the position off the corresponding{' '}
+            <em>future&apos;s</em> dollar notional instead of the option premium:
+          </p>
+          <pre className={styles.codeBlock}><code>
+{`qty = Size % × NAV ÷ (F_ref × M_fut)`}
+          </code></pre>
+          <p>
+            where <code>F_ref</code> is the reference future&apos;s price and{' '}
+            <code>M_fut</code> its contract multiplier. This expresses the leg&apos;s
+            size as a fraction of a futures position rather than as premium spent &mdash;
+            useful when you think of an option overlay in terms of the underlying
+            contract it hedges or replaces.
+          </p>
+          <p>
+            <strong>Futures reference.</strong> When Futures notional is selected, a{' '}
+            <strong>Futures reference</strong> dropdown chooses which listed future
+            supplies <code>F_ref</code>:
+          </p>
+          <ul className={styles.tips}>
+            <li>
+              <strong>Nearest on/after expiry</strong> (default) &mdash; the nearest
+              listed future expiring on or after the option&apos;s expiry, on the
+              root&apos;s real cycle.
+            </li>
+            <li>
+              <strong>Nearest (abs distance)</strong> &mdash; the future whose expiry
+              is closest in absolute time to the option&apos;s expiry.
+            </li>
+          </ul>
+          <p>
+            The implied-leverage readout shown for percentage sizing is specific to
+            premium notional, so it is hidden in Futures-notional mode &mdash; the
+            formula above is surfaced beneath the reference dropdown instead.
+          </p>
+        </Details>
       </section>
 
       {/* ── Portfolio ── */}

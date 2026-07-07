@@ -43,6 +43,16 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg, referenceDa
           // the backend requires it, so force it on regardless of form state.
           hold_between_rolls: true,
           nav_times: instrument.nav_times ?? 1.0,
+          // SIZING MODE — forward the futures-notional config ONLY when the user
+          // opted into it. Premium-notional (the default) adds NO keys, so a leg
+          // the user never touches serialises byte-identically to today (backend
+          // default is premium_notional / nearest_on_or_after).
+          ...(instrument.sizing_mode === 'futures_notional'
+            ? {
+              sizing_mode: 'futures_notional',
+              futures_reference: instrument.futures_reference || 'nearest_on_or_after',
+            }
+            : {}),
           weight: 100,
         });
       } else if (instrument.type === 'continuous') {

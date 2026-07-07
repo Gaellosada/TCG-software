@@ -89,4 +89,62 @@ describe('AddHoldingModal — option_stream leg mapping', () => {
     expect('adjustment' in leg).toBe(false);
     expect(leg.roll_offset).toBe(0);
   });
+
+  it('forwards futures-notional sizing (sizing_mode + futures_reference) when the user opts in', () => {
+    const { onAddLeg } = renderModal();
+    capturedOnSelect({
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'P',
+      cycle: 'M',
+      maturity: { kind: 'nearest_to_target', target_days: 30 },
+      selection: { kind: 'by_delta', target: -0.1, tolerance: 0.05, strict: false },
+      stream: 'mid',
+      roll_offset: 0,
+      hold_between_rolls: true,
+      nav_times: 1.0,
+      sizing_mode: 'futures_notional',
+      futures_reference: 'nearest_abs',
+    });
+    const leg = onAddLeg.mock.calls[0][0];
+    expect(leg.sizing_mode).toBe('futures_notional');
+    expect(leg.futures_reference).toBe('nearest_abs');
+  });
+
+  it('a premium-notional (default) leg carries NO sizing_mode / futures_reference keys (byte-identical)', () => {
+    const { onAddLeg } = renderModal();
+    capturedOnSelect({
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'C',
+      cycle: 'M',
+      maturity: { kind: 'nearest_to_target', target_days: 30 },
+      selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
+      stream: 'mid',
+      roll_offset: 0,
+      // No sizing_mode / futures_reference — the untouched default.
+    });
+    const leg = onAddLeg.mock.calls[0][0];
+    expect('sizing_mode' in leg).toBe(false);
+    expect('futures_reference' in leg).toBe(false);
+  });
+
+  it('seeds futures_reference default when sizing is futures but reference is absent', () => {
+    const { onAddLeg } = renderModal();
+    capturedOnSelect({
+      type: 'option_stream',
+      collection: 'OPT_SP_500',
+      option_type: 'P',
+      cycle: 'M',
+      maturity: { kind: 'nearest_to_target', target_days: 30 },
+      selection: { kind: 'by_delta', target: -0.1, tolerance: 0.05, strict: false },
+      stream: 'mid',
+      roll_offset: 0,
+      sizing_mode: 'futures_notional',
+      // futures_reference intentionally omitted.
+    });
+    const leg = onAddLeg.mock.calls[0][0];
+    expect(leg.sizing_mode).toBe('futures_notional');
+    expect(leg.futures_reference).toBe('nearest_on_or_after');
+  });
 });

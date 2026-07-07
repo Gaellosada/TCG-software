@@ -11,6 +11,7 @@ import OptionStreamForm, {
   pickDefaultCycle,
   navFractionToPercent,
   navPercentToFraction,
+  SIZING_MODE_LABELS,
 } from './OptionStreamForm';
 
 afterEach(cleanup);
@@ -776,6 +777,95 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
     };
     renderForm({ value, holdRequired: true });
     expect(String(screen.getByTestId('nav-times').value)).toBe('0.45');
+  });
+});
+
+// ── Sizing mode (futures-notional) — shared across signals + portfolio ──────
+describe('<OptionStreamForm> sizing mode (premium vs futures notional)', () => {
+  const holdValue = () => ({
+    ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+    hold_between_rolls: true,
+    nav_times: 1.0,
+  });
+
+  it('defaults the sizing-mode select to premium_notional; no reference dropdown; leverage readout shown', () => {
+    renderForm({ value: holdValue(), showHoldControls: true });
+    const sel = screen.getByTestId('sizing-mode');
+    expect(sel.value).toBe('premium_notional');
+    // Futures-reference dropdown is absent in percentage mode.
+    expect(screen.queryByTestId('futures-reference')).toBeNull();
+    expect(screen.queryByTestId('futures-notional-help')).toBeNull();
+    // The premium-notional leverage readout renders (fallback hint here, since
+    // the test ROOTS carry no last_trade_date / referenceDate to probe).
+    expect(screen.getByTestId('nav-hint')).toBeTruthy();
+  });
+
+  it('offers exactly two sizing-mode options with the documented labels', () => {
+    renderForm({ value: holdValue(), showHoldControls: true });
+    const opts = Array.from(screen.getByTestId('sizing-mode').querySelectorAll('option'));
+    expect(opts.map((o) => o.value)).toEqual(['premium_notional', 'futures_notional']);
+    expect(opts.map((o) => o.textContent)).toEqual([
+      SIZING_MODE_LABELS.premium_notional,
+      SIZING_MODE_LABELS.futures_notional,
+    ]);
+  });
+
+  it('switching to Futures notional emits sizing_mode + seeds futures_reference=nearest_on_or_after', () => {
+    const onChange = vi.fn();
+    renderForm({ value: holdValue(), onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('sizing-mode'), { target: { value: 'futures_notional' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.sizing_mode).toBe('futures_notional');
+    expect(emitted.futures_reference).toBe('nearest_on_or_after');
+  });
+
+  it('in futures mode: reference dropdown (2 options, NO continuous_front) + helper + nav_times; leverage readout HIDDEN', () => {
+    const value = { ...holdValue(), sizing_mode: 'futures_notional', futures_reference: 'nearest_on_or_after' };
+    renderForm({ value, showHoldControls: true });
+    const ref = screen.getByTestId('futures-reference');
+    const refOpts = Array.from(ref.querySelectorAll('option')).map((o) => o.value);
+    expect(refOpts).toEqual(['nearest_on_or_after', 'nearest_abs']);
+    expect(refOpts).not.toContain('continuous_front');
+    expect(screen.getByTestId('futures-notional-help')).toBeTruthy();
+    // nav_times stays exposed in both modes.
+    expect(screen.getByTestId('nav-times')).toBeTruthy();
+    // The premium-notional readout must NOT render (neither the hint nor the data group).
+    expect(screen.queryByTestId('nav-hint')).toBeNull();
+    expect(screen.queryByTestId('lev-readout-group')).toBeNull();
+  });
+
+  it('changing the futures reference emits futures_reference=nearest_abs', () => {
+    const onChange = vi.fn();
+    const value = { ...holdValue(), sizing_mode: 'futures_notional', futures_reference: 'nearest_on_or_after' };
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('futures-reference'), { target: { value: 'nearest_abs' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.futures_reference).toBe('nearest_abs');
+  });
+
+  it('renders the sizing control in the PORTFOLIO holdRequired branch (percentage mode)', () => {
+    renderForm({ value: holdValue(), holdRequired: true });
+    expect(screen.getByTestId('sizing-mode').value).toBe('premium_notional');
+    expect(screen.queryByTestId('futures-reference')).toBeNull();
+  });
+
+  it('futures mode works in the PORTFOLIO holdRequired branch too (readout hidden)', () => {
+    const value = { ...holdValue(), sizing_mode: 'futures_notional' };
+    renderForm({ value, holdRequired: true });
+    expect(screen.getByTestId('futures-reference')).toBeTruthy();
+    expect(screen.getByTestId('futures-notional-help')).toBeTruthy();
+    expect(screen.queryByTestId('nav-hint')).toBeNull();
+  });
+
+  it('a never-touched default leg carries NO sizing_mode / futures_reference key (byte-identical serialisation)', () => {
+    const v = buildDefaultOptionStream({ availableRoots: ROOTS });
+    expect('sizing_mode' in v).toBe(false);
+    expect('futures_reference' in v).toBe(false);
+  });
+
+  it('the sizing control is NOT shown when hold is off (signals default)', () => {
+    renderForm({ showHoldControls: true }); // hold defaults off
+    expect(screen.queryByTestId('sizing-mode')).toBeNull();
   });
 });
 
