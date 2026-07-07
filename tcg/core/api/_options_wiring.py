@@ -561,6 +561,53 @@ def build_stream_resolver_wiring(
     return cached, maturity_resolver, underlying_resolver, bulk
 
 
+def build_futures_reference_resolver(
+    market_data: MarketDataService,
+    *,
+    option_collection: str,
+    futures_reference: str,
+    prefetch_window: "tuple[date, date] | None" = None,
+) -> Callable[[date, date], Awaitable[float | None]]:
+    """Build the per-roll reference-future PRICE resolver for futures-notional sizing.
+
+    Maps ``OPT_<root>`` → ``FUT_<root>`` BY NAME (Guardrail Sign 3 — never
+    ``underlying_id``) and returns an async ``(roll_date, option_expiry) -> price``
+    closure the option-stream resolver calls at each roll.  Reuses the existing
+    ``_FuturesDataPortAdapter`` (per-window memoized) so it honours the same
+    partition-pruning / N+1 protections as the underlying-price path.
+
+    Modes:
+      * ``nearest_on_or_after`` — the nearest LISTED future expiring >= the option
+        expiry (root's real cycle: monthly VIX, quarterly SP/NDX).  Backed by
+        ``get_futures_close_on_or_after_expiration``.
+      * ``nearest_abs`` / ``continuous_front`` — NOT yet wired (no data-layer
+        contract-expiration listing / continuous-front hookup here); the closure
+        raises so the caller surfaces a clear not-implemented error rather than
+        mis-sizing off the wrong reference.  The field still validates upstream.
+    """
+    from tcg.types.multipliers import futures_collection_for_option
+
+    fut_collection = futures_collection_for_option(option_collection)
+    futures_port = _FuturesDataPortAdapter(market_data, prefetch_window=prefetch_window)
+
+    if futures_reference == "nearest_on_or_after":
+
+        async def _resolve(roll_date: date, option_expiry: date) -> float | None:
+            return await futures_port.get_futures_close_on_or_after_expiration(
+                fut_collection, option_expiry, roll_date
+            )
+
+        return _resolve
+
+    async def _not_implemented(roll_date: date, option_expiry: date) -> float | None:
+        raise NotImplementedError(
+            f"futures_reference={futures_reference!r} is not yet implemented; "
+            f"use 'nearest_on_or_after'"
+        )
+
+    return _not_implemented
+
+
 def build_options_selector(
     market_data: MarketDataService,
     *,

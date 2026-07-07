@@ -18,40 +18,7 @@ import numpy as np
 
 from tcg.engine.hold_pnl import _compound_with_hold, _HoldPnLSpec
 
-
-# ── Futures-notional oracle (base-NAV dollar accounting) ────────────────────
-def oracle_ratio_futures(
-    owner_prev: np.ndarray,
-    owner_cur: np.ndarray,
-    is_roll: np.ndarray,
-    roll_future_ref: np.ndarray,
-    *,
-    nav_times: float,
-    weight: float,
-    m_fut: float,
-    m_opt: float,
-    base_nav: float = 1_000_000.0,
-) -> np.ndarray:
-    """Fixed-contract dollar-P&L NAV → base-1 ratio, sizing off the FUTURE notional.
-
-    ``qty = nav_times·NAV_roll/(F_ref·M_fut)`` (fractional), daily $ =
-    ``sign(weight)·qty·(cur-prev)·M_opt``, resize at each roll off the reference
-    future price frozen at that roll.  ``owner_prev``/``owner_cur`` are the step
-    owner's OPTION mids on days t-1 / t (OLD contract into a roll).
-    """
-    T = len(owner_cur)
-    nav = np.empty(T, dtype=np.float64)
-    nav[0] = base_nav
-    sign = 1.0 if weight > 0 else -1.0
-    qty = nav_times * base_nav / (roll_future_ref[0] * m_fut)
-    for t in range(1, T):
-        dprem = owner_cur[t] - owner_prev[t]
-        if not np.isfinite(dprem):
-            dprem = 0.0
-        nav[t] = nav[t - 1] + sign * qty * dprem * m_opt
-        if bool(is_roll[t]):
-            qty = nav_times * nav[t] / (roll_future_ref[t] * m_fut)
-    return nav / nav[0]
+from _hold_pnl_oracle import oracle_ratio_futures
 
 
 def _run(spec: _HoldPnLSpec, T: int) -> np.ndarray:

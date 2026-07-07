@@ -176,6 +176,16 @@ class LegSpec(BaseModel):
     # non-option legs.  Default False = byte-identical to the daily-reselect path.
     hold_between_rolls: bool = False
     nav_times: float = 1.0
+    # Futures-notional sizing for a hold-mode option PRICE leg (mirrors
+    # ``OptionStreamRef`` / ``InstrumentOptionStream``).  ``premium_notional``
+    # (DEFAULT, byte-identical): qty = nav_times·NAV_roll/premium_roll.
+    # ``futures_notional``: qty = nav_times·NAV_roll/(F_ref·M_fut), daily $ =
+    # qty·Δpremium·M_opt.  ``futures_reference`` picks the reference future (only
+    # meaningful in futures_notional mode).  Ignored for non-hold / level legs.
+    sizing_mode: Literal["premium_notional", "futures_notional"] = "premium_notional"
+    futures_reference: Literal[
+        "nearest_on_or_after", "continuous_front", "nearest_abs"
+    ] = "nearest_on_or_after"
 
     @field_validator("nav_times")
     @classmethod
@@ -718,6 +728,8 @@ async def _evaluate_option_stream_leg(
             roll_offset=roll_offset,
             hold_between_rolls=is_hold_premium,
             nav_times=leg.nav_times,
+            sizing_mode=leg.sizing_mode,
+            futures_reference=leg.futures_reference,
         )
     except PydanticValidationError as exc:
         raise ValidationError(f"Leg '{label}': {exc}") from exc
@@ -740,7 +752,15 @@ async def _evaluate_option_stream_leg(
         fetcher = make_signal_fetcher(svc, start_date, end_date)
         try:
             dates_arr, premium = await fetcher(instrument, "close")
-            _d, is_roll_f, roll_premium = await fetcher.fetch_hold_roll_info(instrument)
+            # 3→4-tuple ripple (Guardrail Sign 4): the production fetcher carries
+            # roll_future_ref for futures-notional sizing; a legacy 3-tuple double
+            # (premium_notional only) still works.
+            _rres = await fetcher.fetch_hold_roll_info(instrument)
+            if len(_rres) == 4:
+                _d, is_roll_f, roll_premium, roll_fref = _rres
+            else:
+                _d, is_roll_f, roll_premium = _rres
+                roll_fref = None
         except (SignalDataError, SignalValidationError) as exc:
             raise ValidationError(f"Leg '{label}': {exc}") from exc
 
@@ -773,6 +793,19 @@ async def _evaluate_option_stream_leg(
                 f"{_diagnostic_hint(hold_diagnostics)}"
             )
         T = int(premium.shape[0])
+        # Futures-notional sizing: resolve the per-root multipliers via the fetcher
+        # side-channel (live-first / config fallback in the core layer); a NaN pair
+        # triggers the engine tail carry-forward.  premium_notional legs leave the
+        # multipliers/roll_future_ref inert.
+        mult_fut = float("nan")
+        mult_opt = float("nan")
+        roll_fref_arr: "npt.NDArray[np.float64] | None" = None
+        if leg.sizing_mode == "futures_notional":
+            if roll_fref is not None:
+                roll_fref_arr = np.asarray(roll_fref, dtype=np.float64)
+            _mult_fn = getattr(fetcher, "fetch_hold_multipliers", None)
+            if _mult_fn is not None:
+                mult_fut, mult_opt = await _mult_fn(instrument)
         # DIRECTION is the leg weight SIGN (a portfolio leg is always held, so
         # ``pos_active`` is all True); ``nav_times`` is the premium-notional SIZE.
         # This is exactly the spec signal_exec builds for a hold-mode option
@@ -785,6 +818,10 @@ async def _evaluate_option_stream_leg(
             is_roll=np.asarray(is_roll_f, dtype=np.float64) > 0.5,
             roll_premium=np.asarray(roll_premium, dtype=np.float64),
             pos_active=np.ones(T, dtype=np.bool_),
+            sizing_mode=leg.sizing_mode,
+            roll_future_ref=roll_fref_arr,
+            mult_fut=float(mult_fut),
+            mult_opt=float(mult_opt),
         )
         equity_ratio, _step_scale, _hold_contrib = _compound_with_hold(
             np.zeros(max(T - 1, 0), dtype=np.float64), [spec]

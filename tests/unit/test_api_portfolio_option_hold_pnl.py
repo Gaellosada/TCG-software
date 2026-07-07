@@ -191,6 +191,39 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
     np.testing.assert_allclose(values, expected, rtol=1e-12, atol=1e-12)
 
 
+async def test_evaluate_option_stream_leg_futures_notional(monkeypatch):
+    """A portfolio option PRICE leg in futures_notional mode books the futures
+    oracle equity (proves portfolio.py threads roll_future_ref + multipliers)."""
+    from _hold_pnl_oracle import oracle_ratio_futures
+
+    roll_fref = np.array([4500.0, np.nan, np.nan, 4520.0, np.nan, np.nan])
+
+    def _fut_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True,
+            roll_future_ref=roll_fref,
+            multipliers=(50.0, 50.0),  # SP_500
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _fut_fetcher)
+    leg = LegSpec(**_hold_put_leg(), sizing_mode="futures_notional")
+    dates, values, mode = await _evaluate_option_stream_leg(
+        "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
+    )
+    assert mode == "price_hold"
+    expected = 100.0 * oracle_ratio_futures(
+        _OWNER_PREV,
+        _OWNER_CUR,
+        _IS_ROLL,
+        roll_fref,
+        nav_times=1.0,
+        weight=-100.0,
+        m_fut=50.0,
+        m_opt=50.0,
+    )
+    np.testing.assert_allclose(values, expected, rtol=1e-10, atol=1e-10)
+
+
 # ── The abs-weight wiring in isolation (why direction must be applied once) ──
 
 

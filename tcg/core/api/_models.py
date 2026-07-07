@@ -184,6 +184,18 @@ class OptionStreamRef(BaseModel):
     # weight ∈ [-100, 100] cannot express — hence a separate field.  Must be finite
     # and > 0.  Ignored when ``hold_between_rolls`` is False.
     nav_times: float = 1.0
+    # SIZING MODE (hold-mode $-P&L only).  ``premium_notional`` (DEFAULT, byte-
+    # identical to shipped): qty = nav_times·NAV_roll/premium_roll.
+    # ``futures_notional`` (opt-in): qty = nav_times·NAV_roll/(F_ref·M_fut) and
+    # daily $ = qty·Δpremium·M_opt — sized off the corresponding FUTURE's notional.
+    sizing_mode: Literal["premium_notional", "futures_notional"] = "premium_notional"
+    # Reference-future selection — only meaningful when sizing_mode=='futures_notional'.
+    # ``nearest_on_or_after`` (DEFAULT): nearest LISTED future expiring >= the option
+    # expiry (root's real cycle); ``nearest_abs``: closest |time| expiry;
+    # ``continuous_front``: the app's continuous front-month price at the roll date.
+    futures_reference: Literal[
+        "nearest_on_or_after", "continuous_front", "nearest_abs"
+    ] = "nearest_on_or_after"
 
     @field_validator("cycle", mode="before")
     @classmethod

@@ -19,6 +19,7 @@ behaviour is unchanged; ``signals.py`` re-imports them.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any
 
@@ -42,6 +43,8 @@ from tcg.types.signal import (
     InstrumentOptionStream,
     InstrumentSpot,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +393,12 @@ def make_signal_fetcher(
     # input (which runs FIRST, via operand resolution) and read by
     # ``fetch_hold_roll_info`` (which ``signal_exec`` calls afterwards for the
     # fixed-contract dollar-P&L path) — so the resolver runs ONCE per hold input.
-    _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any]] = {}
+    _hold_roll_info_cache: dict[Any, tuple[Any, Any, Any, Any]] = {}
+    # Companion: the resolved (m_fut, m_opt) multipliers for a futures-notional
+    # hold input, keyed the same way, populated during the same ``fetch``.  Read by
+    # ``fetch_hold_multipliers`` (signal_exec / portfolio) — the engine never reads
+    # dwh, so the live-first / config-fallback resolution happens here in core.
+    _hold_mult_cache: dict[Any, tuple[float, float]] = {}
     # Companion cache: the resolver's per-date diagnostics (``error_codes``) for a
     # hold-mode option input, keyed the same way and populated during the SAME
     # ``fetch``.  Read by the portfolio all-NaN error path via
@@ -403,6 +411,12 @@ def make_signal_fetcher(
         # maturity/selection/stream/roll_offset) — the axes that determine the
         # held-premium + roll structure.  nav_times is EXCLUDED (it is a sizing
         # multiple applied downstream in signal_exec; the series is identical).
+        #
+        # Guardrail Sign 4: sizing_mode + futures_reference ARE part of the key.
+        # futures_notional mode attaches a ``roll_future_ref`` array (and picks a
+        # different reference per futures_reference), so a premium_notional cached
+        # result must NOT be served for a futures_notional leg with otherwise
+        # identical axes (and vice-versa) — a collision would silently mis-size.
         return (
             instrument.collection,
             instrument.option_type,
@@ -411,6 +425,8 @@ def make_signal_fetcher(
             repr(instrument.selection),
             instrument.stream,
             (int(instrument.roll_offset.value), instrument.roll_offset.unit),
+            instrument.sizing_mode,
+            instrument.futures_reference,
         )
 
     async def fetch(
@@ -518,25 +534,50 @@ def make_signal_fetcher(
             roll_info_out: dict[str, Any] | None = (
                 {} if instrument.hold_between_rolls else None
             )
-            values, diagnostics, _contracts = await resolve_option_stream(
-                dates=trade_dates,
-                collection=instrument.collection,
-                option_type=instrument.option_type,
-                cycle=_cycle,
-                maturity=instrument.maturity,
-                selection=instrument.selection,
-                stream=instrument.stream,
-                roll_offset=instrument.roll_offset,
-                chain_reader=chain_reader,
-                maturity_resolver=mat_resolver,
-                underlying_price_resolver=ul_resolver,
-                bulk_chain_reader=bulk_reader,
-                available_expirations=all_expirations,
-                available_expirations_by_date=available_by_date,
-                concurrency_gate=gate,
-                hold_between_rolls=instrument.hold_between_rolls,
-                hold_roll_info_out=roll_info_out,
-            )
+            # Futures-notional sizing: build the per-roll reference-future price
+            # resolver (OPT_→FUT_ by name).  Only in hold + futures_notional mode;
+            # premium_notional passes None → resolver never touches futures data →
+            # byte-identical to the shipped path.
+            futures_ref_resolver = None
+            if (
+                instrument.hold_between_rolls
+                and instrument.sizing_mode == "futures_notional"
+            ):
+                from tcg.core.api._options_wiring import (
+                    build_futures_reference_resolver,
+                )
+
+                futures_ref_resolver = build_futures_reference_resolver(
+                    svc,
+                    option_collection=instrument.collection,
+                    futures_reference=instrument.futures_reference,
+                    prefetch_window=(trade_dates[0], trade_dates[-1]),
+                )
+            try:
+                values, diagnostics, _contracts = await resolve_option_stream(
+                    dates=trade_dates,
+                    collection=instrument.collection,
+                    option_type=instrument.option_type,
+                    cycle=_cycle,
+                    maturity=instrument.maturity,
+                    selection=instrument.selection,
+                    stream=instrument.stream,
+                    roll_offset=instrument.roll_offset,
+                    chain_reader=chain_reader,
+                    maturity_resolver=mat_resolver,
+                    underlying_price_resolver=ul_resolver,
+                    bulk_chain_reader=bulk_reader,
+                    available_expirations=all_expirations,
+                    available_expirations_by_date=available_by_date,
+                    concurrency_gate=gate,
+                    hold_between_rolls=instrument.hold_between_rolls,
+                    hold_roll_info_out=roll_info_out,
+                    futures_reference_resolver=futures_ref_resolver,
+                )
+            except NotImplementedError as exc:
+                # nearest_abs / continuous_front are not yet wired — surface a LOUD
+                # request-time error rather than mis-size off a missing reference.
+                raise SignalValidationError(str(exc)) from exc
 
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)
             if diag_sink is not None:
@@ -557,14 +598,46 @@ def make_signal_fetcher(
                 )
             if roll_info_out is not None:
                 key = _hold_key(instrument)
+                # 3→4-tuple ripple (Guardrail Sign 4): carry roll_future_ref (NaN
+                # array in premium mode where the resolver populated nothing).
+                _roll_fref = roll_info_out.get("roll_future_ref")
                 _hold_roll_info_cache[key] = (
                     dates_arr,
                     roll_info_out["is_roll"],
                     roll_info_out["roll_premium"],
+                    _roll_fref,
                 )
                 # Companion: stash the per-date diagnostics so the portfolio hold
                 # path can name the dominant cause on an all-NaN resolve.
                 _hold_diag_cache[key] = diagnostics
+                # Futures-notional: resolve the per-root multipliers (live-first,
+                # config fallback; never a silent 1.0) and cache them for the
+                # side-channel.  ``mult_opt_live`` is the first held contract's
+                # contract_size (from the resolver out-dict); the live FUT
+                # contract_size read is not exposed on MarketDataService, so m_fut
+                # falls back to the signed-off config here.
+                if instrument.sizing_mode == "futures_notional":
+                    from tcg.types.multipliers import (
+                        resolve_multipliers,
+                        root_from_collection,
+                    )
+
+                    _live_opt = None
+                    _mo = roll_info_out.get("mult_opt_live")
+                    if _mo is not None and len(_mo) and np.isfinite(_mo[0]):
+                        _live_opt = float(_mo[0])
+                    _res = resolve_multipliers(
+                        root_from_collection(instrument.collection),
+                        live_m_fut=None,
+                        live_m_opt=_live_opt,
+                    )
+                    if _res.diagnostic is not None:
+                        logger.info(
+                            "futures-notional multipliers for %s: %s",
+                            instrument.collection,
+                            _res.diagnostic,
+                        )
+                    _hold_mult_cache[key] = (_res.m_fut, _res.m_opt)
             return dates_arr, values
 
         if isinstance(instrument, InstrumentBasket):
@@ -648,13 +721,19 @@ def make_signal_fetcher(
 
     async def fetch_hold_roll_info(
         instrument: InstrumentOptionStream,
-    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    ) -> tuple[
+        npt.NDArray[np.int64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        "npt.NDArray[np.float64] | None",
+    ]:
         """Return the hold-mode roll structure for ``signal_exec``'s dollar-P&L path.
 
-        ``(dates, is_roll, roll_premium)`` — populated during the normal ``fetch``
-        of this hold-mode option input (which runs first, so the cache is warm).
-        Falls back to a fresh resolve if, defensively, the cache is cold (e.g. a
-        caller ordering that fetches roll info before the operand series).
+        ``(dates, is_roll, roll_premium, roll_future_ref)`` — populated during the
+        normal ``fetch`` of this hold-mode option input (which runs first, so the
+        cache is warm).  ``roll_future_ref`` is a NaN array in premium_notional mode
+        (the resolver populates it only in futures_notional mode).  Falls back to a
+        fresh resolve if, defensively, the cache is cold.
         """
         key = _hold_key(instrument)
         cached = _hold_roll_info_cache.get(key)
@@ -670,6 +749,28 @@ def make_signal_fetcher(
             )
         return cached
 
+    async def fetch_hold_multipliers(
+        instrument: InstrumentOptionStream,
+    ) -> tuple[float, float]:
+        """Return the resolved ``(m_fut, m_opt)`` for a futures-notional hold input.
+
+        Live-first / signed-off-config fallback (:mod:`tcg.types.multipliers`),
+        resolved in core (the engine never reads dwh) during the normal ``fetch``.
+        A NaN pair (root with neither live nor config) is returned verbatim so the
+        engine applies the tail carry-forward — NEVER a silent 1.0.
+        """
+        key = _hold_key(instrument)
+        cached = _hold_mult_cache.get(key)
+        if cached is not None:
+            return cached
+        await fetch(instrument, "close")
+        cached = _hold_mult_cache.get(key)
+        if cached is None:
+            # Defensive: a non-futures-notional / non-hold instrument has no
+            # multipliers — return a NaN pair (engine tail carry-forward).
+            return (float("nan"), float("nan"))
+        return cached
+
     async def fetch_hold_diagnostics(
         instrument: InstrumentOptionStream,
     ) -> list[str | None] | None:
@@ -682,4 +783,5 @@ def make_signal_fetcher(
 
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
     fetch.fetch_hold_diagnostics = fetch_hold_diagnostics  # type: ignore[attr-defined]
+    fetch.fetch_hold_multipliers = fetch_hold_multipliers  # type: ignore[attr-defined]
     return fetch
