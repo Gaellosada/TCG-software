@@ -258,8 +258,8 @@ function ContinuousChart({ collection }) {
             style={{ width: '56px' }}
             value={rollOffset}
             min={0}
-            max={30}
-            onChange={(e) => setRollOffset(Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0)))}
+            max={365}
+            onChange={(e) => setRollOffset(Math.max(0, Math.min(365, parseInt(e.target.value, 10) || 0)))}
           />
         </label>
       </div>

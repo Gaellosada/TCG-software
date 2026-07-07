@@ -355,4 +355,27 @@ describe('ContinuousChart — roll strategy control (Issue #3)', () => {
       expect(last[1]).toMatchObject({ strategy: 'end_of_month' });
     });
   });
+
+  it('accepts a roll offset up to 365 days and clamps beyond it', async () => {
+    mockSeriesResult = makePayload({
+      dates: [20240101, 20240102],
+      close: [100, 101],
+      roll_dates: [],
+      contracts: ['ESH24'],
+    });
+    render(<ContinuousChart collection="FUT_ES" />);
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+
+    const input = screen.getByLabelText(/Roll Offset/i);
+    // 90 (~3 months) is now accepted (cap raised from 30).
+    fireEvent.change(input, { target: { value: '90' } });
+    await waitFor(() => {
+      expect(mockGetContinuousSeries.mock.calls.at(-1)[1]).toMatchObject({ rollOffset: 90 });
+    });
+    // Over-max clamps to 365.
+    fireEvent.change(input, { target: { value: '999' } });
+    await waitFor(() => {
+      expect(mockGetContinuousSeries.mock.calls.at(-1)[1]).toMatchObject({ rollOffset: 365 });
+    });
+  });
 });

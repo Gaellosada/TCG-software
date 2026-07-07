@@ -317,9 +317,10 @@ class RollOffset(BaseModel):
 
     @model_validator(mode="after")
     def _check_range(self) -> "RollOffset":
-        # Per-unit bounds: days 0..30 (mirrors the prior int cap + the futures
-        # roll offset); months 0..12 (a year is the sensible ceiling).
-        cap = 30 if self.unit == "days" else 12
+        # Per-unit bounds: days 0..365 (mirrors the futures roll offset cap);
+        # months 0..12. A year is the sensible ceiling for rolling early — it
+        # lets a signal hold a contract/option several months from expiry.
+        cap = 365 if self.unit == "days" else 12
         if not (0 <= self.value <= cap):
             raise ValueError(
                 f"roll_offset value must be between 0 and {cap} for unit "

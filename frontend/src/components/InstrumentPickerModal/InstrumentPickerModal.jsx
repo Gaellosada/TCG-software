@@ -864,9 +864,9 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
           style={{ width: '56px' }}
           value={rollOffset}
           min={0}
-          max={30}
+          max={365}
           onChange={(e) => emit({
-            rollOffset: Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0)),
+            rollOffset: Math.max(0, Math.min(365, parseInt(e.target.value, 10) || 0)),
           })}
           disabled={disabled}
           data-testid="continuous-spec-picker-roll-offset"

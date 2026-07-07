@@ -109,6 +109,12 @@ class ContractPriceData:
     contract_id: str
     expiration: int  # YYYYMMDD integer (consistent with PriceSeries.dates)
     prices: PriceSeries
+    # dwh ``dim_instrument.expiration_cycle`` — 'M' monthly, 'W' weekly, 'D'
+    # daily, 'Q' quarterly, '' unset. Used by END_OF_MONTH collapse to prefer
+    # the canonical monthly contract when a root lists several contracts in the
+    # same expiration month (VIX/BTC/ETH). Optional (default None) so synthetic
+    # test fixtures and other callers need not supply it.
+    expiration_cycle: str | None = None
 
 
 @dataclass(frozen=True)

@@ -243,6 +243,42 @@ describe('<InstrumentPickerModal>', () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it('continuous roll-offset accepts up to 365 days and clamps beyond', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(getAvailableCycles).mockResolvedValue(['H', 'M']);
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} />);
+    await flushAsync();
+    fireEvent.click(screen.getByText('Futures'));
+    await waitFor(() => expect(screen.getByText('FUT_ES')).toBeTruthy());
+    fireEvent.click(screen.getByText('FUT_ES'));
+    await waitFor(() => expect(screen.getByTestId('continuous-spec-picker')).toBeTruthy());
+
+    const input = screen.getByTestId('continuous-spec-picker-roll-offset');
+    // 90 (~3 months) is now accepted (was capped at 30).
+    fireEvent.change(input, { target: { value: '90' } });
+    fireEvent.click(screen.getByText('Select Continuous Series'));
+    expect(onSelect.mock.calls[0][0].rollOffset).toBe(90);
+  });
+
+  it('continuous roll-offset clamps an over-max value to 365', async () => {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(getAvailableCycles).mockResolvedValue(['H', 'M']);
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} />);
+    await flushAsync();
+    fireEvent.click(screen.getByText('Futures'));
+    await waitFor(() => expect(screen.getByText('FUT_ES')).toBeTruthy());
+    fireEvent.click(screen.getByText('FUT_ES'));
+    await waitFor(() => expect(screen.getByTestId('continuous-spec-picker')).toBeTruthy());
+
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-roll-offset'), {
+      target: { value: '999' },
+    });
+    fireEvent.click(screen.getByText('Select Continuous Series'));
+    expect(onSelect.mock.calls[0][0].rollOffset).toBe(365);
+  });
+
   it('futures drill-down emits strategy=end_of_month when chosen (Issue #3)', async () => {
     vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
     vi.mocked(getAvailableCycles).mockResolvedValue(['H', 'M']);

@@ -21,7 +21,7 @@ import ImpliedLeverageReadout, { BAND_COLORS } from './ImpliedLeverageReadout';
  *                                               // resolve the maturity as of
  *                                               // (date + offset) so the roll fires
  *                                               // that much earlier; {value:0} = no
- *                                               // shift. Range days 0..30 / months
+ *                                               // shift. Range days 0..365 / months
  *                                               // 0..12. DISTINCT from the maturity's
  *                                               // own month offset (which expiration
  *                                               // to target). "Roll at end of month"
@@ -528,7 +528,7 @@ export default function OptionStreamForm({
   }, [emit]);
 
   // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
-  // as {value:int, unit:'days'}. Per-unit cap: days 0..30, months 0..12.
+  // as {value:int, unit:'days'}. Per-unit cap: days 0..365, months 0..12.
   const _normOffset = (ro) => {
     if (typeof ro === 'number') return { value: ro, unit: 'days' };
     if (ro && typeof ro === 'object') {
@@ -536,7 +536,7 @@ export default function OptionStreamForm({
     }
     return { value: 0, unit: 'days' };
   };
-  const _capFor = (unit) => (unit === 'months' ? 12 : 30);
+  const _capFor = (unit) => (unit === 'months' ? 12 : 365);
 
   const setRollOffsetValue = useCallback((raw) => {
     const cur = _normOffset(v.roll_offset);
@@ -769,7 +769,7 @@ export default function OptionStreamForm({
             type="number"
             className={styles.input}
             min={0}
-            max={rollOffset.unit === 'months' ? 12 : 30}
+            max={rollOffset.unit === 'months' ? 12 : 365}
             step={1}
             value={rollOffset.value}
             onChange={(e) => setRollOffsetValue(e.target.value)}
