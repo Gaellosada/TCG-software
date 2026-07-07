@@ -771,6 +771,26 @@ async def _resolve_hold(
                     except (TypeError, ValueError):
                         pass
 
+            # SC3 diagnostic half: in futures-notional mode a roll whose covering
+            # future is MISSING (no reference price) is sized off the CARRIED-FORWARD
+            # quantity (stale) — surface it on EVERY such roll (incl. verified roots
+            # SP/VIX) via the same ``error_codes`` channel the fetcher already
+            # threads (``fetch_hold_diagnostics``), plus a log note, so the stale
+            # sizing is observable.  Numerics are unchanged (the engine still carries
+            # forward); this only ADDS the signal.  ``first_idx`` is the roll/sizing
+            # date for this segment.
+            if not np.isfinite(seg_fref_value):
+                if error_codes[first_idx] is None:
+                    error_codes[first_idx] = "missing_futures_reference"
+                _log.info(
+                    "futures-notional: no covering future for the %s option roll on "
+                    "%s (expiry %s) — carrying forward the last sized quantity "
+                    "(stale sizing)",
+                    stream,
+                    first_date,
+                    seg_exp,
+                )
+
         for idx, d in seg:
             # Record the held contract on every date of the run.
             contracts[idx] = held
