@@ -38,6 +38,7 @@ from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
 from tcg.engine.options.pricing.kernel import BS76Kernel
 from tcg.engine.options.pricing.pricer import DefaultOptionsPricer
 from tcg.engine.options.selection.selector import DefaultOptionsSelector
+from tcg.types.market import FuturesContractMeta
 from tcg.types.options import OptionContractDoc, OptionDailyRow
 
 
@@ -561,51 +562,112 @@ def build_stream_resolver_wiring(
     return cached, maturity_resolver, underlying_resolver, bulk
 
 
+def _pick_reference_contract(
+    metas: "Sequence[FuturesContractMeta]",
+    option_expiry: date,
+    futures_reference: str,
+) -> "FuturesContractMeta | None":
+    """Select the reference futures contract for an option expiry.
+
+    ``metas`` is ascending by ``(expiration, symbol)`` (as
+    ``list_futures_contract_meta`` returns).
+      * ``nearest_on_or_after`` — the FIRST contract expiring >= the option expiry
+        (root's real listed cycle); None if the option outlives the curve.
+      * ``nearest_abs`` — the contract whose expiration is closest in |time| to the
+        option expiry (before OR after).  Ties (equidistant before/after) break
+        toward the on/after contract (the more conservative reference), then toward
+        the earlier expiration — both deterministic.
+    """
+    if not metas:
+        return None
+    if futures_reference == "nearest_on_or_after":
+        for c in metas:  # ascending → first >= is the nearest on/after
+            if c.expiration >= option_expiry:
+                return c
+        return None
+
+    # nearest_abs
+    def _key(c: "FuturesContractMeta") -> tuple:
+        delta = abs((c.expiration - option_expiry).days)
+        after = 0 if c.expiration >= option_expiry else 1  # prefer on/after on tie
+        return (delta, after, c.expiration)
+
+    return min(metas, key=_key)
+
+
 def build_futures_reference_resolver(
     market_data: MarketDataService,
     *,
     option_collection: str,
     futures_reference: str,
     prefetch_window: "tuple[date, date] | None" = None,
-) -> Callable[[date, date], Awaitable[float | None]]:
-    """Build the per-roll reference-future PRICE resolver for futures-notional sizing.
+) -> Callable[[date, date], Awaitable["tuple[float, float | None] | None"]]:
+    """Build the per-roll reference-future resolver for futures-notional sizing.
 
     Maps ``OPT_<root>`` → ``FUT_<root>`` BY NAME (Guardrail Sign 3 — never
-    ``underlying_id``) and returns an async ``(roll_date, option_expiry) -> price``
-    closure the option-stream resolver calls at each roll.  Reuses the existing
-    ``_FuturesDataPortAdapter`` (per-window memoized) so it honours the same
-    partition-pruning / N+1 protections as the underlying-price path.
+    ``underlying_id``) and returns an async ``(roll_date, option_expiry) ->
+    (close_price, contract_size)`` closure the option-stream resolver calls at each
+    roll.  ``contract_size`` is the LIVE ``M_fut`` (None where the dwh row is NULL →
+    signed-off config fallback).  Reuses the window-memoized ``_FuturesDataPortAdapter``
+    for the close read (same partition-pruning / N+1 protections as the
+    underlying-price path); the contract listing is fetched once and cached.
 
     Modes:
-      * ``nearest_on_or_after`` — the nearest LISTED future expiring >= the option
-        expiry (root's real cycle: monthly VIX, quarterly SP/NDX).  Backed by
-        ``get_futures_close_on_or_after_expiration``.
-      * ``nearest_abs`` / ``continuous_front`` — NOT yet wired (no data-layer
-        contract-expiration listing / continuous-front hookup here); the closure
-        raises so the caller surfaces a clear not-implemented error rather than
-        mis-sizing off the wrong reference.  The field still validates upstream.
+      * ``nearest_on_or_after`` (DEFAULT) — nearest LISTED future expiring >= the
+        option expiry (monthly VIX / quarterly SP/NDX).
+      * ``nearest_abs`` — future whose expiration is closest in |time|.
+      * ``continuous_front`` — NOT yet wired (no continuous-front hookup here); the
+        closure raises so the caller surfaces a clear not-implemented error rather
+        than mis-sizing.  The field still validates upstream.
     """
     from tcg.types.multipliers import futures_collection_for_option
 
     fut_collection = futures_collection_for_option(option_collection)
     futures_port = _FuturesDataPortAdapter(market_data, prefetch_window=prefetch_window)
 
-    if futures_reference == "nearest_on_or_after":
+    if futures_reference not in ("nearest_on_or_after", "nearest_abs"):
 
-        async def _resolve(roll_date: date, option_expiry: date) -> float | None:
-            return await futures_port.get_futures_close_on_or_after_expiration(
-                fut_collection, option_expiry, roll_date
+        async def _not_implemented(
+            roll_date: date, option_expiry: date
+        ) -> "tuple[float, float | None] | None":
+            raise NotImplementedError(
+                f"futures_reference={futures_reference!r} is not yet implemented; "
+                f"use 'nearest_on_or_after' or 'nearest_abs'"
             )
 
-        return _resolve
+        return _not_implemented
 
-    async def _not_implemented(roll_date: date, option_expiry: date) -> float | None:
-        raise NotImplementedError(
-            f"futures_reference={futures_reference!r} is not yet implemented; "
-            f"use 'nearest_on_or_after'"
+    # One cached contract listing per closure (per resolve); result-invariant.
+    _meta_cache: dict[str, "list[FuturesContractMeta]"] = {}
+
+    async def _metas() -> "list[FuturesContractMeta]":
+        cached = _meta_cache.get(fut_collection)
+        if cached is None:
+            try:
+                cached = list(
+                    await market_data.list_futures_contract_meta(fut_collection)
+                )
+            except Exception:  # noqa: BLE001
+                cached = []
+            _meta_cache[fut_collection] = cached
+        return cached
+
+    async def _resolve(
+        roll_date: date, option_expiry: date
+    ) -> "tuple[float, float | None] | None":
+        target = _pick_reference_contract(
+            await _metas(), option_expiry, futures_reference
         )
+        if target is None:
+            return None
+        price = await futures_port.get_futures_close_on_date(
+            fut_collection, target.symbol, roll_date
+        )
+        if price is None:
+            return None
+        return (float(price), target.contract_size)
 
-    return _not_implemented
+    return _resolve
 
 
 def build_options_selector(

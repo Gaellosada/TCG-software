@@ -620,23 +620,27 @@ def make_signal_fetcher(
                 _hold_diag_cache[key] = diagnostics
                 # Futures-notional: resolve the per-root multipliers (live-first,
                 # config fallback; never a silent 1.0) and cache them for the
-                # side-channel.  ``mult_opt_live`` is the first held contract's
-                # contract_size (from the resolver out-dict); the live FUT
-                # contract_size read is not exposed on MarketDataService, so m_fut
-                # falls back to the signed-off config here.
+                # side-channel.  Both live hints come from the resolver out-dict:
+                # ``mult_opt_live`` = the first held OPTION contract's contract_size;
+                # ``mult_fut_live`` = the first reference FUTURE's contract_size
+                # (fetched together with its price — no extra round-trip).  Live
+                # wins; the signed-off config is the fallback for a NULL live value.
                 if instrument.sizing_mode == "futures_notional":
                     from tcg.types.multipliers import (
                         resolve_multipliers,
                         root_from_collection,
                     )
 
-                    _live_opt = None
-                    _mo = roll_info_out.get("mult_opt_live")
-                    if _mo is not None and len(_mo) and np.isfinite(_mo[0]):
-                        _live_opt = float(_mo[0])
+                    def _live_hint(arr: Any) -> float | None:
+                        if arr is not None and len(arr) and np.isfinite(arr[0]):
+                            return float(arr[0])
+                        return None
+
+                    _live_opt = _live_hint(roll_info_out.get("mult_opt_live"))
+                    _live_fut = _live_hint(roll_info_out.get("mult_fut_live"))
                     _res = resolve_multipliers(
                         root_from_collection(instrument.collection),
-                        live_m_fut=None,
+                        live_m_fut=_live_fut,
                         live_m_opt=_live_opt,
                     )
                     if _res.diagnostic is not None:

@@ -58,3 +58,29 @@ def test_provisional_root_flagged() -> None:
     r = resolve_multipliers("BTC")
     assert not r.verified
     assert r.diagnostic is not None and "PROVISIONAL" in r.diagnostic
+
+
+def test_live_m_fut_overrides_config() -> None:
+    # A live FUT contract_size that disagrees with config → live wins + diagnostic.
+    r = resolve_multipliers("SP_500", live_m_fut=25.0)
+    assert r.m_fut == 25.0 and r.m_fut_source == "live"
+    assert (
+        r.diagnostic is not None
+        and "m_fut" in r.diagnostic
+        and "disagrees" in r.diagnostic
+    )
+    # A live value equal to config → live source, NO disagreement noise.
+    r2 = resolve_multipliers("VIX", live_m_fut=1000.0)
+    assert r2.m_fut == 1000.0 and r2.m_fut_source == "live"
+    assert r2.diagnostic is None
+
+
+def test_m_fut_null_live_falls_back_to_config() -> None:
+    r = resolve_multipliers("VIX", live_m_fut=None)
+    assert r.m_fut == 1000.0 and r.m_fut_source == "config"
+
+
+def test_m_fut_neither_live_nor_config_is_nan() -> None:
+    r = resolve_multipliers("UNKNOWN", live_m_fut=None)
+    assert math.isnan(r.m_fut) and r.m_fut_source == "missing"
+    assert r.m_fut != 1.0  # never a silent 1.0

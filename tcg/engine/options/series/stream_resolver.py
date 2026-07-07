@@ -607,7 +607,7 @@ async def _resolve_hold(
     underlying_price_resolver: UnderlyingPriceResolver | None = None,
     kernel: "PricingKernel | None" = None,
     roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
-    futures_reference_resolver: "Callable[[date, date], Awaitable[float | None]] | None" = None,
+    futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Select-and-hold resolution over the pre-fetched ``chain_index``.
 
@@ -666,9 +666,12 @@ async def _resolve_hold(
     # roll (NaN off-roll / when unresolvable → engine tail carry-forward).  Only
     # populated when a ``futures_reference_resolver`` is injected (futures mode).
     roll_future_ref: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
-    # Live option multiplier hint: the first held contract's contract_size (NaN if
-    # NULL), surfaced so the core layer can prefer it over the signed-off config.
+    # Live multiplier hints, surfaced so the core layer can prefer them over the
+    # signed-off config: the first held OPTION contract's contract_size, and the
+    # first reference FUTURE's contract_size (from the futures_reference_resolver).
+    # NaN when NULL / unavailable.
     mult_opt_live: float = np.nan
+    mult_fut_live: float = np.nan
 
     async def _mid_of(contract: OptionContractDoc | None, d: date) -> float:
         """Read ``contract``'s ``stream`` value on date ``d`` from the chain.
@@ -753,9 +756,20 @@ async def _resolve_hold(
         # injected (i.e. sizing_mode == 'futures_notional').
         seg_fref_value = np.nan
         if futures_reference_resolver is not None and seg_exp is not None:
-            _fref = await futures_reference_resolver(first_date, seg_exp)
-            if _fref is not None and np.isfinite(_fref) and _fref > 0.0:
-                seg_fref_value = float(_fref)
+            _ref = await futures_reference_resolver(first_date, seg_exp)
+            if _ref is not None:
+                _price, _cs = _ref
+                if _price is not None and np.isfinite(_price) and _price > 0.0:
+                    seg_fref_value = float(_price)
+                # Capture the FIRST finite live M_fut hint (the reference future's
+                # contract_size) for the core live-first multiplier resolution.
+                if not np.isfinite(mult_fut_live) and _cs is not None:
+                    try:
+                        _csf = float(_cs)
+                        if _csf > 0.0:
+                            mult_fut_live = _csf
+                    except (TypeError, ValueError):
+                        pass
 
         for idx, d in seg:
             # Record the held contract on every date of the run.
@@ -818,6 +832,7 @@ async def _resolve_hold(
         # ``dict[str, NDArray]``; NaN when no live contract_size was found.
         roll_info_out["roll_future_ref"] = roll_future_ref
         roll_info_out["mult_opt_live"] = np.array([mult_opt_live], dtype=np.float64)
+        roll_info_out["mult_fut_live"] = np.array([mult_fut_live], dtype=np.float64)
 
     # Fold snap diagnostics in AFTER extraction (success-side note; only where the
     # date resolved a held contract with a quote) — mirrors Phase C's handling.
@@ -863,7 +878,7 @@ async def _resolve_bulk(
     concurrency_gate: "asyncio.Semaphore | None" = None,
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
-    futures_reference_resolver: "Callable[[date, date], Awaitable[float | None]] | None" = None,
+    futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
     coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
@@ -1783,7 +1798,7 @@ async def resolve_option_stream(
     concurrency_gate: "asyncio.Semaphore | None" = None,
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
-    futures_reference_resolver: "Callable[[date, date], Awaitable[float | None]] | None" = None,
+    futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
     coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.

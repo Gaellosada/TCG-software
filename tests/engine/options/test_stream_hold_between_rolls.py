@@ -180,8 +180,9 @@ async def test_hold_populates_roll_future_ref_at_rolls():
 
     async def _fut_ref(roll_date, option_expiry):
         seen.append((roll_date, option_expiry))
-        # Map the option expiry → a distinct reference-future price per segment.
-        return {_APR: 4500.0, _MAY: 4520.0}.get(option_expiry)
+        # Map the option expiry → a distinct (price, contract_size) per segment.
+        price = {_APR: 4500.0, _MAY: 4520.0}.get(option_expiry)
+        return None if price is None else (price, 50.0)
 
     await resolve_option_stream(
         dates=_DATES,
