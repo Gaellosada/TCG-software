@@ -56,6 +56,10 @@ const REBALANCE_OPTIONS = [
 function PortfolioPage() {
   const portfolio = usePortfolio();
   const [modalOpen, setModalOpen] = useState(false);
+  // Index of the leg whose instrument config is being edited (null = not
+  // editing). Drives the shared AddHoldingModal into edit mode. Kept separate
+  // from modalOpen so the add (append) flow is untouched.
+  const [editLegIndex, setEditLegIndex] = useState(null);
   const [signalModalOpen, setSignalModalOpen] = useState(false);
   const [saveInput, setSaveInput] = useState('');
   // archiveTarget holds the backend ID of the portfolio pending-archive
@@ -411,7 +415,16 @@ function PortfolioPage() {
   }, [portfolio.portfolioName]);
 
   const handleOpenModal = useCallback(() => setModalOpen(true), []);
-  const handleCloseModal = useCallback(() => setModalOpen(false), []);
+  // Close covers BOTH the add flow (modalOpen) and the edit flow (editLegIndex).
+  const handleCloseModal = useCallback(() => {
+    setModalOpen(false);
+    setEditLegIndex(null);
+  }, []);
+  // Open the shared holding modal in EDIT mode for a specific leg. The trigger
+  // (HoldingsList instrument cell) is a role="button" that escapes the locked
+  // <fieldset>, so this also fires for a locked portfolio — in which case the
+  // modal opens read-only (view-only) per the picker contract.
+  const handleEditLeg = useCallback((index) => setEditLegIndex(index), []);
 
   // "Save" button: if we already have a persistedId, this is a no-op
   // (autosave handles it). If not, create a new portfolio in the backend.
@@ -574,6 +587,8 @@ function PortfolioPage() {
             onRemoveLeg={portfolio.removeLeg}
             onOpenAddModal={handleOpenModal}
             onOpenSignalModal={() => setSignalModalOpen(true)}
+            onEditLeg={handleEditLeg}
+            readOnly={portfolio.persistedLocked}
           />
         </fieldset>
 
@@ -772,11 +787,19 @@ function PortfolioPage() {
         )}
       </div>
 
-      {/* ── Add Holding Modal ── */}
+      {/* ── Add / Edit Holding Modal (single shared instance) ──
+          Rendered OUTSIDE the locked <fieldset> so its controls are never
+          disabled by the fieldset. editLegIndex non-null => edit mode; the
+          modal pre-fills from the leg and updates it in place on confirm. */}
       <AddHoldingModal
-        isOpen={modalOpen}
+        isOpen={modalOpen || editLegIndex !== null}
         onClose={handleCloseModal}
         onAddLeg={portfolio.addLeg}
+        editLeg={editLegIndex !== null ? portfolio.legs[editLegIndex] : null}
+        onUpdateLeg={(updates) => {
+          if (editLegIndex !== null) portfolio.updateLeg(editLegIndex, updates);
+        }}
+        readOnly={portfolio.persistedLocked}
         referenceDate={portfolio.startDate}
       />
 

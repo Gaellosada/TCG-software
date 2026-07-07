@@ -389,6 +389,12 @@ export default function OptionStreamForm({
   // set: render NO on/off toggle; force hold on + default cycle 'M' once, and
   // always show the nav_times input + a wipeout hint. Signals keep the toggle.
   holdRequired = false,
+  // EDIT mode: a saved config was pre-filled into ``value`` (derived upstream as
+  // ``initialConfig != null``). Suppresses the CREATE-only cycle nudge below so
+  // an edited leg's stored ``cycle`` (incl. null "Any" / 'W3 Friday') is never
+  // silently rewritten to 'M'. Note ``value`` alone can't signal edit here — the
+  // create flow ALSO seeds a non-null default (buildDefaultOptionStream).
+  editMode = false,
   // Optional reference date (YYYY-MM-DD string or Date) at which to probe the
   // representative (strike, premium) for the implied-leverage readout on the
   // hold form. When omitted, the readout falls back to the selected root's
@@ -447,12 +453,14 @@ export default function OptionStreamForm({
   // only defaults the cycle to 'M' (the backend's expand_cycle broadens 'M' to the
   // monthly 3rd-Friday series, reproducing a monthly option roll). One-shot so the
   // user can still change the cycle afterwards.
+  // CREATE-only: gated off in ``editMode`` (a saved config was pre-filled) so an
+  // edited leg's stored cycle is never silently rewritten to 'M' (BLOCKER-1).
   const heldInit = useRef(false);
   useEffect(() => {
-    if (!holdRequired || heldInit.current) return;
+    if (!holdRequired || editMode || heldInit.current) return;
     heldInit.current = true;
     if (v.cycle == null || v.cycle === 'W3 Friday') onChange({ ...v, cycle: 'M' });
-  }, [holdRequired, v, onChange]);
+  }, [holdRequired, editMode, v, onChange]);
 
   // Changing root must also keep ``cycle`` valid: the new root's real cycle
   // tag-set may not contain the current cycle (e.g. picking 'Q' on OPT_BTC then

@@ -1003,6 +1003,7 @@ function IndicatorsPage() {
           showDateRange={showDateRange}
           optionDateRange={optionDateRange}
           onOptionDateRangeChange={handleOptionDateRangeChange}
+          readOnly={!!selectedIndicator?.locked}
         />
       </div>
       <div className={styles.chartPanel}>
