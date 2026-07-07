@@ -20,6 +20,7 @@ from tcg.types.market import (
     ContinuousLegSpec,
     ContinuousRollConfig,
     ContinuousSeries,
+    FuturesContractMeta,
     InstrumentId,
     PriceSeries,
 )
@@ -406,6 +407,19 @@ class DefaultMarketDataService:
         return await self._sql.find_front_contract_on_or_after(
             collection, expiration_int
         )
+
+    async def list_futures_contract_meta(
+        self,
+        collection: str,
+        *,
+        cycle: str | None = None,
+    ) -> list[FuturesContractMeta]:
+        """List a futures root's contracts (symbol / expiration / contract_size).
+
+        Cheap ``dim_instrument``-only scan; feeds futures-notional option sizing
+        (``nearest_abs`` reference selection + the live ``M_fut`` read).
+        """
+        return await self._sql.list_futures_contract_meta(collection, cycle=cycle)
 
     # --- Internal ---
 

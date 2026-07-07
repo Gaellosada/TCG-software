@@ -30,7 +30,13 @@ import numpy as np
 from tcg.data._sql.connection import SCHEMA, DwhConnectionPool, to_float_or
 from tcg.data._utils import date_to_int, int_to_date
 from tcg.types.errors import DataAccessError
-from tcg.types.market import AssetClass, ContractPriceData, InstrumentId, PriceSeries
+from tcg.types.market import (
+    AssetClass,
+    ContractPriceData,
+    FuturesContractMeta,
+    InstrumentId,
+    PriceSeries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +397,57 @@ class SqlInstrumentReader:
                 f"SQL error finding front contract on/after expiration in "
                 f"'{collection}' (expiration={expiration_int}): {exc}"
             ) from exc
+
+    async def list_futures_contract_meta(
+        self,
+        collection: str,
+        *,
+        cycle: str | None = None,
+    ) -> list[FuturesContractMeta]:
+        """List a futures root's contracts with expiration + contract_size.
+
+        Cheap ``dim_instrument``-only scan (NO ``fact_price_eod`` join / no bars):
+        one ``(symbol, expiration, contract_size)`` row per contract, ordered by
+        expiration.  Feeds futures-notional option sizing — the caller picks the
+        reference contract (nearest on/after OR nearest by |time|) and reads its
+        ``contract_size`` as the LIVE ``M_fut`` (NULL → config fallback).  Rows
+        with NULL expiration are excluded (they cannot be a dated reference).
+        """
+        try:
+            params: list[Any] = [collection]
+            cycle_clause = ""
+            if cycle is not None:
+                cycle_clause = " AND expiration_cycle = %s"
+                params.append(cycle)
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT symbol, expiration, contract_size
+                            FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s
+                              AND expiration IS NOT NULL
+                              {cycle_clause}
+                            ORDER BY expiration ASC, symbol ASC""",
+                        params,
+                    )
+                    rows = await cur.fetchall()
+        except DataAccessError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"SQL error listing futures contract meta for '{collection}': {exc}"
+            ) from exc
+        out: list[FuturesContractMeta] = []
+        for r in rows:
+            cs = r["contract_size"]
+            out.append(
+                FuturesContractMeta(
+                    symbol=r["symbol"],
+                    expiration=r["expiration"],
+                    contract_size=None if cs is None else float(cs),
+                )
+            )
+        return out
 
     async def fetch_available_cycles(self, collection: str) -> list[str]:
         """Return distinct non-empty ``expiration_cycle`` values for a collection."""

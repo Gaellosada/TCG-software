@@ -72,6 +72,21 @@ class ContractSpec:
 
 
 @dataclass(frozen=True)
+class FuturesContractMeta:
+    """Lightweight per-contract metadata from ``dim_instrument`` (no price bars).
+
+    Used to select a reference futures contract for futures-notional option sizing:
+    ``symbol`` reads its close/price, ``expiration`` drives the nearest-* choice,
+    and ``contract_size`` is the LIVE ``M_fut`` (NULL where the dwh has none →
+    signed-off config fallback).
+    """
+
+    symbol: str
+    expiration: date
+    contract_size: float | None
+
+
+@dataclass(frozen=True)
 class PriceSeries:
     """Columnar OHLCV data for a single instrument.
 
