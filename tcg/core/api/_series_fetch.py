@@ -47,6 +47,33 @@ from tcg.types.signal import (
 logger = logging.getLogger(__name__)
 
 
+def _hold_cache_key(instrument: InstrumentOptionStream) -> Any:
+    """Identity for the per-signal hold-mode roll-info / multiplier caches.
+
+    Mirrors the engine's option-stream identity (collection/type/cycle/maturity/
+    selection/stream/roll_offset) — the axes that determine the held-premium + roll
+    structure.  ``nav_times`` is EXCLUDED (a downstream sizing multiple; the series
+    is identical).
+
+    Guardrail Sign 4: ``sizing_mode`` + ``futures_reference`` ARE part of the key.
+    futures_notional mode attaches a ``roll_future_ref`` array (and picks a
+    different reference per ``futures_reference``), so a premium_notional cached
+    result must NOT be served for a futures_notional leg with otherwise identical
+    axes (and vice-versa) — a collision would silently mis-size.
+    """
+    return (
+        instrument.collection,
+        instrument.option_type,
+        instrument.cycle or "",
+        repr(instrument.maturity),
+        repr(instrument.selection),
+        instrument.stream,
+        (int(instrument.roll_offset.value), instrument.roll_offset.unit),
+        instrument.sizing_mode,
+        instrument.futures_reference,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Leg materialisation — Pydantic ref → typed leaf instrument
 # ---------------------------------------------------------------------------
@@ -406,28 +433,9 @@ def make_signal_fetcher(
     # cause without a second resolve.
     _hold_diag_cache: dict[Any, list[str | None]] = {}
 
-    def _hold_key(instrument: InstrumentOptionStream) -> Any:
-        # Mirrors the engine's option-stream identity (collection/type/cycle/
-        # maturity/selection/stream/roll_offset) — the axes that determine the
-        # held-premium + roll structure.  nav_times is EXCLUDED (it is a sizing
-        # multiple applied downstream in signal_exec; the series is identical).
-        #
-        # Guardrail Sign 4: sizing_mode + futures_reference ARE part of the key.
-        # futures_notional mode attaches a ``roll_future_ref`` array (and picks a
-        # different reference per futures_reference), so a premium_notional cached
-        # result must NOT be served for a futures_notional leg with otherwise
-        # identical axes (and vice-versa) — a collision would silently mis-size.
-        return (
-            instrument.collection,
-            instrument.option_type,
-            instrument.cycle or "",
-            repr(instrument.maturity),
-            repr(instrument.selection),
-            instrument.stream,
-            (int(instrument.roll_offset.value), instrument.roll_offset.unit),
-            instrument.sizing_mode,
-            instrument.futures_reference,
-        )
+    # Module-level ``_hold_cache_key`` is the single source of truth (also unit-
+    # tested directly for the Sign-4 collision guarantee).
+    _hold_key = _hold_cache_key
 
     async def fetch(
         instrument: InputInstrument, field: str

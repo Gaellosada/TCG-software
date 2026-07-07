@@ -168,6 +168,50 @@ async def _resolve(chains, *, selection, maturity, hold_between_rolls, roll_info
     )
 
 
+async def test_hold_populates_roll_future_ref_at_rolls():
+    """Futures-notional: an injected ``futures_reference_resolver`` populates
+    ``roll_future_ref`` at each roll index (0 initial open + 3 APR→MAY roll) with
+    the resolved reference-future price, NaN elsewhere — the exact side-channel the
+    engine's futures-notional sizing reads."""
+    chains = _build_chains()
+    roll_info: dict = {}
+
+    seen: list = []
+
+    async def _fut_ref(roll_date, option_expiry):
+        seen.append((roll_date, option_expiry))
+        # Map the option expiry → a distinct reference-future price per segment.
+        return {_APR: 4500.0, _MAY: 4520.0}.get(option_expiry)
+
+    await resolve_option_stream(
+        dates=_DATES,
+        collection="OPT_SP_500",
+        option_type="P",
+        cycle=None,
+        maturity=_MATURITY,
+        selection=_BYDELTA,
+        stream="mid",
+        chain_reader=FakeChainReader(chains),
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=FakeBulkChainReader(chains),
+        available_expirations=[_APR, _MAY],
+        hold_between_rolls=True,
+        hold_roll_info_out=roll_info,
+        futures_reference_resolver=_fut_ref,
+    )
+
+    fref = np.asarray(roll_info["roll_future_ref"], dtype=np.float64)
+    is_roll = np.asarray(roll_info["is_roll"], dtype=bool)
+    # Populated exactly at the roll indices with the per-segment reference price.
+    np.testing.assert_allclose(fref[0], 4500.0)  # initial APR open
+    np.testing.assert_allclose(fref[3], 4520.0)  # APR→MAY roll
+    # NaN on every non-roll date.
+    assert np.all(np.isnan(fref[~is_roll]))
+    # The resolver was consulted once per segment with the option expiry.
+    assert (_DATES[0], _APR) in seen and (_DATES[3], _MAY) in seen
+
+
 async def test_default_off_churns_the_contract_daily():
     """DEFAULT: ByDelta re-selects the strike each day → contract_id churns within
     the APR segment; the emitted series is the daily-selected contract's mid
