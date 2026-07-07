@@ -312,12 +312,43 @@ export function validateOptionStream(value, availableRoots) {
   return null;
 }
 
+// ── Sizing-mode presentation labels ──────────────────────────────────────
+// How the held option quantity is sized (hold-mode $-P&L only). Percentage
+// (premium_notional) is the DEFAULT and byte-identical to the shipped behaviour;
+// Futures notional sizes the quantity off the corresponding future's dollar
+// notional instead of the option premium.
+const SIZING_MODE_LABELS = {
+  premium_notional: 'Percentage (current)',
+  futures_notional: 'Futures notional',
+};
+// Futures-reference choices offered in the dropdown. Deliberately EXCLUDES
+// ``continuous_front`` — the backend raises a loud not-implemented error for it,
+// so it must NOT be surfaced yet (see task contract). ``nearest_on_or_after`` is
+// the backend default.
+const FUTURES_REFERENCE_LABELS = {
+  nearest_on_or_after: 'Nearest on/after expiry',
+  nearest_abs: 'Nearest (abs distance)',
+};
+// One-line description of the futures-notional sizing formula, surfaced as a
+// helper beneath the reference dropdown.
+const FUTURES_NOTIONAL_HELP =
+  'Futures-notional sizing: qty = Size% × NAV / (F_ref × M_fut) — the held '
+  + "quantity is sized off the reference future's dollar notional (F_ref = its "
+  + 'price, M_fut = its contract multiplier), not the option premium.';
+
 /**
- * Shared "Size (% of NAV)" input + implied-leverage readout, rendered
- * identically by both the ``holdRequired`` (portfolio price-leg) and the
- * ``hold_between_rolls`` (signals-toggle) branches — they differ ONLY in the
- * input's ``title`` tooltip. Extracted to kill the near-verbatim duplication
- * (one future-drift hazard). Behaviour is identical; test IDs are preserved.
+ * Shared "Sizing" mode + "Size (% of NAV)" input, rendered identically by both
+ * the ``holdRequired`` (portfolio price-leg) and the ``hold_between_rolls``
+ * (signals-toggle) branches — they differ ONLY in the Size input's ``title``
+ * tooltip. Extracted to kill the near-verbatim duplication (one future-drift
+ * hazard). Behaviour is identical; test IDs are preserved.
+ *
+ * SIZING MODE (Guardrail Sign 5): the implied-leverage readout is
+ * premium-notional-specific (leverage = nav_times·strike/premium) and WRONG for
+ * futures-notional sizing, so it is shown ONLY in ``premium_notional`` mode. In
+ * ``futures_notional`` mode it is replaced by the Futures-reference dropdown +
+ * the formula helper (no misleading leverage number). ``nav_times`` (Size %) is
+ * exposed in BOTH modes.
  */
 function SizeAndLeverage({
   title,
@@ -327,11 +358,34 @@ function SizeAndLeverage({
   navBand,
   setNavBand,
   onNavTimes,
+  sizingMode,
+  onSizingMode,
+  futuresReference,
+  onFuturesReference,
   disabled,
 }) {
   const navTimes = typeof streamValue.nav_times === 'number' ? streamValue.nav_times : 1.0;
+  const isFutures = sizingMode === 'futures_notional';
   return (
     <>
+      {/* Sizing mode — Percentage (premium notional, default) vs Futures notional. */}
+      <label
+        className={styles.fieldInline}
+        title="How the held quantity is sized. Percentage: qty = Size% × NAV / premium (default). Futures notional: qty = Size% × NAV / (reference future's price × its contract multiplier)."
+      >
+        Sizing
+        <select
+          className={styles.input}
+          value={sizingMode}
+          onChange={(e) => onSizingMode(e.target.value)}
+          disabled={disabled}
+          aria-label="Sizing mode"
+          data-testid="sizing-mode"
+        >
+          <option value="premium_notional">{SIZING_MODE_LABELS.premium_notional}</option>
+          <option value="futures_notional">{SIZING_MODE_LABELS.futures_notional}</option>
+        </select>
+      </label>
       <label className={styles.fieldInline} title={title}>
         Size (% of NAV)
         <input
@@ -345,16 +399,44 @@ function SizeAndLeverage({
           disabled={disabled}
           aria-label="Size (% of NAV)"
           data-testid="nav-times"
-          style={navBand ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
+          style={navBand && !isFutures ? { borderColor: BAND_COLORS[navBand], borderWidth: 2 } : undefined}
         />
       </label>
-      <ImpliedLeverageReadout
-        streamValue={streamValue}
-        navFraction={navTimes}
-        availableRoots={availableRoots}
-        referenceDate={referenceDate}
-        onBand={setNavBand}
-      />
+      {isFutures ? (
+        <>
+          <label
+            className={styles.fieldInline}
+            title="Which listed future to size the notional against. Nearest on/after expiry: the nearest future expiring on or after the option's expiry (the root's real cycle). Nearest (abs distance): the future whose expiry is closest in absolute time."
+          >
+            Futures reference
+            <select
+              className={styles.input}
+              value={futuresReference}
+              onChange={(e) => onFuturesReference(e.target.value)}
+              disabled={disabled}
+              aria-label="Futures reference"
+              data-testid="futures-reference"
+            >
+              <option value="nearest_on_or_after">{FUTURES_REFERENCE_LABELS.nearest_on_or_after}</option>
+              <option value="nearest_abs">{FUTURES_REFERENCE_LABELS.nearest_abs}</option>
+            </select>
+          </label>
+          <span
+            data-testid="futures-notional-help"
+            style={{ fontSize: '0.85em', opacity: 0.8 }}
+          >
+            {FUTURES_NOTIONAL_HELP}
+          </span>
+        </>
+      ) : (
+        <ImpliedLeverageReadout
+          streamValue={streamValue}
+          navFraction={navTimes}
+          availableRoots={availableRoots}
+          referenceDate={referenceDate}
+          onBand={setNavBand}
+        />
+      )}
     </>
   );
 }
@@ -517,6 +599,36 @@ export default function OptionStreamForm({
       ? navPercentToFraction(parsedPct)
       : 1.0;
     emit({ nav_times: value });
+  }, [emit]);
+
+  // ── Sizing mode (hold-mode $-P&L only) ────────────────────────────────────
+  // Derived DEFAULT-safe view of the wire fields. An untouched leg carries
+  // neither key → these resolve to the backend defaults (premium_notional /
+  // nearest_on_or_after) WITHOUT emitting them, so a never-touched leg still
+  // serialises byte-identically to today.  ``continuous_front`` is intentionally
+  // NOT offered (backend not-implemented) — a persisted leg carrying it falls
+  // back to the offered default so the <select> value stays valid.
+  const sizingMode = v.sizing_mode === 'futures_notional' ? 'futures_notional' : 'premium_notional';
+  const futuresReference = v.futures_reference === 'nearest_abs' ? 'nearest_abs' : 'nearest_on_or_after';
+
+  const setSizingMode = useCallback((raw) => {
+    const mode = raw === 'futures_notional' ? 'futures_notional' : 'premium_notional';
+    const patch = { sizing_mode: mode };
+    if (mode === 'futures_notional') {
+      // Seed a valid reference (never continuous_front) so the emitted ref is
+      // explicit + runnable; clear any stale premium-mode leverage tint (the
+      // readout is hidden in futures mode and never fires onBand → null).
+      if (v.futures_reference !== 'nearest_on_or_after' && v.futures_reference !== 'nearest_abs') {
+        patch.futures_reference = 'nearest_on_or_after';
+      }
+      setNavBand(null);
+    }
+    emit(patch);
+  }, [emit, v.futures_reference]);
+
+  const setFuturesReference = useCallback((raw) => {
+    const ref = raw === 'nearest_abs' ? 'nearest_abs' : 'nearest_on_or_after';
+    emit({ futures_reference: ref });
   }, [emit]);
 
   // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
@@ -950,6 +1062,10 @@ export default function OptionStreamForm({
               navBand={navBand}
               setNavBand={setNavBand}
               onNavTimes={setNavTimes}
+              sizingMode={sizingMode}
+              onSizingMode={setSizingMode}
+              futuresReference={futuresReference}
+              onFuturesReference={setFuturesReference}
               disabled={disabled}
             />
           </div>
@@ -981,6 +1097,10 @@ export default function OptionStreamForm({
                 navBand={navBand}
                 setNavBand={setNavBand}
                 onNavTimes={setNavTimes}
+                sizingMode={sizingMode}
+                onSizingMode={setSizingMode}
+                futuresReference={futuresReference}
+                onFuturesReference={setFuturesReference}
                 disabled={disabled}
               />
             )}
@@ -1014,6 +1134,9 @@ export {
   MID_TOOLTIP,
   SYNTHETIC_WEEKLY_LABEL,
   CYCLE_LABELS,
+  SIZING_MODE_LABELS,
+  FUTURES_REFERENCE_LABELS,
+  FUTURES_NOTIONAL_HELP,
   defaultMaturity,
   defaultSelection,
   deriveCycleOptions,
