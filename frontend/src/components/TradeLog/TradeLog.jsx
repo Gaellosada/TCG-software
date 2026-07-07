@@ -38,10 +38,15 @@ export function formatSignedPercent(fraction) {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
-// Standard notation (never scientific) with up to 4 significant digits: keeps
-// tiny futures counts fractional (0.0004) and large share counts grouped
-// (1,432) without rendering NaN/Infinity/exponent garbage.
-const QTY_FMT = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 4 });
+// Standard notation (never scientific), locale pinned to 'en-US' for
+// deterministic output across machines (matches src/utils/format.js).
+// Magnitude-aware precision:
+//   |qty| >= 1 → up to 2 decimals but the FULL integer part is kept
+//     (so 14325 → "14,325", not the 4-sig-fig "14,320").
+//   |qty| <  1 → up to 4 significant digits, so sub-1 fractions stay
+//     meaningful (0.0004123 → "0.0004123").
+const QTY_FMT_LARGE = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
+const QTY_FMT_SMALL = new Intl.NumberFormat('en-US', { maximumSignificantDigits: 4 });
 
 /**
  * Formats an unsigned trade quantity + its unit label, e.g. "12.34 contracts"
@@ -50,7 +55,8 @@ const QTY_FMT = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 4 }
  */
 export function formatQuantity(qty, unit) {
   if (typeof qty !== 'number' || !Number.isFinite(qty)) return '—';
-  const num = QTY_FMT.format(Math.abs(qty));
+  const mag = Math.abs(qty);
+  const num = (mag >= 1 ? QTY_FMT_LARGE : QTY_FMT_SMALL).format(mag);
   const label = typeof unit === 'string' && unit.trim() ? ` ${unit.trim()}` : '';
   return `${num}${label}`;
 }

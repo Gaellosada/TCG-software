@@ -569,8 +569,15 @@ describe('formatQuantity', () => {
   it('groups large counts and never uses scientific notation', () => {
     expect(formatQuantity(1432, 'shares')).toBe('1,432 shares');
   });
-  it('caps at 4 significant digits', () => {
+  it('preserves full integer precision for large counts (no sig-fig rounding)', () => {
+    // Regression: maximumSignificantDigits:4 would render 14325 as "14,320".
+    expect(formatQuantity(14325, 'shares')).toBe('14,325 shares');
+  });
+  it('rounds |qty|>=1 to 2 decimals', () => {
     expect(formatQuantity(12.34567, 'contracts')).toBe('12.35 contracts');
+  });
+  it('keeps sub-1 fractions meaningful (4 significant digits)', () => {
+    expect(formatQuantity(0.0004123, 'contracts')).toBe('0.0004123 contracts');
   });
   it('non-finite → em-dash (guards NaN/Infinity/null)', () => {
     expect(formatQuantity(NaN, 'contracts')).toBe('—');
