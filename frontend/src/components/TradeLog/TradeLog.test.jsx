@@ -223,10 +223,8 @@ describe('<TradeLog>', () => {
     expect(screen.getByTestId('trade-exit-reason').textContent).toBe('(unnamed)');
   });
 
-  it('P&L toggle: defaults to Realised, switching to Log changes header and value', () => {
-    // open=100, close=110, signed_weight=1.0
-    // Realised: (110/100 - 1)*1 = 0.10 → +10.00%
-    // Log:      ln(110/100)*1  ≈ 0.09531 → +9.53%
+  it('P&L header is a static "Realised P&L" (no mode toggle)', () => {
+    // open=100, close=110, signed_weight=1.0 → realised (110/100 - 1)*1 = +10.00%.
     const trades = [{
       input_id: 'X',
       entry_block_id: 'e1',
@@ -239,40 +237,17 @@ describe('<TradeLog>', () => {
       signed_weight: 1.0,
     }];
     const positions = [pos('X', [100, 110])];
-    render(<TradeLog
-      trades={trades}
-      timestamps={TS}
-      positions={positions}
-    />);
+    render(<TradeLog trades={trades} timestamps={TS} positions={positions} />);
     fireEvent.click(screen.getByTestId('trade-log-toggle'));
 
-    // Default: Realised P&L header and value
     expect(screen.getByTestId('pnl-col-header').textContent).toBe('Realised P&L');
     const rows = screen.getAllByTestId('trade-row');
     expect(rows[0].textContent).toContain('+10.00%');
 
-    // Switch to Log
-    fireEvent.click(screen.getByRole('button', { name: 'Log' }));
-    expect(screen.getByTestId('pnl-col-header').textContent).toBe('Log P&L');
-    // ln(110/100) ≈ 0.09531, *100 = 9.531 → "+9.53%"
-    expect(rows[0].textContent).toContain('+9.53%');
-
-    // Switch back to Realised
-    fireEvent.click(screen.getByRole('button', { name: 'Realised' }));
-    expect(screen.getByTestId('pnl-col-header').textContent).toBe('Realised P&L');
-    expect(rows[0].textContent).toContain('+10.00%');
-  });
-
-  it('clicking the P&L toggle does NOT collapse the panel', () => {
-    render(<TradeLog trades={[]} timestamps={TS} positions={[]} />);
-    fireEvent.click(screen.getByTestId('trade-log-toggle'));
-    expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
-
-    // Click one of the toggle pills — panel must stay open.
-    fireEvent.click(screen.getByRole('button', { name: 'Log' }));
-    expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Realised' }));
-    expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
+    // The Realised/Log mode toggle is GONE (removed with the log P&L mode).
+    expect(screen.queryByTestId('pnl-mode-toggle')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Log' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Realised' })).toBeNull();
   });
 
   it('reason cell exposes the exit block description as a tooltip', () => {
@@ -697,6 +672,64 @@ describe('roll rows (rolling direct legs)', () => {
     fireEvent.click(screen.getByTestId('trade-log-toggle'));
     // (110/100 - 1) * 1.0 = +10.00%.
     expect(screen.getByTestId('trade-pnl').textContent).toBe('+10.00%');
+  });
+
+  it('roll row with null segment_pnl renders em-dash (never the synthetic %)', () => {
+    // A roll row whose backend segment_pnl is null must NOT fall back to
+    // computePnl on the leg synthetic (which would double-invert the short) —
+    // it renders em-dash. The position price series is the leg SYNTHETIC equity
+    // that rises (a profitable short), which the old fallback would have shown
+    // as a large negative percentage.
+    const trades = [{
+      input_id: 'P',
+      entry_block_id: 'roll:P',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:P',
+      exit_block_name: 'end',
+      open_bar: 0,
+      close_bar: 4,
+      direction: 'short',
+      signed_weight: -1.0,
+      quantity: 3.33,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: null,
+      roll_hover: 'rolling OPT_SP_500',
+    }];
+    // Synthetic RISES 100→200 (profitable short); the buggy fallback
+    // (200/100−1)·(−1) = −100% must NOT appear.
+    render(<TradeLog trades={trades} timestamps={TS} positions={[pos('P', [100, 130, 160, 180, 200])]} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const cell = screen.getByTestId('trade-pnl');
+    expect(cell.textContent).toBe('—');
+    expect(cell.textContent).not.toContain('%');
+    expect(cell.textContent).not.toContain('-100');
+  });
+
+  it('profitable short roll row shows a POSITIVE dollar segment_pnl (not inverted)', () => {
+    // The backend now supplies a correctly-signed dollar segment_pnl for a
+    // profitable short; it is shown verbatim and positive.
+    const trades = [{
+      input_id: 'P',
+      entry_block_id: 'roll:P',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:P',
+      exit_block_name: 'end',
+      open_bar: 0,
+      close_bar: 4,
+      direction: 'short',
+      signed_weight: -1.0,
+      quantity: 3.33,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: 13.33,
+      roll_hover: 'rolling OPT_SP_500',
+    }];
+    render(<TradeLog trades={trades} timestamps={TS} positions={[pos('P', [100, 130, 160, 180, 200])]} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const cell = screen.getByTestId('trade-pnl');
+    expect(cell.textContent).toBe('+13.33');
+    expect(cell.textContent).not.toContain('-');
   });
 });
 

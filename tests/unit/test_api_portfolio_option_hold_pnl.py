@@ -152,15 +152,99 @@ async def test_hold_option_leg_emits_per_roll_trade_rows(client):
 
     m_opt, _unit = _leg_multiplier_and_unit("OPT_SP_500")
     assert m_opt is not None
-    # premium (HELD_PREMIUM) = [30,28,26,24,20,19]; sized off it, not the synthetic.
-    prem = _HELD_PREMIUM
-    for r in rows:
-        ob, cb = r["open_bar"], r["close_bar"]
-        exp_q = abs(r["signed_weight"]) * equity[ob] / (prem[ob] * m_opt)
+    # COUNT is sized off the ROLL-DAY premium (ROLL_PREMIUM = [30,·,·,18,·,·]) — the
+    # basis the accumulator sized against, finite at each segment open (a roll bar) —
+    # NOT the daily held premium (which is NaN at a real option's later opens).
+    roll_prem = _ROLL_PREMIUM
+    # segment P&L is the leg's equity change across the segment: synthetic[boundary] −
+    # synthetic[open], where the boundary is the next segment's open (roll bar) — or
+    # the last bar for the final segment — so segments TELESCOPE.  opens=[0,3].
+    boundaries = [3, len(equity) - 1]
+    for r, boundary in zip(rows, boundaries):
+        ob = r["open_bar"]
+        exp_q = abs(r["signed_weight"]) * equity[ob] / (roll_prem[ob] * m_opt)
         assert r["quantity"] == pytest.approx(exp_q)
-        # short leg → sign −1 on qty·Δpremium·M.
-        exp_pnl = -1.0 * r["quantity"] * (prem[cb] - prem[ob]) * m_opt
+        exp_pnl = equity[boundary] - equity[ob]
         assert r["segment_pnl"] == pytest.approx(exp_pnl)
+    # The per-segment P&L reconciles to the leg's total equity change.
+    assert sum(r["segment_pnl"] for r in rows) == pytest.approx(equity[-1] - 100.0)
+
+
+async def test_hold_option_roll_rows_sign_correct_with_nan_tail_premium(monkeypatch):
+    """REGRESSION (the reported bug): a profitable SHORT put whose held-premium
+    series has TRAILING NaNs (real 10Δ-put shape — quotes only for the first
+    contract) must show each roll segment's P&L correctly-signed and FINITE.
+
+    Before the fix, ``segment_pnl`` was ``sign·qty·Δpremium·M`` off the DAILY held
+    premium, which is NaN at the later segments' open/close bars → null; the FE then
+    fell back to ``(close/open−1)·signed_weight`` on the leg SYNTHETIC (direction
+    already baked) → double-inverted a profitable short to NEGATIVE.  The fix derives
+    the segment P&L from the accumulator equity (``synthetic − 100``, telescoping)
+    and sizes the count off the roll-day premium — both NaN-safe.
+    """
+    # Held premium quoted only for the first contract (bars 0–2), NaN after — the
+    # first segment's CLOSE bar (3) and the second segment's OPEN bar (4) are both in
+    # the NaN region, exactly where the old qty·Δpremium path nulled.  is_roll opens
+    # at bar 0 and rolls (interior) at bar 4; roll_premium is finite at both.
+    dates_int = np.array(
+        [20240101, 20240102, 20240103, 20240104, 20240105, 20240106], dtype=np.int64
+    )
+    held_premium = np.array([30.0, 28.0, 26.0, np.nan, np.nan, np.nan])
+    is_roll = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    roll_premium = np.array([30.0, np.nan, np.nan, np.nan, 15.0, np.nan])
+
+    def _nan_tail_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True,
+            held_premium=held_premium,
+            is_roll=is_roll,
+            roll_premium=roll_premium,
+            dates_int=dates_int,
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _nan_tail_fetcher)
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = MagicMock()
+    application.state.app_db_repo = object()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        body = {
+            "legs": {"P": _hold_put_leg()},
+            "weights": {"P": -100},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-01-06",
+        }
+        resp = await ac.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+    equity = np.array(data["portfolio_equity"], dtype=np.float64)
+    # The short put is PROFITABLE: premium fell 30→26 before quotes stopped, so the
+    # synthetic RISES above 100 (and holds flat once premium is NaN).
+    assert equity[-1] > 100.0
+
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    seg_pnls = [r["segment_pnl"] for r in rows]
+
+    # (a) every segment P&L is FINITE (old code → None on the NaN bars).
+    for v in seg_pnls:
+        assert v is not None and np.isfinite(v)
+    # (b) the profitable first segment (synthetic rises) is POSITIVE — the sign fix.
+    assert seg_pnls[0] > 0.0
+    # (c) the segments telescope to the leg's total equity change.
+    assert sum(seg_pnls) == pytest.approx(equity[-1] - 100.0)
+    # (d) the contract count is finite (sized off the roll-day premium, not the
+    #     NaN daily premium — old code nulled segment 1's count).
+    for r in rows:
+        assert r["quantity"] is not None and np.isfinite(r["quantity"])
 
 
 async def test_hold_option_roll_rows_display_only_equity_metrics_byte_identical(
@@ -234,18 +318,19 @@ async def test_futures_notional_option_roll_row_count_follows_sizing_mode(monkey
     assert len(rows) == 2
     equity = np.array(data["portfolio_equity"], dtype=np.float64)
     m_opt, _unit = _leg_multiplier_and_unit("OPT_SP_500")
-    prem = _HELD_PREMIUM
-    for r in rows:
-        ob, cb = r["open_bar"], r["close_bar"]
+    roll_prem = _ROLL_PREMIUM
+    boundaries = [3, len(equity) - 1]
+    for r, boundary in zip(rows, boundaries):
+        ob = r["open_bar"]
         # D1 count = futures-notional value.
         exp_fn = abs(r["signed_weight"]) * equity[ob] / (roll_fref[ob] * m_fut)
         assert r["quantity"] == pytest.approx(exp_fn)
-        # …and it is DISTINCT from the premium-notional value it USED to show.
-        exp_premium = abs(r["signed_weight"]) * equity[ob] / (prem[ob] * m_opt)
+        # …and it is DISTINCT from the premium-notional count it USED to show.
+        exp_premium = abs(r["signed_weight"]) * equity[ob] / (roll_prem[ob] * m_opt)
         assert r["quantity"] != pytest.approx(exp_premium)
-        # P&L stays on the premium with the leg's own displayed multiplier.
-        exp_pnl = -1.0 * r["quantity"] * (prem[cb] - prem[ob]) * r["multiplier"]
-        assert r["segment_pnl"] == pytest.approx(exp_pnl)
+        # P&L is the leg equity change across the segment (accumulator-derived).
+        assert r["segment_pnl"] == pytest.approx(equity[boundary] - equity[ob])
+    assert sum(r["segment_pnl"] for r in rows) == pytest.approx(equity[-1] - 100.0)
 
 
 # ── THE acceptance oracle ──────────────────────────────────────────────────
@@ -320,6 +405,7 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
         premium,
         future_ref,
         m_fut,
+        roll_premium,
     ) = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )
@@ -332,6 +418,9 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
     # inert: no reference-future series and a NaN futures multiplier.
     assert future_ref is None
     assert np.isnan(m_fut)
+    # The roll-day OPEN premium (finite at roll bars) is threaded out so the roll
+    # row's contract COUNT is sized off it (not the mostly-NaN daily premium).
+    np.testing.assert_array_equal(np.asarray(roll_premium), _ROLL_PREMIUM)
     np.testing.assert_array_equal(dates, _DATES_INT)
     expected = 100.0 * _oracle_ratio(
         _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=1.0, weight=-100.0
@@ -363,6 +452,7 @@ async def test_evaluate_option_stream_leg_futures_notional(monkeypatch):
         premium,
         future_ref,
         m_fut,
+        roll_premium,
     ) = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )

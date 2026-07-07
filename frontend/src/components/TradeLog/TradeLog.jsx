@@ -1,12 +1,12 @@
 import { useMemo, useState } from 'react';
-import PillToggle from '../PillToggle';
 import styles from './TradeLog.module.css';
 
 /**
  * Collapsible Trades panel. Reads `response.trades` and joins each row
  * with the matching position's price series for open/close prices.
- * P&L is derived frontend-side: realised = (close/open - 1) * signed_weight;
- * log = ln(close/open) * signed_weight. The mode toggle picks between them.
+ * P&L is realised, derived frontend-side: (close/open - 1) * signed_weight.
+ * Roll rows (rolling direct legs) instead carry a backend DOLLAR `segment_pnl`
+ * and never use the frontend percentage (see below).
  *
  * `entryDescriptions` / `exitDescriptions` are maps `{ [block_id]: description }`
  * supplied by the caller from the selected signal's rules.
@@ -100,14 +100,11 @@ function lastFinitePrice(positionsByInputId, inputId) {
   return null;
 }
 
-function computePnl(mode, openPrice, closePrice, signedWeight) {
+function computePnl(openPrice, closePrice, signedWeight) {
   if (openPrice === null || closePrice === null || openPrice <= 0 || closePrice <= 0) {
     return null;
   }
   const w = signedWeight ?? 0;
-  if (mode === 'log') {
-    return Math.log(closePrice / openPrice) * w;
-  }
   return (closePrice / openPrice - 1) * w;
 }
 
@@ -120,7 +117,6 @@ function TradeLog({
   showHoldingColumn = false,
 }) {
   const [open, setOpen] = useState(false);
-  const [pnlMode, setPnlMode] = useState('realised');
 
   const positionsByInputId = useMemo(() => {
     const m = new Map();
@@ -163,7 +159,6 @@ function TradeLog({
   const count = rows.length;
   const headingId = 'trade-log-heading';
   const bodyId = 'trade-log-body';
-  const pnlHeader = pnlMode === 'log' ? 'Log P&L' : 'Realised P&L';
 
   return (
     <div className={styles.tradeLog} data-testid="trade-log">
@@ -181,17 +176,6 @@ function TradeLog({
           <span className={styles.title}>Trades</span>
           <span className={styles.count} data-testid="trade-log-count">({count})</span>
         </button>
-        <div data-testid="pnl-mode-toggle">
-          <PillToggle
-            options={[
-              { value: 'realised', label: 'Realised' },
-              { value: 'log', label: 'Log' },
-            ]}
-            value={pnlMode}
-            onChange={setPnlMode}
-            ariaLabel="P&L display mode"
-          />
-        </div>
       </div>
       {open && (
         <div id={bodyId} className={styles.body} role="region" aria-labelledby={headingId}>
@@ -212,7 +196,7 @@ function TradeLog({
                     <th scope="col">Size</th>
                     <th scope="col">Open price</th>
                     <th scope="col">Close price</th>
-                    <th scope="col" data-testid="pnl-col-header">{pnlHeader}</th>
+                    <th scope="col" data-testid="pnl-col-header">Realised P&L</th>
                     <th scope="col">Entry reason</th>
                     <th scope="col">Exit reason</th>
                   </tr>
@@ -223,15 +207,26 @@ function TradeLog({
                     const directionClass = tr.direction === 'long'
                       ? styles.dirLong
                       : styles.dirShort;
-                    // Roll rows (continuous / hold-option per-held-contract) carry
-                    // a backend DOLLAR `segment_pnl`; show it verbatim (a realised
-                    // amount, mode-independent). Every other trade keeps the
-                    // frontend-derived percentage under the Realised/Log toggle.
+                    // Roll rows (continuous / hold-option per-held-contract) carry a
+                    // backend DOLLAR `segment_pnl`; show it verbatim (a realised
+                    // amount). A roll row must NEVER fall back to `computePnl`: that
+                    // reads the leg SYNTHETIC equity (direction already baked in), so
+                    // multiplying by signed_weight would double-invert (a profitable
+                    // short shown negative). A roll row with a non-finite segment_pnl
+                    // renders em-dash instead. Every other trade keeps the
+                    // frontend-derived realised percentage.
+                    const isRollRow =
+                      (typeof tr.entry_block_id === 'string'
+                        && tr.entry_block_id.startsWith('roll:'))
+                      || 'segment_pnl' in tr
+                      || typeof tr.roll_hover === 'string';
                     const hasSegmentPnl =
                       typeof tr.segment_pnl === 'number' && Number.isFinite(tr.segment_pnl);
                     const pnl = hasSegmentPnl
                       ? tr.segment_pnl
-                      : computePnl(pnlMode, tr._openPrice, tr._pnlClosePrice, tr.signed_weight);
+                      : isRollRow
+                        ? null
+                        : computePnl(tr._openPrice, tr._pnlClosePrice, tr.signed_weight);
                     const pnlClass = pnl === null
                       ? ''
                       : pnl >= 0
