@@ -163,6 +163,91 @@ async def test_hold_option_leg_emits_per_roll_trade_rows(client):
         assert r["segment_pnl"] == pytest.approx(exp_pnl)
 
 
+async def test_hold_option_roll_rows_display_only_equity_metrics_byte_identical(
+    client, monkeypatch
+):
+    """HARD GATE (option path): toggling the per-roll display rows must leave
+    portfolio equity + ALL metrics + monthly/yearly returns BYTE-identical.  This
+    mirrors the continuous-path byte-identity gate
+    (``test_roll_rows_are_display_only_equity_metrics_byte_identical``), which the
+    option path previously covered only with an oracle ``assert_allclose``.  We
+    compare the SAME production compute path WITH vs WITHOUT the rows (by stubbing
+    ``_build_roll_rows`` to emit nothing), so the numeric equality is exact — not
+    subject to oracle-vs-production last-ULP drift in the synthetic itself."""
+    # 1. WITH the rows (normal path): assert roll rows are actually produced, else
+    #    the gate is vacuous.
+    data_with = await _compute(client, -100)
+    assert any(t.get("entry_block_id") == "roll:P" for t in data_with["trades"])
+
+    # 2. WITHOUT the rows: stub the builder to emit nothing, recompute.
+    monkeypatch.setattr("tcg.core.api.portfolio._build_roll_rows", lambda **kw: [])
+    data_without = await _compute(client, -100)
+    assert not any(t.get("entry_block_id") == "roll:P" for t in data_without["trades"])
+
+    # 3. Every numeric output is byte-identical across the toggle.
+    for key in ("portfolio_equity", "metrics", "monthly_returns", "yearly_returns"):
+        assert data_with[key] == data_without[key], key
+
+
+async def test_futures_notional_option_roll_row_count_follows_sizing_mode(monkeypatch):
+    """D1: a ``sizing_mode == "futures_notional"`` option leg's roll-row COUNT is
+    sized off the FUTURES notional ``|w|·NAV/(F_ref·m_fut)`` — DISTINCT from the
+    premium-notional count ``|w|·NAV/(premium·m_opt)`` — while the per-segment P&L
+    stays on the premium with the leg's own multiplier."""
+    from tcg.core.api.portfolio import _leg_multiplier_and_unit
+    from tcg.core.api.portfolio import router as portfolio_router
+
+    # Reference-future price finite only at the roll bars (0 and 3), where each
+    # roll-row segment opens; m_fut = m_opt = 50 (SP_500).
+    roll_fref = np.array([4500.0, np.nan, np.nan, 4520.0, np.nan, np.nan])
+    m_fut = 50.0
+
+    def _fut_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True, roll_future_ref=roll_fref, multipliers=(m_fut, m_fut)
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _fut_fetcher)
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = MagicMock()
+    application.state.app_db_repo = object()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        body = {
+            "legs": {"P": {**_hold_put_leg(), "sizing_mode": "futures_notional"}},
+            "weights": {"P": -100},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-03-01",
+            "end": "2024-04-30",
+        }
+        resp = await ac.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    equity = np.array(data["portfolio_equity"], dtype=np.float64)
+    m_opt, _unit = _leg_multiplier_and_unit("OPT_SP_500")
+    prem = _HELD_PREMIUM
+    for r in rows:
+        ob, cb = r["open_bar"], r["close_bar"]
+        # D1 count = futures-notional value.
+        exp_fn = abs(r["signed_weight"]) * equity[ob] / (roll_fref[ob] * m_fut)
+        assert r["quantity"] == pytest.approx(exp_fn)
+        # …and it is DISTINCT from the premium-notional value it USED to show.
+        exp_premium = abs(r["signed_weight"]) * equity[ob] / (prem[ob] * m_opt)
+        assert r["quantity"] != pytest.approx(exp_premium)
+        # P&L stays on the premium with the leg's own displayed multiplier.
+        exp_pnl = -1.0 * r["quantity"] * (prem[cb] - prem[ob]) * r["multiplier"]
+        assert r["segment_pnl"] == pytest.approx(exp_pnl)
+
+
 # ── THE acceptance oracle ──────────────────────────────────────────────────
 
 
@@ -227,7 +312,15 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
         "tcg.core.api.portfolio.make_signal_fetcher", _fake_make_signal_fetcher
     )
     leg = LegSpec(**_hold_put_leg())
-    dates, values, mode, roll_dates, premium = await _evaluate_option_stream_leg(
+    (
+        dates,
+        values,
+        mode,
+        roll_dates,
+        premium,
+        future_ref,
+        m_fut,
+    ) = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )
     assert mode == "price_hold"
@@ -235,6 +328,10 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
     # IS_ROLL = [1,0,0,1,0,0] over DATES_INT → the single interior roll is 20240401.
     assert roll_dates == [20240401]
     np.testing.assert_array_equal(np.asarray(premium), _HELD_PREMIUM)
+    # A premium-notional (default) leg leaves the futures-notional side-channels
+    # inert: no reference-future series and a NaN futures multiplier.
+    assert future_ref is None
+    assert np.isnan(m_fut)
     np.testing.assert_array_equal(dates, _DATES_INT)
     expected = 100.0 * _oracle_ratio(
         _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=1.0, weight=-100.0
@@ -258,10 +355,22 @@ async def test_evaluate_option_stream_leg_futures_notional(monkeypatch):
 
     monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _fut_fetcher)
     leg = LegSpec(**_hold_put_leg(), sizing_mode="futures_notional")
-    dates, values, mode, roll_dates, premium = await _evaluate_option_stream_leg(
+    (
+        dates,
+        values,
+        mode,
+        roll_dates,
+        premium,
+        future_ref,
+        m_fut,
+    ) = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )
     assert mode == "price_hold"
+    # futures_notional threads the reference-future series + resolved m_fut out for
+    # the display-only roll-row sizing (D1).
+    np.testing.assert_array_equal(np.asarray(future_ref), roll_fref)
+    assert m_fut == pytest.approx(50.0)
     expected = 100.0 * oracle_ratio_futures(
         _OWNER_PREV,
         _OWNER_CUR,

@@ -211,6 +211,9 @@ def _build_roll_rows(
     equity: npt.NDArray[np.float64],
     cd_index: dict[int, int],
     n_bars: int,
+    sizing_price_series: npt.NDArray[np.float64] | None = None,
+    sizing_multiplier: float | None = None,
+    use_futures_notional: bool = False,
 ) -> list[dict]:
     """One display-only trade row per HELD CONTRACT of a rolling direct leg.
 
@@ -224,6 +227,19 @@ def _build_roll_rows(
     ``end``; every other boundary ``rolling`` (decision 1).  The rows are PURELY
     INFORMATIONAL — they are appended to ``aggregated_trades`` AFTER equity/metrics
     are computed and never feed back into them.
+
+    SIZING (the displayed contract COUNT) follows the leg's sizing_mode.  By
+    default it is the premium/own-price notional ``|w|·NAV_open/(price_open·M)``.
+    When ``use_futures_notional`` is True (a ``sizing_mode == "futures_notional"``
+    option leg — the exact PR#77 leg type), the COUNT is instead sized off the
+    FUTURES notional ``|w|·NAV_open/(F_ref_open·m_fut)`` using ``sizing_price_series``
+    (the reference-future price, aligned to ``common_dates``) and ``sizing_multiplier``
+    (``m_fut``) — mirroring the engine's own futures-notional quantity.  The
+    per-segment realised P&L stays on the leg's OWN premium/price series with the
+    leg's own ``M`` (``sign·qty·Δprice·M``); only the qty basis changes.  All the
+    same NaN/≤0 guards apply, so an unrecoverable ``F_ref``/``m_fut`` nulls the
+    count (the FE falls back to the % display) — NEVER a silent premium fallback.
+    This is DISPLAY-ONLY and never perturbs equity/metrics.
     """
     m, unit = _leg_multiplier_and_unit(collection)
     # Roll boundaries → distinct in-window bars in (0, n_bars-1]; a boundary at
@@ -245,9 +261,24 @@ def _build_roll_rows(
         close_bar = closes[k]
         entry_name = "open" if k == 0 else "rolling"
         exit_name = "end" if k == n_seg - 1 else "rolling"
-        quantity = _roll_row_quantity(
-            leg_fraction, equity, price_series, open_bar, m, n_bars
-        )
+        if use_futures_notional:
+            # Futures-notional COUNT: same §10.5-shape formula, but the futures
+            # reference price + m_fut in the denominator (an unresolved F_ref/m_fut
+            # → None via the shared guards, NOT a premium fallback).
+            quantity = _roll_row_quantity(
+                leg_fraction,
+                equity,
+                sizing_price_series,
+                open_bar,
+                sizing_multiplier,
+                n_bars,
+            )
+        else:
+            quantity = _roll_row_quantity(
+                leg_fraction, equity, price_series, open_bar, m, n_bars
+            )
+        # P&L stays on the leg's OWN premium/price series with its own M — only the
+        # displayed COUNT switches basis above.
         segment_pnl = _roll_row_pnl(
             quantity, leg_fraction, price_series, open_bar, close_bar, m
         )
@@ -882,16 +913,24 @@ async def _evaluate_option_stream_leg(
     str,
     list[int],
     npt.NDArray[np.float64] | None,
+    npt.NDArray[np.float64] | None,
+    float,
 ]:
     """Resolve an option_stream leg and return
-    (dates, values, stream_mode, roll_dates, premium).
+    (dates, values, stream_mode, roll_dates, premium, future_ref, m_fut).
 
     ``roll_dates`` are the DISPLAY-ONLY interior roll BOUNDARIES (YYYYMMDD ints,
     the initial open excluded) for the trade-log roll rows, and ``premium`` is the
     raw held-premium series the hold accumulator was fed (same axis as ``dates``)
     — both populated only on the "price_hold" path, ``[]`` / ``None`` otherwise.
-    They never affect ``values`` (the equity synthetic); they are additive
-    side-channels for the informational per-roll trade rows.
+    ``future_ref`` (the resolver's ``roll_future_ref``, same axis as ``dates``,
+    finite only at roll bars) and ``m_fut`` (the futures multiplier the engine
+    sized off) are the DISPLAY-ONLY side-channels that let the caller size a
+    ``sizing_mode == "futures_notional"`` leg's roll-row COUNT off the FUTURES
+    notional (``|w|·NAV/(F_ref·m_fut)``) instead of the premium notional; both are
+    ``None`` / ``NaN`` for a premium-sized (default) or non-hold leg.  None of
+    these side-channels affect ``values`` (the equity synthetic); they feed only
+    the informational per-roll trade rows.
 
     ``stream_mode`` is either "price_hold" (the hold-mode synthetic $-P&L equity
     leg; caller must apply |weight| — direction is already baked in) or "level" (a
@@ -911,7 +950,8 @@ async def _evaluate_option_stream_leg(
     is applied ONCE.  ``weight`` is consulted only on this hold path.
 
     Returns:
-        Tuple of (YYYYMMDD int dates, values array, stream_mode).
+        Tuple of (YYYYMMDD int dates, values array, stream_mode, interior roll
+        dates, raw premium, future_ref series, futures multiplier).
     """
     # 1. Build an OptionStreamRef from the leg's fields.  ``roll_offset``
     #    mirrors the continuous-leg precedent in ``_parse_legs``: validate the
@@ -1052,7 +1092,19 @@ async def _evaluate_option_stream_leg(
         _roll_mask = np.asarray(is_roll_f, dtype=np.float64) > 0.5
         _roll_all = [int(x) for x in _d_arr[_roll_mask].tolist()]
         roll_dates_interior = _roll_all[1:]
-        return dates_arr, synthetic, "price_hold", roll_dates_interior, premium
+        # ``roll_fref`` (the resolver's ``roll_future_ref``, same axis as ``dates``)
+        # and the resolved ``mult_fut`` are threaded out for the DISPLAY-ONLY
+        # futures-notional roll-row sizing (see §10).  Both are inert for a
+        # premium-notional leg (``roll_fref`` is None, ``mult_fut`` is NaN).
+        return (
+            dates_arr,
+            synthetic,
+            "price_hold",
+            roll_dates_interior,
+            premium,
+            roll_fref,
+            float(mult_fut),
+        )
 
     # 2. Materialise via shared infrastructure
     result = await materialise_option_streams(
@@ -1074,7 +1126,7 @@ async def _evaluate_option_stream_leg(
     #    A level leg (iv/greeks/volume/oi) is a tracking overlay, NOT part of the
     #    equity curve, so it needs no forward-fill or all-NaN guard here (an
     #    all-NaN level leg is surfaced downstream as an empty tracking series).
-    return dates_arr, values, "level", [], None
+    return dates_arr, values, "level", [], None, None, float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +1311,12 @@ async def compute_portfolio(
     # rows of a hold-mode option leg (see §10).  Never touch the equity synthetic.
     option_roll_dates_interior: dict[str, list[int]] = {}
     option_premium_raw: dict[str, npt.NDArray[np.float64] | None] = {}
+    # DISPLAY-ONLY futures-notional sizing side-channels for a hold-mode option leg
+    # in ``sizing_mode == "futures_notional"``: the reference-future price series
+    # (aligned below like the premium) + the resolved futures multiplier, so the
+    # roll-row COUNT follows the leg's sizing_mode (see §10).  Never touch equity.
+    option_future_ref_raw: dict[str, npt.NDArray[np.float64] | None] = {}
+    option_mult_fut: dict[str, float] = {}
 
     for label, leg in option_stream_legs.items():
         (
@@ -1267,6 +1325,8 @@ async def compute_portfolio(
             stream_mode,
             os_roll_interior,
             os_premium,
+            os_future_ref,
+            os_mult_fut,
         ) = await _evaluate_option_stream_leg(
             label,
             leg,
@@ -1291,6 +1351,8 @@ async def compute_portfolio(
                 hold_option_labels.add(label)
                 option_roll_dates_interior[label] = os_roll_interior
                 option_premium_raw[label] = os_premium
+                option_future_ref_raw[label] = os_future_ref
+                option_mult_fut[label] = os_mult_fut
         else:
             # Level leg -- tracking overlay only (not in equity curve)
             tracking_series[label] = {
@@ -1360,6 +1422,22 @@ async def compute_portfolio(
             assume_unique=True,
         )
         option_premium_aligned[label] = np.asarray(prem, dtype=np.float64)[os_mask]
+
+    # Align each futures_notional hold leg's reference-future price series to
+    # common_dates with the SAME os_mask as the premium (it shares the option
+    # leg's date axis).  DISPLAY-ONLY: it sizes the roll-row COUNT off the futures
+    # notional; ``roll_future_ref`` is finite only at roll bars (NaN elsewhere),
+    # which is exactly where each roll-row segment opens.
+    option_future_ref_aligned: dict[str, npt.NDArray[np.float64]] = {}
+    for label, fref in option_future_ref_raw.items():
+        if fref is None or label not in option_stream_dates_map:
+            continue
+        os_mask = np.isin(
+            option_stream_dates_map[label],
+            common_dates,
+            assume_unique=True,
+        )
+        option_future_ref_aligned[label] = np.asarray(fref, dtype=np.float64)[os_mask]
 
     # ── 6. Compute full date range for the slider ──
     #
@@ -1446,8 +1524,13 @@ async def compute_portfolio(
     #
     # ``get_aligned_prices`` discards a continuous leg's roll_dates (keeps only the
     # stitched prices), so re-fetch each continuous leg via ``get_continuous`` to
-    # recover the exact roll BOUNDARIES the chart markers use.  The call is cached
-    # (``get_aligned_prices`` already resolved the same key), so this is cheap.
+    # recover the exact roll BOUNDARIES the chart markers use.  NOTE this is NOT a
+    # free cache hit under a date filter: the equity path reaches ``get_continuous``
+    # via ``get_aligned_prices`` → ``get_continuous(None, None)`` (unfiltered), but
+    # here we pass ``start=start_date, end=end_date``; a non-None window is a
+    # DIFFERENT cache key, so under a date filter this is a cache MISS — a full
+    # contract re-roll per continuous leg (only the unfiltered case reuses the warm
+    # entry).  It stays bounded (one extra roll per continuous leg) and DISPLAY-ONLY.
     # This is purely informational: a failure here must NEVER 500 the compute —
     # the equity/metrics are already built — so a data error degrades to "no roll
     # boundaries" (the leg then shows a single open→end row).
@@ -1569,6 +1652,16 @@ async def compute_portfolio(
             continue
 
         if leg.type == "option_stream" and label in hold_option_labels:
+            # The displayed contract COUNT follows the leg's sizing_mode: a
+            # futures_notional leg is sized off the reference-future notional
+            # (F_ref·m_fut), a premium leg off the premium notional.  Normalise
+            # m_fut to a usable positive-finite float here (else None → the count
+            # nulls via the shared guards, exactly like an unresolved OPT M).
+            use_fn = leg.sizing_mode == "futures_notional"
+            raw_mfut = option_mult_fut.get(label, float("nan"))
+            usable_mfut = (
+                float(raw_mfut) if math.isfinite(raw_mfut) and raw_mfut > 0.0 else None
+            )
             aggregated_trades.extend(
                 _build_roll_rows(
                     label=label,
@@ -1581,6 +1674,11 @@ async def compute_portfolio(
                     equity=equity_arr,
                     cd_index=cd_index,
                     n_bars=n_common,
+                    sizing_price_series=(
+                        option_future_ref_aligned.get(label) if use_fn else None
+                    ),
+                    sizing_multiplier=usable_mfut if use_fn else None,
+                    use_futures_notional=use_fn,
                 )
             )
             continue
