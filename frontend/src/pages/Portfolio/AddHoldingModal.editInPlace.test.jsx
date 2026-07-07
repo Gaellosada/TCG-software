@@ -204,10 +204,29 @@ describe('AddHoldingModal edit mode — confirm updates the leg in place', () =>
     expect(legs[0]).toEqual(CONTINUOUS_LEG); // untouched
   });
 
-  it('cancel/close without confirming leaves the leg unchanged', () => {
-    render(<EditHarness initialLegs={[CONTINUOUS_LEG]} editIndex={0} />);
-    // No capturedOnSelect call = user closed the modal without confirming.
-    expect(readLegs()).toEqual([CONTINUOUS_LEG]);
+  it('cancel/close without confirming emits nothing: no onUpdateLeg, no onAddLeg', () => {
+    // Non-vacuous cancel check: the confirm path IS wired (capturedOnSelect is a
+    // live function that WOULD mutate), but the user CLOSES the modal without
+    // confirming — so neither leg mutator may fire.
+    const onAddLeg = vi.fn();
+    const onUpdateLeg = vi.fn();
+    render(
+      <AddHoldingModal
+        isOpen
+        onClose={vi.fn()}
+        onAddLeg={onAddLeg}
+        editLeg={CONTINUOUS_LEG}
+        onUpdateLeg={onUpdateLeg}
+      />,
+    );
+    // Precondition: a confirm WOULD have mutated (the mutation path exists).
+    expect(typeof capturedOnSelect).toBe('function');
+    // User cancels: invoke the modal's onClose, do NOT call onSelect.
+    act(() => {
+      capturedProps.onClose();
+    });
+    expect(onUpdateLeg).not.toHaveBeenCalled();
+    expect(onAddLeg).not.toHaveBeenCalled();
   });
 });
 

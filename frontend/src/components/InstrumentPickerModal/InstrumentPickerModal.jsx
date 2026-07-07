@@ -525,6 +525,10 @@ export default function InstrumentPickerModal({
                     disabled={readOnly}
                     showHoldControls={showOptionHoldControls}
                     holdRequired={optionHoldRequired}
+                    // Edit mode is DERIVED as initialConfig != null (same as the
+                    // seed effect + JSDoc): suppresses the CREATE-only cycle
+                    // nudge so an edited leg's saved cycle is preserved.
+                    editMode={initialConfig != null}
                     referenceDate={optionReferenceDate}
                     {...(optionStreamAllowedStreams
                       ? { allowedStreams: optionStreamAllowedStreams }
