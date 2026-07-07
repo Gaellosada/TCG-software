@@ -201,6 +201,31 @@
   white-space: nowrap;
 }
 
+/*
+ * Editable (future/option) chip variant: the chip IS the edit trigger
+ * (Decision D1 — replaces the old ✎ pencil). Layered on top of .seriesChip,
+ * it resets native button chrome to keep the badge look, and adds a pointer +
+ * hover highlight so it reads as clickable. Spot chips stay a plain,
+ * non-clickable <span> and never get this class. Stays interactive under
+ * readOnly (opens the modal view-only), so no disabled dimming by default.
+ */
+.seriesChipBtn {
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.seriesChipBtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.seriesChipBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Clickable chip shown in the series row when no instrument is selected yet.
    Matches the visual style of .seriesChip but has a dashed border and acts
    as a button (opens InstrumentPickerModal). */
