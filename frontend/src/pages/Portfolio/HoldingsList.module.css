@@ -151,6 +151,28 @@
   margin-top: 1px;
 }
 
+/* ── Editable instrument cell (future / option legs, click to edit) ── */
+/* role="button" span (see HoldingsList.jsx): stays clickable when the portfolio
+ * is locked so the leg can be VIEWED read-only. Negative margin keeps the hover
+ * hit-area aligned with the cell without shifting the row layout. */
+.instrumentEditBtn {
+  display: block;
+  margin: -4px -6px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.instrumentEditBtn:hover {
+  background: var(--bg-hover, rgba(148, 163, 184, 0.1));
+}
+
+.instrumentEditBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* ── Signal expand button in the instrument column ── */
 
 .expandBtn {
