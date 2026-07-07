@@ -45,6 +45,7 @@ from tcg.core.api._models_options import (
     ByDelta,
     ByMoneyness,
     NearestToTarget,
+    RollOffset,
 )
 from tcg.core.api.errors import tcg_error_handler
 from tcg.core.api.indicators import router as indicators_router
@@ -89,9 +90,7 @@ class TestPydanticAliasParity:
         assert m.target_K_over_S == 1.02
 
     def test_by_delta_be_shape_backwards_compat(self):
-        m = ByDelta.model_validate(
-            {"kind": "by_delta", "target_delta": -0.10}
-        )
+        m = ByDelta.model_validate({"kind": "by_delta", "target_delta": -0.10})
         assert m.target_delta == -0.10
 
     def test_nearest_to_target_be_shape_backwards_compat(self):
@@ -111,13 +110,37 @@ class TestPydanticAliasParity:
         assert m_near.target_dte_days == 60
 
 
+class TestRollOffsetBounds:
+    """The roll-early cap was raised from 30 to 365 days (months stays 12).
+    Pin BOTH sides — accept up to the cap and reject beyond — so a silent revert
+    to the old 30-day cap is caught (the changed 366/400 reject tests alone would
+    still pass at cap=30)."""
+
+    def test_days_accepted_up_to_365(self):
+        assert RollOffset(value=31, unit="days").value == 31
+        assert RollOffset(value=90, unit="days").value == 90  # ~3 months out
+        assert RollOffset(value=365, unit="days").value == 365
+
+    def test_days_over_365_rejected(self):
+        with pytest.raises(ValueError):
+            RollOffset(value=366, unit="days")
+
+    def test_months_still_capped_at_12(self):
+        assert RollOffset(value=12, unit="months").value == 12
+        with pytest.raises(ValueError):
+            RollOffset(value=13, unit="months")
+
+    def test_legacy_bare_int_accepted_in_new_range(self):
+        # legacy days-only int is coerced to {value, unit:days} and bounded 0..365
+        assert RollOffset.model_validate(200).value == 200
+        with pytest.raises(ValueError):
+            RollOffset.model_validate(400)
+
+
 # ── Layer 2 — Full POST through the FastAPI router ─────────────────────
 
 
-_TRIVIAL_INDICATOR = (
-    "def compute(series):\n"
-    "    return series['x']\n"
-)
+_TRIVIAL_INDICATOR = "def compute(series):\n    return series['x']\n"
 
 
 @pytest.fixture
@@ -323,14 +346,10 @@ class TestProgressEndpoint:
         resp = await client.post("/api/indicators/compute", json=body)
         assert resp.status_code == 200, resp.text
         # After response, the BackgroundTask cleared the entry.
-        progress_resp = await client.get(
-            "/api/indicators/progress/test-task-cleanup"
-        )
+        progress_resp = await client.get("/api/indicators/progress/test-task-cleanup")
         assert progress_resp.json() == {"done": 0, "total": 0, "fraction": 0.0}
 
-    async def test_compute_without_task_id_does_not_register(
-        self, client: AsyncClient
-    ):
+    async def test_compute_without_task_id_does_not_register(self, client: AsyncClient):
         """No task_id → no progress entry — proves we don't leak state
         for the common (non-option-stream) compute path."""
         body = _fe_body(
@@ -341,7 +360,5 @@ class TestProgressEndpoint:
         resp = await client.post("/api/indicators/compute", json=body)
         assert resp.status_code == 200, resp.text
         # An arbitrary task_id never registered → poll returns zeros.
-        progress_resp = await client.get(
-            "/api/indicators/progress/never-registered"
-        )
+        progress_resp = await client.get("/api/indicators/progress/never-registered")
         assert progress_resp.json() == {"done": 0, "total": 0, "fraction": 0.0}

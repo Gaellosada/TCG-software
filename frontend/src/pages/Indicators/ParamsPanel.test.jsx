@@ -131,7 +131,26 @@ describe('<ParamsPanel> — instrument picker button', () => {
     expect(btn.textContent).toBe('Select instrument');
   });
 
-  it('shows change icon and chip when an instrument is already picked', () => {
+  it('makes a picked future/option chip the clickable edit trigger (the ✎ pencil was removed, Decision D1)', () => {
+    render(<ParamsPanel {...baseProps({
+      seriesLabels: ['close'],
+      indicator: {
+        ...baseProps().indicator,
+        seriesMap: { close: { type: 'continuous', collection: 'FUT_ES' } },
+      },
+    })} />);
+    // The chip itself now carries the picker testid + an "Edit settings" title
+    // (chip-click replaces the old ✎ pencil affordance).
+    const chip = screen.getByTestId('instrument-picker-close');
+    expect(chip.tagName).toBe('BUTTON');
+    expect(chip.title).toBe('Edit settings');
+    expect(chip.textContent).toBe('FUT_ES (continuous)');
+    // No pencil affordance remains anywhere.
+    expect(screen.queryByTitle('Change instrument')).toBeNull();
+    expect(screen.queryByText('✎')).toBeNull();
+  });
+
+  it('leaves a picked spot chip as a plain, non-clickable span (no edit trigger)', () => {
     render(<ParamsPanel {...baseProps({
       seriesLabels: ['close'],
       indicator: {
@@ -139,11 +158,10 @@ describe('<ParamsPanel> — instrument picker button', () => {
         seriesMap: { close: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } },
       },
     })} />);
-    // When picked, the edit button (✎) carries the testid; the chip shows the label.
-    const btn = screen.getByTestId('instrument-picker-close');
-    expect(btn.title).toBe('Change instrument');
-    // Chip label: "INDEX / SPX"
-    expect(screen.getByText('INDEX / SPX')).toBeTruthy();
+    // Spot has no config screen → the chip is not click-to-edit.
+    expect(screen.queryByTestId('instrument-picker-close')).toBeNull();
+    const chip = screen.getByText('INDEX / SPX');
+    expect(chip.tagName).toBe('SPAN');
   });
 
   it('renders a readable label for an option_stream-shaped series ref', () => {

@@ -85,8 +85,11 @@ class ContinuousInstrumentRef(BaseModel):
     collection: str
     adjustment: Literal["none", "ratio", "difference"] = "none"
     cycle: str | None = None
-    # Accept camelCase from the frontend.
-    rollOffset: int = 0
+    # Accept camelCase from the frontend. Bounded 0..365 days for parity with
+    # the Data-page continuous endpoint (data.py) and the portfolio continuous-
+    # leg validator, so a signal's continuous instrument can't smuggle an
+    # unbounded roll offset past those caps.
+    rollOffset: int = Field(default=0, ge=0, le=365)
     # Issue #3: ``end_of_month`` rolls on the last trading day of each month
     # regardless of expiry; default ``front_month`` keeps existing refs valid.
     strategy: Literal["front_month", "end_of_month"] = "front_month"

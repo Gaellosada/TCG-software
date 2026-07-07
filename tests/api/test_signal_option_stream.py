@@ -494,7 +494,7 @@ class TestSignalOptionStreamRollFields:
     async def test_roll_offset_days_out_of_range_rejected(self, capture_client):
         client, _captured = capture_client
         resp = await self._run(
-            client, _opt_input(roll_offset={"value": 31, "unit": "days"})
+            client, _opt_input(roll_offset={"value": 366, "unit": "days"})
         )
         assert resp.status_code in (400, 422), resp.text
 

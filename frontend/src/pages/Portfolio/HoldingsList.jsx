@@ -12,7 +12,7 @@ const COL_COUNT = 7;
  *
  * Signal legs show an expandable detail row with their input instruments.
  */
-export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemoveLeg, onOpenAddModal, onOpenSignalModal }) {
+export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemoveLeg, onOpenAddModal, onOpenSignalModal, onEditLeg, readOnly = false }) {
   const [pendingRemove, setPendingRemove] = useState(null);
   const [expandedSignals, setExpandedSignals] = useState(new Set());
 
@@ -24,6 +24,29 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
       return next;
     });
   };
+
+  // Click-to-edit affordance for future (continuous) and option legs. Rendered
+  // as a role="button" element — NOT a native <button> — on purpose: this list
+  // is wrapped by PortfolioPage in a native <fieldset disabled> when the
+  // portfolio is locked, and a real <button> inside a disabled fieldset is
+  // non-interactive in real browsers. A role="button" span is not a form
+  // control, so a locked leg stays clickable and opens the modal read-only
+  // (view-only). Keyboard-activable (Enter/Space) for accessibility.
+  const editTriggerProps = (leg, index) => ({
+    role: 'button',
+    tabIndex: 0,
+    className: styles.instrumentEditBtn,
+    'data-testid': `edit-instrument-${leg.id}`,
+    title: readOnly ? 'View settings' : 'Edit settings',
+    'aria-label': `${readOnly ? 'View' : 'Edit'} settings for ${leg.label}`,
+    onClick: () => onEditLeg(index),
+    onKeyDown: (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onEditLeg(index);
+      }
+    },
+  });
 
   return (
     <Card
@@ -113,7 +136,7 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                             </span>
                           </button>
                         ) : leg.type === 'option_stream' ? (
-                          <span>
+                          <span {...editTriggerProps(leg, index)}>
                             <span className={styles.instrumentPrimary}>
                               {leg.collection} {leg.option_type}
                             </span>
@@ -124,11 +147,13 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                             </span>
                           </span>
                         ) : leg.type === 'continuous' ? (
-                          <span>
+                          <span {...editTriggerProps(leg, index)}>
                             <span className={styles.instrumentPrimary}>{leg.collection}</span>
                             <span className={styles.instrumentSecondary}>{leg.strategy || 'front_month'}</span>
                           </span>
                         ) : (
+                          // Spot/index legs have no config step to seed, so they
+                          // are NOT click-to-edit (plain, non-interactive).
                           <span>
                             <span className={styles.instrumentPrimary}>{leg.symbol}</span>
                             <span className={styles.instrumentSecondary}>{leg.collection}</span>

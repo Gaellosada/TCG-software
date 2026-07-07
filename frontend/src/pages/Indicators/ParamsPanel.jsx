@@ -83,6 +83,16 @@ function formatMaturity(m) {
   }
 }
 
+/**
+ * A picked series ref is "editable" (its config popup can be re-opened
+ * pre-filled) only for the drill-down types the shared modal can seed:
+ * continuous futures and option streams. Spot/index refs have no config
+ * screen, so their chip is NOT click-to-edit (Criterion 6/7, Design A2).
+ */
+export function isEditableSeriesRef(ref) {
+  return !!ref && (ref.type === 'continuous' || ref.type === 'option_stream');
+}
+
 function formatSelection(s, optionType) {
   if (!s || !s.kind) return null;
   if (s.kind === 'by_strike') {
@@ -129,6 +139,10 @@ function formatSelection(s, optionType) {
  *   showDateRange           {boolean}      whether to show the option date range control
  *   optionDateRange         {Object|null}  { start, end }
  *   onOptionDateRangeChange {Function}     (value) => void
+ *   readOnly                {boolean}      when true (a LOCKED indicator) the
+ *                                          series picker opens view-only — the
+ *                                          chip stays clickable but the modal is
+ *                                          rendered read-only (Criterion 6).
  */
 function ParamsPanel({
   indicator,
@@ -145,6 +159,7 @@ function ParamsPanel({
   showDateRange,
   optionDateRange,
   onOptionDateRangeChange,
+  readOnly = false,
 }) {
   // Per-input raw string drafts for numeric fields. Keyed by param name.
   const [numericDrafts, setNumericDrafts] = useState({});
@@ -330,15 +345,38 @@ function ParamsPanel({
                   <div className={styles.seriesRow}>
                     <span className={`${styles.seriesLabelText} codeRefLabel`}>{label}</span>
                     {picked ? (
-                      <span className={styles.seriesChip}>
-                        {formatSeriesRefLabel(picked) ?? '(unknown series)'}
-                      </span>
+                      isEditableSeriesRef(picked) ? (
+                        // Editable (future/option) chip — clicking re-opens the
+                        // picker pre-filled with the EFFECTIVE ref driving this
+                        // slot. seriesMap already has the registry defaultSeries
+                        // folded in upstream (IndicatorsPage.applyDefaultSeries),
+                        // so ``picked`` is the effective ref, not a stale saved
+                        // entry. Replaces the old ✎ pencil (Decision D1). Stays
+                        // clickable under readOnly so a locked indicator opens
+                        // the modal view-only rather than being inert.
+                        <button
+                          type="button"
+                          className={`${styles.seriesChip} ${styles.seriesChipBtn}`}
+                          onClick={() => setPickerLabel(label)}
+                          disabled={disabled}
+                          data-testid={`instrument-picker-${label}`}
+                          title={readOnly ? 'View settings' : 'Edit settings'}
+                          aria-label={`${readOnly ? 'View' : 'Edit'} settings for ${label}`}
+                        >
+                          {formatSeriesRefLabel(picked) ?? '(unknown series)'}
+                        </button>
+                      ) : (
+                        // Spot/index chip — no config screen, so not click-to-edit.
+                        <span className={styles.seriesChip}>
+                          {formatSeriesRefLabel(picked) ?? '(unknown series)'}
+                        </span>
+                      )
                     ) : (
                       <button
                         type="button"
                         className={styles.selectChipBtn}
                         onClick={() => setPickerLabel(label)}
-                        disabled={disabled}
+                        disabled={disabled || readOnly}
                         data-testid={`instrument-picker-${label}`}
                         aria-label={`Select instrument for ${label}`}
                       >
@@ -355,19 +393,6 @@ function ParamsPanel({
                         disabled={disabled}
                       >
                         ⓘ
-                      </button>
-                    )}
-                    {picked && (
-                      <button
-                        type="button"
-                        className={styles.iconBtn}
-                        onClick={() => setPickerLabel(label)}
-                        disabled={disabled}
-                        data-testid={`instrument-picker-${label}`}
-                        title="Change instrument"
-                        aria-label={`Change instrument for ${label}`}
-                      >
-                        ✎
                       </button>
                     )}
                   </div>
@@ -451,12 +476,17 @@ dates:   ${summary.data.start ?? '—'} … ${summary.data.end ?? '—'}`}
         </button>
       </div>
 
-      {/* Shared instrument picker modal */}
+      {/* Shared instrument picker modal. In edit mode ``initialConfig`` is the
+          effective ref for the open slot (``seriesMap[pickerLabel]``), so the
+          modal opens pre-filled; an unpicked slot passes null → create mode
+          (unchanged). ``readOnly`` opens it view-only for a locked indicator. */}
       <InstrumentPickerModal
         isOpen={pickerLabel !== null}
         onClose={() => setPickerLabel(null)}
         onSelect={handlePickerSelect}
         title="Select Instrument"
+        initialConfig={pickerLabel !== null ? (seriesMap[pickerLabel] || null) : null}
+        readOnly={readOnly}
       />
     </div>
   );

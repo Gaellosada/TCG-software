@@ -261,7 +261,8 @@ class SqlInstrumentReader:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        f"""SELECT d.symbol, d.expiration, f.trade_date,
+                        f"""SELECT d.symbol, d.expiration, d.expiration_cycle,
+                                   f.trade_date,
                                    COALESCE(f.adj_close, f.close) AS close_val,
                                    f.open, f.high, f.low, f.volume
                             FROM {SCHEMA}.fact_price_eod f
@@ -291,6 +292,7 @@ class SqlInstrumentReader:
             if bucket is None:
                 bucket = {
                     "expiration": date_to_int(r["expiration"]),
+                    "expiration_cycle": r["expiration_cycle"],
                     "dates": [],
                     "open": [],
                     "high": [],
@@ -314,6 +316,7 @@ class SqlInstrumentReader:
                 ContractPriceData(
                     contract_id=sym,
                     expiration=b["expiration"],
+                    expiration_cycle=b["expiration_cycle"],
                     prices=PriceSeries(
                         dates=np.array(b["dates"], dtype=np.int64),
                         open=np.array(b["open"], dtype=np.float64),

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { listCollections, listInstruments, getAvailableCycles } from '../../api/data';
 import { getOptionRoots } from '../../api/options';
 import { createBasket } from '../../api/persistence';
@@ -55,7 +55,7 @@ function collectionsForAssetClass(assetClass, allCollections) {
  *   - Continuous:   { type: 'continuous', collection, adjustment, cycle,
  *                     rollOffset, strategy: 'front_month' }
  *   - OptionStream: { type: 'option_stream', collection, option_type, cycle,
- *                     maturity, selection, stream, adjustment, roll_offset }
+ *                     maturity, selection, stream, roll_offset }
  *   - Basket saved: { type: 'basket', kind: 'saved',  basket_id }
  *   - Basket inline:{ type: 'basket', kind: 'inline', asset_class,
  *                     legs:[{instrument_id, weight}, ...] }
@@ -76,6 +76,24 @@ function collectionsForAssetClass(assetClass, allCollections) {
  *                                  (AddHoldingModal, Indicators ParamsPanel)
  *                                  leave it default-false so the composer
  *                                  does not surface there.
+ *   initialConfig     {object?}    a prior `onSelect` emit shape to PRE-FILL
+ *                                  (edit mode). null (default) = create mode,
+ *                                  byte-unchanged. Non-null ⇒ the modal opens
+ *                                  straight into the terminal config step for
+ *                                  `initialConfig.type` ('continuous' →
+ *                                  ContinuousSpecPicker; 'option_stream' →
+ *                                  OptionStreamForm). Edit mode is DERIVED
+ *                                  (`initialConfig != null`) — no separate
+ *                                  `mode` prop. Confirm emits the SAME shape,
+ *                                  so callers merge via their existing setter;
+ *                                  Cancel mutates nothing. Currently seeds
+ *                                  continuous + option_stream; spot/basket
+ *                                  have no terminal step to pre-fill.
+ *   readOnly          {boolean?}   view-only (locked entity). Default false.
+ *                                  Disables every inner control (threads to
+ *                                  OptionStreamForm `disabled` + a new
+ *                                  ContinuousSpecPicker `disabled`) and hides
+ *                                  the confirm CTA — view + navigate only.
  */
 export default function InstrumentPickerModal({
   isOpen,
@@ -107,6 +125,13 @@ export default function InstrumentPickerModal({
   // leverage readout probes the representative (strike, premium). Falls back to
   // the root's last_trade_date when null.
   optionReferenceDate = null,
+  // EDIT MODE: a prior `onSelect` emit shape to pre-fill. null (default) = the
+  // create flow (unchanged). Non-null ⇒ the open-seed effect drops the modal
+  // straight into the terminal config step. See the JSDoc above.
+  initialConfig = null,
+  // VIEW-ONLY (locked entity): disable every inner control + hide the confirm
+  // CTA. Threads to OptionStreamForm/ContinuousSpecPicker `disabled`.
+  readOnly = false,
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -301,6 +326,43 @@ export default function InstrumentPickerModal({
     }
   }, [isOpen]);
 
+  /* ── Seed the drill-down from initialConfig on OPEN (edit mode) ──
+   *
+   * The modal is `isOpen`-gated but stays MOUNTED at its unconditional call
+   * sites (ParamsPanel / InputsPanel render it always) → `useState`
+   * initializers run ONCE, so pre-fill MUST be an `isOpen`-keyed effect or it
+   * goes stale on the 2nd chip opened (Sign 7). Keyed on `[isOpen]` alone
+   * (NOT initialConfig) so a re-render that hands a fresh object reference does
+   * not wipe in-progress edits — we seed exactly once per open.
+   *
+   * useLayoutEffect (not useEffect): it runs before paint, so an edit opens
+   * DIRECTLY on its terminal config step with no one-frame flash of the
+   * category grid. Composes with the reset-on-close effect above — that acts
+   * only when !isOpen, this only when isOpen; conditions are mutually
+   * exclusive so there is no conflict. */
+  useLayoutEffect(() => {
+    if (!isOpen || !initialConfig) return;
+    if (initialConfig.type === 'continuous') {
+      // Setting selectedFutCollection non-null enters the futures drill-down;
+      // the cycle-loader effect (keyed on selectedFutCollection) then fetches
+      // this collection's cycles automatically.
+      setSelectedFutCollection(initialConfig.collection);
+      setAdjustment(initialConfig.adjustment ?? 'none');
+      setCycle(initialConfig.cycle ?? '');
+      setRollOffset(Number.isFinite(initialConfig.rollOffset) ? initialConfig.rollOffset : 2);
+      setStrategy(initialConfig.strategy ?? 'front_month');
+    } else if (initialConfig.type === 'option_stream') {
+      // Bypass buildDefaultOptionStream — drive the form straight from the
+      // saved value (OptionStreamForm is fully controlled by `value`).
+      setInOptionsDrillDown(true);
+      setOptionStreamValue(initialConfig);
+    }
+    // 'spot' has no params (edit = re-pick, handled by the caller not opening
+    // an edit for spot chips) and 'basket' edit is a follow-up — neither has a
+    // terminal config step to seed here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
   const toggleCategory = useCallback((key) => {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
@@ -310,17 +372,28 @@ export default function InstrumentPickerModal({
     [onClose],
   );
 
+  // In readOnly (view-only) the modal must NEVER emit. The config-step confirm
+  // CTAs are hidden, but drill-down "Back" stays enabled (re-pick is preserved
+  // for EDITABLE edit mode per Decision D1), so a readOnly modal could navigate
+  // back to the category list and commit a spot/basket re-pick. Guarding every
+  // emit path here freezes a clean contract for the consuming surfaces:
+  // readOnly ⇒ onSelect never fires; create/editable flows are unaffected.
+  const emitSelect = useCallback((descriptor) => {
+    if (readOnly) return;
+    onSelect(descriptor);
+  }, [readOnly, onSelect]);
+
   const handleSelectInstrument = useCallback(
     (symbol, collection) => {
-      onSelect({ type: 'spot', collection, instrument_id: symbol });
+      emitSelect({ type: 'spot', collection, instrument_id: symbol });
       onClose();
     },
-    [onSelect, onClose],
+    [emitSelect, onClose],
   );
 
   const handleSelectContinuous = useCallback(
     (collection) => {
-      onSelect({
+      emitSelect({
         type: 'continuous',
         collection,
         strategy,
@@ -330,7 +403,7 @@ export default function InstrumentPickerModal({
       });
       onClose();
     },
-    [adjustment, cycle, rollOffset, strategy, onSelect, onClose],
+    [adjustment, cycle, rollOffset, strategy, emitSelect, onClose],
   );
 
   const handleBackFromFut = useCallback(() => {
@@ -354,9 +427,9 @@ export default function InstrumentPickerModal({
   const handleConfirmOptionStream = useCallback(() => {
     if (!optionStreamValue) return;
     if (validateOptionStream(optionStreamValue, optionRoots) !== null) return;
-    onSelect(optionStreamValue);
+    emitSelect(optionStreamValue);
     onClose();
-  }, [optionStreamValue, optionRoots, onSelect, onClose]);
+  }, [optionStreamValue, optionRoots, emitSelect, onClose]);
 
   const handleEnterBasketComposer = useCallback(() => {
     setInBasketComposer(true);
@@ -373,9 +446,9 @@ export default function InstrumentPickerModal({
    * Emitting closes the picker.
    */
   const handleEmitBasket = useCallback((descriptor) => {
-    onSelect(descriptor);
+    emitSelect(descriptor);
     onClose();
-  }, [onSelect, onClose]);
+  }, [emitSelect, onClose]);
 
   if (!isOpen) return null;
 
@@ -449,23 +522,30 @@ export default function InstrumentPickerModal({
                     value={optionStreamValue}
                     onChange={setOptionStreamValue}
                     availableRoots={optionRoots}
+                    disabled={readOnly}
                     showHoldControls={showOptionHoldControls}
                     holdRequired={optionHoldRequired}
+                    // Edit mode is DERIVED as initialConfig != null (same as the
+                    // seed effect + JSDoc): suppresses the CREATE-only cycle
+                    // nudge so an edited leg's saved cycle is preserved.
+                    editMode={initialConfig != null}
                     referenceDate={optionReferenceDate}
                     {...(optionStreamAllowedStreams
                       ? { allowedStreams: optionStreamAllowedStreams }
                       : {})}
                   />
-                  <button
-                    className={styles.selectContinuousBtn}
-                    type="button"
-                    onClick={handleConfirmOptionStream}
-                    disabled={confirmDisabled}
-                    title={optionStreamValidation ? optionStreamValidation.message : undefined}
-                    data-testid="option-stream-confirm"
-                  >
-                    Confirm
-                  </button>
+                  {!readOnly && (
+                    <button
+                      className={styles.selectContinuousBtn}
+                      type="button"
+                      onClick={handleConfirmOptionStream}
+                      disabled={confirmDisabled}
+                      title={optionStreamValidation ? optionStreamValidation.message : undefined}
+                      data-testid="option-stream-confirm"
+                    >
+                      Confirm
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -502,15 +582,18 @@ export default function InstrumentPickerModal({
                 }}
                 availableCycles={availableCycles}
                 assetClass="future"
+                disabled={readOnly}
               />
 
-              <button
-                className={styles.selectContinuousBtn}
-                type="button"
-                onClick={() => handleSelectContinuous(selectedFutCollection)}
-              >
-                Select Continuous Series
-              </button>
+              {!readOnly && (
+                <button
+                  className={styles.selectContinuousBtn}
+                  type="button"
+                  onClick={() => handleSelectContinuous(selectedFutCollection)}
+                >
+                  Select Continuous Series
+                </button>
+              )}
             </div>
           ) : inBasketComposer ? (
             /* ── Basket composer: expanding panel ── */
@@ -680,8 +763,10 @@ export default function InstrumentPickerModal({
  *                     `value.collection`.
  *   assetClass      — "future" | "option" — currently informational
  *                     (allows future spec divergence by class).
+ *   disabled        — view-only: greys + disables all 4 controls (locked
+ *                     entity / readOnly edit). Default false.
  */
-function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _assetClass = 'future' }) {
+function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _assetClass = 'future', disabled = false }) {
   const [internalCycles, setInternalCycles] = useState([]);
 
   // Load cycles when the parent does NOT supply them (basket-leg case).
@@ -732,6 +817,7 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
           className={styles.optionSelect}
           value={strategy}
           onChange={(e) => emit({ strategy: e.target.value })}
+          disabled={disabled}
           data-testid="continuous-spec-picker-strategy"
         >
           <option value="front_month">Front month (at expiry)</option>
@@ -745,6 +831,7 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
           className={styles.optionSelect}
           value={adjustment}
           onChange={(e) => emit({ adjustment: e.target.value })}
+          disabled={disabled}
           data-testid="continuous-spec-picker-adjustment"
         >
           <option value="none">None</option>
@@ -759,6 +846,7 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
           className={styles.optionSelect}
           value={cycleSelect}
           onChange={(e) => emit({ cycle: e.target.value === '' ? null : e.target.value })}
+          disabled={disabled}
           data-testid="continuous-spec-picker-cycle"
         >
           <option value="">All</option>
@@ -776,10 +864,11 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
           style={{ width: '56px' }}
           value={rollOffset}
           min={0}
-          max={30}
+          max={365}
           onChange={(e) => emit({
-            rollOffset: Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0)),
+            rollOffset: Math.max(0, Math.min(365, parseInt(e.target.value, 10) || 0)),
           })}
+          disabled={disabled}
           data-testid="continuous-spec-picker-roll-offset"
         />
       </label>
@@ -795,7 +884,7 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
  * Used by <BasketLegRow> for `asset_class="option"`.  The form already
  * builds a BE-compatible OptionStreamRef (`{type:"option_stream",
  * collection, option_type, cycle, maturity, selection, stream,
- * adjustment, roll_offset}`) via
+ * roll_offset}`) via
  * `buildDefaultOptionStream`, so the wrapper just initialises the
  * value from `availableRoots` when the leg is empty and forwards
  * subsequent edits through `onChange`.  No new file, no nested modal.

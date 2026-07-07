@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
+import { instrumentToLegConfig, legToInitialConfig } from './legConfig';
 
 // A portfolio option leg is the option PRICE only (Issue #2 D1): pin the
 // option-stream picker to mid and hide the Series selector. iv/greeks/volume
@@ -8,76 +9,61 @@ import InstrumentPickerModal from '../../components/InstrumentPickerModal/Instru
 const PORTFOLIO_OPTION_STREAMS = ['mid'];
 
 /**
- * Portfolio-specific wrapper around InstrumentPickerModal.
- * Translates the generic instrument selection into the portfolio leg format
- * (adds label, weight, maps type names).
+ * Portfolio-specific wrapper around InstrumentPickerModal, in two modes:
+ *
+ *   - ADD (default): translates a selection into a NEW leg (adds label +
+ *     default weight) and appends via onAddLeg.
+ *   - EDIT (when `editLeg` is non-null): pre-fills the picker with the leg's
+ *     current config (inverse leg->modal translation) and, on confirm, UPDATES
+ *     that leg in place via onUpdateLeg with the config fields only — the
+ *     leg's id/label/weight are preserved (settings-only edit, no new leg).
  *
  * Props:
  *   isOpen        {boolean}
  *   onClose       {Function}  () => void
- *   onAddLeg      {Function}  (leg) => void
+ *   onAddLeg      {Function}  (leg) => void            — ADD mode
+ *   editLeg       {object|null}                        — non-null => EDIT mode
+ *   onUpdateLeg   {Function}  (configUpdates) => void   — EDIT mode confirm
+ *   readOnly      {boolean}   view-only (locked portfolio) — threads to the
+ *                 picker; per the modal contract onSelect never fires when true.
  *   referenceDate {string|Date|null}  optional — the portfolio's start date,
  *                 forwarded to the option-leg implied-leverage readout as the
  *                 probe reference date (falls back to the root's last trade
  *                 date when null).
  */
-export default function AddHoldingModal({ isOpen, onClose, onAddLeg, referenceDate = null }) {
+export default function AddHoldingModal({
+  isOpen,
+  onClose,
+  onAddLeg,
+  editLeg = null,
+  onUpdateLeg,
+  readOnly = false,
+  referenceDate = null,
+}) {
+  const editMode = editLeg != null;
+
   const handleSelect = useCallback(
     (instrument) => {
-      if (instrument.type === 'option_stream') {
-        onAddLeg({
-          label: `${instrument.collection} ${instrument.option_type} ${instrument.stream}`,
-          type: 'option_stream',
-          collection: instrument.collection,
-          option_type: instrument.option_type,
-          cycle: instrument.cycle,
-          maturity: instrument.maturity,
-          selection: instrument.selection,
-          stream: instrument.stream,
-          // Roll offset from OptionStreamForm — the unified {value, unit} object
-          // (ROLL-EARLY axis), forwarded whole. Option streams carry no
-          // back-adjustment, so there is no adjustment field (unlike continuous).
-          // "Roll at end of month" is the EndOfMonth maturity, not a schedule.
-          roll_offset: instrument.roll_offset,
-          // PORTFOLIO option price legs are ALWAYS held (fixed-contract $-P&L);
-          // the backend requires it, so force it on regardless of form state.
-          hold_between_rolls: true,
-          nav_times: instrument.nav_times ?? 1.0,
-          // SIZING MODE — forward the futures-notional config ONLY when the user
-          // opted into it. Premium-notional (the default) adds NO keys, so a leg
-          // the user never touches serialises byte-identically to today (backend
-          // default is premium_notional / nearest_on_or_after).
-          ...(instrument.sizing_mode === 'futures_notional'
-            ? {
-              sizing_mode: 'futures_notional',
-              futures_reference: instrument.futures_reference || 'nearest_on_or_after',
-            }
-            : {}),
-          weight: 100,
-        });
-      } else if (instrument.type === 'continuous') {
-        onAddLeg({
-          label: instrument.collection,
-          type: 'continuous',
-          collection: instrument.collection,
-          strategy: instrument.strategy,
-          adjustment: instrument.adjustment,
-          cycle: instrument.cycle,
-          rollOffset: instrument.rollOffset,
-          weight: 100,
-        });
+      const config = instrumentToLegConfig(instrument);
+      if (editMode) {
+        // Settings-only edit: merge the config fields over the existing leg.
+        // updateLeg (usePortfolio) preserves id/label/weight and never appends.
+        onUpdateLeg(config);
       } else {
-        onAddLeg({
-          label: instrument.instrument_id,
-          type: 'instrument',
-          collection: instrument.collection,
-          symbol: instrument.instrument_id,
-          weight: 100,
-        });
+        // Add: derive the display label (add-time only) and a default weight.
+        let label;
+        if (config.type === 'option_stream') {
+          label = `${config.collection} ${config.option_type} ${config.stream}`;
+        } else if (config.type === 'continuous') {
+          label = config.collection;
+        } else {
+          label = config.symbol;
+        }
+        onAddLeg({ ...config, label, weight: 100 });
       }
       onClose();
     },
-    [onAddLeg, onClose],
+    [editMode, onAddLeg, onUpdateLeg, onClose],
   );
 
   return (
@@ -85,7 +71,11 @@ export default function AddHoldingModal({ isOpen, onClose, onAddLeg, referenceDa
       isOpen={isOpen}
       onClose={onClose}
       onSelect={handleSelect}
-      title="Add Holding"
+      title={editMode ? 'Edit Holding' : 'Add Holding'}
+      // Non-null in edit mode => the picker opens pre-filled on the leg's
+      // terminal config step (inverse leg->modal translation). null => create.
+      initialConfig={editMode ? legToInitialConfig(editLeg) : null}
+      readOnly={readOnly}
       optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
       optionHoldRequired={true}
       optionReferenceDate={referenceDate}

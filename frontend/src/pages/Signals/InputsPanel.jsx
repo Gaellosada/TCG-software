@@ -165,6 +165,22 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
           {list.map((input, idx) => {
             const ok = isInputConfigured(input);
             const label = instrumentLabel(input.instrument);
+            const instType = input.instrument && input.instrument.type;
+            // Only future/option configs have a settings screen worth
+            // re-opening. Spot/index chips have none (no config popup to
+            // show) and stay a static label once picked — no click-to-edit.
+            const isEditableType = instType === 'continuous' || instType === 'option_stream';
+            const staticChip = ok && instType === 'spot';
+            // A configured future/option chip stays open-able even when the
+            // signal is LOCKED — it opens the shared picker in its readOnly
+            // (view-only) mode rather than being disabled outright, so a
+            // locked signal's settings are still inspectable. Every other
+            // case (not yet configured, or a non-editable configured type)
+            // keeps the prior disabled-under-lock behaviour.
+            const pickDisabled = readOnly && !(ok && isEditableType);
+            const pickTitle = readOnly
+              ? ((ok && isEditableType) ? 'View settings' : (label || 'No instrument'))
+              : ((ok && isEditableType) ? 'Edit settings' : undefined);
             return (
               <div
                 key={idx}
@@ -198,19 +214,20 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
                   );
                 })()}
                 <div className={styles.pickerCell}>
-                  {/* Read-only: the button keeps showing the chosen instrument
-                      (so the user can SEE it) but is disabled — the picker
-                      modal only EDITS, so opening it under a lock would let the
-                      user change the instrument. The label is the read-only
-                      view of the value. */}
+                  {/* Click-to-edit: a configured future/option chip re-opens
+                      the picker pre-filled with its stored config (settings
+                      only — see initialConfig on the modal below). Locked
+                      signals still open it, but read-only (view + navigate,
+                      no commit). Spot/index chips have no settings screen,
+                      so they never attach a click handler (staticChip). */}
                   <button
                     type="button"
-                    className={styles.pickBtn}
-                    onClick={() => setPickerIdx(idx)}
+                    className={`${styles.pickBtn} ${staticChip ? styles.pickBtnStatic : ''}`}
+                    onClick={staticChip ? undefined : () => setPickerIdx(idx)}
                     aria-label={`Instrument for input ${input.id || idx + 1}`}
                     data-testid={`input-picker-${idx}`}
-                    disabled={readOnly}
-                    title={readOnly ? (label || 'No instrument') : undefined}
+                    disabled={pickDisabled}
+                    title={pickTitle}
                   >
                     {label || 'Select instrument'}
                   </button>
@@ -265,6 +282,12 @@ function InputsPanel({ inputs, onChange, readOnly = false }) {
         // drill-down.  (Not on the basket-leg sub-picker: the backend rejects
         // hold_between_rolls on a basket leg.)
         showOptionHoldControls={true}
+        // Edit mode: pre-fill from the raw stored config of the row being
+        // edited (the exact object onSelect gave us — no reshaping). null
+        // for an unconfigured row falls back to create mode, unchanged.
+        initialConfig={pickerIdx !== null ? list[pickerIdx].instrument : null}
+        // Locked signal → view-only (onSelect never fires inside the modal).
+        readOnly={readOnly}
       />
     </div>
   );

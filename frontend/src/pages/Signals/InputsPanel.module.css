@@ -134,6 +134,16 @@
   border-color: var(--accent);
 }
 
+/* Configured spot/index chips have no settings screen to re-open — no
+   click-to-edit, so no pointer affordance or hover-highlight either. */
+.pickBtnStatic {
+  cursor: default;
+}
+
+.pickBtnStatic:hover {
+  border-color: var(--border-primary);
+}
+
 .deleteBtn {
   background: transparent;
   color: var(--text-secondary);

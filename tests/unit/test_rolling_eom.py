@@ -26,9 +26,12 @@ import pytest
 
 from tcg.data._rolling.calendar import (
     _last_trading_day_of_month,
+    clamp_roll_dates_to_data,
+    collapse_to_one_per_month,
     compute_roll_dates,
 )
 from tcg.data._rolling.stitcher import ContinuousSeriesBuilder
+from tcg.data._utils import int_to_date
 from tcg.types.market import (
     AdjustmentMethod,
     ContinuousRollConfig,
@@ -46,6 +49,7 @@ def _make_contract(
     expiration: int,
     dates: list[int],
     closes: list[float],
+    expiration_cycle: str | None = None,
 ) -> ContractPriceData:
     n = len(dates)
     assert len(closes) == n
@@ -53,6 +57,7 @@ def _make_contract(
     return ContractPriceData(
         contract_id=contract_id,
         expiration=expiration,
+        expiration_cycle=expiration_cycle,
         prices=PriceSeries(
             dates=np.array(dates, dtype=np.int64),
             open=c.copy(),
@@ -182,6 +187,113 @@ class TestComputeRollDatesEndOfMonth:
             compute_roll_dates([c1, c2], "bogus_strategy")  # type: ignore[arg-type]
 
 
+# ── collapse_to_one_per_month (the VIX-weekly fix) ─────────────────────
+
+
+class TestCollapseToOnePerMonth:
+    def test_single_contract_per_month_is_noop(self):
+        """ES-style / pre-2015-VIX: already one contract per month → unchanged."""
+        c1 = _make_contract("a", 20240115, [20240101], [10.0])
+        c2 = _make_contract("b", 20240221, [20240201], [11.0])
+        c3 = _make_contract("c", 20240315, [20240301], [12.0])
+        out = collapse_to_one_per_month([c1, c2, c3])
+        assert [c.contract_id for c in out] == ["a", "b", "c"]
+
+    def test_no_cycle_keeps_latest_expiring_with_data(self):
+        """No expiration_cycle marker (e.g. EURUSD/NASDAQ): fall back to the
+        latest-expiring contract that actually traded."""
+        c1 = _make_contract("mar_early", 20240308, [20240301], [10.0])
+        c2 = _make_contract("mar_late", 20240328, [20240302], [11.0])
+        c3 = _make_contract("apr_early", 20240405, [20240401], [12.0])
+        c4 = _make_contract("apr_late", 20240426, [20240402], [13.0])
+        out = collapse_to_one_per_month([c1, c2, c3, c4])
+        assert [c.contract_id for c in out] == ["mar_late", "apr_late"]
+
+    def test_prefers_monthly_cycle_over_later_weekly(self):
+        """VIX: the canonical monthly ('M') contract wins over a weekly ('W')
+        that expires LATER in the same month. This is the correctness fix —
+        the continuous series must ride the monthly future, not an end-of-month
+        weekly a day from expiry."""
+        monthly = _make_contract(
+            "VX_M", 20240320, [20240101, 20240320], [14.0, 14.5], expiration_cycle="M"
+        )
+        weekly_later = _make_contract(
+            "VXW_late",
+            20240327,
+            [20240301, 20240327],
+            [15.0, 15.2],
+            expiration_cycle="W",
+        )
+        out = collapse_to_one_per_month([monthly, weekly_later])
+        assert [c.contract_id for c in out] == ["VX_M"]
+
+    def test_prefers_contract_with_usable_data(self):
+        """The latest-expiring contract is skipped when it never traded
+        (all-zero closes), so a real month is not silently dropped."""
+        dead_late = _make_contract("dead", 20240328, [20240320, 20240328], [0.0, 0.0])
+        live_early = _make_contract(
+            "live", 20240315, [20240301, 20240315], [11.0, 11.5]
+        )
+        out = collapse_to_one_per_month([live_early, dead_late])
+        assert [c.contract_id for c in out] == ["live"]
+
+    def test_output_sorted_by_expiration_regardless_of_input_order(self):
+        c_may = _make_contract("may", 20240515, [20240501], [12.0])
+        c_mar = _make_contract("mar", 20240328, [20240301], [10.0])
+        c_apr = _make_contract("apr", 20240430, [20240401], [11.0])
+        out = collapse_to_one_per_month([c_may, c_mar, c_apr])
+        assert [c.expiration for c in out] == [20240328, 20240430, 20240515]
+
+    def test_deterministic_tiebreak_on_equal_expiration(self):
+        """A monthly and weekly sharing the SAME expiration day: deterministic
+        regardless of input order (monthly preferred, then contract_id)."""
+        m = _make_contract("VX_M", 20240320, [20240320], [14.0], expiration_cycle="M")
+        w = _make_contract("VX_W", 20240320, [20240320], [14.1], expiration_cycle="W")
+        assert [c.contract_id for c in collapse_to_one_per_month([m, w])] == ["VX_M"]
+        assert [c.contract_id for c in collapse_to_one_per_month([w, m])] == ["VX_M"]
+
+    def test_empty(self):
+        assert collapse_to_one_per_month([]) == []
+
+
+# ── clamp_roll_dates_to_data (the large-roll-offset guard) ─────────────
+
+
+class TestClampRollDatesToData:
+    def test_noop_when_incoming_listed_before_boundary(self):
+        """Normal case: incoming contract already trades before the roll date →
+        boundaries unchanged."""
+        c1 = _make_contract("a", 20240315, [20240101, 20240315], [10.0, 10.5])
+        c2 = _make_contract("b", 20240415, [20240201, 20240415], [11.0, 11.5])
+        # boundary well inside both contracts' data → unchanged
+        assert clamp_roll_dates_to_data([c1, c2], [20240301]) == [20240301]
+
+    def test_clamps_up_to_incoming_first_tradeable_day(self):
+        """A boundary before the incoming contract's first tradeable day is
+        pushed up to that day, so the incoming contract's window is never empty
+        (no silent hole from a large roll_offset)."""
+        c1 = _make_contract("a", 20240315, [20230101, 20240315], [10.0, 10.5])
+        # incoming contract first trades 2024-02-01
+        c2 = _make_contract("b", 20240415, [20240201, 20240415], [11.0, 11.5])
+        # a far-back boundary (huge offset) clamps up to 20240201
+        assert clamp_roll_dates_to_data([c1, c2], [20230115]) == [20240201]
+
+    def test_skips_leading_zero_close_of_incoming(self):
+        """First *tradeable* day ignores leading zero-close (unlisted) rows."""
+        c1 = _make_contract("a", 20240315, [20230101, 20240315], [10.0, 10.5])
+        c2 = _make_contract(
+            "b", 20240415, [20240201, 20240210, 20240415], [0.0, 11.0, 11.5]
+        )
+        assert clamp_roll_dates_to_data([c1, c2], [20230115]) == [20240210]
+
+    def test_result_stays_non_decreasing(self):
+        c1 = _make_contract("a", 20240315, [20240101], [10.0])
+        c2 = _make_contract("b", 20240415, [20240301], [11.0])
+        c3 = _make_contract("c", 20240515, [20240301], [12.0])
+        out = clamp_roll_dates_to_data([c1, c2, c3], [20230101, 20230201])
+        assert out == sorted(out)
+
+
 # ── End-to-end through ContinuousSeriesBuilder ─────────────────────────
 
 
@@ -266,3 +378,172 @@ class TestEndOfMonthThroughBuilder:
         np.testing.assert_allclose(closes[dates.index(20240115)], 5000.0 + diff)
         np.testing.assert_allclose(closes[dates.index(20240215)], 5050.0 + diff)
         np.testing.assert_allclose(closes[dates.index(20240401)], 5270.0)
+
+    def test_multiple_contracts_per_month_does_not_crash(self):
+        """Regression for the VIX weekly-futures crash.
+
+        VIX lists 4-5 contracts PER MONTH (weeklies). Under END_OF_MONTH every
+        contract in a month resolves to the same month-end, the old duplicate-
+        guard dropped boundaries, and ``trim_overlaps`` then indexed past the
+        (now shorter) roll_dates list → ``IndexError: list index out of range``
+        → HTTP 500 on the Data page. The builder must collapse to one contract
+        per month first, so this must build cleanly instead.
+        """
+        # Three weekly contracts in March, three in April, one in May.
+        march = [
+            _make_contract(
+                "W_MAR_1", 20240308, [20240201, 20240301, 20240308], [10.0, 10.1, 10.2]
+            ),
+            _make_contract(
+                "W_MAR_2", 20240315, [20240201, 20240308, 20240315], [10.3, 10.4, 10.5]
+            ),
+            _make_contract(
+                "W_MAR_3", 20240328, [20240301, 20240315, 20240328], [10.6, 10.7, 10.8]
+            ),
+        ]
+        april = [
+            _make_contract("W_APR_1", 20240405, [20240328, 20240405], [11.0, 11.1]),
+            _make_contract("W_APR_2", 20240412, [20240405, 20240412], [11.2, 11.3]),
+            _make_contract("W_APR_3", 20240430, [20240412, 20240430], [11.4, 11.5]),
+        ]
+        may = [_make_contract("W_MAY_1", 20240515, [20240430, 20240515], [12.0, 12.1])]
+        contracts = march + april + may
+
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.END_OF_MONTH, adjustment=AdjustmentMethod.NONE
+        )
+        # Must NOT raise IndexError.
+        result = self.builder.build(contracts, config)
+
+        # Collapsed to the latest-expiring contract per month: the March 28th
+        # weekly, the April 30th weekly, and the sole May contract.
+        assert result.contracts == ("W_MAR_3", "W_APR_3", "W_MAY_1")
+        # One boundary per contract transition (invariant restored).
+        assert len(result.roll_dates) == len(result.contracts) - 1
+        assert np.all(np.isfinite(result.prices.close))
+        # Series is non-empty and strictly date-ordered.
+        assert len(result.prices) > 0
+        assert list(result.prices.dates) == sorted(set(result.prices.dates))
+
+    def test_multi_per_month_rides_the_monthly_cycle_contract(self):
+        """When the root marks a monthly-cycle contract, the collapsed EOM
+        series rides the monthly ('M'), NOT the later end-of-month weekly."""
+        contracts = [
+            _make_contract(
+                "VX_M_MAR",
+                20240320,
+                [20240115, 20240320],
+                [14.0, 14.5],
+                expiration_cycle="M",
+            ),
+            _make_contract(
+                "VXW_MAR",
+                20240327,
+                [20240301, 20240327],
+                [15.0, 15.2],
+                expiration_cycle="W",
+            ),
+            _make_contract(
+                "VX_M_APR",
+                20240417,
+                [20240115, 20240417],
+                [16.0, 16.5],
+                expiration_cycle="M",
+            ),
+            _make_contract(
+                "VXW_APR",
+                20240424,
+                [20240401, 20240424],
+                [17.0, 17.2],
+                expiration_cycle="W",
+            ),
+        ]
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.END_OF_MONTH, adjustment=AdjustmentMethod.NONE
+        )
+        result = self.builder.build(contracts, config)
+        assert result.contracts == ("VX_M_MAR", "VX_M_APR")
+
+    def test_multi_per_month_with_ratio_adjustment_is_finite(self):
+        """collapse + ratio adjustment on a multi-per-month root: no NaN/inf even
+        when the collapsed neighbours share no seam day (nearest-date fallback)."""
+        contracts = [
+            _make_contract("W_MAR_a", 20240308, [20240201, 20240308], [10.0, 10.2]),
+            _make_contract("W_MAR_b", 20240328, [20240301, 20240328], [10.6, 10.8]),
+            _make_contract("W_APR_a", 20240405, [20240402, 20240405], [11.0, 11.1]),
+            _make_contract("W_APR_b", 20240430, [20240412, 20240430], [11.4, 11.5]),
+        ]
+        for method in (AdjustmentMethod.RATIO, AdjustmentMethod.DIFFERENCE):
+            config = ContinuousRollConfig(
+                strategy=RollStrategy.END_OF_MONTH, adjustment=method
+            )
+            result = self.builder.build(contracts, config)
+            assert np.all(np.isfinite(result.prices.close))
+            assert len(result.prices) > 0
+
+    def test_large_roll_offset_does_not_disintegrate_series(self):
+        """The clamp guard: a roll_offset far larger than each contract's history
+        must NOT collapse the series to a single contract with a multi-year hole.
+        Every contract should still contribute, rolling as early as data allows.
+        """
+        contracts = [
+            _make_contract(
+                "M1", 20240315, [20240101, 20240201, 20240315], [10.0, 10.1, 10.2]
+            ),
+            _make_contract(
+                "M2", 20240415, [20240201, 20240301, 20240415], [11.0, 11.1, 11.2]
+            ),
+            _make_contract(
+                "M3", 20240515, [20240301, 20240401, 20240515], [12.0, 12.1, 12.2]
+            ),
+        ]
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.END_OF_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            roll_offset_days=365,  # far exceeds each contract's ~2-3 months history
+        )
+        result = self.builder.build(contracts, config)
+        # All three contracts survive (no silent collapse to just the last one).
+        assert len(result.contracts) == 3
+        assert result.contracts == ("M1", "M2", "M3")
+        # No multi-year hole: consecutive bars are within a normal roll spacing.
+        dates = [int_to_date(int(d)) for d in result.prices.dates]
+        max_gap = max((b - a).days for a, b in zip(dates, dates[1:]))
+        assert max_gap < 120, f"unexpected {max_gap}d hole from large roll_offset"
+
+
+# ── The clamp is gated on roll_offset > 0 (offset-0 stays legacy) ──────
+
+
+class TestClampGatedAtOffsetZero:
+    def setup_method(self):
+        self.builder = ContinuousSeriesBuilder()
+
+    def test_offset_zero_does_not_clamp(self):
+        """At offset 0 the roll clamp must NOT run, so offset-0 series stay
+        byte-identical to the legacy (pre-clamp) output existing portfolios
+        were built on.
+
+        Setup discriminates the gate: contract A keeps bars AFTER its expiry
+        (20240318/25) that the incoming contract B does not quote (B first
+        trades 20240401). Legacy FRONT_MONTH offset-0 rolls at A's expiry
+        (20240315) → those post-expiry bars fall outside A's window and are
+        dropped. If the clamp were (wrongly) applied at offset 0 it would push
+        the boundary to B's first date (20240401) and A would retain 0318/0325.
+        Asserting they are ABSENT proves the clamp is gated off.
+        """
+        a = _make_contract(
+            "A", 20240315, [20240101, 20240301, 20240318, 20240325],
+            [10.0, 10.1, 10.2, 10.3],
+        )
+        b = _make_contract("B", 20240615, [20240401, 20240501], [11.0, 11.1])
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            roll_offset_days=0,
+        )
+        result = self.builder.build([a, b], config)
+        dates = list(result.prices.dates)
+        assert 20240318 not in dates
+        assert 20240325 not in dates
+        assert dates == [20240101, 20240301, 20240401, 20240501]

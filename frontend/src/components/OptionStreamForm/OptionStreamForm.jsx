@@ -21,7 +21,7 @@ import ImpliedLeverageReadout, { BAND_COLORS } from './ImpliedLeverageReadout';
  *                                               // resolve the maturity as of
  *                                               // (date + offset) so the roll fires
  *                                               // that much earlier; {value:0} = no
- *                                               // shift. Range days 0..30 / months
+ *                                               // shift. Range days 0..365 / months
  *                                               // 0..12. DISTINCT from the maturity's
  *                                               // own month offset (which expiration
  *                                               // to target). "Roll at end of month"
@@ -471,6 +471,12 @@ export default function OptionStreamForm({
   // set: render NO on/off toggle; force hold on + default cycle 'M' once, and
   // always show the nav_times input + a wipeout hint. Signals keep the toggle.
   holdRequired = false,
+  // EDIT mode: a saved config was pre-filled into ``value`` (derived upstream as
+  // ``initialConfig != null``). Suppresses the CREATE-only cycle nudge below so
+  // an edited leg's stored ``cycle`` (incl. null "Any" / 'W3 Friday') is never
+  // silently rewritten to 'M'. Note ``value`` alone can't signal edit here — the
+  // create flow ALSO seeds a non-null default (buildDefaultOptionStream).
+  editMode = false,
   // Optional reference date (YYYY-MM-DD string or Date) at which to probe the
   // representative (strike, premium) for the implied-leverage readout on the
   // hold form. When omitted, the readout falls back to the selected root's
@@ -529,12 +535,14 @@ export default function OptionStreamForm({
   // only defaults the cycle to 'M' (the backend's expand_cycle broadens 'M' to the
   // monthly 3rd-Friday series, reproducing a monthly option roll). One-shot so the
   // user can still change the cycle afterwards.
+  // CREATE-only: gated off in ``editMode`` (a saved config was pre-filled) so an
+  // edited leg's stored cycle is never silently rewritten to 'M' (BLOCKER-1).
   const heldInit = useRef(false);
   useEffect(() => {
-    if (!holdRequired || heldInit.current) return;
+    if (!holdRequired || editMode || heldInit.current) return;
     heldInit.current = true;
     if (v.cycle == null || v.cycle === 'W3 Friday') onChange({ ...v, cycle: 'M' });
-  }, [holdRequired, v, onChange]);
+  }, [holdRequired, editMode, v, onChange]);
 
   // Changing root must also keep ``cycle`` valid: the new root's real cycle
   // tag-set may not contain the current cycle (e.g. picking 'Q' on OPT_BTC then
@@ -632,7 +640,7 @@ export default function OptionStreamForm({
   }, [emit]);
 
   // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
-  // as {value:int, unit:'days'}. Per-unit cap: days 0..30, months 0..12.
+  // as {value:int, unit:'days'}. Per-unit cap: days 0..365, months 0..12.
   const _normOffset = (ro) => {
     if (typeof ro === 'number') return { value: ro, unit: 'days' };
     if (ro && typeof ro === 'object') {
@@ -640,7 +648,7 @@ export default function OptionStreamForm({
     }
     return { value: 0, unit: 'days' };
   };
-  const _capFor = (unit) => (unit === 'months' ? 12 : 30);
+  const _capFor = (unit) => (unit === 'months' ? 12 : 365);
 
   const setRollOffsetValue = useCallback((raw) => {
     const cur = _normOffset(v.roll_offset);
@@ -873,7 +881,7 @@ export default function OptionStreamForm({
             type="number"
             className={styles.input}
             min={0}
-            max={rollOffset.unit === 'months' ? 12 : 30}
+            max={rollOffset.unit === 'months' ? 12 : 365}
             step={1}
             value={rollOffset.value}
             onChange={(e) => setRollOffsetValue(e.target.value)}
