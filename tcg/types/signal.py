@@ -137,6 +137,25 @@ class InstrumentOptionStream:
     # a separate field.  Ignored when ``hold_between_rolls`` is False (the default
     # daily-reselect / display path takes the ordinary weight-only price return).
     nav_times: float = 1.0
+    # SIZING MODE for the hold-mode fixed-contract $-P&L (Wave-1 feature).
+    # ``premium_notional`` (DEFAULT, byte-identical to the shipped behaviour): the
+    # held quantity is ``nav_times·NAV_roll/premium_roll`` and daily $ = qty·Δpremium.
+    # ``futures_notional`` (OPT-IN): size off the CORRESPONDING FUTURE's notional —
+    # ``qty = nav_times·NAV_roll/(F_ref·M_fut)`` (fractional, NOT floored) and
+    # daily $ = ``qty·Δpremium·M_opt``.  F_ref is the reference future price frozen at
+    # the segment's roll date; M_fut/M_opt are the per-root contract multipliers
+    # (:mod:`tcg.types.multipliers`).  Direction is still the WEIGHT SIGN.
+    sizing_mode: Literal["premium_notional", "futures_notional"] = "premium_notional"
+    # Which reference FUTURES contract to size off in ``futures_notional`` mode.
+    # ``nearest_on_or_after`` (DEFAULT): the nearest LISTED future whose expiration
+    # is >= the option's expiry (on the root's REAL cycle — monthly for VIX,
+    # quarterly for SP/NDX).  ``nearest_abs``: the future whose expiration is closest
+    # in |time| to the option expiry (before or after).  ``continuous_front``: the
+    # app's continuous-front-month series price at the roll date.  Meaningful ONLY
+    # when ``sizing_mode == 'futures_notional'``.
+    futures_reference: Literal[
+        "nearest_on_or_after", "continuous_front", "nearest_abs"
+    ] = "nearest_on_or_after"
     kind: Literal["option_stream"] = "option_stream"
 
 

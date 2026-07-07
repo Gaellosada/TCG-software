@@ -18,6 +18,31 @@ import numpy as np
 import numpy.typing as npt
 
 
+def _fref_at(spec: "_HoldPnLSpec", idx: int) -> float:
+    """The frozen reference-future price at output index ``idx`` (NaN if absent)."""
+    arr = spec.roll_future_ref
+    if arr is None or idx < 0 or idx >= arr.size:
+        return np.nan
+    return float(arr[idx])
+
+
+def _futures_denom_ok(spec: "_HoldPnLSpec", fref: float) -> bool:
+    """True iff a futures-notional quantity can be sized at ``fref``.
+
+    Requires a finite positive reference price AND finite positive multipliers —
+    a missing/zero value must NEVER produce a silent 1.0 denominator (Guardrail
+    Sign 2); it triggers the tail carry-forward instead.
+    """
+    return bool(
+        np.isfinite(fref)
+        and fref > 0.0
+        and np.isfinite(spec.mult_fut)
+        and spec.mult_fut > 0.0
+        and np.isfinite(spec.mult_opt)
+        and spec.mult_opt > 0.0
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixed-contract dollar-P&L for held option positions (hold_between_rolls)
 # ---------------------------------------------------------------------------
@@ -53,6 +78,24 @@ class _HoldPnLSpec:
     is_roll: npt.NDArray[np.bool_]
     roll_premium: npt.NDArray[np.float64]
     pos_active: npt.NDArray[np.bool_]
+    # ── Futures-notional sizing (Wave-1 opt-in; premium_notional is the default and
+    #    is byte-identical — none of these fields are read in premium mode) ──────
+    # ``premium_notional`` (default): qty = nav_times·NAV_roll/premium_roll,
+    #   daily $ = qty·Δpremium.
+    # ``futures_notional``: qty = nav_times·NAV_roll/(F_ref·mult_fut) (fractional,
+    #   NOT floored), daily $ = qty·Δpremium·mult_opt.
+    sizing_mode: str = "premium_notional"
+    # Per-index reference-future price, FROZEN-at-roll (finite at each ``is_roll``
+    # index, NaN elsewhere/off-roll).  ``None`` in premium mode.  A roll whose entry
+    # is NaN triggers the tail carry-forward (keep the last sized qty).
+    roll_future_ref: "npt.NDArray[np.float64] | None" = None
+    # Contract multipliers: ``mult_fut`` scales the reference-future price into the
+    # sizing DENOMINATOR notional; ``mult_opt`` scales the option premium move into
+    # $ P&L.  They DIFFER for VIX (fut 1000, opt 100).  Read ONLY in futures mode;
+    # the 1.0 defaults are inert there because the caller always supplies resolved
+    # values (or NaN → tail carry-forward) — NEVER a silent 1.0 (Guardrail Sign 2).
+    mult_fut: float = 1.0
+    mult_opt: float = 1.0
 
 
 def _compound_with_hold(
@@ -107,6 +150,11 @@ def _compound_with_hold(
     # the leg books 0 (not yet sized / no quote to size against).  ``holding``
     # tracks whether a sized position is currently held.
     seg_premium: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
+    # Futures-notional companion: the reference-future price frozen at the segment's
+    # roll (the sizing DENOMINATOR, with mult_fut).  NaN in premium mode / until the
+    # first sizable roll.  Carried forward (unchanged) across a roll with no covering
+    # future so the last sized quantity keeps accruing.
+    seg_fref: dict[str, float] = {spec.ref_id: np.nan for spec in hold_specs}
     seg_er: dict[str, float] = {spec.ref_id: 1.0 for spec in hold_specs}
     holding: dict[str, bool] = {spec.ref_id: False for spec in hold_specs}
     # Last FINITE premium of the held contract, carried forward as the interior
@@ -124,15 +172,29 @@ def _compound_with_hold(
     # bar 0 stays flat until its first latch bar, where the loop sizes it.
     for spec in hold_specs:
         rid = spec.ref_id
+        fut_mode = spec.sizing_mode == "futures_notional"
         if T >= 1 and bool(spec.pos_active[0]):
             open_prem = (
                 spec.roll_premium[0] if bool(spec.is_roll[0]) else spec.premium[0]
             )
             if np.isfinite(open_prem) and open_prem > 0.0:
-                seg_premium[rid] = float(open_prem)
-                seg_er[rid] = ratio[0]  # == 1.0
-                holding[rid] = True
-                last_finite[rid] = float(open_prem)  # carry-forward base seed
+                if fut_mode:
+                    # Futures mode also needs a valid reference-future denominator at
+                    # the initial open; without one the leg stays flat until the
+                    # first roll that HAS a covering future (nothing to carry from at
+                    # bar 0).
+                    fref0 = _fref_at(spec, 0)
+                    if _futures_denom_ok(spec, fref0):
+                        seg_premium[rid] = float(open_prem)
+                        seg_fref[rid] = float(fref0)
+                        seg_er[rid] = ratio[0]  # == 1.0
+                        holding[rid] = True
+                        last_finite[rid] = float(open_prem)
+                else:
+                    seg_premium[rid] = float(open_prem)
+                    seg_er[rid] = ratio[0]  # == 1.0
+                    holding[rid] = True
+                    last_finite[rid] = float(open_prem)  # carry-forward base seed
 
     wiped = False
     for s in range(n):
@@ -169,21 +231,41 @@ def _compound_with_hold(
                     spec.roll_premium[s] if bool(spec.is_roll[s]) else last_finite[rid]
                 )
                 cur = spec.premium[s + 1]
-                seg_p = seg_premium[rid]
                 dprem = cur - base
-                if (
-                    np.isfinite(dprem)
-                    and np.isfinite(base)
-                    and np.isfinite(seg_p)
-                    and seg_p != 0.0
-                ):
-                    contrib = (
-                        spec.sign
-                        * spec.nav_times
-                        * (seg_er[rid] / ratio[s])
-                        * dprem
-                        / seg_p
-                    )
+                if spec.sizing_mode == "futures_notional":
+                    # Futures-notional: divide by the frozen future notional
+                    # (F_ref·mult_fut) and scale the premium move by mult_opt.  The
+                    # (seg_er/ratio[s]) equity-coupling and the dprem base are the
+                    # SAME as premium mode — only the denominator + mult_opt differ.
+                    seg_f = seg_fref[rid]
+                    if (
+                        np.isfinite(dprem)
+                        and np.isfinite(base)
+                        and np.isfinite(seg_f)
+                        and seg_f != 0.0
+                    ):
+                        contrib = (
+                            spec.sign
+                            * spec.nav_times
+                            * (seg_er[rid] / ratio[s])
+                            * (dprem * spec.mult_opt)
+                            / (seg_f * spec.mult_fut)
+                        )
+                else:
+                    seg_p = seg_premium[rid]
+                    if (
+                        np.isfinite(dprem)
+                        and np.isfinite(base)
+                        and np.isfinite(seg_p)
+                        and seg_p != 0.0
+                    ):
+                        contrib = (
+                            spec.sign
+                            * spec.nav_times
+                            * (seg_er[rid] / ratio[s])
+                            * dprem
+                            / seg_p
+                        )
                 # Carry the last FINITE held premium forward as the next interior
                 # step's base (the oracle updates ``prev_premium`` only on a finite
                 # premium — a NaN leaves the base unchanged).
@@ -224,7 +306,39 @@ def _compound_with_hold(
                     if bool(spec.is_roll[s + 1])
                     else spec.premium[s + 1]
                 )
-                if np.isfinite(open_prem) and open_prem > 0.0 and ratio[s + 1] != 0.0:
+                if spec.sizing_mode == "futures_notional":
+                    fref_here = _fref_at(spec, s + 1)
+                    if (
+                        np.isfinite(open_prem)
+                        and open_prem > 0.0
+                        and ratio[s + 1] != 0.0
+                    ):
+                        # The dprem base ALWAYS re-anchors to the new segment's open
+                        # (so the roll seam is never booked), independent of whether
+                        # we can re-size the quantity.
+                        seg_premium[rid] = float(open_prem)
+                        last_finite[rid] = float(open_prem)
+                        if _futures_denom_ok(spec, fref_here):
+                            # Full re-size off the new future notional.
+                            seg_fref[rid] = float(fref_here)
+                            seg_er[rid] = ratio[s + 1]
+                            holding[rid] = True
+                        elif holding[rid]:
+                            # TAIL CARRY-FORWARD (Guardrail tail policy): no covering
+                            # future at this roll → keep the LAST sized quantity
+                            # (seg_fref + seg_er frozen) and keep accruing option $
+                            # P&L on the new contract.  NEVER size off missing data,
+                            # never crash.  (Diagnostic is surfaced upstream by the
+                            # resolver/fetcher that produced the NaN roll_future_ref.)
+                            pass
+                        else:
+                            # Never sized yet AND no covering future → cannot size.
+                            holding[rid] = False
+                    elif not holding[rid]:
+                        holding[rid] = False
+                    # else: NaN open premium but already holding → keep prior sizing
+                    #       (a NaN open leaves seg_* intact, matching premium mode).
+                elif np.isfinite(open_prem) and open_prem > 0.0 and ratio[s + 1] != 0.0:
                     seg_premium[rid] = float(open_prem)
                     seg_er[rid] = ratio[s + 1]
                     holding[rid] = True
