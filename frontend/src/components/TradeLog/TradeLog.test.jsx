@@ -3,7 +3,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
-import TradeLog, { formatSignedPercent } from './TradeLog';
+import TradeLog, { formatSignedPercent, formatQuantity } from './TradeLog';
 
 afterEach(cleanup);
 
@@ -504,6 +504,83 @@ describe('open-trade PnL using last available price', () => {
     expect(cells[6].textContent).toContain('110');
     // PnL uses close_bar price (110), not last price (150): "+10.00%"
     expect(cells[7].textContent).toBe('+10.00%');
+  });
+});
+
+describe('Size column — quantity counts vs % fallback (shared component)', () => {
+  const baseTrade = {
+    input_id: 'X',
+    entry_block_id: 'e1',
+    entry_block_name: 'E',
+    exit_block_id: 'x1',
+    exit_block_name: 'X',
+    open_bar: 0,
+    close_bar: 1,
+    direction: 'long',
+    signed_weight: 0.6,
+  };
+  const positions = [pos('X', [100, 110])];
+
+  function renderTrade(overrides) {
+    render(<TradeLog trades={[{ ...baseTrade, ...overrides }]} timestamps={TS} positions={positions} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    return screen.getByTestId('trade-size');
+  }
+
+  it('SC1: finite quantity + unit → renders "<count> <unit>", not a %', () => {
+    const cell = renderTrade({ quantity: 12.34, quantity_unit: 'contracts', multiplier: 50 });
+    expect(cell.textContent).toBe('12.34 contracts');
+    expect(cell.textContent).not.toContain('%');
+  });
+
+  it('SC1: large share count is grouped, not scientific', () => {
+    const cell = renderTrade({ quantity: 1432, quantity_unit: 'shares', multiplier: 1 });
+    expect(cell.textContent).toBe('1,432 shares');
+  });
+
+  it('SC3: quantity null (key present) → em-dash, NOT a % fallback', () => {
+    const cell = renderTrade({ quantity: null, quantity_unit: 'contracts', multiplier: null });
+    expect(cell.textContent).toBe('—');
+    expect(cell.textContent).not.toContain('%');
+  });
+
+  it('SC4: no quantity KEY (Signals-style payload) → still renders the % fallback', () => {
+    // baseTrade has no `quantity` key → shared Signals usage unchanged.
+    const cell = renderTrade({});
+    expect(cell.textContent).toBe('+60.00%');
+  });
+
+  it('tiny fractional futures count renders fractionally without NaN/scientific garbage', () => {
+    const cell = renderTrade({ quantity: 0.0004, quantity_unit: 'contracts', multiplier: 50 });
+    expect(cell.textContent).toBe('0.0004 contracts');
+    expect(cell.textContent).not.toMatch(/e|NaN|Infinity/i);
+  });
+
+  it('magnitude only: negative quantity renders unsigned (sign is in Direction column)', () => {
+    const cell = renderTrade({ quantity: -7.5, quantity_unit: 'contracts', direction: 'short', signed_weight: -0.6 });
+    expect(cell.textContent).toBe('7.5 contracts');
+  });
+});
+
+describe('formatQuantity', () => {
+  it('formats a small fractional count with its unit', () => {
+    expect(formatQuantity(0.0004, 'contracts')).toBe('0.0004 contracts');
+  });
+  it('groups large counts and never uses scientific notation', () => {
+    expect(formatQuantity(1432, 'shares')).toBe('1,432 shares');
+  });
+  it('caps at 4 significant digits', () => {
+    expect(formatQuantity(12.34567, 'contracts')).toBe('12.35 contracts');
+  });
+  it('non-finite → em-dash (guards NaN/Infinity/null)', () => {
+    expect(formatQuantity(NaN, 'contracts')).toBe('—');
+    expect(formatQuantity(Infinity, 'shares')).toBe('—');
+    expect(formatQuantity(null, 'shares')).toBe('—');
+    expect(formatQuantity(undefined, 'shares')).toBe('—');
+  });
+  it('missing/blank unit → number only', () => {
+    expect(formatQuantity(5)).toBe('5');
+    expect(formatQuantity(5, '  ')).toBe('5');
   });
 });
 

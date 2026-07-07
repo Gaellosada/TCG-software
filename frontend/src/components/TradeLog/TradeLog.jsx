@@ -38,6 +38,23 @@ export function formatSignedPercent(fraction) {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
+// Standard notation (never scientific) with up to 4 significant digits: keeps
+// tiny futures counts fractional (0.0004) and large share counts grouped
+// (1,432) without rendering NaN/Infinity/exponent garbage.
+const QTY_FMT = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 4 });
+
+/**
+ * Formats an unsigned trade quantity + its unit label, e.g. "12.34 contracts"
+ * or "1,432 shares". Sign is conveyed by the Direction column, so the magnitude
+ * is shown. Non-finite input → em-dash (guards NaN/Infinity).
+ */
+export function formatQuantity(qty, unit) {
+  if (typeof qty !== 'number' || !Number.isFinite(qty)) return '—';
+  const num = QTY_FMT.format(Math.abs(qty));
+  const label = typeof unit === 'string' && unit.trim() ? ` ${unit.trim()}` : '';
+  return `${num}${label}`;
+}
+
 function priceAtBar(positionsByInputId, inputId, bar) {
   if (bar === null || bar === undefined) return null;
   const pos = positionsByInputId.get(inputId);
@@ -192,6 +209,19 @@ function TradeLog({
                         ? styles.pnlPos
                         : styles.pnlNeg;
 
+                    // Size cell: "counts mode" is detected by the presence of the
+                    // `quantity` KEY on the trade (portfolio trades carry it; the
+                    // shared Signals-page usage does NOT). Key present + finite →
+                    // fractional count + unit; key present but null/NaN (price/M
+                    // uncomputable) → em-dash; key absent entirely → fall back to
+                    // the constant target % so the Signals page is unchanged.
+                    const hasCounts = 'quantity' in tr;
+                    const sizeDisplay = hasCounts
+                      ? (Number.isFinite(tr.quantity)
+                        ? formatQuantity(tr.quantity, tr.quantity_unit)
+                        : '—')
+                      : formatSignedPercent(tr.signed_weight);
+
                     const entryName = tr.entry_block_name || '(unnamed)';
                     const entryTooltip = tr.entry_block_id
                       ? (entryDescriptions[tr.entry_block_id] || '')
@@ -221,8 +251,11 @@ function TradeLog({
                             {tr.direction}
                           </span>
                         </td>
-                        <td className={tr.signed_weight >= 0 ? styles.pnlPos : styles.pnlNeg}>
-                          {formatSignedPercent(tr.signed_weight)}
+                        <td
+                          className={tr.signed_weight >= 0 ? styles.pnlPos : styles.pnlNeg}
+                          data-testid="trade-size"
+                        >
+                          {sizeDisplay}
                         </td>
                         <td>{formatPrice(tr._openPrice)}</td>
                         <td>{isClosed ? formatPrice(tr._closePrice) : <span className={styles.openTag}>—</span>}</td>
