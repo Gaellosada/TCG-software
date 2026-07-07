@@ -135,6 +135,146 @@ def _leg_multiplier_and_unit(collection: str | None) -> tuple[float | None, str]
     return 1.0, "shares"
 
 
+def _roll_row_quantity(
+    leg_fraction: float,
+    equity: npt.NDArray[np.float64],
+    price_series: npt.NDArray[np.float64] | None,
+    open_bar: int,
+    m: float | None,
+    n_bars: int,
+) -> float | None:
+    """Fractional CONTRACT count for a roll row's OPEN bar.
+
+    REUSES the §10.5 formula VERBATIM (``|signed_weight|·NAV_open/(price_open·M)``)
+    and its NaN/null guards so a roll row is sized exactly like the direct-leg row
+    it replaces — a missing/≤0 price, an unresolved FUT/OPT ``M``, or a non-finite
+    NAV yields ``None`` (the FE falls back to the % display; NEVER a silent 1.0).
+    ``price_series`` is the leg's OWN price series aligned to ``common_dates`` (the
+    continuous adjusted close, or the option premium the hold accumulator was fed)
+    — NOT ``price_by_input`` (which is the option leg's synthetic equity, wrong for
+    an option quantity; this is why direct-option rows are sized here, not in §10.5).
+    """
+    price_open = (
+        price_series[open_bar]
+        if price_series is not None and 0 <= open_bar < len(price_series)
+        else None
+    )
+    nav_open = float(equity[open_bar]) if 0 <= open_bar < n_bars else math.nan
+    if (
+        m is None
+        or price_open is None
+        or not math.isfinite(float(price_open))
+        or float(price_open) <= 0.0
+        or not math.isfinite(nav_open)
+    ):
+        return None
+    return abs(leg_fraction) * nav_open / (float(price_open) * m)
+
+
+def _roll_row_pnl(
+    quantity: float | None,
+    leg_fraction: float,
+    price_series: npt.NDArray[np.float64] | None,
+    open_bar: int,
+    close_bar: int,
+    m: float | None,
+) -> float | None:
+    """DISPLAY-ONLY realised P&L for a roll segment = ``sign·qty·Δprice·M``.
+
+    ``Δprice`` = price at ``close_bar`` − price at ``open_bar`` on the leg's own
+    price series; ``sign`` is the leg direction (long +, short −).  Returns ``None``
+    when the quantity/multiplier is unusable or either bar's price is non-finite —
+    ``sanitize_json_floats`` nulls any residual.  NEVER feeds equity or metrics.
+    """
+    if quantity is None or m is None or price_series is None:
+        return None
+    n = len(price_series)
+    if not (0 <= open_bar < n and 0 <= close_bar < n):
+        return None
+    p_open = float(price_series[open_bar])
+    p_close = float(price_series[close_bar])
+    if not (math.isfinite(p_open) and math.isfinite(p_close)):
+        return None
+    dir_sign = 1.0 if leg_fraction >= 0 else -1.0
+    return dir_sign * quantity * (p_close - p_open) * m
+
+
+def _build_roll_rows(
+    *,
+    label: str,
+    input_id: str,
+    collection: str | None,
+    leg_fraction: float,
+    direction: str,
+    interior_roll_dates: list[int],
+    price_series: npt.NDArray[np.float64] | None,
+    equity: npt.NDArray[np.float64],
+    cd_index: dict[int, int],
+    n_bars: int,
+) -> list[dict]:
+    """One display-only trade row per HELD CONTRACT of a rolling direct leg.
+
+    Applies to continuous-futures legs and hold-mode option-stream legs only.
+    ``interior_roll_dates`` are the YYYYMMDD roll BOUNDARIES (the initial open is
+    NOT a boundary — continuous ``ContinuousSeries.roll_dates`` already excludes it
+    and the option path drops the first ``is_roll`` date).  Each boundary is mapped
+    to a ``common_dates`` bar via ``cd_index`` and DROPPED if outside the window
+    (same remap-drop semantics as signal trades).  A leg with N held contracts
+    (N−1 in-window boundaries) yields N rows: row0 entry ``open``; the last row exit
+    ``end``; every other boundary ``rolling`` (decision 1).  The rows are PURELY
+    INFORMATIONAL — they are appended to ``aggregated_trades`` AFTER equity/metrics
+    are computed and never feed back into them.
+    """
+    m, unit = _leg_multiplier_and_unit(collection)
+    # Roll boundaries → distinct in-window bars in (0, n_bars-1]; a boundary at
+    # bar 0 (== window start) or out of range collapses into the first segment.
+    roll_bars = sorted(
+        {
+            b
+            for d in interior_roll_dates
+            if (b := cd_index.get(int(d))) is not None and 1 <= b <= n_bars - 1
+        }
+    )
+    opens = [0, *roll_bars]
+    closes = [*(b - 1 for b in roll_bars), n_bars - 1]
+    n_seg = len(opens)
+    hover = f"rolling {collection or label}"
+    rows: list[dict] = []
+    for k in range(n_seg):
+        open_bar = opens[k]
+        close_bar = closes[k]
+        entry_name = "open" if k == 0 else "rolling"
+        exit_name = "end" if k == n_seg - 1 else "rolling"
+        quantity = _roll_row_quantity(
+            leg_fraction, equity, price_series, open_bar, m, n_bars
+        )
+        segment_pnl = _roll_row_pnl(
+            quantity, leg_fraction, price_series, open_bar, close_bar, m
+        )
+        rows.append(
+            {
+                "input_id": input_id,
+                "entry_block_id": f"roll:{label}",
+                "entry_block_name": entry_name,
+                "exit_block_id": f"roll:{label}",
+                "exit_block_name": exit_name,
+                "open_bar": open_bar,
+                "close_bar": close_bar,
+                "direction": direction,
+                "signed_weight": leg_fraction,
+                "holding_id": label,
+                "holding_name": label,
+                "quantity_unit": unit,
+                "multiplier": m,
+                "quantity": quantity,
+                "segment_pnl": segment_pnl,
+                "roll_hover": hover,
+                "_roll_row": True,
+            }
+        )
+    return rows
+
+
 @dataclass(frozen=True)
 class _SignalLegEvalResult:
     """Internal aggregate of what a signal leg produces for the portfolio.
@@ -736,8 +876,22 @@ async def _evaluate_option_stream_leg(
     svc: MarketDataService,
     start_date: date | None,
     end_date: date | None,
-) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], str]:
-    """Resolve an option_stream leg and return (dates, values, stream_mode).
+) -> tuple[
+    npt.NDArray[np.int64],
+    npt.NDArray[np.float64],
+    str,
+    list[int],
+    npt.NDArray[np.float64] | None,
+]:
+    """Resolve an option_stream leg and return
+    (dates, values, stream_mode, roll_dates, premium).
+
+    ``roll_dates`` are the DISPLAY-ONLY interior roll BOUNDARIES (YYYYMMDD ints,
+    the initial open excluded) for the trade-log roll rows, and ``premium`` is the
+    raw held-premium series the hold accumulator was fed (same axis as ``dates``)
+    — both populated only on the "price_hold" path, ``[]`` / ``None`` otherwise.
+    They never affect ``values`` (the equity synthetic); they are additive
+    side-channels for the informational per-roll trade rows.
 
     ``stream_mode`` is either "price_hold" (the hold-mode synthetic $-P&L equity
     leg; caller must apply |weight| — direction is already baked in) or "level" (a
@@ -888,7 +1042,17 @@ async def _evaluate_option_stream_leg(
             np.zeros(max(T - 1, 0), dtype=np.float64), [spec]
         )
         synthetic = 100.0 * equity_ratio
-        return dates_arr, synthetic, "price_hold"
+        # DISPLAY-ONLY roll boundaries for the trade-log roll rows: the ``is_roll``
+        # dates EXCLUDING the initial open (``is_roll[0]`` marks the first held
+        # contract, which is the natural segment-0 open, not a boundary).  Keyed
+        # off ``_d`` (the roll-info date axis ``is_roll`` aligns to).  ``premium``
+        # is threaded back so the caller sizes the option roll rows off the true
+        # premium (``price_by_input`` holds the synthetic equity, not a premium).
+        _d_arr = np.asarray(_d, dtype=np.int64)
+        _roll_mask = np.asarray(is_roll_f, dtype=np.float64) > 0.5
+        _roll_all = [int(x) for x in _d_arr[_roll_mask].tolist()]
+        roll_dates_interior = _roll_all[1:]
+        return dates_arr, synthetic, "price_hold", roll_dates_interior, premium
 
     # 2. Materialise via shared infrastructure
     result = await materialise_option_streams(
@@ -910,7 +1074,7 @@ async def _evaluate_option_stream_leg(
     #    A level leg (iv/greeks/volume/oi) is a tracking overlay, NOT part of the
     #    equity curve, so it needs no forward-fill or all-NaN guard here (an
     #    all-NaN level leg is surfaced downstream as an empty tracking series).
-    return dates_arr, values, "level"
+    return dates_arr, values, "level", [], None
 
 
 # ---------------------------------------------------------------------------
@@ -1010,6 +1174,11 @@ async def compute_portfolio(
     instrument_full_dates: npt.NDArray[np.int64] | None = None
     instrument_dates: npt.NDArray[np.int64] | None = None
     instrument_closes: dict[str, npt.NDArray[np.float64]] = {}
+    # Bound unconditionally so §9.5 (continuous roll-boundary re-surfacing) can
+    # look up a continuous leg's ContinuousLegSpec even in code paths where the
+    # instrument block did not run (it always runs when a continuous leg exists,
+    # but an empty default keeps the name safe).
+    legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
 
     if instrument_legs:
         legs_spec = _parse_legs(body.legs, classify)
@@ -1086,9 +1255,19 @@ async def compute_portfolio(
     # curve (like signal legs), so their portfolio share below is |weight| — the
     # signed-weight short must NOT be re-applied by the weight normalization.
     hold_option_labels: set[str] = set()
+    # DISPLAY-ONLY per-leg roll boundaries + raw premium for the trade-log roll
+    # rows of a hold-mode option leg (see §10).  Never touch the equity synthetic.
+    option_roll_dates_interior: dict[str, list[int]] = {}
+    option_premium_raw: dict[str, npt.NDArray[np.float64] | None] = {}
 
     for label, leg in option_stream_legs.items():
-        os_dates, os_values, stream_mode = await _evaluate_option_stream_leg(
+        (
+            os_dates,
+            os_values,
+            stream_mode,
+            os_roll_interior,
+            os_premium,
+        ) = await _evaluate_option_stream_leg(
             label,
             leg,
             body.weights[label],
@@ -1110,6 +1289,8 @@ async def compute_portfolio(
             # stream is ever added. Keying off the returned mode can't drift.
             if stream_mode == "price_hold":
                 hold_option_labels.add(label)
+                option_roll_dates_interior[label] = os_roll_interior
+                option_premium_raw[label] = os_premium
         else:
             # Level leg -- tracking overlay only (not in equity curve)
             tracking_series[label] = {
@@ -1165,6 +1346,20 @@ async def compute_portfolio(
             assume_unique=True,
         )
         aligned_closes[label] = option_stream_closes[label][os_mask]
+
+    # Align each hold-mode option leg's RAW premium to common_dates (same mask as
+    # its synthetic close) so the trade-log roll rows are sized/priced off the true
+    # premium — DISPLAY-ONLY, never part of the equity curve.
+    option_premium_aligned: dict[str, npt.NDArray[np.float64]] = {}
+    for label, prem in option_premium_raw.items():
+        if prem is None or label not in option_stream_dates_map:
+            continue
+        os_mask = np.isin(
+            option_stream_dates_map[label],
+            common_dates,
+            assume_unique=True,
+        )
+        option_premium_aligned[label] = np.asarray(prem, dtype=np.float64)[os_mask]
 
     # ── 6. Compute full date range for the slider ──
     #
@@ -1247,6 +1442,40 @@ async def compute_portfolio(
         "yearly",
     )
 
+    # ── 9.5. Re-surface roll boundaries for rolling direct legs (DISPLAY-ONLY) ──
+    #
+    # ``get_aligned_prices`` discards a continuous leg's roll_dates (keeps only the
+    # stitched prices), so re-fetch each continuous leg via ``get_continuous`` to
+    # recover the exact roll BOUNDARIES the chart markers use.  The call is cached
+    # (``get_aligned_prices`` already resolved the same key), so this is cheap.
+    # This is purely informational: a failure here must NEVER 500 the compute —
+    # the equity/metrics are already built — so a data error degrades to "no roll
+    # boundaries" (the leg then shows a single open→end row).
+    continuous_roll_dates_interior: dict[str, list[int]] = {}
+    for label, leg in body.legs.items():
+        if leg.type != "continuous":
+            continue
+        spec = legs_spec.get(label)
+        if not isinstance(spec, ContinuousLegSpec):
+            continue
+        try:
+            cseries = await svc.get_continuous(
+                spec.collection,
+                spec.roll_config,
+                start=start_date,
+                end=end_date,
+            )
+        except Exception as exc:  # noqa: BLE001 — display-only; log, never fail compute
+            logger.warning(
+                "roll-boundary re-fetch failed for continuous leg %r (%s): %s",
+                label,
+                spec.collection,
+                exc,
+            )
+            cseries = None
+        if cseries is not None:
+            continuous_roll_dates_interior[label] = [int(d) for d in cseries.roll_dates]
+
     # ── 10. Aggregate trades + per-input positions across signal legs ──
     #
     # Each signal leg evaluates against its own date overlap (per-signal
@@ -1306,20 +1535,58 @@ async def compute_portfolio(
                 }
             )
 
-    # Direct legs have no engine trades; surface them as a single open Holding
-    # so they appear in the trade log alongside signal-leg trades.
+    # Direct legs have no engine trades; surface them in the trade log alongside
+    # signal-leg trades.  ROLLING direct legs (continuous futures + hold-mode
+    # option premia) emit ONE DISPLAY-ONLY row PER HELD CONTRACT (open / rolling…
+    # / end — see ``_build_roll_rows``); NON-rolling legs (spot/index/ETF and
+    # option LEVEL overlays) keep the single open "Holding" row exactly as before.
+    # Both are built AFTER equity/metrics (§7-9), so they are purely informational.
+    equity_arr = result.portfolio_equity
+    n_common = int(len(common_dates))
     for label, leg in body.legs.items():
         if leg.type == "signal":
             continue
-        if leg.type == "instrument":
-            direct_input_id = leg.symbol or label
-        elif leg.type == "continuous":
-            direct_input_id = leg.collection or label
-        else:
-            direct_input_id = label
         # See note above: convert PERCENT allocation → FRACTION for the
         # trade's signed_weight (trades use fraction units uniformly).
         leg_fraction = float(body.weights[label]) / 100.0
+        direction = "long" if leg_fraction >= 0 else "short"
+
+        if leg.type == "continuous":
+            aggregated_trades.extend(
+                _build_roll_rows(
+                    label=label,
+                    input_id=leg.collection or label,
+                    collection=leg.collection,
+                    leg_fraction=leg_fraction,
+                    direction=direction,
+                    interior_roll_dates=continuous_roll_dates_interior.get(label, []),
+                    price_series=aligned_closes.get(label),
+                    equity=equity_arr,
+                    cd_index=cd_index,
+                    n_bars=n_common,
+                )
+            )
+            continue
+
+        if leg.type == "option_stream" and label in hold_option_labels:
+            aggregated_trades.extend(
+                _build_roll_rows(
+                    label=label,
+                    input_id=label,
+                    collection=leg.collection,
+                    leg_fraction=leg_fraction,
+                    direction=direction,
+                    interior_roll_dates=option_roll_dates_interior.get(label, []),
+                    price_series=option_premium_aligned.get(label),
+                    equity=equity_arr,
+                    cd_index=cd_index,
+                    n_bars=n_common,
+                )
+            )
+            continue
+
+        # Non-rolling direct leg (instrument / option LEVEL overlay): single row.
+        direct_input_id = leg.symbol or label if leg.type == "instrument" else label
         aggregated_trades.append(
             {
                 "input_id": direct_input_id,
@@ -1329,7 +1596,7 @@ async def compute_portfolio(
                 "exit_block_name": None,
                 "open_bar": 0,
                 "close_bar": None,
-                "direction": "long" if leg_fraction >= 0 else "short",
+                "direction": direction,
                 "signed_weight": leg_fraction,
                 "holding_id": label,
                 "holding_name": label,
@@ -1416,9 +1683,11 @@ async def compute_portfolio(
     # Collection is resolved PER TRADE: direct legs carry it on the LegSpec;
     # signal-leg trades use the per-input collection threaded from signal eval
     # (``input_id`` is the remapped underlying — a bare symbol for spot inputs,
-    # not always a collection). Direct OPTION legs are nulled: their positions
+    # not always a collection). Direct OPTION legs are nulled here: their positions
     # "price" is the synthetic 100-based equity, not a tradeable premium, so a
-    # contract count off it would mislead (per-roll option counts are DEFERRED).
+    # contract count off it would mislead.  ROLL rows (continuous + hold-option)
+    # are already sized in ``_build_roll_rows`` off the leg's OWN price/premium
+    # series — SKIP them here so their quantity/multiplier are not overwritten.
     equity = result.portfolio_equity
     n_bars = int(len(equity))
     price_by_input: dict[str, list | None] = {
@@ -1426,6 +1695,8 @@ async def compute_portfolio(
         for p in aggregated_positions
     }
     for tr in aggregated_trades:
+        if tr.get("_roll_row"):
+            continue
         leg = body.legs.get(tr["holding_id"])
         if leg is not None and leg.type == "signal":
             collection = signal_collections_map.get(tr["holding_id"], {}).get(
@@ -1462,6 +1733,10 @@ async def compute_portfolio(
             tr["quantity"] = (
                 abs(tr["signed_weight"]) * nav_open / (float(price_open) * m)
             )
+
+    # Drop the internal roll-row marker; it is a build-time flag, not response data.
+    for tr in aggregated_trades:
+        tr.pop("_roll_row", None)
 
     # ── 11. Build response ──
 

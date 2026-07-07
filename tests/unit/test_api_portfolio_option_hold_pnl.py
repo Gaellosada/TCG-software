@@ -116,6 +116,53 @@ async def _compute(client, weight, *, nav_times=1.0, stream="bs_mid") -> dict:
     return resp.json()
 
 
+# ── Per-roll trade rows for a hold-mode option leg (display-only) ───────────
+
+
+async def test_hold_option_leg_emits_per_roll_trade_rows(client):
+    """A hold-mode option leg emits ONE display-only trade row per held contract
+    (segment), labelled open/rolling/end, sized in contracts off the PREMIUM, with
+    a per-segment realised P&L — and the equity stays byte-identical to the oracle
+    (display-only)."""
+    from tcg.core.api.portfolio import _leg_multiplier_and_unit
+
+    data = await _compute(client, -100)
+    # Equity is UNCHANGED by the roll rows (display-only hard gate for options).
+    equity = np.array(data["portfolio_equity"], dtype=np.float64)
+    expected_eq = 100.0 * _oracle_ratio(
+        _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=1.0, weight=-100.0
+    )
+    np.testing.assert_allclose(equity, expected_eq, rtol=1e-9, atol=1e-9)
+
+    # DATES_INT = [0327,0328,0329,0401,0402,0403]; IS_ROLL = [1,0,0,1,0,0].
+    # Interior roll (excl. initial open) = 20240401 → bar 3 → segments [0,2],[3,5].
+    rows = sorted(data["trades"], key=lambda t: t["open_bar"])
+    assert len(rows) == 2
+    r0, r1 = rows
+    assert (r0["entry_block_name"], r0["exit_block_name"]) == ("open", "rolling")
+    assert (r1["entry_block_name"], r1["exit_block_name"]) == ("rolling", "end")
+    assert (r0["open_bar"], r0["close_bar"]) == (0, 2)
+    assert (r1["open_bar"], r1["close_bar"]) == (3, 5)
+    for r in rows:
+        assert r["direction"] == "short"
+        assert r["roll_hover"] == "rolling OPT_SP_500"
+        assert r["entry_block_id"] == "roll:P"
+        assert r["quantity_unit"] == "contracts"
+        assert "_roll_row" not in r
+
+    m_opt, _unit = _leg_multiplier_and_unit("OPT_SP_500")
+    assert m_opt is not None
+    # premium (HELD_PREMIUM) = [30,28,26,24,20,19]; sized off it, not the synthetic.
+    prem = _HELD_PREMIUM
+    for r in rows:
+        ob, cb = r["open_bar"], r["close_bar"]
+        exp_q = abs(r["signed_weight"]) * equity[ob] / (prem[ob] * m_opt)
+        assert r["quantity"] == pytest.approx(exp_q)
+        # short leg → sign −1 on qty·Δpremium·M.
+        exp_pnl = -1.0 * r["quantity"] * (prem[cb] - prem[ob]) * m_opt
+        assert r["segment_pnl"] == pytest.approx(exp_pnl)
+
+
 # ── THE acceptance oracle ──────────────────────────────────────────────────
 
 
@@ -180,10 +227,14 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
         "tcg.core.api.portfolio.make_signal_fetcher", _fake_make_signal_fetcher
     )
     leg = LegSpec(**_hold_put_leg())
-    dates, values, mode = await _evaluate_option_stream_leg(
+    dates, values, mode, roll_dates, premium = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )
     assert mode == "price_hold"
+    # Interior roll boundaries = is_roll dates minus the initial open (20240327):
+    # IS_ROLL = [1,0,0,1,0,0] over DATES_INT → the single interior roll is 20240401.
+    assert roll_dates == [20240401]
+    np.testing.assert_array_equal(np.asarray(premium), _HELD_PREMIUM)
     np.testing.assert_array_equal(dates, _DATES_INT)
     expected = 100.0 * _oracle_ratio(
         _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=1.0, weight=-100.0
@@ -207,7 +258,7 @@ async def test_evaluate_option_stream_leg_futures_notional(monkeypatch):
 
     monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _fut_fetcher)
     leg = LegSpec(**_hold_put_leg(), sizing_mode="futures_notional")
-    dates, values, mode = await _evaluate_option_stream_leg(
+    dates, values, mode, roll_dates, premium = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )
     assert mode == "price_hold"

@@ -3,7 +3,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
-import TradeLog, { formatSignedPercent, formatQuantity } from './TradeLog';
+import TradeLog, { formatSignedPercent, formatQuantity, formatSignedAmount } from './TradeLog';
 
 afterEach(cleanup);
 
@@ -603,5 +603,112 @@ describe('formatSignedPercent', () => {
 
   it('formats 0 as "0.00%"', () => {
     expect(formatSignedPercent(0)).toBe('0.00%');
+  });
+});
+
+describe('roll rows (rolling direct legs)', () => {
+  // A continuous leg with one interior roll → two segment rows: open→rolling,
+  // rolling→end. Each carries a contract quantity + a backend dollar segment_pnl
+  // + a per-leg roll_hover surfaced through the descriptions channel.
+  const rollTrades = [
+    {
+      input_id: 'FUT_SP_500',
+      entry_block_id: 'roll:SPX',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:SPX',
+      exit_block_name: 'rolling',
+      open_bar: 0,
+      close_bar: 1,
+      direction: 'long',
+      signed_weight: 1.0,
+      quantity: 0.02,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: 1.0,
+      roll_hover: 'rolling FUT_SP_500',
+    },
+    {
+      input_id: 'FUT_SP_500',
+      entry_block_id: 'roll:SPX',
+      entry_block_name: 'rolling',
+      exit_block_id: 'roll:SPX',
+      exit_block_name: 'end',
+      open_bar: 2,
+      close_bar: 4,
+      direction: 'long',
+      signed_weight: 1.0,
+      quantity: 0.02,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: -2.0,
+      roll_hover: 'rolling FUT_SP_500',
+    },
+  ];
+
+  it('renders open/rolling/end reasons with the per-leg hover text', () => {
+    render(<TradeLog
+      trades={rollTrades}
+      timestamps={TS}
+      positions={[pos('FUT_SP_500', [100, 101, 102, 103, 104])]}
+      entryDescriptions={{ 'roll:SPX': 'rolling FUT_SP_500' }}
+      exitDescriptions={{ 'roll:SPX': 'rolling FUT_SP_500' }}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+
+    const entryReasons = screen.getAllByTestId('trade-entry-reason');
+    const exitReasons = screen.getAllByTestId('trade-exit-reason');
+    expect(entryReasons.map((e) => e.textContent)).toEqual(['open', 'rolling']);
+    expect(exitReasons.map((e) => e.textContent)).toEqual(['rolling', 'end']);
+    // Hover text = "rolling <input name>" on both cells.
+    expect(entryReasons[0].getAttribute('title')).toBe('rolling FUT_SP_500');
+    expect(exitReasons[1].getAttribute('title')).toBe('rolling FUT_SP_500');
+  });
+
+  it('Size cell shows contract counts and P&L cell shows the dollar segment_pnl', () => {
+    render(<TradeLog
+      trades={rollTrades}
+      timestamps={TS}
+      positions={[pos('FUT_SP_500', [100, 101, 102, 103, 104])]}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+
+    const sizes = screen.getAllByTestId('trade-size');
+    expect(sizes[0].textContent).toBe('0.02 contracts');
+
+    const pnls = screen.getAllByTestId('trade-pnl');
+    // segment_pnl is a signed DOLLAR amount, not a percentage.
+    expect(pnls[0].textContent).toBe('+1.00');
+    expect(pnls[1].textContent).toBe('-2.00');
+  });
+
+  it('non-roll trades keep the percentage P&L (segment_pnl absent)', () => {
+    const trades = [{
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'EntryA',
+      exit_block_id: 'x1',
+      exit_block_name: 'ExitA',
+      open_bar: 0,
+      close_bar: 2,
+      direction: 'long',
+      signed_weight: 1.0,
+    }];
+    render(<TradeLog trades={trades} timestamps={TS} positions={[pos('X', [100, 105, 110])]} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    // (110/100 - 1) * 1.0 = +10.00%.
+    expect(screen.getByTestId('trade-pnl').textContent).toBe('+10.00%');
+  });
+});
+
+describe('formatSignedAmount', () => {
+  it('formats positive/negative/zero with explicit sign and 2 decimals', () => {
+    expect(formatSignedAmount(1)).toBe('+1.00');
+    expect(formatSignedAmount(-2.5)).toBe('-2.50');
+    expect(formatSignedAmount(0)).toBe('0.00');
+    expect(formatSignedAmount(1234.5)).toBe('+1,234.50');
+  });
+  it('non-finite → em-dash', () => {
+    expect(formatSignedAmount(NaN)).toBe('—');
+    expect(formatSignedAmount(undefined)).toBe('—');
   });
 });

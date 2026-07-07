@@ -48,6 +48,21 @@ export function formatSignedPercent(fraction) {
 const QTY_FMT_LARGE = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 const QTY_FMT_SMALL = new Intl.NumberFormat('en-US', { maximumSignificantDigits: 4 });
 
+// Signed amount (2 decimals, thousands separators, explicit +/-). Used for a
+// roll row's per-segment realised P&L, which the backend supplies as a DOLLAR
+// figure (`segment_pnl`) rather than the frontend-derived percentage.
+const AMT_FMT = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+export function formatSignedAmount(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+  const body = AMT_FMT.format(Math.abs(v));
+  const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+  return `${sign}${body}`;
+}
+
 /**
  * Formats an unsigned trade quantity + its unit label, e.g. "12.34 contracts"
  * or "1,432 shares". Sign is conveyed by the Direction column, so the magnitude
@@ -208,12 +223,25 @@ function TradeLog({
                     const directionClass = tr.direction === 'long'
                       ? styles.dirLong
                       : styles.dirShort;
-                    const pnl = computePnl(pnlMode, tr._openPrice, tr._pnlClosePrice, tr.signed_weight);
+                    // Roll rows (continuous / hold-option per-held-contract) carry
+                    // a backend DOLLAR `segment_pnl`; show it verbatim (a realised
+                    // amount, mode-independent). Every other trade keeps the
+                    // frontend-derived percentage under the Realised/Log toggle.
+                    const hasSegmentPnl =
+                      typeof tr.segment_pnl === 'number' && Number.isFinite(tr.segment_pnl);
+                    const pnl = hasSegmentPnl
+                      ? tr.segment_pnl
+                      : computePnl(pnlMode, tr._openPrice, tr._pnlClosePrice, tr.signed_weight);
                     const pnlClass = pnl === null
                       ? ''
                       : pnl >= 0
                         ? styles.pnlPos
                         : styles.pnlNeg;
+                    const pnlText = pnl === null
+                      ? '—'
+                      : hasSegmentPnl
+                        ? formatSignedAmount(pnl)
+                        : formatSignedPercent(pnl);
 
                     // Size cell: "counts mode" is detected by the presence of the
                     // `quantity` KEY on the trade (portfolio trades carry it; the
@@ -265,8 +293,8 @@ function TradeLog({
                         </td>
                         <td>{formatPrice(tr._openPrice)}</td>
                         <td>{isClosed ? formatPrice(tr._closePrice) : <span className={styles.openTag}>—</span>}</td>
-                        <td className={pnlClass}>
-                          {pnl === null ? '—' : formatSignedPercent(pnl)}
+                        <td className={pnlClass} data-testid="trade-pnl">
+                          {pnlText}
                         </td>
                         <td>
                           <span

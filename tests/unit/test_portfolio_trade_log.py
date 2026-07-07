@@ -131,6 +131,9 @@ def mock_app():
     svc = MagicMock()
     svc._registry = registry
     svc.get_aligned_prices = AsyncMock(return_value=(common_dates, aligned_series))
+    # Default: no roll boundaries re-surfaced (a continuous leg then shows a single
+    # open→end roll row). Tests that exercise interior rolls override this.
+    svc.get_continuous = AsyncMock(return_value=None)
 
     app = FastAPI()
     app.add_exception_handler(TCGError, tcg_error_handler)
@@ -872,16 +875,16 @@ class TestHoldingTradeSynthesis:
         assert out[0]["holding_id"] == "SPX"
         assert out[1]["holding_id"] == "sig1"
 
-    async def test_holding_trade_for_continuous_leg(
+    async def test_continuous_leg_no_rolls_emits_single_open_end_row(
         self, mock_app, client: AsyncClient
     ):
-        """Continuous-futures leg also synthesizes a Holding trade.
+        """Continuous-futures leg with NO re-surfaced roll boundaries (fixture
+        get_continuous → None) emits ONE display-only roll row spanning the whole
+        window: entry 'open', exit 'end' (NOT the old 'Holding' row).
 
-        The fixture's AsyncMock get_aligned_prices returns its canned
-        series under key 'SPX' regardless of the leg spec — so the leg
-        label here is 'SPX' to match. The continuous-specific code path
-        is exercised by leg.type == 'continuous' (input_id resolved to
-        leg.collection).
+        The fixture's AsyncMock get_aligned_prices returns its canned series under
+        key 'SPX' regardless of the leg spec — so the leg label here is 'SPX' to
+        match. input_id resolves to leg.collection.
         """
         body = {
             "legs": {
@@ -891,7 +894,7 @@ class TestHoldingTradeSynthesis:
                     "strategy": "front_month",
                 }
             },
-            # 60 percent → 0.6 fraction on the synthesized Holding trade.
+            # 60 percent → 0.6 fraction on the roll row.
             "weights": {"SPX": 60},
         }
         resp = await client.post("/api/portfolio/compute", json=body)
@@ -899,12 +902,18 @@ class TestHoldingTradeSynthesis:
         data = resp.json()
         assert len(data["trades"]) == 1
         tr = data["trades"][0]
-        assert tr["entry_block_name"] == "Holding"
-        assert tr["entry_block_id"] == "holding"
-        assert tr["close_bar"] is None
+        assert tr["entry_block_name"] == "open"
+        assert tr["exit_block_name"] == "end"
+        assert tr["entry_block_id"] == "roll:SPX"
+        assert tr["exit_block_id"] == "roll:SPX"
+        assert tr["open_bar"] == 0
+        # Whole-window segment → close at the LAST bar (no longer None).
+        assert tr["close_bar"] == len(data["dates"]) - 1
         assert tr["direction"] == "long"
         assert tr["signed_weight"] == pytest.approx(0.6)
         assert tr["holding_id"] == "SPX"
+        assert tr["roll_hover"] == "rolling FUT_VIX"
+        assert "_roll_row" not in tr  # internal build marker is stripped
         # continuous → input_id = leg.collection
         assert tr["input_id"] == "FUT_VIX"
         position_ids = {p["input_id"] for p in data["positions"]}
@@ -1483,3 +1492,178 @@ class TestTradeQuantitySizing:
         # The whole point: the two counts are NOT equal (equity rose, price flat).
         assert out[0]["quantity"] != pytest.approx(out[1]["quantity"])
         assert out[1]["quantity"] > out[0]["quantity"]
+
+
+# ── Per-held-contract ROLL rows for rolling direct legs (continuous) --------
+
+
+def _continuous_series(roll_dates: tuple[int, ...]) -> "object":
+    """Minimal ``ContinuousSeries`` whose only field the portfolio path reads is
+    ``roll_dates`` (the trade-log roll-boundary re-surfacing). Prices/contracts are
+    dummies."""
+    from tcg.types.market import (
+        AdjustmentMethod,
+        ContinuousRollConfig,
+        ContinuousSeries,
+        RollStrategy,
+    )
+
+    prices = _price_series([20240102], [100.0])
+    return ContinuousSeries(
+        collection="FUT_SP_500",
+        roll_config=ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+        ),
+        prices=prices,
+        roll_dates=roll_dates,
+        contracts=tuple(f"C{i}" for i in range(len(roll_dates) + 1)),
+    )
+
+
+class TestContinuousRollRows:
+    """A continuous-futures leg emits ONE display-only trade row per held contract
+    (open / rolling… / end), sized in contracts, with a per-segment realised P&L —
+    and NONE of it perturbs equity/metrics/returns (the display-only hard gate)."""
+
+    async def test_continuous_leg_with_one_roll_emits_two_segment_rows(
+        self, mock_app, client: AsyncClient
+    ):
+        # Fixture common_dates: [02,03,04,05,08]; closes [100,101,102,103,104].
+        # One interior roll on 20240104 → bar 2 → segments [0,1] and [2,4].
+        mock_app.state.market_data.get_continuous = AsyncMock(
+            return_value=_continuous_series((20240104,))
+        )
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "continuous",
+                    "collection": "FUT_SP_500",
+                    "strategy": "front_month",
+                }
+            },
+            "weights": {"SPX": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        rows = sorted(data["trades"], key=lambda t: t["open_bar"])
+        assert len(rows) == 2
+
+        r0, r1 = rows
+        # Reasons: row0 open→rolling; last row rolling→end (decision 1).
+        assert (r0["entry_block_name"], r0["exit_block_name"]) == ("open", "rolling")
+        assert (r1["entry_block_name"], r1["exit_block_name"]) == ("rolling", "end")
+        # Boundaries == ContinuousSeries.roll_dates mapped to bars.
+        assert (r0["open_bar"], r0["close_bar"]) == (0, 1)
+        assert (r1["open_bar"], r1["close_bar"]) == (2, 4)
+        # Hover text = "rolling <input name>" (the collection, not a contract).
+        for r in rows:
+            assert r["roll_hover"] == "rolling FUT_SP_500"
+            assert r["entry_block_id"] == "roll:SPX"
+            assert r["exit_block_id"] == "roll:SPX"
+            assert r["quantity_unit"] == "contracts"
+            assert r["multiplier"] == pytest.approx(50.0)
+            assert "_roll_row" not in r
+
+        equity = data["portfolio_equity"]
+        price_vals = next(
+            p["price"]["values"]
+            for p in data["positions"]
+            if p["input_id"] == "FUT_SP_500"
+        )
+        # quantity = |w| * NAV_open / (price_open * M) (§10.5 formula reused).
+        for r in rows:
+            ob = r["open_bar"]
+            exp_q = abs(r["signed_weight"]) * equity[ob] / (price_vals[ob] * 50.0)
+            assert r["quantity"] == pytest.approx(exp_q)
+        # per-segment P&L = sign * qty * (price_close - price_open) * M.
+        for r in rows:
+            ob, cb = r["open_bar"], r["close_bar"]
+            exp_pnl = r["quantity"] * (price_vals[cb] - price_vals[ob]) * 50.0
+            assert r["segment_pnl"] == pytest.approx(exp_pnl)
+
+    async def test_roll_dates_outside_common_dates_are_dropped(
+        self, mock_app, client: AsyncClient
+    ):
+        # 20240104 is in common_dates (bar 2); 20240106 is NOT a trading day in the
+        # fixture window → dropped (remap-drop). → 2 segments, not 3.
+        mock_app.state.market_data.get_continuous = AsyncMock(
+            return_value=_continuous_series((20240104, 20240106))
+        )
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "continuous",
+                    "collection": "FUT_SP_500",
+                    "strategy": "front_month",
+                }
+            },
+            "weights": {"SPX": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()["trades"]
+        assert len(rows) == 2
+
+    async def test_roll_rows_are_display_only_equity_metrics_byte_identical(
+        self, mock_app, client: AsyncClient
+    ):
+        """HARD GATE: adding per-roll display rows must leave equity + metrics +
+        monthly/yearly returns byte-identical to the pure engine output computed on
+        the same aligned closes."""
+        from dataclasses import asdict
+
+        from tcg.core.api._serializers import sanitize_json_floats
+        from tcg.engine import (
+            aggregate_returns,
+            compute_metrics,
+            compute_weighted_portfolio,
+        )
+
+        # Roll rows ARE generated (one interior roll) so this proves they don't feed
+        # back into the numeric outputs.
+        mock_app.state.market_data.get_continuous = AsyncMock(
+            return_value=_continuous_series((20240104,))
+        )
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "continuous",
+                    "collection": "FUT_SP_500",
+                    "strategy": "front_month",
+                }
+            },
+            "weights": {"SPX": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        # Sanity: the display feature actually produced roll rows.
+        assert any(t.get("entry_block_id") == "roll:SPX" for t in data["trades"])
+
+        common_dates = np.array(
+            [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
+        )
+        closes = np.array([100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64)
+        res = compute_weighted_portfolio(
+            {"SPX": closes}, {"SPX": 100}, "none", "normal", common_dates
+        )
+        assert data["portfolio_equity"] == sanitize_json_floats(
+            res.portfolio_equity.tolist()
+        )
+        assert data["metrics"] == sanitize_json_floats(
+            asdict(compute_metrics(res.portfolio_equity, return_type="normal"))
+        )
+        mo = aggregate_returns(
+            common_dates,
+            res.portfolio_returns,
+            res.per_leg_returns,
+            "normal",
+            "monthly",
+        )
+        yr = aggregate_returns(
+            common_dates, res.portfolio_returns, res.per_leg_returns, "normal", "yearly"
+        )
+        assert data["monthly_returns"] == sanitize_json_floats(mo)
+        assert data["yearly_returns"] == sanitize_json_floats(yr)

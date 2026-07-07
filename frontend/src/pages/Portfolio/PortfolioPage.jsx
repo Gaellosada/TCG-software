@@ -754,6 +754,15 @@ function PortfolioPage() {
                   }
                 }
               }
+              // Roll rows (rolling direct legs) carry their own hover text
+              // ("rolling <input name>") on the trade; surface it through the
+              // same descriptions channel, keyed by the row's roll:<label> id.
+              for (const tr of trades) {
+                if (typeof tr.roll_hover === 'string' && tr.roll_hover) {
+                  if (tr.entry_block_id) entryDescriptions[tr.entry_block_id] = tr.roll_hover;
+                  if (tr.exit_block_id) exitDescriptions[tr.exit_block_id] = tr.roll_hover;
+                }
+              }
               return (
                 <div className={styles.section}>
                   <TradeLog
