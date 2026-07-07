@@ -510,3 +510,40 @@ class TestEndOfMonthThroughBuilder:
         dates = [int_to_date(int(d)) for d in result.prices.dates]
         max_gap = max((b - a).days for a, b in zip(dates, dates[1:]))
         assert max_gap < 120, f"unexpected {max_gap}d hole from large roll_offset"
+
+
+# ── The clamp is gated on roll_offset > 0 (offset-0 stays legacy) ──────
+
+
+class TestClampGatedAtOffsetZero:
+    def setup_method(self):
+        self.builder = ContinuousSeriesBuilder()
+
+    def test_offset_zero_does_not_clamp(self):
+        """At offset 0 the roll clamp must NOT run, so offset-0 series stay
+        byte-identical to the legacy (pre-clamp) output existing portfolios
+        were built on.
+
+        Setup discriminates the gate: contract A keeps bars AFTER its expiry
+        (20240318/25) that the incoming contract B does not quote (B first
+        trades 20240401). Legacy FRONT_MONTH offset-0 rolls at A's expiry
+        (20240315) → those post-expiry bars fall outside A's window and are
+        dropped. If the clamp were (wrongly) applied at offset 0 it would push
+        the boundary to B's first date (20240401) and A would retain 0318/0325.
+        Asserting they are ABSENT proves the clamp is gated off.
+        """
+        a = _make_contract(
+            "A", 20240315, [20240101, 20240301, 20240318, 20240325],
+            [10.0, 10.1, 10.2, 10.3],
+        )
+        b = _make_contract("B", 20240615, [20240401, 20240501], [11.0, 11.1])
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.NONE,
+            roll_offset_days=0,
+        )
+        result = self.builder.build([a, b], config)
+        dates = list(result.prices.dates)
+        assert 20240318 not in dates
+        assert 20240325 not in dates
+        assert dates == [20240101, 20240301, 20240401, 20240501]

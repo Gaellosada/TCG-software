@@ -12,17 +12,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Continuous futures "End of month" roll no longer 500s on FUT_VIX.**
   VIX lists both monthly and weekly futures (4-5 contracts per expiration
-  month), so under `END_OF_MONTH` several contracts resolved to the same
-  month-end; the old duplicate-boundary guard then returned fewer roll
-  boundaries than contracts and `trim_overlaps` indexed past the end of the
-  `roll_dates` list → `IndexError` → HTTP 500 (surfaced in the desktop app as
-  "Backend unreachable"). Added `collapse_to_one_per_month` (keep the
-  latest-expiring contract per month) as an `END_OF_MONTH` pre-step in
-  `ContinuousSeriesBuilder`, restoring the 1:1 contract↔boundary invariant.
-  For VIX this keeps the weekly expiring nearest month-end, so the series
-  rolls at ~month-end essentially gap-free; it is a no-op for single-contract-
-  per-month roots (ES quarterly, pre-2015 VIX), so existing series are
-  unchanged. (`tcg/data/_rolling/calendar.py`, `tcg/data/_rolling/stitcher.py`)
+  month; BTC/ETH list daily ones), so under `END_OF_MONTH` several contracts
+  resolved to the same month-end; the old duplicate-boundary guard then
+  returned fewer roll boundaries than contracts and `trim_overlaps` indexed
+  past the end of the `roll_dates` list → `IndexError` → HTTP 500 (surfaced in
+  the desktop app as "Backend unreachable"). Added `collapse_to_one_per_month`
+  as an `END_OF_MONTH` pre-step in `ContinuousSeriesBuilder`, restoring the 1:1
+  contract↔boundary invariant. It keeps the **canonical monthly-cycle contract**
+  (`expiration_cycle == 'M'`, plumbed from dwh through `ContractPriceData`) —
+  falling back to the latest-expiring contract that actually traded when a root
+  marks no monthly. For VIX this rides the standard monthly future the rest of
+  the platform uses (not an end-of-month weekly a day from expiry), which also
+  carries enough history to survive a large roll offset. No-op for single-
+  contract-per-month roots (ES quarterly, pre-2015 VIX), so existing series are
+  unchanged. (`tcg/data/_rolling/calendar.py`, `tcg/data/_rolling/stitcher.py`,
+  `tcg/types/market.py`, `tcg/data/_sql/instruments.py`)
 
 ### Changed — Roll-offset cap raised from 30 days to 365 days
 
@@ -31,11 +35,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   option stream could not hold a contract more than ~1 month from expiry.
   Raised the days cap to 365 (months unchanged at 12) across the Data-page
   continuous chart, the option-stream "Roll early by" field, the instrument
-  picker's continuous control, and the portfolio continuous-leg validator, so
-  you can now roll relative to expiry far enough to hold a contract/option
-  three or more months out (e.g. roll offset `90` ≈ 3 months). (`data.py`,
-  `_models_options.py`, `portfolio.py`, `ContinuousChart.jsx`,
-  `OptionStreamForm.jsx`, `InstrumentPickerModal.jsx`, Signals `storage.js`)
+  picker's continuous control, the portfolio continuous-leg validator, and the
+  signals continuous-instrument model, so you can now roll relative to expiry
+  far enough to hold a contract/option three or more months out (e.g. roll
+  offset `90` ≈ 3 months). (`data.py`, `_models.py`, `_models_options.py`,
+  `portfolio.py`, `ContinuousChart.jsx`, `OptionStreamForm.jsx`,
+  `InstrumentPickerModal.jsx`, Signals `storage.js`)
+- **Large roll offsets can no longer silently corrupt a series.** A roll
+  offset beyond a contract's listed history would otherwise push its roll
+  window before the contract's data and drop it, leaving a silent multi-year
+  hole (acute for short-history roots like VIX weeklies). `clamp_roll_dates_to_data`
+  now clamps each boundary up to the incoming contract's first tradeable day, so
+  a too-large offset rolls as early as the data allows instead of dropping
+  contracts. Gated on `roll_offset > 0`, so offset-0 series stay byte-identical.
+  (`tcg/data/_rolling/calendar.py`, `tcg/data/_rolling/stitcher.py`)
 
 ### Added — Options feature Phase 1 (data + chain browser)
 
