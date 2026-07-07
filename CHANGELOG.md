@@ -8,6 +8,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased] — 2026-04-26
 
+### Fixed — End-of-month roll crashed on roots with sub-monthly contracts
+
+- **Continuous futures "End of month" roll no longer 500s on FUT_VIX.**
+  VIX lists both monthly and weekly futures (4-5 contracts per expiration
+  month), so under `END_OF_MONTH` several contracts resolved to the same
+  month-end; the old duplicate-boundary guard then returned fewer roll
+  boundaries than contracts and `trim_overlaps` indexed past the end of the
+  `roll_dates` list → `IndexError` → HTTP 500 (surfaced in the desktop app as
+  "Backend unreachable"). Added `collapse_to_one_per_month` (keep the
+  latest-expiring contract per month) as an `END_OF_MONTH` pre-step in
+  `ContinuousSeriesBuilder`, restoring the 1:1 contract↔boundary invariant.
+  For VIX this keeps the weekly expiring nearest month-end, so the series
+  rolls at ~month-end essentially gap-free; it is a no-op for single-contract-
+  per-month roots (ES quarterly, pre-2015 VIX), so existing series are
+  unchanged. (`tcg/data/_rolling/calendar.py`, `tcg/data/_rolling/stitcher.py`)
+
+### Changed — Roll-offset cap raised from 30 days to 365 days
+
+- **Roll early by up to a year, on every roll-offset control.** The 30-day
+  ceiling limited rolling to ~1 month before expiry, so a continuous series /
+  option stream could not hold a contract more than ~1 month from expiry.
+  Raised the days cap to 365 (months unchanged at 12) across the Data-page
+  continuous chart, the option-stream "Roll early by" field, the instrument
+  picker's continuous control, and the portfolio continuous-leg validator, so
+  you can now roll relative to expiry far enough to hold a contract/option
+  three or more months out (e.g. roll offset `90` ≈ 3 months). (`data.py`,
+  `_models_options.py`, `portfolio.py`, `ContinuousChart.jsx`,
+  `OptionStreamForm.jsx`, `InstrumentPickerModal.jsx`, Signals `storage.js`)
+
 ### Added — Options feature Phase 1 (data + chain browser)
 
 Options now enter TCG as another well-modelled data source on the existing

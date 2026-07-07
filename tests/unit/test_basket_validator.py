@@ -311,7 +311,7 @@ def test_inline_option_stream_leg_defaults_when_absent() -> None:
 
 
 def test_inline_option_stream_leg_roll_offset_out_of_range_rejected() -> None:
-    """``OptionStreamRef`` bounds roll_offset to 0..30 on the inline path."""
+    """``OptionStreamRef`` bounds roll_offset to 0..365 on the inline path."""
     from pydantic import ValidationError
 
     from tcg.core.api._models import BasketLeg
@@ -326,7 +326,7 @@ def test_inline_option_stream_leg_roll_offset_out_of_range_rejected() -> None:
                 "maturity": {"kind": "next_third_friday", "offset_months": 0},
                 "selection": {"kind": "by_moneyness", "target": 1.0, "tolerance": 0.01},
                 "stream": "mid",
-                "roll_offset": 31,
+                "roll_offset": 366,
             },
             weight=0.5,
         )

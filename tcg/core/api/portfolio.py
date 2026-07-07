@@ -345,9 +345,9 @@ def _parse_legs(
                     raw_days = leg.roll_offset.value
                 else:
                     raw_days = leg.roll_offset
-                if not (0 <= raw_days <= 30):
+                if not (0 <= raw_days <= 365):
                     raise ValidationError(
-                        f"Leg '{label}': roll_offset must be between 0 and 30"
+                        f"Leg '{label}': roll_offset must be between 0 and 365"
                     )
                 roll_offset_days = raw_days
 

@@ -60,6 +60,41 @@ def _last_trading_day_of_month(year: int, month: int) -> date:
     return vd[-1].date()
 
 
+def collapse_to_one_per_month(
+    contracts: list[ContractPriceData],
+) -> list[ContractPriceData]:
+    """Keep exactly one contract per expiration month (END_OF_MONTH pre-step).
+
+    END_OF_MONTH rolls at each month-end and relies on a 1:1 contract↔boundary
+    mapping — ``compute_roll_dates`` returns ``len(contracts) - 1`` boundaries
+    and ``trim_overlaps`` / ``_concatenate`` index ``roll_dates`` by contract
+    position. Roots with sub-monthly listings break that: VIX now lists 4-5
+    WEEKLY futures per month, so several contracts resolve to the SAME month-end.
+    The old duplicate-boundary guard dropped those collapsed boundaries, leaving
+    ``len(roll_dates) < len(contracts) - 1``; ``trim_overlaps`` then read
+    ``roll_dates[i - 1]`` past the end of the list → ``IndexError`` → HTTP 500
+    on the Data page ("End of month" roll on FUT_VIX).
+
+    Fix: before rolling, keep the contract expiring LATEST in each expiration
+    month. For VIX that is the weekly expiring nearest month-end, so the EOM
+    roll lands at ~month-end with minimal data gaps; for single-contract-per-
+    month roots (ES quarterly, pre-2015 VIX) it is a no-op. This restores the
+    invariant so the crash cannot occur, without touching ``trim_overlaps`` /
+    ``_concatenate`` / adjustment.
+
+    Order-independent: the winner per month is chosen by max expiration and the
+    result is returned sorted ascending by expiration (as the builder requires).
+    """
+    best: dict[tuple[int, int], ContractPriceData] = {}
+    for c in contracts:
+        exp = int_to_date(c.expiration)
+        key = (exp.year, exp.month)
+        current = best.get(key)
+        if current is None or c.expiration > current.expiration:
+            best[key] = c
+    return sorted(best.values(), key=lambda c: c.expiration)
+
+
 def compute_roll_dates(
     contracts: list[ContractPriceData],
     strategy: RollStrategy,

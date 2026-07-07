@@ -611,7 +611,7 @@ class TestPortfolioOptionStreamRollFields:
                 "SPX": SPX_LEG,
                 "OPT": {
                     **self.OPT_LEVEL_LEG,
-                    "roll_offset": {"value": 31, "unit": "days"},
+                    "roll_offset": {"value": 366, "unit": "days"},
                 },
             },
             "weights": {"SPX": 50, "OPT": 50},

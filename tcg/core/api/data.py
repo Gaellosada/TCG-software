@@ -137,7 +137,7 @@ async def get_continuous_series(
     ),
     cycle: str | None = Query(None, description="Expiration cycle filter (e.g. HMUZ)"),
     roll_offset: int = Query(
-        0, ge=0, le=30, description="Days before expiration to roll"
+        0, ge=0, le=365, description="Days before expiration to roll (0-365)"
     ),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),

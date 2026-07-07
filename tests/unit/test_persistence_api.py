@@ -188,9 +188,9 @@ def test_saved_basket_option_ref_threads_roll_offset_and_tolerates_legacy_adjust
     d = _OptionStreamRefLocal(**common)
     assert not hasattr(d, "adjustment")
     assert (d.roll_offset.value, d.roll_offset.unit) == (0, "days")
-    # roll_offset days bounded 0..30, mirroring OptionStreamRef.
+    # roll_offset days bounded 0..365, mirroring OptionStreamRef.
     with pytest.raises(ValidationError):
-        _OptionStreamRefLocal(**common, roll_offset=40)
+        _OptionStreamRefLocal(**common, roll_offset=400)
 
 
 # ---------------------------------------------------------------------------

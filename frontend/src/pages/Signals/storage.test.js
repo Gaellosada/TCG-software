@@ -471,7 +471,7 @@ describe('Signals storage (v8)', () => {
                 selection: { kind: 'by_moneyness', target: 1.0, tolerance: 0.05 },
                 stream: 'iv',
                 adjustment: 'bogus',     // stray key → dropped (no adjustment)
-                roll_offset: 99.7,       // legacy float → trunc + clamp → {30, days}
+                roll_offset: 400.7,      // legacy float → trunc + clamp → {365, days}
               },
             },
           ],
@@ -481,7 +481,7 @@ describe('Signals storage (v8)', () => {
     }));
     const inst = loadState().signals[0].inputs[0].instrument;
     expect('adjustment' in inst).toBe(false);
-    expect(inst.roll_offset).toEqual({ value: 30, unit: 'days' });
+    expect(inst.roll_offset).toEqual({ value: 365, unit: 'days' });
   });
 
   it('sanitiser rejects an option_stream with missing fields', () => {

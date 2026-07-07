@@ -10,10 +10,15 @@ from tcg.types.market import (
     ContinuousSeries,
     ContractPriceData,
     PriceSeries,
+    RollStrategy,
 )
 
 from tcg.data._rolling.adjustment import adjust_difference, adjust_ratio
-from tcg.data._rolling.calendar import compute_roll_dates, trim_overlaps
+from tcg.data._rolling.calendar import (
+    collapse_to_one_per_month,
+    compute_roll_dates,
+    trim_overlaps,
+)
 
 
 class ContinuousSeriesBuilder:
@@ -42,6 +47,16 @@ class ContinuousSeriesBuilder:
         """
         # Filter out contracts with no data
         contracts = [c for c in contracts if len(c.prices) > 0]
+
+        # END_OF_MONTH requires exactly one contract per expiration month
+        # (roll_dates are indexed by contract position downstream). Roots with
+        # sub-monthly listings — e.g. VIX weekly futures, 4-5 contracts/month —
+        # otherwise collapse several contracts onto the same month-end, which
+        # broke the 1:1 contract↔boundary invariant and crashed trim_overlaps
+        # with an IndexError. Collapsing to the latest-expiring contract per
+        # month restores the invariant (no-op for one-per-month roots).
+        if config.strategy == RollStrategy.END_OF_MONTH:
+            contracts = collapse_to_one_per_month(contracts)
 
         # Contracts must be sorted by expiration for correct roll sequencing
         for i in range(len(contracts) - 1):

@@ -26,6 +26,7 @@ import pytest
 
 from tcg.data._rolling.calendar import (
     _last_trading_day_of_month,
+    collapse_to_one_per_month,
     compute_roll_dates,
 )
 from tcg.data._rolling.stitcher import ContinuousSeriesBuilder
@@ -182,6 +183,39 @@ class TestComputeRollDatesEndOfMonth:
             compute_roll_dates([c1, c2], "bogus_strategy")  # type: ignore[arg-type]
 
 
+# ── collapse_to_one_per_month (the VIX-weekly fix) ─────────────────────
+
+
+class TestCollapseToOnePerMonth:
+    def test_single_contract_per_month_is_noop(self):
+        """ES-style / pre-2015-VIX: already one contract per month → unchanged."""
+        c1 = _make_contract("a", 20240115, [20240101], [10.0])
+        c2 = _make_contract("b", 20240221, [20240201], [11.0])
+        c3 = _make_contract("c", 20240315, [20240301], [12.0])
+        out = collapse_to_one_per_month([c1, c2, c3])
+        assert [c.contract_id for c in out] == ["a", "b", "c"]
+
+    def test_keeps_latest_expiring_per_month(self):
+        """VIX weeklies: keep the contract expiring LATEST (nearest month-end)
+        in each month, so the EOM roll lands at ~month-end with minimal gaps."""
+        c1 = _make_contract("mar_early", 20240308, [20240301], [10.0])
+        c2 = _make_contract("mar_late", 20240328, [20240302], [11.0])
+        c3 = _make_contract("apr_early", 20240405, [20240401], [12.0])
+        c4 = _make_contract("apr_late", 20240426, [20240402], [13.0])
+        out = collapse_to_one_per_month([c1, c2, c3, c4])
+        assert [c.contract_id for c in out] == ["mar_late", "apr_late"]
+
+    def test_output_sorted_by_expiration_regardless_of_input_order(self):
+        c_may = _make_contract("may", 20240515, [20240501], [12.0])
+        c_mar = _make_contract("mar", 20240328, [20240301], [10.0])
+        c_apr = _make_contract("apr", 20240430, [20240401], [11.0])
+        out = collapse_to_one_per_month([c_may, c_mar, c_apr])
+        assert [c.expiration for c in out] == [20240328, 20240430, 20240515]
+
+    def test_empty(self):
+        assert collapse_to_one_per_month([]) == []
+
+
 # ── End-to-end through ContinuousSeriesBuilder ─────────────────────────
 
 
@@ -266,3 +300,49 @@ class TestEndOfMonthThroughBuilder:
         np.testing.assert_allclose(closes[dates.index(20240115)], 5000.0 + diff)
         np.testing.assert_allclose(closes[dates.index(20240215)], 5050.0 + diff)
         np.testing.assert_allclose(closes[dates.index(20240401)], 5270.0)
+
+    def test_multiple_contracts_per_month_does_not_crash(self):
+        """Regression for the VIX weekly-futures crash.
+
+        VIX lists 4-5 contracts PER MONTH (weeklies). Under END_OF_MONTH every
+        contract in a month resolves to the same month-end, the old duplicate-
+        guard dropped boundaries, and ``trim_overlaps`` then indexed past the
+        (now shorter) roll_dates list → ``IndexError: list index out of range``
+        → HTTP 500 on the Data page. The builder must collapse to one contract
+        per month first, so this must build cleanly instead.
+        """
+        # Three weekly contracts in March, three in April, one in May.
+        march = [
+            _make_contract(
+                "W_MAR_1", 20240308, [20240201, 20240301, 20240308], [10.0, 10.1, 10.2]
+            ),
+            _make_contract(
+                "W_MAR_2", 20240315, [20240201, 20240308, 20240315], [10.3, 10.4, 10.5]
+            ),
+            _make_contract(
+                "W_MAR_3", 20240328, [20240301, 20240315, 20240328], [10.6, 10.7, 10.8]
+            ),
+        ]
+        april = [
+            _make_contract("W_APR_1", 20240405, [20240328, 20240405], [11.0, 11.1]),
+            _make_contract("W_APR_2", 20240412, [20240405, 20240412], [11.2, 11.3]),
+            _make_contract("W_APR_3", 20240430, [20240412, 20240430], [11.4, 11.5]),
+        ]
+        may = [_make_contract("W_MAY_1", 20240515, [20240430, 20240515], [12.0, 12.1])]
+        contracts = march + april + may
+
+        config = ContinuousRollConfig(
+            strategy=RollStrategy.END_OF_MONTH, adjustment=AdjustmentMethod.NONE
+        )
+        # Must NOT raise IndexError.
+        result = self.builder.build(contracts, config)
+
+        # Collapsed to the latest-expiring contract per month: the March 28th
+        # weekly, the April 30th weekly, and the sole May contract.
+        assert result.contracts == ("W_MAR_3", "W_APR_3", "W_MAY_1")
+        # One boundary per contract transition (invariant restored).
+        assert len(result.roll_dates) == len(result.contracts) - 1
+        assert np.all(np.isfinite(result.prices.close))
+        # Series is non-empty and strictly date-ordered.
+        assert len(result.prices) > 0
+        assert list(result.prices.dates) == sorted(set(result.prices.dates))
