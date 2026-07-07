@@ -152,7 +152,7 @@ class LegSpec(BaseModel):
     # a legacy value on a persisted option leg is accepted and has no effect.
     adjustment: str | None = None
     cycle: str | None = None  # Optional for "continuous" and "option_stream"
-    # Roll-early offset.  "continuous" (futures) uses a bare int = DAYS (0..30).
+    # Roll-early offset.  "continuous" (futures) uses a bare int = DAYS (0..365).
     # "option_stream" uses the unified ``RollOffset`` ``{value, unit:days|months}``
     # — though a bare int is still accepted for it and read as days (legacy
     # shim).  None = no shift.  ("Roll at end of month" for options is the

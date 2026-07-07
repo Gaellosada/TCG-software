@@ -15,6 +15,7 @@ from tcg.types.market import (
 
 from tcg.data._rolling.adjustment import adjust_difference, adjust_ratio
 from tcg.data._rolling.calendar import (
+    clamp_roll_dates_to_data,
     collapse_to_one_per_month,
     compute_roll_dates,
     trim_overlaps,
@@ -48,16 +49,6 @@ class ContinuousSeriesBuilder:
         # Filter out contracts with no data
         contracts = [c for c in contracts if len(c.prices) > 0]
 
-        # END_OF_MONTH requires exactly one contract per expiration month
-        # (roll_dates are indexed by contract position downstream). Roots with
-        # sub-monthly listings — e.g. VIX weekly futures, 4-5 contracts/month —
-        # otherwise collapse several contracts onto the same month-end, which
-        # broke the 1:1 contract↔boundary invariant and crashed trim_overlaps
-        # with an IndexError. Collapsing to the latest-expiring contract per
-        # month restores the invariant (no-op for one-per-month roots).
-        if config.strategy == RollStrategy.END_OF_MONTH:
-            contracts = collapse_to_one_per_month(contracts)
-
         # Contracts must be sorted by expiration for correct roll sequencing
         for i in range(len(contracts) - 1):
             if contracts[i].expiration > contracts[i + 1].expiration:
@@ -66,6 +57,17 @@ class ContinuousSeriesBuilder:
                     f"{contracts[i].contract_id} ({contracts[i].expiration}) > "
                     f"{contracts[i + 1].contract_id} ({contracts[i + 1].expiration})"
                 )
+
+        # END_OF_MONTH requires exactly one contract per expiration month
+        # (roll_dates are indexed by contract position downstream). Roots with
+        # sub-monthly listings — VIX weekly futures (~5/month), BTC/ETH daily —
+        # otherwise collapse several contracts onto the same month-end, which
+        # broke the 1:1 contract↔boundary invariant and crashed trim_overlaps
+        # with an IndexError. Collapse keeps one contract per month (the
+        # canonical monthly-cycle one, else the latest that traded), restoring
+        # the invariant (no-op for one-per-month roots).
+        if config.strategy == RollStrategy.END_OF_MONTH:
+            contracts = collapse_to_one_per_month(contracts)
 
         if not contracts:
             return ContinuousSeries(
@@ -98,6 +100,11 @@ class ContinuousSeriesBuilder:
         roll_schedule = compute_roll_dates(
             contracts, config.strategy, config.roll_offset_days
         )
+
+        # 1b. Clamp each boundary so a large roll_offset can't push it before the
+        # incoming contract's data exists (which would empty its window, drop it,
+        # and leave a silent multi-year hole). Roll as early as the data allows.
+        roll_schedule = clamp_roll_dates_to_data(contracts, roll_schedule)
 
         # 2. Trim overlaps (also strips zero-close rows)
         trimmed = trim_overlaps(contracts, roll_schedule)

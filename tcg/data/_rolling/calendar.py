@@ -60,6 +60,37 @@ def _last_trading_day_of_month(year: int, month: int) -> date:
     return vd[-1].date()
 
 
+def _first_tradeable_int(contract: ContractPriceData) -> int | None:
+    """First YYYYMMDD date on which the contract has a nonzero close.
+
+    Zero-close rows are unlisted/untraded placeholders that ``trim_overlaps``
+    strips, so a contract's *usable* history starts at its first nonzero close.
+    Returns ``None`` when the contract never traded (all-zero closes).
+    """
+    ps = contract.prices
+    nz = ps.close != 0.0
+    if not np.any(nz):
+        return None
+    return int(ps.dates[nz][0])  # dates are ascending
+
+
+def _month_representative(members: list[ContractPriceData]) -> ContractPriceData:
+    """Pick the one contract that represents an expiration month.
+
+    Preference order (see :func:`collapse_to_one_per_month`):
+    1. Restrict to contracts that actually traded (≥1 nonzero close); fall back
+       to all members if none did.
+    2. Prefer the canonical MONTHLY-cycle contract (``expiration_cycle == 'M'``).
+    3. Among the survivors, take the latest expiration; break ties on
+       ``contract_id`` for determinism.
+    """
+    with_data = [c for c in members if _first_tradeable_int(c) is not None]
+    pool = with_data or members
+    monthly = [c for c in pool if c.expiration_cycle == "M"]
+    candidates = monthly or pool
+    return max(candidates, key=lambda c: (c.expiration, c.contract_id))
+
+
 def collapse_to_one_per_month(
     contracts: list[ContractPriceData],
 ) -> list[ContractPriceData]:
@@ -68,31 +99,71 @@ def collapse_to_one_per_month(
     END_OF_MONTH rolls at each month-end and relies on a 1:1 contract↔boundary
     mapping — ``compute_roll_dates`` returns ``len(contracts) - 1`` boundaries
     and ``trim_overlaps`` / ``_concatenate`` index ``roll_dates`` by contract
-    position. Roots with sub-monthly listings break that: VIX now lists 4-5
-    WEEKLY futures per month, so several contracts resolve to the SAME month-end.
-    The old duplicate-boundary guard dropped those collapsed boundaries, leaving
-    ``len(roll_dates) < len(contracts) - 1``; ``trim_overlaps`` then read
-    ``roll_dates[i - 1]`` past the end of the list → ``IndexError`` → HTTP 500
-    on the Data page ("End of month" roll on FUT_VIX).
+    position. Roots with sub-monthly listings break that: VIX lists ~5 WEEKLY
+    futures per month (BTC/ETH list DAILY ones), so several contracts resolve to
+    the SAME month-end. The old duplicate-boundary guard dropped those collapsed
+    boundaries, leaving ``len(roll_dates) < len(contracts) - 1``; ``trim_overlaps``
+    then read ``roll_dates[i - 1]`` past the end of the list → ``IndexError`` →
+    HTTP 500 on the Data page ("End of month" roll on FUT_VIX).
 
-    Fix: before rolling, keep the contract expiring LATEST in each expiration
-    month. For VIX that is the weekly expiring nearest month-end, so the EOM
-    roll lands at ~month-end with minimal data gaps; for single-contract-per-
-    month roots (ES quarterly, pre-2015 VIX) it is a no-op. This restores the
-    invariant so the crash cannot occur, without touching ``trim_overlaps`` /
-    ``_concatenate`` / adjustment.
+    Fix: before rolling, keep ONE contract per expiration month via
+    :func:`_month_representative` — the canonical MONTHLY-cycle contract
+    (``expiration_cycle == 'M'``) when the root marks one, else the latest-
+    expiring contract that actually traded. Preferring the monthly (not merely
+    the latest expiry) matters two ways: (a) it is the contract the rest of the
+    platform treats as "the" VIX/crypto future, not an end-of-month weekly a day
+    from expiry; (b) the monthly carries far more listed history (~9 months vs a
+    weekly's ~7 weeks), so a large ``roll_offset`` does not push its window
+    before it was listed. No-op for single-contract-per-month roots (ES
+    quarterly, pre-2015 VIX). Does not touch ``trim_overlaps`` / ``_concatenate``
+    / adjustment.
 
-    Order-independent: the winner per month is chosen by max expiration and the
-    result is returned sorted ascending by expiration (as the builder requires).
+    Deterministic and order-independent: the per-month winner depends only on
+    ``(expiration_cycle, expiration, contract_id)``, not input order; the result
+    is returned sorted ascending by expiration (as the builder requires).
     """
-    best: dict[tuple[int, int], ContractPriceData] = {}
+    groups: dict[tuple[int, int], list[ContractPriceData]] = {}
     for c in contracts:
         exp = int_to_date(c.expiration)
-        key = (exp.year, exp.month)
-        current = best.get(key)
-        if current is None or c.expiration > current.expiration:
-            best[key] = c
-    return sorted(best.values(), key=lambda c: c.expiration)
+        groups.setdefault((exp.year, exp.month), []).append(c)
+    winners = [_month_representative(members) for members in groups.values()]
+    return sorted(winners, key=lambda c: c.expiration)
+
+
+def clamp_roll_dates_to_data(
+    contracts: list[ContractPriceData],
+    roll_dates: list[int],
+) -> list[int]:
+    """Clamp each roll boundary so it never precedes the incoming contract's data.
+
+    ``roll_dates[i]`` hands ownership from ``contracts[i]`` to ``contracts[i+1]``.
+    A large ``roll_offset_days`` shifts every boundary earlier; once a boundary
+    lands before the incoming contract's first listed (tradeable) day, that
+    contract's ``trim_overlaps`` window is entirely before its data → the mask is
+    empty → the contract is dropped, leaving a multi-year hole in a "continuous"
+    series that is still returned as HTTP 200 (silent corruption). This is acute
+    for short-history roots (VIX weeklies ~7 weeks of data): a 90-day offset —
+    the "~3 months out" the feature advertises — otherwise disintegrates the
+    series.
+
+    Fix: clamp ``roll_dates[i]`` UP to ``contracts[i+1]``'s first tradeable date,
+    so the roll happens as early as the data actually allows (never earlier).
+    Clamping up preserves monotonicity (both the base boundaries and the incoming
+    first-dates are ascending); a boundary is left unchanged when the incoming
+    contract has no tradeable data (it would be dropped regardless). At the
+    default offset of 0 the boundary sits at/after expiry, well after the
+    incoming contract's listing, so this is a no-op for normal series.
+    """
+    clamped: list[int] = []
+    prev = None
+    for i, rd in enumerate(roll_dates):
+        first_incoming = _first_tradeable_int(contracts[i + 1])
+        value = rd if first_incoming is None else max(rd, first_incoming)
+        if prev is not None and value < prev:
+            value = prev  # keep non-decreasing
+        clamped.append(value)
+        prev = value
+    return clamped
 
 
 def compute_roll_dates(
@@ -115,9 +186,13 @@ def compute_roll_dates(
         contract↔boundary mapping that ``trim_overlaps`` / ``_concatenate`` /
         adjustment depend on, so those stages are untouched.
 
-    Returns one date per roll boundary (len = len(contracts) - 1) for
-    FRONT_MONTH; END_OF_MONTH may return FEWER when two consecutive contracts
-    resolve to the same month-end (cycle=None edge — see the duplicate guard).
+    Returns one date per roll boundary (len = len(contracts) - 1). For
+    END_OF_MONTH the builder first runs :func:`collapse_to_one_per_month`, so
+    each contract is in a distinct month and the month-ends are strictly
+    increasing — the duplicate guard below therefore never fires via the real
+    pipeline. It is retained only to keep a *direct* caller that passes
+    same-month contracts from producing a degenerate boundary (and
+    ``trim_overlaps`` additionally tolerates a short list without IndexError).
 
     Contracts must be sorted by expiration (ascending).
     """
@@ -222,10 +297,16 @@ def trim_overlaps(
         # one shared seam day survives for the back-adjustment gap (see
         # docstring). Everything earlier (long pre-window back-month history) is
         # dropped — that is what fixes the deferred-riding bug.
+        # The bounds are indexed by contract position, which assumes
+        # ``len(roll_dates) == len(contracts) - 1`` (the builder guarantees this,
+        # incl. the END_OF_MONTH collapse). The ``i - 1 < len(roll_dates)`` guard
+        # is defensive belt-and-braces: a direct caller passing a shorter
+        # roll_dates list must degrade to a no-lower-bound window, never
+        # IndexError (the original FUT_VIX crash was exactly this over-index).
         mask = nonzero_mask
         if i < len(roll_dates):
             mask = mask & (ps.dates <= roll_dates[i])
-        if i > 0:
+        if 0 < i <= len(roll_dates):
             mask = mask & (ps.dates >= roll_dates[i - 1])
 
         if not np.any(mask):
@@ -244,6 +325,7 @@ def trim_overlaps(
                 contract_id=contract.contract_id,
                 expiration=contract.expiration,
                 prices=filtered,
+                expiration_cycle=contract.expiration_cycle,
             )
         )
 
