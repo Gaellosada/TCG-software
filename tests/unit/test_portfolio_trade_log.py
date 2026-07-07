@@ -21,6 +21,8 @@ from httpx import ASGITransport, AsyncClient
 
 from tcg.core.api.portfolio import (
     _SignalLegEvalResult,
+    _leg_multiplier_and_unit,
+    _signal_input_collection,
     _signal_input_underlying_id,
 )
 from tcg.data._mongo.registry import CollectionRegistry
@@ -123,9 +125,7 @@ def mock_app():
         [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
     )
     aligned_series = {
-        "SPX": _price_series(
-            common_dates.tolist(), [100.0, 101.0, 102.0, 103.0, 104.0]
-        )
+        "SPX": _price_series(common_dates.tolist(), [100.0, 101.0, 102.0, 103.0, 104.0])
     }
 
     svc = MagicMock()
@@ -154,12 +154,14 @@ def _leg_result(
     prices: np.ndarray,
     trades: tuple = (),
     positions_payload: tuple = (),
+    collection_by_input: dict | None = None,
 ) -> _SignalLegEvalResult:
     return _SignalLegEvalResult(
         index=dates,
         synthetic=prices,
         trades=trades,
         positions_payload=positions_payload,
+        collection_by_input=collection_by_input or {},
     )
 
 
@@ -245,20 +247,14 @@ class TestPortfolioAggregation:
         "tcg.core.api.portfolio._evaluate_signal_leg",
         new_callable=AsyncMock,
     )
-    async def test_mixed_axis_legs_remap_and_drop(
-        self, mock_eval, client: AsyncClient
-    ):
+    async def test_mixed_axis_legs_remap_and_drop(self, mock_eval, client: AsyncClient):
         """Two signal legs with different date overlaps. Trades whose
         endpoints fall outside common_dates are DROPPED (not clamped)."""
         # Leg A index: [20240102, 20240103, 20240104, 20240105]
-        a_dates = np.array(
-            [20240102, 20240103, 20240104, 20240105], dtype=np.int64
-        )
+        a_dates = np.array([20240102, 20240103, 20240104, 20240105], dtype=np.int64)
         a_prices = np.full(4, 100.0, dtype=np.float64)
         # Leg B index: [20240103, 20240104, 20240105, 20240108]
-        b_dates = np.array(
-            [20240103, 20240104, 20240105, 20240108], dtype=np.int64
-        )
+        b_dates = np.array([20240103, 20240104, 20240105, 20240108], dtype=np.int64)
         b_prices = np.full(4, 100.0, dtype=np.float64)
         # Common: [20240103, 20240104, 20240105]
         # ── Leg A trades:
@@ -372,11 +368,15 @@ class TestPortfolioAggregation:
         shared_dates = np.array(
             [20240102, 20240103, 20240104, 20240105, 20240108], dtype=np.int64
         )
-        shared_prices = np.array(
-            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
-        )
+        shared_prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64)
         leg_a_price_values = [100.0, 101.0, 102.0, 103.0, 104.0]
-        leg_b_price_values = [200.0, 201.0, 202.0, 203.0, 204.0]  # different — first wins
+        leg_b_price_values = [
+            200.0,
+            201.0,
+            202.0,
+            203.0,
+            204.0,
+        ]  # different — first wins
 
         leg_a_trades = (
             Trade(
@@ -409,13 +409,23 @@ class TestPortfolioAggregation:
             shared_dates,
             shared_prices,
             leg_a_trades,
-            ({"input_id": "AAPL", "price": {"label": "AAPL.close", "values": leg_a_price_values}},),
+            (
+                {
+                    "input_id": "AAPL",
+                    "price": {"label": "AAPL.close", "values": leg_a_price_values},
+                },
+            ),
         )
         leg_b_result = _leg_result(
             shared_dates,
             shared_prices,
             leg_b_trades,
-            ({"input_id": "AAPL", "price": {"label": "AAPL.close", "values": leg_b_price_values}},),
+            (
+                {
+                    "input_id": "AAPL",
+                    "price": {"label": "AAPL.close", "values": leg_b_price_values},
+                },
+            ),
         )
         mock_eval.side_effect = [leg_a_result, leg_b_result]
 
@@ -513,9 +523,7 @@ class TestPortfolioAggregation:
             [20240102, 20240103, 20240104, 20240105, 20240108],
             dtype=np.int64,
         )
-        sig_prices = np.array(
-            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
-        )
+        sig_prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64)
         # Single open trade with open_bar=1 (NOT the last bar, which is 4).
         trades = (
             Trade(
@@ -546,9 +554,7 @@ class TestPortfolioAggregation:
         data = resp.json()
 
         out = data["trades"]
-        assert len(out) == 1, (
-            "open trade with open_bar < n_sig-1 must NOT be dropped"
-        )
+        assert len(out) == 1, "open trade with open_bar < n_sig-1 must NOT be dropped"
         tr = out[0]
         assert tr["close_bar"] is None
         # Signal index aligns 1:1 with common_dates, so open_bar=1 maps to 1.
@@ -581,17 +587,13 @@ class TestPortfolioAggregation:
             [20231229, 20240102, 20240103, 20240104, 20240105],
             dtype=np.int64,
         )
-        a_prices = np.array(
-            [99.0, 100.0, 101.0, 102.0, 103.0], dtype=np.float64
-        )
+        a_prices = np.array([99.0, 100.0, 101.0, 102.0, 103.0], dtype=np.float64)
         # Leg B index: starts at 20240102 (so 20231229 is NOT in common).
         b_dates = np.array(
             [20240102, 20240103, 20240104, 20240105, 20240108],
             dtype=np.int64,
         )
-        b_prices = np.array(
-            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
-        )
+        b_prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64)
         # common_dates = [20240102, 20240103, 20240104, 20240105].
 
         # Leg A open trade at its own bar 0 (date 20231229 — OUTSIDE
@@ -650,9 +652,7 @@ class TestPortfolioAggregation:
             [20240102, 20240103, 20240104, 20240105, 20240108],
             dtype=np.int64,
         )
-        sig_prices = np.array(
-            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
-        )
+        sig_prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64)
         # Open trade at the signal's LAST bar (index 4 == n_sig - 1).
         trades = (
             Trade(
@@ -694,9 +694,7 @@ class TestPortfolioAggregation:
 
 
 class TestHoldingTradeSynthesis:
-    async def test_holding_trade_for_instrument_leg_long(
-        self, client: AsyncClient
-    ):
+    async def test_holding_trade_for_instrument_leg_long(self, client: AsyncClient):
         """Single direct instrument leg at weight 0.7 emits one Holding
         open trade pointing at the SPX positions entry."""
         body = {
@@ -728,9 +726,7 @@ class TestHoldingTradeSynthesis:
         position_ids = {p["input_id"] for p in data["positions"]}
         assert "SPX" in position_ids
 
-    async def test_holding_trade_for_instrument_leg_short(
-        self, client: AsyncClient
-    ):
+    async def test_holding_trade_for_instrument_leg_short(self, client: AsyncClient):
         """Negative weight → direction='short', signed_weight preserves sign."""
         body = {
             "legs": {
@@ -987,9 +983,7 @@ class TestWeightAsFraction:
         assert tr["signed_weight"] == pytest.approx(0.4)
         assert tr["direction"] == "long"
 
-    async def test_holding_trade_short_at_neg_25pct(
-        self, client: AsyncClient
-    ):
+    async def test_holding_trade_short_at_neg_25pct(self, client: AsyncClient):
         """Direct leg at weight -25 (percent) → Holding trade
         signed_weight = -0.25, direction='short'."""
         body = {
@@ -1084,9 +1078,7 @@ class TestSignalTradeInputIdRemap:
         pos_values = np.zeros(T, dtype=np.float64)
         clipped = np.zeros(T, dtype=np.bool_)
         realized_pnl = np.zeros(T, dtype=np.float64)
-        price_vals = np.array(
-            [100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64
-        )
+        price_vals = np.array([100.0, 101.0, 102.0, 103.0, 104.0], dtype=np.float64)
 
         # The engine emits the trade keyed by signal-local input id "index".
         engine_trade = Trade(
@@ -1172,9 +1164,7 @@ class TestSignalTradeInputIdRemap:
         clipped = np.zeros(T, dtype=np.bool_)
         realized_pnl = np.zeros(T, dtype=np.float64)
         # Distinctive price series so we can tell which leg won the dedup.
-        sig_price_vals = np.array(
-            [999.0, 999.0, 999.0, 999.0, 999.0], dtype=np.float64
-        )
+        sig_price_vals = np.array([999.0, 999.0, 999.0, 999.0, 999.0], dtype=np.float64)
 
         engine_position = InstrumentPositionResult(
             input_id="index",
@@ -1226,3 +1216,270 @@ class TestSignalTradeInputIdRemap:
         # Signal leg won → its 999.0 price values are kept.
         assert spx_positions[0]["price"]["values"][0] == pytest.approx(999.0)
 
+
+# ── _leg_multiplier_and_unit / _signal_input_collection helpers ------------
+
+
+class TestMultiplierAndUnitHelper:
+    def test_futures_collection_uses_m_fut_contracts(self):
+        m, unit = _leg_multiplier_and_unit("FUT_SP_500")
+        assert unit == "contracts"
+        assert m == pytest.approx(50.0)
+
+    def test_option_collection_uses_m_opt_contracts(self):
+        # VIX is the root where m_fut (1000) != m_opt (100) — verify OPT_ picks
+        # m_opt, proving the FUT/OPT split is honored.
+        m, unit = _leg_multiplier_and_unit("OPT_VIX")
+        assert unit == "contracts"
+        assert m == pytest.approx(100.0)
+
+    def test_futures_collection_uses_m_fut_not_m_opt_for_vix(self):
+        m, unit = _leg_multiplier_and_unit("FUT_VIX")
+        assert unit == "contracts"
+        assert m == pytest.approx(1000.0)
+
+    def test_spot_collection_is_shares_multiplier_one(self):
+        m, unit = _leg_multiplier_and_unit("INDEX")
+        assert unit == "shares"
+        assert m == pytest.approx(1.0)
+
+    def test_none_collection_is_shares_multiplier_one(self):
+        m, unit = _leg_multiplier_and_unit(None)
+        assert unit == "shares"
+        assert m == pytest.approx(1.0)
+
+    def test_unknown_futures_root_returns_none_multiplier_contracts(self):
+        # Unknown FUT root with no config + no live contract_size → M None
+        # (NEVER a silent 1.0), unit still flagged "contracts" for the label.
+        m, unit = _leg_multiplier_and_unit("FUT_TOTALLY_UNKNOWN_ROOT")
+        assert unit == "contracts"
+        assert m is None
+
+
+class TestSignalInputCollectionHelper:
+    def test_spot_returns_collection(self):
+        inst = InstrumentSpot(collection="INDEX", instrument_id="SPX")
+        assert _signal_input_collection(inst) == "INDEX"
+
+    def test_continuous_returns_collection(self):
+        inst = InstrumentContinuous(collection="FUT_SP_500", adjustment="none")
+        assert _signal_input_collection(inst) == "FUT_SP_500"
+
+    def test_unknown_variant_returns_none(self):
+        assert _signal_input_collection(object()) is None
+
+
+# ── Per-trade fractional contract/asset COUNT (quantity) -------------------
+
+
+class TestTradeQuantitySizing:
+    """quantity = |signed_weight| * NAV_open / (price_open * M)."""
+
+    async def test_futures_direct_leg_quantity_and_unit(self, client: AsyncClient):
+        """Direct continuous FUT_SP_500 leg: quantity uses M=50, unit
+        'contracts', and matches the hand formula against the returned
+        equity + price."""
+        body = {
+            "legs": {
+                # Label MUST be 'SPX' — the fixture's get_aligned_prices returns
+                # its canned series under that key regardless of the leg spec.
+                "SPX": {
+                    "type": "continuous",
+                    "collection": "FUT_SP_500",
+                    "strategy": "front_month",
+                }
+            },
+            "weights": {"SPX": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert len(data["trades"]) == 1
+        tr = data["trades"][0]
+        assert tr["quantity_unit"] == "contracts"
+        assert tr["multiplier"] == pytest.approx(50.0)
+
+        equity = data["portfolio_equity"]
+        price_vals = next(
+            p["price"]["values"]
+            for p in data["positions"]
+            if p["input_id"] == "FUT_SP_500"
+        )
+        ob = tr["open_bar"]
+        expected = abs(tr["signed_weight"]) * equity[ob] / (price_vals[ob] * 50.0)
+        assert tr["quantity"] == pytest.approx(expected)
+        # equity[0]=100 (100-based index), price[0]=100, w=1.0 → 100/5000 = 0.02
+        assert tr["quantity"] == pytest.approx(0.02)
+
+    async def test_spot_equity_leg_is_shares_multiplier_one(self, client: AsyncClient):
+        """Direct spot/equity leg (collection INDEX): M=1.0, unit 'shares'."""
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "instrument",
+                    "collection": "INDEX",
+                    "symbol": "SPX",
+                }
+            },
+            "weights": {"SPX": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        tr = data["trades"][0]
+        assert tr["quantity_unit"] == "shares"
+        assert tr["multiplier"] == pytest.approx(1.0)
+        equity = data["portfolio_equity"]
+        price_vals = next(
+            p["price"]["values"] for p in data["positions"] if p["input_id"] == "SPX"
+        )
+        ob = tr["open_bar"]
+        expected = abs(tr["signed_weight"]) * equity[ob] / (price_vals[ob] * 1.0)
+        assert tr["quantity"] == pytest.approx(expected)
+        # equity[0]=100, price[0]=100, w=1.0 → 1.0 share.
+        assert tr["quantity"] == pytest.approx(1.0)
+
+    async def test_unknown_futures_root_yields_null_quantity(self, client: AsyncClient):
+        """A FUT_ leg whose root is absent from the multiplier config →
+        multiplier None and quantity null (never a silent 1.0), no crash.
+        The JSON carries a real null (not NaN)."""
+        body = {
+            "legs": {
+                "SPX": {
+                    "type": "continuous",
+                    "collection": "FUT_TOTALLY_UNKNOWN_ROOT",
+                    "strategy": "front_month",
+                }
+            },
+            "weights": {"SPX": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        assert "NaN" not in resp.text  # RFC-8259: null, never NaN.
+        data = resp.json()
+        tr = data["trades"][0]
+        assert tr["quantity_unit"] == "contracts"
+        assert tr["multiplier"] is None
+        assert tr["quantity"] is None
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_zero_price_yields_null_quantity(
+        self, mock_eval, client: AsyncClient
+    ):
+        """price_open <= 0 → quantity null even when M is valid."""
+        sig_dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
+        sig_prices = np.array([100.0, 101.0, 103.0], dtype=np.float64)
+        trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry",
+                exit_block_id=None,
+                exit_block_name=None,
+                open_bar=0,
+                close_bar=None,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+        positions_payload = (
+            {
+                "input_id": "X",
+                "price": {"label": "P", "values": [0.0, 101.0, 103.0]},
+            },
+        )
+        mock_eval.return_value = _leg_result(
+            sig_dates,
+            sig_prices,
+            trades,
+            positions_payload,
+            collection_by_input={"X": "FUT_SP_500"},
+        )
+        body = {
+            "legs": {"sig1": {"type": "signal", "signal_spec": _minimal_signal_spec()}},
+            "weights": {"sig1": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        assert "NaN" not in resp.text
+        data = resp.json()
+        tr = data["trades"][0]
+        assert tr["multiplier"] == pytest.approx(50.0)
+        assert tr["quantity"] is None
+
+    @patch(
+        "tcg.core.api.portfolio._evaluate_signal_leg",
+        new_callable=AsyncMock,
+    )
+    async def test_signal_leg_two_entries_have_differing_quantities(
+        self, mock_eval, client: AsyncClient
+    ):
+        """KEY property: two entries at different NAV (equity rises) with a
+        constant price → the two contract COUNTS differ (proves the size is
+        no longer the constant target %)."""
+        sig_dates = np.array([20240102, 20240103, 20240104], dtype=np.int64)
+        # Synthetic drives the equity (rises 100→110→121). Positions price is a
+        # SEPARATE constant series so NAV/price ratio changes between entries.
+        sig_prices = np.array([100.0, 110.0, 121.0], dtype=np.float64)
+        trades = (
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry",
+                exit_block_id="X1",
+                exit_block_name="exit",
+                open_bar=0,
+                close_bar=1,
+                direction="long",
+                signed_weight=1.0,
+            ),
+            Trade(
+                input_id="X",
+                entry_block_id="E1",
+                entry_block_name="entry",
+                exit_block_id=None,
+                exit_block_name=None,
+                open_bar=2,
+                close_bar=None,
+                direction="long",
+                signed_weight=1.0,
+            ),
+        )
+        positions_payload = (
+            {
+                "input_id": "X",
+                "price": {"label": "P", "values": [100.0, 100.0, 100.0]},
+            },
+        )
+        mock_eval.return_value = _leg_result(
+            sig_dates,
+            sig_prices,
+            trades,
+            positions_payload,
+            collection_by_input={"X": "FUT_SP_500"},
+        )
+        body = {
+            "legs": {"sig1": {"type": "signal", "signal_spec": _minimal_signal_spec()}},
+            "weights": {"sig1": 100},
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        out = sorted(data["trades"], key=lambda t: t["open_bar"])
+        assert len(out) == 2
+        equity = data["portfolio_equity"]
+        price_vals = next(
+            p["price"]["values"] for p in data["positions"] if p["input_id"] == "X"
+        )
+        for tr in out:
+            ob = tr["open_bar"]
+            assert tr["quantity_unit"] == "contracts"
+            assert tr["multiplier"] == pytest.approx(50.0)
+            expected = abs(tr["signed_weight"]) * equity[ob] / (price_vals[ob] * 50.0)
+            assert tr["quantity"] == pytest.approx(expected)
+        # The whole point: the two counts are NOT equal (equity rose, price flat).
+        assert out[0]["quantity"] != pytest.approx(out[1]["quantity"])
+        assert out[1]["quantity"] > out[0]["quantity"]

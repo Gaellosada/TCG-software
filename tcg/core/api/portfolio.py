@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from typing import Callable, Literal
 
@@ -59,6 +60,7 @@ from tcg.types.market import (
     InstrumentId,
     RollStrategy,
 )
+from tcg.types.multipliers import resolve_multipliers, root_from_collection
 from tcg.types.portfolio import RebalanceFreq
 from tcg.types.signal import (
     InstrumentContinuous,
@@ -92,6 +94,47 @@ def _signal_input_underlying_id(instrument: object) -> str | None:
     return None
 
 
+def _signal_input_collection(instrument: object) -> str | None:
+    """Resolve a signal Input's bound instrument to its dwh COLLECTION.
+
+    Unlike ``_signal_input_underlying_id`` (which returns the SPOT
+    ``instrument_id``), this always returns the ``collection`` so the
+    trade-log sizing can key the FUT_/OPT_ multiplier rule off the
+    collection PREFIX regardless of the instrument variant.  A spot input's
+    ``input_id`` is its symbol (no FUT_/OPT_ prefix) — reading the prefix off
+    the ``input_id`` alone would silently mis-classify a mis-mapped futures
+    leg as ``shares``; keying off the true collection avoids that (Sign: NEVER
+    a silent shares/1.0 for a FUT/OPT leg).  Returns ``None`` for unknown
+    variants so the caller nulls the quantity.
+    """
+    if isinstance(
+        instrument, (InstrumentSpot, InstrumentContinuous, InstrumentOptionStream)
+    ):
+        return instrument.collection
+    return None
+
+
+def _leg_multiplier_and_unit(collection: str | None) -> tuple[float | None, str]:
+    """Resolve ``(M, quantity_unit)`` for a trade's collection.
+
+    - ``FUT_*`` → ``m_fut``; ``OPT_*`` → ``m_opt`` (via the PR#77
+      ``resolve_multipliers`` machinery). CONFIG-ONLY at this seam: no live
+      ``dim_instrument.contract_size`` read is issued here (it would be a new
+      per-trade DB call on the hot compute path); the signed-off fallback table
+      is authoritative and an unknown root yields ``NaN`` → ``M = None`` so the
+      quantity is nulled — NEVER a silent ``1.0`` for a FUT/OPT leg.
+    - anything else (spot / equity / index, or an unknown/None collection) →
+      ``M = 1.0``, unit ``"shares"``.  Unit is still reported for a FUT/OPT leg
+      with an unresolved multiplier (``M = None``) so the FE can label it.
+    """
+    if collection is not None and collection.startswith(("FUT_", "OPT_")):
+        res = resolve_multipliers(root_from_collection(collection))
+        m = res.m_fut if collection.startswith("FUT_") else res.m_opt
+        usable = float(m) if math.isfinite(m) and m > 0.0 else None
+        return usable, "contracts"
+    return 1.0, "shares"
+
+
 @dataclass(frozen=True)
 class _SignalLegEvalResult:
     """Internal aggregate of what a signal leg produces for the portfolio.
@@ -106,6 +149,11 @@ class _SignalLegEvalResult:
     synthetic: npt.NDArray[np.float64]
     trades: tuple[Trade, ...] = ()
     positions_payload: tuple[dict, ...] = ()
+    # Trade ``input_id`` (already remapped to the underlying) → its dwh
+    # collection, so the portfolio trade-log sizing can resolve the FUT/OPT
+    # multiplier off the collection PREFIX (``input_id`` alone is a bare symbol
+    # for spot inputs). Empty for a leg whose inputs have no known collection.
+    collection_by_input: dict[str, str] = field(default_factory=dict)
 
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -507,6 +555,18 @@ async def _evaluate_signal_leg(
         replace(tr, input_id=_remap_id(tr.input_id)) for tr in result.trades
     )
 
+    # Trade-log sizing needs each input's COLLECTION (FUT_/OPT_/spot) to pick
+    # the contract multiplier. Key by the SAME remapped id the trades carry so
+    # the downstream lookup is by ``trade.input_id`` (first input wins on a
+    # collision — distinct inputs sharing an underlying with different
+    # collections is not expected).
+    collection_by_input: dict[str, str] = {}
+    for inp in signal.inputs:
+        coll = _signal_input_collection(inp.instrument)
+        if coll is None:
+            continue
+        collection_by_input.setdefault(_remap_id(inp.id), coll)
+
     # 8. Build per-input price payloads in the signals-API shape so the
     #    portfolio TradeLog can look up open/close prices by input_id.
     positions_payload: list[dict] = []
@@ -527,6 +587,7 @@ async def _evaluate_signal_leg(
         synthetic=synthetic,
         trades=remapped_trades,
         positions_payload=tuple(positions_payload),
+        collection_by_input=collection_by_input,
     )
 
 
@@ -997,6 +1058,8 @@ async def compute_portfolio(
     # for portfolio-level trade log aggregation (see §10 below).
     signal_trades_map: dict[str, tuple[Trade, ...]] = {}
     signal_positions_map: dict[str, tuple[dict, ...]] = {}
+    # label -> {remapped input_id -> collection} for trade-log contract sizing.
+    signal_collections_map: dict[str, dict[str, str]] = {}
 
     for label, leg in signal_legs.items():
         leg_result = await _evaluate_signal_leg(
@@ -1011,6 +1074,7 @@ async def compute_portfolio(
         signal_closes[label] = leg_result.synthetic
         signal_trades_map[label] = leg_result.trades
         signal_positions_map[label] = leg_result.positions_payload
+        signal_collections_map[label] = leg_result.collection_by_input
         all_date_grids.append(leg_result.index)
 
     # ── 4.5. Evaluate option_stream legs (if any) ──
@@ -1336,6 +1400,68 @@ async def compute_portfolio(
                 },
             }
         )
+
+    # ── 10.5. Per-trade sizing: fractional CONTRACT / ASSET count ──
+    #
+    # The trade "size" the FE shows is no longer the constant target % — it is
+    # HOW MANY contracts (FUT/OPT) or shares (spot/equity) the |signed_weight|
+    # allocation buys at the trade's open, off the 100-based equity index
+    # treated as a $100 NAV (no initial_capital):
+    #     quantity = |signed_weight| * NAV_open / (price_open * M)
+    # NAV_open = portfolio_equity[open_bar]; price_open = the input's aligned
+    # close at open_bar; M = the contract multiplier (FUT_→m_fut, OPT_→m_opt,
+    # else 1.0). NaN-safe: a missing/≤0 price, an unresolved FUT/OPT M, or a
+    # non-finite NAV → quantity=None (the FE falls back to the % display); the
+    # terminal ``sanitize_json_floats`` pass nulls any residual non-finite.
+    # Collection is resolved PER TRADE: direct legs carry it on the LegSpec;
+    # signal-leg trades use the per-input collection threaded from signal eval
+    # (``input_id`` is the remapped underlying — a bare symbol for spot inputs,
+    # not always a collection). Direct OPTION legs are nulled: their positions
+    # "price" is the synthetic 100-based equity, not a tradeable premium, so a
+    # contract count off it would mislead (per-roll option counts are DEFERRED).
+    equity = result.portfolio_equity
+    n_bars = int(len(equity))
+    price_by_input: dict[str, list | None] = {
+        p["input_id"]: (p["price"]["values"] if p.get("price") else None)
+        for p in aggregated_positions
+    }
+    for tr in aggregated_trades:
+        leg = body.legs.get(tr["holding_id"])
+        if leg is not None and leg.type == "signal":
+            collection = signal_collections_map.get(tr["holding_id"], {}).get(
+                tr["input_id"]
+            )
+        elif leg is not None:
+            collection = leg.collection
+        else:
+            collection = None
+
+        m, unit = _leg_multiplier_and_unit(collection)
+        tr["quantity_unit"] = unit
+        tr["multiplier"] = m
+
+        open_bar = tr["open_bar"]
+        values = price_by_input.get(tr["input_id"])
+        price_open = (
+            values[open_bar]
+            if values is not None and 0 <= open_bar < len(values)
+            else None
+        )
+        nav_open = float(equity[open_bar]) if 0 <= open_bar < n_bars else math.nan
+        is_direct_option = leg is not None and leg.type == "option_stream"
+        if (
+            is_direct_option
+            or m is None
+            or price_open is None
+            or not math.isfinite(float(price_open))
+            or float(price_open) <= 0.0
+            or not math.isfinite(nav_open)
+        ):
+            tr["quantity"] = None
+        else:
+            tr["quantity"] = (
+                abs(tr["signed_weight"]) * nav_open / (float(price_open) * m)
+            )
 
     # ── 11. Build response ──
 
