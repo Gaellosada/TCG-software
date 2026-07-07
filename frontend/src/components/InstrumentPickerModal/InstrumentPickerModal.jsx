@@ -55,7 +55,7 @@ function collectionsForAssetClass(assetClass, allCollections) {
  *   - Continuous:   { type: 'continuous', collection, adjustment, cycle,
  *                     rollOffset, strategy: 'front_month' }
  *   - OptionStream: { type: 'option_stream', collection, option_type, cycle,
- *                     maturity, selection, stream, adjustment, roll_offset }
+ *                     maturity, selection, stream, roll_offset }
  *   - Basket saved: { type: 'basket', kind: 'saved',  basket_id }
  *   - Basket inline:{ type: 'basket', kind: 'inline', asset_class,
  *                     legs:[{instrument_id, weight}, ...] }
@@ -884,7 +884,7 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
  * Used by <BasketLegRow> for `asset_class="option"`.  The form already
  * builds a BE-compatible OptionStreamRef (`{type:"option_stream",
  * collection, option_type, cycle, maturity, selection, stream,
- * adjustment, roll_offset}`) via
+ * roll_offset}`) via
  * `buildDefaultOptionStream`, so the wrapper just initialises the
  * value from `availableRoots` when the leg is empty and forwards
  * subsequent edits through `onChange`.  No new file, no nested modal.
