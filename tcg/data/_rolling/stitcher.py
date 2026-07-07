@@ -104,7 +104,12 @@ class ContinuousSeriesBuilder:
         # 1b. Clamp each boundary so a large roll_offset can't push it before the
         # incoming contract's data exists (which would empty its window, drop it,
         # and leave a silent multi-year hole). Roll as early as the data allows.
-        roll_schedule = clamp_roll_dates_to_data(contracts, roll_schedule)
+        # Gated on a nonzero offset: at offset 0 the boundary sits at expiry /
+        # month-end (never before the incoming contract lists), so clamping would
+        # be a no-op — skipping it guarantees offset-0 series stay byte-identical
+        # to the legacy output that existing portfolios were built on.
+        if config.roll_offset_days > 0:
+            roll_schedule = clamp_roll_dates_to_data(contracts, roll_schedule)
 
         # 2. Trim overlaps (also strips zero-close rows)
         trimmed = trim_overlaps(contracts, roll_schedule)
