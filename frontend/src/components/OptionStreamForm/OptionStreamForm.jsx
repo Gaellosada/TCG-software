@@ -419,7 +419,7 @@ function SizeAndLeverage({
           >
             Futures reference
             <select
-              className={styles.input}
+              className={`${styles.input} ${styles.futuresRefSelect}`}
               value={futuresReference}
               onChange={(e) => onFuturesReference(e.target.value)}
               disabled={disabled}
