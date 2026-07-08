@@ -381,7 +381,17 @@ def _build_roll_rows(
             # daily premium is NaN near expiry for a far-OTM option — walk back to the
             # last finite value in the segment, else em-dash).
             open_price = _finite_at(open_price_series, open_bar)
-            close_price = _last_finite_in(price_series, open_bar, close_bar)
+            # Measure the close at the SAME bar the P&L telescopes to — the roll
+            # bar (``close_boundary``), where the resolver books the held contract's
+            # roll-day realise mid — NOT the prior interior bar (``close_bar``, one
+            # bar early).  A roll day carrying a large premium move otherwise showed
+            # a stale pre-move close price/date beside the post-move segment_pnl.
+            close_price = _last_finite_in(price_series, open_bar, close_boundary)
+            # Align the displayed close BAR (→ close DATE on the FE, which reads
+            # ``close_bar``) with the same realise bar.  For the final segment
+            # ``close_boundary == close_bar`` so this is a no-op there.  DISPLAY-only:
+            # the row is informational (appended after equity/metrics), never fed back.
+            close_bar = close_boundary
         else:
             # CONTINUOUS leg (unchanged): count off the leg's own adjusted close, and
             # the segment P&L is sign·qty·Δclose·M on that (finite) close series.

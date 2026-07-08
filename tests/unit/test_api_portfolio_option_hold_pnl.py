@@ -141,7 +141,11 @@ async def test_hold_option_leg_emits_per_roll_trade_rows(client):
     r0, r1 = rows
     assert (r0["entry_block_name"], r0["exit_block_name"]) == ("open", "rolling")
     assert (r1["entry_block_name"], r1["exit_block_name"]) == ("rolling", "end")
-    assert (r0["open_bar"], r0["close_bar"]) == (0, 2)
+    # The interior segment's displayed close bar is the ROLL bar (3, == the next
+    # segment's open / the bar its P&L telescopes to), not the prior interior bar
+    # (2); the final segment's close is the last bar (5).  See
+    # ``test_hold_option_roll_row_close_references_realise_bar``.
+    assert (r0["open_bar"], r0["close_bar"]) == (0, 3)
     assert (r1["open_bar"], r1["close_bar"]) == (3, 5)
     for r in rows:
         assert r["direction"] == "short"
@@ -177,6 +181,43 @@ async def test_hold_option_leg_emits_per_roll_trade_rows(client):
         )
     # The per-segment P&L reconciles to the leg's total equity change.
     assert sum(r["segment_pnl"] for r in rows) == pytest.approx(equity[-1] - 100.0)
+
+
+async def test_hold_option_roll_row_close_references_realise_bar(client):
+    """REGRESSION (display-only close bar/price lag): an interior option roll row's
+    displayed CLOSE must reference the bar its P&L telescopes to — the ROLL bar
+    (``close_boundary``, where the resolver books the held contract's roll-day
+    realise mid) — NOT the prior interior bar (``close_boundary - 1``).
+
+    Before the fix ``close_price``/``close_bar`` were measured one bar early, so a
+    roll day carrying a large premium move showed a stale pre-move close (price AND
+    date) alongside the post-move ``segment_pnl`` — the reported "big move, ~0 P&L,
+    dates that don't line up" artifact.  Equity is untouched (display-only).
+
+    Fixture ``HELD_PREMIUM = [30,28,26,24,20,19]``, interior roll at bar 3 →
+    segments ``[0,2]`` and ``[3,5]``.  The held (OLD) contract's roll-day realise mid
+    is ``HELD_PREMIUM[3] = 24`` (the value segment 0's P&L telescopes through); the
+    prior interior bar is ``HELD_PREMIUM[2] = 26``.  They differ, so the fix is
+    observable.  The final segment is unchanged (``close_boundary == close_bar``).
+    """
+    data = await _compute(client, -100)
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    r0, r1 = rows
+    # Interior segment: close references the ROLL bar (3), NOT the interior bar (2).
+    assert r0["close_bar"] == 3
+    assert r0["close_price"] == pytest.approx(_HELD_PREMIUM[3])  # 24.0 (realise mid)
+    assert r0["close_price"] != pytest.approx(_HELD_PREMIUM[2])  # not 26.0 (one early)
+    # Final segment is unchanged: close_boundary == close_bar == last bar.
+    assert r1["close_bar"] == len(_HELD_PREMIUM) - 1
+    assert r1["close_price"] == pytest.approx(_HELD_PREMIUM[-1])  # 19.0
+    # Internal consistency: the displayed close price is the held-premium value at
+    # the row's OWN close_bar — open/close/pnl now all reconcile at the same bar.
+    for r in rows:
+        assert r["close_price"] == pytest.approx(_HELD_PREMIUM[r["close_bar"]])
 
 
 async def test_hold_option_roll_rows_sign_correct_with_nan_tail_premium(monkeypatch):
