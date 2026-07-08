@@ -32,8 +32,11 @@ export const DEFAULT_AUTOSAVE_DEBOUNCE_MS = 3000;
  *      request) AND clears any ``pendingRestart`` so the switch-away is
  *      truly idempotent. Used on selection change.
  *
- *   3. Unmounting aborts the in-flight save and prevents post-unmount
- *      state updates.
+ *   3. Unmounting FLUSHES a pending debounced edit (fires the save so a
+ *      last edit is never lost on navigation) and does NOT abort an
+ *      in-flight save (it is allowed to complete); it only prevents
+ *      post-unmount state updates. Aborting on context switch is
+ *      ``reset()``'s job (rule 2), not unmount's.
  *
  *   4. Status semantics: an AbortError-rejected save resolves the status
  *      to ``'idle'`` (it was intentionally cancelled), unless another
@@ -54,10 +57,16 @@ export const DEFAULT_AUTOSAVE_DEBOUNCE_MS = 3000;
  * @param {number}  [opts.debounceMs=DEFAULT_AUTOSAVE_DEBOUNCE_MS]
  * @returns {{ status: 'idle'|'saving'|'saved'|'error',
  *             flush: () => void,
+ *             saveNow: (overridePayload?: *) => Promise<*>,
  *             reset: () => void,
  *             setStatus: (s: 'idle'|'saving'|'saved'|'error') => void }}
  *   ``flush`` synchronously fires any pending debounced save (coalesces
  *   with in-flight per the rules above).
+ *   ``saveNow`` fires a save UNCONDITIONALLY (even with autosave off /
+ *   no timer pending), cancels the debounce, coalesces with any in-flight
+ *   save, and returns a Promise that settles when the save completes.
+ *   Pass ``overridePayload`` to persist an explicit payload (guards the
+ *   stale-state race where a synchronous setState hasn't propagated yet).
  *   ``reset`` clears the status back to ``idle``, cancels any pending
  *   timer WITHOUT firing, AND aborts the in-flight save if any — use
  *   when switching selection.
@@ -73,6 +82,11 @@ export default function useBackendAutosave({
 }) {
   const [status, setStatus] = useState('idle');
   const timerRef = useRef(null);
+  // True while a debounced save is armed but has not yet fired. Kept
+  // SEPARATE from ``timerRef`` because the scheduling effect's cleanup
+  // nulls ``timerRef`` on unmount BEFORE the unmount-flush effect runs —
+  // this ref survives that so the flush can tell there was pending work.
+  const pendingRef = useRef(false);
   const onSaveRef = useRef(onSave);
   const payloadRef = useRef(payload);
   // Active AbortController for the in-flight save, or null if none.
@@ -80,6 +94,9 @@ export default function useBackendAutosave({
   // True when an edit lands while a save is in flight — we'll fire a
   // new save with the latest payload after the in-flight one settles.
   const pendingRestartRef = useRef(false);
+  // Promise of the current in-flight save (or null). Lets ``saveNow``
+  // return something awaitable when it coalesces with an in-flight save.
+  const inFlightPromiseRef = useRef(null);
   // Track mounted state to guard setState across async boundaries.
   const mountedRef = useRef(true);
 
@@ -103,7 +120,7 @@ export default function useBackendAutosave({
     controllerRef.current = controller;
     if (mountedRef.current) setStatus('saving');
     const value = payloadRef.current;
-    Promise.resolve()
+    const promise = Promise.resolve()
       .then(() => onSaveRef.current(value, { signal: controller.signal }))
       .then(() => {
         // Only resolve status if this controller is still the active one.
@@ -115,6 +132,7 @@ export default function useBackendAutosave({
           if (launchSaveRef.current) launchSaveRef.current();
           return;
         }
+        if (inFlightPromiseRef.current === promise) inFlightPromiseRef.current = null;
         if (mountedRef.current) setStatus('saved');
       })
       .catch((err) => {
@@ -123,14 +141,17 @@ export default function useBackendAutosave({
           || controller.signal.aborted;
         const wasActive = controllerRef.current === controller;
         if (wasActive) controllerRef.current = null;
-        if (!mountedRef.current) return;
         // If a restart is queued, fire it regardless of how this save
-        // ended — the user's latest intent is what matters.
+        // ended — the user's latest intent is what matters. This runs
+        // even after unmount so a pending edit flushed on navigation is
+        // not dropped when the preceding in-flight save fails.
         if (wasActive && pendingRestartRef.current) {
           pendingRestartRef.current = false;
           if (launchSaveRef.current) launchSaveRef.current();
           return;
         }
+        if (inFlightPromiseRef.current === promise) inFlightPromiseRef.current = null;
+        if (!mountedRef.current) return;
         if (!wasActive) return; // superseded — caller already moved on
         if (isAbort) {
           setStatus('idle');
@@ -138,6 +159,8 @@ export default function useBackendAutosave({
           setStatus('error');
         }
       });
+    inFlightPromiseRef.current = promise;
+    return promise;
   }, []);
 
   useEffect(() => { launchSaveRef.current = launchSave; }, [launchSave]);
@@ -154,7 +177,9 @@ export default function useBackendAutosave({
 
   const reset = useCallback(() => {
     cancelTimer();
+    pendingRef.current = false;
     pendingRestartRef.current = false;
+    inFlightPromiseRef.current = null;
     const c = controllerRef.current;
     if (c) {
       controllerRef.current = null;
@@ -166,33 +191,88 @@ export default function useBackendAutosave({
   const flush = useCallback(() => {
     if (!timerRef.current) return;
     cancelTimer();
+    pendingRef.current = false;
     runSave();
   }, [cancelTimer, runSave]);
+
+  // Public: fire a save RIGHT NOW, unconditionally — used by the manual
+  // Save button. Unlike ``flush`` (which no-ops unless a debounce timer
+  // is pending), ``saveNow`` always dispatches, so it works when autosave
+  // is OFF (no timer is ever scheduled) and when the debounce already
+  // fired. Cancels any pending timer, coalesces with an in-flight save
+  // (last-edit-wins), and returns a Promise that settles when the save
+  // completes so callers can await persistence.
+  //
+  // ``overridePayload`` (optional): when provided, persist THIS payload
+  // instead of the tracked ``payload`` prop. Guards the stale-state race
+  // where a synchronous ``setState`` (e.g. a rename) has not yet
+  // propagated into the ``payload`` prop by click time.
+  const saveNow = useCallback((overridePayload) => {
+    cancelTimer();
+    pendingRef.current = false;
+    if (overridePayload !== undefined) {
+      payloadRef.current = overridePayload;
+    }
+    if (controllerRef.current) {
+      // A save is already in flight — queue the latest payload to fire
+      // after it settles, and hand back the in-flight promise.
+      pendingRestartRef.current = true;
+      return inFlightPromiseRef.current || Promise.resolve();
+    }
+    return launchSave();
+  }, [cancelTimer, launchSave]);
 
   useEffect(() => {
     if (!enabled) {
       cancelTimer();
+      pendingRef.current = false;
       return undefined;
     }
     cancelTimer();
+    pendingRef.current = true;
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
+      pendingRef.current = false;
       runSave();
     }, debounceMs);
+    // Cleanup clears only the timer (on re-arm or unmount); pendingRef is
+    // intentionally left set so the unmount-flush effect can still see it.
     return cancelTimer;
   }, [enabled, payload, debounceMs, cancelTimer, runSave]);
 
-  // Cleanup on unmount: cancel timer, abort in-flight, mark unmounted.
+  // Cleanup on unmount (BUG 2 — SPA navigation must NOT lose data):
+  //
+  //   - If a debounced save is pending, FLUSH it — fire the save now so
+  //     the unsaved edit is persisted instead of being silently dropped
+  //     when React unmounts the page on a route change. The request is
+  //     allowed to complete (the SPA process stays alive); status updates
+  //     are skipped since the component is gone.
+  //   - Do NOT abort an in-flight save — it represents unsaved user data.
+  //     If a newer edit is also pending, queue it so it fires after the
+  //     in-flight save settles.
+  //
+  // This is deliberately different from ``reset()`` (selection switch),
+  // which DOES abort — that is a context switch, not data loss.
   useEffect(() => () => {
     mountedRef.current = false;
+    const hadPending = pendingRef.current;
+    pendingRef.current = false;
     cancelTimer();
-    pendingRestartRef.current = false;
-    const c = controllerRef.current;
-    if (c) {
-      controllerRef.current = null;
-      try { c.abort(); } catch { /* ignore */ }
+    if (hadPending) {
+      if (controllerRef.current) {
+        // In-flight save exists — fire the pending edit right after it.
+        pendingRestartRef.current = true;
+      } else {
+        launchSave();
+      }
+    } else {
+      pendingRestartRef.current = false;
     }
-  }, [cancelTimer]);
+    // NOTE: intentionally leave controllerRef alone — the in-flight
+    // request (if any) is allowed to complete.
+  }, [cancelTimer, launchSave]);
 
-  return { status, flush, reset, setStatus };
+  return {
+    status, flush, saveNow, reset, setStatus,
+  };
 }

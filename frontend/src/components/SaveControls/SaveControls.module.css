@@ -38,6 +38,16 @@
   cursor: not-allowed;
 }
 
+/*
+ * Clean state (everything saved): the button reads transparent/muted so
+ * the toolbar visually signals "nothing to save". Solid when dirty. This
+ * is driven by the `dirty` prop (not just :disabled) so the intent is
+ * explicit and consistent across Indicators / Signals / Portfolio.
+ */
+.saveBtn.clean {
+  opacity: 0.4;
+}
+
 .autosaveLabel {
   display: flex;
   align-items: center;

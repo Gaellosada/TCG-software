@@ -82,4 +82,19 @@ describe('<SaveControls>', () => {
     expect(screen.getByLabelText('name')).toBeTruthy();
     expect(screen.getByRole('button', { name: /save/i })).toBeTruthy();
   });
+
+  // BUG 3 — the button must read TRANSPARENT (muted) when everything is
+  // saved (!dirty) and SOLID/actionable when there are unsaved changes.
+  // Driven by the `dirty` prop so all three pages behave identically.
+  it('marks the Save button clean (transparent) when !dirty', () => {
+    render(<SaveControls {...props} dirty={false} />);
+    const btn = screen.getByRole('button', { name: /save/i });
+    expect(btn.getAttribute('data-clean')).toBe('true');
+  });
+
+  it('marks the Save button dirty (solid) when there are unsaved changes', () => {
+    render(<SaveControls {...props} dirty />);
+    const btn = screen.getByRole('button', { name: /save/i });
+    expect(btn.getAttribute('data-clean')).toBe('false');
+  });
 });

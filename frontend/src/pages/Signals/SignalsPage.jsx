@@ -491,7 +491,7 @@ function SignalsPage() {
 
   const {
     status: cloudStatus,
-    flush: flushCloudSave,
+    saveNow: saveNowCloud,
     reset: resetCloudStatus,
   } = useBackendAutosave({
     // Suspend autosave while the signal is locked — the server would 423.
@@ -501,22 +501,16 @@ function SignalsPage() {
   });
   resetCloudStatusRef.current = resetCloudStatus;
 
-  // Manual Save button: flush the pending backend autosave, or fire a
-  // one-shot save when autosave is off.
+  // Manual Save button: persist the CURRENT payload immediately and
+  // unconditionally via ``saveNow`` — works whether autosave is on or
+  // off, and whether or not a debounce timer happens to be pending. (The
+  // old ``flush``-only path was a no-op with autosave off.)
   const commitSave = useCallback(() => {
     // A locked signal is read-only — never attempt a write (server 423s).
     if (selectedLocked) return;
-    if (autosave) {
-      flushCloudSave();
-    } else {
-      const payload = selectedDocSerialized;
-      if (payload && selectedId) {
-        handleBackendSave(payload, {}).catch(() => {
-          // Error already set by handleBackendSave.
-        });
-      }
-    }
-  }, [selectedLocked, autosave, flushCloudSave, selectedDocSerialized, selectedId, handleBackendSave]);
+    if (!selectedId) return;
+    saveNowCloud();
+  }, [selectedLocked, selectedId, saveNowCloud]);
 
   // When the selection changes, reset cloud status so the indicator
   // doesn't show "saved" for the previously selected signal.

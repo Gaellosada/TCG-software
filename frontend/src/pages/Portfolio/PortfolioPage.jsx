@@ -389,6 +389,7 @@ function PortfolioPage() {
 
   const {
     status: cloudStatus,
+    saveNow: saveNowCloud,
     reset: resetCloudStatus,
   } = useBackendAutosave({
     enabled: !!portfolio.persistedId && cloudDirty && portfolio.autosave && !portfolio.persistedLocked,
@@ -434,23 +435,46 @@ function PortfolioPage() {
   // modal opens read-only (view-only) per the picker contract.
   const handleEditLeg = useCallback((index) => setEditLegIndex(index), []);
 
-  // "Save" button: if we already have a persistedId, this is a no-op
-  // (autosave handles it). If not, create a new portfolio in the backend.
+  // "Save" button. Not yet persisted → create in the backend. Already
+  // persisted → persist the CURRENT state IMMEDIATELY via ``saveNow``
+  // (the old code was a no-op that relied entirely on autosave, so with
+  // autosave off clicking Save saved nothing).
   const handleSave = useCallback(() => {
-    if (portfolio.persistedId) {
-      // Already persisted — the autosave will push changes. We could
-      // force a flush here, but a manual rename (changing saveInput)
-      // already triggers the cloudPayload change → autosave debounce.
-      // Update the name if the user typed a new one.
-      const name = saveInput.trim();
-      if (name && name !== portfolio.portfolioName) {
-        portfolio.setPortfolioName(name);
-      }
+    if (portfolio.persistedLocked) return;
+    if (!portfolio.persistedId) {
+      // Not yet persisted — create in backend.
+      handleCreatePortfolio();
       return;
     }
-    // Not yet persisted — create in backend.
-    handleCreatePortfolio();
-  }, [saveInput, portfolio.persistedId, portfolio.portfolioName, portfolio.setPortfolioName, handleCreatePortfolio]);
+    // Apply a pending rename typed into the name input.
+    const name = saveInput.trim();
+    if (name && name !== portfolio.portfolioName) {
+      portfolio.setPortfolioName(name);
+    }
+    // Persist now. ``setPortfolioName`` above is async (state has not
+    // propagated into ``cloudPayload`` yet), so build the payload with
+    // the just-entered name explicitly and hand it to ``saveNow`` to
+    // avoid a stale-payload race.
+    const overridePayload = JSON.stringify({
+      name: name || portfolio.portfolioName || 'Portfolio',
+      category: portfolio.persistedCategory,
+      legs: legsToWire(portfolio.legs),
+      rebalance: portfolio.rebalance || 'none',
+    });
+    saveNowCloud(overridePayload);
+  }, [
+    saveInput,
+    portfolio.persistedId,
+    portfolio.persistedLocked,
+    portfolio.portfolioName,
+    portfolio.persistedCategory,
+    portfolio.legs,
+    portfolio.rebalance,
+    portfolio.setPortfolioName,
+    legsToWire,
+    handleCreatePortfolio,
+    saveNowCloud,
+  ]);
 
   return (
     <div className={styles.page}>

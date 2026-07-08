@@ -23,9 +23,7 @@ import {
   computeOptionStreamSanity,
   deriveAssetTypeFromSeriesMap,
 } from './runGate';
-// useAutosave no longer called — backend autosave via useBackendAutosave.
-// eslint-disable-next-line no-unused-vars
-import SaveControls, { useAutosave } from '../../components/SaveControls';
+import SaveControls from '../../components/SaveControls';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import LockBanner from '../../components/LockBanner';
@@ -451,7 +449,7 @@ function IndicatorsPage() {
 
   const {
     status: cloudStatus,
-    flush: flushCloudSave,
+    saveNow: saveNowCloud,
     reset: resetCloudStatus,
   } = useBackendAutosave({
     // Suspend autosave while the indicator is locked — the server would 423,
@@ -484,23 +482,14 @@ function IndicatorsPage() {
   // defaults, always false (their per-session overrides are negligible).
   const dirty = backendDirty;
 
-  // Manual Save button: flush the pending backend autosave immediately.
-  // When autosave is off and the user clicks Save, we trigger a one-shot
-  // save via handleBackendSave directly with the current payload.
+  // Manual Save button: persist the CURRENT payload immediately and
+  // unconditionally via ``saveNow`` — works whether autosave is on or
+  // off, and whether or not a debounce timer is pending. (The old
+  // ``flush``-only path was a no-op when autosave was off.)
   const commitSave = useCallback(() => {
-    if (autosave) {
-      // Autosave is on — flush the pending debounced save.
-      flushCloudSave();
-    } else {
-      // Autosave is off — fire a one-shot save.
-      const payload = selectedPayloadSerialized;
-      if (payload && selectedId) {
-        handleBackendSave(payload, {}).catch(() => {
-          // Error already set by handleBackendSave.
-        });
-      }
-    }
-  }, [autosave, flushCloudSave, selectedPayloadSerialized, selectedId, handleBackendSave]);
+    if (!selectedId) return;
+    saveNowCloud();
+  }, [selectedId, saveNowCloud]);
 
   // --- Derived helpers -------------------------------------------------
   const parsedSpec = useMemo(
