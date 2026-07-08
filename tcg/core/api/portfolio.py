@@ -201,32 +201,52 @@ def _roll_row_pnl(
 
 def _synthetic_segment_pnl(
     synthetic: npt.NDArray[np.float64] | None,
+    equity: npt.NDArray[np.float64],
+    leg_fraction: float,
     open_bar: int,
     close_boundary: int,
+    n_bars: int,
 ) -> float | None:
-    """DISPLAY-ONLY realised P&L for an OPTION hold segment, derived from the leg's
-    accumulator equity rather than its (mostly-NaN) daily premium.
+    """DISPLAY-ONLY realised P&L for an OPTION hold segment, in the SAME weight/NAV-
+    scaled dollar unit as the continuous-futures rows in the same column.
 
-    The leg synthetic is ``100·equity_ratio`` and, for a single hold leg, the shared
-    ``realized_pnl`` builder reconciles EXACTLY to ``equity_ratio − 1`` — so the
-    leg's realised-$ series is ``synthetic − 100`` and a segment's realised P&L is
-    simply ``synthetic[close_boundary] − synthetic[open_bar]``.  ``close_boundary``
-    is the NEXT segment's open bar (the roll bar, whose step books the OLD contract's
-    final move) — or the last bar for the final segment — so consecutive segments
-    TELESCOPE to the leg's total equity change (``Σ = synthetic[-1] − 100``).  This
-    is NaN-safe (the accumulator books 0 where the premium is missing) and correctly
-    signed (direction is baked into the synthetic exactly once).
+        segment_pnl = |leg_fraction| · NAV_open · (synthetic[close_boundary] /
+                                                   synthetic[open_bar] − 1)
+
+    * ``NAV_open`` = the PORTFOLIO equity at the segment open (``equity[open_bar]``),
+      the SAME NAV the continuous path / :func:`_roll_row_quantity` deploy — NOT the
+      leg synthetic — so an option leg's P&L respects its portfolio weight and is
+      comparable to the continuous rows.
+    * ``synthetic`` = the leg's aligned synthetic (``100·equity_ratio``); its ratio
+      ``synthetic[close_boundary]/synthetic[open_bar]`` is the leg's segment RETURN,
+      which already bakes in DIRECTION (so ``|leg_fraction|`` is used, not the signed
+      weight — multiplying by the signed weight would re-introduce the inversion).
+    * ``close_boundary`` is the NEXT segment's open bar (the roll bar, whose step
+      books the OLD contract's final move) — or the last bar for the final segment —
+      so, for a SINGLE full-weight leg (``|w|=1``, ``NAV_open == synthetic[open]``),
+      this COLLAPSES to ``synthetic[close_boundary] − synthetic[open_bar]`` and the
+      segments TELESCOPE to the leg's total equity change.
+
+    Mirrors the continuous ``leg_fraction·NAV_open·(price return)``.  NaN-safe (the
+    accumulator books 0 where the premium is missing).  A leg WIPED to ``synthetic
+    ≤ 0`` at the segment open makes the return undefined → ``None`` (the FE shows
+    em-dash — an honest "no return to show" rather than a fake 0).
     """
     if synthetic is None:
         return None
     n = len(synthetic)
     if not (0 <= open_bar < n and 0 <= close_boundary < n):
         return None
-    p_open = float(synthetic[open_bar])
-    p_close = float(synthetic[close_boundary])
-    if not (math.isfinite(p_open) and math.isfinite(p_close)):
+    s_open = float(synthetic[open_bar])
+    s_close = float(synthetic[close_boundary])
+    nav_open = float(equity[open_bar]) if 0 <= open_bar < n_bars else math.nan
+    if not (
+        math.isfinite(s_open) and math.isfinite(s_close) and math.isfinite(nav_open)
+    ):
         return None
-    return p_close - p_open
+    if s_open <= 0.0:
+        return None
+    return abs(leg_fraction) * nav_open * (s_close / s_open - 1.0)
 
 
 def _build_roll_rows(
@@ -266,9 +286,11 @@ def _build_roll_rows(
       the leg's adjusted close (finite), exactly as before (unchanged).
     * OPTION hold legs (``pnl_series`` = the leg's aligned synthetic equity) — the
       daily held premium is mostly NaN for a far-OTM option, so BOTH bases move off
-      it: the segment P&L is derived from the accumulator equity
-      (:func:`_synthetic_segment_pnl`; NaN-safe, correctly signed, telescoping to the
-      leg equity change) and the COUNT is sized off ``sizing_price_series`` — the
+      it: the segment P&L is the accumulator-derived, weight/NAV-scaled dollar amount
+      ``|w|·NAV_open·(synthetic return)`` (:func:`_synthetic_segment_pnl`; NaN-safe,
+      correctly signed, SAME unit + weight scaling as the continuous rows, and for a
+      single full-weight leg it collapses to the leg equity change) and the COUNT is
+      sized off ``sizing_price_series`` — the
       FUTURES notional ``|w|·NAV/(F_ref·m_fut)`` (``sizing_multiplier`` = m_fut) when
       ``use_futures_notional``, else the roll-day PREMIUM notional
       ``|w|·NAV/(roll_premium·M)`` (both finite at the segment opens, which are roll
@@ -313,7 +335,9 @@ def _build_roll_rows(
             # is the NEXT segment's open bar (the roll bar whose step books the OLD
             # contract's final move) so segments telescope to the leg equity change.
             close_boundary = opens[k + 1] if k < n_seg - 1 else n_bars - 1
-            segment_pnl = _synthetic_segment_pnl(pnl_series, open_bar, close_boundary)
+            segment_pnl = _synthetic_segment_pnl(
+                pnl_series, equity, leg_fraction, open_bar, close_boundary, n_bars
+            )
         else:
             # CONTINUOUS leg (unchanged): count off the leg's own adjusted close, and
             # the segment P&L is sign·qty·Δclose·M on that (finite) close series.

@@ -247,6 +247,59 @@ async def test_hold_option_roll_rows_sign_correct_with_nan_tail_premium(monkeypa
         assert r["quantity"] is not None and np.isfinite(r["quantity"])
 
 
+async def test_multi_leg_option_roll_pnl_scales_with_weight(client):
+    """MAJOR-defect regression: an option roll row's ``segment_pnl`` must be
+    weight/NAV-scaled dollars (``|w|·NAV_open·leg_return``) — the SAME unit + scaling
+    as the continuous-futures rows in the same column — NOT the weight-agnostic
+    base-100 leg unit.  Two hold option legs (put −70, call −30) share the same
+    premium fixture (identical leg return) and the same portfolio NAV at each open
+    bar, so their per-segment P&L ratio must be purely the weight ratio 70:30.
+
+    Before the fix (segment_pnl = synthetic[boundary] − synthetic[open], weight-
+    agnostic) the two legs' identical synthetics gave IDENTICAL P&L → ratio 1; this
+    test is the one that catches that.  After the fix the ratio is 70/30.
+    """
+    body = {
+        "legs": {
+            "P": _hold_put_leg(),
+            "C": {**_hold_put_leg(), "option_type": "C"},
+        },
+        "weights": {"P": -70, "C": -30},
+        "rebalance": "none",
+        "return_type": "normal",
+        "start": "2024-03-01",
+        "end": "2024-04-30",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    p_rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    c_rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:C"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(p_rows) == 2 and len(c_rows) == 2
+    # Each segment: the −70 leg's P&L is 70/30× the −30 leg's (pure weight ratio).
+    for pr, cr in zip(p_rows, c_rows):
+        assert pr["segment_pnl"] == pytest.approx(cr["segment_pnl"] * (70.0 / 30.0))
+        assert pr["segment_pnl"] != pytest.approx(cr["segment_pnl"])  # weight matters
+
+    # …and the −70 leg's P&L is NOT its sole-−100 value (weight now scales it): a
+    # single full-weight leg's seg0 = synthetic[boundary]−100, the −70 leg's is
+    # 0.70×that.
+    sole = await _compute(client, -100)
+    sole_rows = sorted(
+        (t for t in sole["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert p_rows[0]["segment_pnl"] == pytest.approx(0.70 * sole_rows[0]["segment_pnl"])
+    assert p_rows[0]["segment_pnl"] != pytest.approx(sole_rows[0]["segment_pnl"])
+
+
 async def test_hold_option_roll_rows_display_only_equity_metrics_byte_identical(
     client, monkeypatch
 ):
