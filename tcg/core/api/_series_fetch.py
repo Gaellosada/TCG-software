@@ -583,8 +583,9 @@ def make_signal_fetcher(
                     futures_reference_resolver=futures_ref_resolver,
                 )
             except NotImplementedError as exc:
-                # nearest_abs / continuous_front are not yet wired — surface a LOUD
-                # request-time error rather than mis-size off a missing reference.
+                # continuous_front is not yet wired — surface a LOUD request-time
+                # error rather than mis-size off a missing reference.  (nearest_abs
+                # and nearest_on_or_after ARE wired; only continuous_front raises.)
                 raise SignalValidationError(str(exc)) from exc
 
             dates_arr = np.array([date_to_int(d) for d in trade_dates], dtype=np.int64)

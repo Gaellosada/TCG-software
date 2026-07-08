@@ -155,6 +155,39 @@ describe('<PortfolioPage> — manual Save clears dirty + reflects in the UI', ()
     expect(screen.queryByText('Unsaved changes')).toBeNull();
   });
 
+  it('editing a leg then reverting it to the saved value clears the dirty UI (no ghost "Unsaved changes")', async () => {
+    // FE-SAVE-1: the button's ``dirty`` prop was driven by usePortfolio's
+    // MONOTONIC ``dirty`` flag, but the autosave enable-gate + markSaved fire
+    // off the true content-diff (cloudDirty). Edit a leg then revert it to the
+    // saved value BEFORE the debounce fires: cloudDirty recomputes false, so
+    // autosave never fires and markSaved is never called — the monotonic flag
+    // stays true forever and the button falsely shows "Unsaved changes" on
+    // byte-identical content. Drive the button off the same content-diff.
+    // Autosave stays ON — the revert happens BEFORE the 3s debounce fires, so
+    // no save ever runs (real timers; the test completes in ms).
+    await loadPortfolio();
+
+    const saveBtn = screen.getByRole('button', { name: 'Save' });
+    await waitFor(() => {
+      expect(saveBtn.getAttribute('data-clean')).toBe('true');
+    });
+
+    // Edit → dirty (button solid).
+    await act(async () => { capturedUpdateLeg(0, { weight: 75 }); });
+    await waitFor(() => {
+      expect(saveBtn.getAttribute('data-clean')).toBe('false');
+    });
+
+    // Revert to the saved value (60) — content is now byte-identical to the
+    // persisted snapshot. No save has fired. The button MUST go clean.
+    await act(async () => { capturedUpdateLeg(0, { weight: 60 }); });
+    await waitFor(() => {
+      expect(saveBtn.getAttribute('data-clean')).toBe('true');
+    });
+    // No redundant PUT was needed to reach the clean state.
+    expect(mockUpdatePortfolio).not.toHaveBeenCalled();
+  });
+
   it('re-editing after a save marks dirty again', async () => {
     await loadPortfolio();
     const saveBtn = screen.getByRole('button', { name: 'Save' });

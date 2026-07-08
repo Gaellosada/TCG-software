@@ -425,7 +425,8 @@ class SqlInstrumentReader:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        f"""SELECT symbol, expiration, contract_size
+                        f"""SELECT symbol, expiration, contract_size,
+                                   expiration_cycle
                             FROM {SCHEMA}.dim_instrument
                             WHERE source_collection = %s
                               AND expiration IS NOT NULL
@@ -448,6 +449,7 @@ class SqlInstrumentReader:
                     symbol=r["symbol"],
                     expiration=r["expiration"],
                     contract_size=None if cs is None else float(cs),
+                    expiration_cycle=r["expiration_cycle"],
                 )
             )
         return out

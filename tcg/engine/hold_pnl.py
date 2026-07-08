@@ -308,6 +308,22 @@ def _compound_with_hold(
                 )
                 if spec.sizing_mode == "futures_notional":
                     fref_here = _fref_at(spec, s + 1)
+                    # ``roll_future_ref`` is finite ONLY at roll bars, so a
+                    # MID-SEGMENT (off-roll) re-open — the leg went flat and
+                    # re-latched between rolls — reads NaN here and could not be
+                    # sized, silently booking ZERO until the next roll (premium
+                    # mode re-sizes fine on the same bar).  We are still inside the
+                    # same roll period, so the segment's frozen reference (captured
+                    # at its roll) is the correct anchor: carry it forward to size
+                    # the re-entry.  A genuine roll bar keeps its own fref_here.
+                    # KNOWN LIMITATION: if the leg is flat ACROSS a roll (the roll's
+                    # resize was skipped while flat) and then re-enters off-roll,
+                    # ``seg_fref`` is stale by one+ roll period, so the re-entry is
+                    # approximately (not exactly) sized until the next roll re-anchors
+                    # it.  Same-roll-period re-entry is exact; and this is strictly
+                    # better than the prior behaviour (ZERO P&L for the whole window).
+                    if not bool(spec.is_roll[s + 1]) and not np.isfinite(fref_here):
+                        fref_here = seg_fref[rid]
                     if (
                         np.isfinite(open_prem)
                         and open_prem > 0.0

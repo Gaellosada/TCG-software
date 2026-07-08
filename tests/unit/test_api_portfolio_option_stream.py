@@ -122,6 +122,16 @@ HOLD_MID_LEG = {
     "nav_times": 1.0,
 }
 
+# A hold-mode CLOSE (EOD settlement mark) premium leg — the faithful realized
+# price for a held-to-roll option.  ``close`` is a premium in _HOLD_PREMIUM_STREAMS,
+# so it takes the same fixed-contract $-P&L hold path as mid/bs_mid.
+HOLD_CLOSE_LEG = {
+    **OPT_MID_LEG,
+    "stream": "close",
+    "hold_between_rolls": True,
+    "nav_times": 1.0,
+}
+
 # A level (iv) leg — display-only overlay, valid WITH hold off (unchanged).
 OPT_IV_LEG = {
     **OPT_MID_LEG,
@@ -220,6 +230,33 @@ class TestPortfolioOptionStream:
         assert "OPT_MID" in data["leg_equities"]
         assert "metrics" in data
 
+    async def test_hold_close_leg_in_equity_curve(self, client):
+        """A hold-mode CLOSE (settlement) premium leg participates in the equity
+        curve via the same fixed-contract $-P&L hold path as mid/bs_mid — ``close``
+        is in ``_HOLD_PREMIUM_STREAMS``, so it resolves through make_signal_fetcher
+        and books settlement-based equity rather than a %-return."""
+        body = {
+            "legs": {
+                "SPX": SPX_LEG,
+                "OPT_CLOSE": HOLD_CLOSE_LEG,
+            },
+            "weights": {"SPX": 60, "OPT_CLOSE": 40},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        resp = await client.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "portfolio_equity" in data
+        assert len(data["portfolio_equity"]) > 0
+        # The close leg lands in the equity curve (a price_hold synthetic), NOT the
+        # display-only tracking_series.
+        assert "OPT_CLOSE" in data["leg_equities"]
+        assert "OPT_CLOSE" not in data.get("tracking_series", {})
+        assert "metrics" in data
+
     async def test_mid_leg_without_hold_rejected(self, client):
         """A mid (premium) option leg WITHOUT hold-mode is rejected: a rolled
         option's daily-reselect %-return is not a valid equity series."""
@@ -242,9 +279,9 @@ class TestPortfolioOptionStream:
         assert "hold" in msg
         assert "mid" in msg or "price" in msg
 
-    @pytest.mark.parametrize("stream", ["mid", "bs_mid"])
+    @pytest.mark.parametrize("stream", ["mid", "bs_mid", "close"])
     async def test_premium_leg_without_hold_rejected_both_streams(self, client, stream):
-        """Both premium streams (mid, bs_mid) are rejected without hold-mode."""
+        """Every premium stream (mid, bs_mid, close) is rejected without hold-mode."""
         body = {
             "legs": {"OPT": {**OPT_MID_LEG, "stream": stream}},
             "weights": {"OPT": 100},

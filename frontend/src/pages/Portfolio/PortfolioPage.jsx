@@ -346,6 +346,21 @@ function PortfolioPage() {
   // can read the current dirty state without a closure dependency.
   cloudDirtyRef.current = cloudDirty;
 
+  // Drive the Save button off the SAME content-diff as the autosave
+  // enable-gate (``cloudDirty``) rather than usePortfolio's MONOTONIC
+  // ``dirty`` flag. Otherwise: edit a leg then REVERT it before the debounce
+  // fires → cloudDirty recomputes false → autosave never fires → markSaved
+  // is never called → the monotonic flag stays true forever → the button
+  // falsely shows "unsaved" on byte-identical content (FE-SAVE-1). Gating the
+  // touched flag on cloudDirty also keeps the button clean right after a
+  // create (markSaved has cleared ``dirty``) instead of flickering dirty
+  // until the post-create list refetch reseeds ``lastSeenPayloadRef``. A
+  // not-yet-persisted portfolio has no backend snapshot to diff against, so
+  // fall back to the touched flag alone so a brand-new portfolio is savable.
+  const buttonContentDirty = portfolio.persistedId
+    ? (portfolio.dirty && cloudDirty)
+    : portfolio.dirty;
+
   // Ref to the autosave hook's reset() so the locked-save handler (declared
   // before the hook) can clear a transient 'saving'/'error' status when it
   // flips the portfolio to locked. Seeded just below the hook.
@@ -535,7 +550,7 @@ function PortfolioPage() {
             <SaveControls
               dirty={
                 !portfolio.persistedLocked && (
-                  portfolio.dirty
+                  buttonContentDirty
                   || (saveInput.trim() !== '' && saveInput.trim() !== portfolio.portfolioName)
                 )
               }

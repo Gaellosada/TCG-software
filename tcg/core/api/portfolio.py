@@ -282,6 +282,32 @@ def _last_finite_in(
     return None
 
 
+def _align_hold_series(
+    raw_by_label: dict[str, npt.NDArray[np.float64] | None],
+    option_stream_dates_map: dict[str, npt.NDArray[np.int64]],
+    common_dates: npt.NDArray[np.int64],
+) -> dict[str, npt.NDArray[np.float64]]:
+    """Slice each hold-leg DISPLAY-ONLY side-channel to ``common_dates``.
+
+    The raw held premium, the reference-future price and the roll-day open
+    premium each share the option leg's date axis, so the SAME ``os_mask``
+    aligns any of them to ``common_dates``.  A label whose series is ``None`` or
+    which has no entry in ``option_stream_dates_map`` is skipped.  Never touches
+    the equity curve — purely feeds the trade-log roll rows.
+    """
+    out: dict[str, npt.NDArray[np.float64]] = {}
+    for label, raw in raw_by_label.items():
+        if raw is None or label not in option_stream_dates_map:
+            continue
+        os_mask = np.isin(
+            option_stream_dates_map[label],
+            common_dates,
+            assume_unique=True,
+        )
+        out[label] = np.asarray(raw, dtype=np.float64)[os_mask]
+    return out
+
+
 def _build_roll_rows(
     *,
     label: str,
@@ -516,7 +542,7 @@ class LegSpec(BaseModel):
     stream: OptionStreamLabel | None = None
     # SELECT-AND-HOLD (fixed-contract dollar-P&L) for an option_stream leg.
     # Mirrors ``InstrumentOptionStream`` / ``OptionStreamRef`` semantics: when
-    # True AND the stream is a PREMIUM (mid/bs_mid), the leg books fixed-contract
+    # True AND the stream is a PREMIUM (mid/bs_mid/close), the leg books fixed-contract
     # dollar P&L (a quantity sized once per roll off the compounding NAV,
     # qty·Δpremium daily) via the SHARED accumulator instead of a daily-reselect
     # %-return — so a short 10Δ-put leg reproduces the validated S1 signal curve.
@@ -561,7 +587,7 @@ class LegSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_option_price_leg_requires_hold(self) -> LegSpec:
-        """An option PRICE leg (mid/bs_mid) MUST use hold-mode fixed-contract P&L.
+        """An option PRICE leg (mid/bs_mid/close) MUST use hold-mode fixed-contract P&L.
 
         A rolled option's daily-reselect %-return is not a valid equity series:
         the resolver picks a DIFFERENT contract each day (delta/moneyness drift +
@@ -585,7 +611,7 @@ class LegSpec(BaseModel):
             and not self.hold_between_rolls
         ):
             raise ValidationError(
-                "option price legs (mid/bs_mid) require hold-mode fixed-contract "
+                "option price legs (mid/bs_mid/close) require hold-mode fixed-contract "
                 "P&L — enable 'Hold contract between rolls'; a rolled option's "
                 "daily-reselect %-return is not a valid equity series"
             )
@@ -1016,7 +1042,7 @@ _HOLD_PREMIUM_STREAMS: frozenset[str] = frozenset({"mid", "bs_mid", "close"})
 
 
 def _is_hold_mode_price_leg(leg: LegSpec) -> bool:
-    """True iff ``leg`` is a hold-mode option PRICE leg (a mid/bs_mid premium with
+    """True iff ``leg`` is a hold-mode option PRICE leg (a mid/bs_mid/close premium with
     ``hold_between_rolls``), i.e. one whose equity is the fixed-contract $-P&L
     synthetic — which can wipe to an absorbing 0 (a fully-decayed / blown-up
     short) and then emit NaN returns.  Level streams (iv/greeks/volume/oi) and
@@ -1073,11 +1099,11 @@ async def _evaluate_option_stream_leg(
     ``stream_mode`` is either "price_hold" (the hold-mode synthetic $-P&L equity
     leg; caller must apply |weight| — direction is already baked in) or "level" (a
     greeks/IV/volume/oi display overlay, NOT part of the equity curve).  A non-hold
-    premium ("price") leg is impossible — mid/bs_mid REQUIRE hold-mode
+    premium ("price") leg is impossible — mid/bs_mid/close REQUIRE hold-mode
     (``validate_option_price_leg_requires_hold``) — so only those two modes occur.
 
     SELECT-AND-HOLD: when ``leg.hold_between_rolls`` is True AND the stream is a
-    PREMIUM (mid/bs_mid), the leg is resolved through the SAME hold-mode resolver
+    PREMIUM (mid/bs_mid/close), the leg is resolved through the SAME hold-mode resolver
     the signal path uses (``make_signal_fetcher`` → ``resolve_option_stream``) and
     its fixed-contract dollar P&L is booked via the SHARED accumulator
     (:func:`tcg.engine.hold_pnl._compound_with_hold`).  ``values`` is then the
@@ -1105,7 +1131,7 @@ async def _evaluate_option_stream_leg(
     # a structured error; default a missing value to the no-op.  ("end of month"
     # is the EndOfMonth maturity, not a roll value — no roll_schedule here.)
     roll_offset = RollOffset() if leg.roll_offset is None else leg.roll_offset
-    # A hold-mode PREMIUM leg (mid/bs_mid + hold flag) books fixed-contract dollar
+    # A hold-mode PREMIUM leg (mid/bs_mid/close + hold flag) books fixed-contract dollar
     # P&L; every other case (non-hold, or a level stream) keeps the display path
     # with hold OFF on the ref → byte-identical to today.
     is_hold_premium = leg.hold_between_rolls and leg.stream in _HOLD_PREMIUM_STREAMS
@@ -1258,13 +1284,13 @@ async def _evaluate_option_stream_leg(
     dates_arr, values, _diagnostics, _contracts = result["_leg"]
 
     # 3. Only display-only LEVEL streams reach this point.  A PREMIUM leg
-    #    (mid/bs_mid) either took the hold branch above (early return
+    #    (mid/bs_mid/close) either took the hold branch above (early return
     #    "price_hold") or was rejected at LegSpec construction
-    #    (``validate_option_price_leg_requires_hold``), and ``PRICE_LIKE_STREAMS``
-    #    ({"mid"}) ⊆ the premium set — so no %-return "price" leg can reach here.
-    #    A level leg (iv/greeks/volume/oi) is a tracking overlay, NOT part of the
-    #    equity curve, so it needs no forward-fill or all-NaN guard here (an
-    #    all-NaN level leg is surfaced downstream as an empty tracking series).
+    #    (``validate_option_price_leg_requires_hold``) — so no %-return "price"
+    #    leg can reach here.  A level leg (iv/greeks/volume/oi) is a tracking
+    #    overlay, NOT part of the equity curve, so it needs no forward-fill or
+    #    all-NaN guard here (an all-NaN level leg is surfaced downstream as an
+    #    empty tracking series).
     return dates_arr, values, "level", [], None, None, float("nan"), None
 
 
@@ -1555,52 +1581,26 @@ async def compute_portfolio(
         )
         aligned_closes[label] = option_stream_closes[label][os_mask]
 
-    # Align each hold-mode option leg's RAW premium to common_dates (same mask as
-    # its synthetic close) so the trade-log roll rows are sized/priced off the true
-    # premium — DISPLAY-ONLY, never part of the equity curve.
-    option_premium_aligned: dict[str, npt.NDArray[np.float64]] = {}
-    for label, prem in option_premium_raw.items():
-        if prem is None or label not in option_stream_dates_map:
-            continue
-        os_mask = np.isin(
-            option_stream_dates_map[label],
-            common_dates,
-            assume_unique=True,
-        )
-        option_premium_aligned[label] = np.asarray(prem, dtype=np.float64)[os_mask]
-
-    # Align each futures_notional hold leg's reference-future price series to
-    # common_dates with the SAME os_mask as the premium (it shares the option
-    # leg's date axis).  DISPLAY-ONLY: it sizes the roll-row COUNT off the futures
-    # notional; ``roll_future_ref`` is finite only at roll bars (NaN elsewhere),
-    # which is exactly where each roll-row segment opens.
-    option_future_ref_aligned: dict[str, npt.NDArray[np.float64]] = {}
-    for label, fref in option_future_ref_raw.items():
-        if fref is None or label not in option_stream_dates_map:
-            continue
-        os_mask = np.isin(
-            option_stream_dates_map[label],
-            common_dates,
-            assume_unique=True,
-        )
-        option_future_ref_aligned[label] = np.asarray(fref, dtype=np.float64)[os_mask]
-
-    # Align each hold leg's roll-day OPEN premium to common_dates (same os_mask): a
-    # premium-notional roll row's COUNT is sized off it (finite at roll bars, which
-    # are exactly where each segment opens) rather than the daily held premium (NaN
-    # at a far-OTM option's later segment opens).  DISPLAY-ONLY.
-    option_roll_premium_aligned: dict[str, npt.NDArray[np.float64]] = {}
-    for label, rprem in option_roll_premium_raw.items():
-        if rprem is None or label not in option_stream_dates_map:
-            continue
-        os_mask = np.isin(
-            option_stream_dates_map[label],
-            common_dates,
-            assume_unique=True,
-        )
-        option_roll_premium_aligned[label] = np.asarray(rprem, dtype=np.float64)[
-            os_mask
-        ]
+    # Align each hold-mode option leg's DISPLAY-ONLY side-channels to common_dates
+    # (same os_mask as the synthetic close, computed once per label in the shared
+    # ``_align_hold_series`` helper) so the trade-log roll rows are sized/priced off
+    # the true series — never part of the equity curve:
+    #   * RAW premium         — the held premium the accumulator was fed.
+    #   * reference-future    — a futures_notional leg's roll-row COUNT sizes off the
+    #     price series           futures notional; finite only at roll bars (= each
+    #                            roll-row segment open).
+    #   * roll-day OPEN        — a premium-notional roll row's COUNT sizes off it
+    #     premium                (finite at roll bars) rather than the daily held
+    #                            premium (NaN at a far-OTM option's later opens).
+    option_premium_aligned = _align_hold_series(
+        option_premium_raw, option_stream_dates_map, common_dates
+    )
+    option_future_ref_aligned = _align_hold_series(
+        option_future_ref_raw, option_stream_dates_map, common_dates
+    )
+    option_roll_premium_aligned = _align_hold_series(
+        option_roll_premium_raw, option_stream_dates_map, common_dates
+    )
 
     # ── 6. Compute full date range for the slider ──
     #
@@ -1989,25 +1989,22 @@ async def compute_portfolio(
 
         open_bar = tr["open_bar"]
         values = price_by_input.get(tr["input_id"])
-        price_open = (
-            values[open_bar]
-            if values is not None and 0 <= open_bar < len(values)
-            else None
-        )
-        nav_open = float(equity[open_bar]) if 0 <= open_bar < n_bars else math.nan
+        # A direct OPTION leg's position "price" is its synthetic 100-based equity,
+        # not a tradeable premium, so a contract count off it would mislead — null
+        # it here at the call site.  Every other leg delegates the guarded quantity
+        # math to the SHARED ``_roll_row_quantity`` (the same formula the roll rows
+        # use) so the two can never drift.
         is_direct_option = leg is not None and leg.type == "option_stream"
-        if (
-            is_direct_option
-            or m is None
-            or price_open is None
-            or not math.isfinite(float(price_open))
-            or float(price_open) <= 0.0
-            or not math.isfinite(nav_open)
-        ):
+        if is_direct_option:
             tr["quantity"] = None
         else:
-            tr["quantity"] = (
-                abs(tr["signed_weight"]) * nav_open / (float(price_open) * m)
+            tr["quantity"] = _roll_row_quantity(
+                tr["signed_weight"],
+                equity,
+                values,
+                open_bar,
+                m,
+                n_bars,
             )
 
     # Drop the internal roll-row marker; it is a build-time flag, not response data.

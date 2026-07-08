@@ -110,3 +110,59 @@ test('manual Save (autosave OFF) fires the PUT AND clears the dirty UI', async (
   await weightInput.fill('80');
   await expect(saveBtn).toHaveAttribute('data-clean', 'false');
 });
+
+// FE-SAVE-1: editing a leg then REVERTING it to the saved value (before the
+// autosave debounce fires) must clear the button. The button used to be driven
+// by a MONOTONIC "touched" flag, so a revert left it stuck showing unsaved on
+// byte-identical content — no save (and no markSaved) ever fired to clear it.
+test('editing a leg then reverting it to the saved value clears the button (no ghost dirty)', async ({ page }) => {
+  const putBodies = [];
+
+  await page.route('**/api/data/collections*', (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ collections: ['INDEX'] }),
+  }));
+  await page.route('**/api/data/INDEX*', (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ dates: [20200101, 20201231], close: [100, 110] }),
+  }));
+  await page.route('**/api/persistence/portfolios**', async (route) => {
+    const req = route.request();
+    if (req.method() === 'PUT') {
+      putBodies.push(JSON.parse(req.postData() || '{}'));
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ...DOC, ...JSON.parse(req.postData() || '{}') }),
+      });
+    }
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify([DOC]),
+    });
+  });
+
+  await page.goto(`${BASE}/portfolio`);
+
+  const row = page.locator('[data-testid="load-portfolio-pf-drive"]');
+  await expect(row).toBeVisible();
+  await row.click();
+
+  const weightInput = page.locator('input[type="number"]').first();
+  await expect(weightInput).toHaveValue('60');
+
+  const controls = page.getByTestId('save-controls');
+  const saveBtn = controls.getByRole('button', { name: 'Save' });
+  // Autosave stays ON (default) — the revert happens well before the 3s debounce.
+  await expect(saveBtn).toHaveAttribute('data-clean', 'true');
+
+  // Edit 60 → 75: dirty.
+  await weightInput.fill('75');
+  await expect(saveBtn).toHaveAttribute('data-clean', 'false');
+
+  // Revert 75 → 60: content is byte-identical to the saved snapshot again.
+  await weightInput.fill('60');
+  // The button MUST return to clean — this is the FE-SAVE-1 fix.
+  await expect(saveBtn).toHaveAttribute('data-clean', 'true');
+  // And no PUT should have been needed to reach the clean state.
+  expect(putBodies.length).toBe(0);
+});

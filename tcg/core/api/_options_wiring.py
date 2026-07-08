@@ -577,9 +577,20 @@ def _pick_reference_contract(
         option expiry (before OR after).  Ties (equidistant before/after) break
         toward the on/after contract (the more conservative reference), then toward
         the earlier expiration — both deterministic.
+
+    WEEKLY contracts (``expiration_cycle == 'W'``) are never a sizing reference on
+    a multi-cycle root: the docstrings promise the root's REAL cycle (monthly for
+    VIX, quarterly for SP/NDX), and a weekly VX future that happens to expire close
+    to the option would mis-anchor the notional.  Weeklies are dropped whenever any
+    non-weekly candidate remains; if the root is ALL weekly (degenerate) the full
+    set is kept rather than refusing to size.  Single-cycle roots carry an empty
+    ``expiration_cycle`` (never 'W') so their selection is unchanged.
     """
     if not metas:
         return None
+    regular = [c for c in metas if c.expiration_cycle != "W"]
+    if regular:
+        metas = regular
     if futures_reference == "nearest_on_or_after":
         for c in metas:  # ascending → first >= is the nearest on/after
             if c.expiration >= option_expiry:
@@ -643,12 +654,14 @@ def build_futures_reference_resolver(
     async def _metas() -> "list[FuturesContractMeta]":
         cached = _meta_cache.get(fut_collection)
         if cached is None:
-            try:
-                cached = list(
-                    await market_data.list_futures_contract_meta(fut_collection)
-                )
-            except Exception:  # noqa: BLE001
-                cached = []
+            # A real DB fault (pool timeout / dropped socket) surfaces as
+            # DataAccessError and MUST propagate so the request fails loudly —
+            # swallowing it to [] would be indistinguishable from a genuine
+            # "no covering future" and silently carry the whole leg forward.
+            # A genuinely EMPTY result ([]) is a real answer and is cached; the
+            # exception path is NOT cached so a retry after a transient fault can
+            # succeed.
+            cached = list(await market_data.list_futures_contract_meta(fut_collection))
             _meta_cache[fut_collection] = cached
         return cached
 

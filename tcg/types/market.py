@@ -84,6 +84,11 @@ class FuturesContractMeta:
     symbol: str
     expiration: date
     contract_size: float | None
+    # dwh ``expiration_cycle`` code ("M" monthly / "W" weekly / "" for
+    # single-cycle roots; None when not sourced).  Used to keep WEEKLY contracts
+    # from becoming a futures-notional sizing reference on multi-cycle roots
+    # (e.g. FUT_VIX lists both monthly 'M' and weekly 'W').
+    expiration_cycle: str | None = None
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,16 @@ import { useEffect, useRef, useState, useCallback } from 'react';
  */
 export const DEFAULT_AUTOSAVE_DEBOUNCE_MS = 3000;
 
+// Externally-settled promise. Lets ``saveNow`` hand back a promise that
+// resolves only when a COALESCED restart (not the prior in-flight save it
+// piggy-backed on) has persisted the override payload.
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 /**
  * Debounced backend-autosave hook with AbortController + in-flight
  * coalescing.
@@ -97,6 +107,10 @@ export default function useBackendAutosave({
   // Promise of the current in-flight save (or null). Lets ``saveNow``
   // return something awaitable when it coalesces with an in-flight save.
   const inFlightPromiseRef = useRef(null);
+  // Deferred that settles when a QUEUED restart (from ``saveNow`` coalescing)
+  // eventually persists its payload — so ``saveNow`` awaiters are signalled
+  // only after the override is durable, not when the prior save settles.
+  const pendingRestartDeferredRef = useRef(null);
   // Track mounted state to guard setState across async boundaries.
   const mountedRef = useRef(true);
 
@@ -113,6 +127,26 @@ export default function useBackendAutosave({
   // Forward declaration via ref to break the runSave -> launchSave cycle.
   const launchSaveRef = useRef(null);
 
+  // Fire a queued restart (last-edit-wins) and, if a ``saveNow`` awaiter
+  // coalesced onto it, settle that awaiter's deferred only when the restart's
+  // own save chain settles — so the promise resolves after the OVERRIDE
+  // payload is persisted, not when the piggy-backed save finished. Reads
+  // ``launchSaveRef`` (a ref) so it can be defined before ``launchSave``.
+  const fireQueuedRestart = useCallback(() => {
+    pendingRestartRef.current = false;
+    const restartPromise = launchSaveRef.current
+      ? launchSaveRef.current()
+      : Promise.resolve();
+    const d = pendingRestartDeferredRef.current;
+    if (d) {
+      pendingRestartDeferredRef.current = null;
+      // launchSave's promise resolves when this restart's onSave settles
+      // (and, if IT coalesces again, chains onward). Never rejects the
+      // awaiter for an internal restart hiccup — fall back to resolve.
+      Promise.resolve(restartPromise).then(d.resolve, d.resolve);
+    }
+  }, []);
+
   // Internal: actually fire onSave. Assumes controllerRef is null (no
   // save currently in flight).
   const launchSave = useCallback(() => {
@@ -128,8 +162,7 @@ export default function useBackendAutosave({
         controllerRef.current = null;
         if (pendingRestartRef.current) {
           // A newer edit was queued while we were in flight — fire it.
-          pendingRestartRef.current = false;
-          if (launchSaveRef.current) launchSaveRef.current();
+          fireQueuedRestart();
           return;
         }
         if (inFlightPromiseRef.current === promise) inFlightPromiseRef.current = null;
@@ -146,8 +179,7 @@ export default function useBackendAutosave({
         // even after unmount so a pending edit flushed on navigation is
         // not dropped when the preceding in-flight save fails.
         if (wasActive && pendingRestartRef.current) {
-          pendingRestartRef.current = false;
-          if (launchSaveRef.current) launchSaveRef.current();
+          fireQueuedRestart();
           return;
         }
         if (inFlightPromiseRef.current === promise) inFlightPromiseRef.current = null;
@@ -180,6 +212,13 @@ export default function useBackendAutosave({
     pendingRef.current = false;
     pendingRestartRef.current = false;
     inFlightPromiseRef.current = null;
+    // A queued restart is being discarded (context switch, not data loss) —
+    // settle any ``saveNow`` awaiter so its promise never dangles.
+    if (pendingRestartDeferredRef.current) {
+      const d = pendingRestartDeferredRef.current;
+      pendingRestartDeferredRef.current = null;
+      d.resolve();
+    }
     const c = controllerRef.current;
     if (c) {
       controllerRef.current = null;
@@ -214,10 +253,15 @@ export default function useBackendAutosave({
       payloadRef.current = overridePayload;
     }
     if (controllerRef.current) {
-      // A save is already in flight — queue the latest payload to fire
-      // after it settles, and hand back the in-flight promise.
+      // A save is already in flight — queue the latest payload to fire after
+      // it settles. Hand back a promise tied to the QUEUED RESTART (not the
+      // prior in-flight save), so an awaiter is signalled only once THIS
+      // override payload is durably persisted (matches the JSDoc contract).
       pendingRestartRef.current = true;
-      return inFlightPromiseRef.current || Promise.resolve();
+      if (!pendingRestartDeferredRef.current) {
+        pendingRestartDeferredRef.current = createDeferred();
+      }
+      return pendingRestartDeferredRef.current.promise;
     }
     return launchSave();
   }, [cancelTimer, launchSave]);

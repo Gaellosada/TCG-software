@@ -228,6 +228,54 @@ def test_tail_carry_forward_missing_future_at_roll() -> None:
     assert np.all(np.isfinite(ratio))
 
 
+# ── Off-roll re-entry: a futures leg that exits then re-latches mid-segment ──
+def test_futures_offroll_reentry_resizes_and_books_pnl() -> None:
+    """A ``futures_notional`` hold leg that goes flat then re-opens on a NON-roll
+    bar must re-size off the CURRENT segment's frozen reference (carried forward
+    from the roll) and book correctly-sized P&L on the re-entry window.
+
+    Regression for ENG-SIZING-1: ``roll_future_ref`` is finite only at roll bars,
+    so an off-roll re-open read a NaN reference, failed ``_futures_denom_ok``, and
+    the leg silently booked ZERO until the next roll (premium mode re-sized fine on
+    the same bar — a silent asymmetry).
+    """
+    # Single segment (roll at idx 0 only).  Held [0,1], flat [2,3], re-open [4,5].
+    premium = np.array([30.0, 29.0, 28.0, 27.0, 26.0, 24.0])
+    is_roll = np.array([True, False, False, False, False, False])
+    roll_premium = np.array([30.0, np.nan, np.nan, np.nan, np.nan, np.nan])
+    roll_fref = np.array([4500.0, np.nan, np.nan, np.nan, np.nan, np.nan])
+    pos_active = np.array([True, True, False, False, True, True])
+    spec = _HoldPnLSpec(
+        ref_id="opt",
+        sign=-1.0,
+        nav_times=1.0,
+        premium=premium,
+        is_roll=is_roll,
+        roll_premium=roll_premium,
+        pos_active=pos_active,
+        sizing_mode="futures_notional",
+        roll_future_ref=roll_fref,
+        mult_fut=50.0,
+        mult_opt=50.0,
+    )
+    ratio, _scale, contrib = _compound_with_hold(np.zeros(5, dtype=np.float64), [spec])
+
+    # Closed window (steps 1,2,3) books exactly 0.
+    assert contrib["opt"][1] == 0.0
+    assert contrib["opt"][2] == 0.0
+    assert contrib["opt"][3] == 0.0
+
+    # Re-entry step (bar 4→5): sized off the frozen F_ref=4500 (carried forward),
+    # premium base re-anchored to the re-open mid premium[4]=26 → dprem=24-26=-2.
+    # seg_er == ratio[4] on the re-open bar so the equity-coupling cancels to 1.
+    expected = (-1.0) * 1.0 * ((-2.0) * 50.0) / (4500.0 * 50.0)
+    assert contrib["opt"][4] != 0.0
+    assert abs(contrib["opt"][4] - expected) < 1e-12
+    # And it flows into the equity curve.
+    assert abs((ratio[5] / ratio[4] - 1.0) - expected) < 1e-12
+    assert np.all(np.isfinite(ratio))
+
+
 # ── premium_notional unchanged when the new fields default ──────────────────
 def test_premium_notional_byte_identical_default() -> None:
     from _hold_pnl_oracle import (

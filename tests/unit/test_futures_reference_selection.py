@@ -19,8 +19,20 @@ from tcg.data._utils import date_to_int
 from tcg.types.market import FuturesContractMeta, PriceSeries
 
 
-def _m(y: int, mo: int, d: int, cs: float | None, sym: str) -> FuturesContractMeta:
-    return FuturesContractMeta(symbol=sym, expiration=date(y, mo, d), contract_size=cs)
+def _m(
+    y: int,
+    mo: int,
+    d: int,
+    cs: float | None,
+    sym: str,
+    cycle: str | None = None,
+) -> FuturesContractMeta:
+    return FuturesContractMeta(
+        symbol=sym,
+        expiration=date(y, mo, d),
+        contract_size=cs,
+        expiration_cycle=cycle,
+    )
 
 
 # ascending by (expiration, symbol), as list_futures_contract_meta returns
@@ -73,6 +85,67 @@ def test_nearest_abs_equidistant_tie_prefers_on_or_after() -> None:
     ]
     c = _pick_reference_contract(metas, date(2024, 6, 21), "nearest_abs")
     assert c is not None and c.symbol == "B"
+
+
+# ── ENG-SIZING-2: weekly contracts are never the sizing reference ───────────
+def test_weekly_contracts_excluded_when_monthly_present() -> None:
+    """For a multi-cycle root (VIX = monthly 'M' + weekly 'W') the reference must
+    be a MONTHLY contract even when a weekly expires closer to the option expiry."""
+    metas = [
+        _m(2024, 5, 15, 1000.0, "VXK24", cycle="M"),  # monthly
+        _m(2024, 5, 22, 1000.0, "VX22W", cycle="W"),  # weekly, expires closer
+        _m(2024, 6, 19, 1000.0, "VXM24", cycle="M"),  # monthly
+    ]
+    # Option expiry 2024-05-20: the WEEKLY (05-22) is nearest on/after, but must be
+    # skipped → the JUN monthly (first monthly >= expiry) is chosen.
+    c = _pick_reference_contract(metas, date(2024, 5, 20), "nearest_on_or_after")
+    assert c is not None and c.symbol == "VXM24"
+    # nearest_abs would also pick the 05-22 weekly (2 days) over 05-15 monthly (5
+    # days); with weeklies excluded the 05-15 monthly wins.
+    c2 = _pick_reference_contract(metas, date(2024, 5, 20), "nearest_abs")
+    assert c2 is not None and c2.symbol == "VXK24"
+
+
+def test_single_cycle_root_unaffected_by_weekly_filter() -> None:
+    """SP_500 futures are single-cycle (empty-string ``expiration_cycle``); the
+    weekly filter must leave selection byte-identical to the no-cycle path."""
+    metas = [
+        _m(2024, 3, 15, 50.0, "ESH24", cycle=""),
+        _m(2024, 6, 21, 50.0, "ESM24", cycle=""),
+    ]
+    c = _pick_reference_contract(metas, date(2024, 5, 1), "nearest_on_or_after")
+    assert c is not None and c.symbol == "ESM24"
+
+
+def test_all_weekly_root_falls_back_to_weeklies() -> None:
+    """Degenerate: if EVERY candidate is weekly, don't return None — fall back to
+    the full set rather than refusing to size."""
+    metas = [
+        _m(2024, 5, 22, 1000.0, "VX22W", cycle="W"),
+        _m(2024, 5, 29, 1000.0, "VX29W", cycle="W"),
+    ]
+    c = _pick_reference_contract(metas, date(2024, 5, 20), "nearest_on_or_after")
+    assert c is not None and c.symbol == "VX22W"
+
+
+# ── ENG-SIZING-3: a transient DB error must PROPAGATE, not become silent [] ──
+async def test_db_error_propagates_not_silent_empty() -> None:
+    from tcg.types.errors import DataAccessError
+
+    class _FailingSvc:
+        async def list_futures_contract_meta(self, collection, *, cycle=None):
+            raise DataAccessError("transient dwh pool timeout")
+
+    import pytest
+
+    resolver = build_futures_reference_resolver(
+        _FailingSvc(),
+        option_collection="OPT_VIX",
+        futures_reference="nearest_on_or_after",
+        prefetch_window=None,
+    )
+    with pytest.raises(DataAccessError):
+        await resolver(date(2024, 5, 1), date(2024, 5, 17))
 
 
 # ── The closure returns (price, contract_size) — the live M_fut hint ────────
