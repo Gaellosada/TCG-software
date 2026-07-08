@@ -3,7 +3,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
-import TradeLog, { formatSignedPercent, formatQuantity, formatSignedAmount } from './TradeLog';
+import TradeLog, { formatSignedPercent, formatQuantity, formatSignedAmount, formatPrice } from './TradeLog';
 
 afterEach(cleanup);
 
@@ -654,6 +654,43 @@ describe('roll rows (rolling direct legs)', () => {
     // segment_pnl is a signed DOLLAR amount, not a percentage.
     expect(pnls[0].textContent).toBe('+1.00');
     expect(pnls[1].textContent).toBe('-2.00');
+  });
+
+  it('option roll row shows the contract PREMIUM as open/close price, not the base-100 synthetic', () => {
+    // Reported bug: the open price showed 100. An option leg's position series is
+    // the base-100 synthetic equity, so the row carries explicit open_price/
+    // close_price (the premium); the FE must prefer them over the position series.
+    const optionRoll = [{
+      input_id: 'P',
+      entry_block_id: 'roll:P',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:P',
+      exit_block_name: 'end',
+      open_bar: 0,
+      close_bar: 2,
+      direction: 'short',
+      signed_weight: -1.0,
+      quantity: 9.76,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: 100.0,
+      roll_hover: 'rolling OPT_SP_500',
+      open_price: 10.25,   // the roll-day entry premium
+      close_price: 3.5,    // last observed premium
+    }];
+    render(<TradeLog
+      trades={optionRoll}
+      timestamps={TS}
+      // position series is the SYNTHETIC equity (starts at 100) — must NOT be shown as price
+      positions={[pos('P', [100, 150, 200])]}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+
+    const openPrices = screen.getAllByTestId('trade-open-price');
+    const closePrices = screen.getAllByTestId('trade-close-price');
+    expect(openPrices[0].textContent).toBe(formatPrice(10.25));
+    expect(openPrices[0].textContent).not.toBe(formatPrice(100));
+    expect(closePrices[0].textContent).toBe(formatPrice(3.5));
   });
 
   it('non-roll trades keep the percentage P&L (segment_pnl absent)', () => {

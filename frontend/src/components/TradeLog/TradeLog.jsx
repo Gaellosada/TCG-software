@@ -24,7 +24,7 @@ function formatTs(ts) {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 }
 
-function formatPrice(p) {
+export function formatPrice(p) {
   if (typeof p !== 'number' || !Number.isFinite(p)) return '—';
   return p.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
@@ -136,8 +136,14 @@ function TradeLog({
     return sorted.map((tr) => {
       const openTs = Number.isInteger(tr.open_bar) ? timestamps[tr.open_bar] : null;
       const closeTs = Number.isInteger(tr.close_bar) ? timestamps[tr.close_bar] : null;
-      const openPrice = priceAtBar(positionsByInputId, tr.input_id, tr.open_bar);
-      const closePrice = priceAtBar(positionsByInputId, tr.input_id, tr.close_bar);
+      // An option roll row carries an explicit `open_price`/`close_price` (the
+      // contract PREMIUM), because its position series is the base-100 synthetic
+      // equity — not a price. Prefer those when present; otherwise (instrument /
+      // continuous rows) read the real price from the position series.
+      const openPrice =
+        'open_price' in tr ? tr.open_price : priceAtBar(positionsByInputId, tr.input_id, tr.open_bar);
+      const closePrice =
+        'close_price' in tr ? tr.close_price : priceAtBar(positionsByInputId, tr.input_id, tr.close_bar);
       // For open trades (close_bar == null), use the last finite price in the
       // position series as the effective close price for PnL ONLY.
       // The displayed close-price column stays as em-dash for open trades.
@@ -286,8 +292,8 @@ function TradeLog({
                         >
                           {sizeDisplay}
                         </td>
-                        <td>{formatPrice(tr._openPrice)}</td>
-                        <td>{isClosed ? formatPrice(tr._closePrice) : <span className={styles.openTag}>—</span>}</td>
+                        <td data-testid="trade-open-price">{formatPrice(tr._openPrice)}</td>
+                        <td data-testid="trade-close-price">{isClosed ? formatPrice(tr._closePrice) : <span className={styles.openTag}>—</span>}</td>
                         <td className={pnlClass} data-testid="trade-pnl">
                           {pnlText}
                         </td>

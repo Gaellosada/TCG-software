@@ -166,6 +166,15 @@ async def test_hold_option_leg_emits_per_roll_trade_rows(client):
         assert r["quantity"] == pytest.approx(exp_q)
         exp_pnl = equity[boundary] - equity[ob]
         assert r["segment_pnl"] == pytest.approx(exp_pnl)
+        # The displayed OPEN PRICE is the option's roll-day entry PREMIUM (the basis
+        # the count was sized against) — NOT the base-100 synthetic equity. Reported
+        # bug: it showed 100 (positions[label] = 100·equity_ratio at bar 0).
+        assert r["open_price"] == pytest.approx(roll_prem[ob])
+        assert r["open_price"] != pytest.approx(100.0)
+        # And it reconciles with the displayed count: qty·price·M ≈ |w|·NAV_open.
+        assert r["quantity"] * r["open_price"] * m_opt == pytest.approx(
+            abs(r["signed_weight"]) * equity[ob]
+        )
     # The per-segment P&L reconciles to the leg's total equity change.
     assert sum(r["segment_pnl"] for r in rows) == pytest.approx(equity[-1] - 100.0)
 

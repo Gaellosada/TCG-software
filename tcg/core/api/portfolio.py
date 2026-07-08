@@ -254,6 +254,34 @@ def _synthetic_segment_pnl(
     return result if math.isfinite(result) else None
 
 
+def _finite_at(series: npt.NDArray[np.float64] | None, bar: int) -> float | None:
+    """The series value at ``bar`` if finite and in range, else None."""
+    if series is None or not (0 <= bar < len(series)):
+        return None
+    v = float(series[bar])
+    return v if math.isfinite(v) else None
+
+
+def _last_finite_in(
+    series: npt.NDArray[np.float64] | None, lo: int, hi: int
+) -> float | None:
+    """The last finite value in ``series[lo..hi]`` (inclusive), else None.
+
+    Walks back from ``hi`` so a far-OTM option — whose daily premium goes NaN
+    once it stops quoting near expiry — still shows its LAST observed premium as
+    the segment's close price rather than an em-dash.
+    """
+    if series is None:
+        return None
+    n = len(series)
+    hi = min(hi, n - 1)
+    for b in range(hi, max(lo, 0) - 1, -1):
+        v = float(series[b])
+        if math.isfinite(v):
+            return v
+    return None
+
+
 def _build_roll_rows(
     *,
     label: str,
@@ -270,6 +298,7 @@ def _build_roll_rows(
     sizing_multiplier: float | None = None,
     use_futures_notional: bool = False,
     pnl_series: npt.NDArray[np.float64] | None = None,
+    open_price_series: npt.NDArray[np.float64] | None = None,
 ) -> list[dict]:
     """One display-only trade row per HELD CONTRACT of a rolling direct leg.
 
@@ -343,6 +372,16 @@ def _build_roll_rows(
             segment_pnl = _synthetic_segment_pnl(
                 pnl_series, equity, leg_fraction, open_bar, close_boundary, n_bars
             )
+            # DISPLAY prices = the option PREMIUM, not the leg's base-100 synthetic
+            # equity (``positions[label]`` = ``100·equity_ratio``, which the FE would
+            # otherwise show as a nonsensical "100" open price). Open = the roll-day
+            # entry premium the count was sized against (``|w|·NAV/(premium·M)`` ⇒
+            # premium == NAV/(qty·M), which is what the user expects); close = the
+            # last observed daily premium of the held contract before the roll (the
+            # daily premium is NaN near expiry for a far-OTM option — walk back to the
+            # last finite value in the segment, else em-dash).
+            open_price = _finite_at(open_price_series, open_bar)
+            close_price = _last_finite_in(price_series, open_bar, close_bar)
         else:
             # CONTINUOUS leg (unchanged): count off the leg's own adjusted close, and
             # the segment P&L is sign·qty·Δclose·M on that (finite) close series.
@@ -352,27 +391,38 @@ def _build_roll_rows(
             segment_pnl = _roll_row_pnl(
                 quantity, leg_fraction, price_series, open_bar, close_bar, m
             )
-        rows.append(
-            {
-                "input_id": input_id,
-                "entry_block_id": f"roll:{label}",
-                "entry_block_name": entry_name,
-                "exit_block_id": f"roll:{label}",
-                "exit_block_name": exit_name,
-                "open_bar": open_bar,
-                "close_bar": close_bar,
-                "direction": direction,
-                "signed_weight": leg_fraction,
-                "holding_id": label,
-                "holding_name": label,
-                "quantity_unit": unit,
-                "multiplier": m,
-                "quantity": quantity,
-                "segment_pnl": segment_pnl,
-                "roll_hover": hover,
-                "_roll_row": True,
-            }
-        )
+            # No explicit display price — the FE reads the leg's own (finite)
+            # adjusted-close series from ``positions[input_id]`` (a real futures
+            # price already), so these keys are omitted below and it falls back.
+            open_price = None
+            close_price = None
+        row = {
+            "input_id": input_id,
+            "entry_block_id": f"roll:{label}",
+            "entry_block_name": entry_name,
+            "exit_block_id": f"roll:{label}",
+            "exit_block_name": exit_name,
+            "open_bar": open_bar,
+            "close_bar": close_bar,
+            "direction": direction,
+            "signed_weight": leg_fraction,
+            "holding_id": label,
+            "holding_name": label,
+            "quantity_unit": unit,
+            "multiplier": m,
+            "quantity": quantity,
+            "segment_pnl": segment_pnl,
+            "roll_hover": hover,
+            "_roll_row": True,
+        }
+        # OPTION rows carry explicit premium prices (open = roll-day entry premium,
+        # close = last observed premium) so the FE shows the option's PRICE, not the
+        # base-100 synthetic. CONTINUOUS rows omit these keys → the FE falls back to
+        # its adjusted-close position series (a real price already).
+        if option_mode:
+            row["open_price"] = open_price
+            row["close_price"] = close_price
+        rows.append(row)
     return rows
 
 
@@ -1791,6 +1841,11 @@ async def compute_portfolio(
                     # per-segment realised P&L is accumulator-derived (NaN-safe +
                     # correctly signed), NOT qty·Δpremium off the NaN daily premium.
                     pnl_series=aligned_closes.get(label),
+                    # Display OPEN price = the roll-day entry PREMIUM (finite at each
+                    # segment open), so the trade log shows the option's real price
+                    # instead of the base-100 synthetic. Close price walks back over
+                    # the daily premium (price_series) to the last observed quote.
+                    open_price_series=option_roll_premium_aligned.get(label),
                 )
             )
             continue
