@@ -135,6 +135,13 @@ class AppDbConnectionPool:
             # category / locked / payload / created_at / updated_at).
             kwargs={"row_factory": dict_row},
             configure=_configure_connection,
+            # check runs on every BORROW: a lightweight liveness probe that
+            # discards+replaces a connection the server has silently closed
+            # (RDS/NAT idle-reap) before handing it to a query, so a stale
+            # pooled socket can never surface "server closed the connection
+            # unexpectedly" and wedge every subsequent request. See the twin
+            # comment in tcg/data/_sql/connection.py.
+            check=AsyncConnectionPool.check_connection,
             open=False,
             name="app-data",
         )

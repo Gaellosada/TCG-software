@@ -142,6 +142,13 @@ class DwhConnectionPool:
             # read-only on top of the GUC + autocommit so no idle transaction
             # lingers on a pooled connection.
             configure=_configure_connection,
+            # check runs on every BORROW: a lightweight liveness probe that
+            # discards+replaces a connection the server has silently closed
+            # (RDS/NAT idle-reap) BEFORE handing it to a query. Without it a
+            # dead pooled socket is handed out and the first query fails with
+            # "server closed the connection unexpectedly" — and, since the dead
+            # connection is never replaced, EVERY subsequent request fails too.
+            check=AsyncConnectionPool.check_connection,
             open=False,
             name="dwh-market",
         )
