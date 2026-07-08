@@ -234,6 +234,70 @@ describe('usePortfolio — signal leg support', () => {
     expect('roll_schedule' in leg).toBe(false);
   });
 
+  it('handleCalculate forwards option_stream futures_notional sizing + reference', async () => {
+    // Regression: the compute request dropped sizing_mode, so a portfolio option
+    // leg always ran premium_notional — which wipes a low-premium (10Δ) leg to
+    // -100%. The chosen futures_notional sizing + reference future must reach the
+    // API so the leg is sized off the underlying future's notional instead.
+    const { result } = renderHook(() => usePortfolio());
+    act(() => {
+      result.current.addLeg({
+        label: 'OPT_SP_500 P mid',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'P',
+        cycle: 'M',
+        maturity: { kind: 'end_of_month', offset_months: 2 },
+        selection: { kind: 'by_delta', target: -0.1, tolerance: 0.05 },
+        stream: 'mid',
+        sizing_mode: 'futures_notional',
+        futures_reference: 'nearest_on_or_after',
+        weight: -100,
+      });
+    });
+    act(() => {
+      result.current.setStartDate('2021-01-01');
+      result.current.setEndDate('2021-12-31');
+    });
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+    const call = computePortfolio.mock.calls[0][0];
+    const leg = call.legs[result.current.legs[0].label];
+    expect(leg.sizing_mode).toBe('futures_notional');
+    expect(leg.futures_reference).toBe('nearest_on_or_after');
+  });
+
+  it('handleCalculate omits sizing_mode for a premium_notional (default) leg', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => {
+      result.current.addLeg({
+        label: 'OPT_SP_500 P mid',
+        type: 'option_stream',
+        collection: 'OPT_SP_500',
+        option_type: 'P',
+        cycle: 'M',
+        maturity: { kind: 'end_of_month', offset_months: 0 },
+        selection: { kind: 'by_delta', target: -0.1, tolerance: 0.05 },
+        stream: 'mid',
+        weight: -100,
+      });
+    });
+    act(() => {
+      result.current.setStartDate('2021-01-01');
+      result.current.setEndDate('2021-12-31');
+    });
+    await act(async () => {
+      await result.current.handleCalculate();
+    });
+    const call = computePortfolio.mock.calls[0][0];
+    const leg = call.legs[result.current.legs[0].label];
+    // Untouched sizing → omitted so the backend applies its premium_notional
+    // default and the leg serialises byte-identically to before this fix.
+    expect('sizing_mode' in leg).toBe(false);
+    expect('futures_reference' in leg).toBe(false);
+  });
+
   it('handleCalculate forwards a legacy bare-int roll_offset as {value, days}', async () => {
     const { result } = renderHook(() => usePortfolio());
     act(() => {

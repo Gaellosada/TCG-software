@@ -129,6 +129,14 @@ function PortfolioPage() {
     // SELECT-AND-HOLD (fixed-contract dollar-P&L) — option_stream legs only.
     hold_between_rolls: l.hold_between_rolls ?? false,
     nav_times: l.nav_times ?? 1.0,
+    // Option hold-mode SIZING pass-through. These were dropped here, so a
+    // portfolio option leg ALWAYS fell back to the backend default
+    // ``premium_notional`` — which wipes out a low-premium (e.g. 10Δ) leg
+    // (qty = NAV/premium ⇒ enormous leverage). Emit ONLY when set so an
+    // untouched leg stays byte-identical AND the backend applies its defaults
+    // (``sizing_mode`` is a non-optional Literal — never send null).
+    ...(l.sizing_mode ? { sizing_mode: l.sizing_mode } : {}),
+    ...(l.futures_reference ? { futures_reference: l.futures_reference } : {}),
   })), []);
 
   // Save current portfolio state to backend in the selected category.
