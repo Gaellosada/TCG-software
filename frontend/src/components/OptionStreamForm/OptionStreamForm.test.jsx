@@ -924,3 +924,112 @@ describe('nav_times Size multiplier presentation', () => {
     expect(SIZE_LABEL_FUTURES).not.toMatch(/%/);
   });
 });
+
+describe('<OptionStreamForm> close (settlement) stream', () => {
+  const HOLD_LABEL = 'Hold contract between rolls (fixed-contract P&L)';
+
+  it('offers Close (settlement) as a selectable Series option', () => {
+    renderForm();
+    const seriesSelect = screen.getByLabelText('Series');
+    const opts = Array.from(seriesSelect.querySelectorAll('option')).map((o) => o.value);
+    expect(opts).toContain('close');
+    const closeOpt = Array.from(seriesSelect.querySelectorAll('option')).find(
+      (o) => o.value === 'close',
+    );
+    expect(closeOpt.textContent).toMatch(/close/i);
+    expect(closeOpt.textContent).toMatch(/settlement/i);
+  });
+
+  it('defaults a NEW hold leg to the close stream when hold is turned on', () => {
+    // Untouched leg → stream 'mid'. Enabling hold flips the default to 'close'.
+    const { onChange } = renderForm({ showHoldControls: true });
+    const toggle = screen.getByLabelText(HOLD_LABEL);
+    fireEvent.click(toggle);
+    expect(onChange).toHaveBeenCalled();
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.hold_between_rolls).toBe(true);
+    expect(patched.stream).toBe('close');
+  });
+
+  it('does NOT flip an explicitly-chosen bs_mid stream when hold is turned on', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'bs_mid' };
+    const { onChange } = renderForm({ value, showHoldControls: true });
+    fireEvent.click(screen.getByLabelText(HOLD_LABEL));
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.hold_between_rolls).toBe(true);
+    // bs_mid was explicit → honoured verbatim, not coerced to close.
+    expect(patched.stream === undefined || patched.stream === 'bs_mid').toBe(true);
+  });
+
+  it('coerces a NEW leg to the single allowed stream (generic singleStream path)', () => {
+    // When a consumer pins a SINGLE allowed stream, a create-mode leg carrying a
+    // different value is coerced to it (the selector is then hidden).
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid' };
+    const { onChange } = renderForm({ value, allowedStreams: ['close'], editMode: false });
+    expect(onChange).toHaveBeenCalled();
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.stream).toBe('close');
+  });
+
+  it('preserves a persisted stream on EDIT under a single-stream pin (no coercion)', () => {
+    // An edited leg persisted with 'mid' must stay 'mid' even if the single-stream
+    // pin differs — reproducibility of saved research (editMode gate).
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid' };
+    const { onChange } = renderForm({ value, allowedStreams: ['close'], editMode: true });
+    const coerced = onChange.mock.calls.some((c) => c[0] && c[0].stream === 'close');
+    expect(coerced).toBe(false);
+  });
+
+  // ── Portfolio flow (AddHoldingModal props): selector VISIBLE + close default ──
+  const PORTFOLIO_STREAMS = ['close', 'mid', 'bs_mid'];
+
+  it('renders a VISIBLE, CHANGEABLE Series selector with 3+ options in the portfolio flow', () => {
+    // REGRESSION: the portfolio picker previously pinned a SINGLE stream, which
+    // hid the Series selector entirely ("no stream option anymore"). With the
+    // three price streams the selector must render, expose close/mid/bs_mid, and
+    // be user-changeable (not a hidden 1-item pin).
+    const { onChange } = renderForm({
+      value: { ...buildDefaultOptionStream({ availableRoots: ROOTS }), hold_between_rolls: true, stream: 'close' },
+      allowedStreams: PORTFOLIO_STREAMS,
+      holdRequired: true,
+      editMode: true, // suppress the create-time heldInit emit; just inspect render
+    });
+    const seriesSelect = screen.getByLabelText('Series');
+    expect(seriesSelect).toBeTruthy();
+    expect(seriesSelect.tagName.toLowerCase()).toBe('select');
+    expect(seriesSelect.disabled).toBe(false);
+    const opts = Array.from(seriesSelect.querySelectorAll('option')).map((o) => o.value);
+    expect(opts.length).toBeGreaterThanOrEqual(3);
+    expect(opts).toEqual(['close', 'mid', 'bs_mid']);
+    expect(seriesSelect.value).toBe('close'); // default pre-selected, not forced
+    // ...and the user can change it (mid / bs_mid selectable).
+    fireEvent.change(seriesSelect, { target: { value: 'bs_mid' } });
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.stream).toBe('bs_mid');
+  });
+
+  it('defaults a NEW portfolio (holdRequired) leg to close via the create-only one-shot', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid' };
+    const { onChange } = renderForm({
+      value,
+      allowedStreams: PORTFOLIO_STREAMS,
+      holdRequired: true,
+      editMode: false,
+    });
+    expect(onChange).toHaveBeenCalled();
+    const emittedClose = onChange.mock.calls.some((c) => c[0] && c[0].stream === 'close');
+    expect(emittedClose).toBe(true);
+  });
+
+  it('does NOT flip a persisted portfolio leg stream on EDIT-open (holdRequired)', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid', cycle: 'M' };
+    const { onChange } = renderForm({
+      value,
+      allowedStreams: PORTFOLIO_STREAMS,
+      holdRequired: true,
+      editMode: true,
+    });
+    const coerced = onChange.mock.calls.some((c) => c[0] && c[0].stream === 'close');
+    expect(coerced).toBe(false);
+  });
+});

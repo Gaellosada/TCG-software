@@ -101,10 +101,13 @@ class ContinuousInstrumentRef(BaseModel):
 # ``*_stored`` (or quote) field on the row.  ``bs_mid`` is the exception: a
 # COMPUTED premium — the Black-76 theoretical price from the contract's stored
 # IV + the underlying FUTURE price (the Java sim's price basis), intrinsic at
-# expiry — not a row field.  It is price-like (a premium), like ``mid``.
+# expiry — not a row field.  It is price-like (a premium), like ``mid``.  ``close``
+# is the raw EOD settlement price — the faithful realized mark for a held-to-roll
+# option (>0-guarded in the resolver); also price-like.
 OptionStreamLabel = Literal[
     "mid",
     "bs_mid",
+    "close",
     "iv",
     "delta",
     "gamma",
@@ -211,6 +214,30 @@ class OptionStreamRef(BaseModel):
     @classmethod
     def _check_nav_times(cls, v: float) -> float:
         return _validate_nav_times(v)
+
+    @model_validator(mode="after")
+    def _default_hold_stream_to_close(self) -> "OptionStreamRef":
+        """CONDITIONAL DEFAULT: a HOLD leg with NO explicit stream prices on
+        ``close`` (the faithful EOD settlement mark), not ``mid``.
+
+        For a held-to-roll option the exchange settlement ``close`` reproduces the
+        ground-truth realized P&L to the cent, while the bid-ask ``mid`` is
+        materially STALE (see ``output/price_source_and_multiplier.md``).  So a
+        NEW hold leg that did not pick a stream should default to ``close``.
+
+        The default is resolved at CONSTRUCTION using ``model_fields_set`` so it is
+        applied ONLY when ``stream`` was absent from the payload:
+          * NON-hold legs are untouched (they keep the ``mid`` display default);
+          * a leg that EXPLICITLY set ``stream`` (mid/bs_mid/close/…) is honoured
+            verbatim — never coerced;
+          * PERSISTED legs are safe: persistence always serialises ``stream``
+            explicitly (``signals._serialize_instrument`` / the basket mirror), so
+            a reload carries ``stream`` in ``model_fields_set`` and is never
+            flipped — saved research stays reproducible.
+        """
+        if self.hold_between_rolls and "stream" not in self.model_fields_set:
+            self.stream = "close"
+        return self
 
 
 # Per-asset-class strict mapping from the basket's declared ``asset_class``

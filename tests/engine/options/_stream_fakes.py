@@ -73,13 +73,14 @@ def _row(
     mid: float | None = 1.05,
     iv: float | None = 0.20,
     delta: float | None = 0.50,
+    close: float | None = None,
 ) -> OptionDailyRow:
     return OptionDailyRow(
         date=row_date,
         open=None,
         high=None,
         low=None,
-        close=None,
+        close=close,
         bid=mid - 0.05 if mid is not None else None,
         ask=mid + 0.05 if mid is not None else None,
         bid_size=None,

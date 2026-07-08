@@ -149,6 +149,7 @@ _MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
 StreamLabel = Literal[
     "mid",
     "bs_mid",
+    "close",
     "iv",
     "delta",
     "gamma",
@@ -175,6 +176,11 @@ _DAYS_PER_YEAR: float = 365.0
 # (see ``_price_bs_mid`` / ``_extract_stream_value``), not read off a field.
 _STREAM_TO_ATTR: dict[str, str] = {
     "mid": "mid",
+    # ``close`` = the EOD settlement price (raw ``OptionDailyRow.close``).  A plain
+    # row-attribute stream like ``mid`` — but with a >0 guard in
+    # ``_extract_stream_value`` (settlement can be 0.0/absent on illiquid
+    # contracts, mirroring the derived ``mid`` >0 rule).
+    "close": "close",
     "iv": "iv_stored",
     "delta": "delta_stored",
     "gamma": "gamma_stored",
@@ -183,6 +189,22 @@ _STREAM_TO_ATTR: dict[str, str] = {
     "open_interest": "open_interest",
     "volume": "volume",
 }
+
+
+def _row_value_ok(stream: str, raw: float) -> bool:
+    """False when a row-attribute ``stream`` value must be treated as MISSING.
+
+    ``close`` (EOD settlement) is 0.0 / negative / NaN on illiquid contracts —
+    treat a non-positive settlement as missing (same NaN-safety as the derived
+    ``mid`` >0 rule) so a false zero premium never injects into the P&L series.
+    ``raw > 0.0`` rejects 0, negatives AND NaN in one comparison.  All other
+    row-attribute streams pass through (their own None-ness is the only gate).
+    Applied at every row-attribute extraction site (Phase C sync, legacy per-date,
+    and :func:`_extract_stream_value`) so the guard can never drift between them.
+    """
+    if stream == "close":
+        return raw > 0.0
+    return True
 
 
 def _missing_code_for(stream: str) -> str:
@@ -290,7 +312,7 @@ async def _extract_stream_value(
             kernel=kernel,
         )
     raw = getattr(row, attr_name, None)
-    if raw is None:
+    if raw is None or not _row_value_ok(stream, float(raw)):
         return None, _missing_code_for(stream)
     return float(raw), None
 
@@ -1587,7 +1609,7 @@ async def _resolve_bulk(
                 return
             contract, row = sel
             raw = getattr(row, attr_name, None)
-            if raw is None:
+            if raw is None or not _row_value_ok(stream, float(raw)):
                 error_codes[idx] = _missing_code_for(stream)
                 return
             values[idx] = float(raw)
@@ -2132,7 +2154,7 @@ async def resolve_option_stream(
                 contracts[i] = result.contract
 
                 raw = getattr(row, attr_name, None)
-                if raw is None:
+                if raw is None or not _row_value_ok(stream, float(raw)):
                     error_codes[i] = _missing_code_for(stream)
                     return
                 values[i] = float(raw)

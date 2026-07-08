@@ -44,7 +44,7 @@ import ImpliedLeverageReadout, { BAND_COLORS } from './ImpliedLeverageReadout';
 
 const ALL_OPTION_TYPES = ['C', 'P'];
 const ALL_CYCLES = [null, 'M', 'W3 Friday', 'W1 Friday', 'W2 Friday', 'W4 Friday', 'W', 'Q'];
-const ALL_STREAMS = ['mid', 'bs_mid', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
+const ALL_STREAMS = ['mid', 'bs_mid', 'close', 'iv', 'delta', 'gamma', 'vega', 'theta', 'open_interest', 'volume'];
 const GREEK_STREAMS = new Set(['gamma', 'vega', 'theta']);
 // NOTE: option continuous series carry NO back-adjustment.  Ratio/difference are
 // conceptually ill-posed for option premia (a back-adjusted premium represents
@@ -79,6 +79,7 @@ const SELECTION_LABELS = {
 const STREAM_LABELS = {
   mid: 'Mid price',
   bs_mid: 'BS mid (from IV)',
+  close: 'Close (settlement)',
   iv: 'Implied volatility',
   delta: 'Delta',
   gamma: 'Gamma',
@@ -531,26 +532,41 @@ export default function OptionStreamForm({
   // hidden below.
   const singleStream = allowedStreams.length === 1;
   useEffect(() => {
-    if (singleStream && v.stream !== allowedStreams[0]) {
+    // Gate on ``!editMode``: a pre-filled EDITED leg keeps its STORED stream
+    // verbatim (reproducibility of saved research) even when the current pin
+    // differs — e.g. a portfolio leg persisted with 'mid' opened for edit while
+    // the pin is now 'close' must stay 'mid', never be silently coerced (the
+    // known heldInit/editMode footgun class from PR #78). NEW (create-mode) legs
+    // are still coerced to the single allowed stream (the pinned default).
+    if (!editMode && singleStream && v.stream !== allowedStreams[0]) {
       onChange({ ...v, stream: allowedStreams[0] });
     }
     // Re-run when the restriction or current stream changes.
-  }, [singleStream, allowedStreams, v, onChange]);
+  }, [editMode, singleStream, allowedStreams, v, onChange]);
 
   // PORTFOLIO hold-required flow: option price legs are ALWAYS held (no toggle).
   // The hold flag itself is forced on by AddHoldingModal at leg-build time (the
   // SINGLE authority for it — the backend also rejects hold-off), so this one-shot
-  // only defaults the cycle to 'M' (the backend's expand_cycle broadens 'M' to the
-  // monthly 3rd-Friday series, reproducing a monthly option roll). One-shot so the
-  // user can still change the cycle afterwards.
+  // defaults (a) the cycle to 'M' (the backend's expand_cycle broadens 'M' to the
+  // monthly 3rd-Friday series, reproducing a monthly option roll) and (b) the
+  // series to CLOSE (the faithful EOD settlement mark for a held-to-roll option;
+  // only the UNTOUCHED 'mid' default is flipped, so a value already carrying a
+  // different price stream is respected). One-shot so the user can still change
+  // either afterwards via the now-visible controls.
   // CREATE-only: gated off in ``editMode`` (a saved config was pre-filled) so an
-  // edited leg's stored cycle is never silently rewritten to 'M' (BLOCKER-1).
+  // edited leg's stored cycle/stream is never silently rewritten (BLOCKER-1 / the
+  // PR#78 heldInit/editMode coercion footgun).
   const heldInit = useRef(false);
   useEffect(() => {
-    if (!holdRequired || editMode || heldInit.current) return;
+    // Never mutate a READ-ONLY (disabled) leg — a locked/view-only portfolio must
+    // render verbatim (also: the create-time default is meaningless there).
+    if (!holdRequired || editMode || disabled || heldInit.current) return;
     heldInit.current = true;
-    if (v.cycle == null || v.cycle === 'W3 Friday') onChange({ ...v, cycle: 'M' });
-  }, [holdRequired, editMode, v, onChange]);
+    const patch = {};
+    if (v.cycle == null || v.cycle === 'W3 Friday') patch.cycle = 'M';
+    if (v.stream === 'mid') patch.stream = 'close';
+    if (Object.keys(patch).length > 0) onChange({ ...v, ...patch });
+  }, [holdRequired, editMode, disabled, v, onChange]);
 
   // Changing root must also keep ``cycle`` valid: the new root's real cycle
   // tag-set may not contain the current cycle (e.g. picking 'Q' on OPT_BTC then
@@ -597,6 +613,15 @@ export default function OptionStreamForm({
     const patch = { hold_between_rolls: !!checked };
     if (checked && !(typeof v.nav_times === 'number' && v.nav_times > 0)) {
       patch.nav_times = 1.0;
+    }
+    // DEFAULT a NEW hold leg's series to CLOSE (the faithful EOD settlement mark
+    // for a held-to-roll option; mid is stale — see the backend
+    // ``_default_hold_stream_to_close``). Only flip the UNTOUCHED 'mid' default,
+    // so an explicit bs_mid/close (or any level operand) the user already picked
+    // is honoured verbatim. This mirrors the backend conditional default on the
+    // wire model for a leg the user actively turns hold ON for.
+    if (checked && v.stream === 'mid') {
+      patch.stream = 'close';
     }
     // Reset the leverage tint on hold-off: the readout unmounts without
     // clearing the parent-held band, so a stale colour would flash on the
@@ -1012,10 +1037,12 @@ export default function OptionStreamForm({
           "Mid price" is explicitly the BID-ASK MID (see the help glyph +
           tooltip), NOT a daily OHLC field.
 
-          Hidden entirely when the form is restricted to a single stream (the
-          portfolio price-only flow): there is no choice to surface, so a
-          1-item dropdown would be pointless noise. The stream is pinned by the
-          coercion effect above. */}
+          Hidden ONLY when a consumer restricts the form to a SINGLE allowed
+          stream (a genuine 1-item pin): a 1-option dropdown is pointless noise
+          and the stream is pinned by the coercion effect above. The Portfolio
+          flow is NOT single-stream — it exposes the three PRICE streams
+          (close/mid/bs_mid) so the selector RENDERS and is changeable, defaulting
+          to close for hold legs. */}
       {!singleStream && (
         <label className={styles.row}>
           <span className={styles.label}>

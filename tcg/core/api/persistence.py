@@ -480,8 +480,15 @@ def _ticket_to_out(doc: TicketDoc) -> TicketOut:
 # the dict-literal form as the file-local convention here).
 
 
+# Kept IN SYNC with ``_models.OptionStreamLabel`` / ``signal.OptionStreamLabel`` /
+# the engine ``StreamLabel`` (same set) — a persisted leg may carry any stream the
+# wire model accepts.  ``bs_mid`` (COMPUTED Black-76 premium) and ``close`` (EOD
+# settlement) are both price-like premia; this mirror previously omitted ``bs_mid``
+# (an inconsistency reconciled when ``close`` was added).
 _OptionStreamLabel = Literal[
     "mid",
+    "bs_mid",
+    "close",
     "iv",
     "delta",
     "gamma",

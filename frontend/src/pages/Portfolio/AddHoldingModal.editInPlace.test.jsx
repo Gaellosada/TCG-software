@@ -111,9 +111,10 @@ describe('AddHoldingModal edit mode — pre-fill & threading', () => {
       rollOffset: 3,
       strategy: 'front_month',
     });
-    // Edit-mode title, and the mid-pin + hold-required option props still apply.
+    // Edit-mode title, and the price-stream restriction + hold-required option
+    // props still apply.
     expect(capturedProps.title).toBe('Edit Holding');
-    expect(capturedProps.optionStreamAllowedStreams).toEqual(['mid']);
+    expect(capturedProps.optionStreamAllowedStreams).toEqual(['close', 'mid', 'bs_mid']);
     expect(capturedProps.optionHoldRequired).toBe(true);
   });
 

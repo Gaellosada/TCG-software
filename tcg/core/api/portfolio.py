@@ -1005,13 +1005,14 @@ async def _empty_cycle_hint(svc: MarketDataService, leg: LegSpec) -> str | None:
 
 
 # A hold-mode option leg books fixed-contract dollar P&L only for a PREMIUM
-# stream.  Both ``mid`` and ``bs_mid`` are premia (bs_mid is the Black-76
-# theoretical premium — the S1 oracle's price basis) and the resolver's hold
-# path supports both.  A premium leg WITHOUT hold is rejected at construction
-# (``validate_option_price_leg_requires_hold``), so a premium always takes the
-# hold path.  Levels (iv/greeks/volume/oi) are NOT premia — hold does not apply,
-# they keep the display-only (tracking-overlay) path.
-_HOLD_PREMIUM_STREAMS: frozenset[str] = frozenset({"mid", "bs_mid"})
+# stream.  ``mid``, ``bs_mid`` and ``close`` are all premia (bs_mid is the
+# Black-76 theoretical premium — the S1 oracle's price basis; close is the EOD
+# settlement mark — the faithful realized price for a held-to-roll option) and the
+# resolver's hold path supports all three.  A premium leg WITHOUT hold is rejected
+# at construction (``validate_option_price_leg_requires_hold``), so a premium
+# always takes the hold path.  Levels (iv/greeks/volume/oi) are NOT premia — hold
+# does not apply, they keep the display-only (tracking-overlay) path.
+_HOLD_PREMIUM_STREAMS: frozenset[str] = frozenset({"mid", "bs_mid", "close"})
 
 
 def _is_hold_mode_price_leg(leg: LegSpec) -> bool:

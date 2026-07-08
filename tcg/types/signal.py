@@ -73,11 +73,14 @@ class InstrumentContinuous:
 #
 # ``bs_mid`` is a COMPUTED premium (not a row field): the contract's Black-76
 # theoretical price from its stored IV + the underlying FUTURE price (the Java
-# sim's price basis), intrinsic at expiry.  Like ``mid`` it is a price-like
-# premium (usable as a P&L series), unlike the iv/greek/volume LEVEL streams.
+# sim's price basis), intrinsic at expiry.  ``close`` is the raw EOD settlement
+# price (the faithful realized mark for a held-to-roll option; >0-guarded).  Like
+# ``mid`` both are price-like premia (usable as a P&L series), unlike the
+# iv/greek/volume LEVEL streams.
 OptionStreamLabel = Literal[
     "mid",
     "bs_mid",
+    "close",
     "iv",
     "delta",
     "gamma",

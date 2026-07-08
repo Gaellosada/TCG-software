@@ -64,13 +64,15 @@ describe('AddHoldingModal — option_stream leg mapping', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('restricts the picker option leg to the mid (price) stream', () => {
-    // Issue #2 (D1): a portfolio option leg is the option PRICE only. The modal
-    // must tell the picker to pin the option stream to mid (hiding the Series
-    // selector); iv/greeks/volume are signal-level operands, not portfolio legs.
+  it('restricts the picker option leg to the price streams (close default, mid, bs_mid)', () => {
+    // Issue #2 (D1): a portfolio option leg is the option PRICE only — the modal
+    // restricts the picker to the three PRICE streams (iv/greeks/volume are
+    // signal-level operands, not portfolio legs) BUT keeps the Series selector
+    // visible so the user can choose among them. CLOSE (settlement) is first (the
+    // create-time default); mid / bs_mid follow.
     renderModal();
     expect(capturedPickerProps).not.toBeNull();
-    expect(capturedPickerProps.optionStreamAllowedStreams).toEqual(['mid']);
+    expect(capturedPickerProps.optionStreamAllowedStreams).toEqual(['close', 'mid', 'bs_mid']);
   });
 
   it('passes through a default roll_offset (0) and never adds adjustment', () => {
