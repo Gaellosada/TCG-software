@@ -116,6 +116,326 @@ async def _compute(client, weight, *, nav_times=1.0, stream="bs_mid") -> dict:
     return resp.json()
 
 
+# ── Per-roll trade rows for a hold-mode option leg (display-only) ───────────
+
+
+async def test_hold_option_leg_emits_per_roll_trade_rows(client):
+    """A hold-mode option leg emits ONE display-only trade row per held contract
+    (segment), labelled open/rolling/end, sized in contracts off the PREMIUM, with
+    a per-segment realised P&L — and the equity stays byte-identical to the oracle
+    (display-only)."""
+    from tcg.core.api.portfolio import _leg_multiplier_and_unit
+
+    data = await _compute(client, -100)
+    # Equity is UNCHANGED by the roll rows (display-only hard gate for options).
+    equity = np.array(data["portfolio_equity"], dtype=np.float64)
+    expected_eq = 100.0 * _oracle_ratio(
+        _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=1.0, weight=-100.0
+    )
+    np.testing.assert_allclose(equity, expected_eq, rtol=1e-9, atol=1e-9)
+
+    # DATES_INT = [0327,0328,0329,0401,0402,0403]; IS_ROLL = [1,0,0,1,0,0].
+    # Interior roll (excl. initial open) = 20240401 → bar 3 → segments [0,2],[3,5].
+    rows = sorted(data["trades"], key=lambda t: t["open_bar"])
+    assert len(rows) == 2
+    r0, r1 = rows
+    assert (r0["entry_block_name"], r0["exit_block_name"]) == ("open", "rolling")
+    assert (r1["entry_block_name"], r1["exit_block_name"]) == ("rolling", "end")
+    # The interior segment's displayed close bar is the ROLL bar (3, == the next
+    # segment's open / the bar its P&L telescopes to), not the prior interior bar
+    # (2); the final segment's close is the last bar (5).  See
+    # ``test_hold_option_roll_row_close_references_realise_bar``.
+    assert (r0["open_bar"], r0["close_bar"]) == (0, 3)
+    assert (r1["open_bar"], r1["close_bar"]) == (3, 5)
+    for r in rows:
+        assert r["direction"] == "short"
+        assert r["roll_hover"] == "rolling OPT_SP_500"
+        assert r["entry_block_id"] == "roll:P"
+        assert r["quantity_unit"] == "contracts"
+        assert "_roll_row" not in r
+
+    m_opt, _unit = _leg_multiplier_and_unit("OPT_SP_500")
+    assert m_opt is not None
+    # COUNT is sized off the ROLL-DAY premium (ROLL_PREMIUM = [30,·,·,18,·,·]) — the
+    # basis the accumulator sized against, finite at each segment open (a roll bar) —
+    # NOT the daily held premium (which is NaN at a real option's later opens).
+    roll_prem = _ROLL_PREMIUM
+    # segment P&L is the leg's equity change across the segment: synthetic[boundary] −
+    # synthetic[open], where the boundary is the next segment's open (roll bar) — or
+    # the last bar for the final segment — so segments TELESCOPE.  opens=[0,3].
+    boundaries = [3, len(equity) - 1]
+    for r, boundary in zip(rows, boundaries):
+        ob = r["open_bar"]
+        exp_q = abs(r["signed_weight"]) * equity[ob] / (roll_prem[ob] * m_opt)
+        assert r["quantity"] == pytest.approx(exp_q)
+        exp_pnl = equity[boundary] - equity[ob]
+        assert r["segment_pnl"] == pytest.approx(exp_pnl)
+        # The displayed OPEN PRICE is the option's roll-day entry PREMIUM (the basis
+        # the count was sized against) — NOT the base-100 synthetic equity. Reported
+        # bug: it showed 100 (positions[label] = 100·equity_ratio at bar 0).
+        assert r["open_price"] == pytest.approx(roll_prem[ob])
+        assert r["open_price"] != pytest.approx(100.0)
+        # And it reconciles with the displayed count: qty·price·M ≈ |w|·NAV_open.
+        assert r["quantity"] * r["open_price"] * m_opt == pytest.approx(
+            abs(r["signed_weight"]) * equity[ob]
+        )
+    # The per-segment P&L reconciles to the leg's total equity change.
+    assert sum(r["segment_pnl"] for r in rows) == pytest.approx(equity[-1] - 100.0)
+
+
+async def test_hold_option_roll_row_close_references_realise_bar(client):
+    """REGRESSION (display-only close bar/price lag): an interior option roll row's
+    displayed CLOSE must reference the bar its P&L telescopes to — the ROLL bar
+    (``close_boundary``, where the resolver books the held contract's roll-day
+    realise mid) — NOT the prior interior bar (``close_boundary - 1``).
+
+    Before the fix ``close_price``/``close_bar`` were measured one bar early, so a
+    roll day carrying a large premium move showed a stale pre-move close (price AND
+    date) alongside the post-move ``segment_pnl`` — the reported "big move, ~0 P&L,
+    dates that don't line up" artifact.  Equity is untouched (display-only).
+
+    Fixture ``HELD_PREMIUM = [30,28,26,24,20,19]``, interior roll at bar 3 →
+    segments ``[0,2]`` and ``[3,5]``.  The held (OLD) contract's roll-day realise mid
+    is ``HELD_PREMIUM[3] = 24`` (the value segment 0's P&L telescopes through); the
+    prior interior bar is ``HELD_PREMIUM[2] = 26``.  They differ, so the fix is
+    observable.  The final segment is unchanged (``close_boundary == close_bar``).
+    """
+    data = await _compute(client, -100)
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    r0, r1 = rows
+    # Interior segment: close references the ROLL bar (3), NOT the interior bar (2).
+    assert r0["close_bar"] == 3
+    assert r0["close_price"] == pytest.approx(_HELD_PREMIUM[3])  # 24.0 (realise mid)
+    assert r0["close_price"] != pytest.approx(_HELD_PREMIUM[2])  # not 26.0 (one early)
+    # Final segment is unchanged: close_boundary == close_bar == last bar.
+    assert r1["close_bar"] == len(_HELD_PREMIUM) - 1
+    assert r1["close_price"] == pytest.approx(_HELD_PREMIUM[-1])  # 19.0
+    # Internal consistency: the displayed close price is the held-premium value at
+    # the row's OWN close_bar — open/close/pnl now all reconcile at the same bar.
+    for r in rows:
+        assert r["close_price"] == pytest.approx(_HELD_PREMIUM[r["close_bar"]])
+
+
+async def test_hold_option_roll_rows_sign_correct_with_nan_tail_premium(monkeypatch):
+    """REGRESSION (the reported bug): a profitable SHORT put whose held-premium
+    series has TRAILING NaNs (real 10Δ-put shape — quotes only for the first
+    contract) must show each roll segment's P&L correctly-signed and FINITE.
+
+    Before the fix, ``segment_pnl`` was ``sign·qty·Δpremium·M`` off the DAILY held
+    premium, which is NaN at the later segments' open/close bars → null; the FE then
+    fell back to ``(close/open−1)·signed_weight`` on the leg SYNTHETIC (direction
+    already baked) → double-inverted a profitable short to NEGATIVE.  The fix derives
+    the segment P&L from the accumulator equity (``synthetic − 100``, telescoping)
+    and sizes the count off the roll-day premium — both NaN-safe.
+    """
+    # Held premium quoted only for the first contract (bars 0–2), NaN after — the
+    # first segment's CLOSE bar (3) and the second segment's OPEN bar (4) are both in
+    # the NaN region, exactly where the old qty·Δpremium path nulled.  is_roll opens
+    # at bar 0 and rolls (interior) at bar 4; roll_premium is finite at both.
+    dates_int = np.array(
+        [20240101, 20240102, 20240103, 20240104, 20240105, 20240106], dtype=np.int64
+    )
+    held_premium = np.array([30.0, 28.0, 26.0, np.nan, np.nan, np.nan])
+    is_roll = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    roll_premium = np.array([30.0, np.nan, np.nan, np.nan, 15.0, np.nan])
+
+    def _nan_tail_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True,
+            held_premium=held_premium,
+            is_roll=is_roll,
+            roll_premium=roll_premium,
+            dates_int=dates_int,
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _nan_tail_fetcher)
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = MagicMock()
+    application.state.app_db_repo = object()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        body = {
+            "legs": {"P": _hold_put_leg()},
+            "weights": {"P": -100},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-01-06",
+        }
+        resp = await ac.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+    equity = np.array(data["portfolio_equity"], dtype=np.float64)
+    # The short put is PROFITABLE: premium fell 30→26 before quotes stopped, so the
+    # synthetic RISES above 100 (and holds flat once premium is NaN).
+    assert equity[-1] > 100.0
+
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    seg_pnls = [r["segment_pnl"] for r in rows]
+
+    # (a) every segment P&L is FINITE (old code → None on the NaN bars).
+    for v in seg_pnls:
+        assert v is not None and np.isfinite(v)
+    # (b) the profitable first segment (synthetic rises) is POSITIVE — the sign fix.
+    assert seg_pnls[0] > 0.0
+    # (c) the segments telescope to the leg's total equity change.
+    assert sum(seg_pnls) == pytest.approx(equity[-1] - 100.0)
+    # (d) the contract count is finite (sized off the roll-day premium, not the
+    #     NaN daily premium — old code nulled segment 1's count).
+    for r in rows:
+        assert r["quantity"] is not None and np.isfinite(r["quantity"])
+
+
+async def test_multi_leg_option_roll_pnl_scales_with_weight(client):
+    """MAJOR-defect regression: an option roll row's ``segment_pnl`` must be
+    weight/NAV-scaled dollars (``|w|·NAV_open·leg_return``) — the SAME unit + scaling
+    as the continuous-futures rows in the same column — NOT the weight-agnostic
+    base-100 leg unit.  Two hold option legs (put −70, call −30) share the same
+    premium fixture (identical leg return) and the same portfolio NAV at each open
+    bar, so their per-segment P&L ratio must be purely the weight ratio 70:30.
+
+    Before the fix (segment_pnl = synthetic[boundary] − synthetic[open], weight-
+    agnostic) the two legs' identical synthetics gave IDENTICAL P&L → ratio 1; this
+    test is the one that catches that.  After the fix the ratio is 70/30.
+    """
+    body = {
+        "legs": {
+            "P": _hold_put_leg(),
+            "C": {**_hold_put_leg(), "option_type": "C"},
+        },
+        "weights": {"P": -70, "C": -30},
+        "rebalance": "none",
+        "return_type": "normal",
+        "start": "2024-03-01",
+        "end": "2024-04-30",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    p_rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    c_rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:C"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(p_rows) == 2 and len(c_rows) == 2
+    # Each segment: the −70 leg's P&L is 70/30× the −30 leg's (pure weight ratio).
+    for pr, cr in zip(p_rows, c_rows):
+        assert pr["segment_pnl"] == pytest.approx(cr["segment_pnl"] * (70.0 / 30.0))
+        assert pr["segment_pnl"] != pytest.approx(cr["segment_pnl"])  # weight matters
+
+    # …and the −70 leg's P&L is NOT its sole-−100 value (weight now scales it): a
+    # single full-weight leg's seg0 = synthetic[boundary]−100, the −70 leg's is
+    # 0.70×that.
+    sole = await _compute(client, -100)
+    sole_rows = sorted(
+        (t for t in sole["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert p_rows[0]["segment_pnl"] == pytest.approx(0.70 * sole_rows[0]["segment_pnl"])
+    assert p_rows[0]["segment_pnl"] != pytest.approx(sole_rows[0]["segment_pnl"])
+
+
+async def test_hold_option_roll_rows_display_only_equity_metrics_byte_identical(
+    client, monkeypatch
+):
+    """HARD GATE (option path): toggling the per-roll display rows must leave
+    portfolio equity + ALL metrics + monthly/yearly returns BYTE-identical.  This
+    mirrors the continuous-path byte-identity gate
+    (``test_roll_rows_are_display_only_equity_metrics_byte_identical``), which the
+    option path previously covered only with an oracle ``assert_allclose``.  We
+    compare the SAME production compute path WITH vs WITHOUT the rows (by stubbing
+    ``_build_roll_rows`` to emit nothing), so the numeric equality is exact — not
+    subject to oracle-vs-production last-ULP drift in the synthetic itself."""
+    # 1. WITH the rows (normal path): assert roll rows are actually produced, else
+    #    the gate is vacuous.
+    data_with = await _compute(client, -100)
+    assert any(t.get("entry_block_id") == "roll:P" for t in data_with["trades"])
+
+    # 2. WITHOUT the rows: stub the builder to emit nothing, recompute.
+    monkeypatch.setattr("tcg.core.api.portfolio._build_roll_rows", lambda **kw: [])
+    data_without = await _compute(client, -100)
+    assert not any(t.get("entry_block_id") == "roll:P" for t in data_without["trades"])
+
+    # 3. Every numeric output is byte-identical across the toggle.
+    for key in ("portfolio_equity", "metrics", "monthly_returns", "yearly_returns"):
+        assert data_with[key] == data_without[key], key
+
+
+async def test_futures_notional_option_roll_row_count_follows_sizing_mode(monkeypatch):
+    """D1: a ``sizing_mode == "futures_notional"`` option leg's roll-row COUNT is
+    sized off the FUTURES notional ``|w|·NAV/(F_ref·m_fut)`` — DISTINCT from the
+    premium-notional count ``|w|·NAV/(premium·m_opt)`` — while the per-segment P&L
+    stays on the premium with the leg's own multiplier."""
+    from tcg.core.api.portfolio import _leg_multiplier_and_unit
+    from tcg.core.api.portfolio import router as portfolio_router
+
+    # Reference-future price finite only at the roll bars (0 and 3), where each
+    # roll-row segment opens; m_fut = m_opt = 50 (SP_500).
+    roll_fref = np.array([4500.0, np.nan, np.nan, 4520.0, np.nan, np.nan])
+    m_fut = 50.0
+
+    def _fut_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True, roll_future_ref=roll_fref, multipliers=(m_fut, m_fut)
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _fut_fetcher)
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = MagicMock()
+    application.state.app_db_repo = object()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        body = {
+            "legs": {"P": {**_hold_put_leg(), "sizing_mode": "futures_notional"}},
+            "weights": {"P": -100},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-03-01",
+            "end": "2024-04-30",
+        }
+        resp = await ac.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    equity = np.array(data["portfolio_equity"], dtype=np.float64)
+    m_opt, _unit = _leg_multiplier_and_unit("OPT_SP_500")
+    roll_prem = _ROLL_PREMIUM
+    boundaries = [3, len(equity) - 1]
+    for r, boundary in zip(rows, boundaries):
+        ob = r["open_bar"]
+        # D1 count = futures-notional value.
+        exp_fn = abs(r["signed_weight"]) * equity[ob] / (roll_fref[ob] * m_fut)
+        assert r["quantity"] == pytest.approx(exp_fn)
+        # …and it is DISTINCT from the premium-notional count it USED to show.
+        exp_premium = abs(r["signed_weight"]) * equity[ob] / (roll_prem[ob] * m_opt)
+        assert r["quantity"] != pytest.approx(exp_premium)
+        # P&L is the leg equity change across the segment (accumulator-derived).
+        assert r["segment_pnl"] == pytest.approx(equity[boundary] - equity[ob])
+    assert sum(r["segment_pnl"] for r in rows) == pytest.approx(equity[-1] - 100.0)
+
+
 # ── THE acceptance oracle ──────────────────────────────────────────────────
 
 
@@ -180,15 +500,81 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
         "tcg.core.api.portfolio.make_signal_fetcher", _fake_make_signal_fetcher
     )
     leg = LegSpec(**_hold_put_leg())
-    dates, values, mode = await _evaluate_option_stream_leg(
+    (
+        dates,
+        values,
+        mode,
+        roll_dates,
+        premium,
+        future_ref,
+        m_fut,
+        roll_premium,
+    ) = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )
     assert mode == "price_hold"
+    # Interior roll boundaries = is_roll dates minus the initial open (20240327):
+    # IS_ROLL = [1,0,0,1,0,0] over DATES_INT → the single interior roll is 20240401.
+    assert roll_dates == [20240401]
+    np.testing.assert_array_equal(np.asarray(premium), _HELD_PREMIUM)
+    # A premium-notional (default) leg leaves the futures-notional side-channels
+    # inert: no reference-future series and a NaN futures multiplier.
+    assert future_ref is None
+    assert np.isnan(m_fut)
+    # The roll-day OPEN premium (finite at roll bars) is threaded out so the roll
+    # row's contract COUNT is sized off it (not the mostly-NaN daily premium).
+    np.testing.assert_array_equal(np.asarray(roll_premium), _ROLL_PREMIUM)
     np.testing.assert_array_equal(dates, _DATES_INT)
     expected = 100.0 * _oracle_ratio(
         _OWNER_PREV, _OWNER_CUR, _IS_ROLL, _ROLL_PREMIUM, nav_times=1.0, weight=-100.0
     )
     np.testing.assert_allclose(values, expected, rtol=1e-12, atol=1e-12)
+
+
+async def test_evaluate_option_stream_leg_futures_notional(monkeypatch):
+    """A portfolio option PRICE leg in futures_notional mode books the futures
+    oracle equity (proves portfolio.py threads roll_future_ref + multipliers)."""
+    from _hold_pnl_oracle import oracle_ratio_futures
+
+    roll_fref = np.array([4500.0, np.nan, np.nan, 4520.0, np.nan, np.nan])
+
+    def _fut_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True,
+            roll_future_ref=roll_fref,
+            multipliers=(50.0, 50.0),  # SP_500
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _fut_fetcher)
+    leg = LegSpec(**_hold_put_leg(), sizing_mode="futures_notional")
+    (
+        dates,
+        values,
+        mode,
+        roll_dates,
+        premium,
+        future_ref,
+        m_fut,
+        roll_premium,
+    ) = await _evaluate_option_stream_leg(
+        "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
+    )
+    assert mode == "price_hold"
+    # futures_notional threads the reference-future series + resolved m_fut out for
+    # the display-only roll-row sizing (D1).
+    np.testing.assert_array_equal(np.asarray(future_ref), roll_fref)
+    assert m_fut == pytest.approx(50.0)
+    expected = 100.0 * oracle_ratio_futures(
+        _OWNER_PREV,
+        _OWNER_CUR,
+        _IS_ROLL,
+        roll_fref,
+        nav_times=1.0,
+        weight=-100.0,
+        m_fut=50.0,
+        m_opt=50.0,
+    )
+    np.testing.assert_allclose(values, expected, rtol=1e-10, atol=1e-10)
 
 
 # ── The abs-weight wiring in isolation (why direction must be applied once) ──

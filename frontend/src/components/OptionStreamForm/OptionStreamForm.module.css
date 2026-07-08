@@ -61,6 +61,12 @@
   width: 5em;
 }
 
+/* Futures-reference dropdown is 150% wider than the default inline input so its
+   labels ("Nearest on/after expiry" / "Nearest (abs distance)") are not clipped. */
+.fieldInline .futuresRefSelect {
+  width: 12.5em;
+}
+
 .radioGroup {
   display: flex;
   gap: 12px;

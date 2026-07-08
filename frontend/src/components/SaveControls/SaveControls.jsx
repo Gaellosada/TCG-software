@@ -28,7 +28,12 @@ function SaveControls({
   leftSlot,
 }) {
   const rootClass = className ? `${styles.root} ${className}` : styles.root;
-  const disabled = !dirty || saveDisabled;
+  // Clean == everything is saved (no unsaved changes). The button reads
+  // TRANSPARENT/muted when clean and SOLID/actionable when dirty — the
+  // "everything saved" vs "you have unsaved work" signal Gael asked for.
+  const clean = !dirty;
+  const disabled = clean || saveDisabled;
+  const btnClass = clean ? `${styles.saveBtn} ${styles.clean}` : styles.saveBtn;
   return (
     <div className={rootClass} data-testid="save-controls">
       {leftSlot !== undefined && (
@@ -36,7 +41,8 @@ function SaveControls({
       )}
       <button
         type="button"
-        className={styles.saveBtn}
+        className={btnClass}
+        data-clean={clean ? 'true' : 'false'}
         onClick={onSave}
         disabled={disabled}
         aria-label="Save"

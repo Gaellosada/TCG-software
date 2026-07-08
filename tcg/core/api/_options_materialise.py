@@ -9,8 +9,6 @@ Public API
 * ``materialise_option_streams``  -- bulk materialiser (N labels)
 * ``_materialise_option_stream``  -- single-label convenience wrapper
 * ``_business_dates_in_range``    -- CME business-day enumeration
-* ``PRICE_LIKE_STREAMS``          -- streams representing price-like values
-* ``LEVEL_STREAMS``               -- streams representing level / greek values
 """
 
 from __future__ import annotations
@@ -33,31 +31,6 @@ from tcg.types.options import (
     OptionContractDoc,
     expand_cycle,
 )
-
-
-# ---------------------------------------------------------------------------
-# Stream classification constants
-# ---------------------------------------------------------------------------
-
-PRICE_LIKE_STREAMS: frozenset[str] = frozenset({"mid"})
-"""Streams whose values are denominated in the same units as the underlying
-price -- i.e. option premium (mid mark).  Portfolio legs using these streams
-produce returns that can be weighted alongside spot / continuous legs."""
-
-LEVEL_STREAMS: frozenset[str] = frozenset(
-    {
-        "iv",
-        "delta",
-        "gamma",
-        "vega",
-        "theta",
-        "open_interest",
-        "volume",
-    }
-)
-"""Streams whose values are dimensionless levels or greeks -- not directly
-comparable to price returns.  Useful as indicator inputs but not as
-standalone portfolio legs without explicit conversion logic."""
 
 
 # ---------------------------------------------------------------------------

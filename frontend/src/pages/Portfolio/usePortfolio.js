@@ -202,6 +202,12 @@ export default function usePortfolio() {
           // SELECT-AND-HOLD (fixed-contract dollar-P&L) — option_stream legs only.
           hold_between_rolls: leg.hold_between_rolls ?? false,
           nav_times: leg.nav_times ?? 1.0,
+          // Option hold-mode SIZING (premium_notional default / futures_notional).
+          // Must be preserved on the internal leg or the compute/persist builders
+          // have nothing to forward and the leg silently falls back to
+          // premium_notional (which wipes a low-premium leg to -100%).
+          sizing_mode: leg.sizing_mode ?? null,
+          futures_reference: leg.futures_reference ?? null,
         },
       ];
     });
@@ -249,6 +255,16 @@ export default function usePortfolio() {
   const setRebalanceAndDirty = useCallback((value) => {
     setRebalance(value);
     setDirty(true);
+  }, []);
+
+  // Mark the current editor state as persisted — clears the ``dirty`` flag
+  // WITHOUT touching legs/name/etc. Called by the page after a SUCCESSFUL
+  // save (manual Save button AND debounced autosave). Without this the flag
+  // was set true on every edit but reset only on load/clear, so the Save
+  // button stayed solid and "Unsaved changes" persisted after a successful
+  // save — the reported "Save does nothing" bug.
+  const markSaved = useCallback(() => {
+    setDirty(false);
   }, []);
 
   const clearAll = useCallback(() => {
@@ -377,6 +393,16 @@ export default function usePortfolio() {
         if (isPremiumLeg || leg.hold_between_rolls) {
           apiLegs[leg.label].hold_between_rolls = true;
           apiLegs[leg.label].nav_times = leg.nav_times ?? 1.0;
+          // SIZING mode for the hold-mode $-P&L. Send ``futures_notional`` (size
+          // off the underlying future's notional) + its reference future ONLY
+          // when chosen — a premium-notional leg stays byte-identical and the
+          // backend applies its default. Without this the compute request always
+          // ran premium_notional, wiping a low-premium (e.g. 10Δ) leg to -100%.
+          if (leg.sizing_mode === 'futures_notional') {
+            apiLegs[leg.label].sizing_mode = 'futures_notional';
+            apiLegs[leg.label].futures_reference =
+              leg.futures_reference || 'nearest_on_or_after';
+          }
         }
         // Roll offset is the unified {value, unit} object — send it only when
         // its value is non-zero (omit the no-op to keep the body minimal; the
@@ -458,6 +484,7 @@ export default function usePortfolio() {
     rebalance,
     setRebalance: setRebalanceAndDirty,
     dirty,
+    markSaved,
     startDate,
     setStartDate,
     endDate,

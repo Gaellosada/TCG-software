@@ -72,6 +72,26 @@ class ContractSpec:
 
 
 @dataclass(frozen=True)
+class FuturesContractMeta:
+    """Lightweight per-contract metadata from ``dim_instrument`` (no price bars).
+
+    Used to select a reference futures contract for futures-notional option sizing:
+    ``symbol`` reads its close/price, ``expiration`` drives the nearest-* choice,
+    and ``contract_size`` is the LIVE ``M_fut`` (NULL where the dwh has none →
+    signed-off config fallback).
+    """
+
+    symbol: str
+    expiration: date
+    contract_size: float | None
+    # dwh ``expiration_cycle`` code ("M" monthly / "W" weekly / "" for
+    # single-cycle roots; None when not sourced).  Used to keep WEEKLY contracts
+    # from becoming a futures-notional sizing reference on multi-cycle roots
+    # (e.g. FUT_VIX lists both monthly 'M' and weekly 'W').
+    expiration_cycle: str | None = None
+
+
+@dataclass(frozen=True)
 class PriceSeries:
     """Columnar OHLCV data for a single instrument.
 

@@ -129,6 +129,14 @@ function PortfolioPage() {
     // SELECT-AND-HOLD (fixed-contract dollar-P&L) — option_stream legs only.
     hold_between_rolls: l.hold_between_rolls ?? false,
     nav_times: l.nav_times ?? 1.0,
+    // Option hold-mode SIZING pass-through. These were dropped here, so a
+    // portfolio option leg ALWAYS fell back to the backend default
+    // ``premium_notional`` — which wipes out a low-premium (e.g. 10Δ) leg
+    // (qty = NAV/premium ⇒ enormous leverage). Emit ONLY when set so an
+    // untouched leg stays byte-identical AND the backend applies its defaults
+    // (``sizing_mode`` is a non-optional Literal — never send null).
+    ...(l.sizing_mode ? { sizing_mode: l.sizing_mode } : {}),
+    ...(l.futures_reference ? { futures_reference: l.futures_reference } : {}),
   })), []);
 
   // Save current portfolio state to backend in the selected category.
@@ -149,6 +157,9 @@ function PortfolioPage() {
       });
       setOneshotError(null);
       setOneshotStatus('saved');
+      // Just persisted — clear the dirty flag so the Save button reflects the
+      // saved state (same as the update path in handleCloudSave).
+      portfolio.markSaved();
       portfolio.setPersistedId(id);
       portfolio.setPersistedCategory(category);
       // Make sure the portfolioName state reflects what we just saved
@@ -167,7 +178,7 @@ function PortfolioPage() {
     saveInput,
     portfolio.portfolioName, portfolio.persistedCategory, portfolio.legs, portfolio.rebalance,
     portfolio.setPersistedId, portfolio.setPersistedCategory, portfolio.setPortfolioName,
-    invalidate, legsToWire,
+    portfolio.markSaved, invalidate, legsToWire,
   ]);
 
   // Move a persisted portfolio to a different category. Preserves all
@@ -335,6 +346,21 @@ function PortfolioPage() {
   // can read the current dirty state without a closure dependency.
   cloudDirtyRef.current = cloudDirty;
 
+  // Drive the Save button off the SAME content-diff as the autosave
+  // enable-gate (``cloudDirty``) rather than usePortfolio's MONOTONIC
+  // ``dirty`` flag. Otherwise: edit a leg then REVERT it before the debounce
+  // fires → cloudDirty recomputes false → autosave never fires → markSaved
+  // is never called → the monotonic flag stays true forever → the button
+  // falsely shows "unsaved" on byte-identical content (FE-SAVE-1). Gating the
+  // touched flag on cloudDirty also keeps the button clean right after a
+  // create (markSaved has cleared ``dirty``) instead of flickering dirty
+  // until the post-create list refetch reseeds ``lastSeenPayloadRef``. A
+  // not-yet-persisted portfolio has no backend snapshot to diff against, so
+  // fall back to the touched flag alone so a brand-new portfolio is savable.
+  const buttonContentDirty = portfolio.persistedId
+    ? (portfolio.dirty && cloudDirty)
+    : portfolio.dirty;
+
   // Ref to the autosave hook's reset() so the locked-save handler (declared
   // before the hook) can clear a transient 'saving'/'error' status when it
   // flips the portfolio to locked. Seeded just below the hook.
@@ -373,14 +399,22 @@ function PortfolioPage() {
       id: portfolio.persistedId,
       payload: payloadStr,
     };
+    // The editor state is now persisted — clear the ``dirty`` flag so the
+    // Save button goes transparent and "Unsaved changes" clears. Covers BOTH
+    // the manual Save button (saveNow) and debounced autosave, since both
+    // route through this handler. Only reached on a non-aborted success (the
+    // abort guard above returns first, and errors throw before here), so a
+    // failed save correctly leaves the editor dirty.
+    portfolio.markSaved();
     // Note: we intentionally do NOT re-fetch the full portfolio list after
     // every autosave — it would cause flicker and reset scroll position
     // during rapid editing. The local state is authoritative until a
     // category change, add, or archive operation.
-  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked]);
+  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved]);
 
   const {
     status: cloudStatus,
+    saveNow: saveNowCloud,
     reset: resetCloudStatus,
   } = useBackendAutosave({
     enabled: !!portfolio.persistedId && cloudDirty && portfolio.autosave && !portfolio.persistedLocked,
@@ -426,23 +460,46 @@ function PortfolioPage() {
   // modal opens read-only (view-only) per the picker contract.
   const handleEditLeg = useCallback((index) => setEditLegIndex(index), []);
 
-  // "Save" button: if we already have a persistedId, this is a no-op
-  // (autosave handles it). If not, create a new portfolio in the backend.
+  // "Save" button. Not yet persisted → create in the backend. Already
+  // persisted → persist the CURRENT state IMMEDIATELY via ``saveNow``
+  // (the old code was a no-op that relied entirely on autosave, so with
+  // autosave off clicking Save saved nothing).
   const handleSave = useCallback(() => {
-    if (portfolio.persistedId) {
-      // Already persisted — the autosave will push changes. We could
-      // force a flush here, but a manual rename (changing saveInput)
-      // already triggers the cloudPayload change → autosave debounce.
-      // Update the name if the user typed a new one.
-      const name = saveInput.trim();
-      if (name && name !== portfolio.portfolioName) {
-        portfolio.setPortfolioName(name);
-      }
+    if (portfolio.persistedLocked) return;
+    if (!portfolio.persistedId) {
+      // Not yet persisted — create in backend.
+      handleCreatePortfolio();
       return;
     }
-    // Not yet persisted — create in backend.
-    handleCreatePortfolio();
-  }, [saveInput, portfolio.persistedId, portfolio.portfolioName, portfolio.setPortfolioName, handleCreatePortfolio]);
+    // Apply a pending rename typed into the name input.
+    const name = saveInput.trim();
+    if (name && name !== portfolio.portfolioName) {
+      portfolio.setPortfolioName(name);
+    }
+    // Persist now. ``setPortfolioName`` above is async (state has not
+    // propagated into ``cloudPayload`` yet), so build the payload with
+    // the just-entered name explicitly and hand it to ``saveNow`` to
+    // avoid a stale-payload race.
+    const overridePayload = JSON.stringify({
+      name: name || portfolio.portfolioName || 'Portfolio',
+      category: portfolio.persistedCategory,
+      legs: legsToWire(portfolio.legs),
+      rebalance: portfolio.rebalance || 'none',
+    });
+    saveNowCloud(overridePayload);
+  }, [
+    saveInput,
+    portfolio.persistedId,
+    portfolio.persistedLocked,
+    portfolio.portfolioName,
+    portfolio.persistedCategory,
+    portfolio.legs,
+    portfolio.rebalance,
+    portfolio.setPortfolioName,
+    legsToWire,
+    handleCreatePortfolio,
+    saveNowCloud,
+  ]);
 
   return (
     <div className={styles.page}>
@@ -493,7 +550,7 @@ function PortfolioPage() {
             <SaveControls
               dirty={
                 !portfolio.persistedLocked && (
-                  portfolio.dirty
+                  buttonContentDirty
                   || (saveInput.trim() !== '' && saveInput.trim() !== portfolio.portfolioName)
                 )
               }
@@ -752,6 +809,15 @@ function PortfolioPage() {
                       exitDescriptions[b.id] = typeof b.description === 'string' ? b.description : '';
                     }
                   }
+                }
+              }
+              // Roll rows (rolling direct legs) carry their own hover text
+              // ("rolling <input name>") on the trade; surface it through the
+              // same descriptions channel, keyed by the row's roll:<label> id.
+              for (const tr of trades) {
+                if (typeof tr.roll_hover === 'string' && tr.roll_hover) {
+                  if (tr.entry_block_id) entryDescriptions[tr.entry_block_id] = tr.roll_hover;
+                  if (tr.exit_block_id) exitDescriptions[tr.exit_block_id] = tr.roll_hover;
                 }
               }
               return (

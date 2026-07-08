@@ -1,7 +1,7 @@
 // Pure, side-effect-free maths for the option-leg implied-leverage readout.
 //
-// The hold form sizes an option leg by ``nav_times`` (shown as "Size (% of
-// NAV)"): premium notional deployed = nav_times x NAV.  The corresponding
+// The hold form sizes an option leg by ``nav_times`` (shown as "Size", a raw
+// multiplier): premium notional deployed = nav_times x NAV.  The corresponding
 // UNDERLYING notional the position controls is a much larger multiple of NAV —
 // that multiple is the implied leverage, and it is what makes a naked/short
 // option leg able to wipe out equity.  Surfacing it as a concrete number turns
@@ -13,14 +13,14 @@
 // nav_times x NAV, the held quantity is q = nav_times x NAV / premium; the
 // underlying notional it controls is q x strike = nav_times x NAV x
 // strike/premium = leverage x NAV.  So only ONE representative (strike,
-// premium) pair is needed from the backend; the nav_times (Size%) scaling is
-// entirely client-side (recompute on Size% change WITHOUT refetching).
+// premium) pair is needed from the backend; the nav_times (Size) scaling is
+// entirely client-side (recompute on Size change WITHOUT refetching).
 
 // Colour bands by implied leverage.  Single named constant so the thresholds
 // are trivial to tune.  green < amber-threshold ; amber up to red-threshold ;
 // red beyond.  (A 10-delta put premium is ~0.3-0.6% of strike, so a full-
-// notional short at Size%=100 lands deep in the red at ~150-300x.)
-// NOTE: the Help page ("Implied leverage on the Size % field" in
+// notional short at Size=1 lands deep in the red at ~150-300x.)
+// NOTE: the Help page ("Implied leverage on the Size field" in
 // pages/Help/HelpPage.jsx) mirrors these thresholds (2×, 10×) in prose — keep
 // both in sync if you tune them (HelpPage.test.jsx derives its assertion here).
 export const LEVERAGE_BANDS = { amber: 2, red: 10 };
@@ -70,11 +70,11 @@ export function premiumPctOfStrike(strike, premiumMid) {
 }
 
 /**
- * The premium multiple that wipes equity at this Size%.  For a short leg sized
+ * The premium multiple that wipes equity at this Size.  For a short leg sized
  * at navFraction of NAV, loss = navFraction x NAV x (f - 1), so equity is gone
  * when f = 1 + 1/navFraction (independent of strike/premium — it is a function
- * of the SIZE only).  At Size%=100 (navFraction=1) a mere 2x premium spike
- * wipes out; at Size%=33 it takes ~4x.
+ * of the SIZE only).  At Size=1 (navFraction=1) a mere 2x premium spike
+ * wipes out; at Size=0.33 it takes ~4x.
  * @returns {number|null}
  */
 export function wipeoutFactor(navFraction) {

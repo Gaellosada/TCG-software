@@ -12,9 +12,15 @@
   background: var(--bg-surface);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-lg);
-  width: 480px;
-  max-width: 90vw;
-  max-height: 70vh;
+  /* Single source of picker-modal sizing — used by BOTH the Signals
+     (InstrumentPickerModal) and Portfolio (AddHoldingModal wraps this modal)
+     flows, so the size is identical everywhere by construction (UI-consistency
+     rule). Widened from 480 → 760 and 70 → 85vh: the option-stream form carries
+     many rows (root / cycle / maturity / selection / series / hold / sizing) that
+     the old size cramped. */
+  width: 760px;
+  max-width: 92vw;
+  max-height: 85vh;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-md);

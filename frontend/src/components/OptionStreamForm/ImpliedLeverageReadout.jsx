@@ -12,14 +12,15 @@ import {
 /**
  * Live implied-leverage readout for an option-leg "hold" form.
  *
- * Surfaces the UNDERLYING notional the ``nav_times`` (Size %) sizing controls
- * as a concrete multiple of NAV — turning the qualitative wipeout warning into
- * a number.  It DEBOUNCED-probes ONE representative (strike, premium_mid) for
- * the currently-configured contract via GET /api/options/select, then computes
- * leverage = navFraction x strike / premium_mid entirely client-side.  Changing
- * Size% recomputes the number WITHOUT refetching (navFraction is not a fetch
- * dependency); only the contract-defining fields (root / type / criterion /
- * maturity) + the reference date trigger a new probe.
+ * Surfaces the UNDERLYING notional the ``nav_times`` (Size multiplier) sizing
+ * controls as a concrete multiple of NAV — turning the qualitative wipeout
+ * warning into a number.  It DEBOUNCED-probes ONE representative (strike,
+ * premium_mid) for the currently-configured contract via GET /api/options/select,
+ * then computes leverage = navFraction x strike / premium_mid entirely
+ * client-side.  Changing the Size multiplier recomputes the number WITHOUT
+ * refetching (navFraction is not a fetch dependency); only the contract-defining
+ * fields (root / type / criterion / maturity) + the reference date trigger a new
+ * probe.
  *
  * Graceful degradation: while loading, on any error, on an unresolvable
  * selection, or when the premium is missing/zero, it renders the existing
@@ -30,12 +31,12 @@ import {
  * Props:
  *   streamValue    the OptionStreamForm value (collection / option_type /
  *                  cycle / maturity / selection).
- *   navFraction    the current nav_times fraction (1.0 = 100% of NAV).
+ *   navFraction    the current nav_times multiplier (1.0 = full NAV premium).
  *   availableRoots roots list (for the last_trade_date reference-date fallback).
  *   referenceDate  optional YYYY-MM-DD string (or Date) — the date at which to
  *                  probe; falls back to the selected root's last_trade_date.
  *   onBand         optional (band|null) => void — lets the parent tint the
- *                  Size% input by the leverage band.
+ *                  Size input by the leverage band.
  */
 
 export const BAND_COLORS = { green: '#1a7f37', amber: '#9a6700', red: '#cf222e' };
@@ -139,7 +140,7 @@ export default function ImpliedLeverageReadout({
     if (abortRef.current) abortRef.current.abort();
   }, []);
 
-  // Client-side leverage from the probed (strike, premium) + CURRENT Size%.
+  // Client-side leverage from the probed (strike, premium) + CURRENT Size.
   const leverage = computeImpliedLeverage({
     navFraction,
     strike: probe.strike,
@@ -159,9 +160,9 @@ export default function ImpliedLeverageReadout({
     return (
       <span data-testid="nav-hint" style={{ fontSize: '0.85em', opacity: 0.8 }}>
         {probe.status === 'loading' ? 'Estimating leverage… ' : ''}
-        A short/naked option at full notional (100%) can wipe out (a 10Δ put
-        premium can triple on a selloff → &gt;100% loss). Use a small percentage
-        to size the premium notional.
+        A short/naked option at full notional (Size 1) can wipe out (a 10Δ put
+        premium can triple on a selloff → &gt;100% loss). Use a small Size to
+        keep the premium notional modest.
       </span>
     );
   }

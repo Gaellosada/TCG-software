@@ -3,7 +3,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
-import TradeLog, { formatSignedPercent } from './TradeLog';
+import TradeLog, { formatSignedPercent, formatQuantity, formatSignedAmount, formatPrice } from './TradeLog';
 
 afterEach(cleanup);
 
@@ -223,10 +223,8 @@ describe('<TradeLog>', () => {
     expect(screen.getByTestId('trade-exit-reason').textContent).toBe('(unnamed)');
   });
 
-  it('P&L toggle: defaults to Realised, switching to Log changes header and value', () => {
-    // open=100, close=110, signed_weight=1.0
-    // Realised: (110/100 - 1)*1 = 0.10 → +10.00%
-    // Log:      ln(110/100)*1  ≈ 0.09531 → +9.53%
+  it('P&L header is a static "Realised P&L" (no mode toggle)', () => {
+    // open=100, close=110, signed_weight=1.0 → realised (110/100 - 1)*1 = +10.00%.
     const trades = [{
       input_id: 'X',
       entry_block_id: 'e1',
@@ -239,40 +237,17 @@ describe('<TradeLog>', () => {
       signed_weight: 1.0,
     }];
     const positions = [pos('X', [100, 110])];
-    render(<TradeLog
-      trades={trades}
-      timestamps={TS}
-      positions={positions}
-    />);
+    render(<TradeLog trades={trades} timestamps={TS} positions={positions} />);
     fireEvent.click(screen.getByTestId('trade-log-toggle'));
 
-    // Default: Realised P&L header and value
     expect(screen.getByTestId('pnl-col-header').textContent).toBe('Realised P&L');
     const rows = screen.getAllByTestId('trade-row');
     expect(rows[0].textContent).toContain('+10.00%');
 
-    // Switch to Log
-    fireEvent.click(screen.getByRole('button', { name: 'Log' }));
-    expect(screen.getByTestId('pnl-col-header').textContent).toBe('Log P&L');
-    // ln(110/100) ≈ 0.09531, *100 = 9.531 → "+9.53%"
-    expect(rows[0].textContent).toContain('+9.53%');
-
-    // Switch back to Realised
-    fireEvent.click(screen.getByRole('button', { name: 'Realised' }));
-    expect(screen.getByTestId('pnl-col-header').textContent).toBe('Realised P&L');
-    expect(rows[0].textContent).toContain('+10.00%');
-  });
-
-  it('clicking the P&L toggle does NOT collapse the panel', () => {
-    render(<TradeLog trades={[]} timestamps={TS} positions={[]} />);
-    fireEvent.click(screen.getByTestId('trade-log-toggle'));
-    expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
-
-    // Click one of the toggle pills — panel must stay open.
-    fireEvent.click(screen.getByRole('button', { name: 'Log' }));
-    expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Realised' }));
-    expect(screen.getByTestId('trade-log-empty')).toBeTruthy();
+    // The Realised/Log mode toggle is GONE (removed with the log P&L mode).
+    expect(screen.queryByTestId('pnl-mode-toggle')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Log' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Realised' })).toBeNull();
   });
 
   it('reason cell exposes the exit block description as a tooltip', () => {
@@ -507,6 +482,90 @@ describe('open-trade PnL using last available price', () => {
   });
 });
 
+describe('Size column — quantity counts vs % fallback (shared component)', () => {
+  const baseTrade = {
+    input_id: 'X',
+    entry_block_id: 'e1',
+    entry_block_name: 'E',
+    exit_block_id: 'x1',
+    exit_block_name: 'X',
+    open_bar: 0,
+    close_bar: 1,
+    direction: 'long',
+    signed_weight: 0.6,
+  };
+  const positions = [pos('X', [100, 110])];
+
+  function renderTrade(overrides) {
+    render(<TradeLog trades={[{ ...baseTrade, ...overrides }]} timestamps={TS} positions={positions} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    return screen.getByTestId('trade-size');
+  }
+
+  it('SC1: finite quantity + unit → renders "<count> <unit>", not a %', () => {
+    const cell = renderTrade({ quantity: 12.34, quantity_unit: 'contracts', multiplier: 50 });
+    expect(cell.textContent).toBe('12.34 contracts');
+    expect(cell.textContent).not.toContain('%');
+  });
+
+  it('SC1: large share count is grouped, not scientific', () => {
+    const cell = renderTrade({ quantity: 1432, quantity_unit: 'shares', multiplier: 1 });
+    expect(cell.textContent).toBe('1,432 shares');
+  });
+
+  it('SC3: quantity null (key present) → em-dash, NOT a % fallback', () => {
+    const cell = renderTrade({ quantity: null, quantity_unit: 'contracts', multiplier: null });
+    expect(cell.textContent).toBe('—');
+    expect(cell.textContent).not.toContain('%');
+  });
+
+  it('SC4: no quantity KEY (Signals-style payload) → still renders the % fallback', () => {
+    // baseTrade has no `quantity` key → shared Signals usage unchanged.
+    const cell = renderTrade({});
+    expect(cell.textContent).toBe('+60.00%');
+  });
+
+  it('tiny fractional futures count renders fractionally without NaN/scientific garbage', () => {
+    const cell = renderTrade({ quantity: 0.0004, quantity_unit: 'contracts', multiplier: 50 });
+    expect(cell.textContent).toBe('0.0004 contracts');
+    expect(cell.textContent).not.toMatch(/e|NaN|Infinity/i);
+  });
+
+  it('magnitude only: negative quantity renders unsigned (sign is in Direction column)', () => {
+    const cell = renderTrade({ quantity: -7.5, quantity_unit: 'contracts', direction: 'short', signed_weight: -0.6 });
+    expect(cell.textContent).toBe('7.5 contracts');
+  });
+});
+
+describe('formatQuantity', () => {
+  it('formats a small fractional count with its unit', () => {
+    expect(formatQuantity(0.0004, 'contracts')).toBe('0.0004 contracts');
+  });
+  it('groups large counts and never uses scientific notation', () => {
+    expect(formatQuantity(1432, 'shares')).toBe('1,432 shares');
+  });
+  it('preserves full integer precision for large counts (no sig-fig rounding)', () => {
+    // Regression: maximumSignificantDigits:4 would render 14325 as "14,320".
+    expect(formatQuantity(14325, 'shares')).toBe('14,325 shares');
+  });
+  it('rounds |qty|>=1 to 2 decimals', () => {
+    expect(formatQuantity(12.34567, 'contracts')).toBe('12.35 contracts');
+  });
+  it('keeps sub-1 fractions meaningful (4 significant digits)', () => {
+    expect(formatQuantity(0.0004123, 'contracts')).toBe('0.0004123 contracts');
+  });
+  it('non-finite → em-dash (guards NaN/Infinity/null)', () => {
+    expect(formatQuantity(NaN, 'contracts')).toBe('—');
+    expect(formatQuantity(Infinity, 'shares')).toBe('—');
+    expect(formatQuantity(null, 'shares')).toBe('—');
+    expect(formatQuantity(undefined, 'shares')).toBe('—');
+  });
+  it('missing/blank unit → number only', () => {
+    expect(formatQuantity(5)).toBe('5');
+    expect(formatQuantity(5, '  ')).toBe('5');
+  });
+});
+
 describe('formatSignedPercent', () => {
   it('formats +0.1 as "+10.00%" without FP truncation artefacts', () => {
     // Regression: (0.1 * 100) === 10.000000000000009 under Math.trunc — toFixed avoids it.
@@ -519,5 +578,207 @@ describe('formatSignedPercent', () => {
 
   it('formats 0 as "0.00%"', () => {
     expect(formatSignedPercent(0)).toBe('0.00%');
+  });
+});
+
+describe('roll rows (rolling direct legs)', () => {
+  // A continuous leg with one interior roll → two segment rows: open→rolling,
+  // rolling→end. Each carries a contract quantity + a backend dollar segment_pnl
+  // + a per-leg roll_hover surfaced through the descriptions channel.
+  const rollTrades = [
+    {
+      input_id: 'FUT_SP_500',
+      entry_block_id: 'roll:SPX',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:SPX',
+      exit_block_name: 'rolling',
+      open_bar: 0,
+      close_bar: 1,
+      direction: 'long',
+      signed_weight: 1.0,
+      quantity: 0.02,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: 1.0,
+      roll_hover: 'rolling FUT_SP_500',
+    },
+    {
+      input_id: 'FUT_SP_500',
+      entry_block_id: 'roll:SPX',
+      entry_block_name: 'rolling',
+      exit_block_id: 'roll:SPX',
+      exit_block_name: 'end',
+      open_bar: 2,
+      close_bar: 4,
+      direction: 'long',
+      signed_weight: 1.0,
+      quantity: 0.02,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: -2.0,
+      roll_hover: 'rolling FUT_SP_500',
+    },
+  ];
+
+  it('renders open/rolling/end reasons with the per-leg hover text', () => {
+    render(<TradeLog
+      trades={rollTrades}
+      timestamps={TS}
+      positions={[pos('FUT_SP_500', [100, 101, 102, 103, 104])]}
+      entryDescriptions={{ 'roll:SPX': 'rolling FUT_SP_500' }}
+      exitDescriptions={{ 'roll:SPX': 'rolling FUT_SP_500' }}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+
+    const entryReasons = screen.getAllByTestId('trade-entry-reason');
+    const exitReasons = screen.getAllByTestId('trade-exit-reason');
+    expect(entryReasons.map((e) => e.textContent)).toEqual(['open', 'rolling']);
+    expect(exitReasons.map((e) => e.textContent)).toEqual(['rolling', 'end']);
+    // Hover text = "rolling <input name>" on both cells.
+    expect(entryReasons[0].getAttribute('title')).toBe('rolling FUT_SP_500');
+    expect(exitReasons[1].getAttribute('title')).toBe('rolling FUT_SP_500');
+  });
+
+  it('Size cell shows contract counts and P&L cell shows the dollar segment_pnl', () => {
+    render(<TradeLog
+      trades={rollTrades}
+      timestamps={TS}
+      positions={[pos('FUT_SP_500', [100, 101, 102, 103, 104])]}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+
+    const sizes = screen.getAllByTestId('trade-size');
+    expect(sizes[0].textContent).toBe('0.02 contracts');
+
+    const pnls = screen.getAllByTestId('trade-pnl');
+    // segment_pnl is a signed DOLLAR amount, not a percentage.
+    expect(pnls[0].textContent).toBe('+1.00');
+    expect(pnls[1].textContent).toBe('-2.00');
+  });
+
+  it('option roll row shows the contract PREMIUM as open/close price, not the base-100 synthetic', () => {
+    // Reported bug: the open price showed 100. An option leg's position series is
+    // the base-100 synthetic equity, so the row carries explicit open_price/
+    // close_price (the premium); the FE must prefer them over the position series.
+    const optionRoll = [{
+      input_id: 'P',
+      entry_block_id: 'roll:P',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:P',
+      exit_block_name: 'end',
+      open_bar: 0,
+      close_bar: 2,
+      direction: 'short',
+      signed_weight: -1.0,
+      quantity: 9.76,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: 100.0,
+      roll_hover: 'rolling OPT_SP_500',
+      open_price: 10.25,   // the roll-day entry premium
+      close_price: 3.5,    // last observed premium
+    }];
+    render(<TradeLog
+      trades={optionRoll}
+      timestamps={TS}
+      // position series is the SYNTHETIC equity (starts at 100) — must NOT be shown as price
+      positions={[pos('P', [100, 150, 200])]}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+
+    const openPrices = screen.getAllByTestId('trade-open-price');
+    const closePrices = screen.getAllByTestId('trade-close-price');
+    expect(openPrices[0].textContent).toBe(formatPrice(10.25));
+    expect(openPrices[0].textContent).not.toBe(formatPrice(100));
+    expect(closePrices[0].textContent).toBe(formatPrice(3.5));
+  });
+
+  it('non-roll trades keep the percentage P&L (segment_pnl absent)', () => {
+    const trades = [{
+      input_id: 'X',
+      entry_block_id: 'e1',
+      entry_block_name: 'EntryA',
+      exit_block_id: 'x1',
+      exit_block_name: 'ExitA',
+      open_bar: 0,
+      close_bar: 2,
+      direction: 'long',
+      signed_weight: 1.0,
+    }];
+    render(<TradeLog trades={trades} timestamps={TS} positions={[pos('X', [100, 105, 110])]} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    // (110/100 - 1) * 1.0 = +10.00%.
+    expect(screen.getByTestId('trade-pnl').textContent).toBe('+10.00%');
+  });
+
+  it('roll row with null segment_pnl renders em-dash (never the synthetic %)', () => {
+    // A roll row whose backend segment_pnl is null must NOT fall back to
+    // computePnl on the leg synthetic (which would double-invert the short) —
+    // it renders em-dash. The position price series is the leg SYNTHETIC equity
+    // that rises (a profitable short), which the old fallback would have shown
+    // as a large negative percentage.
+    const trades = [{
+      input_id: 'P',
+      entry_block_id: 'roll:P',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:P',
+      exit_block_name: 'end',
+      open_bar: 0,
+      close_bar: 4,
+      direction: 'short',
+      signed_weight: -1.0,
+      quantity: 3.33,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: null,
+      roll_hover: 'rolling OPT_SP_500',
+    }];
+    // Synthetic RISES 100→200 (profitable short); the buggy fallback
+    // (200/100−1)·(−1) = −100% must NOT appear.
+    render(<TradeLog trades={trades} timestamps={TS} positions={[pos('P', [100, 130, 160, 180, 200])]} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const cell = screen.getByTestId('trade-pnl');
+    expect(cell.textContent).toBe('—');
+    expect(cell.textContent).not.toContain('%');
+    expect(cell.textContent).not.toContain('-100');
+  });
+
+  it('profitable short roll row shows a POSITIVE dollar segment_pnl (not inverted)', () => {
+    // The backend now supplies a correctly-signed dollar segment_pnl for a
+    // profitable short; it is shown verbatim and positive.
+    const trades = [{
+      input_id: 'P',
+      entry_block_id: 'roll:P',
+      entry_block_name: 'open',
+      exit_block_id: 'roll:P',
+      exit_block_name: 'end',
+      open_bar: 0,
+      close_bar: 4,
+      direction: 'short',
+      signed_weight: -1.0,
+      quantity: 3.33,
+      quantity_unit: 'contracts',
+      multiplier: 50,
+      segment_pnl: 13.33,
+      roll_hover: 'rolling OPT_SP_500',
+    }];
+    render(<TradeLog trades={trades} timestamps={TS} positions={[pos('P', [100, 130, 160, 180, 200])]} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    const cell = screen.getByTestId('trade-pnl');
+    expect(cell.textContent).toBe('+13.33');
+    expect(cell.textContent).not.toContain('-');
+  });
+});
+
+describe('formatSignedAmount', () => {
+  it('formats positive/negative/zero with explicit sign and 2 decimals', () => {
+    expect(formatSignedAmount(1)).toBe('+1.00');
+    expect(formatSignedAmount(-2.5)).toBe('-2.50');
+    expect(formatSignedAmount(0)).toBe('0.00');
+    expect(formatSignedAmount(1234.5)).toBe('+1,234.50');
+  });
+  it('non-finite → em-dash', () => {
+    expect(formatSignedAmount(NaN)).toBe('—');
+    expect(formatSignedAmount(undefined)).toBe('—');
   });
 });

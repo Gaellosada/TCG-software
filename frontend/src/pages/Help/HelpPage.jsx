@@ -197,35 +197,36 @@ function HelpPage() {
           <p>
             Direction is the sign of the leg&apos;s weight (a short option
             profits as its premium decays). Size is the leg&apos;s
-            &nbsp;<strong>Size (% of NAV)</strong>&nbsp; field (the underlying
-            <code> nav_times</code> parameter) &mdash; the premium notional you
-            hold as a percentage of NAV (100% = full notional); because a short
-            option&apos;s premium can multiply on a sell-off, a full-size short
-            can wipe out, so use a small percentage.
+            &nbsp;<strong>Size (× NAV, premium)</strong>&nbsp; field (the underlying
+            <code> nav_times</code> parameter) &mdash; a plain multiplier (default
+            1 = unlevered) of the premium notional you hold: qty = Size &times; NAV
+            &divide; premium (Size 1 = the full NAV spent on premium). Because a
+            short option&apos;s premium can multiply on a sell-off, a full-size
+            short can wipe out, so use a small Size.
           </p>
           <p>
             This is the <strong>Hold between rolls</strong> model, and it is
             always on for a portfolio price leg. A default signal option stream
             leaves it off: it re-selects the matching contract every day and
             prices it mid-to-mid on that day&apos;s quote (a level, not a
-            held-contract P&amp;L), and the <strong>Size (% of NAV)</strong>
+            held-contract P&amp;L), and the <strong>Size</strong>
             field only appears once hold is turned on.
           </p>
         </Details>
 
-        <Details title="Implied leverage on the Size % field">
+        <Details title="Implied leverage on the Size field">
           <p>
-            Next to <strong>Size (% of NAV)</strong> the hold form shows a live
+            Next to <strong>Size (× NAV, premium)</strong> the hold form shows a live
             readout, e.g. <em>&ldquo;&asymp; 8&times; underlying notional (at
             &lt;date&gt;)&rdquo;</em>. It answers a single question: how much{' '}
             <strong>underlying</strong> market exposure the option leg actually
             controls per dollar of portfolio NAV. For example, a 10&Delta; put
             whose premium is &asymp; 0.5% of strike, held at{' '}
-            <strong>Size % = 4%</strong>, reads <strong>&asymp; 8&times;</strong>{' '}
-            (that is 4 &divide; 0.5) &mdash; on a $100k portfolio, roughly $800k
-            of S&amp;P index notional, even though the premium you deploy is a
-            small fraction of that. The leg is small in premium but large in
-            exposure, and that gap is the leverage.
+            <strong>Size = 0.04</strong> (4% of NAV as premium), reads{' '}
+            <strong>&asymp; 8&times;</strong> (that is 0.04 &times; 100 &divide; 0.5)
+            &mdash; on a $100k portfolio, roughly $800k of S&amp;P index notional,
+            even though the premium you deploy is a small fraction of that. The leg
+            is small in premium but large in exposure, and that gap is the leverage.
           </p>
           <p>
             <strong>How it&apos;s computed &mdash; and how to check it.</strong>{' '}
@@ -233,11 +234,12 @@ function HelpPage() {
             figure yourself:
           </p>
           <pre className={styles.codeBlock}><code>
-{`leverage = Size % ÷ (premium as % of strike)
-         = (Size % / 100) × (strike / premium)`}
+{`leverage = Size × 100 ÷ (premium as % of strike)
+         = Size × (strike / premium)`}
           </code></pre>
           <p>
-            The <strong>Size %</strong> is your input; the{' '}
+            The <strong>Size</strong> is your input (a plain multiplier, 1 =
+            unlevered); the{' '}
             <strong>premium as % of strike</strong> is shown on the readout&apos;s
             sub-line (<em>&ldquo;premium &asymp; 0.5% of strike for this 10&Delta;
             put&rdquo;</em> &mdash; the same 0.5% used in the example above). Both{' '}
@@ -248,7 +250,7 @@ function HelpPage() {
             you know which snapshot day it used: on the{' '}
             <strong>Portfolio</strong> page it is the backtest start date; on the{' '}
             <strong>Signals</strong> page it is the root&apos;s last trade date.
-            Changing Size % rescales the number instantly (no re-probe); changing
+            Changing Size rescales the number instantly (no re-probe); changing
             the contract or date re-probes.
           </p>
           <p>
@@ -264,7 +266,7 @@ function HelpPage() {
               components/OptionStreamForm/leverage.js — keep both in sync (the
               HelpPage.test.jsx assertion derives its regex from that constant). */}
           <p>
-            <strong>Colour bands.</strong> The readout dot and the Size % field
+            <strong>Colour bands.</strong> The readout dot and the Size field
             are tinted by the leverage: 🟢 green below 2&times; · 🟠 amber
             2–10&times; · 🔴 red above 10&times;. Near-dated, deep out-of-the-money
             options have a tiny premium relative to strike, which pushes leverage
@@ -277,11 +279,53 @@ function HelpPage() {
             of capital. The readout spells this out:{' '}
             <em>&ldquo;&#9888; If sold/written, a ~2.0&times; premium spike wipes
             equity&rdquo;</em>. That wipeout multiple is{' '}
-            <code>f = 1 + 1 ÷ (Size % ÷ 100)</code> &mdash; it depends only on
-            Size %, not on which contract you picked (at Size % = 100 a mere
-            2&times; premium spike wipes out; at 33% it takes ~4&times;). A{' '}
+            <code>f = 1 + 1 ÷ Size</code> &mdash; it depends only on
+            Size, not on which contract you picked (at Size = 1 a mere
+            2&times; premium spike wipes out; at Size = 0.33 it takes ~4&times;). A{' '}
             <strong>bought</strong> leg is different: its most it can lose is the
-            premium paid. Practical rule: high leverage &rarr; keep Size % small.
+            premium paid. Practical rule: high leverage &rarr; keep Size small.
+          </p>
+        </Details>
+
+        <Details title="Futures-notional sizing">
+          <p>
+            By default an option leg is sized in <strong>premium notional</strong>:
+            the held quantity is <code>Size &times; NAV &divide; premium</code>, so
+            the dollars you deploy equal the premium. The <strong>Sizing</strong>{' '}
+            dropdown on the hold form offers a second mode, <strong>Futures
+            notional</strong>, which sizes the position off the corresponding{' '}
+            <em>future&apos;s</em> dollar notional instead of the option premium:
+          </p>
+          <pre className={styles.codeBlock}><code>
+{`qty = Size × NAV ÷ (F_ref × M_fut)`}
+          </code></pre>
+          <p>
+            where <code>F_ref</code> is the reference future&apos;s price and{' '}
+            <code>M_fut</code> its contract multiplier. This expresses the leg&apos;s
+            size as a fraction of a futures position rather than as premium spent &mdash;
+            useful when you think of an option overlay in terms of the underlying
+            contract it hedges or replaces.
+          </p>
+          <p>
+            <strong>Futures reference.</strong> When Futures notional is selected, a{' '}
+            <strong>Futures reference</strong> dropdown chooses which listed future
+            supplies <code>F_ref</code>:
+          </p>
+          <ul className={styles.tips}>
+            <li>
+              <strong>Nearest on/after expiry</strong> (default) &mdash; the nearest
+              listed future expiring on or after the option&apos;s expiry, on the
+              root&apos;s real cycle.
+            </li>
+            <li>
+              <strong>Nearest (abs distance)</strong> &mdash; the future whose expiry
+              is closest in absolute time to the option&apos;s expiry.
+            </li>
+          </ul>
+          <p>
+            The implied-leverage readout is specific to
+            premium-notional sizing, so it is hidden in Futures-notional mode &mdash; the
+            formula above is surfaced beneath the reference dropdown instead.
           </p>
         </Details>
       </section>

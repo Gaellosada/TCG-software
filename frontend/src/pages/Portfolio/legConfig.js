@@ -40,6 +40,16 @@ export function instrumentToLegConfig(instrument) {
       // so force hold on regardless of form state.
       hold_between_rolls: true,
       nav_times: instrument.nav_times ?? 1.0,
+      // SIZING MODE — forward the futures-notional config ONLY when the user
+      // opted into it. Premium-notional (the default) adds NO keys, so a leg the
+      // user never touches serialises byte-identically to today (backend default
+      // is premium_notional / nearest_on_or_after).
+      ...(instrument.sizing_mode === 'futures_notional'
+        ? {
+          sizing_mode: 'futures_notional',
+          futures_reference: instrument.futures_reference || 'nearest_on_or_after',
+        }
+        : {}),
     };
   }
   if (instrument.type === 'continuous') {
@@ -80,6 +90,10 @@ export function legToInitialConfig(leg) {
       roll_offset: leg.roll_offset,
       hold_between_rolls: leg.hold_between_rolls,
       nav_times: leg.nav_times,
+      // Restore the sizing mode so editing pre-fills the futures-notional control
+      // (undefined on a premium-notional leg → the form's default takes over).
+      sizing_mode: leg.sizing_mode,
+      futures_reference: leg.futures_reference,
     };
   }
   if (leg.type === 'continuous') {

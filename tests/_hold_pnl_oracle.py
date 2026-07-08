@@ -77,6 +77,40 @@ def oracle_ratio(
     return nav / nav[0]
 
 
+def oracle_ratio_futures(
+    owner_prev: np.ndarray,
+    owner_cur: np.ndarray,
+    is_roll: np.ndarray,
+    roll_future_ref: np.ndarray,
+    *,
+    nav_times: float,
+    weight: float,
+    m_fut: float,
+    m_opt: float,
+    base_nav: float = 1_000_000.0,
+) -> np.ndarray:
+    """Futures-notional fixed-contract dollar-P&L NAV → base-1 ratio.
+
+    Mirrors :func:`oracle_ratio` but sizes the held quantity off the FUTURE
+    notional: ``qty = nav_times·NAV_roll/(F_ref·M_fut)`` (fractional), and books
+    daily $ = ``sign(weight)·qty·(cur-prev)·M_opt``.  ``roll_future_ref`` carries
+    the reference future price at each ``is_roll`` date (NaN elsewhere).
+    """
+    T = len(owner_cur)
+    nav = np.empty(T, dtype=np.float64)
+    nav[0] = base_nav
+    sign = 1.0 if weight > 0 else -1.0
+    qty = nav_times * base_nav / (roll_future_ref[0] * m_fut)
+    for t in range(1, T):
+        dprem = owner_cur[t] - owner_prev[t]
+        if not np.isfinite(dprem):
+            dprem = 0.0
+        nav[t] = nav[t - 1] + sign * qty * dprem * m_opt
+        if bool(is_roll[t]):
+            qty = nav_times * nav[t] / (roll_future_ref[t] * m_fut)
+    return nav / nav[0]
+
+
 def make_hold_fetch(
     *,
     held_premium: np.ndarray = HELD_PREMIUM,
@@ -86,6 +120,8 @@ def make_hold_fetch(
     spx: np.ndarray | None = None,
     require_hold: bool = False,
     diagnostics: Sequence[str | None] | None = None,
+    roll_future_ref: np.ndarray | None = None,
+    multipliers: tuple[float, float] | None = None,
 ) -> Callable[..., Any]:
     """Build a synthetic ``PriceFetcher`` over a held-premium + roll-info fixture.
 
@@ -117,6 +153,15 @@ def make_hold_fetch(
 
     async def fetch_hold_roll_info(instrument):
         assert isinstance(instrument, InstrumentOptionStream)
+        # 4-tuple when a futures-reference fixture is supplied (futures_notional
+        # mode); the legacy 3-tuple otherwise (premium_notional — back-compat).
+        if roll_future_ref is not None:
+            return (
+                dates_int,
+                np.asarray(is_roll, dtype=np.float64).copy(),
+                np.asarray(roll_premium, dtype=np.float64).copy(),
+                np.asarray(roll_future_ref, dtype=np.float64).copy(),
+            )
         return (
             dates_int,
             np.asarray(is_roll, dtype=np.float64).copy(),
@@ -124,6 +169,13 @@ def make_hold_fetch(
         )
 
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
+
+    if multipliers is not None:
+
+        async def fetch_hold_multipliers(instrument):
+            return multipliers
+
+        fetch.fetch_hold_multipliers = fetch_hold_multipliers  # type: ignore[attr-defined]
 
     if diagnostics is not None:
 

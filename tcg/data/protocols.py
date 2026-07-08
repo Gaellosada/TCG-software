@@ -18,6 +18,7 @@ from tcg.types.market import (
     ContinuousLegSpec,
     ContinuousRollConfig,
     ContinuousSeries,
+    FuturesContractMeta,
     InstrumentId,
     PriceSeries,
 )
@@ -162,6 +163,21 @@ class MarketDataService(Protocol):
         own expiration has no listed future (serial/weekly months on a quarterly
         futures curve).  Returns ``None`` when no contract expires on/after the
         date.
+        """
+        ...
+
+    async def list_futures_contract_meta(
+        self,
+        collection: str,
+        *,
+        cycle: str | None = None,
+    ) -> list[FuturesContractMeta]:
+        """List a futures root's contracts (symbol / expiration / contract_size).
+
+        Cheap ``dim_instrument``-only scan feeding futures-notional option sizing:
+        the ``nearest_abs`` reference selection (closest expiration in |time|) and
+        the live ``M_fut`` read (the selected contract's ``contract_size``; NULL →
+        signed-off config fallback).
         """
         ...
 

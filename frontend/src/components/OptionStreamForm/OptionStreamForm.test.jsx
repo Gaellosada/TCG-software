@@ -9,8 +9,9 @@ import OptionStreamForm, {
   CYCLE_LABELS,
   deriveCycleOptions,
   pickDefaultCycle,
-  navFractionToPercent,
-  navPercentToFraction,
+  SIZING_MODE_LABELS,
+  SIZE_LABEL_FUTURES,
+  SIZE_LABEL_PREMIUM,
 } from './OptionStreamForm';
 
 afterEach(cleanup);
@@ -677,7 +678,7 @@ describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
     expect(emitted.nav_times).toBe(1.0);
   });
 
-  it('shows the nav_times input as a PERCENT when hold is already on and edits it', () => {
+  it('shows the nav_times input as the RAW multiplier when hold is on and edits it', () => {
     const onChange = vi.fn();
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
@@ -687,13 +688,13 @@ describe('<OptionStreamForm> hold controls (showHoldControls)', () => {
     renderForm({ value, onChange, showHoldControls: true });
     const navInput = screen.getByTestId('nav-times');
     expect(navInput).toBeTruthy();
-    // The wire fraction 1.0 (full notional) DISPLAYS as 100 (%).
-    expect(String(navInput.value)).toBe('100');
-    // Entering a percent > 100 emits the corresponding fraction > 1 (leverage).
-    fireEvent.change(navInput, { target: { value: '250' } });
+    // The wire multiplier 1.0 (unlevered) DISPLAYS as the raw "1" (not 100).
+    expect(String(navInput.value)).toBe('1');
+    // Typing 2 stores nav_times = 2 VERBATIM (NOT 200, NOT 0.02).
+    fireEvent.change(navInput, { target: { value: '2' } });
     expect(onChange).toHaveBeenCalled();
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
-    expect(emitted.nav_times).toBe(2.5);
+    expect(emitted.nav_times).toBe(2);
     expect(emitted.hold_between_rolls).toBe(true);
   });
 
@@ -759,7 +760,7 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
     expect(emitted.cycle).toBe('M');
   });
 
-  it('keeps nav_times editable as a PERCENT (always shown, no toggle gating)', () => {
+  it('keeps nav_times editable as the RAW multiplier (always shown, no toggle gating)', () => {
     const onChange = vi.fn();
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
@@ -767,47 +768,268 @@ describe('<OptionStreamForm> holdRequired (portfolio ON-only)', () => {
       nav_times: 1.0,
     };
     renderForm({ value, onChange, holdRequired: true });
-    // Enter 0.45% → stored fraction 0.0045 (÷100 boundary conversion).
-    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0.45' } });
+    // Enter 0.5 → stored VERBATIM as 0.5 (no ×100/÷100 conversion).
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '0.5' } });
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
-    expect(emitted.nav_times).toBe(0.0045);
+    expect(emitted.nav_times).toBe(0.5);
   });
 
-  it('displays a small stored fraction as a clean percent (0.0045 → "0.45", no float dust)', () => {
+  it('displays the stored multiplier verbatim (0.0045 → "0.0045", no ×100)', () => {
     const value = {
       ...buildDefaultOptionStream({ availableRoots: ROOTS }),
       hold_between_rolls: true,
       nav_times: 0.0045,
     };
     renderForm({ value, holdRequired: true });
-    expect(String(screen.getByTestId('nav-times').value)).toBe('0.45');
+    expect(String(screen.getByTestId('nav-times').value)).toBe('0.0045');
   });
 });
 
-// ── UI percent ↔ wire fraction conversion is a stable fixed point ──────────
-describe('nav_times percent↔fraction conversion (presentation seam)', () => {
-  it('display rounds ×100 without float dust', () => {
-    expect(navFractionToPercent(0.0045)).toBe(0.45);
-    expect(navFractionToPercent(1.0)).toBe(100);
-    expect(navFractionToPercent(2.5)).toBe(250);
-    expect(navFractionToPercent(0.1)).toBe(10);
+// ── Sizing mode (futures-notional) — shared across signals + portfolio ──────
+describe('<OptionStreamForm> sizing mode (premium vs futures notional)', () => {
+  const holdValue = () => ({
+    ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+    hold_between_rolls: true,
+    nav_times: 1.0,
   });
 
-  it('parse rounds ÷100 without float dust', () => {
-    expect(navPercentToFraction(0.45)).toBe(0.0045);
-    expect(navPercentToFraction(100)).toBe(1.0);
-    expect(navPercentToFraction(250)).toBe(2.5);
-    expect(navPercentToFraction(10)).toBe(0.1);
+  it('defaults the sizing-mode select to premium_notional; no reference dropdown; leverage readout shown', () => {
+    renderForm({ value: holdValue(), showHoldControls: true });
+    const sel = screen.getByTestId('sizing-mode');
+    expect(sel.value).toBe('premium_notional');
+    // Futures-reference dropdown is absent in percentage mode.
+    expect(screen.queryByTestId('futures-reference')).toBeNull();
+    expect(screen.queryByTestId('futures-notional-help')).toBeNull();
+    // The premium-notional leverage readout renders (fallback hint here, since
+    // the test ROOTS carry no last_trade_date / referenceDate to probe).
+    expect(screen.getByTestId('nav-hint')).toBeTruthy();
   });
 
-  it('is a fixed point across load→display→edit→save round-trips', () => {
-    // Loaded fraction → percent → back to the SAME fraction.
-    for (const frac of [0.0045, 0.1, 1.0, 2.5, 0.5]) {
-      expect(navPercentToFraction(navFractionToPercent(frac))).toBe(frac);
-    }
-    // Freshly entered percent → fraction → back to the SAME percent.
-    for (const pct of [0.45, 10, 100, 250, 50]) {
-      expect(navFractionToPercent(navPercentToFraction(pct))).toBe(pct);
-    }
+  it('offers exactly two sizing-mode options with the documented labels', () => {
+    renderForm({ value: holdValue(), showHoldControls: true });
+    const opts = Array.from(screen.getByTestId('sizing-mode').querySelectorAll('option'));
+    expect(opts.map((o) => o.value)).toEqual(['premium_notional', 'futures_notional']);
+    expect(opts.map((o) => o.textContent)).toEqual([
+      SIZING_MODE_LABELS.premium_notional,
+      SIZING_MODE_LABELS.futures_notional,
+    ]);
+  });
+
+  it('switching to Futures notional emits sizing_mode + seeds futures_reference=nearest_on_or_after', () => {
+    const onChange = vi.fn();
+    renderForm({ value: holdValue(), onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('sizing-mode'), { target: { value: 'futures_notional' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.sizing_mode).toBe('futures_notional');
+    expect(emitted.futures_reference).toBe('nearest_on_or_after');
+  });
+
+  it('in futures mode: reference dropdown (2 options, NO continuous_front) + helper + nav_times; leverage readout HIDDEN', () => {
+    const value = { ...holdValue(), sizing_mode: 'futures_notional', futures_reference: 'nearest_on_or_after' };
+    renderForm({ value, showHoldControls: true });
+    const ref = screen.getByTestId('futures-reference');
+    const refOpts = Array.from(ref.querySelectorAll('option')).map((o) => o.value);
+    expect(refOpts).toEqual(['nearest_on_or_after', 'nearest_abs']);
+    expect(refOpts).not.toContain('continuous_front');
+    expect(screen.getByTestId('futures-notional-help')).toBeTruthy();
+    // nav_times stays exposed in both modes.
+    expect(screen.getByTestId('nav-times')).toBeTruthy();
+    // The premium-notional readout must NOT render (neither the hint nor the data group).
+    expect(screen.queryByTestId('nav-hint')).toBeNull();
+    expect(screen.queryByTestId('lev-readout-group')).toBeNull();
+  });
+
+  it('changing the futures reference emits futures_reference=nearest_abs', () => {
+    const onChange = vi.fn();
+    const value = { ...holdValue(), sizing_mode: 'futures_notional', futures_reference: 'nearest_on_or_after' };
+    renderForm({ value, onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('futures-reference'), { target: { value: 'nearest_abs' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.futures_reference).toBe('nearest_abs');
+  });
+
+  it('renders the sizing control in the PORTFOLIO holdRequired branch (percentage mode)', () => {
+    renderForm({ value: holdValue(), holdRequired: true });
+    expect(screen.getByTestId('sizing-mode').value).toBe('premium_notional');
+    expect(screen.queryByTestId('futures-reference')).toBeNull();
+  });
+
+  it('futures mode works in the PORTFOLIO holdRequired branch too (readout hidden)', () => {
+    const value = { ...holdValue(), sizing_mode: 'futures_notional' };
+    renderForm({ value, holdRequired: true });
+    expect(screen.getByTestId('futures-reference')).toBeTruthy();
+    expect(screen.getByTestId('futures-notional-help')).toBeTruthy();
+    expect(screen.queryByTestId('nav-hint')).toBeNull();
+  });
+
+  it('a never-touched default leg carries NO sizing_mode / futures_reference key (byte-identical serialisation)', () => {
+    const v = buildDefaultOptionStream({ availableRoots: ROOTS });
+    expect('sizing_mode' in v).toBe(false);
+    expect('futures_reference' in v).toBe(false);
+  });
+
+  it('the sizing control is NOT shown when hold is off (signals default)', () => {
+    renderForm({ showHoldControls: true }); // hold defaults off
+    expect(screen.queryByTestId('sizing-mode')).toBeNull();
+  });
+});
+
+// ── Size field is a raw multiplier (no ×100 / ÷100), mode-aware label ───────
+describe('nav_times Size multiplier presentation', () => {
+  const holdValue = (nav = 1.0) => ({
+    ...buildDefaultOptionStream({ availableRoots: ROOTS }),
+    hold_between_rolls: true,
+    nav_times: nav,
+  });
+
+  it('default nav_times 1.0 displays as the raw "1"', () => {
+    renderForm({ value: holdValue(1.0), showHoldControls: true });
+    expect(String(screen.getByTestId('nav-times').value)).toBe('1');
+  });
+
+  it('typing 2 stores nav_times = 2 verbatim (NOT 0.02, NOT 200)', () => {
+    const onChange = vi.fn();
+    renderForm({ value: holdValue(1.0), onChange, showHoldControls: true });
+    fireEvent.change(screen.getByTestId('nav-times'), { target: { value: '2' } });
+    const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(emitted.nav_times).toBe(2);
+  });
+
+  it('supports leverage > 1 and fractions < 1 verbatim', () => {
+    const onChange = vi.fn();
+    renderForm({ value: holdValue(1.0), onChange, showHoldControls: true });
+    const input = screen.getByTestId('nav-times');
+    fireEvent.change(input, { target: { value: '3.5' } });
+    expect(onChange.mock.calls[onChange.mock.calls.length - 1][0].nav_times).toBe(3.5);
+    fireEvent.change(input, { target: { value: '0.25' } });
+    expect(onChange.mock.calls[onChange.mock.calls.length - 1][0].nav_times).toBe(0.25);
+  });
+
+  it('labels the Size field as a factor — premium mode by default, futures mode when set', () => {
+    // Premium-notional (default) mode.
+    const { unmount } = renderForm({ value: holdValue(1.0), showHoldControls: true });
+    let input = screen.getByTestId('nav-times');
+    expect(input.getAttribute('aria-label')).toBe(SIZE_LABEL_PREMIUM);
+    expect(SIZE_LABEL_PREMIUM).toMatch(/×/); // reads as a multiplier, not a %
+    expect(SIZE_LABEL_PREMIUM).not.toMatch(/%/);
+    unmount();
+    // Futures-notional mode.
+    renderForm({
+      value: { ...holdValue(1.0), sizing_mode: 'futures_notional' },
+      showHoldControls: true,
+    });
+    input = screen.getByTestId('nav-times');
+    expect(input.getAttribute('aria-label')).toBe(SIZE_LABEL_FUTURES);
+    expect(SIZE_LABEL_FUTURES).toMatch(/×/);
+    expect(SIZE_LABEL_FUTURES).not.toMatch(/%/);
+  });
+});
+
+describe('<OptionStreamForm> close (settlement) stream', () => {
+  const HOLD_LABEL = 'Hold contract between rolls (fixed-contract P&L)';
+
+  it('offers Close (settlement) as a selectable Series option', () => {
+    renderForm();
+    const seriesSelect = screen.getByLabelText('Series');
+    const opts = Array.from(seriesSelect.querySelectorAll('option')).map((o) => o.value);
+    expect(opts).toContain('close');
+    const closeOpt = Array.from(seriesSelect.querySelectorAll('option')).find(
+      (o) => o.value === 'close',
+    );
+    expect(closeOpt.textContent).toMatch(/close/i);
+    expect(closeOpt.textContent).toMatch(/settlement/i);
+  });
+
+  it('defaults a NEW hold leg to the close stream when hold is turned on', () => {
+    // Untouched leg → stream 'mid'. Enabling hold flips the default to 'close'.
+    const { onChange } = renderForm({ showHoldControls: true });
+    const toggle = screen.getByLabelText(HOLD_LABEL);
+    fireEvent.click(toggle);
+    expect(onChange).toHaveBeenCalled();
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.hold_between_rolls).toBe(true);
+    expect(patched.stream).toBe('close');
+  });
+
+  it('does NOT flip an explicitly-chosen bs_mid stream when hold is turned on', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'bs_mid' };
+    const { onChange } = renderForm({ value, showHoldControls: true });
+    fireEvent.click(screen.getByLabelText(HOLD_LABEL));
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.hold_between_rolls).toBe(true);
+    // bs_mid was explicit → honoured verbatim, not coerced to close.
+    expect(patched.stream === undefined || patched.stream === 'bs_mid').toBe(true);
+  });
+
+  it('coerces a NEW leg to the single allowed stream (generic singleStream path)', () => {
+    // When a consumer pins a SINGLE allowed stream, a create-mode leg carrying a
+    // different value is coerced to it (the selector is then hidden).
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid' };
+    const { onChange } = renderForm({ value, allowedStreams: ['close'], editMode: false });
+    expect(onChange).toHaveBeenCalled();
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.stream).toBe('close');
+  });
+
+  it('preserves a persisted stream on EDIT under a single-stream pin (no coercion)', () => {
+    // An edited leg persisted with 'mid' must stay 'mid' even if the single-stream
+    // pin differs — reproducibility of saved research (editMode gate).
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid' };
+    const { onChange } = renderForm({ value, allowedStreams: ['close'], editMode: true });
+    const coerced = onChange.mock.calls.some((c) => c[0] && c[0].stream === 'close');
+    expect(coerced).toBe(false);
+  });
+
+  // ── Portfolio flow (AddHoldingModal props): selector VISIBLE + close default ──
+  const PORTFOLIO_STREAMS = ['close', 'mid', 'bs_mid'];
+
+  it('renders a VISIBLE, CHANGEABLE Series selector with 3+ options in the portfolio flow', () => {
+    // REGRESSION: the portfolio picker previously pinned a SINGLE stream, which
+    // hid the Series selector entirely ("no stream option anymore"). With the
+    // three price streams the selector must render, expose close/mid/bs_mid, and
+    // be user-changeable (not a hidden 1-item pin).
+    const { onChange } = renderForm({
+      value: { ...buildDefaultOptionStream({ availableRoots: ROOTS }), hold_between_rolls: true, stream: 'close' },
+      allowedStreams: PORTFOLIO_STREAMS,
+      holdRequired: true,
+      editMode: true, // suppress the create-time heldInit emit; just inspect render
+    });
+    const seriesSelect = screen.getByLabelText('Series');
+    expect(seriesSelect).toBeTruthy();
+    expect(seriesSelect.tagName.toLowerCase()).toBe('select');
+    expect(seriesSelect.disabled).toBe(false);
+    const opts = Array.from(seriesSelect.querySelectorAll('option')).map((o) => o.value);
+    expect(opts.length).toBeGreaterThanOrEqual(3);
+    expect(opts).toEqual(['close', 'mid', 'bs_mid']);
+    expect(seriesSelect.value).toBe('close'); // default pre-selected, not forced
+    // ...and the user can change it (mid / bs_mid selectable).
+    fireEvent.change(seriesSelect, { target: { value: 'bs_mid' } });
+    const patched = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(patched.stream).toBe('bs_mid');
+  });
+
+  it('defaults a NEW portfolio (holdRequired) leg to close via the create-only one-shot', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid' };
+    const { onChange } = renderForm({
+      value,
+      allowedStreams: PORTFOLIO_STREAMS,
+      holdRequired: true,
+      editMode: false,
+    });
+    expect(onChange).toHaveBeenCalled();
+    const emittedClose = onChange.mock.calls.some((c) => c[0] && c[0].stream === 'close');
+    expect(emittedClose).toBe(true);
+  });
+
+  it('does NOT flip a persisted portfolio leg stream on EDIT-open (holdRequired)', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid', cycle: 'M' };
+    const { onChange } = renderForm({
+      value,
+      allowedStreams: PORTFOLIO_STREAMS,
+      holdRequired: true,
+      editMode: true,
+    });
+    const coerced = onChange.mock.calls.some((c) => c[0] && c[0].stream === 'close');
+    expect(coerced).toBe(false);
   });
 });

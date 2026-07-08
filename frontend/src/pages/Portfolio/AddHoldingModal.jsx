@@ -2,11 +2,15 @@ import { useCallback } from 'react';
 import InstrumentPickerModal from '../../components/InstrumentPickerModal/InstrumentPickerModal';
 import { instrumentToLegConfig, legToInitialConfig } from './legConfig';
 
-// A portfolio option leg is the option PRICE only (Issue #2 D1): pin the
-// option-stream picker to mid and hide the Series selector. iv/greeks/volume
-// are signal-level operands, not portfolio legs. Module-level const so the
-// array identity is stable across renders (not recreated each render).
-const PORTFOLIO_OPTION_STREAMS = ['mid'];
+// A portfolio option leg is the option PRICE only (Issue #2 D1): restrict the
+// option-stream picker to the PRICE series and hide iv/greeks/volume (those are
+// signal-level operands, not portfolio legs). The three price streams are
+// exposed so the Series selector RENDERS and the user can choose among them —
+// CLOSE first (the faithful EOD settlement mark for a held-to-roll option; the
+// default via the create-only heldInit one-shot), then mid / bs_mid. A NEW leg
+// defaults to close; an EDITED leg keeps its persisted stream verbatim (heldInit
+// is gated off in editMode). Module-level const so the array identity is stable.
+const PORTFOLIO_OPTION_STREAMS = ['close', 'mid', 'bs_mid'];
 
 /**
  * Portfolio-specific wrapper around InstrumentPickerModal, in two modes:

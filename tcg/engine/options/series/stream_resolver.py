@@ -74,7 +74,15 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Callable, Literal, Mapping, Protocol, Sequence, runtime_checkable
+from typing import (
+    Awaitable,
+    Callable,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 import numpy as np
 from numpy.typing import NDArray
@@ -141,6 +149,7 @@ _MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
 StreamLabel = Literal[
     "mid",
     "bs_mid",
+    "close",
     "iv",
     "delta",
     "gamma",
@@ -167,6 +176,11 @@ _DAYS_PER_YEAR: float = 365.0
 # (see ``_price_bs_mid`` / ``_extract_stream_value``), not read off a field.
 _STREAM_TO_ATTR: dict[str, str] = {
     "mid": "mid",
+    # ``close`` = the EOD settlement price (raw ``OptionDailyRow.close``).  A plain
+    # row-attribute stream like ``mid`` — but with a >0 guard in
+    # ``_extract_stream_value`` (settlement can be 0.0/absent on illiquid
+    # contracts, mirroring the derived ``mid`` >0 rule).
+    "close": "close",
     "iv": "iv_stored",
     "delta": "delta_stored",
     "gamma": "gamma_stored",
@@ -175,6 +189,22 @@ _STREAM_TO_ATTR: dict[str, str] = {
     "open_interest": "open_interest",
     "volume": "volume",
 }
+
+
+def _row_value_ok(stream: str, raw: float) -> bool:
+    """False when a row-attribute ``stream`` value must be treated as MISSING.
+
+    ``close`` (EOD settlement) is 0.0 / negative / NaN on illiquid contracts —
+    treat a non-positive settlement as missing (same NaN-safety as the derived
+    ``mid`` >0 rule) so a false zero premium never injects into the P&L series.
+    ``raw > 0.0`` rejects 0, negatives AND NaN in one comparison.  All other
+    row-attribute streams pass through (their own None-ness is the only gate).
+    Applied at every row-attribute extraction site (Phase C sync, legacy per-date,
+    and :func:`_extract_stream_value`) so the guard can never drift between them.
+    """
+    if stream == "close":
+        return raw > 0.0
+    return True
 
 
 def _missing_code_for(stream: str) -> str:
@@ -282,7 +312,7 @@ async def _extract_stream_value(
             kernel=kernel,
         )
     raw = getattr(row, attr_name, None)
-    if raw is None:
+    if raw is None or not _row_value_ok(stream, float(raw)):
         return None, _missing_code_for(stream)
     return float(raw), None
 
@@ -599,6 +629,7 @@ async def _resolve_hold(
     underlying_price_resolver: UnderlyingPriceResolver | None = None,
     kernel: "PricingKernel | None" = None,
     roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
+    futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Select-and-hold resolution over the pre-fetched ``chain_index``.
 
@@ -653,6 +684,16 @@ async def _resolve_hold(
     held_value: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
     is_roll: NDArray[np.bool_] = np.zeros(n, dtype=np.bool_)
     roll_premium: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
+    # Futures-notional sizing (Wave-1): the reference-future price frozen at each
+    # roll (NaN off-roll / when unresolvable → engine tail carry-forward).  Only
+    # populated when a ``futures_reference_resolver`` is injected (futures mode).
+    roll_future_ref: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
+    # Live multiplier hints, surfaced so the core layer can prefer them over the
+    # signed-off config: the first held OPTION contract's contract_size, and the
+    # first reference FUTURE's contract_size (from the futures_reference_resolver).
+    # NaN when NULL / unavailable.
+    mult_opt_live: float = np.nan
+    mult_fut_live: float = np.nan
 
     async def _mid_of(contract: OptionContractDoc | None, d: date) -> float:
         """Read ``contract``'s ``stream`` value on date ``d`` from the chain.
@@ -718,6 +759,60 @@ async def _resolve_hold(
         # may carry the OLD mid on a true roll date).
         seg_open_premium = await _mid_of(held, first_date)
 
+        # Live OPTION multiplier hint: the first held contract's contract_size
+        # (POINTS→$ on the option premium P&L).  Surfaced so the core layer can
+        # prefer it over the signed-off config.  NaN when NULL / non-positive.
+        if not np.isfinite(mult_opt_live) and held.contract_size is not None:
+            try:
+                _cs = float(held.contract_size)
+                if _cs > 0.0:
+                    mult_opt_live = _cs
+            except (TypeError, ValueError):
+                pass
+
+        # Futures-notional: resolve the reference-future price for THIS segment's
+        # roll (frozen for the whole run).  ``seg_exp`` is the option expiry;
+        # ``first_date`` is the roll date.  A ``None`` result (no covering future /
+        # end-of-data) leaves ``seg_fref_value`` NaN → the engine tail
+        # carry-forward keeps the last sized qty.  No-op unless a resolver is
+        # injected (i.e. sizing_mode == 'futures_notional').
+        seg_fref_value = np.nan
+        if futures_reference_resolver is not None and seg_exp is not None:
+            _ref = await futures_reference_resolver(first_date, seg_exp)
+            if _ref is not None:
+                _price, _cs = _ref
+                if _price is not None and np.isfinite(_price) and _price > 0.0:
+                    seg_fref_value = float(_price)
+                # Capture the FIRST finite live M_fut hint (the reference future's
+                # contract_size) for the core live-first multiplier resolution.
+                if not np.isfinite(mult_fut_live) and _cs is not None:
+                    try:
+                        _csf = float(_cs)
+                        if _csf > 0.0:
+                            mult_fut_live = _csf
+                    except (TypeError, ValueError):
+                        pass
+
+            # SC3 diagnostic half: in futures-notional mode a roll whose covering
+            # future is MISSING (no reference price) is sized off the CARRIED-FORWARD
+            # quantity (stale) — surface it on EVERY such roll (incl. verified roots
+            # SP/VIX) via the same ``error_codes`` channel the fetcher already
+            # threads (``fetch_hold_diagnostics``), plus a log note, so the stale
+            # sizing is observable.  Numerics are unchanged (the engine still carries
+            # forward); this only ADDS the signal.  ``first_idx`` is the roll/sizing
+            # date for this segment.
+            if not np.isfinite(seg_fref_value):
+                if error_codes[first_idx] is None:
+                    error_codes[first_idx] = "missing_futures_reference"
+                _log.info(
+                    "futures-notional: no covering future for the %s option roll on "
+                    "%s (expiry %s) — carrying forward the last sized quantity "
+                    "(stale sizing)",
+                    stream,
+                    first_date,
+                    seg_exp,
+                )
+
         for idx, d in seg:
             # Record the held contract on every date of the run.
             contracts[idx] = held
@@ -738,6 +833,7 @@ async def _resolve_hold(
                 held_value[idx] = old_mid_today
                 is_roll[idx] = True
                 roll_premium[idx] = seg_open_premium
+                roll_future_ref[idx] = seg_fref_value
                 # Diagnostic keys on the OLD mid (that is this date's value); the
                 # NEW open premium is validated when the NEXT step consumes it.
                 if not np.isfinite(old_mid_today) and error_codes[idx] is None:
@@ -754,6 +850,7 @@ async def _resolve_hold(
                     # or a gap/failed prior segment): still a sizing point.
                     is_roll[idx] = True
                     roll_premium[idx] = seg_open_premium
+                    roll_future_ref[idx] = seg_fref_value
                 # Per-date diagnostic: the held contract not quoting today is a
                 # missing-stream day (the price path's equivalent of a NaN value).
                 if not np.isfinite(held_mid_today) and error_codes[idx] is None:
@@ -771,6 +868,13 @@ async def _resolve_hold(
     if roll_info_out is not None:
         roll_info_out["is_roll"] = is_roll.astype(np.float64)
         roll_info_out["roll_premium"] = roll_premium
+        # Futures-notional side-channel (Guardrail Sign 4): the frozen reference
+        # future per roll + the live option multiplier hint.  ``mult_opt_live`` is
+        # a scalar carried as a length-1 array so the out-dict stays a uniform
+        # ``dict[str, NDArray]``; NaN when no live contract_size was found.
+        roll_info_out["roll_future_ref"] = roll_future_ref
+        roll_info_out["mult_opt_live"] = np.array([mult_opt_live], dtype=np.float64)
+        roll_info_out["mult_fut_live"] = np.array([mult_fut_live], dtype=np.float64)
 
     # Fold snap diagnostics in AFTER extraction (success-side note; only where the
     # date resolved a held contract with a quote) — mirrors Phase C's handling.
@@ -816,6 +920,7 @@ async def _resolve_bulk(
     concurrency_gate: "asyncio.Semaphore | None" = None,
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
+    futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
     coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
@@ -1356,6 +1461,7 @@ async def _resolve_bulk(
             underlying_price_resolver=underlying_price_resolver,
             kernel=kernel,
             roll_info_out=hold_roll_info_out,
+            futures_reference_resolver=futures_reference_resolver,
         )
 
     # ── Phase C: Per-date selection + stream extraction ─────────────
@@ -1503,7 +1609,7 @@ async def _resolve_bulk(
                 return
             contract, row = sel
             raw = getattr(row, attr_name, None)
-            if raw is None:
+            if raw is None or not _row_value_ok(stream, float(raw)):
                 error_codes[idx] = _missing_code_for(stream)
                 return
             values[idx] = float(raw)
@@ -1734,6 +1840,7 @@ async def resolve_option_stream(
     concurrency_gate: "asyncio.Semaphore | None" = None,
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
+    futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
     coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
@@ -1919,6 +2026,7 @@ async def resolve_option_stream(
             concurrency_gate=concurrency_gate,
             hold_between_rolls=hold_between_rolls,
             hold_roll_info_out=hold_roll_info_out,
+            futures_reference_resolver=futures_reference_resolver,
             coverage_aware=coverage_aware,
         )
 
@@ -2046,7 +2154,7 @@ async def resolve_option_stream(
                 contracts[i] = result.contract
 
                 raw = getattr(row, attr_name, None)
-                if raw is None:
+                if raw is None or not _row_value_ok(stream, float(raw)):
                     error_codes[i] = _missing_code_for(stream)
                     return
                 values[i] = float(raw)

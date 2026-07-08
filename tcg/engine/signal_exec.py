@@ -1353,11 +1353,22 @@ async def evaluate_signal(
     # onto ``index`` exactly as ``_union_align`` does; a hold input whose fetcher
     # lacks the capability is a wiring error (loud, not silent — the $-P&L path
     # cannot be run without the roll structure).
+    # Each entry: (is_roll_aligned, roll_premium_aligned, roll_future_ref_aligned,
+    # mult_fut, mult_opt).  ``roll_future_ref_aligned`` is None + the multipliers are
+    # NaN for a premium_notional leg (they are read only in futures_notional mode).
     hold_roll_info: dict[
-        str, tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
+        str,
+        tuple[
+            npt.NDArray[np.float64],
+            npt.NDArray[np.float64],
+            "npt.NDArray[np.float64] | None",
+            float,
+            float,
+        ],
     ] = {}
     if T > 0:
         _roll_fetch = getattr(fetcher, "fetch_hold_roll_info", None)
+        _mult_fetch = getattr(fetcher, "fetch_hold_multipliers", None)
         for ref_id in referenced_ids:
             inp = inputs[ref_id]
             if not (
@@ -1371,14 +1382,45 @@ async def evaluate_signal(
                     f"fetcher to provide 'fetch_hold_roll_info' (fixed-contract "
                     f"dollar-P&L roll structure); none available"
                 )
-            r_dates, r_is_roll, r_roll_premium = await _roll_fetch(inp.instrument)
+            # 3→4-tuple ripple (Guardrail Sign 4): the production fetcher returns
+            # ``(dates, is_roll, roll_premium, roll_future_ref)``; a legacy 3-tuple
+            # double (premium_notional only) still works — roll_future_ref → None.
+            _rres = await _roll_fetch(inp.instrument)
+            if len(_rres) == 4:
+                r_dates, r_is_roll, r_roll_premium, r_roll_fref = _rres
+            else:
+                r_dates, r_is_roll, r_roll_premium = _rres
+                r_roll_fref = None
             is_roll_aligned = _align_series_to_index(
                 r_dates, r_is_roll.astype(np.float64), index, fill=0.0
             )
             roll_premium_aligned = _align_series_to_index(
                 r_dates, r_roll_premium.astype(np.float64), index, fill=np.nan
             )
-            hold_roll_info[ref_id] = (is_roll_aligned, roll_premium_aligned)
+            fut_mode = inp.instrument.sizing_mode == "futures_notional"
+            roll_fref_aligned: "npt.NDArray[np.float64] | None" = None
+            mult_fut = float("nan")
+            mult_opt = float("nan")
+            if fut_mode:
+                if r_roll_fref is not None:
+                    roll_fref_aligned = _align_series_to_index(
+                        r_dates,
+                        np.asarray(r_roll_fref, dtype=np.float64),
+                        index,
+                        fill=np.nan,
+                    )
+                # Multipliers come from the fetcher side-channel (live-first /
+                # config fallback resolved in the core layer — the engine never
+                # reads dwh).  A NaN pair triggers the engine's tail carry-forward.
+                if _mult_fetch is not None:
+                    mult_fut, mult_opt = await _mult_fetch(inp.instrument)
+            hold_roll_info[ref_id] = (
+                is_roll_aligned,
+                roll_premium_aligned,
+                roll_fref_aligned,
+                float(mult_fut),
+                float(mult_opt),
+            )
 
     if T == 0:
         return SignalEvalResult(
@@ -1767,7 +1809,13 @@ async def evaluate_signal(
         contrib_step = np.zeros(max(T - 1, 0), dtype=np.float64)
         hold_spec: _HoldPnLSpec | None = None
         if _hold_mode_option and price_values is not None and ref_id in hold_roll_info:
-            is_roll_arr, roll_premium_arr = hold_roll_info[ref_id]
+            (
+                is_roll_arr,
+                roll_premium_arr,
+                roll_fref_arr,
+                mult_fut,
+                mult_opt,
+            ) = hold_roll_info[ref_id]
             # Direction is the SIGN of the net latched position; ``nav_times`` is
             # the SIZE (a separate field, may exceed the |weight| the sign carries).
             # ``pos`` already folds every latched block's signed weight for this
@@ -1789,6 +1837,10 @@ async def evaluate_signal(
                 is_roll=is_roll_arr > 0.5,
                 roll_premium=roll_premium_arr,
                 pos_active=pos != 0.0,
+                sizing_mode=inp.instrument.sizing_mode,
+                roll_future_ref=roll_fref_arr,
+                mult_fut=mult_fut,
+                mult_opt=mult_opt,
             )
         elif price_values is not None and T >= 2:
             prev_price = price_values[:-1]

@@ -855,6 +855,8 @@ def option_stream_ref_to_instrument(
         roll_offset=_roll_offset_pydantic_to_dataclass(ref.roll_offset),
         hold_between_rolls=ref.hold_between_rolls,
         nav_times=ref.nav_times,
+        sizing_mode=ref.sizing_mode,
+        futures_reference=ref.futures_reference,
     )
 
 
