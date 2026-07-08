@@ -783,3 +783,40 @@ describe('usePortfolio — addLeg auto-suffix on duplicate labels', () => {
     expect(new Set(labels).size).toBe(labels.length);
   });
 });
+
+describe('usePortfolio — dirty lifecycle (save clears, re-edit re-dirties)', () => {
+  const baseLeg = {
+    label: 'SPX',
+    type: 'instrument',
+    collection: 'INDEX',
+    symbol: 'SPX',
+    weight: 100,
+  };
+
+  it('starts clean, dirties on edit, markSaved clears it, re-edit re-dirties', () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    // Fresh hook: nothing edited yet.
+    expect(result.current.dirty).toBe(false);
+
+    // An edit marks it dirty.
+    act(() => {
+      result.current.addLeg(baseLeg);
+    });
+    expect(result.current.dirty).toBe(true);
+
+    // A successful save clears the flag (this is the reported bug: the flag
+    // was set true on edit but NEVER reset on save → the Save button stayed
+    // solid and "Unsaved changes" persisted after a successful PUT).
+    act(() => {
+      result.current.markSaved();
+    });
+    expect(result.current.dirty).toBe(false);
+
+    // Editing again after a save must re-dirty (don't break dirty tracking).
+    act(() => {
+      result.current.updateLeg(0, { weight: 75 });
+    });
+    expect(result.current.dirty).toBe(true);
+  });
+});

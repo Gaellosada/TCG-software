@@ -157,6 +157,9 @@ function PortfolioPage() {
       });
       setOneshotError(null);
       setOneshotStatus('saved');
+      // Just persisted — clear the dirty flag so the Save button reflects the
+      // saved state (same as the update path in handleCloudSave).
+      portfolio.markSaved();
       portfolio.setPersistedId(id);
       portfolio.setPersistedCategory(category);
       // Make sure the portfolioName state reflects what we just saved
@@ -175,7 +178,7 @@ function PortfolioPage() {
     saveInput,
     portfolio.portfolioName, portfolio.persistedCategory, portfolio.legs, portfolio.rebalance,
     portfolio.setPersistedId, portfolio.setPersistedCategory, portfolio.setPortfolioName,
-    invalidate, legsToWire,
+    portfolio.markSaved, invalidate, legsToWire,
   ]);
 
   // Move a persisted portfolio to a different category. Preserves all
@@ -381,11 +384,18 @@ function PortfolioPage() {
       id: portfolio.persistedId,
       payload: payloadStr,
     };
+    // The editor state is now persisted — clear the ``dirty`` flag so the
+    // Save button goes transparent and "Unsaved changes" clears. Covers BOTH
+    // the manual Save button (saveNow) and debounced autosave, since both
+    // route through this handler. Only reached on a non-aborted success (the
+    // abort guard above returns first, and errors throw before here), so a
+    // failed save correctly leaves the editor dirty.
+    portfolio.markSaved();
     // Note: we intentionally do NOT re-fetch the full portfolio list after
     // every autosave — it would cause flicker and reset scroll position
     // during rapid editing. The local state is authoritative until a
     // category change, add, or archive operation.
-  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked]);
+  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved]);
 
   const {
     status: cloudStatus,

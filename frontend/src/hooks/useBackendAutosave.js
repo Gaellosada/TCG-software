@@ -253,23 +253,34 @@ export default function useBackendAutosave({
   //
   // This is deliberately different from ``reset()`` (selection switch),
   // which DOES abort — that is a context switch, not data loss.
-  useEffect(() => () => {
-    mountedRef.current = false;
-    const hadPending = pendingRef.current;
-    pendingRef.current = false;
-    cancelTimer();
-    if (hadPending) {
-      if (controllerRef.current) {
-        // In-flight save exists — fire the pending edit right after it.
-        pendingRestartRef.current = true;
+  //
+  // The setup body re-arms ``mountedRef`` to true on every (re)mount. Without
+  // it, ``mountedRef`` (initialised true) is set false by the cleanup on the
+  // first teardown and NEVER restored — so under React StrictMode's
+  // mount→unmount→remount probe (and any real remount) all subsequent
+  // ``setStatus`` calls are silently skipped and the save-status indicator
+  // ('saving'/'saved') never appears even though the save fires. Deps are
+  // stable ([] useCallbacks) so this only runs on true (re)mounts.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const hadPending = pendingRef.current;
+      pendingRef.current = false;
+      cancelTimer();
+      if (hadPending) {
+        if (controllerRef.current) {
+          // In-flight save exists — fire the pending edit right after it.
+          pendingRestartRef.current = true;
+        } else {
+          launchSave();
+        }
       } else {
-        launchSave();
+        pendingRestartRef.current = false;
       }
-    } else {
-      pendingRestartRef.current = false;
-    }
-    // NOTE: intentionally leave controllerRef alone — the in-flight
-    // request (if any) is allowed to complete.
+      // NOTE: intentionally leave controllerRef alone — the in-flight
+      // request (if any) is allowed to complete.
+    };
   }, [cancelTimer, launchSave]);
 
   return {

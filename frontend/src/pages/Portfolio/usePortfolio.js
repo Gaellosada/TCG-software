@@ -257,6 +257,16 @@ export default function usePortfolio() {
     setDirty(true);
   }, []);
 
+  // Mark the current editor state as persisted — clears the ``dirty`` flag
+  // WITHOUT touching legs/name/etc. Called by the page after a SUCCESSFUL
+  // save (manual Save button AND debounced autosave). Without this the flag
+  // was set true on every edit but reset only on load/clear, so the Save
+  // button stayed solid and "Unsaved changes" persisted after a successful
+  // save — the reported "Save does nothing" bug.
+  const markSaved = useCallback(() => {
+    setDirty(false);
+  }, []);
+
   const clearAll = useCallback(() => {
     abortCalculate();
     setLegs([]);
@@ -474,6 +484,7 @@ export default function usePortfolio() {
     rebalance,
     setRebalance: setRebalanceAndDirty,
     dirty,
+    markSaved,
     startDate,
     setStartDate,
     endDate,
