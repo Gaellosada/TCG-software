@@ -246,7 +246,12 @@ def _synthetic_segment_pnl(
         return None
     if s_open <= 0.0:
         return None
-    return abs(leg_fraction) * nav_open * (s_close / s_open - 1.0)
+    result = abs(leg_fraction) * nav_open * (s_close / s_open - 1.0)
+    # Belt-and-suspenders: a denormal-but-positive s_open could overflow the ratio
+    # to ±inf (unserializable). Unreachable today (the accumulator books an exact 0
+    # on wipe, caught by the s_open<=0 guard), but null any non-finite result so a
+    # future accumulator change can never surface an inf P&L.
+    return result if math.isfinite(result) else None
 
 
 def _build_roll_rows(
