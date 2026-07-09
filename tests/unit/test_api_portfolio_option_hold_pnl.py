@@ -297,6 +297,74 @@ async def test_hold_option_roll_rows_sign_correct_with_nan_tail_premium(monkeypa
         assert r["quantity"] is not None and np.isfinite(r["quantity"])
 
 
+async def test_hold_option_roll_rows_no_fallback_flag_when_all_valid(client):
+    """DETERMINISM: with a fetcher that exposes NO close→mid fallback side-channel
+    (all settlements valid), every roll row carries ``open_price_fallback`` /
+    ``close_price_fallback`` == False — the flag is additive and defaults off."""
+    data = await _compute(client, -100)
+    rows = [t for t in data["trades"] if t.get("entry_block_id") == "roll:P"]
+    assert rows
+    for r in rows:
+        assert r["open_price_fallback"] is False
+        assert r["close_price_fallback"] is False
+
+
+async def test_hold_option_roll_rows_mark_close_mid_fallback(monkeypatch):
+    """A hold option leg whose fetcher reports close→mid fallback markers threads
+    them to the trade-log rows as ``open_price_fallback`` / ``close_price_fallback``
+    booleans, aligned to the exact bar each displayed price was read from.
+
+    Fixture (shared APR→MAY): opens=[0,3], boundaries=[3,5]; r0 open reads
+    ROLL_PREMIUM[0], close reads HELD_PREMIUM[3]; r1 open reads ROLL_PREMIUM[3],
+    close reads HELD_PREMIUM[5].  Markers set the open at bar 0 and the close at
+    bar 3 → r0 flags BOTH True, r1 flags BOTH False.
+    """
+    roll_premium_fallback = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    close_mid_fallback = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+
+    def _fb_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True,
+            close_mid_fallback=close_mid_fallback,
+            roll_premium_fallback=roll_premium_fallback,
+        )
+
+    monkeypatch.setattr("tcg.core.api.portfolio.make_signal_fetcher", _fb_fetcher)
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = MagicMock()
+    application.state.app_db_repo = object()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        body = {
+            "legs": {"P": _hold_put_leg()},
+            "weights": {"P": -100},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-03-01",
+            "end": "2024-04-30",
+        }
+        resp = await ac.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    r0, r1 = rows
+    # r0: open (bar 0) and close (bar 3) both fell back to the mid.
+    assert (r0["open_bar"], r0["close_bar"]) == (0, 3)
+    assert r0["open_price_fallback"] is True
+    assert r0["close_price_fallback"] is True
+    # r1: open (bar 3) and close (bar 5) are on valid settlements → no fallback.
+    assert (r1["open_bar"], r1["close_bar"]) == (3, 5)
+    assert r1["open_price_fallback"] is False
+    assert r1["close_price_fallback"] is False
+
+
 async def test_multi_leg_option_roll_pnl_scales_with_weight(client):
     """MAJOR-defect regression: an option roll row's ``segment_pnl`` must be
     weight/NAV-scaled dollars (``|w|·NAV_open·leg_return``) — the SAME unit + scaling
@@ -509,6 +577,8 @@ async def test_evaluate_option_stream_leg_hold_returns_synthetic(monkeypatch):
         future_ref,
         m_fut,
         roll_premium,
+        close_fallback,
+        roll_open_fallback,
     ) = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )
@@ -556,6 +626,8 @@ async def test_evaluate_option_stream_leg_futures_notional(monkeypatch):
         future_ref,
         m_fut,
         roll_premium,
+        close_fallback,
+        roll_open_fallback,
     ) = await _evaluate_option_stream_leg(
         "P", leg, -100.0, MagicMock(), date(2024, 3, 1), date(2024, 4, 30)
     )

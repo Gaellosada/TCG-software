@@ -432,6 +432,17 @@ def make_signal_fetcher(
     # ``fetch_hold_diagnostics`` so a failed hold resolve can name the dominant
     # cause without a second resolve.
     _hold_diag_cache: dict[Any, list[str | None]] = {}
+    # Companion cache: the resolver's per-date close→mid fallback markers for a
+    # hold-mode option input, keyed the same way and populated during the SAME
+    # ``fetch``.  ``(dates, close_mid_fallback, roll_premium_fallback)`` — 0.0/1.0
+    # float arrays aligned to ``dates`` marking where a false-zero/NULL settlement
+    # was replaced by the row mid (daily value series / roll-day open premium).
+    # Read by the portfolio trade-log path via ``fetch_hold_close_fallback`` so the
+    # roll rows can flag WHERE the fallback fired.  Purely diagnostic.
+    _hold_fallback_cache: dict[
+        Any,
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], npt.NDArray[np.float64]],
+    ] = {}
 
     # Module-level ``_hold_cache_key`` is the single source of truth (also unit-
     # tested directly for the Sign-4 collision guarantee).
@@ -619,6 +630,28 @@ def make_signal_fetcher(
                 # Companion: stash the per-date diagnostics so the portfolio hold
                 # path can name the dominant cause on an all-NaN resolve.
                 _hold_diag_cache[key] = diagnostics
+                # Companion: stash the close→mid fallback markers so the portfolio
+                # trade-log path can flag WHERE a false-zero/NULL settlement was
+                # replaced by the row mid.  Defensive zeros if the resolver omitted
+                # them (only populated on the hold path).
+                _n = len(dates_arr)
+                _close_fb = roll_info_out.get("close_mid_fallback")
+                _roll_prem_fb = roll_info_out.get("roll_premium_fallback")
+                _hold_fallback_cache[key] = (
+                    dates_arr,
+                    np.asarray(
+                        _close_fb
+                        if _close_fb is not None
+                        else np.zeros(_n, dtype=np.float64),
+                        dtype=np.float64,
+                    ),
+                    np.asarray(
+                        _roll_prem_fb
+                        if _roll_prem_fb is not None
+                        else np.zeros(_n, dtype=np.float64),
+                        dtype=np.float64,
+                    ),
+                )
                 # Futures-notional: resolve the per-root multipliers (live-first,
                 # config fallback; never a silent 1.0) and cache them for the
                 # side-channel.  Both live hints come from the resolver out-dict:
@@ -794,7 +827,25 @@ def make_signal_fetcher(
         runs first, so the cache is warm).  Purely diagnostic — never resolves."""
         return _hold_diag_cache.get(_hold_key(instrument))
 
+    async def fetch_hold_close_fallback(
+        instrument: InstrumentOptionStream,
+    ) -> (
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], npt.NDArray[np.float64]]
+        | None
+    ):
+        """Return the cached close→mid fallback markers for a hold-mode option
+        input, or ``None`` if this input was never fetched in hold mode.
+
+        ``(dates, close_mid_fallback, roll_premium_fallback)`` — 0.0/1.0 float
+        arrays aligned to ``dates`` marking where a false-zero/NULL ``close``
+        settlement was replaced by the row mid (daily value series / roll-day open
+        premium respectively).  Populated during the normal ``fetch`` of the hold
+        input (which runs first, so the cache is warm).  Purely diagnostic — never
+        resolves."""
+        return _hold_fallback_cache.get(_hold_key(instrument))
+
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
     fetch.fetch_hold_diagnostics = fetch_hold_diagnostics  # type: ignore[attr-defined]
     fetch.fetch_hold_multipliers = fetch_hold_multipliers  # type: ignore[attr-defined]
+    fetch.fetch_hold_close_fallback = fetch_hold_close_fallback  # type: ignore[attr-defined]
     return fetch
