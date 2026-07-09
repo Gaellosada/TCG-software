@@ -306,6 +306,81 @@ describe('<InstrumentPickerModal>', () => {
     });
   });
 
+  // ── NTH_NEAREST roll strategy (VIX 3M-style) — gated by allowNthNearest ──
+
+  async function openFuturesDrillDown(props = {}) {
+    vi.mocked(listCollections).mockResolvedValue(['FUT_ES']);
+    vi.mocked(getAvailableCycles).mockResolvedValue(['H', 'M']);
+    const onSelect = vi.fn();
+    render(<InstrumentPickerModal isOpen={true} onClose={vi.fn()} onSelect={onSelect} {...props} />);
+    await flushAsync();
+    fireEvent.click(screen.getByText('Futures'));
+    await waitFor(() => expect(screen.getByText('FUT_ES')).toBeTruthy());
+    fireEvent.click(screen.getByText('FUT_ES'));
+    await waitFor(() => expect(screen.getByTestId('continuous-spec-picker')).toBeTruthy());
+    return onSelect;
+  }
+
+  it('does NOT offer the Nth-nearest strategy option by default (gated off)', async () => {
+    await openFuturesDrillDown();
+    const strategySelect = screen.getByTestId('continuous-spec-picker-strategy');
+    const values = within(strategySelect).getAllByRole('option').map((o) => o.value);
+    expect(values).toEqual(['front_month', 'end_of_month']);
+    // No rank input while the strategy is front_month.
+    expect(screen.queryByTestId('continuous-spec-picker-rank')).toBeNull();
+  });
+
+  it('offers Nth-nearest + shows the rank input only when selected (allowNthNearest)', async () => {
+    await openFuturesDrillDown({ allowNthNearest: true });
+    const strategySelect = screen.getByTestId('continuous-spec-picker-strategy');
+    const values = within(strategySelect).getAllByRole('option').map((o) => o.value);
+    expect(values).toContain('nth_nearest');
+    // Hidden until nth_nearest is chosen.
+    expect(screen.queryByTestId('continuous-spec-picker-rank')).toBeNull();
+    fireEvent.change(strategySelect, { target: { value: 'nth_nearest' } });
+    const rankInput = screen.getByTestId('continuous-spec-picker-rank');
+    // Defaults to 3 (a sensible ~3-month pick).
+    expect(Number(rankInput.value)).toBe(3);
+  });
+
+  it('emits strategy=nth_nearest with the chosen rank; front_month emits NO rank', async () => {
+    // nth_nearest path — carries rank.
+    const onSelect = await openFuturesDrillDown({ allowNthNearest: true });
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-strategy'), {
+      target: { value: 'nth_nearest' },
+    });
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-rank'), {
+      target: { value: '3' },
+    });
+    fireEvent.click(screen.getByText('Select Continuous Series'));
+    expect(onSelect.mock.calls[0][0]).toMatchObject({
+      type: 'continuous',
+      collection: 'FUT_ES',
+      strategy: 'nth_nearest',
+      rank: 3,
+    });
+
+    cleanup();
+
+    // front_month path — no stray rank key (byte-identical to before).
+    const onSelect2 = await openFuturesDrillDown({ allowNthNearest: true });
+    fireEvent.click(screen.getByText('Select Continuous Series'));
+    expect(onSelect2.mock.calls[0][0].strategy).toBe('front_month');
+    expect(onSelect2.mock.calls[0][0]).not.toHaveProperty('rank');
+  });
+
+  it('clamps the rank input to the 1..12 range', async () => {
+    const onSelect = await openFuturesDrillDown({ allowNthNearest: true });
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-strategy'), {
+      target: { value: 'nth_nearest' },
+    });
+    fireEvent.change(screen.getByTestId('continuous-spec-picker-rank'), {
+      target: { value: '99' },
+    });
+    fireEvent.click(screen.getByText('Select Continuous Series'));
+    expect(onSelect.mock.calls[0][0].rank).toBe(12);
+  });
+
   it('still emits a spot selection from the existing flow (regression)', async () => {
     const onSelect = vi.fn();
     const onClose = vi.fn();

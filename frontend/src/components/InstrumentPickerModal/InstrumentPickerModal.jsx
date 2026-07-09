@@ -132,6 +132,14 @@ export default function InstrumentPickerModal({
   // VIEW-ONLY (locked entity): disable every inner control + hide the confirm
   // CTA. Threads to OptionStreamForm/ContinuousSpecPicker `disabled`.
   readOnly = false,
+  // NTH_NEAREST roll strategy opt-in. Default false so the option is NOT
+  // offered in the shared control — only the surfaces whose backend accepts
+  // ``strategy=nth_nearest`` + ``rank`` (the Data continuous endpoint and the
+  // Portfolio ``LegSpec``) pass true. Signals / Indicators / basket legs go
+  // through the shared ``ContinuousInstrumentRef`` (a strict
+  // Literal[front_month, end_of_month] with no ``rank``), so they leave this
+  // false and never surface nth_nearest (offering it there would 422 at run).
+  allowNthNearest = false,
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -148,7 +156,13 @@ export default function InstrumentPickerModal({
   const [cycle, setCycle] = useState('');
   const [rollOffset, setRollOffset] = useState(2);
   // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
+  // 'nth_nearest' is offered only when allowNthNearest is set (Data / Portfolio).
   const [strategy, setStrategy] = useState('front_month');
+  // NTH_NEAREST only: the rank-th nearest contract to hold (default 3 — a
+  // sensible ~3-month pick when the user chooses nth_nearest). Emitted ONLY
+  // when strategy === 'nth_nearest', so front-month / end-of-month configs are
+  // byte-identical to before.
+  const [rank, setRank] = useState(3);
   const [availableCycles, setAvailableCycles] = useState([]);
 
   // Options drill-down state
@@ -319,6 +333,7 @@ export default function InstrumentPickerModal({
       setCycle('');
       setRollOffset(2);
       setStrategy('front_month');
+      setRank(3);
       setExpanded({});
       setInOptionsDrillDown(false);
       setOptionStreamValue(null);
@@ -351,6 +366,7 @@ export default function InstrumentPickerModal({
       setCycle(initialConfig.cycle ?? '');
       setRollOffset(Number.isFinite(initialConfig.rollOffset) ? initialConfig.rollOffset : 2);
       setStrategy(initialConfig.strategy ?? 'front_month');
+      setRank(Number.isInteger(initialConfig.rank) ? initialConfig.rank : 3);
     } else if (initialConfig.type === 'option_stream') {
       // Bypass buildDefaultOptionStream — drive the form straight from the
       // saved value (OptionStreamForm is fully controlled by `value`).
@@ -400,10 +416,13 @@ export default function InstrumentPickerModal({
         adjustment,
         cycle: cycle || null,
         rollOffset,
+        // rank is meaningful ONLY for nth_nearest; omit it otherwise so
+        // front-month / end-of-month emits are byte-identical to before.
+        ...(strategy === 'nth_nearest' ? { rank } : {}),
       });
       onClose();
     },
-    [adjustment, cycle, rollOffset, strategy, emitSelect, onClose],
+    [adjustment, cycle, rollOffset, strategy, rank, emitSelect, onClose],
   );
 
   const handleBackFromFut = useCallback(() => {
@@ -412,6 +431,7 @@ export default function InstrumentPickerModal({
     setCycle('');
     setRollOffset(2);
     setStrategy('front_month');
+    setRank(3);
   }, []);
 
   const handleEnterOptionsDrillDown = useCallback(() => {
@@ -572,6 +592,7 @@ export default function InstrumentPickerModal({
                   cycle: cycle || null,
                   rollOffset,
                   strategy,
+                  rank,
                 }}
                 onChange={(next) => {
                   if (typeof next.adjustment === 'string') setAdjustment(next.adjustment);
@@ -579,10 +600,12 @@ export default function InstrumentPickerModal({
                   setCycle(next.cycle == null ? '' : next.cycle);
                   if (Number.isFinite(next.rollOffset)) setRollOffset(next.rollOffset);
                   if (typeof next.strategy === 'string') setStrategy(next.strategy);
+                  if (Number.isInteger(next.rank)) setRank(next.rank);
                 }}
                 availableCycles={availableCycles}
                 assetClass="future"
                 disabled={readOnly}
+                allowNthNearest={allowNthNearest}
               />
 
               {!readOnly && (
@@ -766,7 +789,7 @@ export default function InstrumentPickerModal({
  *   disabled        — view-only: greys + disables all 4 controls (locked
  *                     entity / readOnly edit). Default false.
  */
-function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _assetClass = 'future', disabled = false }) {
+function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _assetClass = 'future', disabled = false, allowNthNearest = false }) {
   const [internalCycles, setInternalCycles] = useState([]);
 
   // Load cycles when the parent does NOT supply them (basket-leg case).
@@ -794,7 +817,10 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
   const cycleSelect = cycleRaw == null ? '' : cycleRaw;
   const rollOffset = value && Number.isFinite(value.rollOffset) ? value.rollOffset : 0;
   // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
+  // 'nth_nearest' is offered only when allowNthNearest is set.
   const strategy = (value && value.strategy) || 'front_month';
+  // NTH_NEAREST rank (default 3 — a sensible ~3-month pick). Bounded 1..12.
+  const rank = value && Number.isInteger(value.rank) ? value.rank : 3;
 
   const emit = useCallback((patch) => {
     const next = {
@@ -806,8 +832,15 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
       strategy,
       ...patch,
     };
+    // rank is carried ONLY for nth_nearest, so front-month / end-of-month
+    // continuous specs stay byte-identical to before (no stray key).
+    if (next.strategy === 'nth_nearest') {
+      next.rank = Number.isInteger(patch.rank) ? patch.rank : rank;
+    } else {
+      delete next.rank;
+    }
     onChange(next);
-  }, [value && value.collection, adjustment, cycleRaw, rollOffset, strategy, onChange]);
+  }, [value && value.collection, adjustment, cycleRaw, rollOffset, strategy, rank, onChange]);
 
   return (
     <div className={styles.rollingOptions} data-testid="continuous-spec-picker">
@@ -822,8 +855,30 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
         >
           <option value="front_month">Front month (at expiry)</option>
           <option value="end_of_month">End of month</option>
+          {allowNthNearest && (
+            <option value="nth_nearest">Nth-nearest</option>
+          )}
         </select>
       </label>
+
+      {strategy === 'nth_nearest' && (
+        <label className={styles.optionLabel}>
+          Rank (Nth contract)
+          <input
+            type="number"
+            className={styles.optionSelect}
+            style={{ width: '56px' }}
+            value={rank}
+            min={1}
+            max={12}
+            onChange={(e) => emit({
+              rank: Math.max(1, Math.min(12, parseInt(e.target.value, 10) || 1)),
+            })}
+            disabled={disabled}
+            data-testid="continuous-spec-picker-rank"
+          />
+        </label>
+      )}
 
       <label className={styles.optionLabel}>
         Adjustment

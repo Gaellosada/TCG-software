@@ -139,6 +139,12 @@ async def get_continuous_series(
     roll_offset: int = Query(
         0, ge=0, le=365, description="Days before expiration to roll (0-365)"
     ),
+    rank: int = Query(
+        1,
+        ge=1,
+        le=12,
+        description="NTH_NEAREST only: hold the rank-th nearest contract (1=front)",
+    ),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),
     svc: MarketDataService = Depends(get_market_data),
@@ -168,6 +174,7 @@ async def get_continuous_series(
         adjustment=adj_method,
         cycle=cycle,
         roll_offset_days=roll_offset,
+        rank=rank,
     )
 
     series = await svc.get_continuous(
@@ -183,6 +190,7 @@ async def get_continuous_series(
         "strategy": roll_config.strategy.value,
         "adjustment": roll_config.adjustment.value,
         "cycle": roll_config.cycle,
+        "rank": roll_config.rank,
         "roll_dates": list(series.roll_dates),
         "contracts": list(series.contracts),
         "dates": series.prices.dates.tolist(),

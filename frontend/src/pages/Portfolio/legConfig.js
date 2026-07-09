@@ -60,6 +60,12 @@ export function instrumentToLegConfig(instrument) {
       adjustment: instrument.adjustment,
       cycle: instrument.cycle,
       rollOffset: instrument.rollOffset,
+      // NTH_NEAREST rank — carried only when the modal emitted it (i.e. the
+      // strategy is nth_nearest). Omitted for front-month / end-of-month so the
+      // leg config stays byte-identical to before.
+      ...(instrument.strategy === 'nth_nearest' && Number.isInteger(instrument.rank)
+        ? { rank: instrument.rank }
+        : {}),
     };
   }
   // spot -> instrument leg: rename instrument_id -> symbol, type spot -> instrument.
@@ -104,6 +110,9 @@ export function legToInitialConfig(leg) {
       cycle: leg.cycle,
       rollOffset: leg.rollOffset,
       strategy: leg.strategy,
+      // Restore the NTH_NEAREST rank so editing pre-fills the rank input
+      // (undefined on a non-nth_nearest leg → the picker's default takes over).
+      rank: leg.rank,
     };
   }
   if (leg.type === 'instrument') {

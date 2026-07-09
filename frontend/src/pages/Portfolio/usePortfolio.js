@@ -102,6 +102,7 @@ export default function usePortfolio() {
             adjustment: leg.adjustment || 'none',
             cycle: leg.cycle || undefined,
             rollOffset: leg.rollOffset || 0,
+            rank: leg.rank || 1,
           };
           const res = await queryClient.fetchQuery({
             queryKey: queryKeys.market.continuous(leg.collection, params),
@@ -189,6 +190,10 @@ export default function usePortfolio() {
           adjustment: leg.adjustment || null,
           cycle: leg.cycle || null,
           rollOffset: leg.rollOffset ?? 0,
+          // NTH_NEAREST continuous legs only: the rank-th nearest contract
+          // (1 = front month). Defaults to 1 so non-nth_nearest legs are
+          // unchanged. Sent to the compute/persist builders below.
+          rank: leg.rank ?? 1,
           weight: leg.weight ?? 100,
           // option_stream fields (null for non-option legs)
           option_type: leg.option_type || null,
@@ -430,6 +435,11 @@ export default function usePortfolio() {
         }
         if (leg.rollOffset > 0) {
           apiLegs[leg.label].roll_offset = leg.rollOffset;
+        }
+        // NTH_NEAREST only: send the rank when > 1 (1 == front month, the BE
+        // default) so front-month / end-of-month bodies stay byte-identical.
+        if (leg.rank > 1) {
+          apiLegs[leg.label].rank = leg.rank;
         }
       } else {
         apiLegs[leg.label] = {

@@ -18,6 +18,7 @@ from tcg.data._rolling.calendar import (
     clamp_roll_dates_to_data,
     collapse_to_one_per_month,
     compute_roll_dates,
+    prepare_nth_nearest,
     trim_overlaps,
 )
 
@@ -69,6 +70,16 @@ class ContinuousSeriesBuilder:
         if config.strategy == RollStrategy.END_OF_MONTH:
             contracts = collapse_to_one_per_month(contracts)
 
+        # NTH_NEAREST: hold the rank-th nearest contract. Replace the contract
+        # list with the held sequence and precompute its roll schedule (front-
+        # contract expiries − offset); the rest of the pipeline (trim / concat /
+        # adjustment) is reused unchanged. See calendar.prepare_nth_nearest.
+        nth_schedule: list[int] | None = None
+        if config.strategy == RollStrategy.NTH_NEAREST:
+            contracts, nth_schedule = prepare_nth_nearest(
+                contracts, config.rank, config.roll_offset_days
+            )
+
         if not contracts:
             return ContinuousSeries(
                 collection=collection,
@@ -96,10 +107,14 @@ class ContinuousSeriesBuilder:
                 contracts=(cleaned[0].contract_id,),
             )
 
-        # 1. Compute roll dates
-        roll_schedule = compute_roll_dates(
-            contracts, config.strategy, config.roll_offset_days
-        )
+        # 1. Compute roll dates (NTH_NEAREST precomputed its own offset-composed
+        # schedule above; other strategies compute from contract positions).
+        if nth_schedule is not None:
+            roll_schedule = nth_schedule
+        else:
+            roll_schedule = compute_roll_dates(
+                contracts, config.strategy, config.roll_offset_days
+            )
 
         # 1b. Clamp each boundary so a large roll_offset can't push it before the
         # incoming contract's data exists (which would empty its window, drop it,

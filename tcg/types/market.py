@@ -41,6 +41,14 @@ class RollStrategy(StrEnum):
     # with a cycle whose contracts live past month-end; a contract that expires
     # before its month-end roll leaves a mid-month-expiry seam (WARN, not block).
     END_OF_MONTH = "end_of_month"
+    # Hold the rank-th nearest contract by expiration (within the cycle filter).
+    # The rank-th nearest changes each time the front (nearest) contract expires,
+    # so a roll fires at each front-contract expiry and ownership shifts up by
+    # one.  rank=1 is identical to FRONT_MONTH; rank=3 on a monthly cycle gives a
+    # ~3-month constant-maturity-style series (holds one real contract, so it is
+    # tradeable, unlike an interpolated constant-maturity index).  ``rank`` lives
+    # on ``ContinuousRollConfig``.
+    NTH_NEAREST = "nth_nearest"
 
 
 class AdjustmentMethod(StrEnum):
@@ -151,6 +159,9 @@ class ContinuousRollConfig:
     adjustment: AdjustmentMethod = AdjustmentMethod.NONE
     cycle: str | None = None
     roll_offset_days: int = 0
+    # NTH_NEAREST only: hold the rank-th nearest contract (1 = front month).
+    # Ignored by FRONT_MONTH / END_OF_MONTH. Bounded 1..12 at the API boundary.
+    rank: int = 1
 
 
 @dataclass(frozen=True)

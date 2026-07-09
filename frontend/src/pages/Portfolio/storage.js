@@ -37,6 +37,9 @@ export function savePortfolio(name, { legs, rebalance }) {
       adjustment: l.adjustment,
       cycle: l.cycle,
       rollOffset: l.rollOffset,
+      // NTH_NEAREST rank (continuous legs). ``?? null`` so a non-nth_nearest
+      // leg persists nothing new; loadPortfolio round-trips it back.
+      rank: l.rank ?? null,
       weight: l.weight,
       // Signal-specific fields (null for non-signal legs).
       signalId: l.signalId || null,
