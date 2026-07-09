@@ -122,16 +122,17 @@ export function useInstrumentPrices(collection, instrument, options = {}) {
  * new one loads — no flash to a loading state mid-interaction.
  */
 export function useContinuousSeries(collection, params = {}, options = {}) {
-  const { strategy = 'front_month', adjustment = 'none', cycle, rollOffset } = params;
+  const { strategy = 'front_month', adjustment = 'none', cycle, rollOffset, rank = 1 } = params;
   return asAsyncResult(
     useQuery({
-      queryKey: queryKeys.market.continuous(collection, { strategy, adjustment, cycle, rollOffset }),
+      queryKey: queryKeys.market.continuous(collection, { strategy, adjustment, cycle, rollOffset, rank }),
       queryFn: () =>
         getContinuousSeries(collection, {
           strategy,
           adjustment,
           cycle: cycle || undefined,
           rollOffset,
+          rank,
         }),
       enabled: !!collection && (options.enabled ?? true),
       placeholderData: keepPreviousData,

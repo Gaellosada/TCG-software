@@ -36,6 +36,31 @@ describe('instrumentToLegConfig (modal onSelect union -> leg config)', () => {
     });
   });
 
+  it('carries rank for an nth_nearest continuous union; omits it for other strategies', () => {
+    const nth = instrumentToLegConfig({
+      type: 'continuous',
+      collection: 'FUT_VIX',
+      strategy: 'nth_nearest',
+      adjustment: 'none',
+      cycle: 'M',
+      rollOffset: 0,
+      rank: 3,
+    });
+    expect(nth).toMatchObject({ strategy: 'nth_nearest', rank: 3 });
+
+    // A front_month union carrying a stray rank must NOT leak it into the leg.
+    const front = instrumentToLegConfig({
+      type: 'continuous',
+      collection: 'FUT_ES',
+      strategy: 'front_month',
+      adjustment: 'none',
+      cycle: null,
+      rollOffset: 0,
+      rank: 3,
+    });
+    expect(front).not.toHaveProperty('rank');
+  });
+
   it('maps an option_stream union to an option leg config (snake roll_offset, forces hold, NO adjustment)', () => {
     const config = instrumentToLegConfig({
       type: 'option_stream',

@@ -169,9 +169,24 @@ function sanitiseContinuousInstrument(raw) {
   // Issue #3: two roll strategies are supported. Validate against the known set
   // (a rogue value still collapses to the default) and PRESERVE end_of_month so
   // a saved signal doesn't silently lose it on load.
+  //
+  // NOTE: the Signals continuous input goes through the shared backend
+  // ``ContinuousInstrumentRef`` (Literal[front_month, end_of_month], no rank),
+  // so ``nth_nearest`` is NOT offered in the Signals UI and any rogue strategy
+  // collapses to front_month here. ``rank`` is nonetheless preserved (default 1
+  // when absent ≡ front month) for forward-compat: a payload authored elsewhere
+  // that carries a rank round-trips losslessly without a schema bump.
   const strategy = ['front_month', 'end_of_month'].includes(raw.strategy)
     ? raw.strategy : 'front_month';
-  return { type: 'continuous', collection, adjustment, cycle, rollOffset, strategy };
+  // ``rank`` is preserved ONLY when a valid value is already present (so an
+  // existing signal with no rank stays byte-identical on the wire and in
+  // storage; a payload authored elsewhere that carries one round-trips
+  // losslessly). Absent ⇒ omitted ⇒ backend default 1 ≡ front month.
+  const hasRank = Number.isInteger(raw.rank) && raw.rank >= 1 && raw.rank <= 12;
+  return {
+    type: 'continuous', collection, adjustment, cycle, rollOffset, strategy,
+    ...(hasRank ? { rank: raw.rank } : {}),
+  };
 }
 
 function sanitiseOptionStreamInstrument(raw) {

@@ -62,12 +62,16 @@ export async function getInstrumentPrices(collection, instrumentId, { start, end
   return res; // { dates, open, high, low, close, volume }
 }
 
-export async function getContinuousSeries(collection, { strategy = 'front_month', adjustment = 'none', cycle, rollOffset, start, end } = {}) {
+export async function getContinuousSeries(collection, { strategy = 'front_month', adjustment = 'none', cycle, rollOffset, rank, start, end } = {}) {
   const params = new URLSearchParams();
   params.set('strategy', strategy);
   params.set('adjustment', adjustment);
   if (cycle) params.set('cycle', cycle);
   if (rollOffset > 0) params.set('roll_offset', String(rollOffset));
+  // NTH_NEAREST only: hold the rank-th nearest contract (1 = front month). Sent
+  // only when > 1 so front-month / end-of-month requests are byte-identical to
+  // before (the backend defaults rank to 1).
+  if (rank > 1) params.set('rank', String(rank));
   if (start) params.set('start', start);
   if (end) params.set('end', end);
   const res = await fetchClassified(`/data/continuous/${encodeURIComponent(collection)}?${params}`);

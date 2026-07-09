@@ -16,8 +16,14 @@ function ContinuousChart({ collection }) {
   const [adjustment, setAdjustment] = useState('none');
   const [cycle, setCycle] = useState('');
   const [rollOffset, setRollOffset] = useState(2);
-  // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
+  // Roll strategy (Issue #3): 'front_month' (default), 'end_of_month', or
+  // 'nth_nearest' (hold the rank-th nearest contract — e.g. rank=3 with the
+  // monthly cycle picks a ~3-month VIX; with an all-cycles or weekly cycle
+  // the 3rd-nearest contract is not ~3 months out).
   const [strategy, setStrategy] = useState('front_month');
+  // NTH_NEAREST rank (default 3 — ~3 months out only with the monthly
+  // cycle). Only sent to the continuous query when strategy === 'nth_nearest'.
+  const [rank, setRank] = useState(3);
   const [chartType, setChartType] = useState(preference);
 
   // Sync local state when global preference changes
@@ -42,6 +48,9 @@ function ContinuousChart({ collection }) {
     adjustment,
     cycle,
     rollOffset,
+    // rank only matters for nth_nearest; keep it 1 otherwise so the query key
+    // for front-month / end-of-month series is unchanged.
+    rank: strategy === 'nth_nearest' ? rank : 1,
   });
 
   const rollDates = (data && data.roll_dates) || [];
@@ -220,8 +229,24 @@ function ContinuousChart({ collection }) {
           >
             <option value="front_month">Front month (at expiry)</option>
             <option value="end_of_month">End of month</option>
+            <option value="nth_nearest">Nth-nearest</option>
           </select>
         </label>
+
+        {strategy === 'nth_nearest' && (
+          <label className={styles.controlLabel}>
+            Rank (Nth contract)
+            <input
+              type="number"
+              className={styles.select}
+              style={{ width: '56px' }}
+              value={rank}
+              min={1}
+              max={12}
+              onChange={(e) => setRank(Math.max(1, Math.min(12, parseInt(e.target.value, 10) || 1)))}
+            />
+          </label>
+        )}
 
         <label className={styles.controlLabel}>
           Adjustment

@@ -83,6 +83,9 @@ export default function AddHoldingModal({
       optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
       optionHoldRequired={true}
       optionReferenceDate={referenceDate}
+      // Portfolio continuous legs (LegSpec.rank) support the NTH_NEAREST roll
+      // strategy — surface it in the shared picker's strategy select.
+      allowNthNearest={true}
     />
   );
 }

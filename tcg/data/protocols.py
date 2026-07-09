@@ -121,6 +121,10 @@ class MarketDataService(Protocol):
 
     async def list_option_expirations(self, root: str) -> list[date]: ...
 
+    async def option_trade_date_coverage(
+        self, root: str
+    ) -> tuple[date | None, date | None]: ...
+
     async def list_option_expirations_filtered(
         self,
         root: str,

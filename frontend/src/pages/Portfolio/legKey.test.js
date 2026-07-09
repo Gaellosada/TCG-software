@@ -18,7 +18,7 @@ describe('legsToRangesKey', () => {
     expect(legsToRangesKey(a)).not.toBe(legsToRangesKey(b));
   });
 
-  it('encodes continuous legs with every config field', () => {
+  it('encodes continuous legs with every config field (rank defaults to 1)', () => {
     const key = legsToRangesKey([{
       type: 'continuous',
       collection: 'FUT_ES',
@@ -27,7 +27,23 @@ describe('legsToRangesKey', () => {
       cycle: 'all',
       rollOffset: 2,
     }]);
-    expect(key).toBe('c:FUT_ES:front_month:none:all:2');
+    // A leg with no rank encodes the default 1 (front month).
+    expect(key).toBe('c:FUT_ES:front_month:none:all:2:1');
+  });
+
+  it('encodes the NTH_NEAREST rank so two legs differing only by rank are distinct', () => {
+    const base = {
+      type: 'continuous',
+      collection: 'FUT_VIX',
+      strategy: 'nth_nearest',
+      adjustment: 'none',
+      cycle: 'M',
+      rollOffset: 0,
+    };
+    const r1 = legsToRangesKey([{ ...base, rank: 1 }]);
+    const r3 = legsToRangesKey([{ ...base, rank: 3 }]);
+    expect(r3).toBe('c:FUT_VIX:nth_nearest:none:M:0:3');
+    expect(r1).not.toBe(r3);
   });
 
   it('encodes signal legs including every input instrument', () => {

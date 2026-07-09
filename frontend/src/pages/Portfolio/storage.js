@@ -37,6 +37,11 @@ export function savePortfolio(name, { legs, rebalance }) {
       adjustment: l.adjustment,
       cycle: l.cycle,
       rollOffset: l.rollOffset,
+      // NTH_NEAREST rank (continuous legs) — carried only when the leg is
+      // nth_nearest, mirroring legConfig.js's toLegConfig. Omitted for
+      // front-month / end-of-month legs so their persisted shape stays
+      // byte-identical to before.
+      ...(l.strategy === 'nth_nearest' ? { rank: l.rank } : {}),
       weight: l.weight,
       // Signal-specific fields (null for non-signal legs).
       signalId: l.signalId || null,
