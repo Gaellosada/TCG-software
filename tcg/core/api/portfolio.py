@@ -1251,7 +1251,29 @@ async def _evaluate_option_stream_leg(
             if _fb_fn is not None:
                 _fb = await _fb_fn(instrument)
                 if _fb is not None:
-                    _, _close_fb, _roll_open_fb = _fb
+                    _fb_dates, _close_fb, _roll_open_fb = _fb
+                    # Defensive alignment guard.  The markers are consumed
+                    # element-parallel to the leg date axis (``dates_arr`` →
+                    # ``option_stream_dates_map[label]``, sliced by the SAME
+                    # ``os_mask`` in ``_align_hold_series``).  They come from the
+                    # SAME fetch as ``dates_arr``/``premium`` so the lengths match
+                    # today; assert it here so a future fetch-semantics refactor
+                    # that desynced them fails LOUDLY at this seam instead of
+                    # silently misaligning fallback flags onto the wrong bars.
+                    if not (
+                        len(_fb_dates)
+                        == len(_close_fb)
+                        == len(_roll_open_fb)
+                        == len(dates_arr)
+                    ):
+                        raise RuntimeError(
+                            "close→mid fallback markers out of sync with the "
+                            f"leg date axis (dates={len(_fb_dates)}, "
+                            f"close_fb={len(_close_fb)}, "
+                            f"roll_open_fb={len(_roll_open_fb)}, "
+                            f"axis={len(dates_arr)}); the side-channel must stay "
+                            "element-parallel to dates_arr/premium"
+                        )
         except (SignalDataError, SignalValidationError) as exc:
             raise ValidationError(f"Leg '{label}': {exc}") from exc
 

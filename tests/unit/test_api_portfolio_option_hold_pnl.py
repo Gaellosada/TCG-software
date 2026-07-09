@@ -365,6 +365,79 @@ async def test_hold_option_roll_rows_mark_close_mid_fallback(monkeypatch):
     assert r1["close_price_fallback"] is False
 
 
+async def test_hold_option_close_walk_back_over_nan_tail_carries_fallback_flag(
+    monkeypatch,
+):
+    """INTERSECTION lock (R1 nit): the close price WALKS BACK over a NaN tail to an
+    EARLIER bar AND that walked-back bar's close came from the mid fallback — the
+    walk-back index and the fallback-flag index must stay in lock-step.
+
+    Fixture: held premium quoted only bars 0–2 (NaN after); is_roll opens at bar 0,
+    interior roll at bar 4.  Segment 0's close boundary is bar 4 (NaN), so
+    ``_last_finite_in`` walks back to bar 2 (value 26.0) — the displayed close.  The
+    close→mid fallback marker is set ONLY at bar 2 (the walked-back bar), and left 0
+    at bar 3 (the interior ``close_bar``) and bar 4 (the boundary) — the two indices a
+    naive impl might read.  So the test passes ONLY if the flag is read at the exact
+    bar the walk-back landed on.
+    """
+    dates_int = np.array(
+        [20240101, 20240102, 20240103, 20240104, 20240105, 20240106], dtype=np.int64
+    )
+    held_premium = np.array([30.0, 28.0, 26.0, np.nan, np.nan, np.nan])
+    is_roll = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    roll_premium = np.array([30.0, np.nan, np.nan, np.nan, 15.0, np.nan])
+    # Fallback set ONLY at bar 2 (where the close walks back to); NOT at bar 3
+    # (interior close_bar) or bar 4 (boundary) — an off-by-one would miss it.
+    close_mid_fallback = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+    roll_premium_fallback = np.zeros(6, dtype=np.float64)
+
+    def _walk_back_fb_fetcher(svc, start, end):
+        return make_hold_fetch(
+            require_hold=True,
+            held_premium=held_premium,
+            is_roll=is_roll,
+            roll_premium=roll_premium,
+            dates_int=dates_int,
+            close_mid_fallback=close_mid_fallback,
+            roll_premium_fallback=roll_premium_fallback,
+        )
+
+    monkeypatch.setattr(
+        "tcg.core.api.portfolio.make_signal_fetcher", _walk_back_fb_fetcher
+    )
+    application = FastAPI()
+    application.add_exception_handler(TCGError, tcg_error_handler)
+    application.include_router(portfolio_router)
+    application.state.market_data = MagicMock()
+    application.state.app_db_repo = object()
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        body = {
+            "legs": {"P": _hold_put_leg()},
+            "weights": {"P": -100},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-01",
+            "end": "2024-01-06",
+        }
+        resp = await ac.post("/api/portfolio/compute", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+    rows = sorted(
+        (t for t in data["trades"] if t.get("entry_block_id") == "roll:P"),
+        key=lambda t: t["open_bar"],
+    )
+    assert len(rows) == 2
+    r0 = rows[0]
+    # (a) close_price is the WALKED-BACK value (bar 2 = 26.0), NOT the NaN boundary
+    #     bar 4 (which would em-dash / null); this confirms the walk-back happened.
+    assert r0["close_price"] is not None
+    assert r0["close_price"] == pytest.approx(held_premium[2])  # 26.0
+    # (b) the fallback flag tracks that SAME walked-back bar — set at bar 2, so True.
+    assert r0["close_price_fallback"] is True
+
+
 async def test_multi_leg_option_roll_pnl_scales_with_weight(client):
     """MAJOR-defect regression: an option roll row's ``segment_pnl`` must be
     weight/NAV-scaled dollars (``|w|·NAV_open·leg_return``) — the SAME unit + scaling
