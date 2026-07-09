@@ -137,3 +137,11 @@
   text-underline-offset: 2px;
   cursor: help;
 }
+
+/* Subtle asterisk marking a price that came from the option close→mid fallback. */
+.fallbackMark {
+  color: var(--accent-warm, #f0a030);
+  cursor: help;
+  font-weight: 700;
+  margin-left: 1px;
+}

@@ -29,6 +29,40 @@ export function formatPrice(p) {
   return p.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
+// ── Option `close`-stream mid-fallback surfacing ──────────────────────────────
+// The backend option `close` (settlement) stream falls back to the row quote
+// mid = (bid+ask)/2 on dates with no settlement print. Option roll rows carry
+// two sibling booleans, ``open_price_fallback`` / ``close_price_fallback``, true
+// on the specific price that came from that fallback. Wording is kept consistent
+// with OptionStreamForm's CLOSE_TOOLTIP (the static help at selection time).
+
+// Dynamic marker tooltip — on a specific price cell where the fallback fired.
+export const FALLBACK_MARKER_TITLE =
+  'Mid fallback — no settlement close print on this date; the quote mid '
+  + '(bid + ask) / 2 was used.';
+
+// Static hint on the Input cell of an option `close`-series leg — tells a log
+// reader the leg's close series has a mid fallback even on rows where it did not
+// fire.
+export const CLOSE_INPUT_HINT =
+  'Series = close (settlement). On dates with no settlement print the value '
+  + 'falls back to the quote mid = (bid + ask) / 2 (marked * on the affected price).';
+
+// True for an OPTION roll row whose Input label denotes the `close` series. The
+// fallback sibling keys are present ONLY on option roll rows (absent on
+// continuous/spot rows), so their presence identifies an option leg; the default
+// portfolio label is ``"<collection> <type> <stream>"`` (e.g. "OPT_SP_500 P
+// close"), so a trailing "close" token pins the close series specifically (a
+// mid/bs_mid leg — whose fallback flags are always false — is NOT falsely
+// hinted). A user-renamed leg that drops the token simply loses the static hint;
+// the selection-time help + the dynamic markers still cover it.
+function isOptionCloseInput(tr) {
+  const hasFallbackKeys =
+    'open_price_fallback' in tr || 'close_price_fallback' in tr;
+  if (!hasFallbackKeys) return false;
+  return /(^|\s)close$/i.test(String(tr.input_id ?? '').trim());
+}
+
 export function formatSignedPercent(fraction) {
   if (typeof fraction !== 'number' || !Number.isFinite(fraction)) return '—';
   const pct = fraction * 100;
@@ -74,6 +108,22 @@ export function formatQuantity(qty, unit) {
   const num = (mag >= 1 ? QTY_FMT_LARGE : QTY_FMT_SMALL).format(mag);
   const label = typeof unit === 'string' && unit.trim() ? ` ${unit.trim()}` : '';
   return `${num}${label}`;
+}
+
+// Subtle superscript asterisk marking a price that came from the mid fallback.
+// ``which`` distinguishes the open vs close cell in the test id.
+function FallbackMark({ which }) {
+  return (
+    <sup
+      className={styles.fallbackMark}
+      role="img"
+      aria-label={FALLBACK_MARKER_TITLE}
+      title={FALLBACK_MARKER_TITLE}
+      data-testid={`fallback-mark-${which}`}
+    >
+      *
+    </sup>
+  );
 }
 
 function priceAtBar(positionsByInputId, inputId, bar) {
@@ -275,7 +325,19 @@ function TradeLog({
                       >
                         <td>{formatTs(tr._openTs)}</td>
                         <td>{isClosed ? formatTs(tr._closeTs) : <span className={styles.openTag}>open</span>}</td>
-                        <td>{tr.input_id}</td>
+                        <td>
+                          {isOptionCloseInput(tr) ? (
+                            <span
+                              className={styles.reason}
+                              title={CLOSE_INPUT_HINT}
+                              data-testid="input-close-hint"
+                            >
+                              {tr.input_id}
+                            </span>
+                          ) : (
+                            tr.input_id
+                          )}
+                        </td>
                         {showHoldingColumn && (
                           <td data-testid="trade-holding">
                             {tr.holding_name ?? tr.holding_id ?? '—'}
@@ -292,8 +354,24 @@ function TradeLog({
                         >
                           {sizeDisplay}
                         </td>
-                        <td data-testid="trade-open-price">{formatPrice(tr._openPrice)}</td>
-                        <td data-testid="trade-close-price">{isClosed ? formatPrice(tr._closePrice) : <span className={styles.openTag}>—</span>}</td>
+                        <td data-testid="trade-open-price">
+                          {formatPrice(tr._openPrice)}
+                          {tr.open_price_fallback && Number.isFinite(tr._openPrice) && (
+                            <FallbackMark which="open" />
+                          )}
+                        </td>
+                        <td data-testid="trade-close-price">
+                          {isClosed ? (
+                            <>
+                              {formatPrice(tr._closePrice)}
+                              {tr.close_price_fallback && Number.isFinite(tr._closePrice) && (
+                                <FallbackMark which="close" />
+                              )}
+                            </>
+                          ) : (
+                            <span className={styles.openTag}>—</span>
+                          )}
+                        </td>
                         <td className={pnlClass} data-testid="trade-pnl">
                           {pnlText}
                         </td>

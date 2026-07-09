@@ -94,6 +94,15 @@ const STREAM_LABELS = {
 const MID_TOOLTIP =
   'Mid = (bid + ask) / 2 — the quote midpoint, NOT the daily high/low or last/close.';
 
+// Tooltip clarifying the ``close`` series semantics: it is the daily SETTLEMENT
+// close, and on dates lacking a settlement print it falls back to the quote mid
+// = (bid + ask) / 2.  Surfaced (contextually) on the Series control when Close
+// is the selected stream, so the fallback is discoverable exactly where a user
+// picks it.  Kept consistent with the trade-log marker/hint wording.
+const CLOSE_TOOLTIP =
+  'Close = the daily settlement price. On dates with no settlement print it '
+  + 'falls back to the quote mid = (bid + ask) / 2 (the fallback is marked in the trade log).';
+
 const CYCLE_LABELS = {
   _any: 'Any',
   M: 'Standard Monthly (M)',
@@ -1058,6 +1067,21 @@ export default function OptionStreamForm({
             >
               ⓘ
             </span>
+            {/* Contextual help for the settlement-close fallback: shown only
+                when Close is the selected stream, so the mid-fallback semantics
+                are surfaced exactly where the user picks Close (no second
+                always-on glyph competing with the Mid one above). */}
+            {v.stream === 'close' && (
+              <span
+                className={styles.help}
+                data-testid="close-tooltip"
+                role="img"
+                aria-label={CLOSE_TOOLTIP}
+                title={CLOSE_TOOLTIP}
+              >
+                ⓘ
+              </span>
+            )}
           </span>
           <select
             className={styles.input}
@@ -1171,6 +1195,7 @@ export {
   ALL_SELECTION_KINDS,
   GREEK_STREAMS,
   MID_TOOLTIP,
+  CLOSE_TOOLTIP,
   SYNTHETIC_WEEKLY_LABEL,
   CYCLE_LABELS,
   SIZING_MODE_LABELS,

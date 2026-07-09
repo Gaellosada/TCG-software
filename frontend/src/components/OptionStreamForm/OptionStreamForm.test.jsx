@@ -5,6 +5,7 @@ import OptionStreamForm, {
   buildDefaultOptionStream,
   validateOptionStream,
   MID_TOOLTIP,
+  CLOSE_TOOLTIP,
   SYNTHETIC_WEEKLY_LABEL,
   CYCLE_LABELS,
   deriveCycleOptions,
@@ -93,6 +94,21 @@ describe('<OptionStreamForm>', () => {
     expect(onChange).toHaveBeenCalled();
     const emitted = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(emitted.stream).toBe('bs_mid');
+  });
+
+  it('shows the settlement-close mid-fallback help only when close is selected', () => {
+    const value = { ...buildDefaultOptionStream({ availableRoots: ROOTS }), stream: 'mid' };
+    const { rerender } = renderForm({ value });
+    // Mid selected → no close-fallback glyph.
+    expect(screen.queryByTestId('close-tooltip')).toBeNull();
+    // Select close → the contextual help glyph appears with the fallback text.
+    rerender(<OptionStreamForm value={{ ...value, stream: 'close' }} onChange={() => {}} availableRoots={ROOTS} />);
+    const glyph = screen.getByTestId('close-tooltip');
+    expect(glyph.getAttribute('title')).toBe(CLOSE_TOOLTIP);
+    expect(glyph.getAttribute('aria-label')).toBe(CLOSE_TOOLTIP);
+    // The text names both "settlement" and the mid fallback.
+    expect(CLOSE_TOOLTIP.toLowerCase()).toContain('settlement');
+    expect(CLOSE_TOOLTIP.toLowerCase()).toContain('mid');
   });
 
   // Issue #2 (D1): in the PORTFOLIO add-holding flow an option leg is just the

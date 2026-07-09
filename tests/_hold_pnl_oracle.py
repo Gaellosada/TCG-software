@@ -122,6 +122,8 @@ def make_hold_fetch(
     diagnostics: Sequence[str | None] | None = None,
     roll_future_ref: np.ndarray | None = None,
     multipliers: tuple[float, float] | None = None,
+    close_mid_fallback: np.ndarray | None = None,
+    roll_premium_fallback: np.ndarray | None = None,
 ) -> Callable[..., Any]:
     """Build a synthetic ``PriceFetcher`` over a held-premium + roll-info fixture.
 
@@ -183,5 +185,23 @@ def make_hold_fetch(
             return list(diagnostics)
 
         fetch.fetch_hold_diagnostics = fetch_hold_diagnostics  # type: ignore[attr-defined]
+
+    if close_mid_fallback is not None or roll_premium_fallback is not None:
+        _n = len(dates_int)
+        _cfb = (
+            np.zeros(_n, dtype=np.float64)
+            if close_mid_fallback is None
+            else np.asarray(close_mid_fallback, dtype=np.float64)
+        )
+        _rfb = (
+            np.zeros(_n, dtype=np.float64)
+            if roll_premium_fallback is None
+            else np.asarray(roll_premium_fallback, dtype=np.float64)
+        )
+
+        async def fetch_hold_close_fallback(instrument):
+            return dates_int, _cfb.copy(), _rfb.copy()
+
+        fetch.fetch_hold_close_fallback = fetch_hold_close_fallback  # type: ignore[attr-defined]
 
     return fetch

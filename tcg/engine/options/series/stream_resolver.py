@@ -215,6 +215,46 @@ def _missing_code_for(stream: str) -> str:
     return f"missing_{stream}"
 
 
+def _resolve_row_stream_value(
+    stream: str, row: OptionDailyRow, attr_name: str
+) -> tuple[float | None, str | None, bool]:
+    """Resolve ONE row-attribute stream value, applying the close→mid fallback.
+
+    The SINGLE home for row-attribute extraction so the guard/fallback can never
+    drift between the three sites that read a stream off a row (the shared
+    :func:`_extract_stream_value`, the Phase-C sync select, and the legacy
+    per-date select).  Returns ``(value, missing_code, used_fallback)`` — exactly
+    one of ``value`` / ``missing_code`` is non-None.
+
+    * Raw attr passes :func:`_row_value_ok` → return it verbatim
+      (``used_fallback=False``).  On a VALID bar the numeric result is therefore
+      byte-identical to the pre-fallback code — only false-zero/NULL close bars
+      can take a different branch (determinism guarantee).
+    * ``stream == "close"`` and the raw settlement fails the ``>0`` guard
+      (0.0 / negative / NaN / NULL) → fall back to the row's derived ``mid``
+      ((bid+ask)/2, itself SQL-gated to require both quotes present AND >0).
+      When ``mid`` is finite return it with ``used_fallback=True``; the dwh
+      ``fact_price_eod.close`` is a frequent FALSE ZERO for far-OTM SPX puts on
+      month-end roll dates, and the bid/ask mid is the faithful mark there
+      (mirrors the settlement-primary-with-mid-fallback baseline).
+    * Otherwise (raw missing and no usable fallback) → ``(None, missing_code,
+      False)`` so the value stays a loud NaN / em-dash.
+
+    ``bs_mid`` is NOT handled here — it is COMPUTED (see :func:`_price_bs_mid`),
+    not read off a row; :func:`_extract_stream_value` routes it separately.
+    """
+    raw = getattr(row, attr_name, None)
+    if raw is not None and _row_value_ok(stream, float(raw)):
+        return float(raw), None, False
+    if stream == "close":
+        mid = row.mid
+        if mid is not None:
+            mid_val = float(mid)
+            if np.isfinite(mid_val):
+                return mid_val, None, True
+    return None, _missing_code_for(stream), False
+
+
 def _price_bs_mid(
     *,
     iv: float | None,
@@ -287,23 +327,27 @@ async def _extract_stream_value(
     attr_name: str,
     underlying_price_resolver: UnderlyingPriceResolver | None,
     kernel: "PricingKernel | None",
-) -> tuple[float | None, str | None]:
+) -> tuple[float | None, str | None, bool]:
     """Extract one stream value for a selected ``(contract, row)`` on date ``d``.
 
     Row-attribute streams (``mid``/``iv``/greeks/…) read ``getattr(row, attr)``
-    synchronously.  ``bs_mid`` is COMPUTED: it awaits the underlying FUTURE price
-    and prices via the Black-76 ``kernel`` (see :func:`_price_bs_mid`).  Returns
-    ``(value, error_code)`` — exactly one non-None.  Shared by the Phase-C
-    per-date path and the select-and-hold path so the two never diverge.
+    synchronously via :func:`_resolve_row_stream_value` (which also applies the
+    close→mid fallback).  ``bs_mid`` is COMPUTED: it awaits the underlying FUTURE
+    price and prices via the Black-76 ``kernel`` (see :func:`_price_bs_mid`).
+    Returns ``(value, error_code, used_fallback)`` — exactly one of value/code is
+    non-None; ``used_fallback`` is True only when a ``close`` settlement fell back
+    to the row mid (always False for ``bs_mid`` and every other stream).  Shared
+    by the Phase-C per-date path and the select-and-hold path so the two never
+    diverge.
     """
     if stream == _BS_MID:
         if kernel is None:  # pragma: no cover (resolver always builds one)
-            return None, "missing_bs_price"
+            return None, "missing_bs_price", False
         F: float | None = None
         if underlying_price_resolver is not None:
             F = await underlying_price_resolver(contract, d)
         dte_days = (contract.expiration - d).days
-        return _price_bs_mid(
+        value, code = _price_bs_mid(
             iv=row.iv_stored,
             future_price=F,
             strike=contract.strike,
@@ -311,10 +355,8 @@ async def _extract_stream_value(
             dte_days=dte_days,
             kernel=kernel,
         )
-    raw = getattr(row, attr_name, None)
-    if raw is None or not _row_value_ok(stream, float(raw)):
-        return None, _missing_code_for(stream)
-    return float(raw), None
+        return value, code, False
+    return _resolve_row_stream_value(stream, row, attr_name)
 
 
 def _apply_roll_offset(d: date, roll_offset: RollOffset) -> date:
@@ -666,8 +708,13 @@ async def _resolve_hold(
     Writes the held mid LEVEL into ``values`` (``values[t]`` == the owning
     contract's mid on ``t``; NaN where that contract has no quote), preserving
     Phase-A/B error codes for dates not covered by a segment.  When
-    ``roll_info_out`` is a dict it is populated with ``{"is_roll", "roll_premium"}``
-    (both length ``T`` ``float64``/bool arrays).  Returns the
+    ``roll_info_out`` is a dict it is populated with ``{"is_roll", "roll_premium",
+    "roll_future_ref", "mult_opt_live", "mult_fut_live", "close_mid_fallback",
+    "roll_premium_fallback"}`` (length-``T`` ``float64`` arrays, except the two
+    scalar multiplier hints).  ``close_mid_fallback`` / ``roll_premium_fallback``
+    are 0.0/1.0 markers of where a false-zero/NULL ``close`` settlement fell back
+    to the row mid (daily value series / roll-day open premium respectively).
+    Returns the
     ``(values, error_codes, contracts)`` triple (roll info goes through the
     out-dict so the 3-tuple return stays stable for every non-hold caller).
     NOTE: in hold mode ``values`` is the held-contract mid LEVEL — an honest
@@ -684,6 +731,14 @@ async def _resolve_hold(
     held_value: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
     is_roll: NDArray[np.bool_] = np.zeros(n, dtype=np.bool_)
     roll_premium: NDArray[np.float64] = np.full(n, np.nan, dtype=np.float64)
+    # close→mid fallback markers (per output-index, surfaced via ``roll_info_out``
+    # so the frontend can flag WHERE a false-zero/NULL settlement was replaced by
+    # the bid/ask mid).  ``value_fallback`` tracks the DAILY value series
+    # (``held_value`` → the trade log's close price); ``roll_premium_fallback``
+    # tracks each segment's roll-day OPEN premium (``roll_premium`` → the open
+    # price).  Both stay all-False for non-``close`` streams and valid-close bars.
+    value_fallback: NDArray[np.bool_] = np.zeros(n, dtype=np.bool_)
+    roll_premium_fallback: NDArray[np.bool_] = np.zeros(n, dtype=np.bool_)
     # Futures-notional sizing (Wave-1): the reference-future price frozen at each
     # roll (NaN off-roll / when unresolvable → engine tail carry-forward).  Only
     # populated when a ``futures_reference_resolver`` is injected (futures mode).
@@ -695,21 +750,26 @@ async def _resolve_hold(
     mult_opt_live: float = np.nan
     mult_fut_live: float = np.nan
 
-    async def _mid_of(contract: OptionContractDoc | None, d: date) -> float:
+    async def _mid_of(
+        contract: OptionContractDoc | None, d: date
+    ) -> tuple[float, bool]:
         """Read ``contract``'s ``stream`` value on date ``d`` from the chain.
 
-        Returns ``NaN`` when the contract is absent from ``d``'s chain or the
-        stream value is unavailable (a NaN value makes the adjacent P&L steps
-        contribute 0 in signal_exec, mirroring the price path's ``valid`` mask).
-        For ``bs_mid`` the value is COMPUTED (Black-76 from IV + the underlying
-        future), so this is async — the future price is fetched per date."""
+        Returns ``(value, used_fallback)``.  ``value`` is ``NaN`` when the
+        contract is absent from ``d``'s chain or the stream value is unavailable
+        (a NaN value makes the adjacent P&L steps contribute 0 in signal_exec,
+        mirroring the price path's ``valid`` mask).  ``used_fallback`` is True
+        only when a ``close`` settlement fell back to the row mid (see
+        :func:`_resolve_row_stream_value`).  For ``bs_mid`` the value is COMPUTED
+        (Black-76 from IV + the underlying future), so this is async — the future
+        price is fetched per date."""
         if contract is None:
-            return np.nan
+            return np.nan, False
         rows = chain_index.get(d, [])
         row = _row_for_contract(rows, contract) if rows else None
         if row is None:
-            return np.nan
-        value, _code = await _extract_stream_value(
+            return np.nan, False
+        value, _code, used_fallback = await _extract_stream_value(
             stream=stream,
             contract=contract,
             row=row,
@@ -718,7 +778,7 @@ async def _resolve_hold(
             underlying_price_resolver=underlying_price_resolver,
             kernel=kernel,
         )
-        return np.nan if value is None else float(value)
+        return (np.nan if value is None else float(value)), used_fallback
 
     prev_seg_contract: OptionContractDoc | None = None
     prev_seg_last_idx: int | None = None
@@ -757,7 +817,7 @@ async def _resolve_hold(
         # the segment's first date.  It is the base for the NEW segment's P&L and
         # for sizing the held quantity (surfaced via roll_info_out — values[first]
         # may carry the OLD mid on a true roll date).
-        seg_open_premium = await _mid_of(held, first_date)
+        seg_open_premium, seg_open_fallback = await _mid_of(held, first_date)
 
         # Live OPTION multiplier hint: the first held contract's contract_size
         # (POINTS→$ on the option premium P&L).  Surfaced so the core layer can
@@ -818,7 +878,7 @@ async def _resolve_hold(
             contracts[idx] = held
 
         for j, (idx, d) in enumerate(seg):
-            held_mid_today = await _mid_of(held, d)
+            held_mid_today, held_fallback = await _mid_of(held, d)
             is_true_roll = (
                 seg_num > 0
                 and prev_seg_contract is not None
@@ -829,10 +889,12 @@ async def _resolve_hold(
                 # roll day, so the step ENDING here is the OLD's own move into the
                 # roll (realise the OLD).  The NEW open premium lives in
                 # roll_premium (below).
-                old_mid_today = await _mid_of(prev_seg_contract, d)
+                old_mid_today, old_fallback = await _mid_of(prev_seg_contract, d)
                 held_value[idx] = old_mid_today
+                value_fallback[idx] = old_fallback
                 is_roll[idx] = True
                 roll_premium[idx] = seg_open_premium
+                roll_premium_fallback[idx] = seg_open_fallback
                 roll_future_ref[idx] = seg_fref_value
                 # Diagnostic keys on the OLD mid (that is this date's value); the
                 # NEW open premium is validated when the NEXT step consumes it.
@@ -845,11 +907,13 @@ async def _resolve_hold(
                 # Interior date (or the very first open, seg_num==0 j==0): the
                 # value is THIS segment's held contract's mid.
                 held_value[idx] = held_mid_today
+                value_fallback[idx] = held_fallback
                 if j == 0:
                     # Segment open that is NOT a true roll (first segment overall,
                     # or a gap/failed prior segment): still a sizing point.
                     is_roll[idx] = True
                     roll_premium[idx] = seg_open_premium
+                    roll_premium_fallback[idx] = seg_open_fallback
                     roll_future_ref[idx] = seg_fref_value
                 # Per-date diagnostic: the held contract not quoting today is a
                 # missing-stream day (the price path's equivalent of a NaN value).
@@ -875,6 +939,16 @@ async def _resolve_hold(
         roll_info_out["roll_future_ref"] = roll_future_ref
         roll_info_out["mult_opt_live"] = np.array([mult_opt_live], dtype=np.float64)
         roll_info_out["mult_fut_live"] = np.array([mult_fut_live], dtype=np.float64)
+        # close→mid fallback markers (0.0/1.0, same axis as ``is_roll``): where the
+        # DAILY value series (``close_mid_fallback``) and each roll-day OPEN premium
+        # (``roll_premium_fallback``) substituted the row mid for a false-zero/NULL
+        # settlement.  All-zero for non-``close`` streams (the fallback only fires
+        # for ``close``).  Purely diagnostic — the numeric series already carry the
+        # substituted value.
+        roll_info_out["close_mid_fallback"] = value_fallback.astype(np.float64)
+        roll_info_out["roll_premium_fallback"] = roll_premium_fallback.astype(
+            np.float64
+        )
 
     # Fold snap diagnostics in AFTER extraction (success-side note; only where the
     # date resolved a held contract with a quote) — mirrors Phase C's handling.
@@ -1608,11 +1682,13 @@ async def _resolve_bulk(
             if sel is None:
                 return
             contract, row = sel
-            raw = getattr(row, attr_name, None)
-            if raw is None or not _row_value_ok(stream, float(raw)):
-                error_codes[idx] = _missing_code_for(stream)
+            value, code, _used_fallback = _resolve_row_stream_value(
+                stream, row, attr_name
+            )
+            if code is not None:
+                error_codes[idx] = code
                 return
-            values[idx] = float(raw)
+            values[idx] = value
         except Exception as exc:
             error_codes[idx] = "data_access_error"
             _log.debug("resolve_one_bulk date=%s failed: %s", d, exc)
@@ -1639,7 +1715,7 @@ async def _resolve_bulk(
                 return
             contract, row = sel
             async with _sem:
-                value, code = await _extract_stream_value(
+                value, code, _used_fallback = await _extract_stream_value(
                     stream=stream,
                     contract=contract,
                     row=row,
@@ -1720,7 +1796,7 @@ async def _resolve_bulk(
                 # bs_mid extractor fetches it again (result-invariant; the futures
                 # adapter memoizes per resolve, so no extra dwh round-trip in
                 # production).
-                value, code = await _extract_stream_value(
+                value, code, _used_fallback = await _extract_stream_value(
                     stream=stream,
                     contract=result.contract,
                     row=row,
@@ -2153,11 +2229,13 @@ async def resolve_option_stream(
                 # stream value still records the contract identity.
                 contracts[i] = result.contract
 
-                raw = getattr(row, attr_name, None)
-                if raw is None or not _row_value_ok(stream, float(raw)):
-                    error_codes[i] = _missing_code_for(stream)
+                value, code, _used_fallback = _resolve_row_stream_value(
+                    stream, row, attr_name
+                )
+                if code is not None:
+                    error_codes[i] = code
                     return
-                values[i] = float(raw)
+                values[i] = value
         except Exception as exc:
             # A single date failing (e.g. MongoDB timeout, network
             # blip) must not abort the entire stream — record NaN +

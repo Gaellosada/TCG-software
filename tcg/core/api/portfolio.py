@@ -270,16 +270,40 @@ def _last_finite_in(
     Walks back from ``hi`` so a far-OTM option — whose daily premium goes NaN
     once it stops quoting near expiry — still shows its LAST observed premium as
     the segment's close price rather than an em-dash.
+
+    Delegates the walk-back to :func:`_last_finite_index_in` so the close value
+    and any parallel per-bar flag read from the *same* bar can never desync.
     """
+    idx = _last_finite_index_in(series, lo, hi)
+    return None if idx is None else float(series[idx])
+
+
+def _last_finite_index_in(
+    series: npt.NDArray[np.float64] | None, lo: int, hi: int
+) -> int | None:
+    """The BAR of the last finite value in ``series[lo..hi]`` (inclusive), else
+    None.  Same walk-back as :func:`_last_finite_in`, but returns the index so a
+    caller can read a parallel per-bar flag (e.g. the close→mid fallback marker)
+    at the exact bar the displayed close price was taken from."""
     if series is None:
         return None
     n = len(series)
     hi = min(hi, n - 1)
     for b in range(hi, max(lo, 0) - 1, -1):
-        v = float(series[b])
-        if math.isfinite(v):
-            return v
+        if math.isfinite(float(series[b])):
+            return b
     return None
+
+
+def _flag_at(series: npt.NDArray[np.float64] | None, bar: int | None) -> bool:
+    """True iff the 0.0/1.0 marker ``series`` is set at ``bar`` (in range).
+
+    Used to read a per-bar close→mid fallback flag beside the displayed price;
+    a ``None`` series (leg without the side-channel) or out-of-range bar → False.
+    """
+    if series is None or bar is None or not (0 <= bar < len(series)):
+        return False
+    return bool(series[bar] > 0.5)
 
 
 def _align_hold_series(
@@ -325,6 +349,8 @@ def _build_roll_rows(
     use_futures_notional: bool = False,
     pnl_series: npt.NDArray[np.float64] | None = None,
     open_price_series: npt.NDArray[np.float64] | None = None,
+    open_fallback_series: npt.NDArray[np.float64] | None = None,
+    close_fallback_series: npt.NDArray[np.float64] | None = None,
 ) -> list[dict]:
     """One display-only trade row per HELD CONTRACT of a rolling direct leg.
 
@@ -407,12 +433,24 @@ def _build_roll_rows(
             # daily premium is NaN near expiry for a far-OTM option — walk back to the
             # last finite value in the segment, else em-dash).
             open_price = _finite_at(open_price_series, open_bar)
+            # close→mid fallback flag for the OPEN price: read the roll-day open
+            # premium's marker at the SAME bar (open_bar); False when no open price.
+            open_price_fallback = open_price is not None and _flag_at(
+                open_fallback_series, open_bar
+            )
             # Measure the close at the SAME bar the P&L telescopes to — the roll
             # bar (``close_boundary``), where the resolver books the held contract's
             # roll-day realise mid — NOT the prior interior bar (``close_bar``, one
             # bar early).  A roll day carrying a large premium move otherwise showed
             # a stale pre-move close price/date beside the post-move segment_pnl.
             close_price = _last_finite_in(price_series, open_bar, close_boundary)
+            # close→mid fallback flag for the CLOSE price: read the daily value
+            # series' marker at the EXACT bar the walk-back landed on (the bar whose
+            # premium is the displayed close), so the flag matches the shown price.
+            close_price_fallback = _flag_at(
+                close_fallback_series,
+                _last_finite_index_in(price_series, open_bar, close_boundary),
+            )
             # Align the displayed close BAR (→ close DATE on the FE, which reads
             # ``close_bar``) with the same realise bar.  For the final segment
             # ``close_boundary == close_bar`` so this is a no-op there.  DISPLAY-only:
@@ -458,6 +496,11 @@ def _build_roll_rows(
         if option_mode:
             row["open_price"] = open_price
             row["close_price"] = close_price
+            # Sibling booleans: True where the displayed premium came from the
+            # close→mid fallback (a false-zero/NULL settlement replaced by the row
+            # mid).  The frontend uses these to mark WHERE the fallback fired.
+            row["open_price_fallback"] = open_price_fallback
+            row["close_price_fallback"] = close_price_fallback
         rows.append(row)
     return rows
 
@@ -1077,10 +1120,18 @@ async def _evaluate_option_stream_leg(
     npt.NDArray[np.float64] | None,
     float,
     npt.NDArray[np.float64] | None,
+    npt.NDArray[np.float64] | None,
+    npt.NDArray[np.float64] | None,
 ]:
     """Resolve an option_stream leg and return
     (dates, values, stream_mode, roll_dates, premium, future_ref, m_fut,
-    roll_premium).
+    roll_premium, close_mid_fallback, roll_premium_fallback).
+
+    ``close_mid_fallback`` / ``roll_premium_fallback`` are DISPLAY-ONLY per-date
+    0.0/1.0 markers (same axis as ``dates``) of where a false-zero/NULL ``close``
+    settlement was replaced by the row mid — for the daily value series (→ the
+    roll row's close price) and each roll-day open premium (→ its open price)
+    respectively.  ``None`` off the "price_hold" path (or a bare test double).
 
     ``roll_dates`` are the DISPLAY-ONLY interior roll BOUNDARIES (YYYYMMDD ints,
     the initial open excluded) for the trade-log roll rows, and ``premium`` is the
@@ -1184,6 +1235,41 @@ async def _evaluate_option_stream_leg(
             else:
                 _d, is_roll_f, roll_premium = _rres
                 roll_fref = None
+            # DISPLAY-ONLY close→mid fallback markers (additive side-channel, same
+            # pattern as fetch_hold_roll_info): per-date 0.0/1.0 flags of where a
+            # false-zero/NULL settlement was replaced by the row mid — the daily
+            # value series (→ the roll row's close price) and each roll-day open
+            # premium (→ its open price).  A fetcher without the accessor (a bare
+            # test double) degrades to all-False.
+            _close_fb: npt.NDArray[np.float64] | None = None
+            _roll_open_fb: npt.NDArray[np.float64] | None = None
+            _fb_fn = getattr(fetcher, "fetch_hold_close_fallback", None)
+            if _fb_fn is not None:
+                _fb = await _fb_fn(instrument)
+                if _fb is not None:
+                    _fb_dates, _close_fb, _roll_open_fb = _fb
+                    # Defensive alignment guard.  The markers are consumed
+                    # element-parallel to the leg date axis (``dates_arr`` →
+                    # ``option_stream_dates_map[label]``, sliced by the SAME
+                    # ``os_mask`` in ``_align_hold_series``).  They come from the
+                    # SAME fetch as ``dates_arr``/``premium`` so the lengths match
+                    # today; assert it here so a future fetch-semantics refactor
+                    # that desynced them fails LOUDLY at this seam instead of
+                    # silently misaligning fallback flags onto the wrong bars.
+                    if not (
+                        len(_fb_dates)
+                        == len(_close_fb)
+                        == len(_roll_open_fb)
+                        == len(dates_arr)
+                    ):
+                        raise RuntimeError(
+                            "close→mid fallback markers out of sync with the "
+                            f"leg date axis (dates={len(_fb_dates)}, "
+                            f"close_fb={len(_close_fb)}, "
+                            f"roll_open_fb={len(_roll_open_fb)}, "
+                            f"axis={len(dates_arr)}); the side-channel must stay "
+                            "element-parallel to dates_arr/premium"
+                        )
         except (SignalDataError, SignalValidationError) as exc:
             raise ValidationError(f"Leg '{label}': {exc}") from exc
 
@@ -1273,6 +1359,8 @@ async def _evaluate_option_stream_leg(
             roll_fref,
             float(mult_fut),
             np.asarray(roll_premium, dtype=np.float64),
+            _close_fb,
+            _roll_open_fb,
         )
 
     # 2. Materialise via shared infrastructure
@@ -1295,7 +1383,7 @@ async def _evaluate_option_stream_leg(
     #    overlay, NOT part of the equity curve, so it needs no forward-fill or
     #    all-NaN guard here (an all-NaN level leg is surfaced downstream as an
     #    empty tracking series).
-    return dates_arr, values, "level", [], None, None, float("nan"), None
+    return dates_arr, values, "level", [], None, None, float("nan"), None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -1491,6 +1579,12 @@ async def compute_portfolio(
     # later segment opens, so the count must be sized off this (what the accumulator
     # sized against) instead.  Never touches equity.
     option_roll_premium_raw: dict[str, npt.NDArray[np.float64] | None] = {}
+    # DISPLAY-ONLY close→mid fallback markers (per-date 0.0/1.0, same axis as the
+    # premium): where a false-zero/NULL settlement was replaced by the row mid, for
+    # the daily value series (→ close price) and each roll-day open premium (→ open
+    # price).  Aligned below like the premium; feed only the trade-log roll rows.
+    option_close_fallback_raw: dict[str, npt.NDArray[np.float64] | None] = {}
+    option_roll_open_fallback_raw: dict[str, npt.NDArray[np.float64] | None] = {}
 
     for label, leg in option_stream_legs.items():
         (
@@ -1502,6 +1596,8 @@ async def compute_portfolio(
             os_future_ref,
             os_mult_fut,
             os_roll_premium,
+            os_close_fallback,
+            os_roll_open_fallback,
         ) = await _evaluate_option_stream_leg(
             label,
             leg,
@@ -1529,6 +1625,8 @@ async def compute_portfolio(
                 option_future_ref_raw[label] = os_future_ref
                 option_mult_fut[label] = os_mult_fut
                 option_roll_premium_raw[label] = os_roll_premium
+                option_close_fallback_raw[label] = os_close_fallback
+                option_roll_open_fallback_raw[label] = os_roll_open_fallback
         else:
             # Level leg -- tracking overlay only (not in equity curve)
             tracking_series[label] = {
@@ -1604,6 +1702,14 @@ async def compute_portfolio(
     )
     option_roll_premium_aligned = _align_hold_series(
         option_roll_premium_raw, option_stream_dates_map, common_dates
+    )
+    # close→mid fallback markers, aligned on the SAME os_mask as the premium so the
+    # trade-log roll rows can flag WHERE the settlement fell back to the mid.
+    option_close_fallback_aligned = _align_hold_series(
+        option_close_fallback_raw, option_stream_dates_map, common_dates
+    )
+    option_roll_open_fallback_aligned = _align_hold_series(
+        option_roll_open_fallback_raw, option_stream_dates_map, common_dates
     )
 
     # ── 6. Compute full date range for the slider ──
@@ -1861,6 +1967,10 @@ async def compute_portfolio(
                     # instead of the base-100 synthetic. Close price walks back over
                     # the daily premium (price_series) to the last observed quote.
                     open_price_series=option_roll_premium_aligned.get(label),
+                    # close→mid fallback markers (aligned like the premium): flag the
+                    # displayed open/close prices that came from the mid fallback.
+                    open_fallback_series=option_roll_open_fallback_aligned.get(label),
+                    close_fallback_series=option_close_fallback_aligned.get(label),
                 )
             )
             continue
