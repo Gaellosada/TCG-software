@@ -44,9 +44,10 @@ export const queryKeys = {
      * ``cycle`` is normalised: ''/undefined/null all collapse to null (the
      * "all cycles" case) so the Data-page chart and a portfolio leg with no
      * cycle hit the SAME cache entry. ``rollOffset`` is coerced to a number
-     * for the same reason.
+     * for the same reason. ``rank`` (NTH_NEAREST only) is coerced to a number,
+     * defaulting to 1 so front-month/end-of-month keys are unchanged.
      */
-    continuous: (collection, { strategy, adjustment, cycle, rollOffset } = {}) => [
+    continuous: (collection, { strategy, adjustment, cycle, rollOffset, rank } = {}) => [
       'market',
       'continuous',
       collection,
@@ -54,6 +55,7 @@ export const queryKeys = {
       adjustment || 'none',
       cycle || null,
       Number(rollOffset) || 0,
+      Number(rank) || 1,
     ],
 
     /** GET /data/continuous/{collection}/cycles — available roll cycles */
@@ -78,6 +80,9 @@ export const queryKeys = {
 
     /** GET /options/expirations?root= — distinct expirations for a root */
     optionExpirations: (root) => ['market', 'optionExpirations', root],
+
+    /** GET /options/coverage?root= — first/last bar trade_date (data span) */
+    optionCoverage: (root) => ['market', 'optionCoverage', root],
 
     /** GET /options/contract/{coll}/{id} — per-contract time series */
     optionContract: (collection, contractId, { computeMissing, dateFrom, dateTo } = {}) => [

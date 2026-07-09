@@ -527,6 +527,9 @@ class LegSpec(BaseModel):
     # a legacy value on a persisted option leg is accepted and has no effect.
     adjustment: str | None = None
     cycle: str | None = None  # Optional for "continuous" and "option_stream"
+    # NTH_NEAREST continuous legs only: hold the rank-th nearest contract (1 =
+    # front month). Bounded 1..12; ignored by other strategies / leg types.
+    rank: int = Field(default=1, ge=1, le=12)
     # Roll-early offset.  "continuous" (futures) uses a bare int = DAYS (0..365).
     # "option_stream" uses the unified ``RollOffset`` ``{value, unit:days|months}``
     # — though a bare int is still accepted for it and read as days (legacy
@@ -743,6 +746,7 @@ def _parse_legs(
                     adjustment=adj_method,
                     cycle=leg.cycle,
                     roll_offset_days=roll_offset_days,
+                    rank=leg.rank,
                 ),
             )
 

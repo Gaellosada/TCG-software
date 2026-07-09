@@ -356,6 +356,32 @@ describe('ContinuousChart — roll strategy control (Issue #3)', () => {
     });
   });
 
+  it('re-queries with strategy=nth_nearest and the chosen rank', async () => {
+    mockSeriesResult = makePayload({
+      dates: [20240101, 20240102],
+      close: [100, 101],
+      roll_dates: [],
+      contracts: ['ESH24'],
+    });
+    render(<ContinuousChart collection="FUT_ES" />);
+    await waitFor(() => expect(capturedChartProps).not.toBeNull());
+
+    // The rank input is hidden until nth_nearest is selected.
+    expect(screen.queryByLabelText(/Rank \(Nth contract\)/i)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText(/Roll strategy/i), {
+      target: { value: 'nth_nearest' },
+    });
+    fireEvent.change(screen.getByLabelText(/Rank \(Nth contract\)/i), {
+      target: { value: '3' },
+    });
+
+    await waitFor(() => {
+      const last = mockGetContinuousSeries.mock.calls.at(-1);
+      expect(last[1]).toMatchObject({ strategy: 'nth_nearest', rank: 3 });
+    });
+  });
+
   it('accepts a roll offset up to 365 days and clamps beyond it', async () => {
     mockSeriesResult = makePayload({
       dates: [20240101, 20240102],

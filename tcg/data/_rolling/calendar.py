@@ -61,14 +61,17 @@ def _last_trading_day_of_month(year: int, month: int) -> date:
 
 
 def _first_tradeable_int(contract: ContractPriceData) -> int | None:
-    """First YYYYMMDD date on which the contract has a nonzero close.
+    """First YYYYMMDD date on which the contract has a POSITIVE close.
 
-    Zero-close rows are unlisted/untraded placeholders that ``trim_overlaps``
-    strips, so a contract's *usable* history starts at its first nonzero close.
-    Returns ``None`` when the contract never traded (all-zero closes).
+    Non-positive-close rows are unlisted/untraded placeholders that
+    ``trim_overlaps`` strips — exact-0 rows and the ``-2.147480`` (INT32_MIN/1e9)
+    "no quote" sentinel that real weekly FUT_VIX contracts carry on their first
+    listed day. A futures close is a price, so ``<= 0`` is never a real quote; a
+    contract's *usable* history starts at its first ``close > 0``.
+    Returns ``None`` when the contract never traded (no positive closes).
     """
     ps = contract.prices
-    nz = ps.close != 0.0
+    nz = ps.close > 0.0
     if not np.any(nz):
         return None
     return int(ps.dates[nz][0])  # dates are ascending
@@ -238,6 +241,52 @@ def compute_roll_dates(
     return [date_to_int(int_to_date(c.expiration) - offset) for c in contracts[:-1]]
 
 
+def prepare_nth_nearest(
+    contracts: list[ContractPriceData],
+    rank: int,
+    roll_offset_days: int = 0,
+) -> tuple[list[ContractPriceData], list[int]]:
+    """Return the (held_contracts, roll_dates) for the NTH_NEAREST strategy.
+
+    ``contracts`` must be sorted ascending by expiration (the builder guarantees
+    this) and already restricted to the desired cycle (the SQL fetch applies the
+    ``cycle`` filter, so ``rank`` counts WITHIN the cycle-filtered set — the
+    documented convention: a ~3-month VIX is ``rank=3`` with the monthly cycle).
+
+    Semantics: between the expiry of front contract ``p-1`` and front contract
+    ``p`` the live contracts are ``contracts[p:]``, so the rank-th nearest is
+    ``contracts[p + rank - 1]``. A roll therefore fires at each front-contract
+    expiry (shifted earlier by ``roll_offset_days``, composing exactly as for
+    FRONT_MONTH) and ownership shifts up by one contract. Consequently:
+
+    - ``held_contracts = contracts[rank - 1:]`` (the contracts that ever become
+      the rank-th nearest, in order);
+    - ``roll_dates[p] = contracts[p].expiration (− offset)`` for
+      ``p in 0 .. len(held) - 2`` — the FRONT expiry that triggers each shift,
+      NOT the held contract's own (later) expiry.
+
+    ``rank == 1`` reproduces FRONT_MONTH exactly (held == contracts, roll dates ==
+    front expiries). Fewer than ``rank`` contracts → no rank-th nearest ever
+    exists → ``([], [])``. Exactly ``rank`` contracts → a single held contract and
+    no rolls.
+    """
+    if rank < 1:
+        raise ValueError(f"NTH_NEAREST rank must be >= 1, got {rank}")
+    if len(contracts) < rank:
+        return [], []
+
+    held = contracts[rank - 1 :]
+    n_rolls = len(held) - 1  # one roll per front-contract expiry that shifts us
+    offset = timedelta(days=roll_offset_days) if roll_offset_days else None
+    roll_dates: list[int] = []
+    for p in range(n_rolls):
+        exp = int_to_date(contracts[p].expiration)
+        if offset is not None:
+            exp = exp - offset
+        roll_dates.append(date_to_int(exp))
+    return held, roll_dates
+
+
 def trim_overlaps(
     contracts: list[ContractPriceData],
     roll_dates: list[int],
@@ -277,7 +326,7 @@ def trim_overlaps(
     adjustment; the inclusive bound preserves shared-day continuity while still
     discarding the long pre-window back-month history that caused the bug.
 
-    Strip rows with close == 0 (unlisted/untraded dates).
+    Strip rows with close <= 0 (unlisted/untraded dates and no-quote sentinels).
 
     Contracts with no remaining data after filtering are excluded.
     """
@@ -289,8 +338,10 @@ def trim_overlaps(
     for i, contract in enumerate(contracts):
         ps = contract.prices
 
-        # Strip zero-close rows first
-        nonzero_mask = ps.close != 0.0
+        # Strip non-positive-close rows first: exact-0 unlisted placeholders AND
+        # the ``-2.147480`` no-quote sentinel weekly FUT_VIX contracts carry on
+        # their first listed day. A futures close <= 0 is never a real price.
+        nonzero_mask = ps.close > 0.0
 
         # Front-month window: upper bound = this contract's roll boundary;
         # lower bound = the PREVIOUS contract's roll boundary, INCLUSIVE so the

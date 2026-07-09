@@ -939,6 +939,70 @@ class SqlOptionsDataReader:
             res = await cur.fetchone()
             return res["d"] if res else None
 
+    async def _first_trade_date(self, conn: Any, collection: str) -> date | None:
+        """Earliest ``trade_date`` with a bar in *collection* (data start).
+
+        Mirror image of ``_last_trade_date``: a ``min(trade_date)`` over a whole
+        root seq-scans every partition and times out (the fact's only btree is
+        the composite PK), but a ``min`` over a SINGLE ``instrument_id`` is a
+        fast PK index scan.
+
+        So: pick ONE representative early contract — the earliest-expiring
+        contract (``expiration ASC``, indexed dim lookup) — then
+        ``min(trade_date)`` for just that instrument. The earliest-expiring
+        contract is the first to be listed, so its first bar closely tracks the
+        root's true data start.
+
+        NOTE (approximation, by design — matches the ``_last_trade_date``
+        contract): a longer-dated contract listed even earlier could carry a
+        marginally earlier bar, so the returned start may lag the true first
+        bar by a small margin. This is acceptable — the value seeds the
+        portfolio date-slider floor, and the goal is to expose the real
+        multi-decade history (~2005/2006 for SPX/VIX) rather than an artificial
+        recent floor; a few weeks of slack at the very start is immaterial.
+        Returns ``None`` only when the root has no dated contracts at all.
+        """
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT instrument_id FROM {SCHEMA}.dim_instrument
+                    WHERE source_collection = %s AND expiration IS NOT NULL
+                    ORDER BY expiration ASC
+                    LIMIT 1""",
+                (collection,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+
+            await cur.execute(
+                f"""SELECT min(trade_date) AS d
+                    FROM {SCHEMA}.fact_price_eod
+                    WHERE instrument_id = %s""",
+                (row["instrument_id"],),
+            )
+            res = await cur.fetchone()
+            return res["d"] if res else None
+
+    async def trade_date_coverage(self, root: str) -> tuple[date | None, date | None]:
+        """``(first_trade_date, last_trade_date)`` bar coverage for *root*.
+
+        Both bounds reuse the single-representative-contract heuristic (see
+        ``_first_trade_date`` / ``_last_trade_date``) to stay inside the
+        statement timeout on the huge option fact. Either element is ``None``
+        when the root has no usable contract. Backs the portfolio date-slider
+        floor for option-only portfolios so they default to the option
+        collection's TRUE history instead of an artificial recent default.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                first = await self._first_trade_date(conn, root)
+                last = await self._last_trade_date(conn, root)
+                return (first, last)
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error reading trade-date coverage for {root}: {exc}"
+            ) from exc
+
 
 def _scale(value: float | None, factor: float) -> float | None:
     """Multiply *value* by *factor* when present; preserve None."""

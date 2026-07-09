@@ -117,6 +117,15 @@ class OptionsDataReader(Protocol):
         """
         ...
 
+    async def trade_date_coverage(self, root: str) -> tuple[date | None, date | None]:
+        """``(first_trade_date, last_trade_date)`` bar coverage for *root*.
+
+        Backs the portfolio date-slider floor so an option-only portfolio
+        defaults to the option collection's TRUE history. Either bound is
+        ``None`` when the root has no usable contract.
+        """
+        ...
+
     async def list_expirations_filtered(
         self,
         root: str,

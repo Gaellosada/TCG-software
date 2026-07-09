@@ -20,6 +20,15 @@ vi.mock('../../api/data', () => ({
   getContinuousSeries: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
 }));
 
+// Option-stream legs now resolve their real collection coverage (first..last
+// trade_date) via GET /api/options/coverage. Mock it to the SPX-like span so
+// an option-only portfolio floors at the true history (~2005), not today-5y.
+vi.mock('../../api/options', () => ({
+  getOptionCoverage: vi.fn(() => Promise.resolve({
+    root: 'OPT_SP_500', start: '2005-12-01', end: '2025-06-30',
+  })),
+}));
+
 vi.mock('../Signals/requestBuilder', () => ({
   buildComputeRequestBody: vi.fn(() => ({
     body: {
@@ -481,11 +490,13 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
     expect(body.end).toBeTruthy();
   });
 
-  it('seeds the platform-standard 5-year default window for an option-only portfolio', async () => {
-    // Option-only portfolios have no priced leg to anchor on, so the window
-    // must default to ~5 years back from today (matching the basket default),
-    // and that window must reach both the slider (via overlapRange) and the
-    // compute request.
+  it('resolves the option collection real coverage as the window for an option-only portfolio', async () => {
+    // Option-only portfolios have no priced instrument leg, but the option leg
+    // now resolves its REAL collection coverage (first..last trade_date via
+    // /api/options/coverage) and flows through the normal overlap logic. So the
+    // window reflects the option collection's true multi-decade history
+    // (~2005 for SPX) — NOT an artificial today-5y (~2021) default. That window
+    // must reach both the slider (via overlapRange) and the compute request.
     const { result } = renderHook(() => usePortfolio());
 
     act(() => {
@@ -496,17 +507,12 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
       await new Promise((r) => setTimeout(r, 50));
     });
 
-    // Expected window computed the same way defaultDateRange() (utils/format)
-    // does — kept inline so the test is decoupled from the helper's internals.
-    const end = new Date();
-    const start = new Date();
-    start.setFullYear(start.getFullYear() - 5);
-    const iso = (d) => d.toISOString().slice(0, 10);
-    const expectedStart = iso(start);
-    const expectedEnd = iso(end);
+    // The mocked coverage span (SPX-like: 2005-12-01 .. 2025-06-30).
+    const expectedStart = '2005-12-01';
+    const expectedEnd = '2025-06-30';
 
     // The slider min/max are bound to overlapRange (PortfolioPage), so it must
-    // carry the default window.
+    // carry the real coverage window.
     expect(result.current.overlapRange).toEqual({ start: expectedStart, end: expectedEnd });
 
     await act(async () => {
@@ -547,10 +553,11 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
     expect(result.current.error).toBeNull();
     expect(computePortfolio).toHaveBeenCalledTimes(1);
     const body = computePortfolio.mock.calls[0][0];
-    // The window falls back to the available overlap (the instrument's
-    // 2020-01-01..2020-12-31 from the getInstrumentPrices mock) — NOT the 5y
-    // default — so the BE can enumerate the option leg's trade dates and the
-    // window matches what the slider shows.
+    // The window falls back to the available overlap: the instrument's
+    // 2020-01-01..2020-12-31 (getInstrumentPrices mock) intersected with the
+    // option leg's wider 2005-12-01..2025-06-30 coverage → the 2020 window. The
+    // BE can enumerate the option leg's trade dates and the window matches what
+    // the slider shows.
     expect(body.start).toBe('2020-01-01');
     expect(body.end).toBe('2020-12-31');
   });
@@ -616,11 +623,11 @@ describe('usePortfolio — option leg date window (PR #67 bug)', () => {
   });
 
   it('guard fires (safety net) when priced legs are disjoint so no overlap exists', async () => {
-    // Two instrument legs with non-overlapping ranges → overlapStart > overlapEnd
-    // → overlapRange is null (the option-stream default branch is NOT reached,
-    // since validStarts is non-empty). With an option leg present and no
-    // derivable window, the guard correctly fires instead of sending an
-    // undefined window to the backend.
+    // Two instrument legs with non-overlapping ranges (EARLY 2018, LATE 2023)
+    // → overlapStart (2023) > overlapEnd (2018) → overlapRange is null even
+    // though the option leg's coverage (2005..2025) spans both. With an option
+    // leg present and no derivable window, the guard correctly fires instead of
+    // sending an undefined window to the backend.
     const prev = getInstrumentPrices.getMockImplementation();
     getInstrumentPrices.mockImplementation((_collection, symbol) => {
       if (symbol === 'EARLY') return Promise.resolve({ dates: [20180101, 20181231] });

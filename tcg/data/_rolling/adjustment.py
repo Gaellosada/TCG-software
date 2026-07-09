@@ -184,12 +184,15 @@ def adjust_ratio(
                 new_close,
             )
 
-        # Zero/NaN guard (symmetric with adjust_difference): a 0 or NaN
-        # reference close cannot produce a meaningful gap — skip the roll
-        # rather than zeroing-out or NaN-poisoning all prior history.
+        # Non-positive/NaN guard (symmetric with adjust_difference): a
+        # reference close that is <= 0 or NaN cannot produce a meaningful gap.
+        # This covers exact-0 unlisted rows, NaN, AND the negative ``-2.147480``
+        # no-quote sentinel weekly FUT_VIX contracts carry: a negative reference
+        # close would make ``new/old < 0`` and SIGN-FLIP all prior history (the
+        # root of the ~1e63 FUT_VIX ratio blow-up). Skip the roll instead.
         if (
-            old_close == 0.0
-            or new_close == 0.0
+            old_close <= 0.0
+            or new_close <= 0.0
             or not np.isfinite(old_close)
             or not np.isfinite(new_close)
         ):
@@ -279,14 +282,14 @@ def adjust_difference(
                 new_close,
             )
 
-        # Zero/NaN guard — SYMMETRIC with adjust_ratio (fixes the prior
-        # asymmetry where difference had no guard). A 0 reference close means a
-        # row that should have been stripped; treating diff = -old_close there
-        # would shift all history by a full contract price. A NaN would poison
-        # the entire series. Skip such rolls rather than corrupt the output.
+        # Non-positive/NaN guard — SYMMETRIC with adjust_ratio. A close <= 0
+        # (exact-0 unlisted row, or the negative ``-2.147480`` no-quote sentinel
+        # weekly FUT_VIX carries) is not a real price: treating diff against it
+        # would shift all history by a spurious amount. A NaN would poison the
+        # entire series. Skip such rolls rather than corrupt the output.
         if (
-            old_close == 0.0
-            or new_close == 0.0
+            old_close <= 0.0
+            or new_close <= 0.0
             or not np.isfinite(old_close)
             or not np.isfinite(new_close)
         ):

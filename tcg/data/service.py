@@ -347,6 +347,11 @@ class DefaultMarketDataService:
     async def list_option_expirations(self, root: str) -> list[date]:
         return await self._options.list_expirations(root)
 
+    async def option_trade_date_coverage(
+        self, root: str
+    ) -> tuple[date | None, date | None]:
+        return await self._options.trade_date_coverage(root)
+
     async def list_option_expirations_filtered(
         self,
         root: str,
@@ -445,6 +450,6 @@ class DefaultMarketDataService:
         return (
             f"continuous:{collection}:{roll_config.strategy}"
             f":{roll_config.adjustment}:{roll_config.cycle}"
-            f":{roll_config.roll_offset_days}"
+            f":{roll_config.roll_offset_days}:{roll_config.rank}"
             f":{start}:{end}"
         )

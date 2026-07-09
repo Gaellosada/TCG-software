@@ -23,7 +23,9 @@ export function legsToRangesKey(legs) {
       // back-adjustment, so there is no adjustment segment.
       return `o:${l.collection}:${l.option_type}:${l.cycle}:${JSON.stringify(m)}:${JSON.stringify(s)}:${l.stream}:${JSON.stringify(l.roll_offset ?? { value: 0, unit: 'days' })}`;
     }
-    if (l.type === 'continuous') return `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}`;
+    // rank shifts which contract is held (NTH_NEAREST), so it must be part of
+    // the range-refetch key; ``?? 1`` keeps a non-nth_nearest leg's key stable.
+    if (l.type === 'continuous') return `c:${l.collection}:${l.strategy}:${l.adjustment}:${l.cycle}:${l.rollOffset}:${l.rank ?? 1}`;
     return `i:${l.collection}:${l.symbol}`;
   }).join('|');
 }
