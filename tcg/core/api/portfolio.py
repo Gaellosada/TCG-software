@@ -270,16 +270,12 @@ def _last_finite_in(
     Walks back from ``hi`` so a far-OTM option — whose daily premium goes NaN
     once it stops quoting near expiry — still shows its LAST observed premium as
     the segment's close price rather than an em-dash.
+
+    Delegates the walk-back to :func:`_last_finite_index_in` so the close value
+    and any parallel per-bar flag read from the *same* bar can never desync.
     """
-    if series is None:
-        return None
-    n = len(series)
-    hi = min(hi, n - 1)
-    for b in range(hi, max(lo, 0) - 1, -1):
-        v = float(series[b])
-        if math.isfinite(v):
-            return v
-    return None
+    idx = _last_finite_index_in(series, lo, hi)
+    return None if idx is None else float(series[idx])
 
 
 def _last_finite_index_in(
