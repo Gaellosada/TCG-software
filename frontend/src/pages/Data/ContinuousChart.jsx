@@ -17,10 +17,12 @@ function ContinuousChart({ collection }) {
   const [cycle, setCycle] = useState('');
   const [rollOffset, setRollOffset] = useState(2);
   // Roll strategy (Issue #3): 'front_month' (default), 'end_of_month', or
-  // 'nth_nearest' (hold the rank-th nearest contract — e.g. a ~3-month VIX).
+  // 'nth_nearest' (hold the rank-th nearest contract — e.g. rank=3 with the
+  // monthly cycle picks a ~3-month VIX; with an all-cycles or weekly cycle
+  // the 3rd-nearest contract is not ~3 months out).
   const [strategy, setStrategy] = useState('front_month');
-  // NTH_NEAREST rank (default 3 — a sensible ~3-month pick). Only sent to the
-  // continuous query when strategy === 'nth_nearest'.
+  // NTH_NEAREST rank (default 3 — ~3 months out only with the monthly
+  // cycle). Only sent to the continuous query when strategy === 'nth_nearest'.
   const [rank, setRank] = useState(3);
   const [chartType, setChartType] = useState(preference);
 

@@ -158,9 +158,10 @@ export default function InstrumentPickerModal({
   // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
   // 'nth_nearest' is offered only when allowNthNearest is set (Data / Portfolio).
   const [strategy, setStrategy] = useState('front_month');
-  // NTH_NEAREST only: the rank-th nearest contract to hold (default 3 — a
-  // sensible ~3-month pick when the user chooses nth_nearest). Emitted ONLY
-  // when strategy === 'nth_nearest', so front-month / end-of-month configs are
+  // NTH_NEAREST only: the rank-th nearest contract to hold (default 3 — ~3
+  // months out only with the monthly cycle; with all-cycles or weeklies the
+  // 3rd-nearest contract is not ~3 months out). Emitted ONLY when
+  // strategy === 'nth_nearest', so front-month / end-of-month configs are
   // byte-identical to before.
   const [rank, setRank] = useState(3);
   const [availableCycles, setAvailableCycles] = useState([]);
@@ -819,7 +820,9 @@ function ContinuousSpecPicker({ value, onChange, availableCycles, assetClass: _a
   // Roll strategy (Issue #3): 'front_month' (default) or 'end_of_month'.
   // 'nth_nearest' is offered only when allowNthNearest is set.
   const strategy = (value && value.strategy) || 'front_month';
-  // NTH_NEAREST rank (default 3 — a sensible ~3-month pick). Bounded 1..12.
+  // NTH_NEAREST rank (default 3 — ~3 months out only with the monthly cycle;
+  // with all-cycles or weeklies the 3rd-nearest contract is not ~3 months
+  // out). Bounded 1..12.
   const rank = value && Number.isInteger(value.rank) ? value.rank : 3;
 
   const emit = useCallback((patch) => {
