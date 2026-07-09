@@ -59,6 +59,20 @@ export async function getOptionExpirations(root) {
 }
 
 // ---------------------------------------------------------------------------
+// 1c. Trade-date coverage (data span) for a root
+//     GET /api/options/coverage?root=OPT_SP_500
+//     Returns: { root, start: 'YYYY-MM-DD'|null, end: 'YYYY-MM-DD'|null }
+//     Used by the portfolio editor to resolve an option leg's real available
+//     date range (so an option-only portfolio's slider floors at the option
+//     collection's true history, not an artificial recent default).
+// ---------------------------------------------------------------------------
+
+export async function getOptionCoverage(root) {
+  const qp = new URLSearchParams({ root: String(root) });
+  return fetchClassified(`/options/coverage?${qp}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2. Chain query
 //    GET /api/options/chain
 //    Returns: ChainResponse

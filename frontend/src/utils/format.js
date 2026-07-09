@@ -34,12 +34,14 @@ export function formatDateTime(value) {
 
 /**
  * Default exploration window for views whose data carries no inherent date
- * range — notably option_stream legs (the backend REQUIRES an explicit window
- * to enumerate their trade dates). Returns ``{ start, end }`` as YYYY-MM-DD,
- * with ``end`` = today and ``start`` = ~5 years back — the platform's standard
- * long-history default. Shared by the basket explorer (Data/BasketChart) and
- * the portfolio editor (Portfolio/usePortfolio) so both prefill the same
- * window. The user can widen/narrow afterwards.
+ * range. Returns ``{ start, end }`` as YYYY-MM-DD, with ``end`` = today and
+ * ``start`` = ~5 years back — a generic long-history default. Used by the
+ * basket explorer (Data/BasketChart) to prefill its window.
+ *
+ * NOTE: the portfolio editor no longer uses this for option-only portfolios —
+ * an option leg now resolves its REAL collection coverage (first..last
+ * trade_date via /api/options/coverage), so it flows through the normal
+ * overlap logic instead of this artificial recent floor.
  *
  * Note: formats via toISOString (UTC) for parity with the original call sites;
  * unlike formatDate() this can land on the prior day near midnight in

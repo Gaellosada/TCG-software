@@ -28,6 +28,7 @@ from typing import Any, Sequence
 import pytest
 
 from tcg.data._sql.options import SqlOptionsDataReader
+from tcg.types.errors import OptionsDataAccessError
 
 
 # --------------------------------------------------------------------------- #
@@ -495,3 +496,75 @@ class TestListExpirationsByDate:
         )
         sql, _params = cur.calls[-1]
         assert "expiration <= %s" not in sql
+
+
+# --------------------------------------------------------------------------- #
+# trade_date_coverage — first/last bar trade_date (portfolio date-slider floor)
+# --------------------------------------------------------------------------- #
+class TestTradeDateCoverage:
+    """``SqlOptionsDataReader.trade_date_coverage`` reuses the single-
+    representative-contract heuristic (earliest-expiry for the start, live
+    front-month for the end) so it stays inside the statement timeout, and
+    returns ``(first, last)`` bar ``trade_date`` for a root."""
+
+    def _make_reader(
+        self, first: date | None, last: date | None, has_contract: bool = True
+    ):
+        def responder(sql: str, _params: Any):
+            if "min(trade_date)" in sql:
+                return [{"d": first}]
+            if "max(trade_date)" in sql:
+                return [{"d": last}]
+            # dim_instrument representative-contract lookups.
+            if not has_contract:
+                return []
+            # Distinguish _last (expiration >= today) from _first (IS NOT NULL).
+            iid = 222 if "expiration >= %s" in sql else 111
+            return [{"instrument_id": iid}]
+
+        cur = _FakeCursor(responder)
+        pool = _FakePool(cur)
+        return SqlOptionsDataReader(pool), cur  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_returns_first_and_last_trade_date(self):
+        reader, _cur = self._make_reader(date(2005, 12, 1), date(2025, 6, 30))
+        first, last = await reader.trade_date_coverage("OPT_SP_500")
+        assert first == date(2005, 12, 1)
+        assert last == date(2025, 6, 30)
+
+    @pytest.mark.asyncio
+    async def test_first_uses_earliest_expiry_representative_contract(self):
+        """The start bound picks the earliest-expiring contract (ASC, NOT the
+        live front-month) so it tracks the root's true data start."""
+        reader, cur = self._make_reader(date(2005, 12, 1), date(2025, 6, 30))
+        await reader.trade_date_coverage("OPT_SP_500")
+        # The _first dim lookup filters IS NOT NULL and orders ASC without a
+        # ``expiration >= today`` predicate (that one belongs to _last).
+        first_dim = next(
+            sql
+            for sql, _ in cur.calls
+            if "ORDER BY expiration ASC" in sql and "expiration >= %s" not in sql
+        )
+        assert "expiration IS NOT NULL" in first_dim
+        # The min() scan is per single instrument_id (fast PK scan, no seq-scan).
+        min_call = next(sql for sql, _ in cur.calls if "min(trade_date)" in sql)
+        assert "instrument_id = %s" in min_call
+
+    @pytest.mark.asyncio
+    async def test_none_when_root_has_no_contracts(self):
+        reader, _cur = self._make_reader(None, None, has_contract=False)
+        first, last = await reader.trade_date_coverage("OPT_EMPTY")
+        assert first is None
+        assert last is None
+
+    @pytest.mark.asyncio
+    async def test_data_access_error_wrapping(self):
+        def boom(_sql: str, _params: Any):
+            raise RuntimeError("connection reset")
+
+        cur = _FakeCursor(boom)
+        pool = _FakePool(cur)
+        reader = SqlOptionsDataReader(pool)  # type: ignore[arg-type]
+        with pytest.raises(OptionsDataAccessError):
+            await reader.trade_date_coverage("OPT_SP_500")

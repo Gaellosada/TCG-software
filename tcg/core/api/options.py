@@ -300,6 +300,35 @@ async def list_expirations(
 
 
 # ---------------------------------------------------------------------------
+# Endpoint 1c — GET /api/options/coverage
+# ---------------------------------------------------------------------------
+
+
+@router.get("/coverage")
+async def get_coverage(
+    root: str = Query(..., description="OPT_* collection name"),
+    svc: MarketDataService = Depends(get_market_data),
+) -> dict:
+    """First/last bar ``trade_date`` for *root* (the collection's data span).
+
+    Backs the portfolio date-slider floor: an option leg resolves its REAL
+    available window from this endpoint (like every other leg), so an
+    option-only portfolio defaults to the option collection's true multi-decade
+    history (~2005/2006 for SPX/VIX) instead of an artificial recent default.
+    ``start``/``end`` are ``null`` when the root has no usable contract.
+
+    Errors:
+        ``OptionsDataAccessError`` from the reader → 502.
+    """
+    first, last = await svc.option_trade_date_coverage(root)
+    return {
+        "root": root,
+        "start": first.isoformat() if first else None,
+        "end": last.isoformat() if last else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Endpoint 2 — GET /api/options/chain
 # ---------------------------------------------------------------------------
 

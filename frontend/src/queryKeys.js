@@ -79,6 +79,9 @@ export const queryKeys = {
     /** GET /options/expirations?root= — distinct expirations for a root */
     optionExpirations: (root) => ['market', 'optionExpirations', root],
 
+    /** GET /options/coverage?root= — first/last bar trade_date (data span) */
+    optionCoverage: (root) => ['market', 'optionCoverage', root],
+
     /** GET /options/contract/{coll}/{id} — per-contract time series */
     optionContract: (collection, contractId, { computeMissing, dateFrom, dateTo } = {}) => [
       'market',

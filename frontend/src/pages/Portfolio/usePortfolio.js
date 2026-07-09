@@ -3,10 +3,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
 import { queryKeys } from '../../queryKeys';
-import { formatDateInt, defaultDateRange } from '../../utils/format';
+import { formatDateInt } from '../../utils/format';
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { fetchSignalLegRange } from './signalLegRange';
+import { fetchOptionLegRange } from './optionLegRange';
 import { legsToRangesKey } from './legKey';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
@@ -86,9 +87,12 @@ export default function usePortfolio() {
         return fetchSignalLegRange(leg);
       }
       if (leg.type === 'option_stream') {
-        // Option streams need materialisation to know exact date bounds.
-        // Return null dates — the user must set explicit start/end dates.
-        return { id: leg.id, start: null, end: null };
+        // An option stream's range is the option COLLECTION's bar coverage
+        // (first..last trade_date), fetched from /api/options/coverage. This
+        // makes an option leg contribute a REAL range to the overlap — exactly
+        // like every other leg — instead of the old null that forced an
+        // artificial today-5y (~2021) floor.
+        return fetchOptionLegRange(queryClient, leg);
       }
       try {
         let dates;
@@ -150,14 +154,12 @@ export default function usePortfolio() {
         } else {
           setOverlapRange(null);
         }
-      } else if (legs.some((l) => l.type === 'option_stream')) {
-        // No priced leg to anchor on, but an option_stream leg needs an
-        // explicit window. Seed the platform-standard 5-year default so the
-        // slider has concrete min/max (PortfolioPage binds them to
-        // overlapRange) and Compute can resolve the option leg without a
-        // manual drag.
-        setOverlapRange(defaultDateRange());
       } else {
+        // No leg resolved a range (e.g. ranges not yet settled or all reads
+        // failed). Option legs now resolve their real coverage above and flow
+        // through the same overlap logic as every other leg — there is no
+        // longer a special-case today-5y default that floored option-only
+        // portfolios at ~2021.
         setOverlapRange(null);
       }
 
@@ -343,11 +345,11 @@ export default function usePortfolio() {
     }
 
     // Effective compute window: an explicit slider selection takes priority;
-    // otherwise fall back to the available range (the overlap of the priced
-    // legs, or the 5-year default seeded for option-only portfolios). This
-    // lets an option leg resolve over the portfolio's available window without
-    // forcing a manual slider drag — the slider already renders '' as the full
-    // range, so the request now matches what the user sees.
+    // otherwise fall back to the available range (the overlap of all legs,
+    // including option legs which now resolve their real collection coverage).
+    // This lets an option leg resolve over the portfolio's available window
+    // without forcing a manual slider drag — the slider already renders '' as
+    // the full range, so the request now matches what the user sees.
     const effectiveStart = startDate || overlapRange?.start;
     const effectiveEnd = endDate || overlapRange?.end;
 

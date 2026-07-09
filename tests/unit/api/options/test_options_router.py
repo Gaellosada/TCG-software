@@ -257,6 +257,43 @@ async def test_expirations_data_access_error_502(
 
 
 # ---------------------------------------------------------------------------
+# /coverage
+# ---------------------------------------------------------------------------
+
+
+async def test_coverage_happy_path(client: AsyncClient, mock_svc):
+    """Returns the first/last bar trade_date as ISO strings. Backs the
+    portfolio date-slider floor for option-only portfolios."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+    resp = await client.get("/api/options/coverage", params={"root": "OPT_SP_500"})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "root": "OPT_SP_500",
+        "start": "2005-12-01",
+        "end": "2025-06-30",
+    }
+
+
+async def test_coverage_none_when_no_contracts(client: AsyncClient, mock_svc):
+    """A root with no usable contract yields null bounds (not an error)."""
+    mock_svc.option_trade_date_coverage = AsyncMock(return_value=(None, None))
+    resp = await client.get("/api/options/coverage", params={"root": "OPT_EMPTY"})
+    assert resp.status_code == 200
+    assert resp.json() == {"root": "OPT_EMPTY", "start": None, "end": None}
+
+
+async def test_coverage_data_access_error_502(client: AsyncClient, mock_svc):
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        side_effect=OptionsDataAccessError("dwh down")
+    )
+    resp = await client.get("/api/options/coverage", params={"root": "OPT_SP_500"})
+    assert resp.status_code == 502
+    assert resp.json()["error_type"] == "options_data_access_error"
+
+
+# ---------------------------------------------------------------------------
 # /chain
 # ---------------------------------------------------------------------------
 
@@ -1189,6 +1226,7 @@ async def test_app_registers_options_paths(client: AsyncClient):
         "/api/options/chain",
         "/api/options/chain-snapshot",
         "/api/options/contract/{coll}/{contract_id}",
+        "/api/options/coverage",
         "/api/options/expirations",
         "/api/options/roots",
         "/api/options/select",
