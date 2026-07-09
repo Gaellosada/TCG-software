@@ -3,7 +3,14 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
-import TradeLog, { formatSignedPercent, formatQuantity, formatSignedAmount, formatPrice } from './TradeLog';
+import TradeLog, {
+  formatSignedPercent,
+  formatQuantity,
+  formatSignedAmount,
+  formatPrice,
+  FALLBACK_MARKER_TITLE,
+  CLOSE_INPUT_HINT,
+} from './TradeLog';
 
 afterEach(cleanup);
 
@@ -767,6 +774,130 @@ describe('roll rows (rolling direct legs)', () => {
     const cell = screen.getByTestId('trade-pnl');
     expect(cell.textContent).toBe('+13.33');
     expect(cell.textContent).not.toContain('-');
+  });
+});
+
+describe('option close→mid fallback surfacing', () => {
+  // An option roll row (carries open_price/close_price + the sibling fallback
+  // booleans) whose default label ends in "close".
+  const optRow = (over = {}) => ({
+    input_id: 'OPT_SP_500 P close',
+    entry_block_id: 'roll:OPT_SP_500 P close',
+    entry_block_name: 'open',
+    exit_block_id: 'roll:OPT_SP_500 P close',
+    exit_block_name: 'end',
+    open_bar: 0,
+    close_bar: 2,
+    direction: 'short',
+    signed_weight: -1.0,
+    quantity: 9.76,
+    quantity_unit: 'contracts',
+    multiplier: 50,
+    segment_pnl: 100.0,
+    roll_hover: 'rolling OPT_SP_500',
+    open_price: 20.1,
+    close_price: 3.5,
+    open_price_fallback: false,
+    close_price_fallback: false,
+    ...over,
+  });
+
+  function renderRow(over) {
+    render(<TradeLog trades={[optRow(over)]} timestamps={TS} positions={[pos('OPT_SP_500 P close', [100, 150, 200])]} />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+  }
+
+  it('DYNAMIC: marks the OPEN price when open_price_fallback is true', () => {
+    renderRow({ open_price_fallback: true });
+    const mark = screen.getByTestId('fallback-mark-open');
+    expect(mark).toBeTruthy();
+    expect(mark.getAttribute('title')).toBe(FALLBACK_MARKER_TITLE);
+    // The numeric mid value is still shown beside the marker (was em-dash before).
+    expect(screen.getByTestId('trade-open-price').textContent).toContain(formatPrice(20.1));
+    // Close cell not flagged.
+    expect(screen.queryByTestId('fallback-mark-close')).toBeNull();
+  });
+
+  it('DYNAMIC: marks the CLOSE price when close_price_fallback is true', () => {
+    renderRow({ close_price_fallback: true });
+    const mark = screen.getByTestId('fallback-mark-close');
+    expect(mark).toBeTruthy();
+    expect(mark.getAttribute('title')).toBe(FALLBACK_MARKER_TITLE);
+    expect(screen.queryByTestId('fallback-mark-open')).toBeNull();
+  });
+
+  it('DYNAMIC: no marker when both flags false', () => {
+    renderRow({});
+    expect(screen.queryByTestId('fallback-mark-open')).toBeNull();
+    expect(screen.queryByTestId('fallback-mark-close')).toBeNull();
+  });
+
+  it('DYNAMIC: no marker when the fallback keys are ABSENT (continuous row)', () => {
+    // A continuous roll row: no open_price/close_price, no fallback keys.
+    render(<TradeLog
+      trades={[{
+        input_id: 'FUT_SP_500',
+        entry_block_id: 'roll:SPX',
+        entry_block_name: 'open',
+        exit_block_id: 'roll:SPX',
+        exit_block_name: 'end',
+        open_bar: 0,
+        close_bar: 2,
+        direction: 'long',
+        signed_weight: 1.0,
+        quantity: 0.02,
+        quantity_unit: 'contracts',
+        multiplier: 50,
+        segment_pnl: 1.0,
+      }]}
+      timestamps={TS}
+      positions={[pos('FUT_SP_500', [100, 101, 102])]}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    expect(screen.queryByTestId('fallback-mark-open')).toBeNull();
+    expect(screen.queryByTestId('fallback-mark-close')).toBeNull();
+  });
+
+  it('DYNAMIC: does not mark an em-dash open (flag true but no finite price)', () => {
+    // Defensive: open_price null → em-dash; even a stray true flag must not mark.
+    renderRow({ open_price: null, open_price_fallback: true });
+    expect(screen.getByTestId('trade-open-price').textContent).toContain('—');
+    expect(screen.queryByTestId('fallback-mark-open')).toBeNull();
+  });
+
+  it('STATIC: the Input cell of a close-series option row carries the hint tooltip', () => {
+    renderRow({});
+    const hint = screen.getByTestId('input-close-hint');
+    expect(hint.textContent).toBe('OPT_SP_500 P close');
+    expect(hint.getAttribute('title')).toBe(CLOSE_INPUT_HINT);
+  });
+
+  it('STATIC: no Input hint on a mid-series option row (fallback never applies)', () => {
+    // A mid leg carries the fallback keys (always false) but its label ends in
+    // "mid" → must NOT be falsely hinted as having a close fallback.
+    renderRow({ input_id: 'OPT_SP_500 P mid', entry_block_id: 'roll:OPT_SP_500 P mid' });
+    expect(screen.queryByTestId('input-close-hint')).toBeNull();
+  });
+
+  it('STATIC: no Input hint on a continuous row (no fallback keys)', () => {
+    render(<TradeLog
+      trades={[{
+        input_id: 'FUT_SP_500 close',
+        entry_block_id: 'roll:SPX',
+        entry_block_name: 'open',
+        exit_block_id: 'roll:SPX',
+        exit_block_name: 'end',
+        open_bar: 0,
+        close_bar: 2,
+        direction: 'long',
+        signed_weight: 1.0,
+        segment_pnl: 1.0,
+      }]}
+      timestamps={TS}
+      positions={[pos('FUT_SP_500 close', [100, 101, 102])]}
+    />);
+    fireEvent.click(screen.getByTestId('trade-log-toggle'));
+    expect(screen.queryByTestId('input-close-hint')).toBeNull();
   });
 });
 
