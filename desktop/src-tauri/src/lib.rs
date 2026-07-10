@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, RunEvent};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::process::{Command, CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 /// Local address the sidecar binds to. Must match the args granted in
@@ -41,6 +41,15 @@ const SIDECAR_PORT: u16 = 8000;
 /// otherwise defaults to allowing only the Vite dev origin.
 const SIDECAR_CORS_ORIGINS: &str =
     "tauri://localhost,https://tauri.localhost,http://tauri.localhost,http://localhost:5173";
+
+/// Bounded retry for a TRANSIENT sidecar spawn failure. On a managed Windows
+/// box an antivirus real-time scan can momentarily lock the freshly-staged
+/// one-file sidecar exe (`ERROR_SHARING_VIOLATION` = os error 32), which clears
+/// within a few hundred ms. A small number of attempts with a short backoff
+/// self-heals that without meaningfully delaying a DETERMINISTIC failure (missing
+/// exe / policy block), which is not retried at all — see `is_transient_spawn_error`.
+const SPAWN_MAX_ATTEMPTS: u32 = 3;
+const SPAWN_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Holds the spawned sidecar's child handle so we can terminate it on exit.
 /// `CommandChild::kill` consumes the handle, hence `Option` + `take()`.
@@ -249,6 +258,118 @@ fn resolve_env_file(app: &AppHandle) -> Option<String> {
     None
 }
 
+/// Is a sidecar `spawn()` failure worth retrying? Only TRANSIENT conditions —
+/// an antivirus real-time scan briefly locking the freshly-staged one-file exe —
+/// clear on their own within a few hundred ms. That surfaces on Windows as
+/// `ERROR_SHARING_VIOLATION` (raw os error 32), or cross-platform as
+/// `ErrorKind::WouldBlock` (the OS reporting the resource temporarily
+/// unavailable). DETERMINISTIC failures do NOT change on retry — retrying only
+/// delays the inevitable error — so they return false and fail fast: os error 2
+/// (FILE_NOT_FOUND, exe quarantined/never staged), 5 (ACCESS_DENIED — an
+/// AppLocker/SRP/AV execute-block or ACL is a policy verdict, not a lock; a mere
+/// scan lock shows as 32, handled above), 193 (BAD_EXE_FORMAT), 225/226
+/// (Defender VIRUS_INFECTED/VIRUS_DELETED). Pure so it is unit-testable without
+/// spawning.
+fn is_transient_spawn_error(kind: std::io::ErrorKind, raw_os_error: Option<i32>) -> bool {
+    // Windows ERROR_SHARING_VIOLATION: the exe is momentarily locked (AV scan /
+    // still being flushed by the one-file bootloader). The canonical transient.
+    // The check is intentionally NOT `cfg!(windows)`-gated so this fn (and its
+    // unit test) stay platform-agnostic: on Linux raw 32 is EPIPE, which a
+    // `spawn()` cannot realistically return, so at worst this costs a bounded
+    // (<=400ms) retry there — never a correctness problem.
+    if raw_os_error == Some(32) {
+        return true;
+    }
+    // "Resource temporarily unavailable" (EAGAIN/EWOULDBLOCK on Unix; some
+    // Windows locks map here too). Deliberately NOT retried: os error 5, which
+    // is a deterministic policy/ACL denial rather than a transient lock.
+    matches!(kind, std::io::ErrorKind::WouldBlock)
+}
+
+/// Facts probed about the sidecar's launch environment, kept separate from the
+/// string formatting so the formatter (`format_sidecar_diagnostics`) is
+/// unit-testable without touching the filesystem.
+struct SidecarProbe {
+    /// Resolved absolute sidecar path (display form), or the reason it could not
+    /// be resolved.
+    path: Result<String, String>,
+    /// Sidecar file metadata: `Ok(size_bytes)` if it exists, `Err(reason)` if
+    /// missing/unreadable. Only consulted when `path` is `Ok`.
+    file: Result<u64, String>,
+    /// `%TEMP%`/`$TMPDIR` (display form) — where the one-file bootloader unpacks
+    /// `_MEIxxxx`.
+    temp_dir: String,
+    /// Whether a probe file could be written into `temp_dir`.
+    temp_writable: Result<(), String>,
+}
+
+/// Fold a `SidecarProbe` into the one-line diagnostic appended to a spawn-failure
+/// message: resolved path + exists/size + temp writability. Pure.
+fn format_sidecar_diagnostics(probe: &SidecarProbe) -> String {
+    let mut out = String::new();
+    match &probe.path {
+        Ok(path) => {
+            out.push_str(&format!("resolved sidecar path={path}"));
+            match &probe.file {
+                Ok(size) => out.push_str(&format!(" exists=yes size={size}B")),
+                Err(reason) => out.push_str(&format!(" exists=NO ({reason})")),
+            }
+        }
+        Err(reason) => out.push_str(&format!("could not resolve sidecar path: {reason}")),
+    }
+    match &probe.temp_writable {
+        Ok(()) => out.push_str(&format!("; temp_dir={} writable=yes", probe.temp_dir)),
+        Err(reason) => out.push_str(&format!("; temp_dir={} writable=NO ({reason})", probe.temp_dir)),
+    }
+    out
+}
+
+/// Probe the filesystem to reproduce the shell plugin's sidecar path resolution
+/// (`<exe-dir>/tcg-backend[.exe]`, mirroring
+/// `tauri_plugin_shell::process::relative_command_path`) plus `%TEMP%`
+/// writability. Because `.sidecar()` only *joins* this path (no existence
+/// check), a missing/quarantined exe fails at `spawn()` — which is exactly what
+/// this annotates. Does the I/O; the formatting is delegated to the pure
+/// `format_sidecar_diagnostics`.
+fn probe_sidecar() -> SidecarProbe {
+    let (path, file) = match std::env::current_exe() {
+        Ok(exe) => match exe.parent() {
+            Some(dir) => {
+                let name = if cfg!(windows) { "tcg-backend.exe" } else { "tcg-backend" };
+                let candidate = dir.join(name);
+                let file = match std::fs::metadata(&candidate) {
+                    Ok(m) => Ok(m.len()),
+                    Err(e) => Err(e.to_string()),
+                };
+                (Ok(candidate.display().to_string()), file)
+            }
+            None => (Err("current_exe has no parent dir".into()), Ok(0)),
+        },
+        Err(e) => (Err(format!("current_exe() failed: {e}")), Ok(0)),
+    };
+    let temp_dir = std::env::temp_dir();
+    let probe_file = temp_dir.join(format!(".tcg_write_probe_{}", std::process::id()));
+    let temp_writable = match std::fs::write(&probe_file, b"x") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe_file);
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    };
+    SidecarProbe {
+        path,
+        file,
+        temp_dir: temp_dir.display().to_string(),
+        temp_writable,
+    }
+}
+
+/// One-line spawn-failure diagnostic: absolute sidecar path + exists/size + temp
+/// writability. Thin wrapper composing the FS probe with the pure formatter.
+fn sidecar_diagnostics() -> String {
+    format_sidecar_diagnostics(&probe_sidecar())
+}
+
 /// Spawn the bundled backend sidecar, wiring args + the CORS/.env environment,
 /// and stash the child handle in managed state. Any previously-spawned child is
 /// killed first so this doubles as the restart primitive. Streams the sidecar's
@@ -280,35 +401,47 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let port = SIDECAR_PORT.to_string();
 
-    let mut command = app
-        .shell()
-        // `sidecar` takes the *filename* from `externalBin` (no target-triple
-        // suffix, no path) — Tauri resolves the actual binary at runtime.
-        .sidecar("tcg-backend")?
-        .args([
-            "--host",
-            SIDECAR_HOST,
-            "--port",
-            &port,
-            "--log-level",
-            "warning",
-        ])
-        // Critical: let the packaged webview origin through the backend's CORS.
-        .env("TCG_CORS_ORIGINS", SIDECAR_CORS_ORIGINS);
-
-    // Give the sidecar the resolved .env path (Settings-written config dir,
-    // next to the exe, an explicit override, or the dev fallback). The file's
-    // contents are never read here.
-    if let Some(env_file) = resolve_env_file(app) {
-        eprintln!("[tcg-desktop] sidecar .env file: {env_file}");
-        command = command.env("TCG_ENV_FILE", env_file);
-    } else {
-        eprintln!(
+    // Resolve the .env path (Settings-written config dir, next to the exe, an
+    // explicit override, or the dev fallback) ONCE and log it once — a spawn
+    // retry below must not re-run or re-log this. The file's contents are never
+    // read here.
+    let env_file = resolve_env_file(app);
+    match &env_file {
+        Some(f) => eprintln!("[tcg-desktop] sidecar .env file: {f}"),
+        None => eprintln!(
             "[tcg-desktop] WARNING: no .env found — set database credentials in \
              Settings (writes {}). The backend will not start until then.",
-            app_config_env_path(app).unwrap_or_else(|_| "<app config dir>/.env".into()).display()
-        );
+            app_config_env_path(app)
+                .unwrap_or_else(|_| "<app config dir>/.env".into())
+                .display()
+        ),
     }
+
+    // Build a FRESH sidecar command for each spawn attempt: `Command` is not
+    // `Clone` and `spawn(self)` consumes it, so the retry loop below has to
+    // reconstruct it. This is cheap (no I/O) and does NOT log, so retries stay
+    // quiet and the happy path is unchanged.
+    let build_command = || -> Result<Command, Box<dyn std::error::Error>> {
+        let mut command = app
+            .shell()
+            // `sidecar` takes the *filename* from `externalBin` (no target-triple
+            // suffix, no path) — Tauri resolves the actual binary at runtime.
+            .sidecar("tcg-backend")?
+            .args([
+                "--host",
+                SIDECAR_HOST,
+                "--port",
+                &port,
+                "--log-level",
+                "warning",
+            ])
+            // Critical: let the packaged webview origin through the backend's CORS.
+            .env("TCG_CORS_ORIGINS", SIDECAR_CORS_ORIGINS);
+        if let Some(f) = &env_file {
+            command = command.env("TCG_ENV_FILE", f);
+        }
+        Ok(command)
+    };
 
     // Open the backend log file in APPEND mode and write a session header. We
     // append (rather than truncate) on purpose: `spawn_sidecar` is also the
@@ -358,7 +491,60 @@ fn spawn_sidecar(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let (mut rx, child) = command.spawn()?;
+    // Spawn with a bounded retry on TRANSIENT failures only (e.g. an antivirus
+    // real-time scan momentarily locking the freshly-staged sidecar exe =
+    // ERROR_SHARING_VIOLATION 32). Deterministic failures (missing exe = 2,
+    // policy/ACL block = 5, bad format = 193) fall through on the first attempt
+    // with a rich diagnostic. The happy path spawns on the first try — no added
+    // latency, no changed ordering.
+    let mut attempt = 1u32;
+    let (mut rx, child) = loop {
+        // A build failure (sidecar not configured under `externalBin`) is a
+        // deterministic config error, never transient — surface it immediately.
+        let command = build_command()?;
+        match command.spawn() {
+            Ok(pair) => break pair,
+            Err(e) => {
+                let (kind, os_n) = match &e {
+                    tauri_plugin_shell::Error::Io(io) => (Some(io.kind()), io.raw_os_error()),
+                    _ => (None, None),
+                };
+                if attempt < SPAWN_MAX_ATTEMPTS
+                    && kind.is_some_and(|k| is_transient_spawn_error(k, os_n))
+                {
+                    eprintln!(
+                        "[tcg-desktop] sidecar spawn attempt {attempt}/{SPAWN_MAX_ATTEMPTS} hit a \
+                         transient error (os error {}); retrying in {} ms",
+                        os_n.map(|n| n.to_string()).unwrap_or_else(|| "none".into()),
+                        SPAWN_RETRY_BACKOFF.as_millis()
+                    );
+                    attempt += 1;
+                    std::thread::sleep(SPAWN_RETRY_BACKOFF);
+                    continue;
+                }
+                // Surface the os-error NUMBER + resolved path/existence + temp
+                // writability instead of the opaque "(os error N)". Windows: 2 =
+                // FILE_NOT_FOUND (exe quarantined/deleted/never staged), 5 =
+                // ACCESS_DENIED (AppLocker/SRP/AV execute-block or ACL), 32 =
+                // SHARING_VIOLATION (AV scan lock), 193 = BAD_EXE_FORMAT
+                // (corrupt), 225/226 = VIRUS_INFECTED/VIRUS_DELETED (Defender),
+                // 740 = ELEVATION_REQUIRED. NB: a temp-EXTRACTION block does NOT
+                // reach here — spawn() returns Ok and the child then TERMINATES.
+                let os_str = os_n.map(|n| n.to_string()).unwrap_or_else(|| "none".into());
+                let tried = if attempt > 1 {
+                    format!(" after {attempt} attempts")
+                } else {
+                    String::new()
+                };
+                let msg = format!(
+                    "spawn failed{tried} (os error {os_str}): {e} | {}",
+                    sidecar_diagnostics()
+                );
+                eprintln!("[tcg-desktop] {msg}");
+                return Err(msg.into());
+            }
+        }
+    };
     eprintln!(
         "[tcg-desktop] spawned backend sidecar (pid {}) on http://{}:{}",
         child.pid(),
@@ -661,4 +847,75 @@ pub fn run() {
             RunEvent::Exit => kill_sidecar(app_handle),
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_sidecar_diagnostics, is_transient_spawn_error, SidecarProbe};
+    use std::io::ErrorKind;
+
+    #[test]
+    fn transient_only_for_sharing_violation_and_would_block() {
+        // Windows ERROR_SHARING_VIOLATION (AV scan lock) -> retry, whatever the
+        // mapped ErrorKind is.
+        assert!(is_transient_spawn_error(ErrorKind::Other, Some(32)));
+        // "Resource temporarily unavailable" (EAGAIN/EWOULDBLOCK) -> retry.
+        assert!(is_transient_spawn_error(ErrorKind::WouldBlock, None));
+        assert!(is_transient_spawn_error(ErrorKind::WouldBlock, Some(11)));
+
+        // Deterministic verdicts must NOT be retried (retrying only delays them).
+        assert!(!is_transient_spawn_error(ErrorKind::NotFound, Some(2))); // FILE_NOT_FOUND
+        // ACCESS_DENIED (5) is a policy/ACL block, not a transient lock — a mere
+        // scan lock surfaces as 32 (asserted above). This is the key boundary.
+        assert!(!is_transient_spawn_error(ErrorKind::PermissionDenied, Some(5)));
+        assert!(!is_transient_spawn_error(ErrorKind::Other, Some(193))); // BAD_EXE_FORMAT
+        assert!(!is_transient_spawn_error(ErrorKind::Other, Some(225))); // VIRUS_INFECTED
+        assert!(!is_transient_spawn_error(ErrorKind::Other, Some(226))); // VIRUS_DELETED
+        // No os error + a generic kind -> no retry.
+        assert!(!is_transient_spawn_error(ErrorKind::Other, None));
+    }
+
+    #[test]
+    fn diagnostics_reports_existing_file_and_writable_temp() {
+        let s = format_sidecar_diagnostics(&SidecarProbe {
+            path: Ok("/opt/app/tcg-backend".into()),
+            file: Ok(12_345),
+            temp_dir: "/tmp".into(),
+            temp_writable: Ok(()),
+        });
+        assert!(s.contains("resolved sidecar path=/opt/app/tcg-backend"), "{s}");
+        assert!(s.contains("exists=yes size=12345B"), "{s}");
+        assert!(s.contains("temp_dir=/tmp writable=yes"), "{s}");
+    }
+
+    #[test]
+    fn diagnostics_reports_missing_file_and_unwritable_temp() {
+        let s = format_sidecar_diagnostics(&SidecarProbe {
+            path: Ok("C:\\Program Files\\TCG\\tcg-backend.exe".into()),
+            file: Err("The system cannot find the file specified. (os error 2)".into()),
+            temp_dir: "C:\\Temp".into(),
+            temp_writable: Err("Access is denied. (os error 5)".into()),
+        });
+        assert!(
+            s.contains("exists=NO (The system cannot find the file specified."),
+            "{s}"
+        );
+        assert!(s.contains("writable=NO (Access is denied."), "{s}");
+    }
+
+    #[test]
+    fn diagnostics_reports_unresolvable_path_and_ignores_file() {
+        let s = format_sidecar_diagnostics(&SidecarProbe {
+            path: Err("current_exe() failed: nope".into()),
+            file: Ok(0),
+            temp_dir: "/tmp".into(),
+            temp_writable: Ok(()),
+        });
+        assert!(
+            s.contains("could not resolve sidecar path: current_exe() failed"),
+            "{s}"
+        );
+        // `file` is not consulted when the path itself could not be resolved.
+        assert!(!s.contains("exists="), "{s}");
+    }
 }

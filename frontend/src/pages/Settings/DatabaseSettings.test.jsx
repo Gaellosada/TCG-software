@@ -10,7 +10,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/re
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args) => invoke(...args) }));
 
-import DatabaseSettings from './DatabaseSettings';
+import DatabaseSettings, { looksLikeSpawnBlock } from './DatabaseSettings';
 
 const STORED = {
   host: 'db.example.com',
@@ -114,6 +114,85 @@ describe('<DatabaseSettings>', () => {
     await waitFor(() => {
       expect(screen.getByTestId('db-status').textContent).toContain('permission denied');
     });
+  });
+
+  it('renders the antivirus/spawn hint when save fails with an os-error message', async () => {
+    mockInvoke({
+      save: new Error(
+        'saved credentials, but backend restart failed: spawn failed (os error 5): ' +
+          'Access is denied. | resolved sidecar path=C:\\TCG\\tcg-backend.exe exists=yes size=8B',
+      ),
+    });
+
+    render(<DatabaseSettings />);
+    await waitFor(() => expect(screen.getByDisplayValue('db.example.com')).toBeDefined());
+
+    fireEvent.click(screen.getByTestId('db-save-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('db-spawn-hint')).toBeDefined();
+    });
+    // Raw detail is still surfaced alongside the plain-language hint.
+    expect(screen.getByTestId('db-status').textContent).toContain('os error 5');
+    expect(screen.getByTestId('db-spawn-hint').textContent).toMatch(/antivirus/i);
+  });
+
+  it('does NOT render the spawn hint on a realistic .env-write failure (carries "os error")', async () => {
+    // Rust's io::Error Display always appends "(os error N)", so a plain
+    // .env-write failure ALSO contains that fragment — the hint must key off the
+    // "spawn failed" marker, not "os error", or this would false-positive.
+    mockInvoke({
+      save: new Error(
+        'could not write /home/u/.config/com.trajectoirecap.tcg/.env: Permission denied (os error 13)',
+      ),
+    });
+
+    render(<DatabaseSettings />);
+    await waitFor(() => expect(screen.getByDisplayValue('db.example.com')).toBeDefined());
+
+    fireEvent.click(screen.getByTestId('db-save-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('db-status').textContent).toContain('os error 13');
+    });
+    expect(screen.queryByTestId('db-spawn-hint')).toBeNull();
+  });
+
+  it('does NOT render the spawn hint on a successful save', async () => {
+    mockInvoke({ save: undefined });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true });
+
+    render(<DatabaseSettings />);
+    await waitFor(() => expect(screen.getByDisplayValue('db.example.com')).toBeDefined());
+
+    fireEvent.click(screen.getByTestId('db-save-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('db-status').textContent).toBe('Connected');
+    });
+    expect(screen.queryByTestId('db-spawn-hint')).toBeNull();
+  });
+
+  it('looksLikeSpawnBlock matches the "spawn failed" marker only (not any "os error")', () => {
+    // True spawn blocks carry the literal `spawn failed` prefix.
+    expect(looksLikeSpawnBlock('spawn failed (os error 32): ...')).toBe(true);
+    expect(looksLikeSpawnBlock('backend restart failed: spawn failed (os error 5)')).toBe(true);
+    // A bare "(os error N)" is NOT sufficient — io::Error Display always appends
+    // it, so .env-write failures carry it too and must not match.
+    expect(looksLikeSpawnBlock('Error: (os error 2)')).toBe(false);
+    expect(
+      looksLikeSpawnBlock(
+        'could not write /home/u/.config/com.trajectoirecap.tcg/.env: Permission denied (os error 13)',
+      ),
+    ).toBe(false);
+    expect(
+      looksLikeSpawnBlock('could not create config dir /home/u/.config/x: Permission denied (os error 13)'),
+    ).toBe(false);
+    // Normal errors and the degraded-health message must not match.
+    expect(looksLikeSpawnBlock('could not write /cfg/.env: permission denied')).toBe(false);
+    expect(looksLikeSpawnBlock('Saved, but the backend did not come back.')).toBe(false);
+    expect(looksLikeSpawnBlock('')).toBe(false);
+    expect(looksLikeSpawnBlock(undefined)).toBe(false);
   });
 
   it('shows a degraded message when the backend never comes back after save', async () => {
