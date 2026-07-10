@@ -17,6 +17,22 @@ const EMPTY_CREDS = {
   app_db_password: '',
 };
 
+// Does this error message indicate the backend sidecar failed to *launch* (an
+// OS-level spawn error — most often an antivirus/EDR quarantine or execute-block
+// on the unsigned one-file exe) rather than a normal credential/DB error? Match
+// the literal `spawn failed` marker ONLY (case-insensitive). We deliberately do
+// NOT key off "os error N": Rust's std::io::Error Display ALWAYS appends
+// "(os error N)", so the sibling save_db_credentials failures ("could not create
+// config dir …: {e}", "could not write …: {e}" in lib.rs) also carry that
+// fragment and would wrongly trigger the AV hint on a plain disk-full/permission
+// /.env-write error. Every TRUE spawn block is built with the `spawn failed`
+// prefix (and propagates through "backend restart failed: …"), so this gives
+// full true-positive coverage with zero false positives. Exported for unit tests.
+export function looksLikeSpawnBlock(message) {
+  if (!message) return false;
+  return /spawn failed/i.test(message);
+}
+
 // Poll the backend /health until it returns 200 or we give up. Used after a
 // save so the UI can report "Connected" once the freshly-restarted sidecar is
 // answering. Returns true on success, false on timeout. Budget (80 * 500ms =
@@ -255,6 +271,15 @@ function DatabaseSettings() {
           </span>
         ) : null}
       </div>
+
+      {status.kind === 'error' && looksLikeSpawnBlock(status.message) ? (
+        <p className={styles.sectionHint} data-testid="db-spawn-hint">
+          The backend process couldn&apos;t be started. Your antivirus or security software may have
+          quarantined or blocked it{logPath ? ' — see the backend log below for the exact error' : ''}.
+          Check your security software&apos;s quarantine or protection history, allow the TCG backend,
+          then try saving again.
+        </p>
+      ) : null}
 
       {logPath ? (
         <p className={styles.logHint} data-testid="db-log-path">
