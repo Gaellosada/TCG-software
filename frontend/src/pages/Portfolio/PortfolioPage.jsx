@@ -529,9 +529,12 @@ function PortfolioPage() {
   // Cache-ON "modified — recompute needed" empty state: shown when the current
   // config is confirmed NOT cached and nothing is displayed. Gated on
   // badgeCached === false so it never flashes before the range/key resolves.
+  // FIX B: suppressed while an error banner is up (show one or the other; the
+  // error takes precedence).
   const showRecomputeNeeded = portfolio.cacheEnabled
     && !portfolio.results
     && !portfolio.loading
+    && !portfolio.error
     && portfolio.legs.length > 0
     && badgeCached === false;
 
@@ -777,7 +780,7 @@ function PortfolioPage() {
         {showRecomputeNeeded && (
           <div className={styles.section}>
             <div className={styles.recomputeNotice} data-testid="portfolio-recompute-needed">
-              Portfolio modified — click Recompute to update results.
+              Portfolio modified — click Compute to update results.
             </div>
           </div>
         )}

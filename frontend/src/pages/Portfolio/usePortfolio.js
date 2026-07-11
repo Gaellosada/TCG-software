@@ -9,6 +9,7 @@ import { fetchSignalLegRange } from './signalLegRange';
 import { fetchOptionLegRange } from './optionLegRange';
 import { legsToRangesKey } from './legKey';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
+import { shouldDisplayComputeResult } from './cacheDisplayPolicy';
 import { computeCacheKey } from '../../lib/computeCacheKey';
 import { getCached, putCached } from '../../lib/portfolioCache';
 import { isPortfolioCacheEnabled } from '../../lib/userSettings';
@@ -89,6 +90,11 @@ export default function usePortfolio() {
   //    React effect-cleanup timing.
   const computingRef = useRef(false);
   const computeSeqRef = useRef(0);
+  // Live cache key mirror (FIX A): always holds the key of the CURRENT config,
+  // updated synchronously by the auto-display effect. A landing compute compares
+  // the key it ran for against this; if the user edited mid-flight the keys
+  // differ and the stale result is dropped (not shown for the modified config).
+  const currentKeyRef = useRef(null);
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -424,6 +430,11 @@ export default function usePortfolio() {
       } catch {
         cacheKey = null;
       }
+      // Baseline the live-key mirror to the config we're about to compute so a
+      // Compute clicked before the debounced effect resolved still displays; an
+      // edit while in flight then moves currentKeyRef away (via the effect) and
+      // FIX A drops the stale result.
+      if (cacheKey) currentKeyRef.current = cacheKey;
     }
 
     // Race guards: mark a compute in flight and stamp a new sequence so the
@@ -444,13 +455,24 @@ export default function usePortfolio() {
           signal,
         });
         if (!signal.aborted) {
-          setResults(res);
+          // ALWAYS cache the fresh result — it is valid for the config it ran
+          // for, so reverting to that config re-shows it (auto-display).
           if (cacheOn && cacheKey) {
             try {
               await putCached(cacheKey, persistedId, res);
             } catch {
               // caching is best-effort; the compute already succeeded
             }
+          }
+          // FIX A: only DISPLAY it if the live config still matches the one this
+          // compute ran for. If the user edited mid-flight, drop it (stay blank
+          // for the modified config); the cacheVersion bump below then re-syncs.
+          if (shouldDisplayComputeResult({
+            cacheOn,
+            computeKey: cacheKey,
+            liveKey: currentKeyRef.current,
+          })) {
+            setResults(res);
           }
         }
       } catch (err) {
@@ -477,6 +499,7 @@ export default function usePortfolio() {
   // cache-OFF path, so it cannot affect OFF fidelity.
   useEffect(() => {
     if (!cacheEnabled || legs.length === 0) {
+      currentKeyRef.current = null;
       setCurrentCacheKey(null);
       return undefined;
     }
@@ -484,6 +507,7 @@ export default function usePortfolio() {
     const effEnd = endDate || overlapRange?.end;
     // Gate until the range resolves — do NOT blank here (avoid a flash on load).
     if (!effStart || !effEnd) {
+      currentKeyRef.current = null;
       setCurrentCacheKey(null);
       return undefined;
     }
@@ -505,11 +529,17 @@ export default function usePortfolio() {
           availableIndicators,
         });
         if (missing.length > 0) {
-          if (!cancelled) setCurrentCacheKey(null);
+          if (!cancelled) {
+            currentKeyRef.current = null;
+            setCurrentCacheKey(null);
+          }
           return;
         }
         const key = await computeCacheKey(body);
         if (cancelled) return;
+        // Update the live-key mirror FIRST (synchronously) so a compute landing
+        // right now compares against the freshly-edited config (FIX A).
+        currentKeyRef.current = key;
         setCurrentCacheKey(key);
         const cached = await getCached(key);
         // RACE GUARD: never overwrite results while a compute is in flight, and

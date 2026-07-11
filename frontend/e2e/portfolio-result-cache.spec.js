@@ -56,7 +56,8 @@ const STATS_RESULT = {
 // Register every mock the Portfolio + Settings pages touch and return the
 // mutable compute-hit counter.
 async function installRoutes(page) {
-  const state = { computeHits: 0 };
+  // computeDelayMs lets a test hold a compute in flight (simulating slow dwh).
+  const state = { computeHits: 0, computeDelayMs: 0 };
 
   // NOTE: Playwright checks routes most-recently-registered FIRST, so general
   // patterns are registered before the specific ones that must win.
@@ -95,11 +96,22 @@ async function installRoutes(page) {
     status: 200, contentType: 'application/json', body: JSON.stringify(STATS_RESULT),
   }));
 
-  // THE observable: every real compute call increments the counter.
-  await page.route('**/portfolio/compute', (route) => {
+  // THE observable: every real compute call increments the counter. Each call
+  // returns a DISTINCT date_range end year (…202<hits>-12-31) so a test can tell
+  // WHICH compute's result is on screen. Optionally delayed to hold it in flight.
+  await page.route('**/portfolio/compute', async (route) => {
     state.computeHits += 1;
+    const hits = state.computeHits;
+    if (state.computeDelayMs) {
+      await new Promise((r) => { setTimeout(r, state.computeDelayMs); });
+    }
     return route.fulfill({
-      status: 200, contentType: 'application/json', body: JSON.stringify(COMPUTE_RESULT),
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...COMPUTE_RESULT,
+        date_range: { start: '2020-01-01', end: `20${20 + hits}-12-31` },
+      }),
     });
   });
 
@@ -233,4 +245,69 @@ test('cache OFF (default): no auto-display, no blank-on-edit, Compute hits every
   await compute.click();
   await expect.poll(() => state.computeHits).toBe(3);
   await page.screenshot({ path: `${OUT}/cache-off.png` });
+});
+
+// FIX A — edit mid-compute: a compute dispatched for config A must NOT display
+// its (fresh) result once the user has edited to config B mid-flight. Uses a
+// DELAYED compute so the edit lands while A is in flight, and a MutationObserver
+// to detect whether A's distinct result (…2022-12-31) ever reaches the DOM.
+test('cache ON: editing mid-compute drops the superseded compute result (never shown for the modified config)', async ({ page }) => {
+  const state = await installRoutes(page);
+  await enableCacheViaSettings(page);
+  await page.goto(`${BASE}/portfolio`);
+  await loadPortfolio(page);
+
+  const badge = page.getByTestId('portfolio-cache-badge');
+  const compute = page.getByTestId('portfolio-compute-btn');
+  const dataRange = page.getByText(/Data range:/);
+  const notice = page.getByTestId('portfolio-recompute-needed');
+  const weightInput = page.locator('input[type="number"]').first();
+
+  // Seed config A (weight 60) → first compute returns …2021-12-31.
+  await compute.click();
+  await expect(dataRange).toBeVisible();
+  await expect.poll(() => state.computeHits).toBe(1);
+  await expect(badge).toHaveAttribute('data-cached', 'true');
+
+  // Watch for the NEXT compute's distinct marker (…2022-12-31) ever hitting the DOM.
+  await page.evaluate(() => {
+    window.__sawFresh = false;
+    const check = () => {
+      if (document.body && document.body.innerText.includes('2022-12-31')) {
+        window.__sawFresh = true;
+      }
+    };
+    window.__freshObs = new MutationObserver(check);
+    window.__freshObs.observe(document.body, { childList: true, subtree: true, characterData: true });
+    check();
+  });
+
+  // Hold the next compute in flight, click Recompute (for config A), then edit
+  // to config B (weight 80) while A is still computing.
+  state.computeDelayMs = 900;
+  await compute.click();                 // recompute A → will return …2022-12-31
+  await weightInput.fill('80');          // edit to config B mid-flight
+  await expect(badge).toHaveAttribute('data-cached', 'false'); // B is not cached
+
+  // Let compute A land (900ms) and everything settle.
+  await expect.poll(() => state.computeHits, { timeout: 5000 }).toBe(2); // A ran (not aborted)
+  await page.waitForTimeout(700);
+
+  // FIX A: A's fresh result (…2022-12-31) must NEVER have been displayed.
+  const sawFresh = await page.evaluate(() => window.__sawFresh);
+  expect(sawFresh).toBe(false);
+
+  // End state for the modified (uncached) config B: blank + "recompute needed".
+  await expect(dataRange).toHaveCount(0);
+  await expect(notice).toBeVisible();
+  await expect(badge).toHaveAttribute('data-cached', 'false');
+  await page.screenshot({ path: `${OUT}/cache-on-edit-mid-compute.png` });
+
+  // A stayed cached (the superseded compute was DROPPED from display but still
+  // WRITTEN to the cache — it is valid for config A). Reverting to config A
+  // auto-displays that freshest A result (…2022-12-31) with NO new compute.
+  await weightInput.fill('60');
+  await expect(page.getByText(/2022-12-31/)).toBeVisible();
+  await expect(badge).toHaveAttribute('data-cached', 'true');
+  expect(state.computeHits).toBe(2);
 });
