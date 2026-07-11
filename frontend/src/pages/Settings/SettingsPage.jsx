@@ -5,7 +5,11 @@ import RiskFreeRateInput from '../../components/RiskFreeRateInput';
 import DatabaseSettings from './DatabaseSettings';
 import { isTauri } from '../../api/base';
 import styles from './SettingsPage.module.css';
-import { DEFAULT_RISK_FREE_RATE_PCT, PORTFOLIO_CACHE_KEY } from '../../lib/userSettings';
+import {
+  DEFAULT_RISK_FREE_RATE_PCT,
+  PORTFOLIO_CACHE_KEY,
+  isPortfolioCacheEnabled,
+} from '../../lib/userSettings';
 import { clearCache } from '../../lib/portfolioCache';
 
 function getStoredTheme() {
@@ -32,14 +36,6 @@ function getStoredRiskFreeRate() {
   }
 }
 
-function getStoredPortfolioCache() {
-  try {
-    return localStorage.getItem(PORTFOLIO_CACHE_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}
-
 function applyChartType(type) {
   document.documentElement.dataset.chartType = type;
 }
@@ -54,7 +50,7 @@ function SettingsPage() {
   const [rfPct, setRfPct] = useState(getStoredRiskFreeRate);
   // Local portfolio-result cache — opt-in, default OFF. Persisted to
   // localStorage; read by usePortfolio at mount.
-  const [portfolioCache, setPortfolioCache] = useState(getStoredPortfolioCache);
+  const [portfolioCache, setPortfolioCache] = useState(isPortfolioCacheEnabled);
   const [cacheCleared, setCacheCleared] = useState(false);
   // Desktop-only: the app version (from tauri.conf.json) shown in a small
   // footer. Empty in web mode so nothing renders there.

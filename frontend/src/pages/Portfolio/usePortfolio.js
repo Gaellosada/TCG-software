@@ -385,10 +385,10 @@ export default function usePortfolio() {
 
     // Build the resolved compute body via the SHARED builder — the badge hashes
     // the exact same object, so the cache key is guaranteed identical (key
-    // parity guardrail). hydrate only when a signal leg actually references
-    // indicators; the body is byte-identical either way.
-    const hasSignalLegs = legs.some((l) => l.type === 'signal');
-    const availableIndicators = hasSignalLegs ? await hydrateAvailableIndicators() : [];
+    // parity guardrail). Hydration is UNCONDITIONAL here (as on main) so the
+    // cache-OFF path is byte-identical to today's — do not gate it on signal
+    // legs or the cache flag.
+    const availableIndicators = await hydrateAvailableIndicators();
     const { body, missingByLeg } = buildPortfolioComputeBody({
       legs,
       rebalance,
