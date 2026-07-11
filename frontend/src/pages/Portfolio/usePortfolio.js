@@ -76,10 +76,19 @@ export default function usePortfolio() {
   // The cache key for the CURRENT editor state, recomputed reactively for the
   // badge. Null while gated (no legs / ranges unresolved / un-keyable body).
   const [currentCacheKey, setCurrentCacheKey] = useState(null);
-  // Bumped after every cache write so the badge re-checks hasCached().
+  // Bumped after every compute completes so the auto-display/badge effect
+  // re-syncs the displayed result and the badge to the freshly-cached state.
   const [cacheVersion, setCacheVersion] = useState(0);
-  // Set true for a single compute to bypass a cache HIT (Force recompute).
-  const forceRecomputeRef = useRef(false);
+  // RACE GUARDS for the auto-display effect (cache-ON only):
+  //  - computingRef: true while a compute is in flight → the effect must not
+  //    touch `results` (the compute owns it).
+  //  - computeSeqRef: incremented at the START of every compute; the effect
+  //    captures it and refuses to setResults if it changed mid-read (a compute
+  //    started/ran during the async hash+getCached), so a stale cache read can
+  //    never clobber a fresh compute result. Deterministic — does not rely on
+  //    React effect-cleanup timing.
+  const computingRef = useRef(false);
+  const computeSeqRef = useRef(0);
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -402,14 +411,12 @@ export default function usePortfolio() {
       return;
     }
 
-    // ── Cache gate ──
-    // OFF → this whole block is skipped and the flow below is byte-for-byte
-    // today's. ON → hash the body; a HIT serves instantly with ZERO network; a
-    // Force-recompute run bypasses the hit but still refreshes the entry. Any
-    // cache/crypto error falls through to a normal /portfolio/compute.
+    // ── Compute = ALWAYS a fresh network run (never served from cache) ──
+    // Serving cached results is now the auto-display effect's job; the button
+    // always recomputes and (when the cache is on) RE-CACHES the fresh result.
+    // The OFF path below is byte-for-byte today's (the cacheOn branches are
+    // no-ops when disabled).
     const cacheOn = cacheEnabled;
-    const force = forceRecomputeRef.current;
-    forceRecomputeRef.current = false;
     let cacheKey = null;
     if (cacheOn) {
       try {
@@ -417,19 +424,12 @@ export default function usePortfolio() {
       } catch {
         cacheKey = null;
       }
-      if (cacheKey && !force) {
-        try {
-          const cached = await getCached(cacheKey);
-          if (cached) {
-            setError(null);
-            setResults(cached);
-            return; // instant — no network call
-          }
-        } catch {
-          // fall through to a normal compute
-        }
-      }
     }
+
+    // Race guards: mark a compute in flight and stamp a new sequence so the
+    // auto-display effect can't overwrite the result this compute produces.
+    computeSeqRef.current += 1;
+    computingRef.current = true;
 
     setError(null);
     await runAbortable(async ({ signal }) => {
@@ -448,7 +448,6 @@ export default function usePortfolio() {
           if (cacheOn && cacheKey) {
             try {
               await putCached(cacheKey, persistedId, res);
-              setCacheVersion((v) => v + 1);
             } catch {
               // caching is best-effort; the compute already succeeded
             }
@@ -457,15 +456,25 @@ export default function usePortfolio() {
       } catch (err) {
         if (signal.aborted) return;
         setError(err.message || 'Computation failed');
+      } finally {
+        // Compute finished — release the in-flight guard, then (cache on) bump
+        // the version so the auto-display/badge effect re-syncs to the newly
+        // cached state (flips the badge to "Cached ✓").
+        computingRef.current = false;
+        if (cacheOn) setCacheVersion((v) => v + 1);
       }
     });
   }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, cacheEnabled, persistedId]);
 
-  /* ── Reactive cache key for the badge ── */
-  // Recompute the CURRENT editor's cache key whenever a key-affecting field
-  // changes. Gated: no legs, unresolved date range, or an un-keyable body
-  // (missing indicators) → null (badge hidden). Uses the SAME shared builder as
-  // the compute path so the badge's key == the compute's key.
+  /* ── Reactive cache key + AUTO-DISPLAY / BLANK-ON-EDIT (cache-ON only) ── */
+  // On any key-affecting change: recompute the current cache key (for the
+  // badge) and then reflect the cache into the displayed results —
+  //   HIT  → setResults(cached)  (auto-display, no Compute click)
+  //   MISS → setResults(null)    (blank; the page shows "recompute needed")
+  // Debounced so editing a numeric field doesn't hammer hydrate/hash on every
+  // keystroke. Gated on a resolved date range so loading a cached portfolio
+  // doesn't flash-blank before dates settle. This effect NEVER runs on the
+  // cache-OFF path, so it cannot affect OFF fidelity.
   useEffect(() => {
     if (!cacheEnabled || legs.length === 0) {
       setCurrentCacheKey(null);
@@ -473,15 +482,17 @@ export default function usePortfolio() {
     }
     const effStart = startDate || overlapRange?.start;
     const effEnd = endDate || overlapRange?.end;
-    // Gate until the range resolves so a transient undefined-date key is never
-    // shown (matches the compute path, which also needs a resolved window).
+    // Gate until the range resolves — do NOT blank here (avoid a flash on load).
     if (!effStart || !effEnd) {
       setCurrentCacheKey(null);
       return undefined;
     }
     let cancelled = false;
-    (async () => {
+    const startSeq = computeSeqRef.current;
+    const timer = setTimeout(async () => {
       try {
+        // Hydration may be skipped when there are no signal legs — this effect
+        // is new cache-ON-only code, so this does NOT affect OFF fidelity.
         const hasSignalLegs = legs.some((l) => l.type === 'signal');
         const availableIndicators = hasSignalLegs
           ? await hydrateAvailableIndicators()
@@ -498,20 +509,23 @@ export default function usePortfolio() {
           return;
         }
         const key = await computeCacheKey(body);
-        if (!cancelled) setCurrentCacheKey(key);
+        if (cancelled) return;
+        setCurrentCacheKey(key);
+        const cached = await getCached(key);
+        // RACE GUARD: never overwrite results while a compute is in flight, and
+        // never act on a read that a compute superseded (seq changed). The
+        // compute's cacheVersion bump re-triggers this effect afterwards to
+        // re-sync cleanly.
+        if (cancelled || computingRef.current || computeSeqRef.current !== startSeq) {
+          return;
+        }
+        setResults(cached ? cached : null);
       } catch {
         if (!cancelled) setCurrentCacheKey(null);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [cacheEnabled, legs, rebalance, startDate, endDate, overlapRange]);
-
-  // Trigger a compute that bypasses a cache HIT for exactly one run (the entry
-  // is still refreshed on completion). Used by the badge's "Force recompute".
-  const handleForceRecompute = useCallback(() => {
-    forceRecomputeRef.current = true;
-    handleCalculate();
-  }, [handleCalculate]);
+    }, 275);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [cacheEnabled, legs, rebalance, startDate, endDate, overlapRange, cacheVersion]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -545,14 +559,13 @@ export default function usePortfolio() {
     error,
     clearError,
     handleCalculate,
-    // Local portfolio-result cache (opt-in). ``cacheEnabled`` gates the badge;
-    // ``currentCacheKey`` is the active portfolio's key (null while gated);
-    // ``cacheVersion`` bumps on each write so the badge re-checks hasCached();
-    // ``handleForceRecompute`` bypasses a cache hit for one run.
+    // Local portfolio-result cache (opt-in). ``cacheEnabled`` gates the badge
+    // + auto-display; ``currentCacheKey`` is the active portfolio's key (null
+    // while gated); ``cacheVersion`` bumps after each compute so the badge /
+    // auto-display effect re-syncs.
     cacheEnabled,
     currentCacheKey,
     cacheVersion,
-    handleForceRecompute,
     // localStorage save/load functions — kept in the hook but no longer
     // exposed. All persistence goes through the backend now.
     // savePortfolio,

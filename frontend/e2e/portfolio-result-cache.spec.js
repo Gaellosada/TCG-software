@@ -122,7 +122,7 @@ async function loadPortfolio(page) {
   await expect(page.locator('input[type="number"]').first()).toHaveValue('60');
 }
 
-test('cache ON: two computes of an unchanged portfolio hit the compute route exactly once', async ({ page }) => {
+test('cache ON: pre-seeded entry auto-displays with zero clicks/route calls; edit blanks, revert re-shows; Compute is always fresh', async ({ page }) => {
   const state = await installRoutes(page);
   await enableCacheViaSettings(page);   // real Settings toggle → localStorage
   await page.goto(`${BASE}/portfolio`); // full reload → usePortfolio reads enabled=true
@@ -130,57 +130,105 @@ test('cache ON: two computes of an unchanged portfolio hit the compute route exa
   await loadPortfolio(page);
 
   const badge = page.getByTestId('portfolio-cache-badge');
-  // Badge appears once the range resolves; before any compute it's "Not cached".
+  const compute = page.getByTestId('portfolio-compute-btn');
+  const dataRange = page.getByText(/Data range:/);
+  const notice = page.getByTestId('portfolio-recompute-needed');
+
+  // Fresh (not cached) config: no result shown, "recompute needed" notice up.
   await expect(badge).toBeVisible();
   await expect(badge).toHaveAttribute('data-cached', 'false');
+  await expect(notice).toBeVisible();
+  await expect(dataRange).toHaveCount(0);
 
-  const compute = page.getByRole('button', { name: 'Compute', exact: true });
-
-  // First compute → real network call, result renders, entry cached.
+  // SEED the cache with one real compute.
   await compute.click();
-  await expect(page.getByText(/Data range:/)).toBeVisible();
+  await expect(dataRange).toBeVisible();
   await expect.poll(() => state.computeHits).toBe(1);
-  // Badge flips to cached after the write.
   await expect(badge).toHaveAttribute('data-cached', 'true');
-  await expect(badge).toContainText('Cached');
 
-  // Second compute of the UNCHANGED portfolio → served from cache, ZERO network.
-  await compute.click();
-  await expect(page.getByText(/Data range:/)).toBeVisible();
-  // Give any (erroneous) network call time to land, then assert it did NOT.
-  await page.waitForTimeout(300);
-  expect(state.computeHits).toBe(1);
-  await page.screenshot({ path: `${OUT}/cache-on-hit.png` });
+  // ── AUTO-DISPLAY across a full reload (IndexedDB persists) ──
+  const seeded = state.computeHits; // 1
+  await page.goto(`${BASE}/portfolio`);
+  await loadPortfolio(page);
+  // Result appears with ZERO Compute clicks and ZERO new compute-route calls.
+  await expect(dataRange).toBeVisible();
+  await expect(badge).toHaveAttribute('data-cached', 'true');
+  await expect(compute).toHaveText('Recompute'); // relabelled while cached shown
+  await page.waitForTimeout(400); // let the debounced effect settle
+  expect(state.computeHits).toBe(seeded); // no network for the auto-display
+  await page.screenshot({ path: `${OUT}/cache-on-autodisplay.png` });
 
-  // Editing the weight changes the body → new key → badge flips to Not cached.
+  // ── BLANK-ON-EDIT ──
   const weightInput = page.locator('input[type="number"]').first();
   await weightInput.fill('75');
   await expect(badge).toHaveAttribute('data-cached', 'false');
+  await expect(dataRange).toHaveCount(0);       // display cleared
+  await expect(notice).toBeVisible();           // "recompute needed"
+  expect(state.computeHits).toBe(seeded);       // editing never hits the network
+  await page.screenshot({ path: `${OUT}/cache-on-blank-on-edit.png` });
 
-  // Third compute (edited portfolio) → cache miss → route fires again.
+  // ── EDIT-BACK re-shows from cache (content-addressed), still zero network ──
+  await weightInput.fill('60');
+  await expect(dataRange).toBeVisible();
+  await expect(badge).toHaveAttribute('data-cached', 'true');
+  await expect(notice).toHaveCount(0);
+  expect(state.computeHits).toBe(seeded);
+
+  // ── COMPUTE = FORCE FRESH (while a cached result is shown) ──
+  // Clicking Recompute hits the network even though the config is cached, and
+  // must NOT blank / double-clobber the fresh result (race guard).
+  await expect(compute).toHaveText('Recompute');
   await compute.click();
-  await expect.poll(() => state.computeHits).toBe(2);
+  await expect.poll(() => state.computeHits).toBe(seeded + 1); // fresh route call
+  await expect(dataRange).toBeVisible();      // result restored, never blanked
+  await expect(notice).toHaveCount(0);        // recompute notice never appeared
+  await expect(badge).toHaveAttribute('data-cached', 'true');
+
+  // ── RACE: recompute a NEWLY-edited (uncached) config; blank-on-edit must not
+  // clobber the in-flight compute, and the fresh result must land. ──
+  await weightInput.fill('80');
+  await expect(dataRange).toHaveCount(0);      // blanked (80 not cached)
+  await expect(badge).toHaveAttribute('data-cached', 'false');
+  await compute.click();                       // recompute for 80
+  await expect.poll(() => state.computeHits).toBe(seeded + 2);
+  await expect(dataRange).toBeVisible();       // fresh result shown, not clobbered
   await expect(badge).toHaveAttribute('data-cached', 'true');
   await page.screenshot({ path: `${OUT}/cache-on-after-edit.png` });
 });
 
-test('cache OFF (default): every compute hits the route and no badge is shown', async ({ page }) => {
+test('cache OFF (default): no auto-display, no blank-on-edit, Compute hits every click, no badge', async ({ page }) => {
   const state = await installRoutes(page);
   await page.goto(`${BASE}/portfolio`); // default: cache disabled
 
   await loadPortfolio(page);
 
-  // No badge when the feature is off.
+  // No cache UI at all when the feature is off.
   await expect(page.getByTestId('portfolio-cache-badge')).toHaveCount(0);
+  await expect(page.getByTestId('portfolio-recompute-needed')).toHaveCount(0);
 
-  const compute = page.getByRole('button', { name: 'Compute', exact: true });
+  const compute = page.getByTestId('portfolio-compute-btn');
+  const dataRange = page.getByText(/Data range:/);
 
+  // No auto-display: nothing shown until Compute is clicked.
+  await expect(compute).toHaveText('Compute');
+  await expect(dataRange).toHaveCount(0);
+  await page.waitForTimeout(400);
+  expect(state.computeHits).toBe(0);
+
+  // Every click hits the route (no cache serve).
   await compute.click();
-  await expect(page.getByText(/Data range:/)).toBeVisible();
+  await expect(dataRange).toBeVisible();
   await expect.poll(() => state.computeHits).toBe(1);
 
   await compute.click();
   await expect.poll(() => state.computeHits).toBe(2);
+
+  // No blank-on-edit on the OFF path: editing leaves the last result in place.
+  const weightInput = page.locator('input[type="number"]').first();
+  await weightInput.fill('75');
+  await page.waitForTimeout(400);
+  await expect(dataRange).toBeVisible();       // still shown (OFF = today's behavior)
+  await expect(compute).toHaveText('Compute'); // never relabelled
 
   await compute.click();
   await expect.poll(() => state.computeHits).toBe(3);

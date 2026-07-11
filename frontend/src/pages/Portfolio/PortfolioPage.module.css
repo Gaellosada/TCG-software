@@ -277,26 +277,13 @@
   border-color: var(--border-primary);
 }
 
-.forceRecomputeBtn {
-  padding: 3px 10px;
-  background: transparent;
+.recomputeNotice {
+  padding: 12px 16px;
+  border: 1px dashed var(--border-primary);
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  font-family: inherit;
-  font-size: 0.72rem;
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-
-.forceRecomputeBtn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.forceRecomputeBtn:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: var(--accent);
+  font-size: 0.85rem;
+  text-align: center;
 }
 
 .computeBtn {

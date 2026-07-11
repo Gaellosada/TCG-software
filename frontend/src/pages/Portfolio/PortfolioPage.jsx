@@ -521,6 +521,19 @@ function PortfolioPage() {
   const showCacheBadge = portfolio.cacheEnabled
     && portfolio.currentCacheKey != null
     && badgeCached != null;
+  // The Compute button reads "Recompute" while a cached result is on screen
+  // (cache on, a result is displayed, and it matches the current cached config).
+  const showRecomputeLabel = portfolio.cacheEnabled
+    && !!portfolio.results
+    && badgeCached === true;
+  // Cache-ON "modified — recompute needed" empty state: shown when the current
+  // config is confirmed NOT cached and nothing is displayed. Gated on
+  // badgeCached === false so it never flashes before the range/key resolves.
+  const showRecomputeNeeded = portfolio.cacheEnabled
+    && !portfolio.results
+    && !portfolio.loading
+    && portfolio.legs.length > 0
+    && badgeCached === false;
 
   return (
     <div className={styles.page}>
@@ -698,9 +711,10 @@ function PortfolioPage() {
             </fieldset>
 
             {/* Cache badge — active portfolio only, shown when the local cache
-                is enabled and a key has resolved. "Cached ✓" means the next
-                Compute serves instantly from IndexedDB (no network); editing a
-                leg/weight/signal/indicator flips it to "Not cached". */}
+                is enabled and a key has resolved. "Cached ✓" means the result
+                for this exact config is auto-displayed from IndexedDB; editing a
+                leg/weight/signal/indicator flips it to "Not cached" and blanks
+                the display until Recompute. */}
             {showCacheBadge && (
               <div className={styles.cacheBadgeGroup}>
                 <span
@@ -708,34 +722,26 @@ function PortfolioPage() {
                   data-testid="portfolio-cache-badge"
                   data-cached={badgeCached ? 'true' : 'false'}
                   title={badgeCached
-                    ? 'This exact portfolio is cached — Compute serves instantly with no network call.'
-                    : 'Not cached — Compute will run the backend and store the result.'}
+                    ? 'This exact portfolio is cached — its result is shown automatically.'
+                    : 'Not cached — click Recompute to run the backend and store the result.'}
                 >
                   {badgeCached ? 'Cached ✓' : 'Not cached'}
                 </span>
-                {badgeCached && (
-                  <button
-                    className={styles.forceRecomputeBtn}
-                    type="button"
-                    onClick={portfolio.handleForceRecompute}
-                    disabled={portfolio.legs.length === 0 || portfolio.loading}
-                    data-testid="portfolio-force-recompute"
-                    title="Bypass the cache and recompute from the backend for this run."
-                  >
-                    Force recompute
-                  </button>
-                )}
               </div>
             )}
 
-            {/* Compute button */}
+            {/* Compute button — ALWAYS a fresh recompute (never served from
+                cache). Reads "Recompute" while a cached result is on screen. */}
             <button
               className={styles.computeBtn}
               type="button"
               onClick={portfolio.handleCalculate}
               disabled={portfolio.legs.length === 0 || portfolio.loading}
+              data-testid="portfolio-compute-btn"
             >
-              {portfolio.loading ? 'Computing...' : 'Compute'}
+              {portfolio.loading
+                ? 'Computing...'
+                : (showRecomputeLabel ? 'Recompute' : 'Compute')}
             </button>
           </div>
 
@@ -760,6 +766,18 @@ function PortfolioPage() {
           <div className={styles.section}>
             <div className={styles.loadingBar}>
               <div className={styles.loadingBarFill} />
+            </div>
+          </div>
+        )}
+
+        {/* ── Cache-ON "recompute needed" notice ──
+            The current config isn't cached and nothing is displayed (a fresh
+            portfolio, or one blanked by an edit). Never shown on the cache-OFF
+            path. */}
+        {showRecomputeNeeded && (
+          <div className={styles.section}>
+            <div className={styles.recomputeNotice} data-testid="portfolio-recompute-needed">
+              Portfolio modified — click Recompute to update results.
             </div>
           </div>
         )}
