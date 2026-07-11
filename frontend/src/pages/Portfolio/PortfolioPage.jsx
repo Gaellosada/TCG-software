@@ -17,6 +17,7 @@ import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
+import { hasCached } from '../../lib/portfolioCache';
 import {
   createPortfolio,
   updatePortfolio,
@@ -501,6 +502,26 @@ function PortfolioPage() {
     saveNowCloud,
   ]);
 
+  // ── Cache badge for the active portfolio ──
+  // null = unknown / gated (no key yet); true/false = cached / not-cached.
+  // Re-checks whenever the current key changes OR a write bumps cacheVersion.
+  const [badgeCached, setBadgeCached] = useState(null);
+  useEffect(() => {
+    if (!portfolio.cacheEnabled || !portfolio.currentCacheKey) {
+      setBadgeCached(null);
+      return undefined;
+    }
+    let cancelled = false;
+    hasCached(portfolio.currentCacheKey)
+      .then((h) => { if (!cancelled) setBadgeCached(h); })
+      .catch(() => { if (!cancelled) setBadgeCached(false); });
+    return () => { cancelled = true; };
+  }, [portfolio.cacheEnabled, portfolio.currentCacheKey, portfolio.cacheVersion]);
+  // Show the badge only once a key has resolved (gated until ranges settle).
+  const showCacheBadge = portfolio.cacheEnabled
+    && portfolio.currentCacheKey != null
+    && badgeCached != null;
+
   return (
     <div className={styles.page}>
       <div className={styles.scroll}>
@@ -675,6 +696,37 @@ function PortfolioPage() {
                 ))}
               </select>
             </fieldset>
+
+            {/* Cache badge — active portfolio only, shown when the local cache
+                is enabled and a key has resolved. "Cached ✓" means the next
+                Compute serves instantly from IndexedDB (no network); editing a
+                leg/weight/signal/indicator flips it to "Not cached". */}
+            {showCacheBadge && (
+              <div className={styles.cacheBadgeGroup}>
+                <span
+                  className={`${styles.cacheBadge} ${badgeCached ? styles.cacheBadgeHit : styles.cacheBadgeMiss}`}
+                  data-testid="portfolio-cache-badge"
+                  data-cached={badgeCached ? 'true' : 'false'}
+                  title={badgeCached
+                    ? 'This exact portfolio is cached — Compute serves instantly with no network call.'
+                    : 'Not cached — Compute will run the backend and store the result.'}
+                >
+                  {badgeCached ? 'Cached ✓' : 'Not cached'}
+                </span>
+                {badgeCached && (
+                  <button
+                    className={styles.forceRecomputeBtn}
+                    type="button"
+                    onClick={portfolio.handleForceRecompute}
+                    disabled={portfolio.legs.length === 0 || portfolio.loading}
+                    data-testid="portfolio-force-recompute"
+                    title="Bypass the cache and recompute from the backend for this run."
+                  >
+                    Force recompute
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Compute button */}
             <button

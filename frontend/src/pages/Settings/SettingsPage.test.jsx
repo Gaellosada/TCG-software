@@ -92,6 +92,42 @@ describe('<SettingsPage> — risk-free rate row', () => {
   });
 });
 
+describe('<SettingsPage> — portfolio-result cache toggle', () => {
+  it('defaults to OFF when localStorage is empty', () => {
+    render(<SettingsPage />);
+    const on = screen.getByTestId('portfolio-cache-on');
+    const off = screen.getByTestId('portfolio-cache-off');
+    expect(on.getAttribute('aria-checked')).toBe('false');
+    expect(off.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('reflects a stored "true" as ON', () => {
+    localStorage.setItem('tcg-portfolio-cache-enabled', 'true');
+    render(<SettingsPage />);
+    expect(screen.getByTestId('portfolio-cache-on').getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('writes String(true)/String(false) to localStorage on toggle', () => {
+    render(<SettingsPage />);
+    fireEvent.click(screen.getByTestId('portfolio-cache-on'));
+    expect(localStorage.getItem('tcg-portfolio-cache-enabled')).toBe('true');
+    fireEvent.click(screen.getByTestId('portfolio-cache-off'));
+    expect(localStorage.getItem('tcg-portfolio-cache-enabled')).toBe('false');
+  });
+
+  it('renders a "Clear cached results" button that acknowledges the click', async () => {
+    render(<SettingsPage />);
+    const btn = screen.getByTestId('clear-cache-btn');
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn);
+    // clearCache() is best-effort (no IndexedDB in jsdom → resolves false); the
+    // UI still confirms the action ran.
+    await waitFor(() => {
+      expect(screen.getByTestId('cache-cleared')).toBeTruthy();
+    });
+  });
+});
+
 describe('<SettingsPage> — desktop-only DB credentials section', () => {
   it('does NOT render the Database connection section in web mode (no Tauri global)', () => {
     // isTauri() is false under jsdom, so the desktop-only credentials editor
