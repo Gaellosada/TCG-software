@@ -607,6 +607,16 @@ class LegSpec(BaseModel):
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # COMPOSED-PORTFOLIO fields (required when type == "portfolio").  A portfolio
+    # leg references a saved PURE portfolio reused as a building block: the
+    # frontend RESOLVES the reference and INLINES the child's current saved spec
+    # into ``portfolio`` (backend never loads by id — ``portfolio_id`` is
+    # provenance only, so the content-addressed frontend cache busts on child
+    # edits).  The child is computed to an equity curve and injected as one
+    # synthetic price series (mirrors a ``signal`` leg).  Depth is capped at 1:
+    # a child that itself contains a ``portfolio`` leg is rejected at evaluation.
+    portfolio_id: str | None = None
+    portfolio: PortfolioRequest | None = None
 
     @field_validator("nav_times")
     @classmethod
@@ -618,10 +628,16 @@ class LegSpec(BaseModel):
     @field_validator("type")
     @classmethod
     def validate_type(cls, v: str) -> str:
-        if v not in ("instrument", "continuous", "signal", "option_stream"):
+        if v not in (
+            "instrument",
+            "continuous",
+            "signal",
+            "option_stream",
+            "portfolio",
+        ):
             raise ValueError(
                 f"leg type must be 'instrument', 'continuous', 'signal', "
-                f"or 'option_stream', got {v!r}"
+                f"'option_stream', or 'portfolio', got {v!r}"
             )
         return v
 
@@ -693,6 +709,14 @@ class PortfolioRequest(BaseModel):
     end: str | None = None
 
 
+# ``LegSpec.portfolio`` is typed ``PortfolioRequest`` (a composed leg inlines a
+# full child portfolio body) and ``PortfolioRequest.legs`` is ``dict[str,
+# LegSpec]`` — a mutual recursion.  With ``from __future__ import annotations``
+# the forward reference is a string, so rebuild ``LegSpec`` now that
+# ``PortfolioRequest`` exists in the module namespace to bind the annotation.
+LegSpec.model_rebuild()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -704,13 +728,13 @@ def _parse_legs(
 ) -> dict[str, InstrumentId | ContinuousLegSpec]:
     """Convert request leg specs to service-layer types with validation.
 
-    Only processes instrument/continuous legs; signal and option_stream
-    legs are skipped (handled separately).
+    Only processes instrument/continuous legs; signal, option_stream and
+    portfolio legs are skipped (handled separately).
     """
     legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
 
     for label, leg in legs.items():
-        if leg.type in ("signal", "option_stream"):
+        if leg.type in ("signal", "option_stream", "portfolio"):
             continue
 
         if leg.type == "instrument":
@@ -1386,6 +1410,84 @@ async def _evaluate_option_stream_leg(
     return dates_arr, values, "level", [], None, None, float("nan"), None, None, None
 
 
+async def _evaluate_portfolio_leg(
+    label: str,
+    leg: LegSpec,
+    svc: MarketDataService,
+    classify: Callable[[str], AssetClass | None],
+    repo: WriteRepository,
+    start: str | None,
+    end: str | None,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+    """Evaluate a composed-portfolio leg to a synthetic equity price series.
+
+    A ``portfolio`` leg references a saved PURE portfolio reused as a building
+    block; the frontend has inlined the child's resolved spec into
+    ``leg.portfolio``.  We compute that child to an equity curve and return it
+    as this leg's synthetic close series over the child's own date grid — the
+    parent then intersects it with the other legs and rebalances at the parent's
+    frequency, exactly as it does for a ``signal`` leg's synthetic.
+
+    The child is evaluated by **recursively invoking the very same
+    ``compute_portfolio`` endpoint** (not a re-implementation), so the child's
+    ``portfolio_equity`` is byte-identical to that child computed standalone
+    over the same range (criterion A1-1) and the existing per-type leg
+    evaluators are reused verbatim.  Depth is capped at 1: the guard below runs
+    BEFORE recursing, which also makes infinite recursion impossible.
+
+    Raises:
+        ValidationError (→ HTTP 400, never 500):
+          * the child is missing/empty/unresolved;
+          * the child itself contains a ``portfolio`` leg (depth-1 only).
+    """
+    child = leg.portfolio
+    # Empty / unresolved guard (Sign 4): a broken reference (archived/deleted
+    # child, or the frontend could not resolve it) yields a missing or empty
+    # child body — surface a clear 400, never a 500.
+    if child is None or not child.legs:
+        raise ValidationError(
+            f"Leg '{label}': referenced portfolio has no legs or could not be resolved"
+        )
+
+    # Depth-1 guard (Sign 3, the real backstop): a composed portfolio may not
+    # reference another composed portfolio.  Enforced BEFORE the recursive
+    # compute so the reference graph is acyclic by construction.
+    for child_label, child_leg in child.legs.items():
+        if child_leg.type == "portfolio":
+            raise ValidationError(
+                f"Leg '{label}': composed portfolios cannot reference other "
+                f"composed portfolios (depth-1 only) — child leg "
+                f"'{child_label}' is itself a portfolio"
+            )
+
+    # Compute the child over the PARENT's requested date range (mirrors how a
+    # signal/option leg receives the parent's start/end), then let the parent's
+    # date-grid intersection align it with the other legs.
+    child_body = PortfolioRequest(
+        legs=child.legs,
+        weights=child.weights,
+        rebalance=child.rebalance,
+        return_type=child.return_type,
+        start=start,
+        end=end,
+    )
+    child_result = await compute_portfolio(child_body, svc, classify, repo)
+
+    # Convert the child response back to the engine's YYYYMMDD-int date grid +
+    # float64 equity array.  ``portfolio_equity`` was passed through
+    # ``sanitize_json_floats`` (non-finite → None); map None back to NaN so the
+    # parent's return/compounding math holds those bars flat as usual.
+    child_dates = np.array(
+        [date_to_int(date.fromisoformat(d)) for d in child_result["dates"]],
+        dtype=np.int64,
+    )
+    child_equity = np.array(
+        [np.nan if v is None else v for v in child_result["portfolio_equity"]],
+        dtype=np.float64,
+    )
+    return child_dates, child_equity
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -1473,6 +1575,11 @@ async def compute_portfolio(
     }
     option_stream_legs = {
         label: leg for label, leg in body.legs.items() if leg.type == "option_stream"
+    }
+    # COMPOSED-PORTFOLIO legs: each references a saved pure portfolio inlined by
+    # the frontend; evaluated to a synthetic equity series like a signal leg.
+    portfolio_legs = {
+        label: leg for label, leg in body.legs.items() if leg.type == "portfolio"
     }
 
     # ── 3. Fetch instrument prices (if any) ──
@@ -1637,6 +1744,28 @@ async def compute_portfolio(
                 "metrics": _compute_level_metrics(os_values),
             }
 
+    # ── 4.6. Evaluate composed-portfolio legs (if any) ──
+    #
+    # Each portfolio leg is computed to an equity curve (over the parent's
+    # requested range) and injected as a synthetic close series, exactly like a
+    # signal leg.  Its DIRECTION is the parent weight sign (no baked-in sign, so
+    # NOT a hold_option_label) and it rebalances at the parent's frequency.
+    portfolio_leg_dates_map: dict[str, npt.NDArray[np.int64]] = {}
+    portfolio_leg_closes: dict[str, npt.NDArray[np.float64]] = {}
+    for label, leg in portfolio_legs.items():
+        pf_dates, pf_equity = await _evaluate_portfolio_leg(
+            label,
+            leg,
+            svc,
+            classify,
+            repo,
+            body.start,
+            body.end,
+        )
+        portfolio_leg_dates_map[label] = pf_dates
+        portfolio_leg_closes[label] = pf_equity
+        all_date_grids.append(pf_dates)
+
     # ── 5. Align all series to common dates ──
 
     if not all_date_grids:
@@ -1683,6 +1812,15 @@ async def compute_portfolio(
         )
         aligned_closes[label] = option_stream_closes[label][os_mask]
 
+    # Slice composed-portfolio leg equities to common dates
+    for label in portfolio_leg_closes:
+        pf_mask = np.isin(
+            portfolio_leg_dates_map[label],
+            common_dates,
+            assume_unique=True,
+        )
+        aligned_closes[label] = portfolio_leg_closes[label][pf_mask]
+
     # Align each hold-mode option leg's DISPLAY-ONLY side-channels to common_dates
     # (same os_mask as the synthetic close, computed once per label in the shared
     # ``_align_hold_series`` helper) so the trade-log roll rows are sized/priced off
@@ -1727,6 +1865,8 @@ async def compute_portfolio(
         full_date_grids.append(signal_dates_map[label])
     for label in option_stream_dates_map:
         full_date_grids.append(option_stream_dates_map[label])
+    for label in portfolio_leg_dates_map:
+        full_date_grids.append(portfolio_leg_dates_map[label])
 
     full_common_all = full_date_grids[0]
     for grid in full_date_grids[1:]:
