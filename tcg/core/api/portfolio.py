@@ -23,6 +23,7 @@ from tcg.core.api._models import (
 )
 from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
 from tcg.core.api._options_materialise import materialise_option_streams
+from tcg.core.api._portfolio_leg_cache import BoundedLRUCache, canonical_key
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.api.common import get_market_data
 from tcg.core.api._persistence_wiring import get_write_repository
@@ -1410,6 +1411,18 @@ async def _evaluate_option_stream_leg(
     return dates_arr, values, "level", [], None, None, float("nan"), None, None, None
 
 
+# Approach 3: transparent, per-process LRU over composed-leg child computes.
+# Keyed on a canonical hash of the child compute body (which carries the parent's
+# resolved date range), so an unchanged child is not recomputed and any child
+# edit (including a nested signal leg) busts the key automatically. The value is
+# the ``(dates, equity)`` tuple ``_evaluate_portfolio_leg`` returns; a hit is
+# byte-identical to a recompute. Module-level so it persists across requests
+# within a process; tests reset it via ``.clear()``.
+_PORTFOLIO_LEG_CACHE: BoundedLRUCache[
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]
+] = BoundedLRUCache()
+
+
 async def _evaluate_portfolio_leg(
     label: str,
     leg: LegSpec,
@@ -1435,6 +1448,14 @@ async def _evaluate_portfolio_leg(
     evaluators are reused verbatim.  Depth is capped at 1: the guard below runs
     BEFORE recursing, which also makes infinite recursion impossible.
 
+    The expensive child compute is memoised through ``_PORTFOLIO_LEG_CACHE``
+    (Approach 3): a repeat of the same child spec over the same resolved range
+    returns the cached ``(dates, equity)`` without recomputing.  The cache is
+    keyed on the child body (which carries the parent's ``start``/``end``), so it
+    is transparent and byte-identical to the uncached path — the validation
+    guards below run on EVERY call (never cached), so a broken/depth-2 reference
+    still 400s regardless of cache state.
+
     Raises:
         ValidationError (→ HTTP 400, never 500):
           * the child is missing/empty/unresolved;
@@ -1443,7 +1464,8 @@ async def _evaluate_portfolio_leg(
     child = leg.portfolio
     # Empty / unresolved guard (Sign 4): a broken reference (archived/deleted
     # child, or the frontend could not resolve it) yields a missing or empty
-    # child body — surface a clear 400, never a 500.
+    # child body — surface a clear 400, never a 500.  Runs BEFORE the cache so a
+    # broken reference is never masked by a cached sibling.
     if child is None or not child.legs:
         raise ValidationError(
             f"Leg '{label}': referenced portfolio has no legs or could not be resolved"
@@ -1471,21 +1493,32 @@ async def _evaluate_portfolio_leg(
         start=start,
         end=end,
     )
-    child_result = await compute_portfolio(child_body, svc, classify, repo)
 
-    # Convert the child response back to the engine's YYYYMMDD-int date grid +
-    # float64 equity array.  ``portfolio_equity`` was passed through
-    # ``sanitize_json_floats`` (non-finite → None); map None back to NaN so the
-    # parent's return/compounding math holds those bars flat as usual.
-    child_dates = np.array(
-        [date_to_int(date.fromisoformat(d)) for d in child_result["dates"]],
-        dtype=np.int64,
-    )
-    child_equity = np.array(
-        [np.nan if v is None else v for v in child_result["portfolio_equity"]],
-        dtype=np.float64,
-    )
-    return child_dates, child_equity
+    async def _compute() -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+        child_result = await compute_portfolio(child_body, svc, classify, repo)
+        # Convert the child response back to the engine's YYYYMMDD-int date grid
+        # + float64 equity array.  ``portfolio_equity`` was passed through
+        # ``sanitize_json_floats`` (non-finite → None); map None back to NaN so
+        # the parent's return/compounding math holds those bars flat as usual.
+        child_dates = np.array(
+            [date_to_int(date.fromisoformat(d)) for d in child_result["dates"]],
+            dtype=np.int64,
+        )
+        child_equity = np.array(
+            [np.nan if v is None else v for v in child_result["portfolio_equity"]],
+            dtype=np.float64,
+        )
+        # Freeze the cached arrays: the caller only fancy-indexes them (which
+        # copies), so a shared read-only entry is safe, and any accidental
+        # in-place write downstream fails loudly instead of corrupting the cache.
+        child_dates.flags.writeable = False
+        child_equity.flags.writeable = False
+        return child_dates, child_equity
+
+    # Content-addressed key over the full child body (captures spec + range +
+    # every nested leg). ``model_dump(mode="json")`` yields a JSON-native dict.
+    key = canonical_key(child_body.model_dump(mode="json"))
+    return await _PORTFOLIO_LEG_CACHE.get_or_compute(key, _compute)
 
 
 # ---------------------------------------------------------------------------
