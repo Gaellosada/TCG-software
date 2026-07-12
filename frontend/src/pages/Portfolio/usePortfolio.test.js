@@ -791,6 +791,53 @@ describe('usePortfolio — addLeg auto-suffix on duplicate labels', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// REGRESSION (feat/portfolio-result-cache): loading a saved portfolio whose
+// ranges key is IDENTICAL to the currently-loaded one (e.g. same instrument,
+// only the weight differs) stranded overlapRange at null. loadFromPersisted
+// nulls overlapRange, but the range-resolving effect is keyed on the legs'
+// ranges key — unchanged here — so it never re-fired and overlapRange stayed
+// null forever. Downstream, the cached-badge/auto-display stuck at 'checking'
+// and Compute sent start/end = undefined (full range) instead of the overlap.
+// The fix must make overlapRange reliably become non-null after ANY load when
+// data coverage exists.
+// ---------------------------------------------------------------------------
+
+describe('usePortfolio — overlapRange re-resolves on a same-ranges-key reload', () => {
+  const docA = {
+    id: 'pa', name: 'A', rebalance: 'none', category: 'RESEARCH',
+    legs: [{ label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 60 }],
+  };
+  const docB = {
+    id: 'pb', name: 'B', rebalance: 'none', category: 'RESEARCH',
+    // SAME ranges key as A (i:INDEX:SPX) — only the weight differs.
+    legs: [{ label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 75 }],
+  };
+
+  it('overlapRange is non-null (concrete window) and Compute sends real dates after loading B', async () => {
+    const { result } = renderHook(() => usePortfolio());
+
+    // Load A and let its range resolve to the concrete instrument window.
+    act(() => { result.current.loadFromPersisted(docA); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(result.current.overlapRange).toEqual({ start: '2020-01-01', end: '2020-12-31' });
+
+    // Load B — SAME ranges key. On the buggy code the range effect does not
+    // re-fire, so overlapRange is stranded at null.
+    act(() => { result.current.loadFromPersisted(docB); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+
+    // Must reliably become the concrete window again, never stuck at null.
+    expect(result.current.overlapRange).toEqual({ start: '2020-01-01', end: '2020-12-31' });
+
+    // And the effective compute window must be the concrete dates, not undefined.
+    await act(async () => { await result.current.handleCalculate(); });
+    const body = computePortfolio.mock.calls.at(-1)[0];
+    expect(body.start).toBe('2020-01-01');
+    expect(body.end).toBe('2020-12-31');
+  });
+});
+
 describe('usePortfolio — dirty lifecycle (save clears, re-edit re-dirties)', () => {
   const baseLeg = {
     label: 'SPX',
