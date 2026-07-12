@@ -10,12 +10,48 @@ from tcg.types.persistence import (
     BasketDoc,
     Category,
     DocType,
+    PortfolioDoc,
     from_json_doc,
     to_json_doc,
 )
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def _make_portfolio(**kwargs) -> PortfolioDoc:
+    base: dict = {
+        "id": "ptf-1",
+        "type": DocType.PORTFOLIO.value,
+        "name": "60-40",
+        "category": Category.RESEARCH,
+        "created_at": NOW,
+        "updated_at": NOW,
+        "legs": (),
+        "rebalance": "none",
+    }
+    base.update(kwargs)
+    return PortfolioDoc(**base)
+
+
+def test_portfolio_doc_kind_round_trips() -> None:
+    doc = _make_portfolio(kind="composed")
+    d = to_json_doc(doc)
+    assert d["kind"] == "composed"
+    assert from_json_doc(d) == doc
+
+
+def test_portfolio_doc_legacy_payload_defaults_kind_pure() -> None:
+    # A legacy portfolio payload predates the ``kind`` field. ``from_json_doc``
+    # must fall back to the dataclass default ("pure") — an old portfolio is
+    # pure and safe to reference. (Forward-compatibility, line 305-306 in
+    # persistence.from_json_doc.)
+    doc = _make_portfolio(kind="composed")
+    payload = to_json_doc(doc)
+    del payload["kind"]  # simulate a doc written before ``kind`` existed
+    reconstructed = from_json_doc(payload)
+    assert isinstance(reconstructed, PortfolioDoc)
+    assert reconstructed.kind == "pure"
 
 
 def _spot_leg(instrument_id: str, weight: float = 0.5) -> dict:

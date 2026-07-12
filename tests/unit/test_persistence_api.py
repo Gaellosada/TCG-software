@@ -234,6 +234,57 @@ def test_create_portfolio_duplicate_returns_409(
     assert "already exists" in r.json()["detail"]
 
 
+def test_portfolio_kind_composed_roundtrips_create_and_get(
+    client: TestClient,
+) -> None:
+    """A composed portfolio persists ``kind="composed"`` and echoes it on
+    create + GET (design §5 — opaque JSONB, no schema change)."""
+    r = client.post(
+        "/api/persistence/portfolios",
+        json={
+            "id": "ptf-composed",
+            "name": "Composed",
+            "category": "RESEARCH",
+            "kind": "composed",
+            "legs": [],
+            "rebalance": "none",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "composed"
+    g = client.get("/api/persistence/portfolios/ptf-composed")
+    assert g.status_code == 200, g.text
+    assert g.json()["kind"] == "composed"
+
+
+def test_portfolio_kind_defaults_pure_when_omitted(client: TestClient) -> None:
+    """A pure-page / legacy client that omits ``kind`` still saves (no 422)
+    and reads back as ``pure``."""
+    r = client.post(
+        "/api/persistence/portfolios",
+        json={"id": "ptf-legacy", "name": "Pure", "category": "RESEARCH"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "pure"
+
+
+def test_portfolio_kind_rejects_unknown_value(client: TestClient) -> None:
+    """``kind`` is a strict Literal — an unknown value is rejected (the app maps
+    request-body validation to a 400 ``validation_error`` envelope), not
+    silently stored."""
+    r = client.post(
+        "/api/persistence/portfolios",
+        json={
+            "id": "ptf-bad",
+            "name": "Bad",
+            "category": "RESEARCH",
+            "kind": "hybrid",
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "pure" in r.json()["message"] and "composed" in r.json()["message"]
+
+
 def test_create_then_recreate_same_id_returns_409_via_fake(
     client: TestClient,
 ) -> None:
