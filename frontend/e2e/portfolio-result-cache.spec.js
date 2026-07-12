@@ -57,7 +57,8 @@ const STATS_RESULT = {
 // mutable compute-hit counter.
 async function installRoutes(page, { docs = [DOC] } = {}) {
   // computeDelayMs lets a test hold a compute in flight (simulating slow dwh).
-  const state = { computeHits: 0, computeDelayMs: 0 };
+  // lastComputeBody captures the most recent /portfolio/compute request body.
+  const state = { computeHits: 0, computeDelayMs: 0, lastComputeBody: null };
 
   // NOTE: Playwright checks routes most-recently-registered FIRST, so general
   // patterns are registered before the specific ones that must win.
@@ -108,6 +109,11 @@ async function installRoutes(page, { docs = [DOC] } = {}) {
   await page.route('**/portfolio/compute', async (route) => {
     state.computeHits += 1;
     const hits = state.computeHits;
+    try {
+      state.lastComputeBody = JSON.parse(route.request().postData() || 'null');
+    } catch {
+      state.lastComputeBody = null;
+    }
     if (state.computeDelayMs) {
       await new Promise((r) => { setTimeout(r, state.computeDelayMs); });
     }
@@ -375,4 +381,49 @@ test('cache OFF (default): saved-list shows NO per-row cache icons', async ({ pa
   await expect(page.getByTestId('load-portfolio-pf-a')).toBeVisible();
   await expect(page.getByTestId('portfolio-row-cache-pf-a')).toHaveCount(0);
   await expect(page.getByTestId('portfolio-row-cache-pf-b')).toHaveCount(0);
+});
+
+// REGRESSION (fails before the range-effect fix, passes after): switching
+// between two portfolios that share an identical legsToRangesKey (same
+// instrument, different weight) must still resolve overlapRange — the active
+// badge must not freeze at "checking" (hidden) and Compute must send real
+// start/end (not undefined).
+const SAME_A = {
+  ...DOC, id: 'pf-samea', name: 'SameA',
+  legs: [{ ...WIRE_LEG, label: 'SPX', symbol: 'SPX', weight: 60 }],
+};
+const SAME_B = {
+  ...DOC, id: 'pf-sameb', name: 'SameB',
+  legs: [{ ...WIRE_LEG, label: 'SPX', symbol: 'SPX', weight: 75 }],
+};
+
+test('cache ON: switching between two portfolios with the SAME range spec (different weight) still resolves the range — badge not stuck, Compute sends real start/end', async ({ page }) => {
+  const state = await installRoutes(page, { docs: [SAME_A, SAME_B] });
+  await enableCacheViaSettings(page);
+  await page.goto(`${BASE}/portfolio`);
+
+  const badge = page.getByTestId('portfolio-cache-badge');
+  const compute = page.getByTestId('portfolio-compute-btn');
+  const weightInput = page.locator('input[type="number"]').first();
+
+  // Load A → range resolves, badge shows.
+  await page.getByTestId('load-portfolio-pf-samea').click();
+  await expect(weightInput).toHaveValue('60');
+  await expect(badge).toHaveAttribute('data-cached', 'false');
+
+  // Switch to B: SAME legsToRangesKey (SPX), different weight. Pre-fix this left
+  // overlapRange stuck null → the badge stayed hidden ("checking") forever.
+  await page.getByTestId('load-portfolio-pf-sameb').click();
+  await expect(weightInput).toHaveValue('75');
+  await expect(badge).toBeVisible();                       // NOT stuck/hidden
+  await expect(badge).toHaveAttribute('data-cached', 'false');
+
+  // Compute B → the request must carry REAL resolved dates, not undefined.
+  await compute.click();
+  await expect(page.getByText(/Data range:/)).toBeVisible();
+  await expect.poll(() => state.computeHits).toBeGreaterThan(0);
+  expect(state.lastComputeBody).toBeTruthy();
+  expect(state.lastComputeBody.start).toBe('2020-01-01');
+  expect(state.lastComputeBody.end).toBe('2020-12-31');
+  expect(state.lastComputeBody.weights.SPX).toBe(75);
 });

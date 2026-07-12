@@ -95,8 +95,20 @@ export default function usePortfolio() {
 
   /* ── Fetch date ranges when legs change ── */
 
-  // Stable key: only data-affecting fields (not label/weight) trigger re-fetch
-  const rangesKey = useMemo(() => legsToRangesKey(legs), [legs]);
+  // Re-resolve ranges when the range SPEC changes (legsToRangesKey — instrument
+  // / roll / etc., NOT label/weight) OR when the leg IDENTITY set changes
+  // (load / add / remove; ids are stable across weight/label edits). Including
+  // the ids fixes a stuck-null overlapRange when switching to a different
+  // portfolio that happens to share an identical range spec (same instrument,
+  // different weight): the spec key alone wouldn't change, so the effect
+  // wouldn't re-fire and overlapRange (nulled on load) would stay null —
+  // freezing the cache badge / auto-display at "checking" and sending
+  // start=undefined to Compute. Weight/label edits keep the same ids AND spec,
+  // so they still never trigger a refetch (the original optimization holds).
+  const rangesKey = useMemo(
+    () => `${legsToRangesKey(legs)}#${legs.map((l) => l.id).join(',')}`,
+    [legs],
+  );
 
   useEffect(() => {
     if (legs.length === 0) {
