@@ -6,6 +6,32 @@
 // leak-proof cache key: any edit to the portfolio, a signal it uses, or an
 // indicator those signals use necessarily changes the body → new key.
 
+import { sha256HexFromBytes } from './sha256';
+
+// SHA-256 → lowercase hex. Uses WebCrypto (`crypto.subtle`) when available (the
+// fast native path), else a byte-identical pure-JS fallback. This matters for
+// the installed Linux (WebKitGTK) app, whose production `tauri://` custom
+// protocol is a non-secure context where `crypto.subtle` can be absent — there
+// the fallback keeps the cache working (and its keys identical to the WebCrypto
+// path, so entries are portable across environments).
+async function sha256Hex(bytes) {
+  try {
+    const subtle = globalThis.crypto && globalThis.crypto.subtle;
+    if (subtle && typeof subtle.digest === 'function') {
+      const digest = await subtle.digest('SHA-256', bytes);
+      const view = new Uint8Array(digest);
+      let hex = '';
+      for (let i = 0; i < view.length; i++) {
+        hex += view[i].toString(16).padStart(2, '0');
+      }
+      return hex;
+    }
+  } catch {
+    // subtle present but threw (e.g. non-secure context) → use the JS fallback.
+  }
+  return sha256HexFromBytes(bytes);
+}
+
 /**
  * Recursively sort object keys so the serialization is independent of insertion
  * order (defense-in-depth: insertion order is already stable upstream, but a
@@ -38,11 +64,5 @@ export function canonicalize(value) {
 export async function computeCacheKey(bodyObj) {
   const canonical = JSON.stringify(canonicalize(bodyObj));
   const bytes = new TextEncoder().encode(canonical);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const view = new Uint8Array(digest);
-  let hex = '';
-  for (let i = 0; i < view.length; i++) {
-    hex += view[i].toString(16).padStart(2, '0');
-  }
-  return hex;
+  return sha256Hex(bytes);
 }
