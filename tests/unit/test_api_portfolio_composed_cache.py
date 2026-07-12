@@ -249,3 +249,61 @@ class TestBoundedLRU:
         await c.get_or_compute("b", _mk)  # compute b (n=2) → evicts a
         await c.get_or_compute("a", _mk)  # a evicted → recompute (n=3)
         assert calls["n"] == 3
+
+
+# ── Cache-transparency invariant (hardening) ───────────────────────────
+#
+# The cache is transparent ONLY because the caller feeds each portfolio leg's
+# frozen cached close array into the weight/rebalance math through a BOOLEAN-MASK
+# advanced index (``portfolio_leg_closes[label][pf_mask]``), and numpy boolean
+# masking returns an independent COPY — so the shared frozen entry is never
+# written. That safety is implicit. This test locks it: if someone later changes
+# that indexing to a slice/view (``[a:b]``), the array handed to the math would
+# become a read-only VIEW of the frozen entry (writeable False, ``base`` set),
+# and these assertions FAIL.
+
+
+class TestCacheTransparencyInvariant:
+    async def test_leg_array_fed_to_weight_math_is_writeable_independent_copy(
+        self, client: AsyncClient, monkeypatch
+    ):
+        import tcg.core.api.portfolio as pf_mod
+
+        real = pf_mod.compute_weighted_portfolio
+        captured: dict = {}
+
+        def _spy(aligned_closes, weights, rebalance, return_type, dates):
+            # The PARENT compute is the call that carries the composed "block"
+            # leg (the child compute carries "up"/"down"). Snapshot the exact
+            # array object + its flags AS HANDED to the weight math, before the
+            # real routine reads it.
+            if "block" in aligned_closes:
+                arr = aligned_closes["block"]
+                captured["arr"] = arr
+                captured["writeable"] = bool(arr.flags.writeable)
+                captured["base_is_none"] = arr.base is None
+            return real(aligned_closes, weights, rebalance, return_type, dates)
+
+        monkeypatch.setattr(pf_mod, "compute_weighted_portfolio", _spy)
+
+        body = _composed({"up": 60.0, "down": 40.0})  # one portfolio leg "block"
+        r = await client.post("/api/portfolio/compute", json=body)
+        assert r.status_code == 200, r.text
+        assert "arr" in captured, "parent compute never received the 'block' leg"
+
+        # (1) The array feeding the weight/rebalance math is WRITEABLE — a future
+        #     mask→view of the frozen cached entry would make it read-only.
+        assert captured["writeable"] is True
+        # (2) It is an INDEPENDENT copy, NOT a view onto the cached frozen entry
+        #     (a boolean-mask index owns its data → base is None; a slice would
+        #     set base to the source array).
+        assert captured["base_is_none"] is True
+
+        # (3) The cached entry itself is frozen, and mutating the downstream
+        #     writeable array does NOT bleed into it (concrete non-aliasing).
+        ((cached_dates, cached_equity),) = list(_PORTFOLIO_LEG_CACHE._store.values())
+        assert cached_equity.flags.writeable is False
+        assert cached_dates.flags.writeable is False
+        before = cached_equity.copy()
+        captured["arr"][:] = captured["arr"] + 123.0  # allowed: it is writeable
+        assert np.array_equal(cached_equity, before)  # cache untouched
