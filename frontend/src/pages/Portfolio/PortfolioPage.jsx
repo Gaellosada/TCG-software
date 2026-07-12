@@ -18,6 +18,7 @@ import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
 import { hasCached } from '../../lib/portfolioCache';
+import useSavedPortfolioCacheStatus from './useSavedPortfolioCacheStatus';
 import {
   createPortfolio,
   updatePortfolio,
@@ -538,6 +539,28 @@ function PortfolioPage() {
     && portfolio.legs.length > 0
     && badgeCached === false;
 
+  // Per-row "cached" status for the Saved Portfolios list (cache-ON only).
+  // Reuses the active portfolio's live key so the active row agrees with the badge.
+  const rowCacheStatus = useSavedPortfolioCacheStatus({
+    portfolios,
+    cacheEnabled: portfolio.cacheEnabled,
+    cacheVersion: portfolio.cacheVersion,
+    activeId: portfolio.persistedId,
+    activeKey: portfolio.currentCacheKey,
+  });
+  // The ACTIVE portfolio's row must agree EXACTLY with the active badge, so
+  // derive it straight from `badgeCached` (the badge's own reactive source)
+  // rather than the hook's async active path — no divergence, no race.
+  const mergedRowCacheStatus = useMemo(() => {
+    if (!portfolio.cacheEnabled || !portfolio.persistedId) return rowCacheStatus;
+    const activeStatus = badgeCached === true
+      ? 'cached'
+      : badgeCached === false
+        ? 'not-cached'
+        : 'checking';
+    return { ...rowCacheStatus, [portfolio.persistedId]: activeStatus };
+  }, [rowCacheStatus, portfolio.cacheEnabled, portfolio.persistedId, badgeCached]);
+
   return (
     <div className={styles.page}>
       <div className={styles.scroll}>
@@ -658,6 +681,8 @@ function PortfolioPage() {
             selectedId={portfolio.persistedId}
             onSelect={handleSelectPersisted}
             onSetPortfolioLocked={handleSetPortfolioLocked}
+            cacheEnabled={portfolio.cacheEnabled}
+            cacheStatusById={mergedRowCacheStatus}
           />
         </div>
 

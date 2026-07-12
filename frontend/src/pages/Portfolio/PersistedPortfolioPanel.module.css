@@ -125,6 +125,31 @@
   color: var(--accent);
 }
 
+/* Per-row cache status dot (cache-ON only). Fixed width so the row layout
+   never jumps between checking / cached / not-cached. */
+.cacheDot {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  font-size: 0.72rem;
+  line-height: 1;
+  user-select: none;
+}
+
+.cacheDotHit {
+  color: var(--positive, #1a7f37);
+  font-weight: 700;
+}
+
+.cacheDotMiss {
+  color: var(--border-primary);
+}
+
+.cacheDotChecking {
+  color: var(--text-tertiary, var(--text-secondary));
+  opacity: 0.5;
+}
+
 /* Hover/focus action cluster (category chip + archive ×). Collapsed to ZERO
  * width at rest so the name flexes to the full row width (no premature
  * ellipsis); expands on :hover / :focus-within (keyboard). The wrapper — not

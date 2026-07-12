@@ -55,7 +55,7 @@ const STATS_RESULT = {
 
 // Register every mock the Portfolio + Settings pages touch and return the
 // mutable compute-hit counter.
-async function installRoutes(page) {
+async function installRoutes(page, { docs = [DOC] } = {}) {
   // computeDelayMs lets a test hold a compute in flight (simulating slow dwh).
   const state = { computeHits: 0, computeDelayMs: 0 };
 
@@ -69,10 +69,16 @@ async function installRoutes(page) {
     status: 200, contentType: 'application/json',
     body: JSON.stringify({ dates: [20200101, 20201231], close: [100, 110] }),
   }));
-  // Instrument price series → drives the leg's date range → overlapRange.
+  // Instrument price series → drives each leg's date range → overlapRange.
+  // (Playwright's `*` does not cross `/`, so the INDEX* route above does NOT
+  // match INDEX/<symbol>; each instrument path needs its own route.)
   await page.route('**/api/data/INDEX/SPX*', (route) => route.fulfill({
     status: 200, contentType: 'application/json',
     body: JSON.stringify({ dates: [20200101, 20201231], close: [100, 110] }),
+  }));
+  await page.route('**/api/data/INDEX/NDX*', (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ dates: [20200101, 20201231], close: [200, 220] }),
   }));
 
   // Persistence: general catch-all first, then the specific portfolios route
@@ -83,12 +89,12 @@ async function installRoutes(page) {
   await page.route('**/api/persistence/portfolios**', async (route) => {
     if (route.request().method() === 'GET') {
       return route.fulfill({
-        status: 200, contentType: 'application/json', body: JSON.stringify([DOC]),
+        status: 200, contentType: 'application/json', body: JSON.stringify(docs),
       });
     }
     return route.fulfill({
       status: 200, contentType: 'application/json',
-      body: JSON.stringify({ ...DOC }),
+      body: JSON.stringify({ ...docs[0] }),
     });
   });
 
@@ -310,4 +316,63 @@ test('cache ON: editing mid-compute drops the superseded compute result (never s
   await expect(page.getByText(/2022-12-31/)).toBeVisible();
   await expect(badge).toHaveAttribute('data-cached', 'true');
   expect(state.computeHits).toBe(2);
+});
+
+// Two saved portfolios with DISTINCT instruments (SPX vs NDX) → distinct keys,
+// and distinct legsToRangesKey so switching between them re-resolves the range.
+const DOC_A = {
+  ...DOC, id: 'pf-a', name: 'Alpha',
+  legs: [{ ...WIRE_LEG, label: 'SPX', symbol: 'SPX', weight: 60 }],
+};
+const DOC_B = {
+  ...DOC, id: 'pf-b', name: 'Beta',
+  legs: [{ ...WIRE_LEG, label: 'NDX', symbol: 'NDX', weight: 60 }],
+};
+
+test('cache ON: saved-list row cache icon is accurate — only the actually-cached portfolio shows cached, and computing flips a row', async ({ page }) => {
+  const state = await installRoutes(page, { docs: [DOC_A, DOC_B] });
+  await enableCacheViaSettings(page);
+  await page.goto(`${BASE}/portfolio`);
+
+  const rowA = page.getByTestId('portfolio-row-cache-pf-a');
+  const rowB = page.getByTestId('portfolio-row-cache-pf-b');
+  const badge = page.getByTestId('portfolio-cache-badge');
+  const compute = page.getByTestId('portfolio-compute-btn');
+
+  // Both rows render; neither cached yet (icons resolve away from "checking").
+  await expect(rowA).toBeVisible();
+  await expect(rowB).toBeVisible();
+  await expect(rowA).toHaveAttribute('data-cache-status', 'not-cached');
+  await expect(rowB).toHaveAttribute('data-cache-status', 'not-cached');
+
+  // Load Alpha; wait until its key resolves (badge → not-cached) so the compute
+  // key matches the badge/row key, then compute → Alpha's exact key is cached.
+  await page.getByTestId('load-portfolio-pf-a').click();
+  await expect(badge).toHaveAttribute('data-cached', 'false');
+  await compute.click();
+  await expect(page.getByText(/Data range:/)).toBeVisible();
+  await expect.poll(() => state.computeHits).toBe(1);
+
+  // Alpha's row flips to cached (row key == the active/compute key — shared
+  // range resolver + body builder); Beta stays not-cached.
+  await expect(rowA).toHaveAttribute('data-cache-status', 'cached');
+  await expect(rowB).toHaveAttribute('data-cache-status', 'not-cached');
+  await page.screenshot({ path: `${OUT}/cache-on-row-icons.png` });
+
+  // Compute Beta → Beta flips to cached; Alpha remains cached.
+  await page.getByTestId('load-portfolio-pf-b').click();
+  await expect(badge).toHaveAttribute('data-cached', 'false');
+  await compute.click();
+  await expect.poll(() => state.computeHits).toBe(2);
+  await expect(rowB).toHaveAttribute('data-cache-status', 'cached');
+  await expect(rowA).toHaveAttribute('data-cache-status', 'cached');
+});
+
+test('cache OFF (default): saved-list shows NO per-row cache icons', async ({ page }) => {
+  await installRoutes(page, { docs: [DOC_A, DOC_B] });
+  await page.goto(`${BASE}/portfolio`); // cache disabled by default
+
+  await expect(page.getByTestId('load-portfolio-pf-a')).toBeVisible();
+  await expect(page.getByTestId('portfolio-row-cache-pf-a')).toHaveCount(0);
+  await expect(page.getByTestId('portfolio-row-cache-pf-b')).toHaveCount(0);
 });

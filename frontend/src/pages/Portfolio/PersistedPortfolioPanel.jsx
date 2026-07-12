@@ -36,6 +36,8 @@ function PersistedPortfolioPanel({
   selectedId,
   onSelect,
   onSetPortfolioLocked,
+  cacheEnabled = false,
+  cacheStatusById = {},
 }) {
   const headerRight = (
     <div className={styles.headerActions}>
@@ -85,6 +87,9 @@ function PersistedPortfolioPanel({
           portfolios.map((p) => {
             const isSelected = p.id === selectedId;
             const isLocked = !!p.locked;
+            // Cache-ON only: a compact per-row icon meaning "opening this shows a
+            // result instantly" (its exact current key is in IndexedDB).
+            const cacheStatus = cacheEnabled ? (cacheStatusById[p.id] || 'checking') : null;
             return (
               <div
                 key={p.id}
@@ -102,6 +107,30 @@ function PersistedPortfolioPanel({
                     locked={isLocked}
                     onSetLocked={(next) => onSetPortfolioLocked(p.id, next)}
                   />
+                )}
+                {/* Cache-ON only: fixed-width status dot (no layout jump). */}
+                {cacheStatus && (
+                  <span
+                    className={`${styles.cacheDot} ${
+                      cacheStatus === 'cached'
+                        ? styles.cacheDotHit
+                        : cacheStatus === 'not-cached'
+                          ? styles.cacheDotMiss
+                          : styles.cacheDotChecking
+                    }`}
+                    data-testid={`portfolio-row-cache-${p.id}`}
+                    data-cache-status={cacheStatus}
+                    title={
+                      cacheStatus === 'cached'
+                        ? 'Cached — opening this portfolio shows its result instantly'
+                        : cacheStatus === 'not-cached'
+                          ? 'Not cached — opening will need a Compute'
+                          : 'Checking cache…'
+                    }
+                    aria-label={`cache ${cacheStatus}`}
+                  >
+                    {cacheStatus === 'cached' ? '✓' : '•'}
+                  </span>
                 )}
                 <button
                   type="button"

@@ -1,13 +1,10 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
-import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
-import { queryKeys } from '../../queryKeys';
-import { formatDateInt } from '../../utils/format';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
-import { fetchSignalLegRange } from './signalLegRange';
-import { fetchOptionLegRange } from './optionLegRange';
 import { legsToRangesKey } from './legKey';
+import { resolvePortfolioRange } from './resolvePortfolioRange';
+import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { shouldDisplayComputeResult } from './cacheDisplayPolicy';
 import { computeCacheKey } from '../../lib/computeCacheKey';
@@ -105,100 +102,25 @@ export default function usePortfolio() {
     if (legs.length === 0) {
       setLegDateRanges({});
       setOverlapRange(null);
-      return;
+      return undefined;
     }
 
     let cancelled = false;
     setRangesLoading(true);
 
-    // Fetch each leg's price data using the same APIs as the Data page.
-    // Signal legs derive their range from the overlap of their inputs' ranges.
-    const promises = legs.map(async (leg) => {
-      if (leg.type === 'signal') {
-        return fetchSignalLegRange(leg);
-      }
-      if (leg.type === 'option_stream') {
-        // An option stream's range is the option COLLECTION's bar coverage
-        // (first..last trade_date), fetched from /api/options/coverage. This
-        // makes an option leg contribute a REAL range to the overlap — exactly
-        // like every other leg — instead of the old null that forced an
-        // artificial today-5y (~2021) floor.
-        return fetchOptionLegRange(queryClient, leg);
-      }
-      try {
-        let dates;
-        if (leg.type === 'continuous') {
-          const params = {
-            strategy: leg.strategy || 'front_month',
-            adjustment: leg.adjustment || 'none',
-            cycle: leg.cycle || undefined,
-            rollOffset: leg.rollOffset || 0,
-            rank: leg.rank || 1,
-          };
-          const res = await queryClient.fetchQuery({
-            queryKey: queryKeys.market.continuous(leg.collection, params),
-            queryFn: () => getContinuousSeries(leg.collection, params),
-          });
-          dates = res?.dates;
-        } else {
-          const res = await queryClient.fetchQuery({
-            queryKey: queryKeys.market.prices(leg.collection, leg.symbol),
-            queryFn: () => getInstrumentPrices(leg.collection, leg.symbol),
-          });
-          dates = res?.dates;
-        }
-        if (dates && dates.length > 0) {
-          return {
-            id: leg.id,
-            start: formatDateInt(dates[0]),
-            end: formatDateInt(dates[dates.length - 1]),
-          };
-        }
-        return { id: leg.id, start: null, end: null };
-      } catch {
-        return { id: leg.id, start: null, end: null };
-      }
-    });
-
-    Promise.all(promises).then((results) => {
-      if (cancelled) return;
-
-      const ranges = {};
-      const validStarts = [];
-      const validEnds = [];
-
-      for (const r of results) {
-        ranges[r.id] = { start: r.start, end: r.end };
-        if (r.start) {
-          validStarts.push(r.start);
-          validEnds.push(r.end);
-        }
-      }
-
-      setLegDateRanges(ranges);
-
-      if (validStarts.length > 0) {
-        // Overlap = latest start to earliest end
-        const overlapStart = validStarts.reduce((a, b) => (a > b ? a : b));
-        const overlapEnd = validEnds.reduce((a, b) => (a < b ? a : b));
-        if (overlapStart <= overlapEnd) {
-          setOverlapRange({ start: overlapStart, end: overlapEnd });
-        } else {
-          setOverlapRange(null);
-        }
-      } else {
-        // No leg resolved a range (e.g. ranges not yet settled or all reads
-        // failed). Option legs now resolve their real coverage above and flow
-        // through the same overlap logic as every other leg — there is no
-        // longer a special-case today-5y default that floored option-only
-        // portfolios at ~2021.
-        setOverlapRange(null);
-      }
-
-      setRangesLoading(false);
-    }).catch(() => {
-      if (!cancelled) setRangesLoading(false);
-    });
+    // Resolve each leg's coverage + the portfolio overlap via the SHARED
+    // resolver — the saved-list cache-status detection uses the identical path,
+    // so a row's key always matches the active/compute key (no lying icons).
+    resolvePortfolioRange(legs, { queryClient })
+      .then(({ ranges, overlapRange: overlap }) => {
+        if (cancelled) return;
+        setLegDateRanges(ranges);
+        setOverlapRange(overlap);
+        setRangesLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setRangesLoading(false);
+      });
 
     return () => { cancelled = true; };
   }, [rangesKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -328,25 +250,11 @@ export default function usePortfolio() {
    */
   const loadFromPersisted = useCallback((doc) => {
     if (!doc || typeof doc !== 'object') return;
-    const backendLegs = Array.isArray(doc.legs) ? doc.legs : [];
-    // Stamp local-only id onto each leg so React keys remain unique.
-    // We do NOT round-trip the id back to the backend — the id is
-    // assigned per-load, not stored.
-    const restoredLegs = backendLegs.map((l) => {
-      const leg = { ...l, id: nextId++ };
-      // Backward-compat: an option PRICE leg (mid/bs_mid) is now hold-ON-only
-      // (the backend rejects hold-off). A portfolio saved BEFORE that rule has
-      // no hold_between_rolls, so coerce it on load — otherwise an old portfolio
-      // loads fine but 400s on Compute with no in-UI way to enable hold.
-      if (
-        leg.type === 'option_stream'
-        && (leg.stream === 'mid' || leg.stream === 'bs_mid')
-      ) {
-        leg.hold_between_rolls = true;
-        if (typeof leg.nav_times !== 'number') leg.nav_times = 1.0;
-      }
-      return leg;
-    });
+    // Shared doc→legs conversion (incl. the option hold-ON coercion), then stamp
+    // a local-only React-key id. The SAME converter feeds the saved-list cache
+    // detection, so its per-row body/key matches what loading this doc produces.
+    // The id is assigned per-load, never round-tripped to the backend.
+    const restoredLegs = persistedDocToLegs(doc).map((l) => ({ ...l, id: nextId++ }));
     abortCalculate();
     setLegs(restoredLegs);
     setRebalance(typeof doc.rebalance === 'string' ? doc.rebalance : 'none');
