@@ -1,6 +1,8 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
+import { getPortfolio } from '../../api/persistence';
+import { queryKeys } from '../../queryKeys';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { legsToRangesKey } from './legKey';
 import { resolvePortfolioRange } from './resolvePortfolioRange';
@@ -212,6 +214,35 @@ export default function usePortfolio() {
     setDirty(true);
   }, []);
 
+  // Add a saved PURE portfolio as a composed leg (mirrors addSignalLeg). We
+  // store ONLY enough to render the row (id + name) and the weight — the FULL
+  // child spec is resolved FRESH at compute time by ``resolvePortfolio`` below,
+  // NEVER snapshotted here, so editing the child propagates (live reference).
+  const addPortfolioLeg = useCallback((child) => {
+    const id = nextId++;
+    setLegs((prev) => {
+      const label = uniqueLegLabel(child.name || `Portfolio ${id}`, prev);
+      return [
+        ...prev,
+        {
+          id,
+          label,
+          type: 'portfolio',
+          portfolioId: child.id,
+          portfolioName: child.name,
+          weight: 100,
+          collection: null,
+          symbol: null,
+          strategy: null,
+          adjustment: null,
+          cycle: null,
+          rollOffset: 0,
+        },
+      ];
+    });
+    setDirty(true);
+  }, []);
+
   const updateLeg = useCallback((index, updates) => {
     setLegs((prev) =>
       prev.map((leg, i) => (i === index ? { ...leg, ...updates } : leg)),
@@ -287,6 +318,100 @@ export default function usePortfolio() {
     setPersistedId(id);
   }, []);
 
+  /* ── Composed portfolios: resolve child (sub-portfolio) legs ── */
+  // The distinct set of referenced child portfolio ids (composed page only —
+  // pure portfolios have none, so all of this is inert on the pure path).
+  const portfolioLegIds = useMemo(
+    () => [...new Set(
+      legs.filter((l) => l.type === 'portfolio' && l.portfolioId).map((l) => l.portfolioId),
+    )],
+    [legs],
+  );
+  const portfolioLegIdsKey = portfolioLegIds.join(',');
+
+  // childPortfolios: { [id]: doc | 'broken' } for the UI badge (broken-ref).
+  // Undefined (absent) = still loading. Populated by fetching each child's
+  // CURRENT saved doc through React Query (deduped with the build-time resolver
+  // below, which reads the SAME cache entries → identical inlined spec → key
+  // parity between the badge/compute bodies).
+  const [childPortfolios, setChildPortfolios] = useState({});
+  useEffect(() => {
+    if (portfolioLegIds.length === 0) {
+      setChildPortfolios({});
+      return undefined;
+    }
+    let cancelled = false;
+    Promise.all(portfolioLegIds.map(async (id) => {
+      try {
+        const doc = await queryClient.fetchQuery({
+          queryKey: queryKeys.persistence.portfolios.detail(id),
+          queryFn: () => getPortfolio(id),
+          staleTime: 10 * 1000,
+        });
+        return [id, doc || 'broken'];
+      } catch {
+        return [id, 'broken'];
+      }
+    })).then((entries) => {
+      if (!cancelled) setChildPortfolios(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, [portfolioLegIdsKey, queryClient]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A resolved child doc is USABLE only if it exists, still has legs, and is not
+  // archived/deleted — otherwise it's a broken reference (design §5). Shared by
+  // the sync UI resolver and the async build-time resolver so both agree.
+  const usableChildDoc = useCallback((doc) => {
+    if (!doc || doc === 'broken') return null;
+    if (doc.category === 'ARCHIVE' || doc.category === 'DELETED') return null;
+    if (!Array.isArray(doc.legs) || doc.legs.length === 0) return null;
+    return doc;
+  }, []);
+
+  // Sync resolver over the fetched-into-state child docs — drives the per-leg
+  // broken-ref badge (portfolioRefStatus). NOT used for building bodies (that
+  // uses the always-fresh async resolver below) to avoid a state/race gap.
+  const resolvePortfolio = useCallback(
+    (id) => usableChildDoc(childPortfolios[id]),
+    [childPortfolios, usableChildDoc],
+  );
+
+  // Per-leg reference status for the Holdings UI: 'loading' | 'ok' | 'broken'.
+  const portfolioRefStatus = useMemo(() => {
+    const out = {};
+    for (const l of legs) {
+      if (l.type !== 'portfolio') continue;
+      const doc = childPortfolios[l.portfolioId];
+      if (doc === undefined) out[l.id] = 'loading';
+      else out[l.id] = usableChildDoc(doc) ? 'ok' : 'broken';
+    }
+    return out;
+  }, [legs, childPortfolios, usableChildDoc]);
+
+  // Build-time resolver: fetch every referenced child's CURRENT spec through
+  // React Query (deduped; same cache the state effect fills) and return a SYNC
+  // ``(id) => doc|null`` closure over that fresh snapshot. Both compute and the
+  // cache-key effect await this, so both inline byte-identical child specs →
+  // the cache-key body equals the compute body (hard parity guardrail). Because
+  // it always fetches current specs, a child edit flows straight into the body.
+  const resolveChildrenNow = useCallback(async () => {
+    if (portfolioLegIds.length === 0) return () => null;
+    const pairs = await Promise.all(portfolioLegIds.map(async (id) => {
+      try {
+        const doc = await queryClient.fetchQuery({
+          queryKey: queryKeys.persistence.portfolios.detail(id),
+          queryFn: () => getPortfolio(id),
+          staleTime: 10 * 1000,
+        });
+        return [id, doc];
+      } catch {
+        return [id, null];
+      }
+    }));
+    const map = Object.fromEntries(pairs);
+    return (id) => usableChildDoc(map[id]);
+  }, [portfolioLegIdsKey, queryClient, usableChildDoc]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── Calculate ── */
 
   const handleCalculate = useCallback(async () => {
@@ -324,16 +449,26 @@ export default function usePortfolio() {
     // cache-OFF path is byte-identical to today's — do not gate it on signal
     // legs or the cache flag.
     const availableIndicators = await hydrateAvailableIndicators();
-    const { body, missingByLeg } = buildPortfolioComputeBody({
+    // Resolve every referenced child portfolio's CURRENT spec (composed page).
+    // On the pure page there are none, so this returns a no-op resolver and the
+    // built body is byte-identical to today's.
+    const resolveChild = await resolveChildrenNow();
+    const { body, missingByLeg, brokenRefs } = buildPortfolioComputeBody({
       legs,
       rebalance,
       start: effectiveStart,
       end: effectiveEnd,
       availableIndicators,
+      resolvePortfolio: resolveChild,
     });
     if (missingByLeg.length > 0) {
       const first = missingByLeg[0];
       setError(`Signal "${first.label}" references missing indicators: ${first.ids.join(', ')}. Please check the Indicators page.`);
+      return;
+    }
+    if (brokenRefs.length > 0) {
+      const first = brokenRefs[0];
+      setError(`Portfolio leg "${first.label}" references a portfolio that can't be resolved (deleted, archived, or empty). Remove it or pick another building block.`);
       return;
     }
 
@@ -406,7 +541,7 @@ export default function usePortfolio() {
         if (cacheOn) setCacheVersion((v) => v + 1);
       }
     });
-  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, cacheEnabled, persistedId]);
+  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, cacheEnabled, persistedId, resolveChildrenNow]);
 
   /* ── Reactive cache key + AUTO-DISPLAY / BLANK-ON-EDIT (cache-ON only) ── */
   // On any key-affecting change: recompute the current cache key (for the
@@ -450,14 +585,22 @@ export default function usePortfolio() {
         const availableIndicators = hasSignalLegs
           ? await hydrateAvailableIndicators()
           : [];
-        const { body, missing } = buildPortfolioComputeBody({
+        // Resolve child portfolios the SAME way handleCalculate does (deduped
+        // through React Query) so the badge's cache-key body equals the compute
+        // body — key parity. No-op resolver when there are no portfolio legs.
+        const resolveChild = await resolveChildrenNow();
+        if (cancelled) return;
+        const { body, missing, brokenRefs } = buildPortfolioComputeBody({
           legs,
           rebalance,
           start: effStart,
           end: effEnd,
           availableIndicators,
+          resolvePortfolio: resolveChild,
         });
-        if (missing.length > 0) {
+        // A missing indicator OR a broken portfolio ref makes the body
+        // un-keyable — blank the badge (compute is blocked upstream anyway).
+        if (missing.length > 0 || brokenRefs.length > 0) {
           if (!cancelled) {
             currentKeyRef.current = null;
             setCurrentCacheKey(null);
@@ -484,7 +627,7 @@ export default function usePortfolio() {
       }
     }, 275);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [cacheEnabled, legs, rebalance, startDate, endDate, overlapRange, cacheVersion]);
+  }, [cacheEnabled, legs, rebalance, startDate, endDate, overlapRange, cacheVersion, resolveChildrenNow]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -499,6 +642,11 @@ export default function usePortfolio() {
     legs,
     addLeg,
     addSignalLeg,
+    // Composed portfolios: add a saved PURE portfolio as a leg; ``resolvePortfolio``
+    // + ``portfolioRefStatus`` drive live child resolution and the broken-ref UI.
+    addPortfolioLeg,
+    resolvePortfolio,
+    portfolioRefStatus,
     updateLeg,
     removeLeg,
     clearAll,

@@ -89,6 +89,19 @@ function App() {
                 </PageContainer>
               }
             />
+            {/* Composed portfolios — the SAME page component behind the
+                ``mode="composed"`` capability flag (Sign 5: shared components,
+                no duplicated page). */}
+            <Route
+              path="/composed-portfolios"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <PortfolioPage mode="composed" />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
             <Route
               path="/settings"
               element={

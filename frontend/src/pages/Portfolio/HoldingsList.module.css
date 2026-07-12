@@ -30,6 +30,22 @@
   background: var(--accent-warm, #f0a030);
 }
 
+.addPortfolioBtn {
+  background: var(--accent-cool, #7c5cff);
+}
+
+/* Broken portfolio reference: the child was deleted, archived, or emptied. */
+.brokenRefBadge {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm, 3px);
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: white;
+  background: var(--negative, #d64545);
+}
+
 .empty {
   padding: 32px 16px;
   text-align: center;

@@ -3,6 +3,7 @@ import usePortfolio from './usePortfolio';
 import HoldingsList from './HoldingsList';
 import AddHoldingModal from './AddHoldingModal';
 import SignalPickerModal from './SignalPickerModal';
+import PortfolioPickerModal from './PortfolioPickerModal';
 import PersistedPortfolioPanel from './PersistedPortfolioPanel';
 import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
@@ -55,9 +56,21 @@ const REBALANCE_OPTIONS = [
   { value: 'annually', label: 'Annually' },
 ];
 
-function PortfolioPage() {
+// ``mode`` parameterizes the single shared page into two routes (Sign 5 — no
+// duplicated page code):
+//   "pure"     → the existing /portfolio route. No "Add portfolio" action;
+//                saved-list shows pure/legacy portfolios; saves kind:"pure".
+//   "composed" → the /composed-portfolios route. "Add portfolio" opens the
+//                PortfolioPickerModal (pure-only); saved-list shows composed;
+//                saves kind:"composed"; portfolio-ref legs are allowed.
+function PortfolioPage({ mode = 'pure' }) {
+  const allowPortfolioLegs = mode === 'composed';
+  const portfolioKind = allowPortfolioLegs ? 'composed' : 'pure';
   const portfolio = usePortfolio();
   const [modalOpen, setModalOpen] = useState(false);
+  // Portfolio picker (composed page only): pick a saved pure portfolio to add
+  // as a leg. Kept separate from the instrument/signal modals.
+  const [portfolioModalOpen, setPortfolioModalOpen] = useState(false);
   // Index of the leg whose instrument config is being edited (null = not
   // editing). Drives the shared AddHoldingModal into edit mode. Kept separate
   // from modalOpen so the add (append) flow is untouched.
@@ -103,6 +116,18 @@ function PortfolioPage() {
     if (portfoliosQuery.data) setPortfolios(portfoliosQuery.data);
   }, [portfoliosQuery.data]);
 
+  // Saved-list separation by page (Sign 5 + design §5): the pure route shows
+  // pure/legacy portfolios; the composed route shows composed ones. ``kind`` is
+  // authoritative; a doc with no ``kind`` is legacy → pure. The full
+  // ``portfolios`` list is kept intact (handleSelect/autosave still look up by
+  // id across it) — only the RENDERED/scanned subset is filtered.
+  const visiblePortfolios = useMemo(
+    () => portfolios.filter((p) => (
+      allowPortfolioLegs ? p.kind === 'composed' : p.kind !== 'composed'
+    )),
+    [portfolios, allowPortfolioLegs],
+  );
+
   // Serialize the portfolio leg list into the wire shape — strip the
   // local-only ``id`` (which we assign on load and never persist) and
   // null-out missing fields so the backend receives a clean shape.
@@ -139,6 +164,14 @@ function PortfolioPage() {
     // (``sizing_mode`` is a non-optional Literal — never send null).
     ...(l.sizing_mode ? { sizing_mode: l.sizing_mode } : {}),
     ...(l.futures_reference ? { futures_reference: l.futures_reference } : {}),
+    // Composed leg: a live reference to a saved pure portfolio. Emitted ONLY for
+    // portfolio legs so every other leg's wire shape stays byte-identical (the
+    // autosave dirty-diff snapshots the raw stored legs, which legacy docs have
+    // without these fields). Only the id + name are persisted — the child's full
+    // spec is resolved FRESH at compute so edits to the child propagate.
+    ...(l.type === 'portfolio'
+      ? { portfolioId: l.portfolioId || null, portfolioName: l.portfolioName || null }
+      : {}),
   })), []);
 
   // Save current portfolio state to backend in the selected category.
@@ -156,6 +189,9 @@ function PortfolioPage() {
         category,
         legs: legsToWire(portfolio.legs),
         rebalance: portfolio.rebalance || 'none',
+        // pure vs composed — opaque top-level field (design §5); legacy docs
+        // with no ``kind`` are treated as pure everywhere they're read.
+        kind: portfolioKind,
       });
       setOneshotError(null);
       setOneshotStatus('saved');
@@ -180,7 +216,7 @@ function PortfolioPage() {
     saveInput,
     portfolio.portfolioName, portfolio.persistedCategory, portfolio.legs, portfolio.rebalance,
     portfolio.setPersistedId, portfolio.setPersistedCategory, portfolio.setPortfolioName,
-    portfolio.markSaved, invalidate, legsToWire,
+    portfolio.markSaved, invalidate, legsToWire, portfolioKind,
   ]);
 
   // Move a persisted portfolio to a different category. Preserves all
@@ -195,6 +231,9 @@ function PortfolioPage() {
         category: newCat,
         legs: target.legs || [],
         rebalance: target.rebalance || 'none',
+        // Preserve the doc's own kind on a pure category move (fall back to the
+        // page mode for legacy docs that predate the field).
+        kind: target.kind || portfolioKind,
       });
       setOneshotError(null);
       setOneshotStatus('saved');
@@ -214,7 +253,7 @@ function PortfolioPage() {
       // eslint-disable-next-line no-console
       console.error('updatePortfolio (category change) failed:', err);
     }
-  }, [portfolios, portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedCategory, invalidate]);
+  }, [portfolios, portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedCategory, invalidate, portfolioKind]);
 
   // Archive (soft-delete) a persisted portfolio.
   const handleArchivePortfolio = useCallback(async (id) => {
@@ -306,6 +345,7 @@ function PortfolioPage() {
       category: portfolio.persistedCategory,
       legs: legsToWire(portfolio.legs),
       rebalance: portfolio.rebalance || 'none',
+      kind: portfolioKind,
     });
   }, [
     portfolio.persistedId,
@@ -314,6 +354,7 @@ function PortfolioPage() {
     portfolio.legs,
     portfolio.rebalance,
     legsToWire,
+    portfolioKind,
   ]);
 
   // Track the snapshot we last received from the backend so we don't
@@ -336,10 +377,13 @@ function PortfolioPage() {
           category: persisted.category,
           legs: persisted.legs || [],
           rebalance: persisted.rebalance || 'none',
+          // Match cloudPayload's shape (the page mode drives kind) so a
+          // freshly-loaded doc isn't seen as dirty and PUT back immediately.
+          kind: portfolioKind,
         }),
       };
     }
-  }, [portfolio.persistedId, portfolios]);
+  }, [portfolio.persistedId, portfolios, portfolioKind]);
 
   const cloudDirty = !!cloudPayload
     && (lastSeenPayloadRef.current.id !== portfolio.persistedId
@@ -487,6 +531,7 @@ function PortfolioPage() {
       category: portfolio.persistedCategory,
       legs: legsToWire(portfolio.legs),
       rebalance: portfolio.rebalance || 'none',
+      kind: portfolioKind,
     });
     saveNowCloud(overridePayload);
   }, [
@@ -501,6 +546,7 @@ function PortfolioPage() {
     legsToWire,
     handleCreatePortfolio,
     saveNowCloud,
+    portfolioKind,
   ]);
 
   // ── Cache badge for the active portfolio ──
@@ -542,10 +588,13 @@ function PortfolioPage() {
   // Per-row "cached" status for the Saved Portfolios list (cache-ON only).
   // The active row is skipped by the hook and supplied below from `badgeCached`.
   const rowCacheStatus = useSavedPortfolioCacheStatus({
-    portfolios,
+    portfolios: visiblePortfolios,
     cacheEnabled: portfolio.cacheEnabled,
     cacheVersion: portfolio.cacheVersion,
     activeId: portfolio.persistedId,
+    // Composed rows inline their children's specs before keying; pure rows get
+    // a no-op resolver (unchanged behaviour).
+    resolvePortfolio: portfolio.resolvePortfolio,
   });
   // The ACTIVE portfolio's row must agree EXACTLY with the active badge, so
   // derive it straight from `badgeCached` (the badge's own reactive source)
@@ -566,7 +615,7 @@ function PortfolioPage() {
         {/* ── Header ── */}
         <div className={styles.header}>
           <div className={styles.headerLeft}>
-            <h2 className={styles.pageTitle}>Portfolio</h2>
+            <h2 className={styles.pageTitle}>{allowPortfolioLegs ? 'Composed Portfolios' : 'Portfolio'}</h2>
             {/* New portfolio — detach from current and start fresh */}
             <button
               className={styles.newBtn}
@@ -671,7 +720,7 @@ function PortfolioPage() {
           <PersistedPortfolioPanel
             category={portfolio.persistedCategory}
             onCategoryChange={portfolio.setPersistedCategory}
-            portfolios={portfolios}
+            portfolios={visiblePortfolios}
             loading={portfoliosLoading}
             onSaveCurrent={handleCreatePortfolio}
             saveDisabled={portfolio.legs.length === 0}
@@ -707,6 +756,9 @@ function PortfolioPage() {
             onOpenSignalModal={() => setSignalModalOpen(true)}
             onEditLeg={handleEditLeg}
             readOnly={portfolio.persistedLocked}
+            allowPortfolioLegs={allowPortfolioLegs}
+            onOpenPortfolioModal={() => setPortfolioModalOpen(true)}
+            portfolioRefStatus={portfolio.portfolioRefStatus}
           />
         </fieldset>
 
@@ -975,6 +1027,21 @@ function PortfolioPage() {
           setSignalModalOpen(false);
         }}
       />
+
+      {/* ── Add Portfolio Modal (composed page only) ──
+          Lists ONLY pure portfolios (depth-1 enforcement #1). Excludes the
+          currently-loaded doc so a composed portfolio can't reference itself. */}
+      {allowPortfolioLegs && (
+        <PortfolioPickerModal
+          isOpen={portfolioModalOpen}
+          onClose={() => setPortfolioModalOpen(false)}
+          excludeId={portfolio.persistedId}
+          onSelect={(childPortfolio) => {
+            portfolio.addPortfolioLeg(childPortfolio);
+            setPortfolioModalOpen(false);
+          }}
+        />
+      )}
 
       {/* ── Archive portfolio confirmation ── */}
       <ConfirmDialog

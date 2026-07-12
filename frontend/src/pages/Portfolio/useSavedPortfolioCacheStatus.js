@@ -64,6 +64,9 @@ export default function useSavedPortfolioCacheStatus({
   cacheEnabled,
   cacheVersion,
   activeId,
+  // Composed rows inline their children's specs before keying. Optional — pure
+  // pages omit it (portfolio legs don't occur there, so it's never consulted).
+  resolvePortfolio,
 }) {
   const queryClient = useQueryClient();
   const [statusById, setStatusById] = useState({});
@@ -123,14 +126,17 @@ export default function useSavedPortfolioCacheStatus({
             const legs = persistedDocToLegs(doc);
             const { overlapRange } = await resolvePortfolioRange(legs, { queryClient });
             if (overlapRange && overlapRange.start && overlapRange.end) {
-              const { body, missing } = buildPortfolioComputeBody({
+              const { body, missing, brokenRefs = [] } = buildPortfolioComputeBody({
                 legs,
                 rebalance: doc.rebalance || 'none',
                 start: overlapRange.start,
                 end: overlapRange.end,
                 availableIndicators,
+                resolvePortfolio,
               });
-              if (!missing.length) key = await computeCacheKey(body);
+              // A composed row with an unresolved child (or a missing indicator)
+              // has no stable key → treat as not-cached (leave key null).
+              if (!missing.length && !brokenRefs.length) key = await computeCacheKey(body);
             }
             // Only memoize a SUCCESSFULLY-resolved key. A transient dwh flake
             // resolves the range to {start:null,end:null} (never throws) → key
@@ -158,7 +164,7 @@ export default function useSavedPortfolioCacheStatus({
     })();
 
     return () => { cancelled = true; };
-  }, [portfolios, cacheEnabled, cacheVersion, activeId, queryClient]);
+  }, [portfolios, cacheEnabled, cacheVersion, activeId, queryClient, resolvePortfolio]);
 
   return cacheEnabled ? statusById : {};
 }

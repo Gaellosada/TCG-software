@@ -12,7 +12,21 @@ const COL_COUNT = 7;
  *
  * Signal legs show an expandable detail row with their input instruments.
  */
-export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemoveLeg, onOpenAddModal, onOpenSignalModal, onEditLeg, readOnly = false }) {
+export default function HoldingsList({
+  legs,
+  legDateRanges,
+  onUpdateLeg,
+  onRemoveLeg,
+  onOpenAddModal,
+  onOpenSignalModal,
+  onEditLeg,
+  readOnly = false,
+  // Composed page only: enables the "+ Add Portfolio" action and renders
+  // portfolio-ref legs (with a broken-reference badge from portfolioRefStatus).
+  allowPortfolioLegs = false,
+  onOpenPortfolioModal,
+  portfolioRefStatus = {},
+}) {
   const [pendingRemove, setPendingRemove] = useState(null);
   const [expandedSignals, setExpandedSignals] = useState(new Set());
 
@@ -69,6 +83,17 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
           >
             + Add Signal
           </button>
+          {allowPortfolioLegs && (
+            <button
+              className={`${styles.addBtn} ${styles.addPortfolioBtn}`}
+              type="button"
+              onClick={onOpenPortfolioModal}
+              aria-label="Add portfolio"
+              data-testid="add-portfolio-btn"
+            >
+              + Add Portfolio
+            </button>
+          )}
         </div>
       }
     >
@@ -113,11 +138,13 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                         <span className={styles.typeBadge} data-type={leg.type}>
                           {isSignal
                             ? 'Signal'
-                            : leg.type === 'option_stream'
-                              ? 'Option'
-                              : leg.type === 'continuous'
-                                ? 'Continuous'
-                                : 'Instrument'}
+                            : leg.type === 'portfolio'
+                              ? 'Portfolio'
+                              : leg.type === 'option_stream'
+                                ? 'Option'
+                                : leg.type === 'continuous'
+                                  ? 'Continuous'
+                                  : 'Instrument'}
                         </span>
                       </td>
                       <td className={styles.monoCell}>
@@ -135,6 +162,29 @@ export default function HoldingsList({ legs, legDateRanges, onUpdateLeg, onRemov
                               {inputs.length} input{inputs.length !== 1 ? 's' : ''}
                             </span>
                           </button>
+                        ) : leg.type === 'portfolio' ? (
+                          // Composed leg: a live reference to a saved pure
+                          // portfolio. The child spec is resolved fresh at
+                          // compute; we only show its name + a broken-ref badge
+                          // when the reference can't be resolved.
+                          <span data-testid={`portfolio-leg-${leg.id}`}>
+                            <span className={styles.instrumentPrimary}>
+                              {leg.portfolioName || '—'}
+                            </span>
+                            {portfolioRefStatus[leg.id] === 'broken' ? (
+                              <span
+                                className={styles.brokenRefBadge}
+                                data-testid={`portfolio-broken-${leg.id}`}
+                                title="This portfolio was deleted, archived, or emptied. Remove this leg or pick another building block."
+                              >
+                                broken reference
+                              </span>
+                            ) : (
+                              <span className={styles.instrumentSecondary}>
+                                {portfolioRefStatus[leg.id] === 'loading' ? 'resolving…' : 'portfolio'}
+                              </span>
+                            )}
+                          </span>
                         ) : leg.type === 'option_stream' ? (
                           <span {...editTriggerProps(leg, index)}>
                             <span className={styles.instrumentPrimary}>
