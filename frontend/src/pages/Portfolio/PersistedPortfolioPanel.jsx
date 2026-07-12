@@ -108,15 +108,26 @@ function PersistedPortfolioPanel({
                     onSetLocked={(next) => onSetPortfolioLocked(p.id, next)}
                   />
                 )}
-                {/* Cache-ON only: fixed-width status dot (no layout jump). */}
+                <button
+                  type="button"
+                  className={styles.rowName}
+                  title={`Load ${p.name}`}
+                  onClick={() => onSelect && onSelect(p.id)}
+                  data-testid={`load-portfolio-${p.id}`}
+                >
+                  {p.name}
+                </button>
+                {/* Cache-ON only: right-aligned status TAG (text pill, matches
+                    the active Compute-row badge). Sits just left of the
+                    hover-reveal actions; hidden entirely when cache is off. */}
                 {cacheStatus && (
                   <span
-                    className={`${styles.cacheDot} ${
+                    className={`${styles.cacheTag} ${
                       cacheStatus === 'cached'
-                        ? styles.cacheDotHit
+                        ? styles.cacheTagHit
                         : cacheStatus === 'not-cached'
-                          ? styles.cacheDotMiss
-                          : styles.cacheDotChecking
+                          ? styles.cacheTagMiss
+                          : styles.cacheTagChecking
                     }`}
                     data-testid={`portfolio-row-cache-${p.id}`}
                     data-cache-status={cacheStatus}
@@ -129,18 +140,13 @@ function PersistedPortfolioPanel({
                     }
                     aria-label={`cache ${cacheStatus}`}
                   >
-                    {cacheStatus === 'cached' ? '✓' : '•'}
+                    {cacheStatus === 'cached'
+                      ? 'Cached ✓'
+                      : cacheStatus === 'not-cached'
+                        ? 'Not cached'
+                        : 'Checking…'}
                   </span>
                 )}
-                <button
-                  type="button"
-                  className={styles.rowName}
-                  title={`Load ${p.name}`}
-                  onClick={() => onSelect && onSelect(p.id)}
-                  data-testid={`load-portfolio-${p.id}`}
-                >
-                  {p.name}
-                </button>
                 {/* Hover/focus action cluster (category chip + archive ×).
                     Wrapped in .rowActions which collapses to zero width at rest
                     so the name spans the full row (no premature ellipsis) and
