@@ -159,7 +159,6 @@ export default function useSavedPortfolioCacheStatus({
     })();
 
     return () => { cancelled = true; };
-    // eslint-disable-line react-hooks/exhaustive-deps
   }, [portfolios, cacheEnabled, cacheVersion, activeId, activeKey, queryClient]);
 
   return cacheEnabled ? statusById : {};
