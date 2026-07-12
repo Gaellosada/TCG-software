@@ -29,6 +29,8 @@ import {
   isLockedError,
 } from '../../api/persistence';
 import { usePortfoliosList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
+import { useQueryClient } from '@tanstack/react-query';
+import { queryKeys } from '../../queryKeys';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
 // Statistics endpoint expects YYYYMMDD integers (existing project
@@ -90,6 +92,7 @@ function PortfolioPage({ mode = 'pure' }) {
   // invalidate.portfolios() → background refetch → re-sync.
   const portfoliosQuery = usePortfoliosList(portfolio.persistedCategory);
   const invalidate = useInvalidatePersistence();
+  const queryClient = useQueryClient();
   const [portfolios, setPortfolios] = useState([]);
 
   // Separate status state for one-shot operations (save-current / archive /
@@ -456,7 +459,20 @@ function PortfolioPage({ mode = 'pure' }) {
     // every autosave — it would cause flicker and reset scroll position
     // during rapid editing. The local state is authoritative until a
     // category change, add, or archive operation.
-  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved]);
+    //
+    // BUT invalidate THIS doc's DETAIL query so composed portfolios that
+    // reference it as a live child re-resolve the fresh spec. ``resolveChildrenNow``
+    // reads the child through ``queryClient.fetchQuery(portfolios.detail(id),
+    // staleTime:10s)``; without this, an edit made via autosave/manual-Save
+    // would be masked by the 10s stale window and the composed parent would
+    // compute the OLD child (live-ref breaks). Only the DETAIL key is
+    // invalidated (not the list), so the no-flicker guarantee above is kept —
+    // and the detail query has no active observer here, so this just marks it
+    // stale for the next fetch (no refetch storm).
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.persistence.portfolios.detail(portfolio.persistedId),
+    });
+  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved, queryClient]);
 
   const {
     status: cloudStatus,

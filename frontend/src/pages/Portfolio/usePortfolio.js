@@ -579,12 +579,16 @@ export default function usePortfolio() {
     const startSeq = computeSeqRef.current;
     const timer = setTimeout(async () => {
       try {
-        // Hydration may be skipped when there are no signal legs — this effect
-        // is new cache-ON-only code, so this does NOT affect OFF fidelity.
-        const hasSignalLegs = legs.some((l) => l.type === 'signal');
-        const availableIndicators = hasSignalLegs
-          ? await hydrateAvailableIndicators()
-          : [];
+        // Hydrate indicators UNCONDITIONALLY — the SAME single path
+        // handleCalculate uses — so the reactive cache key and the compute key
+        // are built from the identical indicator set (single source of truth).
+        // A parent-only ``some(type==='signal')`` gate missed signal legs living
+        // inside a REFERENCED CHILD (composed §4): the child's signal legs then
+        // reported missing indicators → key nulled → the badge/auto-display
+        // diverged from compute, which always hydrates (NIT-1 / Sign 8). The
+        // effect is debounced (275ms), so hydrating here even with no signal
+        // legs is cheap, and it remains cache-ON-only (no OFF-path impact).
+        const availableIndicators = await hydrateAvailableIndicators();
         // Resolve child portfolios the SAME way handleCalculate does (deduped
         // through React Query) so the badge's cache-key body equals the compute
         // body — key parity. No-op resolver when there are no portfolio legs.
