@@ -53,9 +53,10 @@ async function runPool(items, limit, worker) {
  * @param {Array}  p.portfolios   persisted docs [{id, legs, rebalance, ...}]
  * @param {boolean} p.cacheEnabled
  * @param {number} p.cacheVersion bump → re-check hasCached (cheap; keys reused)
- * @param {string|null} p.activeId  currently-loaded portfolio id
- * @param {string|null} p.activeKey the active portfolio's live cache key
- *                                   (reused so the active row agrees with the badge)
+ * @param {string|null} p.activeId  currently-loaded portfolio id — SKIPPED here;
+ *                                   its row status is supplied by the page from
+ *                                   `badgeCached` (mergedRowCacheStatus), so we
+ *                                   never compute or re-scan IDB for it.
  * @returns {Record<string,'checking'|'cached'|'not-cached'>}
  */
 export default function useSavedPortfolioCacheStatus({
@@ -63,7 +64,6 @@ export default function useSavedPortfolioCacheStatus({
   cacheEnabled,
   cacheVersion,
   activeId,
-  activeKey,
 }) {
   const queryClient = useQueryClient();
   const [statusById, setStatusById] = useState({});
@@ -107,43 +107,42 @@ export default function useSavedPortfolioCacheStatus({
 
       await runPool(rows, CONCURRENCY, async (doc) => {
         if (!live()) return;
+        // The active row is authoritatively supplied by the page from
+        // `badgeCached` (mergedRowCacheStatus overrides it), so anything we'd
+        // compute here is discarded. Skip it entirely — no key resolution, no
+        // IDB scan — so editing the active portfolio doesn't re-scan the whole
+        // saved list.
+        if (doc.id === activeId) return;
         let key = null;
         try {
-          if (doc.id === activeId) {
-            // Reuse the active portfolio's already-computed key so the row and
-            // the active badge can never disagree (edited/unsaved-safe).
-            key = activeKey || null;
+          const sig = docSignature(doc);
+          const cached = keyCacheRef.current.get(doc.id);
+          if (cached && cached.sig === sig) {
+            key = cached.key;
           } else {
-            const sig = docSignature(doc);
-            const cached = keyCacheRef.current.get(doc.id);
-            if (cached && cached.sig === sig) {
-              key = cached.key;
-            } else {
-              const legs = persistedDocToLegs(doc);
-              const { overlapRange } = await resolvePortfolioRange(legs, { queryClient });
-              if (overlapRange && overlapRange.start && overlapRange.end) {
-                const { body, missing } = buildPortfolioComputeBody({
-                  legs,
-                  rebalance: doc.rebalance || 'none',
-                  start: overlapRange.start,
-                  end: overlapRange.end,
-                  availableIndicators,
-                });
-                if (!missing.length) key = await computeCacheKey(body);
-              }
-              keyCacheRef.current.set(doc.id, { sig, key });
+            const legs = persistedDocToLegs(doc);
+            const { overlapRange } = await resolvePortfolioRange(legs, { queryClient });
+            if (overlapRange && overlapRange.start && overlapRange.end) {
+              const { body, missing } = buildPortfolioComputeBody({
+                legs,
+                rebalance: doc.rebalance || 'none',
+                start: overlapRange.start,
+                end: overlapRange.end,
+                availableIndicators,
+              });
+              if (!missing.length) key = await computeCacheKey(body);
             }
+            // Only memoize a SUCCESSFULLY-resolved key. A transient dwh flake
+            // resolves the range to {start:null,end:null} (never throws) → key
+            // stays null; caching {sig, key:null} would permanently mark an
+            // actually-cached row "Not cached" for the session. Leaving it
+            // unmemoized lets the next cacheVersion bump retry the resolve.
+            if (key) keyCacheRef.current.set(doc.id, { sig, key });
           }
         } catch {
           key = null; // dwh flake / hash error → treat row as not-cached
         }
         if (!live()) return;
-
-        // Active row with an unresolved key mirrors the badge's gated state.
-        if (doc.id === activeId && !key) {
-          setStatusById((prev) => ({ ...prev, [doc.id]: 'checking' }));
-          return;
-        }
 
         let present = false;
         if (key) {
@@ -159,7 +158,7 @@ export default function useSavedPortfolioCacheStatus({
     })();
 
     return () => { cancelled = true; };
-  }, [portfolios, cacheEnabled, cacheVersion, activeId, activeKey, queryClient]);
+  }, [portfolios, cacheEnabled, cacheVersion, activeId, queryClient]);
 
   return cacheEnabled ? statusById : {};
 }

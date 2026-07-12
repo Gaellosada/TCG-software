@@ -540,13 +540,12 @@ function PortfolioPage() {
     && badgeCached === false;
 
   // Per-row "cached" status for the Saved Portfolios list (cache-ON only).
-  // Reuses the active portfolio's live key so the active row agrees with the badge.
+  // The active row is skipped by the hook and supplied below from `badgeCached`.
   const rowCacheStatus = useSavedPortfolioCacheStatus({
     portfolios,
     cacheEnabled: portfolio.cacheEnabled,
     cacheVersion: portfolio.cacheVersion,
     activeId: portfolio.persistedId,
-    activeKey: portfolio.currentCacheKey,
   });
   // The ACTIVE portfolio's row must agree EXACTLY with the active badge, so
   // derive it straight from `badgeCached` (the badge's own reactive source)

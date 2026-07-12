@@ -431,6 +431,15 @@ export default function usePortfolio() {
       setCurrentCacheKey(null);
       return undefined;
     }
+    // FIX A (extended): the ref only advanced inside the debounced timer, so a
+    // compute landing within the 275ms window after a key-affecting edit could
+    // still display the PREVIOUS config's result (liveKey == old computeKey).
+    // Null the live-key mirror SYNCHRONOUSLY now (the range gate has passed) so
+    // an in-flight compute for the old config sees liveKey=null !== computeKey
+    // and is dropped. Only the ref is touched (not setCurrentCacheKey), so the
+    // badge does NOT flicker to "checking"; the timer below re-sets the ref, and
+    // handleCalculate re-baselines it at compute start for same-config displays.
+    currentKeyRef.current = null;
     let cancelled = false;
     const startSeq = computeSeqRef.current;
     const timer = setTimeout(async () => {
