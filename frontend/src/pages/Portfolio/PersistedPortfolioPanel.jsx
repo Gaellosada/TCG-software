@@ -36,6 +36,8 @@ function PersistedPortfolioPanel({
   selectedId,
   onSelect,
   onSetPortfolioLocked,
+  cacheEnabled = false,
+  cacheStatusById = {},
 }) {
   const headerRight = (
     <div className={styles.headerActions}>
@@ -85,6 +87,9 @@ function PersistedPortfolioPanel({
           portfolios.map((p) => {
             const isSelected = p.id === selectedId;
             const isLocked = !!p.locked;
+            // Cache-ON only: a compact per-row icon meaning "opening this shows a
+            // result instantly" (its exact current key is in IndexedDB).
+            const cacheStatus = cacheEnabled ? (cacheStatusById[p.id] || 'checking') : null;
             return (
               <div
                 key={p.id}
@@ -112,6 +117,36 @@ function PersistedPortfolioPanel({
                 >
                   {p.name}
                 </button>
+                {/* Cache-ON only: right-aligned status TAG (text pill, matches
+                    the active Compute-row badge). Sits just left of the
+                    hover-reveal actions; hidden entirely when cache is off. */}
+                {cacheStatus && (
+                  <span
+                    className={`${styles.cacheTag} ${
+                      cacheStatus === 'cached'
+                        ? styles.cacheTagHit
+                        : cacheStatus === 'not-cached'
+                          ? styles.cacheTagMiss
+                          : styles.cacheTagChecking
+                    }`}
+                    data-testid={`portfolio-row-cache-${p.id}`}
+                    data-cache-status={cacheStatus}
+                    title={
+                      cacheStatus === 'cached'
+                        ? 'Cached — opening this portfolio shows its result instantly'
+                        : cacheStatus === 'not-cached'
+                          ? 'Not cached — opening will need a Compute'
+                          : 'Checking cache…'
+                    }
+                    aria-label={`cache ${cacheStatus}`}
+                  >
+                    {cacheStatus === 'cached'
+                      ? 'Cached ✓'
+                      : cacheStatus === 'not-cached'
+                        ? 'Not cached'
+                        : 'Checking…'}
+                  </span>
+                )}
                 {/* Hover/focus action cluster (category chip + archive ×).
                     Wrapped in .rowActions which collapses to zero width at rest
                     so the name spans the full row (no premature ellipsis) and

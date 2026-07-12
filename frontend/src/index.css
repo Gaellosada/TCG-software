@@ -18,6 +18,10 @@
   --accent-glow: rgba(14, 165, 233, 0.15);
   --border-accent: rgba(14, 165, 233, 0.2);
   --success: #22c55e;
+  /* Positive/"cached-hit" accent for small bold pill text. Per-theme so it
+     clears WCAG AA (>=4.5:1) on the tinted pill bg in BOTH themes: the bright
+     dark-theme green fails on the light bg, so light gets a darker green. */
+  --positive: #22c55e;
   --error: #ef4444;
   --error-bg: rgba(239, 68, 68, 0.08);
   --error-text: #fca5a5;
@@ -67,6 +71,8 @@
   --text-dim: #bbbbbb;
   --accent: #0284c7;
   --accent-subtle: rgba(2, 132, 199, 0.08);
+  /* Darker green so the pill's green text clears AA on the light bg. */
+  --positive: #166534;
   --bg-hover: rgba(0, 0, 0, 0.03);
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.06);
   --shadow-md: 0 4px 12px rgba(0,0,0,0.08);

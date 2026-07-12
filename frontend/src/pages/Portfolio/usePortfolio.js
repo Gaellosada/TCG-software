@@ -1,14 +1,15 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
-import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
-import { queryKeys } from '../../queryKeys';
-import { formatDateInt } from '../../utils/format';
-import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
-import { fetchSignalLegRange } from './signalLegRange';
-import { fetchOptionLegRange } from './optionLegRange';
 import { legsToRangesKey } from './legKey';
+import { resolvePortfolioRange } from './resolvePortfolioRange';
+import { persistedDocToLegs } from './persistedDoc';
+import { buildPortfolioComputeBody } from './computeBodyBuilder';
+import { shouldDisplayComputeResult } from './cacheDisplayPolicy';
+import { computeCacheKey } from '../../lib/computeCacheKey';
+import { getCached, putCached } from '../../lib/portfolioCache';
+import { isPortfolioCacheEnabled } from '../../lib/userSettings';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
@@ -65,109 +66,73 @@ export default function usePortfolio() {
   // when the lock API call returns an updated doc.
   const [persistedLocked, setPersistedLocked] = useState(false);
 
+  // ── Local portfolio-result cache (opt-in; Settings toggle, default OFF) ──
+  // Read once at mount (mirrors the userSettings convention: a toggle change
+  // applies on the next mount). When off, every cache branch below is skipped
+  // and behavior is byte-for-byte today's.
+  const [cacheEnabled] = useState(() => isPortfolioCacheEnabled());
+  // The cache key for the CURRENT editor state, recomputed reactively for the
+  // badge. Null while gated (no legs / ranges unresolved / un-keyable body).
+  const [currentCacheKey, setCurrentCacheKey] = useState(null);
+  // Bumped after every compute completes so the auto-display/badge effect
+  // re-syncs the displayed result and the badge to the freshly-cached state.
+  const [cacheVersion, setCacheVersion] = useState(0);
+  // RACE GUARDS for the auto-display effect (cache-ON only):
+  //  - computingRef: true while a compute is in flight → the effect must not
+  //    touch `results` (the compute owns it).
+  //  - computeSeqRef: incremented at the START of every compute; the effect
+  //    captures it and refuses to setResults if it changed mid-read (a compute
+  //    started/ran during the async hash+getCached), so a stale cache read can
+  //    never clobber a fresh compute result. Deterministic — does not rely on
+  //    React effect-cleanup timing.
+  const computingRef = useRef(false);
+  const computeSeqRef = useRef(0);
+  // Live cache key mirror (FIX A): always holds the key of the CURRENT config,
+  // updated synchronously by the auto-display effect. A landing compute compares
+  // the key it ran for against this; if the user edited mid-flight the keys
+  // differ and the stale result is dropped (not shown for the modified config).
+  const currentKeyRef = useRef(null);
+
   /* ── Fetch date ranges when legs change ── */
 
-  // Stable key: only data-affecting fields (not label/weight) trigger re-fetch
-  const rangesKey = useMemo(() => legsToRangesKey(legs), [legs]);
+  // Re-resolve ranges when the range SPEC changes (legsToRangesKey — instrument
+  // / roll / etc., NOT label/weight) OR when the leg IDENTITY set changes
+  // (load / add / remove; ids are stable across weight/label edits). Including
+  // the ids fixes a stuck-null overlapRange when switching to a different
+  // portfolio that happens to share an identical range spec (same instrument,
+  // different weight): the spec key alone wouldn't change, so the effect
+  // wouldn't re-fire and overlapRange (nulled on load) would stay null —
+  // freezing the cache badge / auto-display at "checking" and sending
+  // start=undefined to Compute. Weight/label edits keep the same ids AND spec,
+  // so they still never trigger a refetch (the original optimization holds).
+  const rangesKey = useMemo(
+    () => `${legsToRangesKey(legs)}#${legs.map((l) => l.id).join(',')}`,
+    [legs],
+  );
 
   useEffect(() => {
     if (legs.length === 0) {
       setLegDateRanges({});
       setOverlapRange(null);
-      return;
+      return undefined;
     }
 
     let cancelled = false;
     setRangesLoading(true);
 
-    // Fetch each leg's price data using the same APIs as the Data page.
-    // Signal legs derive their range from the overlap of their inputs' ranges.
-    const promises = legs.map(async (leg) => {
-      if (leg.type === 'signal') {
-        return fetchSignalLegRange(leg);
-      }
-      if (leg.type === 'option_stream') {
-        // An option stream's range is the option COLLECTION's bar coverage
-        // (first..last trade_date), fetched from /api/options/coverage. This
-        // makes an option leg contribute a REAL range to the overlap — exactly
-        // like every other leg — instead of the old null that forced an
-        // artificial today-5y (~2021) floor.
-        return fetchOptionLegRange(queryClient, leg);
-      }
-      try {
-        let dates;
-        if (leg.type === 'continuous') {
-          const params = {
-            strategy: leg.strategy || 'front_month',
-            adjustment: leg.adjustment || 'none',
-            cycle: leg.cycle || undefined,
-            rollOffset: leg.rollOffset || 0,
-            rank: leg.rank || 1,
-          };
-          const res = await queryClient.fetchQuery({
-            queryKey: queryKeys.market.continuous(leg.collection, params),
-            queryFn: () => getContinuousSeries(leg.collection, params),
-          });
-          dates = res?.dates;
-        } else {
-          const res = await queryClient.fetchQuery({
-            queryKey: queryKeys.market.prices(leg.collection, leg.symbol),
-            queryFn: () => getInstrumentPrices(leg.collection, leg.symbol),
-          });
-          dates = res?.dates;
-        }
-        if (dates && dates.length > 0) {
-          return {
-            id: leg.id,
-            start: formatDateInt(dates[0]),
-            end: formatDateInt(dates[dates.length - 1]),
-          };
-        }
-        return { id: leg.id, start: null, end: null };
-      } catch {
-        return { id: leg.id, start: null, end: null };
-      }
-    });
-
-    Promise.all(promises).then((results) => {
-      if (cancelled) return;
-
-      const ranges = {};
-      const validStarts = [];
-      const validEnds = [];
-
-      for (const r of results) {
-        ranges[r.id] = { start: r.start, end: r.end };
-        if (r.start) {
-          validStarts.push(r.start);
-          validEnds.push(r.end);
-        }
-      }
-
-      setLegDateRanges(ranges);
-
-      if (validStarts.length > 0) {
-        // Overlap = latest start to earliest end
-        const overlapStart = validStarts.reduce((a, b) => (a > b ? a : b));
-        const overlapEnd = validEnds.reduce((a, b) => (a < b ? a : b));
-        if (overlapStart <= overlapEnd) {
-          setOverlapRange({ start: overlapStart, end: overlapEnd });
-        } else {
-          setOverlapRange(null);
-        }
-      } else {
-        // No leg resolved a range (e.g. ranges not yet settled or all reads
-        // failed). Option legs now resolve their real coverage above and flow
-        // through the same overlap logic as every other leg — there is no
-        // longer a special-case today-5y default that floored option-only
-        // portfolios at ~2021.
-        setOverlapRange(null);
-      }
-
-      setRangesLoading(false);
-    }).catch(() => {
-      if (!cancelled) setRangesLoading(false);
-    });
+    // Resolve each leg's coverage + the portfolio overlap via the SHARED
+    // resolver — the saved-list cache-status detection uses the identical path,
+    // so a row's key always matches the active/compute key (no lying icons).
+    resolvePortfolioRange(legs, { queryClient })
+      .then(({ ranges, overlapRange: overlap }) => {
+        if (cancelled) return;
+        setLegDateRanges(ranges);
+        setOverlapRange(overlap);
+        setRangesLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setRangesLoading(false);
+      });
 
     return () => { cancelled = true; };
   }, [rangesKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -297,25 +262,11 @@ export default function usePortfolio() {
    */
   const loadFromPersisted = useCallback((doc) => {
     if (!doc || typeof doc !== 'object') return;
-    const backendLegs = Array.isArray(doc.legs) ? doc.legs : [];
-    // Stamp local-only id onto each leg so React keys remain unique.
-    // We do NOT round-trip the id back to the backend — the id is
-    // assigned per-load, not stored.
-    const restoredLegs = backendLegs.map((l) => {
-      const leg = { ...l, id: nextId++ };
-      // Backward-compat: an option PRICE leg (mid/bs_mid) is now hold-ON-only
-      // (the backend rejects hold-off). A portfolio saved BEFORE that rule has
-      // no hold_between_rolls, so coerce it on load — otherwise an old portfolio
-      // loads fine but 400s on Compute with no in-UI way to enable hold.
-      if (
-        leg.type === 'option_stream'
-        && (leg.stream === 'mid' || leg.stream === 'bs_mid')
-      ) {
-        leg.hold_between_rolls = true;
-        if (typeof leg.nav_times !== 'number') leg.nav_times = 1.0;
-      }
-      return leg;
-    });
+    // Shared doc→legs conversion (incl. the option hold-ON coercion), then stamp
+    // a local-only React-key id. The SAME converter feeds the saved-list cache
+    // detection, so its per-row body/key matches what loading this doc produces.
+    // The id is assigned per-load, never round-tripped to the backend.
+    const restoredLegs = persistedDocToLegs(doc).map((l) => ({ ...l, id: nextId++ }));
     abortCalculate();
     setLegs(restoredLegs);
     setRebalance(typeof doc.rebalance === 'string' ? doc.rebalance : 'none');
@@ -367,115 +318,173 @@ export default function usePortfolio() {
       return;
     }
 
-    // Build legs dict for API
+    // Build the resolved compute body via the SHARED builder — the badge hashes
+    // the exact same object, so the cache key is guaranteed identical (key
+    // parity guardrail). Hydration is UNCONDITIONAL here (as on main) so the
+    // cache-OFF path is byte-identical to today's — do not gate it on signal
+    // legs or the cache flag.
     const availableIndicators = await hydrateAvailableIndicators();
-    const apiLegs = {};
-    for (const leg of legs) {
-      if (leg.type === 'signal') {
-        const { body, missing } = buildComputeRequestBody(leg.signalSpec, availableIndicators);
-        if (missing.length > 0) {
-          setError(`Signal "${leg.label}" references missing indicators: ${missing.join(', ')}. Please check the Indicators page.`);
-          return;
-        }
-        apiLegs[leg.label] = {
-          type: 'signal',
-          signal_spec: body,
-        };
-      } else if (leg.type === 'option_stream') {
-        apiLegs[leg.label] = {
-          type: 'option_stream',
-          collection: leg.collection,
-          option_type: leg.option_type,
-          cycle: leg.cycle,
-          maturity: leg.maturity,
-          selection: leg.selection,
-          stream: leg.stream,
-        };
-        // SELECT-AND-HOLD (fixed-contract dollar-P&L). An option PRICE leg
-        // (mid/bs_mid) is hold-ON-only — the backend rejects hold-off — so ALWAYS
-        // send hold for a premium leg, which also covers legacy legs persisted
-        // before that rule (otherwise the whole /compute request 400s). Level
-        // streams (iv/greeks) never carry hold.
-        const isPremiumLeg = leg.stream === 'mid' || leg.stream === 'bs_mid';
-        if (isPremiumLeg || leg.hold_between_rolls) {
-          apiLegs[leg.label].hold_between_rolls = true;
-          apiLegs[leg.label].nav_times = leg.nav_times ?? 1.0;
-          // SIZING mode for the hold-mode $-P&L. Send ``futures_notional`` (size
-          // off the underlying future's notional) + its reference future ONLY
-          // when chosen — a premium-notional leg stays byte-identical and the
-          // backend applies its default. Without this the compute request always
-          // ran premium_notional, wiping a low-premium (e.g. 10Δ) leg to -100%.
-          if (leg.sizing_mode === 'futures_notional') {
-            apiLegs[leg.label].sizing_mode = 'futures_notional';
-            apiLegs[leg.label].futures_reference =
-              leg.futures_reference || 'nearest_on_or_after';
-          }
-        }
-        // Roll offset is the unified {value, unit} object — send it only when
-        // its value is non-zero (omit the no-op to keep the body minimal; the
-        // BE defaults to value 0). Option streams carry NO back-adjustment, so
-        // no `adjustment` is sent. ("End of month" is the maturity, not a
-        // separate roll_schedule — that field was removed.)
-        const ro = leg.roll_offset;
-        if (ro && typeof ro === 'object' && ro.value > 0) {
-          apiLegs[leg.label].roll_offset = { value: ro.value, unit: ro.unit || 'days' };
-        } else if (typeof ro === 'number' && ro > 0) {
-          // Legacy in-memory int (days) — forward in the unified shape.
-          apiLegs[leg.label].roll_offset = { value: ro, unit: 'days' };
-        }
-      } else if (leg.type === 'continuous') {
-        apiLegs[leg.label] = {
-          type: 'continuous',
-          collection: leg.collection,
-          strategy: leg.strategy || 'front_month',
-          adjustment: leg.adjustment || 'none',
-        };
-        if (leg.cycle) {
-          apiLegs[leg.label].cycle = leg.cycle;
-        }
-        if (leg.rollOffset > 0) {
-          apiLegs[leg.label].roll_offset = leg.rollOffset;
-        }
-        // NTH_NEAREST only: send the rank when > 1 (1 == front month, the BE
-        // default) so front-month / end-of-month bodies stay byte-identical.
-        if (leg.rank > 1) {
-          apiLegs[leg.label].rank = leg.rank;
-        }
-      } else {
-        apiLegs[leg.label] = {
-          type: 'instrument',
-          collection: leg.collection,
-          symbol: leg.symbol,
-        };
-      }
+    const { body, missingByLeg } = buildPortfolioComputeBody({
+      legs,
+      rebalance,
+      start: effectiveStart,
+      end: effectiveEnd,
+      availableIndicators,
+    });
+    if (missingByLeg.length > 0) {
+      const first = missingByLeg[0];
+      setError(`Signal "${first.label}" references missing indicators: ${first.ids.join(', ')}. Please check the Indicators page.`);
+      return;
     }
 
-    const apiWeights = {};
-    for (const leg of legs) {
-      apiWeights[leg.label] = Number(leg.weight) || 0;
+    // ── Compute = ALWAYS a fresh network run (never served from cache) ──
+    // Serving cached results is now the auto-display effect's job; the button
+    // always recomputes and (when the cache is on) RE-CACHES the fresh result.
+    // The OFF path below is byte-for-byte today's (the cacheOn branches are
+    // no-ops when disabled).
+    const cacheOn = cacheEnabled;
+    let cacheKey = null;
+    if (cacheOn) {
+      try {
+        cacheKey = await computeCacheKey(body);
+      } catch {
+        cacheKey = null;
+      }
+      // Baseline the live-key mirror to the config we're about to compute so a
+      // Compute clicked before the debounced effect resolved still displays; an
+      // edit while in flight then moves currentKeyRef away (via the effect) and
+      // FIX A drops the stale result.
+      if (cacheKey) currentKeyRef.current = cacheKey;
     }
+
+    // Race guards: mark a compute in flight and stamp a new sequence so the
+    // auto-display effect can't overwrite the result this compute produces.
+    computeSeqRef.current += 1;
+    computingRef.current = true;
 
     setError(null);
     await runAbortable(async ({ signal }) => {
       try {
         const res = await computePortfolio({
-          legs: apiLegs,
-          weights: apiWeights,
-          rebalance,
-          returnType: 'normal',
-          start: effectiveStart || undefined,
-          end: effectiveEnd || undefined,
+          legs: body.legs,
+          weights: body.weights,
+          rebalance: body.rebalance,
+          returnType: body.return_type,
+          start: body.start,
+          end: body.end,
           signal,
         });
         if (!signal.aborted) {
-          setResults(res);
+          // ALWAYS cache the fresh result — it is valid for the config it ran
+          // for, so reverting to that config re-shows it (auto-display).
+          if (cacheOn && cacheKey) {
+            try {
+              await putCached(cacheKey, persistedId, res);
+            } catch {
+              // caching is best-effort; the compute already succeeded
+            }
+          }
+          // FIX A: only DISPLAY it if the live config still matches the one this
+          // compute ran for. If the user edited mid-flight, drop it (stay blank
+          // for the modified config); the cacheVersion bump below then re-syncs.
+          if (shouldDisplayComputeResult({
+            cacheOn,
+            computeKey: cacheKey,
+            liveKey: currentKeyRef.current,
+          })) {
+            setResults(res);
+          }
         }
       } catch (err) {
         if (signal.aborted) return;
         setError(err.message || 'Computation failed');
+      } finally {
+        // Compute finished — release the in-flight guard, then (cache on) bump
+        // the version so the auto-display/badge effect re-syncs to the newly
+        // cached state (flips the badge to "Cached ✓").
+        computingRef.current = false;
+        if (cacheOn) setCacheVersion((v) => v + 1);
       }
     });
-  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable]);
+  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, cacheEnabled, persistedId]);
+
+  /* ── Reactive cache key + AUTO-DISPLAY / BLANK-ON-EDIT (cache-ON only) ── */
+  // On any key-affecting change: recompute the current cache key (for the
+  // badge) and then reflect the cache into the displayed results —
+  //   HIT  → setResults(cached)  (auto-display, no Compute click)
+  //   MISS → setResults(null)    (blank; the page shows "recompute needed")
+  // Debounced so editing a numeric field doesn't hammer hydrate/hash on every
+  // keystroke. Gated on a resolved date range so loading a cached portfolio
+  // doesn't flash-blank before dates settle. This effect NEVER runs on the
+  // cache-OFF path, so it cannot affect OFF fidelity.
+  useEffect(() => {
+    if (!cacheEnabled || legs.length === 0) {
+      currentKeyRef.current = null;
+      setCurrentCacheKey(null);
+      return undefined;
+    }
+    const effStart = startDate || overlapRange?.start;
+    const effEnd = endDate || overlapRange?.end;
+    // Gate until the range resolves — do NOT blank here (avoid a flash on load).
+    if (!effStart || !effEnd) {
+      currentKeyRef.current = null;
+      setCurrentCacheKey(null);
+      return undefined;
+    }
+    // FIX A (extended): the ref only advanced inside the debounced timer, so a
+    // compute landing within the 275ms window after a key-affecting edit could
+    // still display the PREVIOUS config's result (liveKey == old computeKey).
+    // Null the live-key mirror SYNCHRONOUSLY now (the range gate has passed) so
+    // an in-flight compute for the old config sees liveKey=null !== computeKey
+    // and is dropped. Only the ref is touched (not setCurrentCacheKey), so the
+    // badge does NOT flicker to "checking"; the timer below re-sets the ref, and
+    // handleCalculate re-baselines it at compute start for same-config displays.
+    currentKeyRef.current = null;
+    let cancelled = false;
+    const startSeq = computeSeqRef.current;
+    const timer = setTimeout(async () => {
+      try {
+        // Hydration may be skipped when there are no signal legs — this effect
+        // is new cache-ON-only code, so this does NOT affect OFF fidelity.
+        const hasSignalLegs = legs.some((l) => l.type === 'signal');
+        const availableIndicators = hasSignalLegs
+          ? await hydrateAvailableIndicators()
+          : [];
+        const { body, missing } = buildPortfolioComputeBody({
+          legs,
+          rebalance,
+          start: effStart,
+          end: effEnd,
+          availableIndicators,
+        });
+        if (missing.length > 0) {
+          if (!cancelled) {
+            currentKeyRef.current = null;
+            setCurrentCacheKey(null);
+          }
+          return;
+        }
+        const key = await computeCacheKey(body);
+        if (cancelled) return;
+        // Update the live-key mirror FIRST (synchronously) so a compute landing
+        // right now compares against the freshly-edited config (FIX A).
+        currentKeyRef.current = key;
+        setCurrentCacheKey(key);
+        const cached = await getCached(key);
+        // RACE GUARD: never overwrite results while a compute is in flight, and
+        // never act on a read that a compute superseded (seq changed). The
+        // compute's cacheVersion bump re-triggers this effect afterwards to
+        // re-sync cleanly.
+        if (cancelled || computingRef.current || computeSeqRef.current !== startSeq) {
+          return;
+        }
+        setResults(cached ? cached : null);
+      } catch {
+        if (!cancelled) setCurrentCacheKey(null);
+      }
+    }, 275);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [cacheEnabled, legs, rebalance, startDate, endDate, overlapRange, cacheVersion]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -509,6 +518,13 @@ export default function usePortfolio() {
     error,
     clearError,
     handleCalculate,
+    // Local portfolio-result cache (opt-in). ``cacheEnabled`` gates the badge
+    // + auto-display; ``currentCacheKey`` is the active portfolio's key (null
+    // while gated); ``cacheVersion`` bumps after each compute so the badge /
+    // auto-display effect re-syncs.
+    cacheEnabled,
+    currentCacheKey,
+    cacheVersion,
     // localStorage save/load functions — kept in the hook but no longer
     // exposed. All persistence goes through the backend now.
     // savePortfolio,
