@@ -1483,22 +1483,61 @@ def _get_result_cache() -> DiskResultCache:
     return _result_cache
 
 
+# Compute-version salt for the durable on-disk cache. The cache now survives
+# restarts (30-day TTL), so — unlike the old restart-wiped in-memory cache — a
+# deploy no longer implicitly invalidates it. But the equity a body maps to
+# depends on code/config that is NOT in the body: engine logic, the option
+# pricer's constants, and the contract multipliers in ``tcg/types/multipliers.py``
+# (e.g. the OPT_SP_500 $50-vs-$100 fix). Folding this token into the key
+# namespaces the cache by compute version, so any such change → new keys → old
+# durable entries never match (and TTL-evict), instead of serving a stale WRONG
+# equity with ``from_cache: true`` for up to 30 days.
+#
+# BUMP ``COMPUTE_VERSION`` on ANY compute-affecting change (engine / pricing /
+# multipliers / rate constants) AND on each release. No backend version is
+# importable (no ``tcg.__version__``; ``pyproject`` version is unmanaged for this
+# purpose), so this is the single deliberate knob.
+COMPUTE_VERSION = "0.1.11"
+
+
+def _strip_use_cache(obj: object) -> object:
+    """Recursively drop every ``use_cache`` key from a JSON-able structure.
+
+    ``use_cache`` can appear at the top level AND inside any inlined child
+    (``legs.<x>.portfolio.use_cache``, at any depth). It selects WHETHER to use
+    the cache, never WHICH result a body maps to, so it must not affect the key at
+    any level — otherwise a composed body's key would change with an inlined
+    child's flag.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_use_cache(v) for k, v in obj.items() if k != "use_cache"}
+    if isinstance(obj, list):
+        return [_strip_use_cache(v) for v in obj]
+    return obj
+
+
 def _portfolio_cache_key(body: PortfolioRequest) -> str:
     """Canonical content key for a compute body.
 
-    Hashes the IDENTITY fields ``{legs, weights, rebalance, return_type, start,
-    end}`` only (children already inlined by the caller). Because a composed leg
-    builds its child sub-request as a ``PortfolioRequest`` with the SAME fields
-    and the parent's range threaded in, this yields the SAME key a standalone
-    compute of that child would — the unified-reuse guarantee (Sign 9).
+    Hashes the WHOLE request body (children already inlined by the caller) with
+    ``use_cache`` stripped at EVERY nesting level, plus a ``COMPUTE_VERSION``
+    salt. Used by BOTH the compute path and ``/cache/status`` so their keys always
+    coincide.
 
-    ``use_cache`` is EXCLUDED: it selects whether to consult the cache, not which
-    result an input maps to, so a ``use_cache=True`` compute still hits an entry a
-    prior cached compute wrote and toggling the flag never changes identity.
-    (``from_cache``/``computed_ms`` are response-only and never on the request, so
-    they cannot leak into the key.)
+    * Because a composed leg builds its child sub-request as a ``PortfolioRequest``
+      with the same content and the parent's range threaded in, this yields the
+      SAME key a standalone compute of that child would — the unified-reuse
+      guarantee (Sign 9). A change to any nested child (incl. a signal leg) changes
+      the body → new key → recompute.
+    * ``use_cache`` is EXCLUDED at all levels: it selects whether to consult the
+      cache, not which result a body maps to, so toggling it never changes
+      identity. (``from_cache``/``computed_ms`` are response-only and never on the
+      request.)
+    * ``COMPUTE_VERSION`` namespaces the durable cache by compute version, so a
+      code/config/release change invalidates stale entries (BE-B1).
     """
-    return canonical_hash(body.model_dump(mode="json", exclude={"use_cache"}))
+    payload = _strip_use_cache(body.model_dump(mode="json"))
+    return canonical_hash({"_cv": COMPUTE_VERSION, "body": payload})
 
 
 async def _evaluate_portfolio_leg(
