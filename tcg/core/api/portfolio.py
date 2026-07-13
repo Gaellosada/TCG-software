@@ -2491,3 +2491,38 @@ async def clear_portfolio_cache() -> dict:
     cache = _get_result_cache()
     await asyncio.to_thread(cache.clear)
     return {"cleared": True}
+
+
+class CacheStatusRequest(BaseModel):
+    """Batch of compute bodies to check for a cached result (order-preserving)."""
+
+    queries: list[dict] = Field(default_factory=list)
+
+
+@router.post("/cache/status")
+async def portfolio_cache_status(body: CacheStatusRequest) -> dict:
+    """Report, per query body, whether a cached compute result already exists —
+    WITHOUT computing anything and WITHOUT reading market data.
+
+    For each body it computes the SAME canonical key the compute path uses
+    (``_portfolio_cache_key``, which excludes ``use_cache``) and ``peek``s the
+    on-disk cache (a pure, non-mutating existence check that respects the TTL and
+    never bumps the LRU). So the status agrees exactly with a real hit, and a
+    composed body's status reflects child edits automatically (children are
+    inlined into the key). This endpoint takes NO market-data / repo dependency,
+    so it structurally cannot fetch dwh or trigger a compute.
+
+    Response ``{"results": [{"cached": bool}, ...]}`` is parallel to
+    ``queries``. A malformed / unparseable body yields ``cached: false`` (never a
+    500) — it could not have been cached under a valid key anyway.
+    """
+    cache = _get_result_cache()
+    results: list[dict] = []
+    for query in body.queries:
+        try:
+            req = PortfolioRequest(**query)
+            cached = await cache.peek(_portfolio_cache_key(req))
+        except Exception:  # noqa: BLE001 — any parse failure ⇒ not cached, no 500
+            cached = False
+        results.append({"cached": bool(cached)})
+    return {"results": results}

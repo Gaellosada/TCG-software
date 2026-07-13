@@ -136,6 +136,23 @@ class DiskResultCache:
             conn.execute("UPDATE results SET last_access = ? WHERE key = ?", (now, key))
             return json.loads(value_json)
 
+    def _peek_sync(self, key: str) -> bool:
+        now = time.time()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT created_at FROM results WHERE key = ?", (key,)
+            ).fetchone()
+            if row is None:
+                return False
+            (created_at,) = row
+            # Respect the TTL — an expired entry reports absent. Do NOT delete or
+            # touch ``last_access``: peek is strictly non-mutating (a pure read),
+            # so it never evicts, never bumps the LRU, and never changes what a
+            # later ``get`` would return.
+            if self._ttl is not None and (now - created_at) > self._ttl:
+                return False
+            return True
+
     def _put_sync(self, key: str, value: Any) -> None:
         now = time.time()
         blob = json.dumps(value, separators=(",", ":"))
@@ -164,6 +181,16 @@ class DiskResultCache:
     async def put(self, key: str, value: Any) -> None:
         """Store ``value`` under ``key`` (evicting the LRU entry if over cap)."""
         await asyncio.to_thread(self._put_sync, key, value)
+
+    async def peek(self, key: str) -> bool:
+        """Return whether a LIVE (non-expired) entry exists for ``key``.
+
+        A pure, side-effect-free existence check: no compute, no write, no LRU
+        bump, no eviction. Respects the TTL (an expired entry reports ``False``).
+        Backs the cache-status endpoint so the UI can show a proactive
+        "cached / not-cached" indicator without triggering a compute.
+        """
+        return await asyncio.to_thread(self._peek_sync, key)
 
     async def get_or_compute(
         self, key: str, compute: Callable[[], Awaitable[Any]]
