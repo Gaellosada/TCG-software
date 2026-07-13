@@ -93,18 +93,6 @@ def mock_app():
     return app
 
 
-@pytest.fixture(autouse=True)
-def _clear_leg_cache():
-    # Approach 3 adds a module-level LRU over composed-leg child computes. Clear
-    # it before each test so a cached entry from another test (same child body,
-    # different mocked data) can never leak a stale result.
-    from tcg.core.api.portfolio import _PORTFOLIO_LEG_CACHE
-
-    _PORTFOLIO_LEG_CACHE.clear()
-    yield
-    _PORTFOLIO_LEG_CACHE.clear()
-
-
 @pytest.fixture
 async def client(mock_app):
     transport = ASGITransport(app=mock_app)
