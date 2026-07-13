@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
@@ -711,6 +712,14 @@ class PortfolioRequest(BaseModel):
     return_type: str = "normal"
     start: str | None = None
     end: str | None = None
+    # Result-cache opt-out (Settings toggle). Default True = caching on
+    # (unchanged behaviour). When False the compute path bypasses the on-disk
+    # cache entirely (no read, no write) and always recomputes fresh; the flag
+    # propagates to composed children so they bypass too. It is DELIBERATELY
+    # excluded from the cache key (see ``_portfolio_cache_key``) — it selects
+    # WHETHER to use the cache, not WHICH entry, so a later ``use_cache=True``
+    # compute of the same body still hits an entry a prior cached compute wrote.
+    use_cache: bool = True
 
 
 # ``LegSpec.portfolio`` is typed ``PortfolioRequest`` (a composed leg inlines a
@@ -1438,24 +1447,58 @@ def _default_cache_path() -> str:
     return str(Path(base) / "portfolio_results.sqlite")
 
 
+# Generous default TTL that auto-bounds staleness from a dwh bar backfill/revision
+# while keeping same-day / same-session reuse fast. The result cache is content-
+# addressed (a changed body is already a new key), so this only guards against
+# UPSTREAM data changes under an unchanged body.
+_DEFAULT_CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+
+
+def _default_cache_ttl() -> float | None:
+    """Resolve the default result-cache TTL in seconds, or ``None`` for no expiry.
+
+    ``TCG_CACHE_TTL_SECONDS`` overrides the default: a positive value sets the
+    TTL; ``0`` (or a negative / non-numeric / empty value) DISABLES expiry
+    (``None``). Unset → the generous 30-day default so staleness is auto-bounded
+    out of the box. The manual ``POST /api/portfolio/cache/clear`` is the
+    immediate remedy regardless of TTL.
+    """
+    raw = os.environ.get("TCG_CACHE_TTL_SECONDS")
+    if raw is None or not raw.strip():
+        return float(_DEFAULT_CACHE_TTL_SECONDS)
+    try:
+        val = float(raw)
+    except ValueError:
+        return None  # misconfigured → fail safe to no-expiry rather than crash
+    return val if val > 0 else None
+
+
 def _get_result_cache() -> DiskResultCache:
     """Return the process-wide result cache, lazily creating it on first use."""
     global _result_cache
     if _result_cache is None:
-        _result_cache = DiskResultCache(_default_cache_path())
+        _result_cache = DiskResultCache(
+            _default_cache_path(), ttl_seconds=_default_cache_ttl()
+        )
     return _result_cache
 
 
 def _portfolio_cache_key(body: PortfolioRequest) -> str:
     """Canonical content key for a compute body.
 
-    Hashes the full request body ``{legs, weights, rebalance, return_type, start,
-    end}`` (children already inlined by the caller). Because a composed leg builds
-    its child sub-request as a ``PortfolioRequest`` with the SAME fields and the
-    parent's range threaded in, this yields the SAME key a standalone compute of
-    that child would — the unified-reuse guarantee (Sign 9).
+    Hashes the IDENTITY fields ``{legs, weights, rebalance, return_type, start,
+    end}`` only (children already inlined by the caller). Because a composed leg
+    builds its child sub-request as a ``PortfolioRequest`` with the SAME fields
+    and the parent's range threaded in, this yields the SAME key a standalone
+    compute of that child would — the unified-reuse guarantee (Sign 9).
+
+    ``use_cache`` is EXCLUDED: it selects whether to consult the cache, not which
+    result an input maps to, so a ``use_cache=True`` compute still hits an entry a
+    prior cached compute wrote and toggling the flag never changes identity.
+    (``from_cache``/``computed_ms`` are response-only and never on the request, so
+    they cannot leak into the key.)
     """
-    return canonical_hash(body.model_dump(mode="json"))
+    return canonical_hash(body.model_dump(mode="json", exclude={"use_cache"}))
 
 
 async def _evaluate_portfolio_leg(
@@ -1466,6 +1509,7 @@ async def _evaluate_portfolio_leg(
     repo: WriteRepository,
     start: str | None,
     end: str | None,
+    use_cache: bool,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Evaluate a composed-portfolio leg to a synthetic equity price series.
 
@@ -1530,6 +1574,11 @@ async def _evaluate_portfolio_leg(
         return_type=child.return_type,
         start=start,
         end=end,
+        # Propagate the parent's cache preference so a use_cache=False compute
+        # recomputes every child fresh (and never reads/writes the cache). The
+        # flag does not affect the child's key (excluded), so this never breaks
+        # unified reuse between a cached parent and a standalone child.
+        use_cache=use_cache,
     )
     child_result = await compute_portfolio(child_body, svc, classify, repo)
 
@@ -1827,6 +1876,7 @@ async def _compute_portfolio_uncached(
             repo,
             body.start,
             body.end,
+            body.use_cache,
         )
         portfolio_leg_dates_map[label] = pf_dates
         portfolio_leg_closes[label] = pf_equity
@@ -2398,16 +2448,46 @@ async def compute_portfolio(
     cached serve is byte-identical to a fresh compute apart from those two fields
     (BC-3). Cache access runs off the event loop (``asyncio.to_thread`` inside
     the cache). Validation errors from the uncached compute propagate as usual
-    (400, never cached)."""
+    (400, never cached).
+
+    ``body.use_cache=False`` (the Settings opt-out) bypasses the cache entirely:
+    no read, no write, always a fresh compute (``from_cache: false``). The flag
+    is threaded to composed children so they recompute fresh too."""
+    # Cache opt-out: skip the cache on both ends — never read, never write.
+    if not body.use_cache:
+        started = time.perf_counter()
+        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        computed_ms = int((time.perf_counter() - started) * 1000)
+        return {**result, "from_cache": False, "computed_ms": computed_ms}
+
     cache = _get_result_cache()
     key = _portfolio_cache_key(body)
 
-    cached = await cache.get(key)
-    if cached is not None:
-        return {**cached, "from_cache": True, "computed_ms": None}
+    # Single cache code path via ``get_or_compute``. The compute closure runs ONLY
+    # on a miss, so it doubles as the hit/miss signal: it stamps ``computed_ms``,
+    # which stays None on a hit → ``from_cache`` is exactly "the closure did not
+    # run". This keeps the response metadata without a second manual get/put path.
+    meta: dict[str, int | None] = {"computed_ms": None}
 
-    started = time.perf_counter()
-    result = await _compute_portfolio_uncached(body, svc, classify, repo)
-    computed_ms = int((time.perf_counter() - started) * 1000)
-    await cache.put(key, result)
-    return {**result, "from_cache": False, "computed_ms": computed_ms}
+    async def _compute() -> dict:
+        compute_started = time.perf_counter()
+        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        meta["computed_ms"] = int((time.perf_counter() - compute_started) * 1000)
+        return result
+
+    result = await cache.get_or_compute(key, _compute)
+    return {
+        **result,
+        "from_cache": meta["computed_ms"] is None,
+        "computed_ms": meta["computed_ms"],
+    }
+
+
+@router.post("/cache/clear")
+async def clear_portfolio_cache() -> dict:
+    """Clear the on-disk portfolio result cache (the Settings "Clear cached
+    results" action). Content-addressed, so this only forces the next compute of
+    each body to recompute-and-repopulate — never a correctness change."""
+    cache = _get_result_cache()
+    await asyncio.to_thread(cache.clear)
+    return {"cleared": True}

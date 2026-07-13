@@ -37,8 +37,9 @@ import hashlib
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterator
 
 # Default bound on the number of distinct results retained on disk.
 DEFAULT_MAX_ENTRIES = 200
@@ -82,14 +83,30 @@ class DiskResultCache:
 
     # ── connection / schema ──
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection, committing on clean exit and ALWAYS closing it.
+
+        A bare ``sqlite3.Connection`` used as a context manager commits/rolls back
+        the transaction but does NOT close the connection (it leaks the fd until
+        GC). This wrapper closes it in ``finally`` — no fd churn — while keeping
+        the commit-on-success / rollback-on-error semantics the callers rely on.
+        """
         conn = sqlite3.connect(self._path, timeout=30.0)
         # WAL: durable, allows a reader concurrent with the writer. busy_timeout:
         # wait (not fail) on a transient write lock. Both are per-connection but
-        # WAL is a persistent property of the file once set.
+        # WAL is a persistent property of the file once set. PRAGMAs run before
+        # any DML, so they are outside a transaction.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
