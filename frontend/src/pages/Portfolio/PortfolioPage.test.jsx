@@ -54,6 +54,13 @@ vi.mock('../../api/statistics', () => ({
   fetchStatistics: vi.fn(() => new Promise(() => {})),
 }));
 
+// Mock the backend-driven cache-status hook so the page renders synchronously
+// without hitting the network. Tests set its return to drive the badge.
+const mockCacheStatus = vi.fn(() => ({ activeCached: null, rowStatusById: {} }));
+vi.mock('./usePortfolioCacheStatus', () => ({
+  default: (...args) => mockCacheStatus(...args),
+}));
+
 // Mock persistence API to prevent real HTTP calls.
 const mockListPortfolios = vi.fn(() => Promise.resolve([]));
 vi.mock('../../api/persistence', () => ({
@@ -127,6 +134,7 @@ function resultsFixture(overrides = {}) {
 
 beforeEach(() => {
   vi.mocked(usePortfolio).mockReturnValue(baseHook());
+  mockCacheStatus.mockReturnValue({ activeCached: null, rowStatusById: {} });
 });
 
 afterEach(() => {
@@ -471,31 +479,47 @@ describe('<PortfolioPage> — persisted portfolios panel', () => {
   });
 });
 
-// The backend serves compute from its on-disk result cache and marks the
-// response with ``from_cache``. The page shows a subtle "cached" tag when the
-// displayed result came from that cache, and hides it otherwise.
-describe('<PortfolioPage> — backend "cached" tag (from_cache)', () => {
-  it('shows the cached tag when the compute response has from_cache === true', () => {
-    vi.mocked(usePortfolio).mockReturnValue(
-      baseHook({ results: resultsFixture({ from_cache: true }) }),
-    );
-    render(<PortfolioPage />);
-    expect(screen.getByTestId('portfolio-cached-tag')).toBeTruthy();
+// Proactive backend-driven cache badge: reflects usePortfolioCacheStatus'
+// ``activeCached`` when caching is on and the config is non-empty. The Compute
+// button reads "Recompute" while cached.
+describe('<PortfolioPage> — proactive cache badge (backend status)', () => {
+  const withLegs = (overrides) => baseHook({
+    cacheEnabled: true,
+    legs: [{ id: 1, label: 'A', type: 'instrument', collection: 'C', symbol: 'A', weight: 100 }],
+    ...overrides,
   });
 
-  it('hides the cached tag when from_cache is false', () => {
-    vi.mocked(usePortfolio).mockReturnValue(
-      baseHook({ results: resultsFixture({ from_cache: false }) }),
-    );
+  it('shows a "cached" badge and Recompute label when activeCached === true', () => {
+    mockCacheStatus.mockReturnValue({ activeCached: true, rowStatusById: {} });
+    vi.mocked(usePortfolio).mockReturnValue(withLegs());
     render(<PortfolioPage />);
-    expect(screen.queryByTestId('portfolio-cached-tag')).toBeNull();
+    const badge = screen.getByTestId('portfolio-cache-badge');
+    expect(badge.getAttribute('data-cached')).toBe('true');
+    expect(badge.textContent).toMatch(/^cached$/);
+    expect(screen.getByTestId('portfolio-compute-btn').textContent).toBe('Recompute');
   });
 
-  it('hides the cached tag when from_cache is absent (legacy response)', () => {
-    vi.mocked(usePortfolio).mockReturnValue(
-      baseHook({ results: resultsFixture() }),
-    );
+  it('shows a "not cached" badge and Compute label when activeCached === false', () => {
+    mockCacheStatus.mockReturnValue({ activeCached: false, rowStatusById: {} });
+    vi.mocked(usePortfolio).mockReturnValue(withLegs());
     render(<PortfolioPage />);
-    expect(screen.queryByTestId('portfolio-cached-tag')).toBeNull();
+    const badge = screen.getByTestId('portfolio-cache-badge');
+    expect(badge.getAttribute('data-cached')).toBe('false');
+    expect(badge.textContent).toMatch(/not cached/);
+    expect(screen.getByTestId('portfolio-compute-btn').textContent).toBe('Compute');
+  });
+
+  it('hides the badge when the status is unresolved (null)', () => {
+    mockCacheStatus.mockReturnValue({ activeCached: null, rowStatusById: {} });
+    vi.mocked(usePortfolio).mockReturnValue(withLegs());
+    render(<PortfolioPage />);
+    expect(screen.queryByTestId('portfolio-cache-badge')).toBeNull();
+  });
+
+  it('hides the badge when the caching toggle is off', () => {
+    mockCacheStatus.mockReturnValue({ activeCached: null, rowStatusById: {} });
+    vi.mocked(usePortfolio).mockReturnValue(withLegs({ cacheEnabled: false }));
+    render(<PortfolioPage />);
+    expect(screen.queryByTestId('portfolio-cache-badge')).toBeNull();
   });
 });

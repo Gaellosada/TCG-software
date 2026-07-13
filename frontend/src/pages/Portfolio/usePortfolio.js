@@ -505,6 +505,9 @@ export default function usePortfolio() {
     error,
     clearError,
     handleCalculate,
+    // Caching toggle (Settings, DEFAULT ON) read once at mount. Sent as
+    // ``use_cache`` on compute AND gates the proactive cache-status indicators.
+    cacheEnabled: useCache,
     portfolioName,
     setPortfolioName,
     autosave,

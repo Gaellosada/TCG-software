@@ -5,6 +5,7 @@ import AddHoldingModal from './AddHoldingModal';
 import SignalPickerModal from './SignalPickerModal';
 import PortfolioPickerModal from './PortfolioPickerModal';
 import PersistedPortfolioPanel from './PersistedPortfolioPanel';
+import usePortfolioCacheStatus from './usePortfolioCacheStatus';
 import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
@@ -563,10 +564,47 @@ function PortfolioPage({ mode = 'pure' }) {
     portfolioKind,
   ]);
 
-  // The backend serves compute from its own on-disk result cache; the response
-  // carries ``from_cache``. Show a subtle "cached" tag when the displayed result
-  // came from that cache.
-  const resultFromCache = !!(portfolio.results && portfolio.results.from_cache);
+  // ── Proactive cache-status indicators (backend-driven) ──
+  // Re-probe after each compute (a fresh compute populates the backend cache, so
+  // the active config flips to "cached"). ``portfolio.results`` identity changes
+  // once per completed compute.
+  const [probeVersion, setProbeVersion] = useState(0);
+  useEffect(() => { setProbeVersion((v) => v + 1); }, [portfolio.results]);
+
+  const { activeCached, rowStatusById } = usePortfolioCacheStatus({
+    cacheEnabled: portfolio.cacheEnabled,
+    legs: portfolio.legs,
+    rebalance: portfolio.rebalance,
+    startDate: portfolio.startDate,
+    endDate: portfolio.endDate,
+    overlapRange: portfolio.overlapRange,
+    resolvePortfolio: portfolio.resolvePortfolio,
+    portfolios: visiblePortfolios,
+    activeId: portfolio.persistedId,
+    refreshKey: probeVersion,
+  });
+
+  // Active-config badge (both states) — shown when caching is on and the probe
+  // resolved a status for the current (non-empty) config.
+  const showCacheBadge = portfolio.cacheEnabled
+    && portfolio.legs.length > 0
+    && activeCached !== null;
+  // The Compute button reads "Recompute" when the active config is already
+  // cached (a click still forces a fresh backend run).
+  const showRecomputeLabel = portfolio.cacheEnabled && activeCached === true;
+
+  // The ACTIVE row's status in the saved list is authoritative from the active
+  // badge (same config) — override the hook's row entry for it (no divergence).
+  const mergedRowStatus = useMemo(() => {
+    if (!portfolio.cacheEnabled) return {};
+    if (!portfolio.persistedId) return rowStatusById;
+    const activeStatus = activeCached === true
+      ? 'cached'
+      : activeCached === false
+        ? 'not-cached'
+        : 'checking';
+    return { ...rowStatusById, [portfolio.persistedId]: activeStatus };
+  }, [rowStatusById, portfolio.cacheEnabled, portfolio.persistedId, activeCached]);
 
   return (
     <div className={styles.page}>
@@ -688,6 +726,8 @@ function PortfolioPage({ mode = 'pure' }) {
             selectedId={portfolio.persistedId}
             onSelect={handleSelectPersisted}
             onSetPortfolioLocked={handleSetPortfolioLocked}
+            cacheEnabled={portfolio.cacheEnabled}
+            cacheStatusById={mergedRowStatus}
           />
         </div>
 
@@ -746,20 +786,26 @@ function PortfolioPage({ mode = 'pure' }) {
               </select>
             </fieldset>
 
-            {/* "cached" tag — subtle, shown when the displayed result was served
-                from the backend's on-disk result cache (response.from_cache). */}
-            {resultFromCache && (
+            {/* Proactive cache badge (backend-driven) — shows whether an
+                identical Compute would be served from the backend cache. Both
+                states; only when the caching toggle is on and a status resolved.
+                Editing anything re-probes and flips it to "not cached". */}
+            {showCacheBadge && (
               <span
-                className={styles.cachedTag}
-                data-testid="portfolio-cached-tag"
-                title="Served from the backend result cache (no recompute)."
+                className={`${styles.cacheBadge} ${activeCached ? styles.cacheBadgeHit : styles.cacheBadgeMiss}`}
+                data-testid="portfolio-cache-badge"
+                data-cached={activeCached ? 'true' : 'false'}
+                title={activeCached
+                  ? 'Cached — an identical Compute is served from the backend cache (no recompute).'
+                  : 'Not cached — Compute will run the backend and store the result.'}
               >
-                cached
+                {activeCached ? 'cached' : 'not cached'}
               </span>
             )}
 
             {/* Compute button — a single fresh POST to /portfolio/compute; the
-                backend serves from its own cache transparently. */}
+                backend serves from its own cache transparently. Reads
+                "Recompute" while the active config is already cached. */}
             <button
               className={styles.computeBtn}
               type="button"
@@ -767,7 +813,9 @@ function PortfolioPage({ mode = 'pure' }) {
               disabled={portfolio.legs.length === 0 || portfolio.loading}
               data-testid="portfolio-compute-btn"
             >
-              {portfolio.loading ? 'Computing...' : 'Compute'}
+              {portfolio.loading
+                ? 'Computing...'
+                : (showRecomputeLabel ? 'Recompute' : 'Compute')}
             </button>
           </div>
 

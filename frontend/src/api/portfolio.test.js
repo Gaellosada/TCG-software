@@ -9,7 +9,7 @@ vi.mock('./client', () => ({
 }));
 
 import { fetchApi } from './client';
-import { computePortfolio, clearPortfolioCache } from './portfolio';
+import { computePortfolio, clearPortfolioCache, getPortfolioCacheStatus } from './portfolio';
 
 beforeEach(() => {
   fetchApi.mockClear();
@@ -43,5 +43,16 @@ describe('clearPortfolioCache', () => {
   it('POSTs to /portfolio/cache/clear', async () => {
     await clearPortfolioCache();
     expect(fetchApi).toHaveBeenCalledWith('/portfolio/cache/clear', { method: 'POST' });
+  });
+});
+
+describe('getPortfolioCacheStatus', () => {
+  it('POSTs { queries } to /portfolio/cache/status', async () => {
+    const bodies = [{ legs: {}, weights: {} }, { legs: { A: {} }, weights: { A: 1 } }];
+    await getPortfolioCacheStatus(bodies);
+    const [path, opts] = fetchApi.mock.calls[0];
+    expect(path).toBe('/portfolio/cache/status');
+    expect(opts.method).toBe('POST');
+    expect(JSON.parse(opts.body)).toEqual({ queries: bodies });
   });
 });

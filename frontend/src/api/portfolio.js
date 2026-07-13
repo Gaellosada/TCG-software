@@ -28,3 +28,23 @@ export async function computePortfolio({
 export async function clearPortfolioCache() {
   return fetchApi('/portfolio/cache/clear', { method: 'POST' });
 }
+
+/**
+ * Batched cache-status probe — a PURE key lookup (no compute) for many compute
+ * bodies at once. POST /api/portfolio/cache/status with
+ * ``{ queries: [<compute_body>, ...] }`` → ``{ results: [{cached: bool}, ...] }``
+ * parallel to ``queries``. The bodies MUST be built by the SAME
+ * ``buildPortfolioComputeBody`` the compute path uses, so a match here means an
+ * identical Compute would be served from cache.
+ *
+ * @param {Array<object>} queries  compute-request bodies
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<{ results: Array<{ cached: boolean }> }>}
+ */
+export async function getPortfolioCacheStatus(queries, { signal } = {}) {
+  return fetchApi('/portfolio/cache/status', {
+    method: 'POST',
+    body: JSON.stringify({ queries }),
+    ...(signal ? { signal } : {}),
+  });
+}
