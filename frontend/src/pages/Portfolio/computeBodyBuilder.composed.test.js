@@ -11,7 +11,6 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
-import { computeCacheKey } from '../../lib/computeCacheKey';
 
 // A saved PURE child portfolio (one instrument leg). ``resolvePortfolio``
 // returns this by id; editing it (below) changes the inlined spec.
@@ -67,7 +66,7 @@ describe('buildPortfolioComputeBody — composed (portfolio) legs', () => {
     expect(body.weights.BuildingBlock).toBe(60);
   });
 
-  it('A1-3: editing the child spec changes the body AND the cache key', async () => {
+  it('live reference: editing the child spec changes the inlined compute body', () => {
     const before = buildPortfolioComputeBody({
       ...baseArgs,
       legs: composedLegs,
@@ -83,12 +82,10 @@ describe('buildPortfolioComputeBody — composed (portfolio) legs', () => {
         : null),
     });
 
+    // The inlined child spec changed → the content-addressed body changed, so
+    // the backend's key changes → recompute (live-ref invalidation).
     expect(after.body).not.toEqual(before.body);
     expect(after.body.legs.BuildingBlock.portfolio.weights.SPX).toBe(50);
-
-    const keyBefore = await computeCacheKey(before.body);
-    const keyAfter = await computeCacheKey(after.body);
-    expect(keyAfter).not.toBe(keyBefore);   // → cache miss → recompute
   });
 
   it('reports an unresolved child as a broken reference and emits no leg', () => {

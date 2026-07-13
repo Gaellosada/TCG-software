@@ -26,9 +26,8 @@ export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
   if (leg.type === 'portfolio') {
     // Composed leg: its available range is the OVERLAP of its referenced child's
     // legs (the same grid the backend/compute builder use). Without this, a
-    // composed portfolio resolved NO range → overlapRange null → the cache-key
-    // effect gated out → currentCacheKey null → no cache badge / no auto-display
-    // on the composed page (the reported "composed caching doesn't work" bug).
+    // composed portfolio resolves NO range → overlapRange null → the compute
+    // window (and slider) can't settle on the composed page.
     const portfolioId = leg.portfolioId || leg.portfolio_id || null;
     if (!portfolioId || _depth >= 1) return { id: leg.id, start: null, end: null };
     try {

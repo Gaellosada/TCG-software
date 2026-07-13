@@ -26,20 +26,3 @@ export function getRiskFreeRateFraction() {
     return DEFAULT_RISK_FREE_RATE_FRACTION;
   }
 }
-
-// localStorage key for the opt-in local portfolio-result cache toggle.
-export const PORTFOLIO_CACHE_KEY = 'tcg-portfolio-cache-enabled';
-
-/**
- * Whether the local portfolio-result cache is enabled. Opt-in, DEFAULT OFF:
- * only the exact string 'true' enables it (mirrors the App.jsx boolean idiom).
- * Absent / any other value / unavailable localStorage → false (no behavior
- * change until the user turns it on).
- */
-export function isPortfolioCacheEnabled() {
-  try {
-    return localStorage.getItem(PORTFOLIO_CACHE_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}

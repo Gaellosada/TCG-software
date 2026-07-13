@@ -470,3 +470,32 @@ describe('<PortfolioPage> — persisted portfolios panel', () => {
     expect(mockListPortfolios).toHaveBeenCalledWith('DEV');
   });
 });
+
+// The backend serves compute from its on-disk result cache and marks the
+// response with ``from_cache``. The page shows a subtle "cached" tag when the
+// displayed result came from that cache, and hides it otherwise.
+describe('<PortfolioPage> — backend "cached" tag (from_cache)', () => {
+  it('shows the cached tag when the compute response has from_cache === true', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({ results: resultsFixture({ from_cache: true }) }),
+    );
+    render(<PortfolioPage />);
+    expect(screen.getByTestId('portfolio-cached-tag')).toBeTruthy();
+  });
+
+  it('hides the cached tag when from_cache is false', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({ results: resultsFixture({ from_cache: false }) }),
+    );
+    render(<PortfolioPage />);
+    expect(screen.queryByTestId('portfolio-cached-tag')).toBeNull();
+  });
+
+  it('hides the cached tag when from_cache is absent (legacy response)', () => {
+    vi.mocked(usePortfolio).mockReturnValue(
+      baseHook({ results: resultsFixture() }),
+    );
+    render(<PortfolioPage />);
+    expect(screen.queryByTestId('portfolio-cached-tag')).toBeNull();
+  });
+});

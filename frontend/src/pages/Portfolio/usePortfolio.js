@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { computePortfolio } from '../../api/portfolio';
 import { getPortfolio } from '../../api/persistence';
@@ -8,10 +8,6 @@ import { legsToRangesKey } from './legKey';
 import { resolvePortfolioRange } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
-import { shouldDisplayComputeResult } from './cacheDisplayPolicy';
-import { computeCacheKey } from '../../lib/computeCacheKey';
-import { getCached, putCached } from '../../lib/portfolioCache';
-import { isPortfolioCacheEnabled } from '../../lib/userSettings';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
@@ -68,33 +64,6 @@ export default function usePortfolio() {
   // when the lock API call returns an updated doc.
   const [persistedLocked, setPersistedLocked] = useState(false);
 
-  // ── Local portfolio-result cache (opt-in; Settings toggle, default OFF) ──
-  // Read once at mount (mirrors the userSettings convention: a toggle change
-  // applies on the next mount). When off, every cache branch below is skipped
-  // and behavior is byte-for-byte today's.
-  const [cacheEnabled] = useState(() => isPortfolioCacheEnabled());
-  // The cache key for the CURRENT editor state, recomputed reactively for the
-  // badge. Null while gated (no legs / ranges unresolved / un-keyable body).
-  const [currentCacheKey, setCurrentCacheKey] = useState(null);
-  // Bumped after every compute completes so the auto-display/badge effect
-  // re-syncs the displayed result and the badge to the freshly-cached state.
-  const [cacheVersion, setCacheVersion] = useState(0);
-  // RACE GUARDS for the auto-display effect (cache-ON only):
-  //  - computingRef: true while a compute is in flight → the effect must not
-  //    touch `results` (the compute owns it).
-  //  - computeSeqRef: incremented at the START of every compute; the effect
-  //    captures it and refuses to setResults if it changed mid-read (a compute
-  //    started/ran during the async hash+getCached), so a stale cache read can
-  //    never clobber a fresh compute result. Deterministic — does not rely on
-  //    React effect-cleanup timing.
-  const computingRef = useRef(false);
-  const computeSeqRef = useRef(0);
-  // Live cache key mirror (FIX A): always holds the key of the CURRENT config,
-  // updated synchronously by the auto-display effect. A landing compute compares
-  // the key it ran for against this; if the user edited mid-flight the keys
-  // differ and the stale result is dropped (not shown for the modified config).
-  const currentKeyRef = useRef(null);
-
   /* ── Fetch date ranges when legs change ── */
 
   // Re-resolve ranges when the range SPEC changes (legsToRangesKey — instrument
@@ -104,9 +73,9 @@ export default function usePortfolio() {
   // portfolio that happens to share an identical range spec (same instrument,
   // different weight): the spec key alone wouldn't change, so the effect
   // wouldn't re-fire and overlapRange (nulled on load) would stay null —
-  // freezing the cache badge / auto-display at "checking" and sending
-  // start=undefined to Compute. Weight/label edits keep the same ids AND spec,
-  // so they still never trigger a refetch (the original optimization holds).
+  // sending start=undefined to Compute. Weight/label edits keep the same ids
+  // AND spec, so they still never trigger a refetch (the original optimization
+  // holds).
   const rangesKey = useMemo(
     () => `${legsToRangesKey(legs)}#${legs.map((l) => l.id).join(',')}`,
     [legs],
@@ -123,8 +92,7 @@ export default function usePortfolio() {
     setRangesLoading(true);
 
     // Resolve each leg's coverage + the portfolio overlap via the SHARED
-    // resolver — the saved-list cache-status detection uses the identical path,
-    // so a row's key always matches the active/compute key (no lying icons).
+    // resolver (also used to seed the compute window).
     resolvePortfolioRange(legs, { queryClient })
       .then(({ ranges, overlapRange: overlap }) => {
         if (cancelled) return;
@@ -294,9 +262,8 @@ export default function usePortfolio() {
   const loadFromPersisted = useCallback((doc) => {
     if (!doc || typeof doc !== 'object') return;
     // Shared doc→legs conversion (incl. the option hold-ON coercion), then stamp
-    // a local-only React-key id. The SAME converter feeds the saved-list cache
-    // detection, so its per-row body/key matches what loading this doc produces.
-    // The id is assigned per-load, never round-tripped to the backend.
+    // a local-only React-key id. The id is assigned per-load, never round-tripped
+    // to the backend.
     const restoredLegs = persistedDocToLegs(doc).map((l) => ({ ...l, id: nextId++ }));
     abortCalculate();
     setLegs(restoredLegs);
@@ -329,11 +296,10 @@ export default function usePortfolio() {
   );
   const portfolioLegIdsKey = portfolioLegIds.join(',');
 
-  // childPortfolios: { [id]: doc | 'broken' } for the UI badge (broken-ref).
+  // childPortfolios: { [id]: doc | 'broken' } for the per-leg broken-ref badge.
   // Undefined (absent) = still loading. Populated by fetching each child's
   // CURRENT saved doc through React Query (deduped with the build-time resolver
-  // below, which reads the SAME cache entries → identical inlined spec → key
-  // parity between the badge/compute bodies).
+  // below, which reads the SAME cache entries).
   const [childPortfolios, setChildPortfolios] = useState({});
   useEffect(() => {
     if (portfolioLegIds.length === 0) {
@@ -390,10 +356,11 @@ export default function usePortfolio() {
 
   // Build-time resolver: fetch every referenced child's CURRENT spec through
   // React Query (deduped; same cache the state effect fills) and return a SYNC
-  // ``(id) => doc|null`` closure over that fresh snapshot. Both compute and the
-  // cache-key effect await this, so both inline byte-identical child specs →
-  // the cache-key body equals the compute body (hard parity guardrail). Because
-  // it always fetches current specs, a child edit flows straight into the body.
+  // ``(id) => doc|null`` closure over that fresh snapshot. ``handleCalculate``
+  // awaits this to inline each child's CURRENT spec, so a child edit flows
+  // straight into the compute body — and, because the backend result cache is
+  // content-addressed on that inlined body, a child edit produces a new key →
+  // recompute (live-reference invalidation is preserved by the inlining).
   const resolveChildrenNow = useCallback(async () => {
     if (portfolioLegIds.length === 0) return () => null;
     const pairs = await Promise.all(portfolioLegIds.map(async (id) => {
@@ -443,11 +410,9 @@ export default function usePortfolio() {
       return;
     }
 
-    // Build the resolved compute body via the SHARED builder — the badge hashes
-    // the exact same object, so the cache key is guaranteed identical (key
-    // parity guardrail). Hydration is UNCONDITIONAL here (as on main) so the
-    // cache-OFF path is byte-identical to today's — do not gate it on signal
-    // legs or the cache flag.
+    // Build the resolved compute body via the SHARED builder. Hydration is
+    // unconditional so signal legs (including ones inside a referenced child)
+    // always resolve their indicators.
     const availableIndicators = await hydrateAvailableIndicators();
     // Resolve every referenced child portfolio's CURRENT spec (composed page).
     // On the pure page there are none, so this returns a no-op resolver and the
@@ -472,31 +437,9 @@ export default function usePortfolio() {
       return;
     }
 
-    // ── Compute = ALWAYS a fresh network run (never served from cache) ──
-    // Serving cached results is now the auto-display effect's job; the button
-    // always recomputes and (when the cache is on) RE-CACHES the fresh result.
-    // The OFF path below is byte-for-byte today's (the cacheOn branches are
-    // no-ops when disabled).
-    const cacheOn = cacheEnabled;
-    let cacheKey = null;
-    if (cacheOn) {
-      try {
-        cacheKey = await computeCacheKey(body);
-      } catch {
-        cacheKey = null;
-      }
-      // Baseline the live-key mirror to the config we're about to compute so a
-      // Compute clicked before the debounced effect resolved still displays; an
-      // edit while in flight then moves currentKeyRef away (via the effect) and
-      // FIX A drops the stale result.
-      if (cacheKey) currentKeyRef.current = cacheKey;
-    }
-
-    // Race guards: mark a compute in flight and stamp a new sequence so the
-    // auto-display effect can't overwrite the result this compute produces.
-    computeSeqRef.current += 1;
-    computingRef.current = true;
-
+    // Compute is a single fresh network run and displays the result. The
+    // backend serves from its on-disk result cache transparently (the response
+    // carries ``from_cache``); the frontend keeps no cache of its own.
     setError(null);
     await runAbortable(async ({ signal }) => {
       try {
@@ -509,129 +452,13 @@ export default function usePortfolio() {
           end: body.end,
           signal,
         });
-        if (!signal.aborted) {
-          // ALWAYS cache the fresh result — it is valid for the config it ran
-          // for, so reverting to that config re-shows it (auto-display).
-          if (cacheOn && cacheKey) {
-            try {
-              await putCached(cacheKey, persistedId, res);
-            } catch {
-              // caching is best-effort; the compute already succeeded
-            }
-          }
-          // FIX A: only DISPLAY it if the live config still matches the one this
-          // compute ran for. If the user edited mid-flight, drop it (stay blank
-          // for the modified config); the cacheVersion bump below then re-syncs.
-          if (shouldDisplayComputeResult({
-            cacheOn,
-            computeKey: cacheKey,
-            liveKey: currentKeyRef.current,
-          })) {
-            setResults(res);
-          }
-        }
+        if (!signal.aborted) setResults(res);
       } catch (err) {
         if (signal.aborted) return;
         setError(err.message || 'Computation failed');
-      } finally {
-        // Compute finished — release the in-flight guard, then (cache on) bump
-        // the version so the auto-display/badge effect re-syncs to the newly
-        // cached state (flips the badge to "Cached ✓").
-        computingRef.current = false;
-        if (cacheOn) setCacheVersion((v) => v + 1);
       }
     });
-  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, cacheEnabled, persistedId, resolveChildrenNow]);
-
-  /* ── Reactive cache key + AUTO-DISPLAY / BLANK-ON-EDIT (cache-ON only) ── */
-  // On any key-affecting change: recompute the current cache key (for the
-  // badge) and then reflect the cache into the displayed results —
-  //   HIT  → setResults(cached)  (auto-display, no Compute click)
-  //   MISS → setResults(null)    (blank; the page shows "recompute needed")
-  // Debounced so editing a numeric field doesn't hammer hydrate/hash on every
-  // keystroke. Gated on a resolved date range so loading a cached portfolio
-  // doesn't flash-blank before dates settle. This effect NEVER runs on the
-  // cache-OFF path, so it cannot affect OFF fidelity.
-  useEffect(() => {
-    if (!cacheEnabled || legs.length === 0) {
-      currentKeyRef.current = null;
-      setCurrentCacheKey(null);
-      return undefined;
-    }
-    const effStart = startDate || overlapRange?.start;
-    const effEnd = endDate || overlapRange?.end;
-    // Gate until the range resolves — do NOT blank here (avoid a flash on load).
-    if (!effStart || !effEnd) {
-      currentKeyRef.current = null;
-      setCurrentCacheKey(null);
-      return undefined;
-    }
-    // FIX A (extended): the ref only advanced inside the debounced timer, so a
-    // compute landing within the 275ms window after a key-affecting edit could
-    // still display the PREVIOUS config's result (liveKey == old computeKey).
-    // Null the live-key mirror SYNCHRONOUSLY now (the range gate has passed) so
-    // an in-flight compute for the old config sees liveKey=null !== computeKey
-    // and is dropped. Only the ref is touched (not setCurrentCacheKey), so the
-    // badge does NOT flicker to "checking"; the timer below re-sets the ref, and
-    // handleCalculate re-baselines it at compute start for same-config displays.
-    currentKeyRef.current = null;
-    let cancelled = false;
-    const startSeq = computeSeqRef.current;
-    const timer = setTimeout(async () => {
-      try {
-        // Hydrate indicators UNCONDITIONALLY — the SAME single path
-        // handleCalculate uses — so the reactive cache key and the compute key
-        // are built from the identical indicator set (single source of truth).
-        // A parent-only ``some(type==='signal')`` gate missed signal legs living
-        // inside a REFERENCED CHILD (composed §4): the child's signal legs then
-        // reported missing indicators → key nulled → the badge/auto-display
-        // diverged from compute, which always hydrates (NIT-1 / Sign 8). The
-        // effect is debounced (275ms), so hydrating here even with no signal
-        // legs is cheap, and it remains cache-ON-only (no OFF-path impact).
-        const availableIndicators = await hydrateAvailableIndicators();
-        // Resolve child portfolios the SAME way handleCalculate does (deduped
-        // through React Query) so the badge's cache-key body equals the compute
-        // body — key parity. No-op resolver when there are no portfolio legs.
-        const resolveChild = await resolveChildrenNow();
-        if (cancelled) return;
-        const { body, missing, brokenRefs } = buildPortfolioComputeBody({
-          legs,
-          rebalance,
-          start: effStart,
-          end: effEnd,
-          availableIndicators,
-          resolvePortfolio: resolveChild,
-        });
-        // A missing indicator OR a broken portfolio ref makes the body
-        // un-keyable — blank the badge (compute is blocked upstream anyway).
-        if (missing.length > 0 || brokenRefs.length > 0) {
-          if (!cancelled) {
-            currentKeyRef.current = null;
-            setCurrentCacheKey(null);
-          }
-          return;
-        }
-        const key = await computeCacheKey(body);
-        if (cancelled) return;
-        // Update the live-key mirror FIRST (synchronously) so a compute landing
-        // right now compares against the freshly-edited config (FIX A).
-        currentKeyRef.current = key;
-        setCurrentCacheKey(key);
-        const cached = await getCached(key);
-        // RACE GUARD: never overwrite results while a compute is in flight, and
-        // never act on a read that a compute superseded (seq changed). The
-        // compute's cacheVersion bump re-triggers this effect afterwards to
-        // re-sync cleanly.
-        if (cancelled || computingRef.current || computeSeqRef.current !== startSeq) {
-          return;
-        }
-        setResults(cached ? cached : null);
-      } catch {
-        if (!cancelled) setCurrentCacheKey(null);
-      }
-    }, 275);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [cacheEnabled, legs, rebalance, startDate, endDate, overlapRange, cacheVersion, resolveChildrenNow]);
+  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, resolveChildrenNow]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -670,19 +497,6 @@ export default function usePortfolio() {
     error,
     clearError,
     handleCalculate,
-    // Local portfolio-result cache (opt-in). ``cacheEnabled`` gates the badge
-    // + auto-display; ``currentCacheKey`` is the active portfolio's key (null
-    // while gated); ``cacheVersion`` bumps after each compute so the badge /
-    // auto-display effect re-syncs.
-    cacheEnabled,
-    currentCacheKey,
-    cacheVersion,
-    // localStorage save/load functions — kept in the hook but no longer
-    // exposed. All persistence goes through the backend now.
-    // savePortfolio,
-    // loadPortfolio,
-    // deleteSavedPortfolio,
-    // getSavedPortfolios,
     portfolioName,
     setPortfolioName,
     autosave,
