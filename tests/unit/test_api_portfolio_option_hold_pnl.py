@@ -508,6 +508,14 @@ async def test_hold_option_roll_rows_display_only_equity_metrics_byte_identical(
     assert any(t.get("entry_block_id") == "roll:P" for t in data_with["trades"])
 
     # 2. WITHOUT the rows: stub the builder to emit nothing, recompute.
+    #    The compute path is now backed by the on-disk result cache, so an
+    #    identical body would be served from step 1's cached result and never
+    #    re-run the (now-stubbed) builder — clear the per-test cache to force a
+    #    genuine recompute. (The cache instance is the tmp one installed by the
+    #    autouse ``_isolate_portfolio_result_cache`` fixture.)
+    from tcg.core.api import portfolio as _portfolio_mod
+
+    _portfolio_mod._result_cache.clear()
     monkeypatch.setattr("tcg.core.api.portfolio._build_roll_rows", lambda **kw: [])
     data_without = await _compute(client, -100)
     assert not any(t.get("entry_block_id") == "roll:P" for t in data_without["trades"])

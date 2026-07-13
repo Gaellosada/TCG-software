@@ -87,8 +87,8 @@ function PersistedPortfolioPanel({
           portfolios.map((p) => {
             const isSelected = p.id === selectedId;
             const isLocked = !!p.locked;
-            // Cache-ON only: a compact per-row icon meaning "opening this shows a
-            // result instantly" (its exact current key is in IndexedDB).
+            // Backend-driven proactive status: 'cached' | 'not-cached' |
+            // 'checking'. Only shown when the caching toggle is on.
             const cacheStatus = cacheEnabled ? (cacheStatusById[p.id] || 'checking') : null;
             return (
               <div
@@ -117,9 +117,9 @@ function PersistedPortfolioPanel({
                 >
                   {p.name}
                 </button>
-                {/* Cache-ON only: right-aligned status TAG (text pill, matches
-                    the active Compute-row badge). Sits just left of the
-                    hover-reveal actions; hidden entirely when cache is off. */}
+                {/* Backend-driven per-row cache status TAG (text pill, matches
+                    the active Compute-row badge). Just left of the hover-reveal
+                    actions; hidden entirely when the caching toggle is off. */}
                 {cacheStatus && (
                   <span
                     className={`${styles.cacheTag} ${
@@ -133,7 +133,7 @@ function PersistedPortfolioPanel({
                     data-cache-status={cacheStatus}
                     title={
                       cacheStatus === 'cached'
-                        ? 'Cached — opening this portfolio shows its result instantly'
+                        ? 'Cached — opening this portfolio and computing serves from cache'
                         : cacheStatus === 'not-cached'
                           ? 'Not cached — opening will need a Compute'
                           : 'Checking cache…'
@@ -141,10 +141,10 @@ function PersistedPortfolioPanel({
                     aria-label={`cache ${cacheStatus}`}
                   >
                     {cacheStatus === 'cached'
-                      ? 'Cached ✓'
+                      ? 'cached'
                       : cacheStatus === 'not-cached'
-                        ? 'Not cached'
-                        : 'Checking…'}
+                        ? 'not cached'
+                        : 'checking…'}
                   </span>
                 )}
                 {/* Hover/focus action cluster (category chip + archive ×).

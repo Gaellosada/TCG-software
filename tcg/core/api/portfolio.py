@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import os
+import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date
+from pathlib import Path
 from typing import Callable, Literal
 
 import numpy as np
@@ -24,6 +28,7 @@ from tcg.core.api._models import (
 from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
 from tcg.core.api._options_materialise import materialise_option_streams
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
+from tcg.core.cache import DiskResultCache, canonical_hash
 from tcg.core.api.common import get_market_data
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
@@ -607,6 +612,16 @@ class LegSpec(BaseModel):
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # COMPOSED-PORTFOLIO fields (required when type == "portfolio").  A portfolio
+    # leg references a saved PURE portfolio reused as a building block: the
+    # frontend RESOLVES the reference and INLINES the child's current saved spec
+    # into ``portfolio`` (backend never loads by id — ``portfolio_id`` is
+    # provenance only, so the content-addressed frontend cache busts on child
+    # edits).  The child is computed to an equity curve and injected as one
+    # synthetic price series (mirrors a ``signal`` leg).  Depth is capped at 1:
+    # a child that itself contains a ``portfolio`` leg is rejected at evaluation.
+    portfolio_id: str | None = None
+    portfolio: PortfolioRequest | None = None
 
     @field_validator("nav_times")
     @classmethod
@@ -618,10 +633,16 @@ class LegSpec(BaseModel):
     @field_validator("type")
     @classmethod
     def validate_type(cls, v: str) -> str:
-        if v not in ("instrument", "continuous", "signal", "option_stream"):
+        if v not in (
+            "instrument",
+            "continuous",
+            "signal",
+            "option_stream",
+            "portfolio",
+        ):
             raise ValueError(
                 f"leg type must be 'instrument', 'continuous', 'signal', "
-                f"or 'option_stream', got {v!r}"
+                f"'option_stream', or 'portfolio', got {v!r}"
             )
         return v
 
@@ -691,6 +712,22 @@ class PortfolioRequest(BaseModel):
     return_type: str = "normal"
     start: str | None = None
     end: str | None = None
+    # Result-cache opt-out (Settings toggle). Default True = caching on
+    # (unchanged behaviour). When False the compute path bypasses the on-disk
+    # cache entirely (no read, no write) and always recomputes fresh; the flag
+    # propagates to composed children so they bypass too. It is DELIBERATELY
+    # excluded from the cache key (see ``_portfolio_cache_key``) — it selects
+    # WHETHER to use the cache, not WHICH entry, so a later ``use_cache=True``
+    # compute of the same body still hits an entry a prior cached compute wrote.
+    use_cache: bool = True
+
+
+# ``LegSpec.portfolio`` is typed ``PortfolioRequest`` (a composed leg inlines a
+# full child portfolio body) and ``PortfolioRequest.legs`` is ``dict[str,
+# LegSpec]`` — a mutual recursion.  With ``from __future__ import annotations``
+# the forward reference is a string, so rebuild ``LegSpec`` now that
+# ``PortfolioRequest`` exists in the module namespace to bind the annotation.
+LegSpec.model_rebuild()
 
 
 # ---------------------------------------------------------------------------
@@ -704,13 +741,13 @@ def _parse_legs(
 ) -> dict[str, InstrumentId | ContinuousLegSpec]:
     """Convert request leg specs to service-layer types with validation.
 
-    Only processes instrument/continuous legs; signal and option_stream
-    legs are skipped (handled separately).
+    Only processes instrument/continuous legs; signal, option_stream and
+    portfolio legs are skipped (handled separately).
     """
     legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
 
     for label, leg in legs.items():
-        if leg.type in ("signal", "option_stream"):
+        if leg.type in ("signal", "option_stream", "portfolio"):
             continue
 
         if leg.type == "instrument":
@@ -1386,19 +1423,238 @@ async def _evaluate_option_stream_leg(
     return dates_arr, values, "level", [], None, None, float("nan"), None, None, None
 
 
+# ── On-disk result cache (durable, always-on) ──
+#
+# ONE cache backs both the top-level ``compute_portfolio`` and the composed-leg
+# path: because the key is a content hash of the compute body, a standalone
+# compute and a composed leg referencing the same ``(spec, range)`` hash
+# IDENTICALLY and share the entry (the Bug-2 unified-reuse fix). The leg path
+# reuses that reuse for free — it calls ``compute_portfolio(child_body)``, which
+# IS the single cache authority, so there is exactly ONE key-computation site
+# (Sign 9: no divergence possible).
+_result_cache: DiskResultCache | None = None
+
+
+def _default_cache_path() -> str:
+    """Resolve the on-disk cache file path.
+
+    ``TCG_CACHE_DIR`` overrides the location (e.g. for a Tauri bundle); the
+    default is a per-user cache dir outside the repo, so nothing is committed and
+    no ``.gitignore`` entry is needed. Tests never reach this — an autouse
+    fixture swaps ``_result_cache`` for a tmp-dir instance (Sign 10).
+    """
+    base = os.environ.get("TCG_CACHE_DIR") or str(Path.home() / ".cache" / "tcg")
+    return str(Path(base) / "portfolio_results.sqlite")
+
+
+# Generous default TTL that auto-bounds staleness from a dwh bar backfill/revision
+# while keeping same-day / same-session reuse fast. The result cache is content-
+# addressed (a changed body is already a new key), so this only guards against
+# UPSTREAM data changes under an unchanged body.
+_DEFAULT_CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+
+
+def _default_cache_ttl() -> float | None:
+    """Resolve the default result-cache TTL in seconds, or ``None`` for no expiry.
+
+    ``TCG_CACHE_TTL_SECONDS`` overrides the default: a positive value sets the
+    TTL; ``0`` (or a negative / non-numeric / empty value) DISABLES expiry
+    (``None``). Unset → the generous 30-day default so staleness is auto-bounded
+    out of the box. The manual ``POST /api/portfolio/cache/clear`` is the
+    immediate remedy regardless of TTL.
+    """
+    raw = os.environ.get("TCG_CACHE_TTL_SECONDS")
+    if raw is None or not raw.strip():
+        return float(_DEFAULT_CACHE_TTL_SECONDS)
+    try:
+        val = float(raw)
+    except ValueError:
+        return None  # misconfigured → fail safe to no-expiry rather than crash
+    return val if val > 0 else None
+
+
+def _get_result_cache() -> DiskResultCache:
+    """Return the process-wide result cache, lazily creating it on first use."""
+    global _result_cache
+    if _result_cache is None:
+        _result_cache = DiskResultCache(
+            _default_cache_path(), ttl_seconds=_default_cache_ttl()
+        )
+    return _result_cache
+
+
+# Compute-version salt for the durable on-disk cache. The cache now survives
+# restarts (30-day TTL), so — unlike the old restart-wiped in-memory cache — a
+# deploy no longer implicitly invalidates it. But the equity a body maps to
+# depends on code/config that is NOT in the body: engine logic, the option
+# pricer's constants, and the contract multipliers in ``tcg/types/multipliers.py``
+# (e.g. the OPT_SP_500 $50-vs-$100 fix). Folding this token into the key
+# namespaces the cache by compute version, so any such change → new keys → old
+# durable entries never match (and TTL-evict), instead of serving a stale WRONG
+# equity with ``from_cache: true`` for up to 30 days.
+#
+# BUMP ``COMPUTE_VERSION`` on ANY compute-affecting change (engine / pricing /
+# multipliers / rate constants) AND on each release. No backend version is
+# importable (no ``tcg.__version__``; ``pyproject`` version is unmanaged for this
+# purpose), so this is the single deliberate knob.
+COMPUTE_VERSION = "0.1.11"
+
+
+def _strip_use_cache(obj: object) -> object:
+    """Recursively drop every ``use_cache`` key from a JSON-able structure.
+
+    ``use_cache`` can appear at the top level AND inside any inlined child
+    (``legs.<x>.portfolio.use_cache``, at any depth). It selects WHETHER to use
+    the cache, never WHICH result a body maps to, so it must not affect the key at
+    any level — otherwise a composed body's key would change with an inlined
+    child's flag.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_use_cache(v) for k, v in obj.items() if k != "use_cache"}
+    if isinstance(obj, list):
+        return [_strip_use_cache(v) for v in obj]
+    return obj
+
+
+def _portfolio_cache_key(body: PortfolioRequest) -> str:
+    """Canonical content key for a compute body.
+
+    Hashes the WHOLE request body (children already inlined by the caller) with
+    ``use_cache`` stripped at EVERY nesting level, plus a ``COMPUTE_VERSION``
+    salt. Used by BOTH the compute path and ``/cache/status`` so their keys always
+    coincide.
+
+    * Because a composed leg builds its child sub-request as a ``PortfolioRequest``
+      with the same content and the parent's range threaded in, this yields the
+      SAME key a standalone compute of that child would — the unified-reuse
+      guarantee (Sign 9). A change to any nested child (incl. a signal leg) changes
+      the body → new key → recompute.
+    * ``use_cache`` is EXCLUDED at all levels: it selects whether to consult the
+      cache, not which result a body maps to, so toggling it never changes
+      identity. (``from_cache``/``computed_ms`` are response-only and never on the
+      request.)
+    * ``COMPUTE_VERSION`` namespaces the durable cache by compute version, so a
+      code/config/release change invalidates stale entries (BE-B1).
+    """
+    payload = _strip_use_cache(body.model_dump(mode="json"))
+    return canonical_hash({"_cv": COMPUTE_VERSION, "body": payload})
+
+
+async def _evaluate_portfolio_leg(
+    label: str,
+    leg: LegSpec,
+    svc: MarketDataService,
+    classify: Callable[[str], AssetClass | None],
+    repo: WriteRepository,
+    start: str | None,
+    end: str | None,
+    use_cache: bool,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+    """Evaluate a composed-portfolio leg to a synthetic equity price series.
+
+    A ``portfolio`` leg references a saved PURE portfolio reused as a building
+    block; the frontend has inlined the child's resolved spec into
+    ``leg.portfolio``.  We compute that child to an equity curve and return it
+    as this leg's synthetic close series over the child's own date grid — the
+    parent then intersects it with the other legs and rebalances at the parent's
+    frequency, exactly as it does for a ``signal`` leg's synthetic.
+
+    The child is evaluated by **recursively invoking the very same
+    ``compute_portfolio`` endpoint** (not a re-implementation), so the child's
+    ``portfolio_equity`` is byte-identical to that child computed standalone
+    over the same range (criterion A1-1) and the existing per-type leg
+    evaluators are reused verbatim.  Depth is capped at 1: the guard below runs
+    BEFORE recursing, which also makes infinite recursion impossible.
+
+    Caching is handled ENTIRELY by ``compute_portfolio`` (the on-disk result
+    cache): this function builds the child sub-request as a ``PortfolioRequest``
+    with the same fields a top-level request carries and the parent's range
+    threaded in, then calls ``compute_portfolio(child_body)`` — which hashes that
+    body to the SAME key a standalone compute of the child would use, so the two
+    share the cache entry (unified reuse, the Bug-2 fix; Sign 9). There is no
+    separate leg cache. Every ``get`` deserialises fresh arrays, so there is no
+    frozen-array/aliasing concern to manage here.
+
+    Raises:
+        ValidationError (→ HTTP 400, never 500):
+          * the child is missing/empty/unresolved;
+          * the child itself contains a ``portfolio`` leg (depth-1 only).
+    """
+    child = leg.portfolio
+    # Empty / unresolved guard (Sign 4): a broken reference (archived/deleted
+    # child, or the frontend could not resolve it) yields a missing or empty
+    # child body — surface a clear 400, never a 500.
+    if child is None or not child.legs:
+        raise ValidationError(
+            f"Leg '{label}': referenced portfolio has no legs or could not be resolved"
+        )
+
+    # Depth-1 guard (Sign 3, the real backstop): a composed portfolio may not
+    # reference another composed portfolio.  Enforced BEFORE the recursive
+    # compute so the reference graph is acyclic by construction.
+    for child_label, child_leg in child.legs.items():
+        if child_leg.type == "portfolio":
+            raise ValidationError(
+                f"Leg '{label}': composed portfolios cannot reference other "
+                f"composed portfolios (depth-1 only) — child leg "
+                f"'{child_label}' is itself a portfolio"
+            )
+
+    # Compute the child over the PARENT's requested date range (mirrors how a
+    # signal/option leg receives the parent's start/end), then let the parent's
+    # date-grid intersection align it with the other legs.  This goes through the
+    # cached ``compute_portfolio`` wrapper, so an already-computed child (whether
+    # from a standalone request or another composition) is served from the
+    # on-disk cache — the SAME entry, keyed on this identical body.
+    child_body = PortfolioRequest(
+        legs=child.legs,
+        weights=child.weights,
+        rebalance=child.rebalance,
+        return_type=child.return_type,
+        start=start,
+        end=end,
+        # Propagate the parent's cache preference so a use_cache=False compute
+        # recomputes every child fresh (and never reads/writes the cache). The
+        # flag does not affect the child's key (excluded), so this never breaks
+        # unified reuse between a cached parent and a standalone child.
+        use_cache=use_cache,
+    )
+    child_result = await compute_portfolio(child_body, svc, classify, repo)
+
+    # Convert the child response back to the engine's YYYYMMDD-int date grid +
+    # float64 equity array.  ``portfolio_equity`` was passed through
+    # ``sanitize_json_floats`` (non-finite → None); map None back to NaN so the
+    # parent's return/compounding math holds those bars flat as usual.
+    child_dates = np.array(
+        [date_to_int(date.fromisoformat(d)) for d in child_result["dates"]],
+        dtype=np.int64,
+    )
+    child_equity = np.array(
+        [np.nan if v is None else v for v in child_result["portfolio_equity"]],
+        dtype=np.float64,
+    )
+    return child_dates, child_equity
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 
-@router.post("/compute")
-async def compute_portfolio(
+async def _compute_portfolio_uncached(
     body: PortfolioRequest,
-    svc: MarketDataService = Depends(get_market_data),
-    classify: Callable[[str], AssetClass | None] = Depends(get_collection_classifier),
-    repo: WriteRepository = Depends(get_write_repository),
+    svc: MarketDataService,
+    classify: Callable[[str], AssetClass | None],
+    repo: WriteRepository,
 ) -> dict:
-    """Compute a weighted portfolio with rebalancing and return full analytics."""
+    """Compute a weighted portfolio with rebalancing and return full analytics.
+
+    This is the pure, UNCACHED computation. The cached endpoint
+    ``compute_portfolio`` wraps it: existing spot/instrument/option/signal/
+    portfolio behaviour is byte-identical to before (golden-master gate) — the
+    cache only decides whether this body runs. The returned dict is the fully
+    sanitized result WITHOUT the ``from_cache``/``computed_ms`` response metadata
+    (those are added by the wrapper, never stored)."""
 
     # ── 1. Validate inputs ──
 
@@ -1473,6 +1729,11 @@ async def compute_portfolio(
     }
     option_stream_legs = {
         label: leg for label, leg in body.legs.items() if leg.type == "option_stream"
+    }
+    # COMPOSED-PORTFOLIO legs: each references a saved pure portfolio inlined by
+    # the frontend; evaluated to a synthetic equity series like a signal leg.
+    portfolio_legs = {
+        label: leg for label, leg in body.legs.items() if leg.type == "portfolio"
     }
 
     # ── 3. Fetch instrument prices (if any) ──
@@ -1637,6 +1898,29 @@ async def compute_portfolio(
                 "metrics": _compute_level_metrics(os_values),
             }
 
+    # ── 4.6. Evaluate composed-portfolio legs (if any) ──
+    #
+    # Each portfolio leg is computed to an equity curve (over the parent's
+    # requested range) and injected as a synthetic close series, exactly like a
+    # signal leg.  Its DIRECTION is the parent weight sign (no baked-in sign, so
+    # NOT a hold_option_label) and it rebalances at the parent's frequency.
+    portfolio_leg_dates_map: dict[str, npt.NDArray[np.int64]] = {}
+    portfolio_leg_closes: dict[str, npt.NDArray[np.float64]] = {}
+    for label, leg in portfolio_legs.items():
+        pf_dates, pf_equity = await _evaluate_portfolio_leg(
+            label,
+            leg,
+            svc,
+            classify,
+            repo,
+            body.start,
+            body.end,
+            body.use_cache,
+        )
+        portfolio_leg_dates_map[label] = pf_dates
+        portfolio_leg_closes[label] = pf_equity
+        all_date_grids.append(pf_dates)
+
     # ── 5. Align all series to common dates ──
 
     if not all_date_grids:
@@ -1683,6 +1967,15 @@ async def compute_portfolio(
         )
         aligned_closes[label] = option_stream_closes[label][os_mask]
 
+    # Slice composed-portfolio leg equities to common dates
+    for label in portfolio_leg_closes:
+        pf_mask = np.isin(
+            portfolio_leg_dates_map[label],
+            common_dates,
+            assume_unique=True,
+        )
+        aligned_closes[label] = portfolio_leg_closes[label][pf_mask]
+
     # Align each hold-mode option leg's DISPLAY-ONLY side-channels to common_dates
     # (same os_mask as the synthetic close, computed once per label in the shared
     # ``_align_hold_series`` helper) so the trade-log roll rows are sized/priced off
@@ -1727,6 +2020,8 @@ async def compute_portfolio(
         full_date_grids.append(signal_dates_map[label])
     for label in option_stream_dates_map:
         full_date_grids.append(option_stream_dates_map[label])
+    for label in portfolio_leg_dates_map:
+        full_date_grids.append(portfolio_leg_dates_map[label])
 
     full_common_all = full_date_grids[0]
     for grid in full_date_grids[1:]:
@@ -2164,3 +2459,109 @@ async def compute_portfolio(
     # the source (so curves are correct, not merely nulled), but this is the
     # last line that makes the invariant total. (#6)
     return sanitize_json_floats(response)
+
+
+@router.post("/compute")
+async def compute_portfolio(
+    body: PortfolioRequest,
+    svc: MarketDataService = Depends(get_market_data),
+    classify: Callable[[str], AssetClass | None] = Depends(get_collection_classifier),
+    repo: WriteRepository = Depends(get_write_repository),
+) -> dict:
+    """Compute a weighted portfolio, served from the on-disk result cache.
+
+    The result is content-addressed on the request body (children already
+    inlined), so:
+
+    * a repeat of the same ``(spec, range)`` is served from cache without
+      recomputing (``from_cache: true``);
+    * a composed-portfolio leg that references a portfolio already computed
+      standalone hits the SAME entry — its ``_evaluate_portfolio_leg`` recurses
+      into THIS wrapper with an identically-serialised child body (the Bug-2
+      unified-reuse fix; Sign 9);
+    * editing a child changes the inlined body → new key → recompute (live-ref
+      invalidation preserved).
+
+    The cached blob is the pure sanitized result; ``from_cache`` and
+    ``computed_ms`` are response-only metadata added here (never stored), so a
+    cached serve is byte-identical to a fresh compute apart from those two fields
+    (BC-3). Cache access runs off the event loop (``asyncio.to_thread`` inside
+    the cache). Validation errors from the uncached compute propagate as usual
+    (400, never cached).
+
+    ``body.use_cache=False`` (the Settings opt-out) bypasses the cache entirely:
+    no read, no write, always a fresh compute (``from_cache: false``). The flag
+    is threaded to composed children so they recompute fresh too."""
+    # Cache opt-out: skip the cache on both ends — never read, never write.
+    if not body.use_cache:
+        started = time.perf_counter()
+        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        computed_ms = int((time.perf_counter() - started) * 1000)
+        return {**result, "from_cache": False, "computed_ms": computed_ms}
+
+    cache = _get_result_cache()
+    key = _portfolio_cache_key(body)
+
+    # Single cache code path via ``get_or_compute``. The compute closure runs ONLY
+    # on a miss, so it doubles as the hit/miss signal: it stamps ``computed_ms``,
+    # which stays None on a hit → ``from_cache`` is exactly "the closure did not
+    # run". This keeps the response metadata without a second manual get/put path.
+    meta: dict[str, int | None] = {"computed_ms": None}
+
+    async def _compute() -> dict:
+        compute_started = time.perf_counter()
+        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        meta["computed_ms"] = int((time.perf_counter() - compute_started) * 1000)
+        return result
+
+    result = await cache.get_or_compute(key, _compute)
+    return {
+        **result,
+        "from_cache": meta["computed_ms"] is None,
+        "computed_ms": meta["computed_ms"],
+    }
+
+
+@router.post("/cache/clear")
+async def clear_portfolio_cache() -> dict:
+    """Clear the on-disk portfolio result cache (the Settings "Clear cached
+    results" action). Content-addressed, so this only forces the next compute of
+    each body to recompute-and-repopulate — never a correctness change."""
+    cache = _get_result_cache()
+    await asyncio.to_thread(cache.clear)
+    return {"cleared": True}
+
+
+class CacheStatusRequest(BaseModel):
+    """Batch of compute bodies to check for a cached result (order-preserving)."""
+
+    queries: list[dict] = Field(default_factory=list)
+
+
+@router.post("/cache/status")
+async def portfolio_cache_status(body: CacheStatusRequest) -> dict:
+    """Report, per query body, whether a cached compute result already exists —
+    WITHOUT computing anything and WITHOUT reading market data.
+
+    For each body it computes the SAME canonical key the compute path uses
+    (``_portfolio_cache_key``, which excludes ``use_cache``) and ``peek``s the
+    on-disk cache (a pure, non-mutating existence check that respects the TTL and
+    never bumps the LRU). So the status agrees exactly with a real hit, and a
+    composed body's status reflects child edits automatically (children are
+    inlined into the key). This endpoint takes NO market-data / repo dependency,
+    so it structurally cannot fetch dwh or trigger a compute.
+
+    Response ``{"results": [{"cached": bool}, ...]}`` is parallel to
+    ``queries``. A malformed / unparseable body yields ``cached: false`` (never a
+    500) — it could not have been cached under a valid key anyway.
+    """
+    cache = _get_result_cache()
+    results: list[dict] = []
+    for query in body.queries:
+        try:
+            req = PortfolioRequest(**query)
+            cached = await cache.peek(_portfolio_cache_key(req))
+        except Exception:  # noqa: BLE001 — any parse failure ⇒ not cached, no 500
+            cached = False
+        results.append({"cached": bool(cached)})
+    return {"results": results}

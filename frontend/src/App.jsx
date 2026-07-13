@@ -79,12 +79,32 @@ function App() {
                 </PageContainer>
               }
             />
+            {/* Distinct ``key`` per route so React REMOUNTS PortfolioPage on a
+                pure↔composed switch. Both routes render the same component type
+                at the same tree position, so without a key React reconciles them
+                as ONE instance and usePortfolio's state (legs, persistedId,
+                persistedLocked, name, results…) leaks across the switch — the
+                carried-over persistedLocked also disabled the holdings fieldset,
+                which is why the leaked legs couldn't be removed. */}
             <Route
               path="/portfolio"
               element={
                 <PageContainer>
                   <ErrorBoundary>
-                    <PortfolioPage />
+                    <PortfolioPage key="pure" />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            {/* Composed portfolios — the SAME page component behind the
+                ``mode="composed"`` capability flag (Sign 5: shared components,
+                no duplicated page). */}
+            <Route
+              path="/composed-portfolios"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <PortfolioPage key="composed" mode="composed" />
                   </ErrorBoundary>
                 </PageContainer>
               }

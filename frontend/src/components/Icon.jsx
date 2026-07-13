@@ -12,6 +12,15 @@ const ICONS = {
       <path d="M22 12A10 10 0 0 0 12 2v10z" />
     </>
   ),
+  // Composed portfolios = stacked/layered building blocks (distinct from the
+  // single-portfolio pie above).
+  layers: (
+    <>
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
+    </>
+  ),
   help: (
     <>
       <circle cx="12" cy="12" r="10" />

@@ -10,7 +10,7 @@ import {
   PORTFOLIO_CACHE_KEY,
   isPortfolioCacheEnabled,
 } from '../../lib/userSettings';
-import { clearCache } from '../../lib/portfolioCache';
+import { clearPortfolioCache } from '../../api/portfolio';
 
 function getStoredTheme() {
   try {
@@ -48,10 +48,11 @@ function SettingsPage() {
   const [theme, setTheme] = useState(getStoredTheme);
   const [chartType, setChartType] = useState(getStoredChartType);
   const [rfPct, setRfPct] = useState(getStoredRiskFreeRate);
-  // Local portfolio-result cache — opt-in, default OFF. Persisted to
-  // localStorage; read by usePortfolio at mount.
+  // Portfolio-result cache toggle — DEFAULT ON. Persisted to localStorage;
+  // read by usePortfolio at mount and sent as ``use_cache`` on compute.
   const [portfolioCache, setPortfolioCache] = useState(isPortfolioCacheEnabled);
   const [cacheCleared, setCacheCleared] = useState(false);
+  const [cacheClearError, setCacheClearError] = useState(false);
   // Desktop-only: the app version (from tauri.conf.json) shown in a small
   // footer. Empty in web mode so nothing renders there.
   const [appVersion, setAppVersion] = useState('');
@@ -111,6 +112,7 @@ function SettingsPage() {
   function handlePortfolioCacheToggle(next) {
     setPortfolioCache(next);
     setCacheCleared(false);
+    setCacheClearError(false);
     try {
       localStorage.setItem(PORTFOLIO_CACHE_KEY, String(next));
     } catch {
@@ -119,8 +121,12 @@ function SettingsPage() {
   }
 
   function handleClearCache() {
-    // Best-effort; clearCache never throws. Reflect the action in the UI.
-    Promise.resolve(clearCache()).finally(() => setCacheCleared(true));
+    setCacheCleared(false);
+    setCacheClearError(false);
+    // Clear the BACKEND cache, then acknowledge in the UI.
+    Promise.resolve(clearPortfolioCache())
+      .then(() => setCacheCleared(true))
+      .catch(() => setCacheClearError(true));
   }
 
   return (
@@ -218,9 +224,9 @@ function SettingsPage() {
             </button>
           </div>
           <div className={styles.settingHint}>
-            Reuse a portfolio&apos;s last computed result instantly when nothing
-            changed. Editing the portfolio, a signal, or an indicator recomputes
-            automatically.
+            When on, compute reuses the backend&apos;s stored result for an
+            identical portfolio and range; editing anything recomputes. Turn off
+            to always recompute fresh.
             {' '}
             <button
               type="button"
@@ -231,6 +237,7 @@ function SettingsPage() {
               Clear cached results
             </button>
             {cacheCleared ? <span data-testid="cache-cleared"> — cleared</span> : null}
+            {cacheClearError ? <span data-testid="cache-clear-error"> — failed</span> : null}
           </div>
         </div>
       </div>

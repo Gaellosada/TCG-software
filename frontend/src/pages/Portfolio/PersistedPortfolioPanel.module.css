@@ -127,9 +127,8 @@
 
 /* Per-row cache status dot (cache-ON only). Fixed width so the row layout
    never jumps between checking / cached / not-cached. */
-/* Per-row cache status TAG — right-aligned text pill, styled to match the
-   active Compute-row badge (.cacheBadge in PortfolioPage.module.css) for a
-   consistent look. Fixed to its content; the row gap handles spacing. */
+/* Per-row cache status TAG — right-aligned text pill matching the active
+   Compute-row badge (.cacheBadge in PortfolioPage.module.css). */
 .cacheTag {
   flex: 0 0 auto;
   font-size: 0.72rem;

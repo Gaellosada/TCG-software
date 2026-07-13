@@ -3,7 +3,9 @@ import usePortfolio from './usePortfolio';
 import HoldingsList from './HoldingsList';
 import AddHoldingModal from './AddHoldingModal';
 import SignalPickerModal from './SignalPickerModal';
+import PortfolioPickerModal from './PortfolioPickerModal';
 import PersistedPortfolioPanel from './PersistedPortfolioPanel';
+import usePortfolioCacheStatus from './usePortfolioCacheStatus';
 import TimeRangeSlider from '../../components/TimeRangeSlider';
 import PortfolioEquityChart from './PortfolioEquityChart';
 import ReturnsGrid from './ReturnsGrid';
@@ -17,8 +19,6 @@ import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
 import styles from './PortfolioPage.module.css';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
-import { hasCached } from '../../lib/portfolioCache';
-import useSavedPortfolioCacheStatus from './useSavedPortfolioCacheStatus';
 import {
   createPortfolio,
   updatePortfolio,
@@ -28,6 +28,8 @@ import {
   isLockedError,
 } from '../../api/persistence';
 import { usePortfoliosList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
+import { useQueryClient } from '@tanstack/react-query';
+import { queryKeys } from '../../queryKeys';
 
 // Portfolio API returns dates as ISO ``YYYY-MM-DD`` strings; the
 // Statistics endpoint expects YYYYMMDD integers (existing project
@@ -55,9 +57,21 @@ const REBALANCE_OPTIONS = [
   { value: 'annually', label: 'Annually' },
 ];
 
-function PortfolioPage() {
+// ``mode`` parameterizes the single shared page into two routes (Sign 5 — no
+// duplicated page code):
+//   "pure"     → the existing /portfolio route. No "Add portfolio" action;
+//                saved-list shows pure/legacy portfolios; saves kind:"pure".
+//   "composed" → the /composed-portfolios route. "Add portfolio" opens the
+//                PortfolioPickerModal (pure-only); saved-list shows composed;
+//                saves kind:"composed"; portfolio-ref legs are allowed.
+function PortfolioPage({ mode = 'pure' }) {
+  const allowPortfolioLegs = mode === 'composed';
+  const portfolioKind = allowPortfolioLegs ? 'composed' : 'pure';
   const portfolio = usePortfolio();
   const [modalOpen, setModalOpen] = useState(false);
+  // Portfolio picker (composed page only): pick a saved pure portfolio to add
+  // as a leg. Kept separate from the instrument/signal modals.
+  const [portfolioModalOpen, setPortfolioModalOpen] = useState(false);
   // Index of the leg whose instrument config is being edited (null = not
   // editing). Drives the shared AddHoldingModal into edit mode. Kept separate
   // from modalOpen so the add (append) flow is untouched.
@@ -77,6 +91,7 @@ function PortfolioPage() {
   // invalidate.portfolios() → background refetch → re-sync.
   const portfoliosQuery = usePortfoliosList(portfolio.persistedCategory);
   const invalidate = useInvalidatePersistence();
+  const queryClient = useQueryClient();
   const [portfolios, setPortfolios] = useState([]);
 
   // Separate status state for one-shot operations (save-current / archive /
@@ -102,6 +117,18 @@ function PortfolioPage() {
   useEffect(() => {
     if (portfoliosQuery.data) setPortfolios(portfoliosQuery.data);
   }, [portfoliosQuery.data]);
+
+  // Saved-list separation by page (Sign 5 + design §5): the pure route shows
+  // pure/legacy portfolios; the composed route shows composed ones. ``kind`` is
+  // authoritative; a doc with no ``kind`` is legacy → pure. The full
+  // ``portfolios`` list is kept intact (handleSelect/autosave still look up by
+  // id across it) — only the RENDERED/scanned subset is filtered.
+  const visiblePortfolios = useMemo(
+    () => portfolios.filter((p) => (
+      allowPortfolioLegs ? p.kind === 'composed' : p.kind !== 'composed'
+    )),
+    [portfolios, allowPortfolioLegs],
+  );
 
   // Serialize the portfolio leg list into the wire shape — strip the
   // local-only ``id`` (which we assign on load and never persist) and
@@ -139,6 +166,14 @@ function PortfolioPage() {
     // (``sizing_mode`` is a non-optional Literal — never send null).
     ...(l.sizing_mode ? { sizing_mode: l.sizing_mode } : {}),
     ...(l.futures_reference ? { futures_reference: l.futures_reference } : {}),
+    // Composed leg: a live reference to a saved pure portfolio. Emitted ONLY for
+    // portfolio legs so every other leg's wire shape stays byte-identical (the
+    // autosave dirty-diff snapshots the raw stored legs, which legacy docs have
+    // without these fields). Only the id + name are persisted — the child's full
+    // spec is resolved FRESH at compute so edits to the child propagate.
+    ...(l.type === 'portfolio'
+      ? { portfolioId: l.portfolioId || null, portfolioName: l.portfolioName || null }
+      : {}),
   })), []);
 
   // Save current portfolio state to backend in the selected category.
@@ -156,6 +191,9 @@ function PortfolioPage() {
         category,
         legs: legsToWire(portfolio.legs),
         rebalance: portfolio.rebalance || 'none',
+        // pure vs composed — opaque top-level field (design §5); legacy docs
+        // with no ``kind`` are treated as pure everywhere they're read.
+        kind: portfolioKind,
       });
       setOneshotError(null);
       setOneshotStatus('saved');
@@ -180,7 +218,7 @@ function PortfolioPage() {
     saveInput,
     portfolio.portfolioName, portfolio.persistedCategory, portfolio.legs, portfolio.rebalance,
     portfolio.setPersistedId, portfolio.setPersistedCategory, portfolio.setPortfolioName,
-    portfolio.markSaved, invalidate, legsToWire,
+    portfolio.markSaved, invalidate, legsToWire, portfolioKind,
   ]);
 
   // Move a persisted portfolio to a different category. Preserves all
@@ -195,6 +233,9 @@ function PortfolioPage() {
         category: newCat,
         legs: target.legs || [],
         rebalance: target.rebalance || 'none',
+        // Preserve the doc's own kind on a pure category move (fall back to the
+        // page mode for legacy docs that predate the field).
+        kind: target.kind || portfolioKind,
       });
       setOneshotError(null);
       setOneshotStatus('saved');
@@ -214,7 +255,7 @@ function PortfolioPage() {
       // eslint-disable-next-line no-console
       console.error('updatePortfolio (category change) failed:', err);
     }
-  }, [portfolios, portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedCategory, invalidate]);
+  }, [portfolios, portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedCategory, invalidate, portfolioKind]);
 
   // Archive (soft-delete) a persisted portfolio.
   const handleArchivePortfolio = useCallback(async (id) => {
@@ -306,6 +347,7 @@ function PortfolioPage() {
       category: portfolio.persistedCategory,
       legs: legsToWire(portfolio.legs),
       rebalance: portfolio.rebalance || 'none',
+      kind: portfolioKind,
     });
   }, [
     portfolio.persistedId,
@@ -314,6 +356,7 @@ function PortfolioPage() {
     portfolio.legs,
     portfolio.rebalance,
     legsToWire,
+    portfolioKind,
   ]);
 
   // Track the snapshot we last received from the backend so we don't
@@ -336,10 +379,13 @@ function PortfolioPage() {
           category: persisted.category,
           legs: persisted.legs || [],
           rebalance: persisted.rebalance || 'none',
+          // Match cloudPayload's shape (the page mode drives kind) so a
+          // freshly-loaded doc isn't seen as dirty and PUT back immediately.
+          kind: portfolioKind,
         }),
       };
     }
-  }, [portfolio.persistedId, portfolios]);
+  }, [portfolio.persistedId, portfolios, portfolioKind]);
 
   const cloudDirty = !!cloudPayload
     && (lastSeenPayloadRef.current.id !== portfolio.persistedId
@@ -412,7 +458,20 @@ function PortfolioPage() {
     // every autosave — it would cause flicker and reset scroll position
     // during rapid editing. The local state is authoritative until a
     // category change, add, or archive operation.
-  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved]);
+    //
+    // BUT invalidate THIS doc's DETAIL query so composed portfolios that
+    // reference it as a live child re-resolve the fresh spec. ``resolveChildrenNow``
+    // reads the child through ``queryClient.fetchQuery(portfolios.detail(id),
+    // staleTime:10s)``; without this, an edit made via autosave/manual-Save
+    // would be masked by the 10s stale window and the composed parent would
+    // compute the OLD child (live-ref breaks). Only the DETAIL key is
+    // invalidated (not the list), so the no-flicker guarantee above is kept —
+    // and the detail query has no active observer here, so this just marks it
+    // stale for the next fetch (no refetch storm).
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.persistence.portfolios.detail(portfolio.persistedId),
+    });
+  }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved, queryClient]);
 
   const {
     status: cloudStatus,
@@ -487,6 +546,7 @@ function PortfolioPage() {
       category: portfolio.persistedCategory,
       legs: legsToWire(portfolio.legs),
       rebalance: portfolio.rebalance || 'none',
+      kind: portfolioKind,
     });
     saveNowCloud(overridePayload);
   }, [
@@ -501,64 +561,50 @@ function PortfolioPage() {
     legsToWire,
     handleCreatePortfolio,
     saveNowCloud,
+    portfolioKind,
   ]);
 
-  // ── Cache badge for the active portfolio ──
-  // null = unknown / gated (no key yet); true/false = cached / not-cached.
-  // Re-checks whenever the current key changes OR a write bumps cacheVersion.
-  const [badgeCached, setBadgeCached] = useState(null);
-  useEffect(() => {
-    if (!portfolio.cacheEnabled || !portfolio.currentCacheKey) {
-      setBadgeCached(null);
-      return undefined;
-    }
-    let cancelled = false;
-    hasCached(portfolio.currentCacheKey)
-      .then((h) => { if (!cancelled) setBadgeCached(h); })
-      .catch(() => { if (!cancelled) setBadgeCached(false); });
-    return () => { cancelled = true; };
-  }, [portfolio.cacheEnabled, portfolio.currentCacheKey, portfolio.cacheVersion]);
-  // Show the badge only once a key has resolved (gated until ranges settle).
-  const showCacheBadge = portfolio.cacheEnabled
-    && portfolio.currentCacheKey != null
-    && badgeCached != null;
-  // The Compute button reads "Recompute" while a cached result is on screen
-  // (cache on, a result is displayed, and it matches the current cached config).
-  const showRecomputeLabel = portfolio.cacheEnabled
-    && !!portfolio.results
-    && badgeCached === true;
-  // Cache-ON "modified — recompute needed" empty state: shown when the current
-  // config is confirmed NOT cached and nothing is displayed. Gated on
-  // badgeCached === false so it never flashes before the range/key resolves.
-  // FIX B: suppressed while an error banner is up (show one or the other; the
-  // error takes precedence).
-  const showRecomputeNeeded = portfolio.cacheEnabled
-    && !portfolio.results
-    && !portfolio.loading
-    && !portfolio.error
-    && portfolio.legs.length > 0
-    && badgeCached === false;
+  // ── Proactive cache-status indicators (backend-driven) ──
+  // Re-probe after each compute (a fresh compute populates the backend cache, so
+  // the active config flips to "cached"). ``portfolio.results`` identity changes
+  // once per completed compute.
+  const [probeVersion, setProbeVersion] = useState(0);
+  useEffect(() => { setProbeVersion((v) => v + 1); }, [portfolio.results]);
 
-  // Per-row "cached" status for the Saved Portfolios list (cache-ON only).
-  // The active row is skipped by the hook and supplied below from `badgeCached`.
-  const rowCacheStatus = useSavedPortfolioCacheStatus({
-    portfolios,
+  const { activeCached, rowStatusById } = usePortfolioCacheStatus({
     cacheEnabled: portfolio.cacheEnabled,
-    cacheVersion: portfolio.cacheVersion,
+    legs: portfolio.legs,
+    rebalance: portfolio.rebalance,
+    startDate: portfolio.startDate,
+    endDate: portfolio.endDate,
+    overlapRange: portfolio.overlapRange,
+    resolvePortfolio: portfolio.resolvePortfolio,
+    portfolios: visiblePortfolios,
     activeId: portfolio.persistedId,
+    refreshKey: probeVersion,
   });
-  // The ACTIVE portfolio's row must agree EXACTLY with the active badge, so
-  // derive it straight from `badgeCached` (the badge's own reactive source)
-  // rather than the hook's async active path — no divergence, no race.
-  const mergedRowCacheStatus = useMemo(() => {
-    if (!portfolio.cacheEnabled || !portfolio.persistedId) return rowCacheStatus;
-    const activeStatus = badgeCached === true
+
+  // Active-config badge (both states) — shown when caching is on and the probe
+  // resolved a status for the current (non-empty) config.
+  const showCacheBadge = portfolio.cacheEnabled
+    && portfolio.legs.length > 0
+    && activeCached !== null;
+  // The Compute button reads "Recompute" when the active config is already
+  // cached (a click still forces a fresh backend run).
+  const showRecomputeLabel = portfolio.cacheEnabled && activeCached === true;
+
+  // The ACTIVE row's status in the saved list is authoritative from the active
+  // badge (same config) — override the hook's row entry for it (no divergence).
+  const mergedRowStatus = useMemo(() => {
+    if (!portfolio.cacheEnabled) return {};
+    if (!portfolio.persistedId) return rowStatusById;
+    const activeStatus = activeCached === true
       ? 'cached'
-      : badgeCached === false
+      : activeCached === false
         ? 'not-cached'
         : 'checking';
-    return { ...rowCacheStatus, [portfolio.persistedId]: activeStatus };
-  }, [rowCacheStatus, portfolio.cacheEnabled, portfolio.persistedId, badgeCached]);
+    return { ...rowStatusById, [portfolio.persistedId]: activeStatus };
+  }, [rowStatusById, portfolio.cacheEnabled, portfolio.persistedId, activeCached]);
 
   return (
     <div className={styles.page}>
@@ -566,7 +612,7 @@ function PortfolioPage() {
         {/* ── Header ── */}
         <div className={styles.header}>
           <div className={styles.headerLeft}>
-            <h2 className={styles.pageTitle}>Portfolio</h2>
+            <h2 className={styles.pageTitle}>{allowPortfolioLegs ? 'Composed Portfolios' : 'Portfolio'}</h2>
             {/* New portfolio — detach from current and start fresh */}
             <button
               className={styles.newBtn}
@@ -671,7 +717,7 @@ function PortfolioPage() {
           <PersistedPortfolioPanel
             category={portfolio.persistedCategory}
             onCategoryChange={portfolio.setPersistedCategory}
-            portfolios={portfolios}
+            portfolios={visiblePortfolios}
             loading={portfoliosLoading}
             onSaveCurrent={handleCreatePortfolio}
             saveDisabled={portfolio.legs.length === 0}
@@ -681,7 +727,7 @@ function PortfolioPage() {
             onSelect={handleSelectPersisted}
             onSetPortfolioLocked={handleSetPortfolioLocked}
             cacheEnabled={portfolio.cacheEnabled}
-            cacheStatusById={mergedRowCacheStatus}
+            cacheStatusById={mergedRowStatus}
           />
         </div>
 
@@ -707,6 +753,9 @@ function PortfolioPage() {
             onOpenSignalModal={() => setSignalModalOpen(true)}
             onEditLeg={handleEditLeg}
             readOnly={portfolio.persistedLocked}
+            allowPortfolioLegs={allowPortfolioLegs}
+            onOpenPortfolioModal={() => setPortfolioModalOpen(true)}
+            portfolioRefStatus={portfolio.portfolioRefStatus}
           />
         </fieldset>
 
@@ -737,28 +786,26 @@ function PortfolioPage() {
               </select>
             </fieldset>
 
-            {/* Cache badge — active portfolio only, shown when the local cache
-                is enabled and a key has resolved. "Cached ✓" means the result
-                for this exact config is auto-displayed from IndexedDB; editing a
-                leg/weight/signal/indicator flips it to "Not cached" and blanks
-                the display until Recompute. */}
+            {/* Proactive cache badge (backend-driven) — shows whether an
+                identical Compute would be served from the backend cache. Both
+                states; only when the caching toggle is on and a status resolved.
+                Editing anything re-probes and flips it to "not cached". */}
             {showCacheBadge && (
-              <div className={styles.cacheBadgeGroup}>
-                <span
-                  className={`${styles.cacheBadge} ${badgeCached ? styles.cacheBadgeHit : styles.cacheBadgeMiss}`}
-                  data-testid="portfolio-cache-badge"
-                  data-cached={badgeCached ? 'true' : 'false'}
-                  title={badgeCached
-                    ? 'This exact portfolio is cached — its result is shown automatically.'
-                    : 'Not cached — click Recompute to run the backend and store the result.'}
-                >
-                  {badgeCached ? 'Cached ✓' : 'Not cached'}
-                </span>
-              </div>
+              <span
+                className={`${styles.cacheBadge} ${activeCached ? styles.cacheBadgeHit : styles.cacheBadgeMiss}`}
+                data-testid="portfolio-cache-badge"
+                data-cached={activeCached ? 'true' : 'false'}
+                title={activeCached
+                  ? 'Cached — an identical Compute is served from the backend cache (no recompute).'
+                  : 'Not cached — Compute will run the backend and store the result.'}
+              >
+                {activeCached ? 'cached' : 'not cached'}
+              </span>
             )}
 
-            {/* Compute button — ALWAYS a fresh recompute (never served from
-                cache). Reads "Recompute" while a cached result is on screen. */}
+            {/* Compute button — a single fresh POST to /portfolio/compute; the
+                backend serves from its own cache transparently. Reads
+                "Recompute" while the active config is already cached. */}
             <button
               className={styles.computeBtn}
               type="button"
@@ -793,18 +840,6 @@ function PortfolioPage() {
           <div className={styles.section}>
             <div className={styles.loadingBar}>
               <div className={styles.loadingBarFill} />
-            </div>
-          </div>
-        )}
-
-        {/* ── Cache-ON "recompute needed" notice ──
-            The current config isn't cached and nothing is displayed (a fresh
-            portfolio, or one blanked by an edit). Never shown on the cache-OFF
-            path. */}
-        {showRecomputeNeeded && (
-          <div className={styles.section}>
-            <div className={styles.recomputeNotice} data-testid="portfolio-recompute-needed">
-              Portfolio modified — click Compute to update results.
             </div>
           </div>
         )}
@@ -975,6 +1010,21 @@ function PortfolioPage() {
           setSignalModalOpen(false);
         }}
       />
+
+      {/* ── Add Portfolio Modal (composed page only) ──
+          Lists ONLY pure portfolios (depth-1 enforcement #1). Excludes the
+          currently-loaded doc so a composed portfolio can't reference itself. */}
+      {allowPortfolioLegs && (
+        <PortfolioPickerModal
+          isOpen={portfolioModalOpen}
+          onClose={() => setPortfolioModalOpen(false)}
+          excludeId={portfolio.persistedId}
+          onSelect={(childPortfolio) => {
+            portfolio.addPortfolioLeg(childPortfolio);
+            setPortfolioModalOpen(false);
+          }}
+        />
+      )}
 
       {/* ── Archive portfolio confirmation ── */}
       <ConfirmDialog

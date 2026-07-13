@@ -573,6 +573,7 @@ def test_out_models_expose_locked_field() -> None:
         legs=[],
         rebalance="none",
         locked=True,
+        kind="pure",
     )
 
 

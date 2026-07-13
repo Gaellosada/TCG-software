@@ -7,16 +7,46 @@
 // from the usePortfolio effect).
 
 import { getInstrumentPrices, getContinuousSeries } from '../../api/data';
+import { getPortfolio } from '../../api/persistence';
 import { queryKeys } from '../../queryKeys';
 import { formatDateInt } from '../../utils/format';
 import { fetchSignalLegRange } from './signalLegRange';
 import { fetchOptionLegRange } from './optionLegRange';
+import { persistedDocToLegs } from './persistedDoc';
 
 /**
  * Resolve one leg's available range → `{ id, start, end }` (ISO strings or
  * null). Never throws — a failed/empty read degrades to nulls.
+ *
+ * ``_depth`` guards the composed-portfolio recursion (depth-1): a portfolio leg
+ * nested inside a child is not resolved (returns nulls), mirroring the compute
+ * builder + backend guard.
  */
-export async function resolveLegRange(leg, { queryClient }) {
+export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
+  if (leg.type === 'portfolio') {
+    // Composed leg: its available range is the OVERLAP of its referenced child's
+    // legs (the same grid the backend/compute builder use). Without this, a
+    // composed portfolio resolves NO range → overlapRange null → the compute
+    // window (and slider) can't settle on the composed page.
+    const portfolioId = leg.portfolioId || leg.portfolio_id || null;
+    if (!portfolioId || _depth >= 1) return { id: leg.id, start: null, end: null };
+    try {
+      const child = await queryClient.fetchQuery({
+        queryKey: queryKeys.persistence.portfolios.detail(portfolioId),
+        queryFn: () => getPortfolio(portfolioId),
+        staleTime: 10 * 1000,
+      });
+      const childLegs = persistedDocToLegs(child);
+      if (childLegs.length === 0) return { id: leg.id, start: null, end: null };
+      const childResults = await Promise.all(
+        childLegs.map((cl) => resolveLegRange(cl, { queryClient }, _depth + 1)),
+      );
+      const overlap = overlapRangeOf(childResults);
+      return { id: leg.id, start: overlap?.start ?? null, end: overlap?.end ?? null };
+    } catch {
+      return { id: leg.id, start: null, end: null };
+    }
+  }
   if (leg.type === 'signal') {
     return fetchSignalLegRange(leg);
   }

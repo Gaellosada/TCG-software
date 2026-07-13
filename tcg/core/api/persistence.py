@@ -359,6 +359,12 @@ class _PortfolioFields(_BaseWriteModel):
     category: Category
     legs: list[dict] = Field(default_factory=list)
     rebalance: RebalanceLiteral = "none"
+    # "pure" = no portfolio-ref legs (safe to be referenced); "composed" = may
+    # hold portfolio legs. The pure page sends "pure", the composed page sends
+    # "composed"; omitted (legacy client) defaults to "pure". Persisted in the
+    # opaque JSONB payload — no table/DDL change. ``extra="forbid"`` is why this
+    # must be an explicit field rather than riding along unvalidated.
+    kind: Literal["pure", "composed"] = "pure"
 
     @field_validator("legs")
     @classmethod
@@ -687,6 +693,8 @@ class PortfolioOut(BaseModel):
     legs: list[dict]
     rebalance: str
     locked: bool
+    # "pure" | "composed"; legacy docs (no stored kind) read back as "pure".
+    kind: str
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +742,7 @@ def _portfolio_to_out(doc: PortfolioDoc) -> PortfolioOut:
         legs=list(doc.legs),
         rebalance=doc.rebalance,
         locked=doc.locked,
+        kind=doc.kind,
     )
 
 
@@ -1077,6 +1086,7 @@ async def create_portfolio(body: PortfolioCreateIn, repo: RepoDep) -> PortfolioO
         updated_at=now,
         legs=tuple(body.legs),
         rebalance=body.rebalance,
+        kind=body.kind,
     )
     try:
         stored = await repo.create(doc)
@@ -1140,6 +1150,7 @@ async def update_portfolio(
         updated_at=existing.updated_at,
         legs=tuple(body.legs),
         rebalance=body.rebalance,
+        kind=body.kind,
         # See update_indicator: lock state is owned by /lock, never the
         # update body — preserve the stored flag verbatim.
         locked=existing.locked,

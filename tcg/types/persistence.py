@@ -150,6 +150,11 @@ class PortfolioDoc:
     legs: tuple[dict, ...] = field(default_factory=tuple)
     rebalance: str = "none"
     locked: bool = False
+    # "pure" (no portfolio-ref legs — safe to be referenced) vs "composed"
+    # (may hold portfolio legs). Opaque to this layer; carried in the JSONB
+    # payload. Legacy docs predate this field, so ``from_json_doc`` falls back
+    # to this default ("pure") when it is absent — an old portfolio is pure.
+    kind: str = "pure"
 
 
 @dataclass(frozen=True, slots=True)

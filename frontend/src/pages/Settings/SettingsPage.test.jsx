@@ -18,11 +18,18 @@ const getVersion = vi.fn(() => Promise.resolve('9.9.9-test'));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: (...a) => getVersion(...a) }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: () => Promise.resolve(undefined) }));
 
+// The Clear-cache button hits the backend; mock the api so no HTTP is attempted.
+const clearPortfolioCache = vi.fn(() => Promise.resolve({ cleared: true }));
+vi.mock('../../api/portfolio', () => ({
+  clearPortfolioCache: (...a) => clearPortfolioCache(...a),
+}));
+
 import SettingsPage from './SettingsPage';
 
 beforeEach(() => {
   localStorage.clear();
   getVersion.mockClear();
+  clearPortfolioCache.mockClear();
 });
 
 afterEach(() => {
@@ -92,36 +99,31 @@ describe('<SettingsPage> — risk-free rate row', () => {
   });
 });
 
-describe('<SettingsPage> — portfolio-result cache toggle', () => {
-  it('defaults to OFF when localStorage is empty', () => {
-    render(<SettingsPage />);
-    const on = screen.getByTestId('portfolio-cache-on');
-    const off = screen.getByTestId('portfolio-cache-off');
-    expect(on.getAttribute('aria-checked')).toBe('false');
-    expect(off.getAttribute('aria-checked')).toBe('true');
-  });
-
-  it('reflects a stored "true" as ON', () => {
-    localStorage.setItem('tcg-portfolio-cache-enabled', 'true');
+describe('<SettingsPage> — portfolio-result cache toggle (backend flag)', () => {
+  it('defaults to ON when localStorage is empty', () => {
     render(<SettingsPage />);
     expect(screen.getByTestId('portfolio-cache-on').getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByTestId('portfolio-cache-off').getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('reflects a stored "false" as OFF', () => {
+    localStorage.setItem('tcg-portfolio-cache-enabled', 'false');
+    render(<SettingsPage />);
+    expect(screen.getByTestId('portfolio-cache-off').getAttribute('aria-checked')).toBe('true');
   });
 
   it('writes String(true)/String(false) to localStorage on toggle', () => {
     render(<SettingsPage />);
-    fireEvent.click(screen.getByTestId('portfolio-cache-on'));
-    expect(localStorage.getItem('tcg-portfolio-cache-enabled')).toBe('true');
     fireEvent.click(screen.getByTestId('portfolio-cache-off'));
     expect(localStorage.getItem('tcg-portfolio-cache-enabled')).toBe('false');
+    fireEvent.click(screen.getByTestId('portfolio-cache-on'));
+    expect(localStorage.getItem('tcg-portfolio-cache-enabled')).toBe('true');
   });
 
-  it('renders a "Clear cached results" button that acknowledges the click', async () => {
+  it('Clear button calls the backend clear endpoint and acknowledges', async () => {
     render(<SettingsPage />);
-    const btn = screen.getByTestId('clear-cache-btn');
-    expect(btn).toBeTruthy();
-    fireEvent.click(btn);
-    // clearCache() is best-effort (no IndexedDB in jsdom → resolves false); the
-    // UI still confirms the action ran.
+    fireEvent.click(screen.getByTestId('clear-cache-btn'));
+    expect(clearPortfolioCache).toHaveBeenCalledTimes(1);
     await waitFor(() => {
       expect(screen.getByTestId('cache-cleared')).toBeTruthy();
     });
