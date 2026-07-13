@@ -6,6 +6,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   getRiskFreeRateFraction,
+  isPortfolioCacheEnabled,
+  PORTFOLIO_CACHE_KEY,
   DEFAULT_RISK_FREE_RATE_PCT,
   DEFAULT_RISK_FREE_RATE_FRACTION,
 } from './userSettings';
@@ -79,6 +81,44 @@ describe('getRiskFreeRateFraction()', () => {
       throw new Error('SecurityError');
     });
     expect(getRiskFreeRateFraction()).toBeCloseTo(0.04, 10);
+    spy.mockRestore();
+  });
+});
+
+describe('isPortfolioCacheEnabled() — DEFAULT ON', () => {
+  it('defaults to TRUE when the key is absent', () => {
+    expect(isPortfolioCacheEnabled()).toBe(true);
+  });
+
+  it('is false ONLY for the exact string "false"', () => {
+    localStorage.setItem(PORTFOLIO_CACHE_KEY, 'false');
+    expect(isPortfolioCacheEnabled()).toBe(false);
+  });
+
+  it('is true for "true"', () => {
+    localStorage.setItem(PORTFOLIO_CACHE_KEY, 'true');
+    expect(isPortfolioCacheEnabled()).toBe(true);
+  });
+
+  it('is true for any non-"false" value (e.g. "1", "FALSE", "no", "")', () => {
+    for (const v of ['1', 'FALSE', 'no', '']) {
+      localStorage.setItem(PORTFOLIO_CACHE_KEY, v);
+      expect(isPortfolioCacheEnabled()).toBe(true);
+    }
+  });
+
+  it('round-trips String(true)/String(false) written by the Settings toggle', () => {
+    localStorage.setItem(PORTFOLIO_CACHE_KEY, String(false));
+    expect(isPortfolioCacheEnabled()).toBe(false);
+    localStorage.setItem(PORTFOLIO_CACHE_KEY, String(true));
+    expect(isPortfolioCacheEnabled()).toBe(true);
+  });
+
+  it('returns true (never throws) when localStorage.getItem throws', () => {
+    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('SecurityError');
+    });
+    expect(isPortfolioCacheEnabled()).toBe(true);
     spy.mockRestore();
   });
 });

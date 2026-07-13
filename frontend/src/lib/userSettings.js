@@ -26,3 +26,22 @@ export function getRiskFreeRateFraction() {
     return DEFAULT_RISK_FREE_RATE_FRACTION;
   }
 }
+
+// localStorage key for the portfolio-result cache toggle. The toggle now drives
+// a REQUEST FLAG (``use_cache``) sent to the backend's on-disk cache — there is
+// no frontend result cache. DEFAULT ON: caching is on unless explicitly off.
+export const PORTFOLIO_CACHE_KEY = 'tcg-portfolio-cache-enabled';
+
+/**
+ * Whether compute requests should ask the backend to cache. DEFAULT ON — true
+ * unless the stored value is exactly the string 'false' (mirrors the App.jsx
+ * boolean idiom). Absent / any other value / unavailable localStorage → true.
+ * Read at mount by usePortfolio (a toggle change applies on the next mount).
+ */
+export function isPortfolioCacheEnabled() {
+  try {
+    return localStorage.getItem(PORTFOLIO_CACHE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}

@@ -8,6 +8,7 @@ import { legsToRangesKey } from './legKey';
 import { resolvePortfolioRange } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
+import { isPortfolioCacheEnabled } from '../../lib/userSettings';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
@@ -63,6 +64,12 @@ export default function usePortfolio() {
   // Mirrors the `locked` field from the backend doc; updated on load and
   // when the lock API call returns an updated doc.
   const [persistedLocked, setPersistedLocked] = useState(false);
+
+  // Whether compute requests ask the backend to cache (Settings toggle, DEFAULT
+  // ON). Read once at mount (a toggle change applies on the next mount, matching
+  // the userSettings convention). Sent as ``use_cache`` on every compute POST —
+  // OFF makes the backend recompute fresh. No frontend result cache.
+  const [useCache] = useState(() => isPortfolioCacheEnabled());
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -450,6 +457,7 @@ export default function usePortfolio() {
           returnType: body.return_type,
           start: body.start,
           end: body.end,
+          useCache,
           signal,
         });
         if (!signal.aborted) setResults(res);
@@ -458,7 +466,7 @@ export default function usePortfolio() {
         setError(err.message || 'Computation failed');
       }
     });
-  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, resolveChildrenNow]);
+  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, resolveChildrenNow, useCache]);
 
   const clearError = useCallback(() => setError(null), []);
 

@@ -5,7 +5,12 @@ import RiskFreeRateInput from '../../components/RiskFreeRateInput';
 import DatabaseSettings from './DatabaseSettings';
 import { isTauri } from '../../api/base';
 import styles from './SettingsPage.module.css';
-import { DEFAULT_RISK_FREE_RATE_PCT } from '../../lib/userSettings';
+import {
+  DEFAULT_RISK_FREE_RATE_PCT,
+  PORTFOLIO_CACHE_KEY,
+  isPortfolioCacheEnabled,
+} from '../../lib/userSettings';
+import { clearPortfolioCache } from '../../api/portfolio';
 
 function getStoredTheme() {
   try {
@@ -43,6 +48,11 @@ function SettingsPage() {
   const [theme, setTheme] = useState(getStoredTheme);
   const [chartType, setChartType] = useState(getStoredChartType);
   const [rfPct, setRfPct] = useState(getStoredRiskFreeRate);
+  // Portfolio-result cache toggle — DEFAULT ON. Persisted to localStorage;
+  // read by usePortfolio at mount and sent as ``use_cache`` on compute.
+  const [portfolioCache, setPortfolioCache] = useState(isPortfolioCacheEnabled);
+  const [cacheCleared, setCacheCleared] = useState(false);
+  const [cacheClearError, setCacheClearError] = useState(false);
   // Desktop-only: the app version (from tauri.conf.json) shown in a small
   // footer. Empty in web mode so nothing renders there.
   const [appVersion, setAppVersion] = useState('');
@@ -97,6 +107,26 @@ function SettingsPage() {
     } catch {
       // localStorage unavailable — ignore
     }
+  }
+
+  function handlePortfolioCacheToggle(next) {
+    setPortfolioCache(next);
+    setCacheCleared(false);
+    setCacheClearError(false);
+    try {
+      localStorage.setItem(PORTFOLIO_CACHE_KEY, String(next));
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }
+
+  function handleClearCache() {
+    setCacheCleared(false);
+    setCacheClearError(false);
+    // Clear the BACKEND cache, then acknowledge in the UI.
+    Promise.resolve(clearPortfolioCache())
+      .then(() => setCacheCleared(true))
+      .catch(() => setCacheClearError(true));
   }
 
   return (
@@ -162,6 +192,53 @@ function SettingsPage() {
             ariaLabel="Default risk-free rate (percent)"
           />
           <div className={styles.settingHint}>Used for Sharpe, Sortino, and Calmar ratios.</div>
+        </div>
+      </div>
+
+      <div className={styles.settingRow}>
+        <span className={styles.settingLabel}>Cache portfolio results</span>
+        <div>
+          <div
+            className={styles.buttonGroup}
+            role="radiogroup"
+            aria-label="Cache portfolio results"
+            data-testid="portfolio-cache-toggle"
+          >
+            <button
+              role="radio"
+              aria-checked={portfolioCache}
+              data-testid="portfolio-cache-on"
+              className={`${styles.optionBtn} ${portfolioCache ? styles.optionBtnActive : ''}`}
+              onClick={() => handlePortfolioCacheToggle(true)}
+            >
+              On
+            </button>
+            <button
+              role="radio"
+              aria-checked={!portfolioCache}
+              data-testid="portfolio-cache-off"
+              className={`${styles.optionBtn} ${!portfolioCache ? styles.optionBtnActive : ''}`}
+              onClick={() => handlePortfolioCacheToggle(false)}
+            >
+              Off
+            </button>
+          </div>
+          <div className={styles.settingHint}>
+            When on, compute reuses the backend&apos;s stored result for an
+            identical portfolio and range; editing anything recomputes. Turn off
+            to always recompute fresh.
+            {' '}
+            <button
+              type="button"
+              className={styles.linkBtn}
+              onClick={handleClearCache}
+              data-testid="clear-cache-btn"
+            >
+              Clear cached results
+            </button>
+            {cacheCleared ? <span data-testid="cache-cleared"> — cleared</span> : null}
+            {cacheClearError ? <span data-testid="cache-clear-error"> — failed</span> : null}
+          </div>
         </div>
       </div>
 

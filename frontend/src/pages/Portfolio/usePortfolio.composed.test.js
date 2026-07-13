@@ -41,6 +41,7 @@ const CHILD = {
 
 describe('usePortfolio — composed portfolio legs', () => {
   beforeEach(() => {
+    localStorage.clear();
     computePortfolio.mockClear();
     getPortfolio.mockReset();
     getPortfolio.mockResolvedValue(CHILD);
@@ -80,6 +81,20 @@ describe('usePortfolio — composed portfolio legs', () => {
       },
     });
     expect(arg.weights.Child).toBe(100);
+    // Cache toggle DEFAULT ON → use_cache flag true on the request.
+    expect(arg.useCache).toBe(true);
+  });
+
+  it('sends use_cache reflecting the Settings toggle (localStorage "false" → false)', async () => {
+    localStorage.setItem('tcg-portfolio-cache-enabled', 'false');
+    const { result } = renderHook(() => usePortfolio());
+    act(() => result.current.addPortfolioLeg(CHILD));
+    act(() => { result.current.setStartDate('2020-01-01'); result.current.setEndDate('2020-12-31'); });
+
+    await act(async () => { await result.current.handleCalculate(); });
+
+    expect(computePortfolio).toHaveBeenCalledTimes(1);
+    expect(computePortfolio.mock.calls[0][0].useCache).toBe(false);
   });
 
   it('blocks compute with a clear error when the child cannot be resolved', async () => {
