@@ -20,8 +20,11 @@ vi.mock('./resolvePortfolioRange', () => ({
     ranges: {}, overlapRange: { start: '2020-01-01', end: '2020-12-31' },
   })),
 }));
+// A composed ROW resolves its OWN children by id through here (FE-B1 fix).
+vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));
 
 import { getPortfolioCacheStatus } from '../../api/portfolio';
+import { getPortfolio } from '../../api/persistence';
 
 const ACTIVE_LEG = { id: 1, label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100 };
 
@@ -45,6 +48,7 @@ describe('usePortfolioCacheStatus', () => {
   beforeEach(() => {
     getPortfolioCacheStatus.mockReset();
     getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }] });
+    getPortfolio.mockReset();
   });
 
   it('probes the active config and reports activeCached from the response', async () => {
@@ -98,5 +102,49 @@ describe('usePortfolioCacheStatus', () => {
     expect(getPortfolioCacheStatus).not.toHaveBeenCalled();
     expect(result.current.activeCached).toBeNull();
     expect(result.current.rowStatusById).toEqual({});
+  });
+
+  // FE-B1: a NON-active COMPOSED saved row must resolve its OWN children (not the
+  // active editor's resolver) so its status body inlines the child spec — else it
+  // is always falsely 'not-cached'.
+  it('resolves a composed row\'s own child and reports it cached (not falsely not-cached)', async () => {
+    const child = {
+      id: 'c1', name: 'Child', kind: 'pure', category: 'RESEARCH', rebalance: 'none',
+      legs: [{ label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100 }],
+    };
+    getPortfolio.mockResolvedValue(child);
+    const composedRow = {
+      id: 'comp-1', rebalance: 'none',
+      legs: [{ label: 'Block', type: 'portfolio', portfolioId: 'c1', portfolioName: 'Child', weight: 100 }],
+    };
+    // No active legs → only the composed row is queried; results[0] → comp-1.
+    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }] });
+
+    const { result } = renderHook((props) => usePortfolioCacheStatus(props), {
+      initialProps: baseProps({ legs: [], portfolios: [composedRow] }),
+    });
+
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalled(), { timeout: 2000 });
+    // The row's OWN child was fetched by id …
+    expect(getPortfolio).toHaveBeenCalledWith('c1');
+    // … and the row body inlines the resolved child (not a broken ref).
+    const rowQuery = getPortfolioCacheStatus.mock.calls[0][0].find((b) => b.legs && b.legs.Block);
+    expect(rowQuery.legs.Block.type).toBe('portfolio');
+    expect(rowQuery.legs.Block.portfolio.legs.SPX).toBeTruthy();
+    // … so the row shows cached, NOT falsely not-cached.
+    await waitFor(() => expect(result.current.rowStatusById['comp-1']).toBe('cached'), { timeout: 2000 });
+  });
+
+  it('a pure row still resolves and reports its status', async () => {
+    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }] });
+    const pureRow = {
+      id: 'pure-1', rebalance: 'none',
+      legs: [{ label: 'NDX', type: 'instrument', collection: 'INDEX', symbol: 'NDX', weight: 100 }],
+    };
+    const { result } = renderHook((props) => usePortfolioCacheStatus(props), {
+      initialProps: baseProps({ legs: [], portfolios: [pureRow] }),
+    });
+    await waitFor(() => expect(result.current.rowStatusById['pure-1']).toBe('cached'), { timeout: 2000 });
+    expect(getPortfolio).not.toHaveBeenCalled(); // pure rows fetch no children
   });
 });

@@ -1,11 +1,13 @@
 // Single source of the /portfolio/compute wire body.
 //
-// Extracted from usePortfolio.handleCalculate so the CACHE-KEY path (badge) and
-// the COMPUTE path build the exact same object — key parity is a hard guardrail.
-// This function is pure: same (legs, rebalance, start, end, availableIndicators)
-// in → same body out. It performs NO validation side effects; it surfaces the
-// set of missing indicator ids so the caller can decide (compute aborts; the
-// badge treats a missing-indicator body as un-keyable).
+// Shared by the COMPUTE path (usePortfolio.handleCalculate) and the cache-STATUS
+// probe (usePortfolioCacheStatus) so both build the exact same object — the
+// backend keys its result cache off this body, so a status match means an
+// identical Compute is served from cache. This function is pure: same (legs,
+// rebalance, start, end, availableIndicators, resolvePortfolio) in → same body
+// out. It performs NO validation side effects; it surfaces the set of missing
+// indicator ids + broken portfolio refs so the caller can decide (compute
+// aborts; the status probe treats such a body as un-keyable).
 
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { persistedDocToLegs } from './persistedDoc';

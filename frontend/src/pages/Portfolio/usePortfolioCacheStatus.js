@@ -15,6 +15,8 @@ import { resolvePortfolioRange } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { getPortfolioCacheStatus } from '../../api/portfolio';
+import { getPortfolio } from '../../api/persistence';
+import { queryKeys } from '../../queryKeys';
 
 const CONCURRENCY = 4;
 const DEBOUNCE_MS = 300;
@@ -127,28 +129,74 @@ export default function usePortfolioCacheStatus({
         } catch { /* un-keyable active config → no active query (stays null) */ }
       }
 
-      // ── Build ROW bodies (memoized; the active row is derived from active) ──
+      // Resolve a saved ROW's OWN referenced child portfolios (by id) → a sync
+      // ``(id) => doc|null`` resolver over the fetched current specs. A row's
+      // children are NOT in the active editor's ``resolvePortfolio`` map (that
+      // only knows the loaded config's children), so composed rows MUST resolve
+      // their own — otherwise every non-active composed row inlines nothing →
+      // brokenRef → omitted → falsely "not cached" (FE-B1). Mirrors the child
+      // resolution in resolvePortfolioRange.js's portfolio branch; fetches go
+      // through React Query (deduped/cached; child edits invalidate the detail).
+      const resolveRowChildren = async (rowLegs) => {
+        const ids = [...new Set(
+          rowLegs
+            .filter((l) => l.type === 'portfolio' && (l.portfolioId || l.portfolio_id))
+            .map((l) => l.portfolioId || l.portfolio_id),
+        )];
+        if (ids.length === 0) return () => null;
+        const pairs = await Promise.all(ids.map(async (id) => {
+          try {
+            const doc = await queryClient.fetchQuery({
+              queryKey: queryKeys.persistence.portfolios.detail(id),
+              queryFn: () => getPortfolio(id),
+              staleTime: 10 * 1000,
+            });
+            return [id, doc];
+          } catch {
+            return [id, null];
+          }
+        }));
+        const map = Object.fromEntries(pairs);
+        return (id) => {
+          const doc = map[id];
+          if (!doc) return null;
+          if (doc.category === 'ARCHIVE' || doc.category === 'DELETED') return null;
+          if (!Array.isArray(doc.legs) || doc.legs.length === 0) return null;
+          return doc;
+        };
+      };
+
+      // ── Build ROW bodies (the active row is derived from activeCached) ──
       await runPool(rows, CONCURRENCY, async (doc) => {
         if (!live() || doc.id === activeId) return;
         try {
+          const rowLegs = persistedDocToLegs(doc);
+          const hasChildRefs = rowLegs.some((l) => l.type === 'portfolio');
           const sig = docSignature(doc);
           const memo = bodyCacheRef.current.get(doc.id);
-          let body = memo && memo.sig === sig ? memo.body : null;
+          // Memoize PURE rows only. A composed row's inlined child spec can
+          // change without the row's OWN legs changing (docSignature unchanged),
+          // so it must rebuild each probe to stay content-addressed on the
+          // current child (the child fetch is still React-Query-cached).
+          let body = (!hasChildRefs && memo && memo.sig === sig) ? memo.body : null;
           if (!body) {
-            const rowLegs = persistedDocToLegs(doc);
             const { overlapRange: ov } = await resolvePortfolioRange(rowLegs, { queryClient });
             if (ov && ov.start && ov.end) {
+              // Resolve THIS row's own children (composed rows) — not the active
+              // editor's resolver — so its status body inlines its real specs.
+              const rowResolver = hasChildRefs ? await resolveRowChildren(rowLegs) : () => null;
+              if (!live()) return;
               const built = buildPortfolioComputeBody({
                 legs: rowLegs,
                 rebalance: doc.rebalance || 'none',
                 start: ov.start,
                 end: ov.end,
                 availableIndicators,
-                resolvePortfolio,
+                resolvePortfolio: rowResolver,
               });
               if (!built.missing.length && !(built.brokenRefs && built.brokenRefs.length)) {
                 body = built.body;
-                bodyCacheRef.current.set(doc.id, { sig, body });
+                if (!hasChildRefs) bodyCacheRef.current.set(doc.id, { sig, body });
               }
             }
           }
