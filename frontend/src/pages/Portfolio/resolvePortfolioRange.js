@@ -108,6 +108,40 @@ export function overlapRangeOf(perLegResults) {
 }
 
 /**
+ * FUND-OF-FUNDS: resolve the OWN date range of each referenced child portfolio →
+ * `Map<portfolioId, {start, end}>`. A child's own range is the OVERLAP of its
+ * legs — exactly the `start`/`end` a STANDALONE compute of that child would send
+ * (its resolved `overlapRange`). Inlining this into a composed leg's
+ * `portfolio.start/end` yields a byte-identical child body → shared backend cache
+ * entry (the key-parity invariant). Never throws: an unresolvable child is simply
+ * absent from the map (the backend then computes it over its full data overlap).
+ *
+ * @param {string[]} childIds
+ * @param {{ queryClient: object }} deps
+ * @returns {Promise<Map<string,{start:string,end:string}>>}
+ */
+export async function resolveChildRanges(childIds, { queryClient }) {
+  const map = new Map();
+  const ids = [...new Set((childIds || []).filter(Boolean))];
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const doc = await queryClient.fetchQuery({
+        queryKey: queryKeys.persistence.portfolios.detail(id),
+        queryFn: () => getPortfolio(id),
+        staleTime: 10 * 1000,
+      });
+      const childLegs = persistedDocToLegs(doc);
+      if (childLegs.length === 0) return;
+      const { overlapRange } = await resolvePortfolioRange(childLegs, { queryClient });
+      if (overlapRange && overlapRange.start && overlapRange.end) {
+        map.set(id, { start: overlapRange.start, end: overlapRange.end });
+      }
+    } catch { /* unresolvable child → absent → backend computes full overlap */ }
+  }));
+  return map;
+}
+
+/**
  * Resolve every leg's range and the portfolio overlap.
  * @returns {Promise<{ ranges: Record<string,{start,end}>, overlapRange: {start,end}|null }>}
  * Never throws (each leg read is wrapped).

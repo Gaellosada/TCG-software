@@ -139,6 +139,38 @@ describe('buildPortfolioComputeBody — composed (portfolio) legs', () => {
     expect(body.legs.B.portfolio.legs).toHaveProperty('Y');
   });
 
+  it('fund-of-funds: inlines the child OWN range into portfolio.start/end when resolveChildRange is provided', () => {
+    const resolvePortfolio = (id) => (id === 'child-1' ? childDoc() : null);
+    const resolveChildRange = (id) => (
+      id === 'child-1' ? { start: '2005-01-03', end: '2024-06-28' } : null
+    );
+    const { body } = buildPortfolioComputeBody({
+      ...baseArgs,
+      legs: composedLegs,
+      resolvePortfolio,
+      resolveChildRange,
+    });
+    const child = body.legs.BuildingBlock.portfolio;
+    // The child's OWN range is inlined (NOT the parent's) — key-parity with a
+    // standalone compute of that child over its overlapRange.
+    expect(child.start).toBe('2005-01-03');
+    expect(child.end).toBe('2024-06-28');
+    expect(child.legs).toHaveProperty('SPX');
+  });
+
+  it('fund-of-funds: no start/end when the child range is unresolved (backend computes full overlap)', () => {
+    const resolvePortfolio = (id) => (id === 'child-1' ? childDoc() : null);
+    const { body } = buildPortfolioComputeBody({
+      ...baseArgs,
+      legs: composedLegs,
+      resolvePortfolio,
+      resolveChildRange: () => null, // unresolved
+    });
+    const child = body.legs.BuildingBlock.portfolio;
+    expect(child).not.toHaveProperty('start');
+    expect(child).not.toHaveProperty('end');
+  });
+
   it('pure legs are byte-identical whether or not a resolver is passed', () => {
     const pureLegs = [
       { id: 1, label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100 },

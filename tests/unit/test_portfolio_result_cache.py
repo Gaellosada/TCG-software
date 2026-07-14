@@ -130,11 +130,10 @@ def _pure_body(labels: list[str], start="2024-01-01", end="2024-12-31") -> dict:
 
 
 def _composed_referencing(child: dict) -> dict:
-    # The composed body threads its OWN start/end to the child (the child sub-body
-    # inlined here omits start/end; the backend injects the parent's range) — so a
-    # composed leg over range R keys identically to a standalone compute of the
-    # child over R.
-    child_inlined = {k: v for k, v in child.items() if k not in ("start", "end")}
+    # FUND-OF-FUNDS: the frontend inlines the child's OWN range into the child
+    # sub-body (``portfolio.start/end``), so a composed leg keys identically to a
+    # standalone compute of the child over that range and shares its cache entry.
+    child_inlined = dict(child)
     return {
         "legs": {
             "block": {

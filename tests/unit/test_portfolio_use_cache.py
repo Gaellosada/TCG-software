@@ -120,9 +120,10 @@ def _pure_body(labels: list[str], **overrides) -> dict:
 
 
 def _composed(child: dict, **overrides) -> dict:
-    child_inlined = {
-        k: v for k, v in child.items() if k not in ("start", "end", "use_cache")
-    }
+    # FUND-OF-FUNDS: the frontend inlines the child's OWN range into
+    # ``portfolio.start/end`` (only ``use_cache`` is dropped), so the child
+    # sub-body is byte-identical to a standalone compute → shared cache entry.
+    child_inlined = {k: v for k, v in child.items() if k != "use_cache"}
     body = {
         "legs": {
             "block": {

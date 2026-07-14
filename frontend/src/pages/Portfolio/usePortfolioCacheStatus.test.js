@@ -19,6 +19,9 @@ vi.mock('./resolvePortfolioRange', () => ({
   resolvePortfolioRange: vi.fn(() => Promise.resolve({
     ranges: {}, overlapRange: { start: '2020-01-01', end: '2020-12-31' },
   })),
+  // Fund-of-funds child-range resolver (composed active/row bodies). Default to
+  // an empty map (children carry no inlined range in these key-status tests).
+  resolveChildRanges: vi.fn(() => Promise.resolve(new Map())),
 }));
 // A composed ROW resolves its OWN children by id through here (FE-B1 fix).
 vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));

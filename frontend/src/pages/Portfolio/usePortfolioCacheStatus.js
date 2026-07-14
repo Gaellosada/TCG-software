@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
-import { resolvePortfolioRange } from './resolvePortfolioRange';
+import { resolvePortfolioRange, resolveChildRanges } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { getPortfolioCacheStatus } from '../../api/portfolio';
@@ -122,8 +122,18 @@ export default function usePortfolioCacheStatus({
       const effEnd = endDate || overlapRange?.end;
       if (legs.length > 0 && effStart && effEnd) {
         try {
+          // Fund-of-funds key parity: resolve each active child's OWN range so
+          // the composed body matches what Compute/auto-display send.
+          const activeChildIds = legs
+            .filter((l) => l.type === 'portfolio' && (l.portfolioId || l.portfolio_id))
+            .map((l) => l.portfolioId || l.portfolio_id);
+          const activeChildRanges = activeChildIds.length > 0
+            ? await resolveChildRanges(activeChildIds, { queryClient })
+            : new Map();
+          if (!live()) return;
           const { body, missing, brokenRefs = [] } = buildPortfolioComputeBody({
             legs, rebalance, start: effStart, end: effEnd, availableIndicators, resolvePortfolio,
+            resolveChildRange: (id) => activeChildRanges.get(id) || null,
           });
           if (!missing.length && !brokenRefs.length) queries.push({ tag: ACTIVE_TAG, body });
         } catch { /* un-keyable active config → no active query (stays null) */ }
@@ -183,8 +193,17 @@ export default function usePortfolioCacheStatus({
             const { overlapRange: ov } = await resolvePortfolioRange(rowLegs, { queryClient });
             if (ov && ov.start && ov.end) {
               // Resolve THIS row's own children (composed rows) — not the active
-              // editor's resolver — so its status body inlines its real specs.
+              // editor's resolver — so its status body inlines its real specs
+              // AND (fund-of-funds) each child's own range, for key parity.
               const rowResolver = hasChildRefs ? await resolveRowChildren(rowLegs) : () => null;
+              const rowChildIds = hasChildRefs
+                ? rowLegs
+                  .filter((l) => l.type === 'portfolio' && (l.portfolioId || l.portfolio_id))
+                  .map((l) => l.portfolioId || l.portfolio_id)
+                : [];
+              const rowChildRanges = rowChildIds.length > 0
+                ? await resolveChildRanges(rowChildIds, { queryClient })
+                : new Map();
               if (!live()) return;
               const built = buildPortfolioComputeBody({
                 legs: rowLegs,
@@ -193,6 +212,7 @@ export default function usePortfolioCacheStatus({
                 end: ov.end,
                 availableIndicators,
                 resolvePortfolio: rowResolver,
+                resolveChildRange: (id) => rowChildRanges.get(id) || null,
               });
               if (!built.missing.length && !(built.brokenRefs && built.brokenRefs.length)) {
                 body = built.body;

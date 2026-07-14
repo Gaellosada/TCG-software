@@ -141,7 +141,9 @@ class TestComputeVersionSalt:
 
         original = p.COMPUTE_VERSION
         try:
-            p.COMPUTE_VERSION = "0.1.12"
+            # A distinct sentinel version (must differ from the current
+            # COMPUTE_VERSION so the durable key namespaces away).
+            p.COMPUTE_VERSION = "0.0.0-version-salt-test"
             after = await _compute(client, body)
         finally:
             p.COMPUTE_VERSION = original
