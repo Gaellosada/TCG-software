@@ -13,6 +13,14 @@ import usePortfolio from './usePortfolio';
 
 const HIT_RESULT = { portfolio_equity: [100, 110], dates: ['2020-01-01', '2020-12-31'], from_cache: true };
 
+// A controllable promise so a test can decide exactly when an in-flight
+// getPortfolioCachedResult call resolves (simulates a slow network round-trip).
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 vi.mock('../../api/portfolio', () => ({
   computePortfolio: vi.fn(() => Promise.resolve({ portfolio_equity: [1, 2], dates: ['a', 'b'], from_cache: false })),
   getPortfolioCachedResult: vi.fn(() => Promise.resolve({ result: null, from_cache: false })),
@@ -95,5 +103,36 @@ describe('usePortfolio — auto-display cached result', () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(getPortfolioCachedResult).not.toHaveBeenCalled();
     expect(result.current.results).toBeNull();
+  });
+
+  it('RACE: a fresh Compute is never clobbered by a late-arriving auto-display get', async () => {
+    const FRESH_RESULT = { portfolio_equity: [200, 220], dates: ['2021-01-01', '2021-12-31'], from_cache: false };
+    const STALE_HIT = { portfolio_equity: [999, 999], dates: ['1999-01-01', '1999-12-31'], from_cache: true };
+
+    // The auto-display get for the pre-Compute config is SLOW (deferred): it
+    // won't resolve until we explicitly tell it to, below.
+    const deferredGet = createDeferred();
+    getPortfolioCachedResult.mockReturnValue(deferredGet.promise);
+    computePortfolio.mockResolvedValue(FRESH_RESULT);
+
+    const { result } = renderHook(() => usePortfolio());
+    act(() => { result.current.addLeg(INSTR_LEG); });
+
+    // The auto-display effect has kicked off its (still-pending) cache-get.
+    await waitFor(() => expect(getPortfolioCachedResult).toHaveBeenCalled());
+    expect(result.current.results).toBeNull();
+
+    // A fresh Compute runs and resolves FIRST, superseding the in-flight get
+    // (autoDisplayRunRef is bumped in handleCalculate before any await).
+    await act(async () => { await result.current.handleCalculate(); });
+    expect(result.current.results).toEqual(FRESH_RESULT);
+
+    // NOW let the stale, late-arriving auto-display get resolve as a HIT.
+    deferredGet.resolve({ result: STALE_HIT, from_cache: true });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    // The fresh Compute's result must survive untouched — the stale get must
+    // NOT clobber it.
+    expect(result.current.results).toEqual(FRESH_RESULT);
   });
 });
