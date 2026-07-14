@@ -9,14 +9,20 @@ class MetricsSuite:
 
     Minimum metric set per advice doc section 9.
     """
-    total_return: float              # As decimal (0.2 = 20%)
-    annualized_return: float         # Assumes 252 trading days
-    sharpe_ratio: float              # Annualized
-    max_drawdown: float              # Negative (e.g. -0.56 = 56% loss)
-    calmar_ratio: float              # annualized_return / abs(max_drawdown)
-    cvar_5: float                    # Conditional VaR at 5% (expected shortfall)
-    time_underwater_days: int        # Number of bars in drawdown
-    annualized_volatility: float     # Annualized std dev of daily returns
-    sortino_ratio: float             # Like Sharpe but only penalizes downside deviation
+
+    total_return: float  # As decimal (0.2 = 20%)
+    annualized_return: float  # Assumes 252 trading days
+    sharpe_ratio: float  # Annualized
+    max_drawdown: float  # Negative (e.g. -0.56 = 56% loss)
+    calmar_ratio: float  # annualized_return / abs(max_drawdown)
+    cvar_5: float  # Conditional VaR at 5% (expected shortfall)
+    time_underwater_days: int  # Number of bars in drawdown
+    annualized_volatility: float  # Annualized std dev of daily returns
+    sortino_ratio: float  # Like Sharpe but only penalizes downside deviation
     num_trades: int
-    win_rate: float | None = None    # Fraction of profitable trades (0.0-1.0)
+    win_rate: float | None = None  # Fraction of profitable trades (0.0-1.0)
+    # Cumulative transaction costs, cumulative-cost / initial-capital, as PERCENT
+    # and always tracked SEPARATELY. 0.0 when the cost feature is off (0 bps).
+    # MAY exceed 100% for high-turnover strategies.
+    total_slippage_paid_pct: float = 0.0
+    total_fees_paid_pct: float = 0.0

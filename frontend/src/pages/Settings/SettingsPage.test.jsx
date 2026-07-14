@@ -99,6 +99,51 @@ describe('<SettingsPage> — risk-free rate row', () => {
   });
 });
 
+describe('<SettingsPage> — slippage & fees rows (bps)', () => {
+  it('render both inputs with default "0" when localStorage is empty', () => {
+    render(<SettingsPage />);
+    expect(screen.getByLabelText(/slippage \(basis points\)/i).value).toBe('0');
+    expect(screen.getByLabelText(/fees \(basis points\)/i).value).toBe('0');
+  });
+
+  it('reflect stored values', () => {
+    localStorage.setItem('tcg-slippage-bps', '5');
+    localStorage.setItem('tcg-fees-bps', '2.5');
+    render(<SettingsPage />);
+    expect(screen.getByLabelText(/slippage \(basis points\)/i).value).toBe('5');
+    expect(screen.getByLabelText(/fees \(basis points\)/i).value).toBe('2.5');
+  });
+
+  it('persist valid values to localStorage on change (round-trip)', () => {
+    render(<SettingsPage />);
+    fireEvent.change(screen.getByLabelText(/slippage \(basis points\)/i), { target: { value: '7.5' } });
+    fireEvent.change(screen.getByLabelText(/fees \(basis points\)/i), { target: { value: '3' } });
+    expect(localStorage.getItem('tcg-slippage-bps')).toBe('7.5');
+    expect(localStorage.getItem('tcg-fees-bps')).toBe('3');
+  });
+
+  it('persist zero (from a non-zero value)', () => {
+    render(<SettingsPage />);
+    const input = screen.getByLabelText(/slippage \(basis points\)/i);
+    fireEvent.change(input, { target: { value: '5' } });
+    fireEvent.change(input, { target: { value: '0' } });
+    expect(localStorage.getItem('tcg-slippage-bps')).toBe('0');
+  });
+
+  it('do NOT write negative or non-numeric values', () => {
+    render(<SettingsPage />);
+    fireEvent.change(screen.getByLabelText(/slippage \(basis points\)/i), { target: { value: '-1' } });
+    fireEvent.change(screen.getByLabelText(/fees \(basis points\)/i), { target: { value: 'abc' } });
+    expect(localStorage.getItem('tcg-slippage-bps')).toBeNull();
+    expect(localStorage.getItem('tcg-fees-bps')).toBeNull();
+  });
+
+  it('render the "bps" unit label (two, one per input)', () => {
+    render(<SettingsPage />);
+    expect(screen.getAllByText('bps').length).toBe(2);
+  });
+});
+
 describe('<SettingsPage> — portfolio-result cache toggle (backend flag)', () => {
   it('defaults to ON when localStorage is empty', () => {
     render(<SettingsPage />);

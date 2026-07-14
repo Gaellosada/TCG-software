@@ -47,6 +47,7 @@ from tcg.engine import (
     compute_metrics,
     compute_weighted_portfolio,
 )
+from tcg.engine.costs import CostConfig
 from tcg.engine.hold_pnl import _HoldPnLSpec, _compound_with_hold
 from tcg.engine.signal_exec import (
     IndicatorSpecInput,
@@ -712,6 +713,9 @@ class PortfolioRequest(BaseModel):
     return_type: str = "normal"
     start: str | None = None
     end: str | None = None
+    # Transaction costs (basis points, independent). Default 0 = OFF = byte-identical.
+    slippage_bps: float = 0.0
+    fees_bps: float = 0.0
     # Result-cache opt-out (Settings toggle). Default True = caching on
     # (unchanged behaviour). When False the compute path bypasses the on-disk
     # cache entirely (no read, no write) and always recomputes fresh; the flag
@@ -2052,12 +2056,62 @@ async def _compute_portfolio_uncached(
         )
         for label in aligned_closes
     }
+    # ── Transaction costs (OFF by default → byte-identical). Continuous-futures
+    #    rolls are charged a round-trip on the leg's notional fraction at each
+    #    interior roll bar, routed into the EQUITY computation here (the display
+    #    roll-rows in §9.5 do NOT feed equity). ──
+    cost_config = CostConfig(
+        slippage_bps=float(body.slippage_bps), fees_bps=float(body.fees_bps)
+    )
+    roll_turnover: npt.NDArray[np.float64] | None = None
+    if not cost_config.is_zero():
+        abs_total = sum(abs(w) for w in portfolio_weights.values()) or 1.0
+        date_to_idx = {int(d): i for i, d in enumerate(common_dates.tolist())}
+        rt = np.zeros(len(common_dates), dtype=np.float64)
+        for label, leg in body.legs.items():
+            if leg.type != "continuous" or label not in portfolio_weights:
+                continue
+            spec = legs_spec.get(label)
+            if not isinstance(spec, ContinuousLegSpec):
+                continue
+            try:
+                cseries = await svc.get_continuous(
+                    spec.collection, spec.roll_config, start=start_date, end=end_date
+                )
+            except Exception as exc:  # noqa: BLE001 — cost overlay, never fail compute
+                logger.warning(
+                    "roll-cost re-fetch failed for continuous leg %r (%s): %s",
+                    label,
+                    spec.collection,
+                    exc,
+                )
+                continue
+            frac = abs(portfolio_weights[label]) / abs_total
+            for d in cseries.roll_dates:
+                idx = date_to_idx.get(int(d))
+                if idx is not None:
+                    rt[idx] += 2.0 * frac  # round-trip = 2 sides
+        # Option hold-leg rolls (interior boundaries already computed above): the
+        # held contract is closed & reopened at each roll -> round-trip on the
+        # leg's portfolio share.
+        for label in hold_option_labels:
+            if label not in portfolio_weights:
+                continue
+            frac = abs(portfolio_weights[label]) / abs_total
+            for d in option_roll_dates_interior.get(label, []):
+                idx = date_to_idx.get(int(d))
+                if idx is not None:
+                    rt[idx] += 2.0 * frac
+        roll_turnover = rt
+
     result = compute_weighted_portfolio(
         aligned_closes,
         portfolio_weights,
         rebalance_freq.value,
         body.return_type,
         common_dates,
+        cost_config=cost_config,
+        roll_turnover=roll_turnover,
     )
 
     # ── 8. Compute metrics ──
@@ -2065,7 +2119,12 @@ async def _compute_portfolio_uncached(
     # Risk stats must use the same return basis the equity curve was built
     # with (HIGH#3): a log-built curve's vol/Sharpe/Sortino are otherwise
     # computed on the wrong (simple-return) basis.
-    metrics = compute_metrics(result.portfolio_equity, return_type=body.return_type)
+    metrics = compute_metrics(
+        result.portfolio_equity,
+        return_type=body.return_type,
+        total_slippage_paid_pct=result.total_slippage_paid_pct,
+        total_fees_paid_pct=result.total_fees_paid_pct,
+    )
     leg_metrics = {
         label: compute_metrics(eq, return_type=body.return_type)
         for label, eq in result.per_leg_equities.items()
@@ -2434,6 +2493,8 @@ async def _compute_portfolio_uncached(
             label: eq.tolist() for label, eq in result.raw_leg_equities.items()
         },
         "rebalance_dates": [int_to_iso(int(d)) for d in result.rebalance_dates],
+        "total_slippage_paid_pct": float(result.total_slippage_paid_pct),
+        "total_fees_paid_pct": float(result.total_fees_paid_pct),
         "metrics": asdict(metrics),
         "leg_metrics": {label: asdict(m) for label, m in leg_metrics.items()},
         "monthly_returns": monthly,

@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { buildComputeRequestBody, normaliseSpecForRequest } from './requestBuilder';
+import {
+  buildComputeRequestBody,
+  normaliseSpecForRequest,
+  costFieldsForRequest,
+} from './requestBuilder';
 import { collectIndicatorIds } from '../../api/signals';
 
 // Request body shape pinned by PLAN.md § Wire contract (v4).
@@ -952,5 +956,50 @@ describe('wire contract — partial links + fire_mode (v8)', () => {
     const wire = normaliseSpecForRequest(spec);
     expect('fire_mode' in wire.rules.resets[0]).toBe(false);
     expect('links' in wire.rules.resets[0]).toBe(false);
+  });
+});
+
+describe('costFieldsForRequest — global slippage/fees (bps)', () => {
+  it('omits both keys when costs is undefined / empty / all-zero', () => {
+    expect(costFieldsForRequest(undefined)).toEqual({});
+    expect(costFieldsForRequest({})).toEqual({});
+    expect(costFieldsForRequest({ slippageBps: 0, feesBps: 0 })).toEqual({});
+  });
+
+  it('emits a key only for a finite value > 0, in bps, verbatim', () => {
+    expect(costFieldsForRequest({ slippageBps: 5, feesBps: 0 }))
+      .toEqual({ slippage_bps: 5 });
+    expect(costFieldsForRequest({ slippageBps: 0, feesBps: 2.5 }))
+      .toEqual({ fees_bps: 2.5 });
+    expect(costFieldsForRequest({ slippageBps: 5, feesBps: 2 }))
+      .toEqual({ slippage_bps: 5, fees_bps: 2 });
+  });
+
+  it('ignores non-finite / negative values (never emits them)', () => {
+    expect(costFieldsForRequest({ slippageBps: NaN, feesBps: Infinity })).toEqual({});
+    expect(costFieldsForRequest({ slippageBps: -1, feesBps: -0.5 })).toEqual({});
+  });
+});
+
+describe('buildComputeRequestBody — cost fields', () => {
+  const SIGNAL = {
+    id: 's1', name: 'S1', inputs: [],
+    rules: { entries: [], exits: [] }, settings: { dont_repeat: true },
+  };
+
+  it('2-arg call stays byte-identical: top level is exactly {spec, indicators}', () => {
+    const { body } = buildComputeRequestBody(SIGNAL, []);
+    expect(Object.keys(body).sort()).toEqual(['indicators', 'spec']);
+  });
+
+  it('all-zero costs add NO keys (byte-identical to pre-feature)', () => {
+    const { body } = buildComputeRequestBody(SIGNAL, [], { slippageBps: 0, feesBps: 0 });
+    expect(Object.keys(body).sort()).toEqual(['indicators', 'spec']);
+  });
+
+  it('non-zero costs ride the top-level body in bps', () => {
+    const { body } = buildComputeRequestBody(SIGNAL, [], { slippageBps: 5, feesBps: 2 });
+    expect(body.slippage_bps).toBe(5);
+    expect(body.fees_bps).toBe(2);
   });
 });

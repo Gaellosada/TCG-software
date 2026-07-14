@@ -149,3 +149,48 @@ describe('buildPortfolioComputeBody — composed (portfolio) legs', () => {
     expect(without.brokenRefs).toEqual([]);
   });
 });
+
+describe('buildPortfolioComputeBody — global slippage/fees (bps)', () => {
+  const pureLegs = [
+    { id: 1, label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100 },
+  ];
+
+  it('omits cost fields when unset / zero (byte-identical body)', () => {
+    const { body } = buildPortfolioComputeBody({ ...baseArgs, legs: pureLegs });
+    expect('slippage_bps' in body).toBe(false);
+    expect('fees_bps' in body).toBe(false);
+
+    const { body: zero } = buildPortfolioComputeBody({
+      ...baseArgs, legs: pureLegs, slippageBps: 0, feesBps: 0,
+    });
+    expect('slippage_bps' in zero).toBe(false);
+    expect('fees_bps' in zero).toBe(false);
+  });
+
+  it('adds cost fields to the TOP-LEVEL body in bps when > 0', () => {
+    const { body } = buildPortfolioComputeBody({
+      ...baseArgs, legs: pureLegs, slippageBps: 5, feesBps: 2,
+    });
+    expect(body.slippage_bps).toBe(5);
+    expect(body.fees_bps).toBe(2);
+  });
+
+  it('never leaks cost fields into an inlined child portfolio (global, applied once)', () => {
+    const resolvePortfolio = (id) => (id === 'child-1' ? childDoc() : null);
+    const { body } = buildPortfolioComputeBody({
+      ...baseArgs,
+      legs: composedLegs,
+      resolvePortfolio,
+      slippageBps: 5,
+      feesBps: 2,
+    });
+    // Top level carries the costs...
+    expect(body.slippage_bps).toBe(5);
+    expect(body.fees_bps).toBe(2);
+    // ...but the recursive child body does NOT (only its 4 §4 keys).
+    const child = body.legs.BuildingBlock.portfolio;
+    expect('slippage_bps' in child).toBe(false);
+    expect('fees_bps' in child).toBe(false);
+    expect(Object.keys(child).sort()).toEqual(['legs', 'rebalance', 'return_type', 'weights']);
+  });
+});

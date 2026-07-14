@@ -8,7 +8,7 @@ import { legsToRangesKey } from './legKey';
 import { resolvePortfolioRange } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
-import { isPortfolioCacheEnabled } from '../../lib/userSettings';
+import { isPortfolioCacheEnabled, getSlippageBps, getFeesBps } from '../../lib/userSettings';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
@@ -425,6 +425,12 @@ export default function usePortfolio() {
     // On the pure page there are none, so this returns a no-op resolver and the
     // built body is byte-identical to today's.
     const resolveChild = await resolveChildrenNow();
+    // Global execution costs read at compute time (picks up the latest Settings
+    // value). Threaded into the built body AND the compute call so both carry
+    // slippage_bps/fees_bps identically — the cache-status probe reads the same
+    // localStorage, keeping the backend cache key consistent.
+    const slippageBps = getSlippageBps();
+    const feesBps = getFeesBps();
     const { body, missingByLeg, brokenRefs } = buildPortfolioComputeBody({
       legs,
       rebalance,
@@ -432,6 +438,8 @@ export default function usePortfolio() {
       end: effectiveEnd,
       availableIndicators,
       resolvePortfolio: resolveChild,
+      slippageBps,
+      feesBps,
     });
     if (missingByLeg.length > 0) {
       const first = missingByLeg[0];
@@ -458,6 +466,8 @@ export default function usePortfolio() {
           start: body.start,
           end: body.end,
           useCache,
+          slippageBps,
+          feesBps,
           signal,
         });
         if (!signal.aborted) setResults(res);

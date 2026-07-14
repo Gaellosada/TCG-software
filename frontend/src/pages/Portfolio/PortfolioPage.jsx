@@ -894,6 +894,10 @@ function PortfolioPage({ mode = 'pure' }) {
                     dates={statDates}
                     equity={statEquity}
                     defaultRiskFreeRate={getRiskFreeRateFraction()}
+                    costs={{
+                      slippagePct: portfolio.results.total_slippage_paid_pct ?? 0,
+                      feesPct: portfolio.results.total_fees_paid_pct ?? 0,
+                    }}
                   />
                 </div>
               );

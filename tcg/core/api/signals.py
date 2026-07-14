@@ -116,6 +116,7 @@ from tcg.core.api.common import error_response, get_market_data
 from tcg.persistence import WriteRepository
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
+from tcg.engine.costs import CostConfig
 from tcg.engine.signal_exec import (
     IndicatorSpecInput,
     SignalDataError,
@@ -313,6 +314,9 @@ class SignalComputeRequest(BaseModel):
     instruments: dict[str, Any] = Field(default_factory=dict)
     start: str | None = None
     end: str | None = None
+    # Transaction costs (basis points, independent). Default 0 = OFF = byte-identical.
+    slippage_bps: float = 0.0
+    fees_bps: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1237,8 +1241,11 @@ async def compute_signal(
         return error_response("data", str(exc))
 
     fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
+    cost_config = CostConfig(
+        slippage_bps=float(body.slippage_bps), fees_bps=float(body.fees_bps)
+    )
     try:
-        result = await evaluate_signal(signal, indicators, fetcher)
+        result = await evaluate_signal(signal, indicators, fetcher, cost_config)
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
     except SignalDataError as exc:
@@ -1326,6 +1333,8 @@ async def compute_signal(
         "trades": trades_out,
         "clipped": bool(result.clipped),
         "diagnostics": dict(result.diagnostics),
+        "total_slippage_paid_pct": float(result.total_slippage_paid_pct),
+        "total_fees_paid_pct": float(result.total_fees_paid_pct),
     }
 
 

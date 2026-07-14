@@ -42,13 +42,28 @@ import { API_BASE } from './base';
  * @returns {Promise<Object>}
  *   the compute response with shape documented in the file header.
  */
-export async function computeSignal(spec, indicators, { signal } = {}) {
+export async function computeSignal(
+  spec,
+  indicators,
+  { signal, slippageBps, feesBps } = {},
+) {
+  // Global execution costs (basis points) ride the request body when > 0;
+  // omitted otherwise so a default request stays byte-identical (backend
+  // treats absent as 0). The wire carries bps as-is (backend converts bps→rate).
+  const costFields = {};
+  if (typeof slippageBps === 'number' && Number.isFinite(slippageBps) && slippageBps > 0) {
+    costFields.slippage_bps = slippageBps;
+  }
+  if (typeof feesBps === 'number' && Number.isFinite(feesBps) && feesBps > 0) {
+    costFields.fees_bps = feesBps;
+  }
   const res = await fetch(`${API_BASE}/signals/compute`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       spec,
       indicators: indicators || [],
+      ...costFields,
     }),
     signal,
   });

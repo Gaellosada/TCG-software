@@ -9,6 +9,12 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
+from tcg.engine.costs import (
+    CostConfig,
+    cumulative_cost_pct,
+    establish_turnover,
+    split_drag,
+)
 from tcg.types.metrics import MetricsSuite
 from tcg.types.portfolio import PortfolioComputeResult
 
@@ -245,6 +251,8 @@ def compute_weighted_portfolio(
     rebalance_freq: str,
     return_type: str,
     dates: npt.NDArray[np.int64],
+    cost_config: CostConfig | None = None,
+    roll_turnover: npt.NDArray[np.float64] | None = None,
 ) -> PortfolioComputeResult:
     """Compute a weighted portfolio with rebalancing.
 
@@ -313,46 +321,74 @@ def compute_weighted_portfolio(
         lbl: compute_daily_returns(aligned_closes[lbl], return_type) for lbl in labels
     }
 
+    # ── Transaction costs (OFF by default -> byte-identical) ──
+    # ``cost_config is None`` or both rates 0 => every builder early-skips ALL
+    # cost math and returns 0.0 totals, so the equity/returns are unchanged.
+    cfg = (
+        cost_config if (cost_config is not None and not cost_config.is_zero()) else None
+    )
+
     # ── Dispatch by rebalance frequency ──
     if rebalance_freq == "daily":
-        portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
-            _compute_daily_rebalance(
-                per_leg_returns,
-                norm_weights,
-                return_type,
-                n,
-                labels,
-            )
+        (
+            portfolio_returns,
+            portfolio_equity,
+            per_leg_equities,
+            rebalance_dates,
+            slippage_pct,
+            fees_pct,
+        ) = _compute_daily_rebalance(
+            per_leg_returns,
+            norm_weights,
+            return_type,
+            n,
+            labels,
+            cfg,
+            roll_turnover,
         )
     elif rebalance_freq == "none":
-        portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
-            _compute_buy_and_hold(
-                per_leg_returns,
-                norm_weights,
-                return_type,
-                n,
-                labels,
-            )
+        (
+            portfolio_returns,
+            portfolio_equity,
+            per_leg_equities,
+            rebalance_dates,
+            slippage_pct,
+            fees_pct,
+        ) = _compute_buy_and_hold(
+            per_leg_returns,
+            norm_weights,
+            return_type,
+            n,
+            labels,
+            cfg,
+            roll_turnover,
         )
     else:
         # Periodic rebalancing: weekly, monthly, quarterly, annually
-        portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates = (
-            _compute_periodic_rebalance(
-                per_leg_returns,
-                norm_weights,
-                return_type,
-                n,
-                labels,
-                dates,
-                rebalance_freq,
-            )
+        (
+            portfolio_returns,
+            portfolio_equity,
+            per_leg_equities,
+            rebalance_dates,
+            slippage_pct,
+            fees_pct,
+        ) = _compute_periodic_rebalance(
+            per_leg_returns,
+            norm_weights,
+            return_type,
+            n,
+            labels,
+            dates,
+            rebalance_freq,
+            cfg,
+            roll_turnover,
         )
 
     # ── Raw (buy-and-hold) leg equities for normalized comparison ──
     if rebalance_freq == "none":
         raw_leg_equities = per_leg_equities
     else:
-        _, _, raw_leg_equities, _ = _compute_buy_and_hold(
+        _, _, raw_leg_equities, _, _, _ = _compute_buy_and_hold(
             per_leg_returns,
             norm_weights,
             return_type,
@@ -367,6 +403,8 @@ def compute_weighted_portfolio(
         per_leg_equities=per_leg_equities,
         raw_leg_equities=raw_leg_equities,
         rebalance_dates=rebalance_dates,
+        total_slippage_paid_pct=slippage_pct,
+        total_fees_paid_pct=fees_pct,
     )
 
 
@@ -376,11 +414,15 @@ def _compute_daily_rebalance(
     return_type: str,
     n: int,
     labels: list[str],
+    cost_config: CostConfig | None = None,
+    roll_turnover: npt.NDArray[np.float64] | None = None,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
     dict[str, npt.NDArray[np.float64]],
     list[int],
+    float,
+    float,
 ]:
     """Daily rebalancing = fixed-weight returns each day.
 
@@ -415,16 +457,46 @@ def _compute_daily_rebalance(
         acc += w * np.where(np.isfinite(tail), tail, 0.0)
     portfolio_returns[1:] = acc
 
+    # ── Transaction costs: charge turnover-based drag on the net per-bar
+    #    return BEFORE compounding (see tcg.engine.costs). Constant target
+    #    weights every bar => turnover captures daily-drift rebalancing. ──
+    slippage_pct = 0.0
+    fees_pct = 0.0
+    if cost_config is not None and n >= 2:
+        pos = np.empty((n, len(labels)), dtype=np.float64)
+        rets = np.empty((n, len(labels)), dtype=np.float64)
+        for j, lbl in enumerate(labels):
+            pos[:, j] = norm_weights[lbl]
+            rets[:, j] = per_leg_returns[lbl]
+        turnover = establish_turnover(pos, rets, acc)
+        if roll_turnover is not None:
+            # A roll at bar s is charged on the step s -> s+1 it opens.
+            turnover = turnover + np.asarray(roll_turnover, dtype=np.float64)[: n - 1]
+        slip_drag, fees_drag = split_drag(turnover, cost_config)
+        portfolio_returns[1:] = acc - slip_drag - fees_drag
+
     portfolio_equity = compute_equity_curve(
         portfolio_returns, return_type, initial_value=100.0
     )
+
+    if cost_config is not None and n >= 2:
+        er_start = portfolio_equity[:-1] / portfolio_equity[0]
+        slippage_pct = cumulative_cost_pct(slip_drag, er_start)
+        fees_pct = cumulative_cost_pct(fees_drag, er_start)
 
     # Per-leg equities: each leg gets its weight fraction of the portfolio at all times
     per_leg_equities: dict[str, npt.NDArray[np.float64]] = {}
     for lbl in labels:
         per_leg_equities[lbl] = portfolio_equity * abs(norm_weights[lbl])
 
-    return portfolio_returns, portfolio_equity, per_leg_equities, []
+    return (
+        portfolio_returns,
+        portfolio_equity,
+        per_leg_equities,
+        [],
+        slippage_pct,
+        fees_pct,
+    )
 
 
 def _compute_buy_and_hold(
@@ -433,11 +505,15 @@ def _compute_buy_and_hold(
     return_type: str,
     n: int,
     labels: list[str],
+    cost_config: CostConfig | None = None,
+    roll_turnover: npt.NDArray[np.float64] | None = None,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
     dict[str, npt.NDArray[np.float64]],
     list[int],
+    float,
+    float,
 ]:
     """Buy-and-hold: legs drift independently from initial allocation.
 
@@ -493,7 +569,37 @@ def _compute_buy_and_hold(
     # Derive portfolio returns from equity curve
     portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
 
-    return portfolio_returns, portfolio_equity, per_leg_equities, []
+    # ── Transaction costs: buy-and-hold trades only at the initial entry
+    #    (legs then drift, no rebalancing) plus any rolls. Charge the drag on
+    #    the derived per-bar return of the step each trade opens, then recompound
+    #    the portfolio equity. Per-leg equities are left GROSS (costs are a
+    #    portfolio-level overlay). ──
+    slippage_pct = 0.0
+    fees_pct = 0.0
+    if cost_config is not None and n >= 2:
+        turnover = np.zeros(n - 1, dtype=np.float64)
+        turnover[0] = sum(abs(norm_weights[lbl]) for lbl in labels)  # entry from cash
+        if roll_turnover is not None:
+            turnover = turnover + np.asarray(roll_turnover, dtype=np.float64)[: n - 1]
+        slip_drag, fees_drag = split_drag(turnover, cost_config)
+        adj_returns = portfolio_returns.copy()
+        adj_returns[1:] = adj_returns[1:] - slip_drag - fees_drag
+        portfolio_equity = compute_equity_curve(
+            adj_returns, return_type, initial_value=100.0
+        )
+        portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
+        er_start = portfolio_equity[:-1] / portfolio_equity[0]
+        slippage_pct = cumulative_cost_pct(slip_drag, er_start)
+        fees_pct = cumulative_cost_pct(fees_drag, er_start)
+
+    return (
+        portfolio_returns,
+        portfolio_equity,
+        per_leg_equities,
+        [],
+        slippage_pct,
+        fees_pct,
+    )
 
 
 def _compute_periodic_rebalance(
@@ -504,11 +610,15 @@ def _compute_periodic_rebalance(
     labels: list[str],
     dates: npt.NDArray[np.int64],
     rebalance_freq: str,
+    cost_config: CostConfig | None = None,
+    roll_turnover: npt.NDArray[np.float64] | None = None,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
     dict[str, npt.NDArray[np.float64]],
     list[int],
+    float,
+    float,
 ]:
     """Periodic rebalancing: within each period, legs drift independently.
 
@@ -537,10 +647,22 @@ def _compute_periodic_rebalance(
     for lbl in labels:
         per_leg_equities[lbl][0] = leg_values[lbl]
 
+    # Per-bar turnover of the rebalance trade at each boundary (0 on non-boundary
+    # bars — the legs just drift). Bar 0 is the initial entry from cash. Recorded
+    # for the cost post-process below; ignored when the cost feature is off.
+    est_turn = np.zeros(n, dtype=np.float64)
+    est_turn[0] = sum(abs(norm_weights[lbl]) for lbl in labels)
+
     for i in range(1, n):
         # At a rebalance boundary, redistribute according to target weights
         if boundaries[i]:
             total_value = sum(leg_values.values())
+            if total_value > 0.0:
+                # Turnover = Σ |target_weight − drifted_weight| across legs.
+                est_turn[i] = sum(
+                    abs(abs(norm_weights[lbl]) - leg_values[lbl] / total_value)
+                    for lbl in labels
+                )
             for lbl in labels:
                 w = norm_weights[lbl]
                 leg_values[lbl] = abs(w) * total_value
@@ -576,7 +698,36 @@ def _compute_periodic_rebalance(
     # Derive portfolio returns from equity curve
     portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
 
-    return portfolio_returns, portfolio_equity, per_leg_equities, rebalance_dates
+    # ── Transaction costs: charge each boundary's turnover (+ any rolls) as a
+    #    drag on the derived per-bar return of the step it opens, then recompound
+    #    the portfolio equity. Per-leg equities are left GROSS. ──
+    slippage_pct = 0.0
+    fees_pct = 0.0
+    if cost_config is not None and n >= 2:
+        total_turn = est_turn.copy()
+        if roll_turnover is not None:
+            total_turn = total_turn + np.asarray(roll_turnover, dtype=np.float64)
+        # est_turn[s] is established at bar s -> charged on step s -> s+1.
+        turnover_step = total_turn[: n - 1]
+        slip_drag, fees_drag = split_drag(turnover_step, cost_config)
+        adj_returns = portfolio_returns.copy()
+        adj_returns[1:] = adj_returns[1:] - slip_drag - fees_drag
+        portfolio_equity = compute_equity_curve(
+            adj_returns, return_type, initial_value=100.0
+        )
+        portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
+        er_start = portfolio_equity[:-1] / portfolio_equity[0]
+        slippage_pct = cumulative_cost_pct(slip_drag, er_start)
+        fees_pct = cumulative_cost_pct(fees_drag, er_start)
+
+    return (
+        portfolio_returns,
+        portfolio_equity,
+        per_leg_equities,
+        rebalance_dates,
+        slippage_pct,
+        fees_pct,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +739,8 @@ def compute_metrics(
     equity_values: npt.NDArray[np.float64],
     risk_free_rate: float = 0.0,
     return_type: str = "normal",
+    total_slippage_paid_pct: float = 0.0,
+    total_fees_paid_pct: float = 0.0,
 ) -> MetricsSuite:
     """Compute performance metrics from an equity curve.
 
@@ -713,6 +866,8 @@ def compute_metrics(
         sortino_ratio=sortino_ratio,
         num_trades=0,
         win_rate=None,
+        total_slippage_paid_pct=total_slippage_paid_pct,
+        total_fees_paid_pct=total_fees_paid_pct,
     )
 
 

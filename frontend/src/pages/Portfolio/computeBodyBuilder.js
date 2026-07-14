@@ -9,7 +9,7 @@
 // indicator ids + broken portfolio refs so the caller can decide (compute
 // aborts; the status probe treats such a body as un-keyable).
 
-import { buildComputeRequestBody } from '../Signals/requestBuilder';
+import { buildComputeRequestBody, costFieldsForRequest } from '../Signals/requestBuilder';
 import { persistedDocToLegs } from './persistedDoc';
 
 /**
@@ -53,6 +53,14 @@ export function buildPortfolioComputeBody({
   end,
   availableIndicators,
   resolvePortfolio,
+  // Global execution costs (basis points). Added to the TOP-LEVEL body only
+  // (see costFieldsForRequest — present only when > 0). NOT threaded into the
+  // recursive child call: slippage/fees are a single global field applied once
+  // by the top-level body, and the inlined child object carries only its own
+  // legs/weights/rebalance/return_type. Must be passed identically by the
+  // compute path AND the cache-status probe so the backend cache key matches.
+  slippageBps,
+  feesBps,
   _depth = 0,
 }) {
   const apiLegs = {};
@@ -199,6 +207,9 @@ export function buildPortfolioComputeBody({
       return_type: 'normal',
       start: start || undefined,
       end: end || undefined,
+      // Global execution costs — present only when > 0, and only at the
+      // top level (_depth 0). Recursive child bodies never receive costs.
+      ...(_depth === 0 ? costFieldsForRequest({ slippageBps, feesBps }) : {}),
     },
     missing: [...new Set(missing)],
     missingByLeg,

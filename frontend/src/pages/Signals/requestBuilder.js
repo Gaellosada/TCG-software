@@ -47,6 +47,27 @@ import {
 export { coerceResetCount as __coerceResetCountForTests };
 
 /**
+ * Build the optional ``slippage_bps`` / ``fees_bps`` request fields from a
+ * global-costs pair. A key is emitted ONLY when its value is a finite number
+ * > 0; otherwise it is omitted so a default (0 / absent) request body stays
+ * byte-identical to a pre-feature payload. Shared by the signal and portfolio
+ * body builders so both add costs identically (one helper, no drift). The wire
+ * carries bps as-is — the backend converts bps→rate.
+ *
+ * @param {{slippageBps?: number, feesBps?: number}=} costs
+ * @returns {{slippage_bps?: number, fees_bps?: number}}
+ */
+export function costFieldsForRequest(costs) {
+  if (!costs || typeof costs !== 'object') return {};
+  const out = {};
+  const s = costs.slippageBps;
+  const f = costs.feesBps;
+  if (typeof s === 'number' && Number.isFinite(s) && s > 0) out.slippage_bps = s;
+  if (typeof f === 'number' && Number.isFinite(f) && f > 0) out.fees_bps = f;
+  return out;
+}
+
+/**
  * Normalise every indicator operand inside a signal spec so that
  * ``params_override`` and ``series_override`` are always present as
  * explicit keys (null if absent). Instrument / constant / null operands
@@ -225,6 +246,14 @@ function normaliseOperand(operand) {
  * @param {Array}  availableIndicators  indicator specs hydrated from the
  *                                      Indicators localStorage
  *                                      (``{id, name, code, params, seriesMap}``)
+ * @param {{slippageBps?: number, feesBps?: number}=} costs
+ *   Global execution costs in basis points. When a value is a finite number
+ *   > 0, the corresponding ``slippage_bps`` / ``fees_bps`` key is added to the
+ *   top-level body. Omitted (or 0) ⇒ the key is absent, keeping the body
+ *   byte-identical to a pre-feature payload (the backend defaults absent → 0).
+ *   NOTE: per-leg signal sub-bodies inside a portfolio call this WITHOUT costs
+ *   — slippage/fees are a single global top-level field, applied once by the
+ *   portfolio body, never per-leg.
  * @returns {{body: Object, missing: string[]}}
  *   ``body`` — the literal POST body
  *     ``{spec, indicators: IndicatorSpec[]}``
@@ -232,7 +261,7 @@ function normaliseOperand(operand) {
  *                 available-indicators array; callers should abort the
  *                 request and surface a validation error.
  */
-export function buildComputeRequestBody(signal, availableIndicators) {
+export function buildComputeRequestBody(signal, availableIndicators, costs) {
   const needed = collectIndicatorIds(signal);
   const indicatorList = [];
   const missing = [];
@@ -273,6 +302,8 @@ export function buildComputeRequestBody(signal, availableIndicators) {
     body: {
       spec: normaliseSpecForRequest(signal),
       indicators: indicatorList,
+      // Global execution costs — present only when > 0 (see costFieldsForRequest).
+      ...costFieldsForRequest(costs),
     },
     missing,
   };

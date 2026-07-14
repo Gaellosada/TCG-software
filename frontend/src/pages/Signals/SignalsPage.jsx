@@ -25,7 +25,7 @@ import { fetchKindToErrorType, ABORTED } from '../Indicators/errorTaxonomy';
 import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
 import { hydrateFromPersisted } from './hydrateSignal';
-import { getRiskFreeRateFraction } from '../../lib/userSettings';
+import { getRiskFreeRateFraction, getSlippageBps, getFeesBps } from '../../lib/userSettings';
 import SaveControls from '../../components/SaveControls';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import useBackendAutosave from '../../hooks/useBackendAutosave';
@@ -555,7 +555,10 @@ function SignalsPage() {
 
   const handleRun = useCallback(async () => {
     if (!selectedSignal) return;
-    const { body, missing } = buildComputeRequestBody(selectedSignal, availableIndicators);
+    // Global execution costs read once here (single localStorage read site) and
+    // threaded into the built body so the wire carries slippage_bps/fees_bps.
+    const costs = { slippageBps: getSlippageBps(), feesBps: getFeesBps() };
+    const { body, missing } = buildComputeRequestBody(selectedSignal, availableIndicators, costs);
     if (missing.length > 0) {
       setError({
         error_type: 'validation',
@@ -567,7 +570,11 @@ function SignalsPage() {
     setError(null);
     await runAbortable(async ({ signal }) => {
       try {
-        const data = await computeSignal(body.spec, body.indicators, { signal });
+        const data = await computeSignal(body.spec, body.indicators, {
+          signal,
+          slippageBps: body.slippage_bps,
+          feesBps: body.fees_bps,
+        });
         if (signal.aborted) return;
         setLastResult(data);
       } catch (e) {
@@ -773,6 +780,10 @@ function SignalsPage() {
             dates={statsInputs.dates}
             equity={statsInputs.equity}
             defaultRiskFreeRate={getRiskFreeRateFraction()}
+            costs={{
+              slippagePct: lastResult?.total_slippage_paid_pct ?? 0,
+              feesPct: lastResult?.total_fees_paid_pct ?? 0,
+            }}
           />
         </div>
       )}
