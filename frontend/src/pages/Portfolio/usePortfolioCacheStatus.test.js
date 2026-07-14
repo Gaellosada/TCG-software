@@ -22,6 +22,9 @@ vi.mock('./resolvePortfolioRange', () => ({
   // Fund-of-funds child-range resolver (composed active/row bodies). Default to
   // an empty map (children carry no inlined range in these key-status tests).
   resolveChildRanges: vi.fn(() => Promise.resolve(new Map())),
+  // Single-source child-range accessor (used by the active + row body builders).
+  // No inlined ranges in these key-status tests → an accessor that returns null.
+  childRangeAccessorFor: vi.fn(() => Promise.resolve(() => null)),
 }));
 // A composed ROW resolves its OWN children by id through here (FE-B1 fix).
 vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));

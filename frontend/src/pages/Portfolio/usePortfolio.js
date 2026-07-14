@@ -5,7 +5,7 @@ import { getPortfolio } from '../../api/persistence';
 import { queryKeys } from '../../queryKeys';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { legsToRangesKey } from './legKey';
-import { resolvePortfolioRange, resolveChildRanges } from './resolvePortfolioRange';
+import { resolvePortfolioRange, childPortfolioIds, childRangeAccessorFor } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { isPortfolioCacheEnabled } from '../../lib/userSettings';
@@ -296,9 +296,7 @@ export default function usePortfolio() {
   // The distinct set of referenced child portfolio ids (composed page only —
   // pure portfolios have none, so all of this is inert on the pure path).
   const portfolioLegIds = useMemo(
-    () => [...new Set(
-      legs.filter((l) => l.type === 'portfolio' && l.portfolioId).map((l) => l.portfolioId),
-    )],
+    () => childPortfolioIds(legs),
     [legs],
   );
   const portfolioLegIdsKey = portfolioLegIds.join(',');
@@ -396,9 +394,7 @@ export default function usePortfolio() {
   const resolveActiveBody = useCallback(async (effStart, effEnd) => {
     const availableIndicators = await hydrateAvailableIndicators();
     const resolveChild = await resolveChildrenNow();
-    const childRangeMap = portfolioLegIds.length > 0
-      ? await resolveChildRanges(portfolioLegIds, { queryClient })
-      : new Map();
+    const resolveChildRange = await childRangeAccessorFor(legs, { queryClient });
     return buildPortfolioComputeBody({
       legs,
       rebalance,
@@ -406,9 +402,9 @@ export default function usePortfolio() {
       end: effEnd,
       availableIndicators,
       resolvePortfolio: resolveChild,
-      resolveChildRange: (id) => childRangeMap.get(id) || null,
+      resolveChildRange,
     });
-  }, [legs, rebalance, portfolioLegIds, queryClient, resolveChildrenNow]);
+  }, [legs, rebalance, queryClient, resolveChildrenNow]);
 
   /* ── Auto-display cached result (read-only, never computes) ── */
   // Monotonic run-id shared by the auto-display effect AND handleCalculate so a
@@ -417,18 +413,33 @@ export default function usePortfolio() {
   const autoDisplayRunRef = useRef(0);
 
   // Signature of everything that changes the backend cache key for the ACTIVE
-  // config: range spec + leg identity + label/weight + rebalance + window. Any
-  // edit changes it → the effect re-runs → blanks the stale result → re-probes.
-  const autoDisplaySig = useMemo(() => [
-    legsToRangesKey(legs),
-    legs.map((l) => l.id).join(','),
-    legs.map((l) => `${l.label}:${l.weight}`).join('|'),
-    rebalance,
-    startDate,
-    endDate,
-    overlapRange?.start || '',
-    overlapRange?.end || '',
-  ].join('#'), [legs, rebalance, startDate, endDate, overlapRange]);
+  // config. DRIFT-PROOF: instead of re-cherry-picking a field list (which would
+  // silently miss any newly-added body-affecting leg field, as the option-leg
+  // sizing/hold fields — nav_times/sizing_mode/futures_reference/
+  // hold_between_rolls — were missed before), serialize each leg's FULL content
+  // minus the purely-volatile React-key ``id``. So ANY field that enters the
+  // compute body invalidates the effect → blanks the stale result → re-probes
+  // (SC5/SC6). ``id`` is excluded from the per-leg JSON but the id LIST is kept
+  // so switching to a different portfolio with an identical spec still re-fires.
+  const autoDisplaySig = useMemo(() => {
+    const legBodies = legs.map((l) => {
+      const { id: _id, ...rest } = l;
+      try {
+        return JSON.stringify(rest);
+      } catch {
+        return String(l.label);
+      }
+    });
+    return [
+      legs.map((l) => l.id).join(','),
+      legBodies.join('|'),
+      rebalance,
+      startDate,
+      endDate,
+      overlapRange?.start || '',
+      overlapRange?.end || '',
+    ].join('#');
+  }, [legs, rebalance, startDate, endDate, overlapRange]);
 
   useEffect(() => {
     // Caching off → never auto-display (matches the badge gate). Empty config →
@@ -516,7 +527,11 @@ export default function usePortfolio() {
 
     // A fresh Compute owns the result — supersede any in-flight auto-display
     // cache-get so a late hit for the pre-Compute config can't clobber it.
-    autoDisplayRunRef.current += 1;
+    // Capture this run id: an edit made DURING a slow compute bumps the ref (via
+    // the auto-display effect), so guarding the terminal set on ``myRun`` also
+    // invalidates a stale compute — it can no longer paint the wrong config's
+    // curve over the edited one.
+    const myRun = (autoDisplayRunRef.current += 1);
 
     // Build the fully-resolved compute body via the SHARED resolver (indicators +
     // live child specs + fund-of-funds child ranges). On the pure page there are
@@ -552,7 +567,7 @@ export default function usePortfolio() {
           useCache,
           signal,
         });
-        if (!signal.aborted) setResults(res);
+        if (!signal.aborted && myRun === autoDisplayRunRef.current) setResults(res);
       } catch (err) {
         if (signal.aborted) return;
         setError(err.message || 'Computation failed');

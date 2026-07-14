@@ -1562,18 +1562,13 @@ def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest
     — never the parent's re-anchored range, which would be numerically wrong under
     this model and would miss the standalone cache entry).
     """
-    return PortfolioRequest(
-        legs=child.legs,
-        weights=child.weights,
-        rebalance=child.rebalance,
-        return_type=child.return_type,
-        start=child.start,
-        end=child.end,
-        # Propagate the parent's cache preference so a use_cache=False compute
-        # recomputes every child fresh. Excluded from the key, so it never breaks
-        # unified reuse between a cached parent and a standalone child.
-        use_cache=use_cache,
-    )
+    # model_copy preserves EVERY current and future PortfolioRequest field
+    # verbatim (so a schema addition can never silently diverge the composed
+    # child key from a standalone compute), overriding ONLY ``use_cache``. That
+    # is the sole intentional override — it propagates the parent's cache
+    # preference (a use_cache=False compute recomputes every child fresh) and is
+    # stripped from the key anyway, so it never breaks unified reuse (SC2).
+    return child.model_copy(update={"use_cache": use_cache})
 
 
 async def _evaluate_portfolio_leg(
@@ -1923,10 +1918,12 @@ async def _compute_portfolio_uncached(
 
     # ── 4.6. Evaluate composed-portfolio legs (if any) ──
     #
-    # Each portfolio leg is computed to an equity curve (over the parent's
-    # requested range) and injected as a synthetic close series, exactly like a
-    # signal leg.  Its DIRECTION is the parent weight sign (no baked-in sign, so
-    # NOT a hold_option_label) and it rebalances at the parent's frequency.
+    # Each portfolio leg is computed to an equity curve over ITS OWN resolved
+    # range (fund-of-funds; see ``_evaluate_portfolio_leg``) and injected as a
+    # synthetic close series, exactly like a signal leg. The parent then
+    # intersects the child grids and (§5) clips to its own date window. Its
+    # DIRECTION is the parent weight sign (no baked-in sign, so NOT a
+    # hold_option_label) and it rebalances at the parent's frequency.
     portfolio_leg_dates_map: dict[str, npt.NDArray[np.int64]] = {}
     portfolio_leg_closes: dict[str, npt.NDArray[np.float64]] = {}
     for label, leg in portfolio_legs.items():
@@ -1962,6 +1959,23 @@ async def _compute_portfolio_uncached(
             "and option date ranges are disjoint (an option leg's available "
             "dates often differ from the spot/continuous legs')"
         )
+
+    # ── Honor the parent's date slider on the composed intersection ──
+    #
+    # Instrument legs are already clipped to [start_date, end_date] upstream (§3)
+    # and signal legs are fetched over that same window (§4), so for the pure
+    # route AND mixed composed portfolios this is a NO-OP (the intersection is
+    # already within range). But a portfolio-only (fund-of-funds) composed
+    # portfolio computes each child over the child's OWN full range — so this is
+    # the ONLY place the parent's slider narrows the composed equity. Clipping
+    # here (rather than threading the parent range into ``_child_request``) keeps
+    # every child body/key full-range, preserving cache reuse + key parity (SC2).
+    if start_date or end_date:
+        lo = date_to_int(start_date) if start_date else 0
+        hi = date_to_int(end_date) if end_date else 99999999
+        common_dates = common_dates[(common_dates >= lo) & (common_dates <= hi)]
+        if len(common_dates) == 0:
+            raise ValidationError("No data in the selected date range")
 
     # Slice instrument closes to common dates
     aligned_closes: dict[str, npt.NDArray[np.float64]] = {}

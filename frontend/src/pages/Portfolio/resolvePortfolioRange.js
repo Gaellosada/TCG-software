@@ -142,6 +142,44 @@ export async function resolveChildRanges(childIds, { queryClient }) {
 }
 
 /**
+ * Extract the distinct set of referenced child-portfolio ids from a leg list.
+ * SINGLE source of the parity-critical child-id predicate
+ * (``portfolioId || portfolio_id``) shared by the active editor, the compute
+ * path, and the cache-status probe — so the predicate can never drift between
+ * them (a drift would build divergent child sub-bodies → different cache keys).
+ *
+ * @param {Array} legs
+ * @returns {string[]}
+ */
+export function childPortfolioIds(legs) {
+  return [...new Set(
+    (legs || [])
+      .filter((l) => l.type === 'portfolio' && (l.portfolioId || l.portfolio_id))
+      .map((l) => l.portfolioId || l.portfolio_id),
+  )];
+}
+
+/**
+ * Fund-of-funds child-range ACCESSOR for a leg list. Collapses the (previously
+ * triplicated) ``filter ids → resolveChildRanges → (id)=>map.get(id)||null``
+ * ritual into ONE source so the active editor, Compute, and the status probe
+ * build byte-identical child sub-bodies (cache-key parity). Returns a sync
+ * ``(id) => {start,end}|null`` closure; no child legs ⇒ an accessor that always
+ * returns null (empty map, no reads).
+ *
+ * @param {Array} legs
+ * @param {{ queryClient: object }} deps
+ * @returns {Promise<(id: string) => ({start:string,end:string}|null)>}
+ */
+export async function childRangeAccessorFor(legs, { queryClient }) {
+  const ids = childPortfolioIds(legs);
+  const map = ids.length > 0
+    ? await resolveChildRanges(ids, { queryClient })
+    : new Map();
+  return (id) => map.get(id) || null;
+}
+
+/**
  * Resolve every leg's range and the portfolio overlap.
  * @returns {Promise<{ ranges: Record<string,{start,end}>, overlapRange: {start,end}|null }>}
  * Never throws (each leg read is wrapped).

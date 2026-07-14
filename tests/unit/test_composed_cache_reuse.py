@@ -250,6 +250,109 @@ class TestCacheGet:
         assert compute_spy["n"] == 0
 
 
+# ── Fund-of-funds date-window clipping (composed slider) ────────────────
+
+
+class TestComposedDateWindow:
+    async def test_portfolio_only_composed_honors_parent_window(self, client):
+        """A portfolio-only composed portfolio (children over their OWN full
+        range) must clip the composed equity to the parent's [start,end] slider.
+        Pre-fix this was ignored (children full-range, no clip) → the slider was
+        a no-op."""
+        child_a = _child_dict(["up"], [100.0])  # own full range 01-02..01-15
+        child_b = _child_dict(["down"], [100.0])
+        composed = _composed_body({"A": child_a, "B": child_b}, {"A": 50.0, "B": 50.0})
+        # Narrow the PARENT to a sub-window (children stay full-range).
+        composed["start"] = "2024-01-08"
+        composed["end"] = "2024-01-12"
+        resp = await _compute(client, composed)
+        assert resp["dates"][0] == "2024-01-08"
+        assert resp["dates"][-1] == "2024-01-12"
+        assert len(resp["dates"]) == 5  # 01-08,09,10,11,12
+
+    async def test_portfolio_only_composed_full_range_when_unset(self, client):
+        """No parent window → the composed equity spans the full child
+        intersection (the clip is a no-op)."""
+        child_a = _child_dict(["up"], [100.0])
+        child_b = _child_dict(["down"], [100.0])
+        composed = _composed_body({"A": child_a, "B": child_b}, {"A": 50.0, "B": 50.0})
+        composed.pop("start")
+        composed.pop("end")
+        resp = await _compute(client, composed)
+        assert resp["dates"][0] == "2024-01-02"
+        assert resp["dates"][-1] == "2024-01-15"
+        assert len(resp["dates"]) == len(DATES)
+
+    async def test_out_of_range_parent_window_raises_400(self, client):
+        """A parent window with no data in it → the SAME 400 the instrument path
+        uses (never a 500)."""
+        child = _child_dict(["up"], [100.0])
+        composed = _composed_body({"A": child}, {"A": 100.0})
+        composed["start"] = "2030-01-01"
+        composed["end"] = "2030-12-31"
+        r = await client.post("/api/portfolio/compute", json=composed)
+        assert r.status_code == 400, r.text
+        assert "selected date range" in r.text
+
+
+# ── Differing child ranges: intersection + re-anchor + disjoint→400 ─────
+
+
+class TestDifferingChildRanges:
+    async def test_partial_overlap_intersects_and_reanchors(self, client):
+        # child_a: 01-02..01-10 ; child_b: 01-08..01-15 → overlap 01-08..01-10.
+        child_a = _child_dict(["up"], [100.0], start="2024-01-02", end="2024-01-10")
+        child_b = _child_dict(["down"], [100.0], start="2024-01-08", end="2024-01-15")
+        composed = _composed_body({"A": child_a, "B": child_b}, {"A": 50.0, "B": 50.0})
+        resp = await _compute(client, composed)
+        assert resp["dates"][0] == "2024-01-08"
+        assert resp["dates"][-1] == "2024-01-10"
+        assert len(resp["dates"]) == 3
+        assert all(v is not None for v in resp["portfolio_equity"])
+
+        # Re-anchor parity: restricting BOTH children to EXACTLY the overlap
+        # yields the same parent equity — the composed engine re-anchors to child
+        # RETURNS within the overlap, independent of each child's absolute equity
+        # level (or pre-overlap history) before the first common bar.
+        child_a2 = _child_dict(["up"], [100.0], start="2024-01-08", end="2024-01-10")
+        child_b2 = _child_dict(["down"], [100.0], start="2024-01-08", end="2024-01-10")
+        composed2 = _composed_body(
+            {"A": child_a2, "B": child_b2}, {"A": 50.0, "B": 50.0}
+        )
+        resp2 = await _compute(client, composed2)
+        np.testing.assert_allclose(
+            np.array(resp["portfolio_equity"], dtype=float),
+            np.array(resp2["portfolio_equity"], dtype=float),
+        )
+
+    async def test_disjoint_children_raise_400_not_500(self, client):
+        child_a = _child_dict(["up"], [100.0], start="2024-01-02", end="2024-01-04")
+        child_b = _child_dict(["down"], [100.0], start="2024-01-11", end="2024-01-15")
+        composed = _composed_body({"A": child_a, "B": child_b}, {"A": 50.0, "B": 50.0})
+        r = await client.post("/api/portfolio/compute", json=composed)
+        assert r.status_code == 400, r.text
+        assert "overlapping" in r.text.lower()
+
+
+# ── /cache/get degrades to a MISS on a cache error (never a 500) ────────
+
+
+class TestCacheGetErrorDegradation:
+    async def test_cache_get_error_returns_miss_not_500(self, client, monkeypatch):
+        """A cache glitch (``cache.get`` raising) must degrade to a 200 MISS, so
+        a cache error can NEVER block the auto-display UI."""
+
+        class _BoomCache:
+            async def get(self, key):
+                raise RuntimeError("simulated cache backend failure")
+
+        monkeypatch.setattr(portfolio, "_get_result_cache", lambda: _BoomCache())
+        body = _child_dict(["up", "down"], [60.0, 40.0])
+        r = await client.post("/api/portfolio/cache/get", json=body)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"result": None, "from_cache": False}
+
+
 # ── SC3: COMPUTE_VERSION bump invalidates old keys ──────────────────────
 
 

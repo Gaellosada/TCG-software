@@ -11,6 +11,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
+import { persistedDocToLegs } from './persistedDoc';
 
 // A saved PURE child portfolio (one instrument leg). ``resolvePortfolio``
 // returns this by id; editing it (below) changes the inlined spec.
@@ -169,6 +170,47 @@ describe('buildPortfolioComputeBody — composed (portfolio) legs', () => {
     const child = body.legs.BuildingBlock.portfolio;
     expect(child).not.toHaveProperty('start');
     expect(child).not.toHaveProperty('end');
+  });
+
+  it('SC2 parity: the composed-inlined child body deep-equals a STANDALONE top-level build of that child over the same range', () => {
+    // The real SC2 invariant: the standalone construction path (a child built
+    // at top level, exactly what a standalone /compute sends) and the
+    // composed-inlined construction path must produce a field-for-field
+    // identical child body. Both must resolve to the SAME backend cache key or
+    // composed children would never reuse the standalone cache entry (the
+    // original slow-recompute bug). Building both sides here (not from one dict)
+    // is what makes this non-tautological.
+    const R = { start: '2005-01-03', end: '2024-06-28' };
+    const doc = childDoc();
+
+    // STANDALONE: build the child at top level over range R.
+    const standalone = buildPortfolioComputeBody({
+      legs: persistedDocToLegs(doc),
+      rebalance: doc.rebalance,
+      start: R.start,
+      end: R.end,
+      availableIndicators: [],
+    });
+
+    // COMPOSED: reference the same child; resolveChildRange returns R.
+    const composed = buildPortfolioComputeBody({
+      ...baseArgs,
+      legs: composedLegs,
+      resolvePortfolio: (id) => (id === 'child-1' ? doc : null),
+      resolveChildRange: (id) => (id === 'child-1' ? R : null),
+    });
+
+    expect(composed.body.legs.BuildingBlock.portfolio).toEqual(standalone.body);
+    // Explicit: the inlined child carries {legs, weights, rebalance, return_type,
+    // start, end} — the standalone shape verbatim.
+    expect(standalone.body).toEqual({
+      legs: { SPX: { type: 'instrument', collection: 'INDEX', symbol: 'SPX' } },
+      weights: { SPX: 100 },
+      rebalance: 'monthly',
+      return_type: 'normal',
+      start: R.start,
+      end: R.end,
+    });
   });
 
   it('pure legs are byte-identical whether or not a resolver is passed', () => {
