@@ -15,6 +15,21 @@ import { fetchOptionLegRange } from './optionLegRange';
 import { persistedDocToLegs } from './persistedDoc';
 
 /**
+ * Extract a portfolio (composed) leg's referenced child-portfolio id, or null.
+ * SINGLE source of the parity-critical predicate (``portfolioId ||
+ * portfolio_id``) — shared by `resolveLegRange`, `childPortfolioIds`, AND the
+ * compute-body builder (`computeBodyBuilder.js`) so it can never drift between
+ * the active editor, the compute path, and the cache-status probe (a drift
+ * would build divergent child sub-bodies → different cache keys).
+ *
+ * @param {object} leg
+ * @returns {string|null}
+ */
+export function getChildPortfolioId(leg) {
+  return (leg && (leg.portfolioId || leg.portfolio_id)) || null;
+}
+
+/**
  * Resolve one leg's available range → `{ id, start, end }` (ISO strings or
  * null). Never throws — a failed/empty read degrades to nulls.
  *
@@ -28,7 +43,7 @@ export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
     // legs (the same grid the backend/compute builder use). Without this, a
     // composed portfolio resolves NO range → overlapRange null → the compute
     // window (and slider) can't settle on the composed page.
-    const portfolioId = leg.portfolioId || leg.portfolio_id || null;
+    const portfolioId = getChildPortfolioId(leg);
     if (!portfolioId || _depth >= 1) return { id: leg.id, start: null, end: null };
     try {
       const child = await queryClient.fetchQuery({
@@ -154,8 +169,8 @@ export async function resolveChildRanges(childIds, { queryClient }) {
 export function childPortfolioIds(legs) {
   return [...new Set(
     (legs || [])
-      .filter((l) => l.type === 'portfolio' && (l.portfolioId || l.portfolio_id))
-      .map((l) => l.portfolioId || l.portfolio_id),
+      .filter((l) => l.type === 'portfolio' && getChildPortfolioId(l))
+      .map((l) => getChildPortfolioId(l)),
   )];
 }
 

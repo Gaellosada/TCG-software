@@ -11,6 +11,7 @@
 
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { persistedDocToLegs } from './persistedDoc';
+import { getChildPortfolioId } from './resolvePortfolioRange';
 
 /**
  * Build the resolved compute request body.
@@ -78,7 +79,7 @@ export function buildPortfolioComputeBody({
       // acyclic. Do NOT emit a leg for a broken/depth-exceeded ref — an empty
       // ``portfolio`` would trip the backend's own empty-child 400; the caller
       // blocks compute on ``brokenRefs`` first, well before that.
-      const portfolioId = leg.portfolioId || leg.portfolio_id || null;
+      const portfolioId = getChildPortfolioId(leg);
       if (_depth >= 1) {
         brokenRefs.push({ label: leg.label, portfolioId, reason: 'depth' });
         continue;

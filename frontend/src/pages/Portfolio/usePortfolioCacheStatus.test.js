@@ -25,6 +25,10 @@ vi.mock('./resolvePortfolioRange', () => ({
   // Single-source child-range accessor (used by the active + row body builders).
   // No inlined ranges in these key-status tests → an accessor that returns null.
   childRangeAccessorFor: vi.fn(() => Promise.resolve(() => null)),
+  // Single-source child-portfolio-id predicate — computeBodyBuilder.js imports
+  // this directly, so a full-module mock here must re-export it too (real impl,
+  // it's pure) or the builder's composed-leg branch throws on the undefined call.
+  getChildPortfolioId: (leg) => (leg && (leg.portfolioId || leg.portfolio_id)) || null,
 }));
 // A composed ROW resolves its OWN children by id through here (FE-B1 fix).
 vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));

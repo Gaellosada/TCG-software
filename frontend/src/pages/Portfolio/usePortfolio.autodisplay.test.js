@@ -168,8 +168,11 @@ describe('usePortfolio — auto-display cached result', () => {
       await calcPromise; await Promise.resolve(); await Promise.resolve();
     });
 
-    // The stale X compute must NOT have painted its curve over edited config Y.
-    expect(result.current.results).not.toEqual(X_RESULT);
+    // The stale X compute must NOT have painted its curve over edited config Y —
+    // assert the actual expected end state (not just "isn't X"): the edit to Y
+    // is an uncached miss (getPortfolioCachedResult still resolves null/from_cache
+    // false), so the display settles on blank, not any stray value.
+    expect(result.current.results).toBeNull();
   });
 
   it('cache-get error: a rejected getPortfolioCachedResult leaves results null and a later Compute still works', async () => {
