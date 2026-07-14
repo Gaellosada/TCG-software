@@ -120,9 +120,10 @@ def _pure_body(labels: list[str], **overrides) -> dict:
 
 
 def _composed(child: dict, **overrides) -> dict:
-    child_inlined = {
-        k: v for k, v in child.items() if k not in ("start", "end", "use_cache")
-    }
+    # FUND-OF-FUNDS: the frontend inlines the child's OWN range into
+    # ``portfolio.start/end`` (only ``use_cache`` is dropped), so the child
+    # sub-body is byte-identical to a standalone compute → shared cache entry.
+    child_inlined = {k: v for k, v in child.items() if k != "use_cache"}
     body = {
         "legs": {
             "block": {
@@ -228,6 +229,52 @@ class TestComposedPropagation:
         assert compute_spy["n"] == 1
         await _post(client, _composed(child))  # parent computes, child cached
         assert compute_spy["n"] == 2  # +1 parent only, child from cache
+
+
+# ── legacy None-range composed child passes through as None ─────────────
+
+
+class TestNoneRangeComposedChild:
+    """A legacy composed body whose inlined child OMITS start/end must pass
+    through as start=None/end=None (child computes over its FULL data overlap) —
+    NEVER a fallback to the parent's range, which would miss the standalone cache
+    entry and produce numerically-wrong results (the original re-anchor bug)."""
+
+    _CHILD_NO_RANGE = {
+        "legs": {"up": {"type": "instrument", "collection": "INDEX", "symbol": "up"}},
+        "weights": {"up": 100.0},
+        "rebalance": "none",
+        "return_type": "normal",
+    }
+
+    def test_child_request_preserves_none_range_and_key_matches_standalone(self):
+        standalone = portfolio.PortfolioRequest(**self._CHILD_NO_RANGE)  # None range
+        inlined = portfolio.PortfolioRequest(**self._CHILD_NO_RANGE)
+        child_body = portfolio._child_request(inlined, use_cache=True)
+        assert child_body.start is None
+        assert child_body.end is None
+        # Key parity with a standalone None-range compute (NOT the parent range).
+        assert portfolio._portfolio_cache_key(
+            standalone
+        ) == portfolio._portfolio_cache_key(child_body)
+
+    async def test_none_range_composed_does_not_500(self, client):
+        body = {
+            "legs": {
+                "block": {
+                    "type": "portfolio",
+                    "portfolio_id": "c",
+                    "portfolio": dict(self._CHILD_NO_RANGE),  # no start/end
+                }
+            },
+            "weights": {"block": 100.0},
+            "rebalance": "none",
+            "return_type": "normal",
+            "start": "2024-01-02",
+            "end": "2024-01-15",
+        }
+        r = await client.post("/api/portfolio/compute", json=body)
+        assert r.status_code == 200, r.text
 
 
 # ── clear endpoint ─────────────────────────────────────────────────────

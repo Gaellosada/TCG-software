@@ -355,6 +355,16 @@ function HelpPage() {
           purple lines on the chart.
         </p>
 
+        <h3 className={styles.conceptTitle}>Composed portfolios (fund-of-funds)</h3>
+        <p className={styles.conceptText}>
+          A composed portfolio allocates across whole sub-portfolios rather than
+          individual instruments. Each sub-portfolio keeps its own rebalancing and its
+          own full history; the composed portfolio only rebalances how much is allocated
+          to each. Because a sub-portfolio&apos;s equity curve is a fixed, reusable object,
+          a composed portfolio computes instantly once its sub-portfolios have each been
+          computed — their results are reused from the cache rather than recomputed.
+        </p>
+
         <h3 className={styles.conceptTitle}>Returns grid</h3>
         <p className={styles.conceptText}>
           A monthly heatmap and yearly summary appear below the equity chart. A toggle

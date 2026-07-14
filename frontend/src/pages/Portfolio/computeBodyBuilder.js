@@ -11,6 +11,7 @@
 
 import { buildComputeRequestBody } from '../Signals/requestBuilder';
 import { persistedDocToLegs } from './persistedDoc';
+import { getChildPortfolioId } from './resolvePortfolioRange';
 
 /**
  * Build the resolved compute request body.
@@ -21,6 +22,14 @@ import { persistedDocToLegs } from './persistedDoc';
  * @param {string=}  p.start
  * @param {string=}  p.end
  * @param {Array=}   p.availableIndicators
+ * @param {(id: string) => ({start?:string,end?:string}|null)=} p.resolveChildRange
+ *   Fund-of-funds range accessor for ``type:"portfolio"`` legs: given a child
+ *   portfolio id, returns that child's OWN resolved date range (its
+ *   ``overlapRange`` — exactly what a standalone compute of the child would
+ *   send). Inlined into the nested ``portfolio.start/end`` so the child sub-body
+ *   is byte-identical to a standalone compute → shared backend cache entry
+ *   (key-parity invariant). Optional: when omitted, the child carries no range
+ *   and the backend computes it over its full data overlap.
  * @param {(id: string) => (object|null)=} p.resolvePortfolio
  *   Resolver for ``type:"portfolio"`` (composed) legs: given a child portfolio
  *   id, returns the child's CURRENT saved doc ({legs, rebalance, ...}) or null
@@ -53,6 +62,7 @@ export function buildPortfolioComputeBody({
   end,
   availableIndicators,
   resolvePortfolio,
+  resolveChildRange,
   _depth = 0,
 }) {
   const apiLegs = {};
@@ -69,7 +79,7 @@ export function buildPortfolioComputeBody({
       // acyclic. Do NOT emit a leg for a broken/depth-exceeded ref — an empty
       // ``portfolio`` would trip the backend's own empty-child 400; the caller
       // blocks compute on ``brokenRefs`` first, well before that.
-      const portfolioId = leg.portfolioId || leg.portfolio_id || null;
+      const portfolioId = getChildPortfolioId(leg);
       if (_depth >= 1) {
         brokenRefs.push({ label: leg.label, portfolioId, reason: 'depth' });
         continue;
@@ -85,16 +95,26 @@ export function buildPortfolioComputeBody({
       // uses) and recurse through the SAME builder — the child sub-body is built
       // identically to a top-level one, so its inlined shape is byte-stable and
       // the cache key captures every child field.
+      // FUND-OF-FUNDS: inline the child's OWN resolved range (exactly the range a
+      // standalone compute of that child would send — its resolved overlapRange)
+      // into the nested ``portfolio`` start/end, so the child sub-body is
+      // byte-identical to a standalone compute → shared backend cache entry
+      // (key-parity invariant, SC2). ``resolveChildRange`` is a sync accessor the
+      // caller pre-populated by resolving each child's range. When omitted
+      // (legacy / range not resolved) start/end stay undefined → the backend
+      // computes the child over its full data overlap (never the parent range).
       const childLegs = persistedDocToLegs(childDoc);
+      const childRange = typeof resolveChildRange === 'function'
+        ? resolveChildRange(portfolioId)
+        : null;
       const childBuilt = buildPortfolioComputeBody({
         legs: childLegs,
         rebalance: typeof childDoc.rebalance === 'string' ? childDoc.rebalance : 'none',
-        // The nested ``portfolio`` object carries NO start/end (design §4) — the
-        // parent's window drives the shared date grid.
-        start: undefined,
-        end: undefined,
+        start: childRange?.start || undefined,
+        end: childRange?.end || undefined,
         availableIndicators,
         resolvePortfolio,
+        resolveChildRange,
         _depth: _depth + 1,
       });
       // Propagate the child's own diagnostics so the parent surfaces them.
@@ -113,6 +133,11 @@ export function buildPortfolioComputeBody({
           weights: childBuilt.body.weights,
           rebalance: childBuilt.body.rebalance,
           return_type: childBuilt.body.return_type,
+          // Emit start/end ONLY when the child's range resolved (fund-of-funds
+          // key parity). Absent otherwise so a legacy/unresolved composed body
+          // stays byte-identical to the pre-range shape.
+          ...(childBuilt.body.start ? { start: childBuilt.body.start } : {}),
+          ...(childBuilt.body.end ? { end: childBuilt.body.end } : {}),
         },
       };
     } else if (leg.type === 'signal') {

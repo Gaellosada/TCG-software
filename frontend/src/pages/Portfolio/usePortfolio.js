@@ -1,11 +1,11 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { computePortfolio } from '../../api/portfolio';
+import { computePortfolio, getPortfolioCachedResult } from '../../api/portfolio';
 import { getPortfolio } from '../../api/persistence';
 import { queryKeys } from '../../queryKeys';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
 import { legsToRangesKey } from './legKey';
-import { resolvePortfolioRange } from './resolvePortfolioRange';
+import { resolvePortfolioRange, childPortfolioIds, childRangeAccessorFor } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { isPortfolioCacheEnabled } from '../../lib/userSettings';
@@ -296,9 +296,7 @@ export default function usePortfolio() {
   // The distinct set of referenced child portfolio ids (composed page only —
   // pure portfolios have none, so all of this is inert on the pure path).
   const portfolioLegIds = useMemo(
-    () => [...new Set(
-      legs.filter((l) => l.type === 'portfolio' && l.portfolioId).map((l) => l.portfolioId),
-    )],
+    () => childPortfolioIds(legs),
     [legs],
   );
   const portfolioLegIdsKey = portfolioLegIds.join(',');
@@ -386,6 +384,116 @@ export default function usePortfolio() {
     return (id) => usableChildDoc(map[id]);
   }, [portfolioLegIdsKey, queryClient, usableChildDoc]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Resolve the fully-inlined compute body for the CURRENT config over the given
+  // effective window. Shared by Compute AND the auto-display effect so the body
+  // (hence the backend cache key) is IDENTICAL on both paths. Resolves child
+  // specs (live reference) AND — fund-of-funds — each child's OWN range so a
+  // composed leg's child sub-body is byte-identical to a standalone compute
+  // (shared cache entry). Pure page: no children → a no-op resolver + empty map,
+  // so the body is byte-identical to before.
+  const resolveActiveBody = useCallback(async (effStart, effEnd) => {
+    const availableIndicators = await hydrateAvailableIndicators();
+    const resolveChild = await resolveChildrenNow();
+    const resolveChildRange = await childRangeAccessorFor(legs, { queryClient });
+    return buildPortfolioComputeBody({
+      legs,
+      rebalance,
+      start: effStart,
+      end: effEnd,
+      availableIndicators,
+      resolvePortfolio: resolveChild,
+      resolveChildRange,
+    });
+  }, [legs, rebalance, queryClient, resolveChildrenNow]);
+
+  /* ── Auto-display cached result (read-only, never computes) ── */
+  // Monotonic run-id shared by the auto-display effect AND handleCalculate so a
+  // slow cache-get for a stale config (or a config a fresh Compute superseded)
+  // can never clobber the displayed result.
+  const autoDisplayRunRef = useRef(0);
+
+  // Signature of everything that changes the backend cache key for the ACTIVE
+  // config. DRIFT-PROOF: instead of re-cherry-picking a field list (which would
+  // silently miss any newly-added body-affecting leg field, as the option-leg
+  // sizing/hold fields — nav_times/sizing_mode/futures_reference/
+  // hold_between_rolls — were missed before), serialize each leg's FULL content
+  // minus the purely-volatile React-key ``id``. So ANY field that enters the
+  // compute body invalidates the effect → blanks the stale result → re-probes
+  // (SC5/SC6). ``id`` is excluded from the per-leg JSON but the id LIST is kept
+  // so switching to a different portfolio with an identical spec still re-fires.
+  const autoDisplaySig = useMemo(() => {
+    const legBodies = legs.map((l) => {
+      const { id: _id, ...rest } = l;
+      try {
+        return JSON.stringify(rest);
+      } catch {
+        return String(l.label);
+      }
+    });
+    return [
+      legs.map((l) => l.id).join(','),
+      legBodies.join('|'),
+      rebalance,
+      startDate,
+      endDate,
+      overlapRange?.start || '',
+      overlapRange?.end || '',
+    ].join('#');
+  }, [legs, rebalance, startDate, endDate, overlapRange]);
+
+  useEffect(() => {
+    // Caching off → never auto-display (matches the badge gate). Empty config →
+    // nothing to show.
+    if (!useCache || legs.length === 0) {
+      return undefined;
+    }
+    // The config CHANGED (edit / select / range-resolve): blank any stale result
+    // the instant the key changes (SC5). A completed Compute does not change this
+    // signature, so it never triggers this blank.
+    setResults(null);
+
+    const effStart = startDate || overlapRange?.start;
+    const effEnd = endDate || overlapRange?.end;
+    // Gate until the date range has resolved so a transient undefined range never
+    // fires a wrong-key get.
+    if (!effStart || !effEnd) return undefined;
+
+    const runId = ++autoDisplayRunRef.current;
+    let cancelled = false;
+    const live = () => !cancelled && runId === autoDisplayRunRef.current;
+
+    (async () => {
+      let built;
+      try {
+        built = await resolveActiveBody(effStart, effEnd);
+      } catch {
+        return; // un-resolvable config → leave blank
+      }
+      if (!live()) return;
+      // Un-keyable (missing indicators / broken refs) → cannot be cached → blank.
+      if (built.missingByLeg?.length || built.brokenRefs?.length) return;
+      let res;
+      try {
+        res = await getPortfolioCachedResult({
+          legs: built.body.legs,
+          weights: built.body.weights,
+          rebalance: built.body.rebalance,
+          returnType: built.body.return_type,
+          start: built.body.start,
+          end: built.body.end,
+        });
+      } catch {
+        return; // cache errors never surface — stay blank, Compute still works
+      }
+      if (!live()) return;
+      // HIT → auto-display. MISS (result null) → stay blank (never computes).
+      if (res && res.result) setResults(res.result);
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoDisplaySig, useCache]);
+
   /* ── Calculate ── */
 
   const handleCalculate = useCallback(async () => {
@@ -417,22 +525,21 @@ export default function usePortfolio() {
       return;
     }
 
-    // Build the resolved compute body via the SHARED builder. Hydration is
-    // unconditional so signal legs (including ones inside a referenced child)
-    // always resolve their indicators.
-    const availableIndicators = await hydrateAvailableIndicators();
-    // Resolve every referenced child portfolio's CURRENT spec (composed page).
-    // On the pure page there are none, so this returns a no-op resolver and the
-    // built body is byte-identical to today's.
-    const resolveChild = await resolveChildrenNow();
-    const { body, missingByLeg, brokenRefs } = buildPortfolioComputeBody({
-      legs,
-      rebalance,
-      start: effectiveStart,
-      end: effectiveEnd,
-      availableIndicators,
-      resolvePortfolio: resolveChild,
-    });
+    // A fresh Compute owns the result — supersede any in-flight auto-display
+    // cache-get so a late hit for the pre-Compute config can't clobber it.
+    // Capture this run id: an edit made DURING a slow compute bumps the ref (via
+    // the auto-display effect), so guarding the terminal set on ``myRun`` also
+    // invalidates a stale compute — it can no longer paint the wrong config's
+    // curve over the edited one.
+    const myRun = (autoDisplayRunRef.current += 1);
+
+    // Build the fully-resolved compute body via the SHARED resolver (indicators +
+    // live child specs + fund-of-funds child ranges). On the pure page there are
+    // no children, so the body is byte-identical to today's.
+    const { body, missingByLeg, brokenRefs } = await resolveActiveBody(
+      effectiveStart,
+      effectiveEnd,
+    );
     if (missingByLeg.length > 0) {
       const first = missingByLeg[0];
       setError(`Signal "${first.label}" references missing indicators: ${first.ids.join(', ')}. Please check the Indicators page.`);
@@ -460,13 +567,13 @@ export default function usePortfolio() {
           useCache,
           signal,
         });
-        if (!signal.aborted) setResults(res);
+        if (!signal.aborted && myRun === autoDisplayRunRef.current) setResults(res);
       } catch (err) {
         if (signal.aborted) return;
         setError(err.message || 'Computation failed');
       }
     });
-  }, [legs, rebalance, startDate, endDate, overlapRange, runAbortable, resolveChildrenNow, useCache]);
+  }, [legs, startDate, endDate, overlapRange, runAbortable, resolveActiveBody, useCache]);
 
   const clearError = useCallback(() => setError(null), []);
 

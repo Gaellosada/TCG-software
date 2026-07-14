@@ -715,6 +715,7 @@ function PortfolioPage({ mode = 'pure' }) {
             </div>
           )}
           <PersistedPortfolioPanel
+            title={allowPortfolioLegs ? 'Saved Composed Portfolios' : 'Saved Portfolios'}
             category={portfolio.persistedCategory}
             onCategoryChange={portfolio.setPersistedCategory}
             portfolios={visiblePortfolios}

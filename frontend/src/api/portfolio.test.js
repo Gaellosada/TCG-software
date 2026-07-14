@@ -9,7 +9,12 @@ vi.mock('./client', () => ({
 }));
 
 import { fetchApi } from './client';
-import { computePortfolio, clearPortfolioCache, getPortfolioCacheStatus } from './portfolio';
+import {
+  computePortfolio,
+  clearPortfolioCache,
+  getPortfolioCacheStatus,
+  getPortfolioCachedResult,
+} from './portfolio';
 
 beforeEach(() => {
   fetchApi.mockClear();
@@ -54,5 +59,41 @@ describe('getPortfolioCacheStatus', () => {
     expect(path).toBe('/portfolio/cache/status');
     expect(opts.method).toBe('POST');
     expect(JSON.parse(opts.body)).toEqual({ queries: bodies });
+  });
+});
+
+describe('getPortfolioCachedResult', () => {
+  it('POSTs the compute body to /portfolio/cache/get (read-only)', async () => {
+    await getPortfolioCachedResult({
+      legs: { A: { type: 'instrument' } },
+      weights: { A: 100 },
+      rebalance: 'none',
+      returnType: 'normal',
+      start: '2020-01-01',
+      end: '2020-12-31',
+    });
+    const [path, opts] = fetchApi.mock.calls[0];
+    expect(path).toBe('/portfolio/cache/get');
+    expect(opts.method).toBe('POST');
+    const sent = JSON.parse(opts.body);
+    expect(sent).toEqual({
+      legs: { A: { type: 'instrument' } },
+      weights: { A: 100 },
+      rebalance: 'none',
+      return_type: 'normal',
+      start: '2020-01-01',
+      end: '2020-12-31',
+    });
+    // Never sends use_cache — it is a pure read.
+    expect(sent).not.toHaveProperty('use_cache');
+  });
+
+  it('collapses falsy start/end to undefined (dropped from JSON)', async () => {
+    await getPortfolioCachedResult({
+      legs: {}, weights: {}, rebalance: 'none', returnType: 'normal',
+    });
+    const sent = JSON.parse(fetchApi.mock.calls[0][1].body);
+    expect(sent).not.toHaveProperty('start');
+    expect(sent).not.toHaveProperty('end');
   });
 });

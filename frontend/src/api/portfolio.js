@@ -48,3 +48,31 @@ export async function getPortfolioCacheStatus(queries, { signal } = {}) {
     ...(signal ? { signal } : {}),
   });
 }
+
+/**
+ * Read-only cache fetch — returns a cached compute result WITHOUT ever computing.
+ * POST /api/portfolio/cache/get with a compute-request body (the SAME shape/body
+ * ``computePortfolio`` sends, so the backend key matches). Backs the auto-display
+ * UX: a HIT returns the cached blob (``from_cache: true``); a MISS returns
+ * ``{ result: null, from_cache: false }`` and NEVER triggers a compute.
+ *
+ * @param {object} p  compute-request body { legs, weights, rebalance, returnType, start, end }
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<{ result: object|null, from_cache: boolean }>}
+ */
+export async function getPortfolioCachedResult({
+  legs, weights, rebalance, returnType, start, end,
+}, { signal } = {}) {
+  return fetchApi('/portfolio/cache/get', {
+    method: 'POST',
+    body: JSON.stringify({
+      legs,
+      weights,
+      rebalance,
+      return_type: returnType,
+      start: start || undefined,
+      end: end || undefined,
+    }),
+    ...(signal ? { signal } : {}),
+  });
+}

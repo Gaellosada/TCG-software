@@ -1497,7 +1497,13 @@ def _get_result_cache() -> DiskResultCache:
 # multipliers / rate constants) AND on each release. No backend version is
 # importable (no ``tcg.__version__``; ``pyproject`` version is unmanaged for this
 # purpose), so this is the single deliberate knob.
-COMPUTE_VERSION = "0.1.11"
+#
+# 0.1.11 → 0.1.12: fund-of-funds composed model. A composed leg's child is now
+# computed over its OWN resolved range (byte-identical to a standalone compute →
+# shared cache entry) instead of the parent's narrowed range. Composed entries
+# cached under the old re-anchor model are numerically different, so this bump
+# invalidates them (they can never be served with ``from_cache: true``).
+COMPUTE_VERSION = "0.1.12"
 
 
 def _strip_use_cache(obj: object) -> object:
@@ -1540,38 +1546,61 @@ def _portfolio_cache_key(body: PortfolioRequest) -> str:
     return canonical_hash({"_cv": COMPUTE_VERSION, "body": payload})
 
 
+def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest:
+    """Build the compute sub-request for a composed leg's child (fund-of-funds).
+
+    The child is computed over its OWN resolved range — ``child.start`` /
+    ``child.end`` inlined by the frontend (exactly the range a standalone compute
+    of that child would send, i.e. its resolved data overlap) — NOT the parent's
+    narrowed intersection range. This makes the child body byte-identical to a
+    standalone compute of the same child, so ``_portfolio_cache_key`` collides and
+    the two SHARE the on-disk cache entry (the key-parity invariant, SC2): a
+    composed portfolio of already-computed children is served entirely from cache.
+
+    A legacy body without an inlined range leaves ``start``/``end`` = None, so the
+    child computes over its FULL data overlap (deterministic and parent-independent
+    — never the parent's re-anchored range, which would be numerically wrong under
+    this model and would miss the standalone cache entry).
+    """
+    # model_copy preserves EVERY current and future PortfolioRequest field
+    # verbatim (so a schema addition can never silently diverge the composed
+    # child key from a standalone compute), overriding ONLY ``use_cache``. That
+    # is the sole intentional override — it propagates the parent's cache
+    # preference (a use_cache=False compute recomputes every child fresh) and is
+    # stripped from the key anyway, so it never breaks unified reuse (SC2).
+    return child.model_copy(update={"use_cache": use_cache})
+
+
 async def _evaluate_portfolio_leg(
     label: str,
     leg: LegSpec,
     svc: MarketDataService,
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
-    start: str | None,
-    end: str | None,
     use_cache: bool,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Evaluate a composed-portfolio leg to a synthetic equity price series.
 
     A ``portfolio`` leg references a saved PURE portfolio reused as a building
-    block; the frontend has inlined the child's resolved spec into
-    ``leg.portfolio``.  We compute that child to an equity curve and return it
-    as this leg's synthetic close series over the child's own date grid — the
-    parent then intersects it with the other legs and rebalances at the parent's
-    frequency, exactly as it does for a ``signal`` leg's synthetic.
+    block; the frontend has inlined the child's resolved spec AND its own resolved
+    date range into ``leg.portfolio``.  We compute that child to an equity curve
+    over ITS OWN range and return it as this leg's synthetic close series over the
+    child's own date grid — the parent then intersects it with the other legs and
+    rebalances only the ALLOCATIONS at the parent's frequency, exactly as it does
+    for a ``signal`` leg's synthetic (the fund-of-funds model).
 
     The child is evaluated by **recursively invoking the very same
     ``compute_portfolio`` endpoint** (not a re-implementation), so the child's
     ``portfolio_equity`` is byte-identical to that child computed standalone
-    over the same range (criterion A1-1) and the existing per-type leg
+    over its own range (criterion A1-1) and the existing per-type leg
     evaluators are reused verbatim.  Depth is capped at 1: the guard below runs
     BEFORE recursing, which also makes infinite recursion impossible.
 
     Caching is handled ENTIRELY by ``compute_portfolio`` (the on-disk result
-    cache): this function builds the child sub-request as a ``PortfolioRequest``
-    with the same fields a top-level request carries and the parent's range
-    threaded in, then calls ``compute_portfolio(child_body)`` — which hashes that
-    body to the SAME key a standalone compute of the child would use, so the two
-    share the cache entry (unified reuse, the Bug-2 fix; Sign 9). There is no
+    cache): ``_child_request`` builds the child sub-request over the child's OWN
+    range, then ``compute_portfolio(child_body)`` hashes that body to the SAME key
+    a standalone compute of the child would use, so the two share the cache entry
+    (unified reuse, the fund-of-funds key-parity invariant; Sign 9). There is no
     separate leg cache. Every ``get`` deserialises fresh arrays, so there is no
     frozen-array/aliasing concern to manage here.
 
@@ -1600,25 +1629,14 @@ async def _evaluate_portfolio_leg(
                 f"'{child_label}' is itself a portfolio"
             )
 
-    # Compute the child over the PARENT's requested date range (mirrors how a
-    # signal/option leg receives the parent's start/end), then let the parent's
-    # date-grid intersection align it with the other legs.  This goes through the
-    # cached ``compute_portfolio`` wrapper, so an already-computed child (whether
-    # from a standalone request or another composition) is served from the
-    # on-disk cache — the SAME entry, keyed on this identical body.
-    child_body = PortfolioRequest(
-        legs=child.legs,
-        weights=child.weights,
-        rebalance=child.rebalance,
-        return_type=child.return_type,
-        start=start,
-        end=end,
-        # Propagate the parent's cache preference so a use_cache=False compute
-        # recomputes every child fresh (and never reads/writes the cache). The
-        # flag does not affect the child's key (excluded), so this never breaks
-        # unified reuse between a cached parent and a standalone child.
-        use_cache=use_cache,
-    )
+    # FUND-OF-FUNDS: compute the child over its OWN resolved range (inlined into
+    # ``child.start``/``child.end`` by the frontend), NOT the parent's narrowed
+    # intersection range, then let the parent's date-grid intersection align it
+    # with the other legs. This goes through the cached ``compute_portfolio``
+    # wrapper with a body byte-identical to a standalone compute of that child, so
+    # an already-computed child is served from the SAME on-disk cache entry
+    # (unified reuse; the key-parity invariant, SC2). See ``_child_request``.
+    child_body = _child_request(child, use_cache)
     child_result = await compute_portfolio(child_body, svc, classify, repo)
 
     # Convert the child response back to the engine's YYYYMMDD-int date grid +
@@ -1900,10 +1918,12 @@ async def _compute_portfolio_uncached(
 
     # ── 4.6. Evaluate composed-portfolio legs (if any) ──
     #
-    # Each portfolio leg is computed to an equity curve (over the parent's
-    # requested range) and injected as a synthetic close series, exactly like a
-    # signal leg.  Its DIRECTION is the parent weight sign (no baked-in sign, so
-    # NOT a hold_option_label) and it rebalances at the parent's frequency.
+    # Each portfolio leg is computed to an equity curve over ITS OWN resolved
+    # range (fund-of-funds; see ``_evaluate_portfolio_leg``) and injected as a
+    # synthetic close series, exactly like a signal leg. The parent then
+    # intersects the child grids and (§5) clips to its own date window. Its
+    # DIRECTION is the parent weight sign (no baked-in sign, so NOT a
+    # hold_option_label) and it rebalances at the parent's frequency.
     portfolio_leg_dates_map: dict[str, npt.NDArray[np.int64]] = {}
     portfolio_leg_closes: dict[str, npt.NDArray[np.float64]] = {}
     for label, leg in portfolio_legs.items():
@@ -1913,8 +1933,6 @@ async def _compute_portfolio_uncached(
             svc,
             classify,
             repo,
-            body.start,
-            body.end,
             body.use_cache,
         )
         portfolio_leg_dates_map[label] = pf_dates
@@ -1941,6 +1959,23 @@ async def _compute_portfolio_uncached(
             "and option date ranges are disjoint (an option leg's available "
             "dates often differ from the spot/continuous legs')"
         )
+
+    # ── Honor the parent's date slider on the composed intersection ──
+    #
+    # Instrument legs are already clipped to [start_date, end_date] upstream (§3)
+    # and signal legs are fetched over that same window (§4), so for the pure
+    # route AND mixed composed portfolios this is a NO-OP (the intersection is
+    # already within range). But a portfolio-only (fund-of-funds) composed
+    # portfolio computes each child over the child's OWN full range — so this is
+    # the ONLY place the parent's slider narrows the composed equity. Clipping
+    # here (rather than threading the parent range into ``_child_request``) keeps
+    # every child body/key full-range, preserving cache reuse + key parity (SC2).
+    if start_date or end_date:
+        lo = date_to_int(start_date) if start_date else 0
+        hi = date_to_int(end_date) if end_date else 99999999
+        common_dates = common_dates[(common_dates >= lo) & (common_dates <= hi)]
+        if len(common_dates) == 0:
+            raise ValidationError("No data in the selected date range")
 
     # Slice instrument closes to common dates
     aligned_closes: dict[str, npt.NDArray[np.float64]] = {}
@@ -2565,3 +2600,36 @@ async def portfolio_cache_status(body: CacheStatusRequest) -> dict:
             cached = False
         results.append({"cached": bool(cached)})
     return {"results": results}
+
+
+@router.post("/cache/get")
+async def get_portfolio_cached_result(body: PortfolioRequest) -> dict:
+    """Return a cached compute result for ``body`` WITHOUT ever computing.
+
+    Read-only companion to ``/compute`` that backs the frontend AUTO-DISPLAY UX:
+    selecting a portfolio whose current config is already cached shows its result
+    with no Compute click and no heavy compute. It computes the SAME canonical key
+    the compute path uses (``_portfolio_cache_key``) and does a plain
+    ``cache.get`` (LRU-bump OK, honors TTL).
+
+    * HIT  → ``{"result": <compute-shaped blob, from_cache:true, computed_ms:null>,
+      "from_cache": true}`` — byte-identical to a ``/compute`` cached serve.
+    * MISS → ``{"result": null, "from_cache": false}``. It **NEVER** calls the
+      compute path on a miss — the safety property behind auto-display (SC6): an
+      auto-display can never trigger a long compute.
+
+    Like ``/cache/status`` it takes NO market-data / repo dependency, so it
+    structurally cannot fetch dwh or trigger a compute. Any cache error degrades
+    to a miss (never a 500) so a cache glitch can never block the UI.
+    """
+    try:
+        cache = _get_result_cache()
+        cached = await cache.get(_portfolio_cache_key(body))
+    except Exception:  # noqa: BLE001 — a cache glitch degrades to a miss, never 500
+        cached = None
+    if cached is None:
+        return {"result": None, "from_cache": False}
+    return {
+        "result": {**cached, "from_cache": True, "computed_ms": None},
+        "from_cache": True,
+    }

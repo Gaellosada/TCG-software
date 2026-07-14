@@ -25,6 +25,7 @@ import styles from './PersistedPortfolioPanel.module.css';
 import { CATEGORIES } from '../../api/persistence';
 
 function PersistedPortfolioPanel({
+  title = 'Saved Portfolios',
   category,
   onCategoryChange,
   portfolios,
@@ -72,7 +73,7 @@ function PersistedPortfolioPanel({
 
   return (
     <Card
-      title="Saved Portfolios"
+      title={title}
       right={headerRight}
       data-testid="persisted-portfolio-panel"
     >
