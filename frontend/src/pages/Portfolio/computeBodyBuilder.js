@@ -63,12 +63,15 @@ export function buildPortfolioComputeBody({
   availableIndicators,
   resolvePortfolio,
   resolveChildRange,
-  // Global execution costs (basis points). Added to the TOP-LEVEL body only
-  // (see costFieldsForRequest — present only when > 0). NOT threaded into the
-  // recursive child call: slippage/fees are a single global field applied once
-  // by the top-level body, and the inlined child object carries only its own
-  // legs/weights/rebalance/return_type/range. Must be passed identically by the
-  // compute path AND the cache-status probe so the backend cache key matches.
+  // Global execution costs (basis points). Emitted (via costFieldsForRequest —
+  // present only when > 0) on the TOP-LEVEL body AND on every inlined child
+  // ``portfolio`` sub-body (see ``costFields`` below), so a composed child is
+  // computed WITH the same global costs a standalone compute of that child would
+  // apply — its own internal rebalance/roll trades are charged inside its own
+  // compute, not left cost-free. The value is the single global setting, so the
+  // child sub-body stays byte-identical to a standalone child body → shared
+  // backend cache key even with costs on (key-parity invariant, SC2). Must be
+  // passed identically by the compute path AND the cache-status probe.
   slippageBps,
   feesBps,
   _depth = 0,
@@ -77,6 +80,11 @@ export function buildPortfolioComputeBody({
   const missing = [];
   const missingByLeg = [];
   const brokenRefs = [];
+  // The global cost fields, computed ONCE and reused for the top-level body and
+  // every inlined child sub-body (below). Empty ({}) when both costs are 0 —
+  // so a 0-bps compute stays byte-identical to a pre-feature payload at every
+  // depth, and children carry no cost keys (byte-identity invariant).
+  const costFields = costFieldsForRequest({ slippageBps, feesBps });
 
   for (const leg of legs) {
     if (leg.type === 'portfolio') {
@@ -146,6 +154,14 @@ export function buildPortfolioComputeBody({
           // stays byte-identical to the pre-range shape.
           ...(childBuilt.body.start ? { start: childBuilt.body.start } : {}),
           ...(childBuilt.body.end ? { end: childBuilt.body.end } : {}),
+          // Global execution costs on the child too (present only when > 0) —
+          // identical to what a STANDALONE compute of this child would carry, so
+          // the child's own internal rebalance/roll trades are charged inside its
+          // own compute AND the sub-body stays byte-identical to the standalone
+          // child body → same backend cache key with costs on (key-parity, SC2).
+          // The parent's roll overlay never touches a portfolio leg, so the
+          // child's internal rolls are charged exactly once (no double-charge).
+          ...costFields,
         },
       };
     } else if (leg.type === 'signal') {
@@ -232,9 +248,11 @@ export function buildPortfolioComputeBody({
       return_type: 'normal',
       start: start || undefined,
       end: end || undefined,
-      // Global execution costs — present only when > 0, and only at the
-      // top level (_depth 0). Recursive child bodies never receive costs.
-      ...(_depth === 0 ? costFieldsForRequest({ slippageBps, feesBps }) : {}),
+      // Global execution costs — present only when > 0. Emitted at the top
+      // level (_depth 0); a recursive child body's OWN top-level cost fields are
+      // discarded (the parent re-emits them onto the inlined child sub-body via
+      // ``costFields`` above), so guard on depth to keep childBuilt.body clean.
+      ...(_depth === 0 ? costFields : {}),
     },
     missing: [...new Set(missing)],
     missingByLeg,

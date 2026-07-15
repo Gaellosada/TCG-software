@@ -393,6 +393,17 @@ function HelpPage() {
           a composed portfolio computes instantly once its sub-portfolios have each been
           computed — their results are reused from the cache rather than recomputed.
         </p>
+        <p className={styles.conceptText}>
+          <strong>Costs in a composed portfolio.</strong> When slippage/fees are on, each
+          sub-portfolio pays its <em>own</em> internal trading costs (its rebalances and
+          rolls), and those are reflected in that sub-portfolio&apos;s equity — so the
+          combined equity curve and every return/risk metric are fully net of all costs.
+          The composed portfolio&apos;s own <strong>Slippage paid</strong> /{' '}
+          <strong>Fees paid</strong> rows report only the <em>allocation-layer</em> cost
+          (the trading it does to rebalance between sub-portfolios); each sub-portfolio&apos;s
+          internal cost shows in that sub-portfolio&apos;s own readout, not summed into the
+          parent&apos;s percentage.
+        </p>
 
         <h3 className={styles.conceptTitle}>Returns grid</h3>
         <p className={styles.conceptText}>
