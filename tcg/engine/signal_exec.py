@@ -64,7 +64,7 @@ from tcg.engine.costs import (
     CostConfig,
     cumulative_cost_pct,
     establish_turnover,
-    roll_turnover_from_flags,
+    hold_leg_turnover,
     split_drag,
 )
 from tcg.engine.hold_pnl import _HoldPnLSpec, _compound_with_hold
@@ -1944,21 +1944,33 @@ async def evaluate_signal(
             # costs are off by default). So the priced sub-book drifts within
             # its own net; the omission is negligible.
             turnover += establish_turnover(pos_mat, rets_mat, gross_net)
-        # Hold-leg roll round-trips (one side at the initial open).
+        # Hold-leg turnover — POSITION-AWARE (parity with the P&L path, which only
+        # accrues while ``pos_active`` on both sides of a step). Charge one OPEN
+        # side when the leg latches, one CLOSE side when it unlatches, and a
+        # round-trip per INTERIOR roll survived while held. A roll while the leg
+        # is flat costs nothing (no phantom cost), and the genuine entry is billed
+        # even though it is not an ``is_roll`` flag.
         for spec in hold_specs:
-            turnover += roll_turnover_from_flags(spec.is_roll, spec.nav_times, T - 1)
+            turnover += hold_leg_turnover(
+                spec.is_roll, spec.pos_active, spec.nav_times, T - 1
+            )
         # Continuous-futures roll round-trips (parity with the PORTFOLIO engine's
         # §7 roll_turnover). A priced continuous leg's BACK-ADJUSTED return stream
         # makes a roll date an ordinary price bar with an UNCHANGED target weight,
         # so ``establish_turnover`` adds ~0 there and the 2-side round-trip on the
         # rolled notional would otherwise never be charged. Mirror the portfolio:
-        # at each interior roll bar add ``2*|position[bar]|`` (the input's net
-        # latched signed-weight FRACTION held over that step). The roll-info read
-        # is gated by ``_cost_on`` (this whole block), so at 0 bps nothing extra
-        # runs and output is byte-identical. If an entry/exit coincides with a
-        # roll, the round-trip is added REGARDLESS (as the portfolio does) —
-        # ``establish_turnover`` is ~0 there for a back-adjusted leg, so there is
-        # no double-counting of the roll itself.
+        # at each interior roll bar add a round-trip on the notional held THROUGH
+        # the boundary. For a hold-through-roll the position is unchanged across
+        # the roll, so this is ``2*|pos[s]|`` as before; but on a bar where the
+        # signal FRESHLY establishes (or flips in from flat) a position exactly on
+        # a roll date, ``establish_turnover`` already bills the full entry side, so
+        # adding a full round-trip on top would ~3x-overcharge that bar. Charge the
+        # round-trip only on the notional common to both sides:
+        # ``2*min(|pos[s-1]|,|pos[s]|)`` when the sign is unchanged (else 0 — a
+        # flip holds nothing through), and 0 at s==0 (nothing held before). This is
+        # identical to the old ``2*|pos[s]|`` for the constant-weight hold-through
+        # case, bills zero on a fresh entry/exit, and a reduced overlap on a
+        # partial resize. Gated by ``_cost_on`` → byte-identical at 0 bps.
         _cont_roll_fetch = getattr(fetcher, "fetch_continuous_roll_info", None)
         if _cont_roll_fetch is not None:
             date_to_idx = {int(d): i for i, d in enumerate(index.tolist())}
@@ -1970,8 +1982,15 @@ async def evaluate_signal(
                 roll_dates = await _cont_roll_fetch(acc.instrument)
                 for d in np.asarray(roll_dates, dtype=np.int64).tolist():
                     s = date_to_idx.get(int(d))
-                    if s is not None and 0 <= s < T - 1:
-                        turnover[s] += 2.0 * abs(float(acc.pos[s]))
+                    if s is None or not (1 <= s < T - 1):
+                        continue  # s==0: nothing held before the first bar
+                    p_prev = float(acc.pos[s - 1])
+                    p_cur = float(acc.pos[s])
+                    same_sign = (p_prev > 0.0 and p_cur > 0.0) or (
+                        p_prev < 0.0 and p_cur < 0.0
+                    )
+                    if same_sign:
+                        turnover[s] += 2.0 * min(abs(p_prev), abs(p_cur))
         slip_drag, fees_drag = split_drag(turnover, cost_config)
     total_drag = slip_drag + fees_drag
 

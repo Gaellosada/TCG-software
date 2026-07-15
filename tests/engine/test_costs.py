@@ -12,6 +12,7 @@ from tcg.engine.costs import (
     CostConfig,
     cumulative_cost_pct,
     establish_turnover,
+    hold_leg_turnover,
     roll_turnover_from_flags,
     split_drag,
 )
@@ -34,6 +35,64 @@ def test_roll_turnover_last_bar_dropped():
     is_roll = np.array([True, False, False, True])  # T=4, n_steps=3, roll at bar 3
     t = roll_turnover_from_flags(is_roll, 1.0, 3)
     np.testing.assert_allclose(t, [1.0, 0.0, 0.0], atol=1e-15)
+
+
+def test_hold_leg_turnover_always_held_matches_flag_primitive():
+    """A leg latched on EVERY bar reduces to the old flag-only primitive.
+
+    is_roll [1,0,0,1,0,0], nav_times 1.0, T=6 (n_steps=5), pos_active all True.
+    OPEN side at bar 0 (latch) -> 1.0 on step 0; interior roll at bar 3 held
+    across -> round-trip 2.0 on step 3; no unlatch -> no close. This is exactly
+    what ``roll_turnover_from_flags`` produced (the live-verified hold-through
+    case is UNCHANGED).
+    """
+    is_roll = np.array([True, False, False, True, False, False])
+    active = np.ones(6, dtype=bool)
+    t = hold_leg_turnover(is_roll, active, 1.0, 5)
+    np.testing.assert_allclose(t, [1.0, 0.0, 0.0, 2.0, 0.0, 0.0][:5], atol=1e-15)
+    # ... and identical to the legacy flag primitive on this always-held case.
+    legacy = roll_turnover_from_flags(is_roll, 1.0, 5)
+    np.testing.assert_allclose(t, legacy, atol=1e-15)
+
+
+def test_hold_leg_turnover_latch_after_roll_ignores_flat_rolls():
+    """Leg FLAT over the initial-open (bar 0) AND the interior roll (bar 3);
+    latches at bar 4 and is held to the end.
+
+    is_roll [1,0,0,1,0,0]; pos_active [F,F,F,F,T,T]; nav_times 1.0, n_steps=5.
+    Both rolls are in the FLAT window -> NOT charged (no phantom cost). The
+    genuine OPEN latches at bar 4 -> 1 side on step 4. No unlatch (held to end).
+    Legacy flag primitive would (wrongly) bill 1.0@step0 + 2.0@step3 = 3.0.
+    """
+    is_roll = np.array([True, False, False, True, False, False])
+    active = np.array([False, False, False, False, True, True])
+    t = hold_leg_turnover(is_roll, active, 1.0, 5)
+    np.testing.assert_allclose(t, [0.0, 0.0, 0.0, 0.0, 1.0], atol=1e-15)
+
+
+def test_hold_leg_turnover_open_close_and_roll_while_held():
+    """Latch at bar 1 (OPEN), survive the interior roll at bar 3 (round-trip),
+    unlatch at bar 4 (CLOSE).
+
+    is_roll [1,0,0,1,0,0]; pos_active [F,T,T,T,F,F]; nav_times 2.0, n_steps=5.
+      OPEN  : q jumps 0->2 at bar 1  -> |2-0|=2 on step 1.
+      ROLL  : bar 3 held across (active[2]&active[3]) -> 2*2=4 on step 3.
+      CLOSE : q drops 2->0 at bar 4  -> |0-2|=2 on step 4.
+    Lifetime = one open (2) + one round-trip (4) + one close (2). The initial
+    is_roll[0] while flat is NOT an open side; the entry is the latch at bar 1.
+    """
+    is_roll = np.array([True, False, False, True, False, False])
+    active = np.array([False, True, True, True, False, False])
+    t = hold_leg_turnover(is_roll, active, 2.0, 5)
+    np.testing.assert_allclose(t, [0.0, 2.0, 0.0, 4.0, 2.0], atol=1e-15)
+
+
+def test_hold_leg_turnover_never_latched_is_zero():
+    """A leg never latched (all flat) with roll flags set costs NOTHING."""
+    is_roll = np.array([True, False, False, True, False, False])
+    active = np.zeros(6, dtype=bool)
+    t = hold_leg_turnover(is_roll, active, 1.0, 5)
+    np.testing.assert_allclose(t, np.zeros(5), atol=1e-15)
 
 
 def test_config_bps_to_rate_and_is_zero():

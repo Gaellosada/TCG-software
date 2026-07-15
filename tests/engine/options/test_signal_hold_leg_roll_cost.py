@@ -95,3 +95,75 @@ async def test_interior_roll_adds_cost_on_top_of_entry():
     )
 
     assert with_roll.total_slippage_paid_pct > entry_only.total_slippage_paid_pct
+
+
+# ── Position-aware hold-leg turnover (FIX round 4) ──────────────────────────
+# The entry condition is ``S.close > 0``, so the spx_series drives the leg's
+# LATCH: <=0 -> flat (pos_active False), >0 -> held. is_roll = [1,0,0,1,0,0]
+# (initial open bar 0 + interior roll bar 3).
+
+
+def _flat_then_latch(latch_from: int) -> np.ndarray:
+    """spx series that latches (>0) from bar ``latch_from`` onward, flat before."""
+    s = np.full(len(_DATES), -1.0, dtype=np.float64)
+    s[latch_from:] = 1.0
+    return s
+
+
+async def test_never_latched_hold_leg_costs_nothing():
+    """A hold leg that NEVER latches (all flat) must incur ZERO cost even though
+    its roll flags fire -- no phantom entry/roll cost while flat. Pre-fix the
+    flag-only primitive charged 1+2 sides of the never-held notional."""
+    chains = _build_chains()
+    sig = _short_put_signal(hold=True)
+    spx_flat = np.full(len(_DATES), -1.0, dtype=np.float64)  # condition never true
+
+    costed = await evaluate_signal(
+        sig, {}, _make_fetcher(chains, spx_series=spx_flat), CostConfig(10.0, 5.0)
+    )
+    assert costed.total_slippage_paid_pct == 0.0
+    assert costed.total_fees_paid_pct == 0.0
+    # Never held -> no P&L, no cost -> equity is flat at 1.0.
+    np.testing.assert_allclose(costed.equity_ratio, np.ones(len(_DATES)), atol=1e-12)
+
+
+async def test_roll_in_flat_window_not_charged():
+    """Leg latches at bar 4 -- AFTER the interior roll (bar 3). The roll happens
+    while flat, so it must NOT be charged: total cost equals the same leg with the
+    interior roll removed. Pre-fix the flat-window roll was billed a round-trip."""
+    chains = _build_chains()
+    sig = _short_put_signal(hold=True)
+    spx = _flat_then_latch(4)  # flat bars 0..3 (incl. the bar-3 roll), held 4..5
+    cfg = CostConfig(10.0, 5.0)
+
+    with_roll = await evaluate_signal(
+        sig, {}, _make_fetcher(chains, spx_series=spx), cfg
+    )
+    no_interior = await evaluate_signal(
+        sig, {}, _no_interior_roll_fetcher(chains, spx_series=spx), cfg
+    )
+
+    assert with_roll.total_slippage_paid_pct == no_interior.total_slippage_paid_pct
+    assert with_roll.total_fees_paid_pct == no_interior.total_fees_paid_pct
+    # The genuine entry (bar-4 latch) is still charged -> a positive cost.
+    assert with_roll.total_slippage_paid_pct > 0.0
+
+
+async def test_roll_while_held_is_charged():
+    """Leg latches at bar 1 -- BEFORE the interior roll (bar 3) and held across
+    it. The roll survived-while-held IS charged: cost strictly exceeds the same
+    leg with the interior roll removed."""
+    chains = _build_chains()
+    sig = _short_put_signal(hold=True)
+    spx = _flat_then_latch(1)  # held bars 1..5, spanning the bar-3 roll
+    cfg = CostConfig(10.0, 5.0)
+
+    with_roll = await evaluate_signal(
+        sig, {}, _make_fetcher(chains, spx_series=spx), cfg
+    )
+    no_interior = await evaluate_signal(
+        sig, {}, _no_interior_roll_fetcher(chains, spx_series=spx), cfg
+    )
+
+    assert with_roll.total_slippage_paid_pct > no_interior.total_slippage_paid_pct
+    assert with_roll.total_fees_paid_pct > no_interior.total_fees_paid_pct

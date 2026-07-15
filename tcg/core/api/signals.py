@@ -315,8 +315,10 @@ class SignalComputeRequest(BaseModel):
     start: str | None = None
     end: str | None = None
     # Transaction costs (basis points, independent). Default 0 = OFF = byte-identical.
-    slippage_bps: float = 0.0
-    fees_bps: float = 0.0
+    # A negative rate would produce negative drag (inflated equity / negative
+    # reported cost), so the boundary rejects it (422).
+    slippage_bps: float = Field(default=0.0, ge=0.0)
+    fees_bps: float = Field(default=0.0, ge=0.0)
 
 
 # ---------------------------------------------------------------------------

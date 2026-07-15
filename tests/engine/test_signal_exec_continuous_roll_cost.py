@@ -113,6 +113,54 @@ async def test_continuous_roll_charges_round_trip_slippage():
     assert res.total_fees_paid_pct == 0.0
 
 
+def _latch_above_115_continuous_signal() -> Signal:
+    """Same continuous leg, but the entry only latches once close > 115 -> the
+    position FRESHLY establishes on bar 2 (price 121), which is the roll bar."""
+    sig = _always_long_continuous_signal()
+    block = sig.rules.entries[0]
+    new_block = Block(
+        id=block.id,
+        input_id=block.input_id,
+        weight=block.weight,
+        conditions=(
+            CompareCondition(
+                op="gt",
+                lhs=InstrumentOperand(input_id="X", field="close"),
+                rhs=ConstantOperand(value=115.0),  # false @100,110 ; true @121,133.1
+            ),
+        ),
+    )
+    return Signal(
+        id=sig.id,
+        name=sig.name,
+        inputs=sig.inputs,
+        rules=SignalRules(entries=(new_block,)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_establish_on_roll_bar_not_double_charged():
+    """FIX: a position that first LATCHES exactly on the roll bar is charged the
+    single entry side only -- NOT entry + a full round-trip (~3x overcharge).
+
+    pos = [0, 0, 1, 1] (latches on bar 2, the roll bar).
+    establish_turnover bills the entry on step 2: |1 - drift(0)| = 1.0.
+    The roll overlay adds ``2*min(|pos[1]|,|pos[2]|) = 2*min(0,1) = 0`` (nothing
+    held THROUGH the boundary) -> turnover = [0, 0, 1.0].
+    slippage_bps=100 (rate 0.01): slip_drag = [0,0,0.01]; only step 2 has a
+    return (pos[2]*0.10 = 0.10) -> net_adj[2] = 0.09 ; equity_ratio[-1] = 1.09.
+    total_slippage = 100*(0.01 * er_start[2]=1.0) = 1.0 %.
+    (Pre-fix the overlay added 2*|pos[2]|=2.0 -> turnover[2]=3.0, cost 3.0%,
+    equity 1.07.)
+    """
+    sig = _latch_above_115_continuous_signal()
+    res = await evaluate_signal(
+        sig, {}, _fetcher(), CostConfig(slippage_bps=100.0, fees_bps=0.0)
+    )
+    np.testing.assert_allclose(res.equity_ratio, [1.0, 1.0, 1.0, 1.09], atol=1e-9)
+    assert abs(res.total_slippage_paid_pct - 1.0) < 1e-9
+
+
 @pytest.mark.asyncio
 async def test_roll_reduces_equity_and_raises_cost_vs_no_roll():
     """Isolate the roll: the SAME signal with NO interior roll charges strictly
