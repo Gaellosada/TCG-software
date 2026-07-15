@@ -220,24 +220,32 @@ def hold_leg_turnover(
                 turnover[r] += 2.0 * mag
         return turnover
 
-    # Per-segment notional basis (futures_notional): bill each event on the
-    # SEGMENT fraction actually crossed.  ``active_prev[b] = active[b-1]``
-    # (``active[-1]=False``); ``frac_prev[b] = notional_frac[b-1]`` (``=0`` at b=0).
+    # Per-segment notional basis (futures_notional): bill each event on the held
+    # NOTIONAL the leg actually crosses.  ``notional_frac[b]`` is the premium
+    # notional fraction of the segment held at bar ``b`` -- 0 on any bar the leg is
+    # flat OR latched-but-unsized (no-quote / false-zero premium).  Deriving events
+    # from ``pos_active``/roll transitions therefore under-bills a leg that latches
+    # unsized and is sized only on a LATER non-roll continuation bar (frac 0->+ with
+    # the leg already active, not a roll): that OPEN keys off no transition.
+    #
+    # Instead bill the held-notional TRANSITIONS directly (``q[b] = frac[b]``,
+    # ``q[-1]=0``): ``|Δq|`` is an OPEN when frac rises from 0, a CLOSE when it
+    # falls to 0, and a resize otherwise -- exactly mirroring how the scalar path
+    # and :func:`establish_turnover` bill a notional/weight change.  An interior
+    # roll the leg is held ACROSS is a genuine close+reopen, so it is lifted from
+    # the net ``|Δq|`` to a full round-trip ``frac[b] + frac[b-1]``.  When sizing
+    # coincides with the latch bar (the common case) this reduces bit-for-bit to
+    # the old OPEN/CLOSE/round-trip billing, and a constant ``frac == mag`` matches
+    # the scalar path.
     frac = np.asarray(notional_frac, dtype=np.float64)
-    active_prev = np.empty(T, dtype=bool)
-    active_prev[0] = False
-    active_prev[1:] = active[: T - 1]
-    frac_prev = np.empty(T, dtype=np.float64)
-    frac_prev[0] = 0.0
-    frac_prev[1:] = frac[: T - 1]
-    # OPEN side at bar b: a segment opens while held -- a fresh latch (was flat) OR
-    # a roll (new segment opens even across a held boundary). Charge frac[b].
-    opens = active[:T] & (rolls[:T] | ~active_prev)
-    # CLOSE side at bar b: the segment held at bar b-1 ends -- a held-across roll
-    # (old segment closes) OR an unlatch to flat. Charge frac[b-1].
-    closes = active_prev & ((rolls[:T] & active[:T]) | ~active[:T])
-    ev = np.where(opens, frac, 0.0) + np.where(closes, frac_prev, 0.0)
-    turnover += ev[:n_steps]
+    changes = np.abs(np.diff(frac, prepend=0.0))  # length T; changes[b] at bar b
+    turnover += changes[:n_steps]
+    for r in np.flatnonzero(rolls).tolist():
+        r = int(r)
+        if 1 <= r < n_steps and active[r] and active[r - 1]:
+            # Lift the net |Δq| already added to a full round-trip (close old
+            # segment frac[r-1] + open new segment frac[r]).
+            turnover[r] += frac[r] + frac[r - 1] - abs(frac[r] - frac[r - 1])
     return turnover
 
 

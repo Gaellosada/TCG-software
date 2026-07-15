@@ -404,6 +404,13 @@ function HelpPage() {
           internal cost shows in that sub-portfolio&apos;s own readout, not summed into the
           parent&apos;s percentage.
         </p>
+        <p className={styles.conceptText}>
+          The same holds for a <strong>signal leg</strong> inside a portfolio: the
+          signal&apos;s own entry/exit/roll costs are charged inside its equity (so the
+          combined curve and metrics are net of them), while the parent&apos;s reported
+          Slippage/Fees rows stay at the allocation layer — identical to how a running a
+          signal on its own page reports its costs.
+        </p>
 
         <h3 className={styles.conceptTitle}>Returns grid</h3>
         <p className={styles.conceptText}>

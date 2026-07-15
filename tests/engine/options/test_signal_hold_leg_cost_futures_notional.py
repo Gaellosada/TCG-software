@@ -154,6 +154,61 @@ def test_hold_leg_turnover_uses_per_segment_fraction():
     np.testing.assert_allclose(t_scalar, [1.0, 0.0, 0.0, 2.0, 0.0], atol=1e-15)
 
 
+def test_hold_leg_turnover_bills_late_sized_open():
+    """Round-6 review MINOR: a leg latched on a no-quote/false-zero premium bar
+    (frac=0, unsized) and sized only on a LATER non-roll continuation bar
+    (frac 0→+ with the leg already active, NOT a roll) must still bill that
+    OPEN.  The old event logic keyed OPEN off ``pos_active``/roll transitions
+    (``opens = active & (rolls | ~active_prev)``) so a resize while continuously
+    held fired neither an open nor a close → the segment's OPEN side was billed
+    0 (under-charge).
+
+    Reviewer's exact repro: mult_fut=mult_opt=50, nav_times=1,
+    premium=[30,30,0,30,30], is_roll=[1,0,0,0,0], roll_premium[0]=30,
+    roll_future_ref[0]=4500, pos_active=[1,0,1,1,1].  The leg latches at bar 0
+    (sized 30/4500), unlatches at bar 1, re-latches at bar 2 on a false-zero
+    premium (unsized, frac=0), and is finally sized at bar 3 on a non-roll
+    continuation bar → held notional q=[f,0,0,f,f], f=30/4500.  Turnover must be
+    the held-notional transitions |Δq| (q[-1]=0), billing the bar-3 open.
+    """
+    f = 30.0 / 4500.0
+    spec = _fut_spec(
+        nav_times=1.0,
+        premium=[30.0, 30.0, 0.0, 30.0, 30.0],
+        roll_premium=[30.0, np.nan, np.nan, np.nan, np.nan],
+        is_roll=[True, False, False, False, False],
+        roll_fref=[4500.0, np.nan, np.nan, np.nan, np.nan],
+        m_fut=50.0,
+        m_opt=50.0,
+    )
+    # Override the always-held pos_active baked into ``_fut_spec``.
+    spec = _HoldPnLSpec(
+        ref_id=spec.ref_id,
+        sign=spec.sign,
+        nav_times=spec.nav_times,
+        premium=spec.premium,
+        is_roll=spec.is_roll,
+        roll_premium=spec.roll_premium,
+        pos_active=np.array([True, False, True, True, True], dtype=bool),
+        sizing_mode="futures_notional",
+        roll_future_ref=spec.roll_future_ref,
+        mult_fut=spec.mult_fut,
+        mult_opt=spec.mult_opt,
+    )
+    frac = hold_leg_notional_fractions(spec)
+    # Held notional: sized@0, flat@1, false-zero premium leaves it unsized@2,
+    # finally sized@3 (carried @4).
+    np.testing.assert_allclose(frac, [f, 0.0, 0.0, f, f], rtol=1e-12)
+
+    t = hold_leg_turnover(
+        spec.is_roll, spec.pos_active, spec.nav_times, 4, notional_frac=frac
+    )
+    # Ground truth |Δq| (q=[f,0,0,f,f], prepend 0): open@0, close@1, open@3.
+    np.testing.assert_allclose(t, [f, f, 0.0, f], rtol=1e-12)
+    # The old event logic under-billed the bar-3 open to 0.
+    assert t[3] == pytest.approx(f, rel=1e-12)
+
+
 # --------------------------------------------------------------------------- #
 # End-to-end through evaluate_signal: the reported cost pct must reflect the
 # premium-notional fraction actually crossed, NOT nav_times.

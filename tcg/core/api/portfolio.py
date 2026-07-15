@@ -846,6 +846,7 @@ async def _evaluate_signal_leg(
     start_date: date | None,
     end_date: date | None,
     repo: WriteRepository,
+    cost_config: CostConfig | None = None,
 ) -> _SignalLegEvalResult:
     """Evaluate a signal leg and bubble up everything the portfolio path needs.
 
@@ -917,7 +918,14 @@ async def _evaluate_signal_leg(
     # 4. Create fetcher and evaluate
     fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
     try:
-        result = await evaluate_signal(signal, indicators, fetcher)
+        # Thread the run's transaction-cost config so the signal leg's INTERNAL
+        # entries/exits/rolls fold into its synthetic equity — exactly mirroring
+        # how a composed sub-portfolio pays its own internal costs. This is the
+        # signal's own turnover (distinct from the parent's ALLOCATION-weight
+        # turnover, which the portfolio engine charges separately), so there is no
+        # double-count. At 0 bps ``evaluate_signal`` early-skips all cost math →
+        # byte-identical to the pre-cost behaviour.
+        result = await evaluate_signal(signal, indicators, fetcher, cost_config)
     except SignalValidationError as exc:
         raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
     except SignalDataError as exc:
@@ -1814,6 +1822,14 @@ async def _compute_portfolio_uncached(
 
     # ── 4. Evaluate signal legs (if any) ──
 
+    # Transaction-cost config for the whole run (OFF by default → byte-identical).
+    # Built here so a signal leg's INTERNAL costs fold into its synthetic equity
+    # (see §7 for the parent's allocation-layer roll/turnover overlay, which reuses
+    # this same object and does NOT touch signal legs → no double-count).
+    cost_config = CostConfig(
+        slippage_bps=float(body.slippage_bps), fees_bps=float(body.fees_bps)
+    )
+
     # signal_dates[label] = YYYYMMDD array, signal_closes[label] = synthetic prices
     signal_dates_map: dict[str, npt.NDArray[np.int64]] = {}
     signal_closes: dict[str, npt.NDArray[np.float64]] = {}
@@ -1832,6 +1848,7 @@ async def _compute_portfolio_uncached(
             start_date,
             end_date,
             repo,
+            cost_config,
         )
         signal_dates_map[label] = leg_result.index
         signal_closes[label] = leg_result.synthetic
@@ -2096,10 +2113,10 @@ async def _compute_portfolio_uncached(
     # ── Transaction costs (OFF by default → byte-identical). Continuous-futures
     #    rolls are charged a round-trip on the leg's notional fraction at each
     #    interior roll bar, routed into the EQUITY computation here (the display
-    #    roll-rows in §9.5 do NOT feed equity). ──
-    cost_config = CostConfig(
-        slippage_bps=float(body.slippage_bps), fees_bps=float(body.fees_bps)
-    )
+    #    roll-rows in §9.5 do NOT feed equity). ``cost_config`` was built at §4 so
+    #    signal legs already folded their INTERNAL costs into their synthetic
+    #    equity; this overlay is the ALLOCATION layer (continuous + hold-option
+    #    rolls) and never touches signal legs → no double-count. ──
     roll_turnover: npt.NDArray[np.float64] | None = None
     if not cost_config.is_zero():
         abs_total = sum(abs(w) for w in portfolio_weights.values()) or 1.0
