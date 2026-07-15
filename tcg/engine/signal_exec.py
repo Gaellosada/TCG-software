@@ -1947,6 +1947,31 @@ async def evaluate_signal(
         # Hold-leg roll round-trips (one side at the initial open).
         for spec in hold_specs:
             turnover += roll_turnover_from_flags(spec.is_roll, spec.nav_times, T - 1)
+        # Continuous-futures roll round-trips (parity with the PORTFOLIO engine's
+        # §7 roll_turnover). A priced continuous leg's BACK-ADJUSTED return stream
+        # makes a roll date an ordinary price bar with an UNCHANGED target weight,
+        # so ``establish_turnover`` adds ~0 there and the 2-side round-trip on the
+        # rolled notional would otherwise never be charged. Mirror the portfolio:
+        # at each interior roll bar add ``2*|position[bar]|`` (the input's net
+        # latched signed-weight FRACTION held over that step). The roll-info read
+        # is gated by ``_cost_on`` (this whole block), so at 0 bps nothing extra
+        # runs and output is byte-identical. If an entry/exit coincides with a
+        # roll, the round-trip is added REGARDLESS (as the portfolio does) —
+        # ``establish_turnover`` is ~0 there for a back-adjusted leg, so there is
+        # no double-counting of the roll itself.
+        _cont_roll_fetch = getattr(fetcher, "fetch_continuous_roll_info", None)
+        if _cont_roll_fetch is not None:
+            date_to_idx = {int(d): i for i, d in enumerate(index.tolist())}
+            for acc in accums:
+                if acc.hold_spec is not None or acc.price_values is None:
+                    continue
+                if not isinstance(acc.instrument, InstrumentContinuous):
+                    continue
+                roll_dates = await _cont_roll_fetch(acc.instrument)
+                for d in np.asarray(roll_dates, dtype=np.int64).tolist():
+                    s = date_to_idx.get(int(d))
+                    if s is not None and 0 <= s < T - 1:
+                        turnover[s] += 2.0 * abs(float(acc.pos[s]))
         slip_drag, fees_drag = split_drag(turnover, cost_config)
     total_drag = slip_drag + fees_drag
 

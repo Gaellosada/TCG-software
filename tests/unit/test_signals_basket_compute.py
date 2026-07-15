@@ -52,10 +52,14 @@ def _price_series(closes: np.ndarray) -> PriceSeries:
 
 
 class _ContinuousSeriesStub:
-    """Stand-in for ``ContinuousSeries`` — only ``prices.dates``/close used."""
+    """Stand-in for ``ContinuousSeries`` — only ``prices.dates``/close used.
+
+    ``roll_dates`` mirrors the real type (always present) so the continuous-roll
+    cost overlay can read it; empty here (no in-window rolls exercised)."""
 
     def __init__(self, closes: np.ndarray) -> None:
         self.prices = _price_series(closes)
+        self.roll_dates: tuple[int, ...] = ()
 
 
 class _BasketRepo:
@@ -212,9 +216,7 @@ def test_compute_with_saved_basket_returns_200_with_basket_position(
     assert leg_ids == {"SPY", "QQQ"}
 
     # Weighted-sum fetcher actually ran for both legs.
-    called_ids = {
-        call.args[1] for call in fake_market_data.get_prices.await_args_list
-    }
+    called_ids = {call.args[1] for call in fake_market_data.get_prices.await_args_list}
     assert {"SPY", "QQQ"}.issubset(called_ids)
 
 
@@ -376,9 +378,7 @@ def test_signals_inline_basket_equity_spot_legs(
     assert seen_calls == []
 
     # Per-leg spot resolver actually ran.
-    called_ids = {
-        call.args[1] for call in fake_market_data.get_prices.await_args_list
-    }
+    called_ids = {call.args[1] for call in fake_market_data.get_prices.await_args_list}
     assert {"SPY", "QQQ"}.issubset(called_ids)
 
 
@@ -391,12 +391,8 @@ def test_signals_inline_basket_future_continuous_legs(
     body = _inline_basket_spec(
         asset_class="future",
         legs=[
-            _continuous_leg(
-                "FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5
-            ),
-            _continuous_leg(
-                "FUT_ES", adjustment="none", cycle="HMUZ", weight=0.5
-            ),
+            _continuous_leg("FUT_VIX", adjustment="ratio", cycle="HMUZ", weight=0.5),
+            _continuous_leg("FUT_ES", adjustment="none", cycle="HMUZ", weight=0.5),
         ],
     )
     resp = client.post("/api/signals/compute", json=body)
@@ -410,8 +406,7 @@ def test_signals_inline_basket_future_continuous_legs(
 
     # Per-leg continuous resolver was hit (not get_prices).
     called_continuous = {
-        call.args[0]
-        for call in fake_market_data.get_continuous.await_args_list
+        call.args[0] for call in fake_market_data.get_continuous.await_args_list
     }
     assert {"FUT_VIX", "FUT_ES"}.issubset(called_continuous)
 
@@ -456,9 +451,7 @@ def test_signals_inline_basket_option_stream_legs_smoke() -> None:
         }
     )
     leg = parsed.legs[0]  # type: ignore[attr-defined]
-    typed = _materialise_leg_instrument(
-        leg.instrument, input_id="B", leg_index=0
-    )
+    typed = _materialise_leg_instrument(leg.instrument, input_id="B", leg_index=0)
     # Should have built an InstrumentOptionStream with the carried spec.
     from tcg.types.signal import InstrumentOptionStream
 
@@ -613,12 +606,8 @@ def test_signals_inline_basket_instrument_identity_stable() -> None:
 
     leg_spy = (InstrumentSpot(collection="ETF", instrument_id="SPY"), 0.6)
     leg_qqq = (InstrumentSpot(collection="ETF", instrument_id="QQQ"), 0.4)
-    b1 = InstrumentBasket(
-        legs=(leg_spy, leg_qqq), basket_id=None, asset_class="equity"
-    )
-    b2 = InstrumentBasket(
-        legs=(leg_qqq, leg_spy), basket_id=None, asset_class="equity"
-    )
+    b1 = InstrumentBasket(legs=(leg_spy, leg_qqq), basket_id=None, asset_class="equity")
+    b2 = InstrumentBasket(legs=(leg_qqq, leg_spy), basket_id=None, asset_class="equity")
     assert _instrument_identity(b1) == _instrument_identity(b2)
 
 
@@ -653,15 +642,9 @@ def test_signals_inline_basket_identity_different_cycle_distinct() -> None:
     inst_h = InstrumentContinuous(
         collection="FUT_VIX", adjustment="ratio", cycle="HMUZ"
     )
-    inst_m = InstrumentContinuous(
-        collection="FUT_VIX", adjustment="ratio", cycle="M"
-    )
-    b_h = InstrumentBasket(
-        legs=((inst_h, 1.0),), basket_id=None, asset_class="future"
-    )
-    b_m = InstrumentBasket(
-        legs=((inst_m, 1.0),), basket_id=None, asset_class="future"
-    )
+    inst_m = InstrumentContinuous(collection="FUT_VIX", adjustment="ratio", cycle="M")
+    b_h = InstrumentBasket(legs=((inst_h, 1.0),), basket_id=None, asset_class="future")
+    b_m = InstrumentBasket(legs=((inst_m, 1.0),), basket_id=None, asset_class="future")
     assert _instrument_identity(b_h) != _instrument_identity(b_m)
 
 
@@ -671,19 +654,13 @@ def test_signals_inline_basket_identity_saved_vs_inline_distinct() -> None:
     from tcg.types.signal import InstrumentBasket, InstrumentSpot
 
     legs = ((InstrumentSpot(collection="ETF", instrument_id="SPY"), 1.0),)
-    b_inline = InstrumentBasket(
-        legs=legs, basket_id=None, asset_class="equity"
-    )
-    b_saved = InstrumentBasket(
-        legs=legs, basket_id="some-saved-id", asset_class=None
-    )
+    b_inline = InstrumentBasket(legs=legs, basket_id=None, asset_class="equity")
+    b_saved = InstrumentBasket(legs=legs, basket_id="some-saved-id", asset_class=None)
     assert _instrument_identity(b_inline) != _instrument_identity(b_saved)
 
     # User-chosen basket_id of "inline" cannot collide with the
     # structural-identity inline tuple either.
-    b_named_inline = InstrumentBasket(
-        legs=legs, basket_id="inline", asset_class=None
-    )
+    b_named_inline = InstrumentBasket(legs=legs, basket_id="inline", asset_class=None)
     assert _instrument_identity(b_named_inline) != _instrument_identity(b_inline)
 
 
@@ -770,8 +747,7 @@ def _build_single_basket_input_signal(*, option_stream: bool):
 
 
 @pytest.mark.asyncio
-async def test_compute_input_overlap_single_input_option_basket_resolves_dates_via_expirations(
-):
+async def test_compute_input_overlap_single_input_option_basket_resolves_dates_via_expirations():
     """Bug 2 regression: ``compute_input_overlap`` must derive a date
     window from option expirations when the single input is an inline
     option basket — even if the envelope's ``start``/``end`` are
@@ -809,8 +785,7 @@ async def test_compute_input_overlap_single_input_option_basket_resolves_dates_v
 
 
 @pytest.mark.asyncio
-async def test_compute_input_overlap_single_input_spot_basket_preserves_short_circuit(
-):
+async def test_compute_input_overlap_single_input_spot_basket_preserves_short_circuit():
     """Control case: the single-input short-circuit MUST still fire
     for inputs without option-stream dependencies — otherwise we'd
     force a redundant date pre-pass on spot/continuous-only baskets.
@@ -860,8 +835,7 @@ async def test_compute_input_overlap_single_input_spot_basket_preserves_short_ci
 
 
 @pytest.mark.asyncio
-async def test_compute_input_overlap_call_and_put_legs_consults_expirations_for_each(
-):
+async def test_compute_input_overlap_call_and_put_legs_consults_expirations_for_each():
     """Single-input signal with a basket that mixes C and P legs:
     `list_option_expirations_filtered` must be called once per leg
     (option_type-specific), and the resulting date window must be the
@@ -969,8 +943,9 @@ async def test_compute_input_overlap_call_and_put_legs_consults_expirations_for_
     assert end <= max(overlap_exp) or end >= min(overlap_exp)
 
 
-def test_signals_inline_basket_option_call_and_put_legs_materialise_distinct_option_type(
-) -> None:
+def test_signals_inline_basket_option_call_and_put_legs_materialise_distinct_option_type() -> (
+    None
+):
     """E2E request shape — inline option basket carrying one Call and
     one Put leg passes strict-mapping validation AND materialises into
     two typed option-stream legs whose ``option_type`` fields differ.
@@ -1009,7 +984,8 @@ def test_signals_inline_basket_option_call_and_put_legs_materialise_distinct_opt
                     "cycle": None,
                     "maturity": {"kind": "next_third_friday"},
                     "selection": {
-                        "kind": "by_moneyness", "target": 1.0,
+                        "kind": "by_moneyness",
+                        "target": 1.0,
                     },
                     "stream": "mid",
                 },
@@ -1023,7 +999,8 @@ def test_signals_inline_basket_option_call_and_put_legs_materialise_distinct_opt
                     "cycle": None,
                     "maturity": {"kind": "next_third_friday"},
                     "selection": {
-                        "kind": "by_moneyness", "target": 1.0,
+                        "kind": "by_moneyness",
+                        "target": 1.0,
                     },
                     "stream": "mid",
                 },
@@ -1105,7 +1082,8 @@ def test_signal_with_indicator_alongside_basket_input_validates() -> None:
                                     "cycle": None,
                                     "maturity": {"kind": "next_third_friday"},
                                     "selection": {
-                                        "kind": "by_moneyness", "target": 1.0,
+                                        "kind": "by_moneyness",
+                                        "target": 1.0,
                                     },
                                     "stream": "mid",
                                 },

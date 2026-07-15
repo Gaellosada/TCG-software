@@ -74,6 +74,23 @@ def _hold_cache_key(instrument: InstrumentOptionStream) -> Any:
     )
 
 
+def _continuous_cache_key(instrument: InstrumentContinuous) -> Any:
+    """Identity for the per-signal continuous-roll-info cache.
+
+    Mirrors the axes ``get_continuous`` rolls on (collection + roll config) — the
+    same axes that determine the stitched series and thus its interior roll
+    boundaries.  Two continuous inputs with identical axes share the cached roll
+    dates (resolved once during the normal ``fetch``).
+    """
+    return (
+        instrument.collection,
+        instrument.adjustment,
+        instrument.cycle or "",
+        int(instrument.roll_offset),
+        instrument.strategy,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Leg materialisation — Pydantic ref → typed leaf instrument
 # ---------------------------------------------------------------------------
@@ -444,9 +461,17 @@ def make_signal_fetcher(
         tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], npt.NDArray[np.float64]],
     ] = {}
 
+    # Companion cache: the interior roll-boundary dates of a CONTINUOUS input,
+    # keyed by its roll axes, populated during the SAME ``fetch`` (which already
+    # calls ``get_continuous`` and discards ``roll_dates``).  Read by
+    # ``fetch_continuous_roll_info`` so the signal cost overlay can charge a roll
+    # round-trip at each boundary (parity with the portfolio engine).
+    _continuous_roll_cache: dict[Any, tuple[int, ...]] = {}
+
     # Module-level ``_hold_cache_key`` is the single source of truth (also unit-
     # tested directly for the Sign-4 collision guarantee).
     _hold_key = _hold_cache_key
+    _continuous_key = _continuous_cache_key
 
     async def fetch(
         instrument: InputInstrument, field: str
@@ -762,6 +787,13 @@ def make_signal_fetcher(
             raise SignalDataError(
                 f"continuous series unavailable for {instrument.collection!r}"
             )
+        # Capture the interior roll boundaries (otherwise discarded) so the signal
+        # cost overlay can charge a roll round-trip at each — parity with the
+        # portfolio engine.  Idempotent across ``field`` re-fetches of the same
+        # instrument; does NOT change the return value (byte-neutral).
+        _continuous_roll_cache[_continuous_key(instrument)] = tuple(
+            int(d) for d in cseries.roll_dates
+        )
         values = _pick_field(cseries.prices, field)
         return cseries.prices.dates, values
 
@@ -844,7 +876,30 @@ def make_signal_fetcher(
         resolves."""
         return _hold_fallback_cache.get(_hold_key(instrument))
 
+    async def fetch_continuous_roll_info(
+        instrument: InstrumentContinuous,
+    ) -> npt.NDArray[np.int64]:
+        """Return the interior roll-boundary dates (YYYYMMDD) of a continuous input.
+
+        Populated during the normal ``fetch`` of the continuous input (its close
+        operand is resolved first, warming the cache) — so no extra ``get_continuous``
+        is issued.  The signal cost overlay reads this to charge a roll round-trip at
+        each boundary.  Falls back to a fresh resolve if, defensively, the cache is
+        cold.  Mirrors ``fetch_hold_roll_info``.
+        """
+        key = _continuous_key(instrument)
+        cached = _continuous_roll_cache.get(key)
+        if cached is None:
+            # Cold cache (defensive): resolve once to populate it via the same
+            # ``fetch`` path, then read back.
+            await fetch(instrument, "close")
+            cached = _continuous_roll_cache.get(key)
+        if cached is None:  # pragma: no cover (only if instrument is not continuous)
+            return np.array([], dtype=np.int64)
+        return np.asarray(cached, dtype=np.int64)
+
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
+    fetch.fetch_continuous_roll_info = fetch_continuous_roll_info  # type: ignore[attr-defined]
     fetch.fetch_hold_diagnostics = fetch_hold_diagnostics  # type: ignore[attr-defined]
     fetch.fetch_hold_multipliers = fetch_hold_multipliers  # type: ignore[attr-defined]
     fetch.fetch_hold_close_fallback = fetch_hold_close_fallback  # type: ignore[attr-defined]
