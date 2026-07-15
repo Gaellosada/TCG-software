@@ -67,7 +67,11 @@ from tcg.engine.costs import (
     hold_leg_turnover,
     split_drag,
 )
-from tcg.engine.hold_pnl import _HoldPnLSpec, _compound_with_hold
+from tcg.engine.hold_pnl import (
+    _HoldPnLSpec,
+    _compound_with_hold,
+    hold_leg_notional_fractions,
+)
 from tcg.engine.indicator_exec import (
     IndicatorRuntimeError,
     IndicatorValidationError,
@@ -1951,8 +1955,18 @@ async def evaluate_signal(
         # is flat costs nothing (no phantom cost), and the genuine entry is billed
         # even though it is not an ``is_roll`` flag.
         for spec in hold_specs:
+            # In futures_notional mode the leg is sized off the reference-FUTURE
+            # notional, so the OPTION-premium notional actually crossed is only a
+            # per-segment fraction of NAV (NOT nav_times); bill turnover on that
+            # exact basis (mirrors the P&L qty). premium_notional stays the scalar
+            # nav_times basis (notional_frac=None) -> byte-identical.
+            frac = (
+                hold_leg_notional_fractions(spec)
+                if spec.sizing_mode == "futures_notional"
+                else None
+            )
             turnover += hold_leg_turnover(
-                spec.is_roll, spec.pos_active, spec.nav_times, T - 1
+                spec.is_roll, spec.pos_active, spec.nav_times, T - 1, notional_frac=frac
             )
         # Continuous-futures roll round-trips (parity with the PORTFOLIO engine's
         # §7 roll_turnover). A priced continuous leg's BACK-ADJUSTED return stream

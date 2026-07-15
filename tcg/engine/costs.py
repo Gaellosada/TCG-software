@@ -157,12 +157,14 @@ def hold_leg_turnover(
     pos_active: npt.NDArray[np.bool_],
     nav_times: float,
     n_steps: int,
+    *,
+    notional_frac: "npt.NDArray[np.float64] | None" = None,
 ) -> npt.NDArray[np.float64]:
     """POSITION-AWARE per-step turnover for a held option leg.
 
-    A held leg trades its ``nav_times`` notional fraction (``mag``) only while it
-    is actually latched, at three kinds of event -- so its lifetime cost is one
-    OPEN + one CLOSE per held span, plus a round-trip per roll it SURVIVES held:
+    A held leg trades its notional fraction only while it is actually latched, at
+    three kinds of event -- so its lifetime cost is one OPEN + one CLOSE per held
+    span, plus a round-trip per roll it SURVIVES held:
 
     * OPEN  (1 side) -- when the net position latches (flat -> open).
     * CLOSE (1 side) -- when it unlatches (open -> flat).
@@ -171,40 +173,71 @@ def hold_leg_turnover(
 
     ``pos_active[b]`` (length ``T = n_steps + 1``) is whether the leg's net
     position is open at bar ``b`` (the ``pos != 0`` mask that gates the P&L in
-    :func:`tcg.engine.hold_pnl._compound_with_hold`).  The open/close notional is
-    modelled as ``q[b] = mag·pos_active[b]``; ``|q[b] − q[b−1]|`` (with
-    ``q[−1]=0``) is charged on the step ``b -> b+1`` the new notional is held
-    over (turnover index ``b``) -- exactly as :func:`establish_turnover` bills a
-    weight change, so a liquidation is charged on the step the position drops to
-    flat and nothing is charged while flat.  A trade on the very last bar is
-    never held into a step and so is dropped (parity with ``establish_turnover``).
+    :func:`tcg.engine.hold_pnl._compound_with_hold`).  A trade on the very last
+    bar is never held into a step and so is dropped (parity with
+    :func:`establish_turnover`).  The initial-open roll flag (``is_roll`` at a
+    leg's first held bar) is NOT a round-trip; a roll while the leg is flat, or
+    across a flat boundary, is NOT charged (no phantom cost) -- consistent with
+    the P&L path, which only accrues while ``pos_active`` on both sides of a step.
 
-    The initial-open roll flag (``is_roll`` at a leg's first held bar) is NOT a
-    round-trip: the open is the single OPEN side above.  A roll while the leg is
-    flat, or across a flat boundary, is NOT charged (no phantom cost).  This is
-    consistent with the P&L path, which only accrues while ``pos_active`` on both
-    sides of the step.
+    ``notional_frac`` selects the traded notional basis:
+
+    * ``None`` (``premium_notional`` / continuous legs) -- the constant
+      ``|nav_times|`` fraction on every event.  ``q[b] = mag·pos_active[b]`` and
+      ``|q[b] − q[b−1]|`` (``q[−1]=0``) is billed on the step ``b -> b+1`` the new
+      notional is held over, exactly as :func:`establish_turnover` bills a weight
+      change; each interior held-across roll adds a ``2·mag`` round-trip.
+    * a length-``T`` array (``futures_notional``) -- ``notional_frac[b]`` is the
+      option-premium notional fraction of the SEGMENT held at bar ``b`` (from
+      :func:`tcg.engine.hold_pnl.hold_leg_notional_fractions`, sized off the
+      reference-future notional).  Each OPEN bills the opening segment's fraction,
+      each CLOSE the closing segment's, and a held-across roll bills BOTH (they
+      differ across the roll).  With a constant ``notional_frac == mag`` this
+      reduces bit-for-bit to the scalar path.
     """
     turnover = np.zeros(max(n_steps, 0), dtype=np.float64)
     if n_steps <= 0:
         return turnover
     active = np.asarray(pos_active, dtype=bool)
     rolls = np.asarray(is_roll, dtype=bool)
-    mag = abs(float(nav_times))
     T = n_steps + 1
-    # OPEN/CLOSE sides: q[b] = mag while held, 0 while flat. The trade at bar b
-    # (change from q[b-1], q[-1]=0) is held over step b->b+1 -> turnover index b;
-    # the trade on the last bar (index n_steps) is dropped.
-    q = np.where(active[:T], mag, 0.0)
-    changes = np.abs(np.diff(q, prepend=0.0))  # length T; changes[b] traded at bar b
-    turnover += changes[:n_steps]
-    # ROLL round-trips: only INTERIOR rolls (bar >= 1) the leg is held ACROSS
-    # (open on both sides of the boundary). Bar 0 is the initial open (already an
-    # OPEN side above); a roll on/after the last bar is never held into a step.
-    for r in np.flatnonzero(rolls).tolist():
-        r = int(r)
-        if 1 <= r < n_steps and active[r] and active[r - 1]:
-            turnover[r] += 2.0 * mag
+
+    if notional_frac is None:
+        mag = abs(float(nav_times))
+        # OPEN/CLOSE sides: q[b] = mag while held, 0 while flat. The trade at bar b
+        # (change from q[b-1], q[-1]=0) is held over step b->b+1 -> turnover index
+        # b; the trade on the last bar (index n_steps) is dropped.
+        q = np.where(active[:T], mag, 0.0)
+        changes = np.abs(np.diff(q, prepend=0.0))  # length T; changes[b] at bar b
+        turnover += changes[:n_steps]
+        # ROLL round-trips: only INTERIOR rolls (bar >= 1) the leg is held ACROSS
+        # (open on both sides of the boundary). Bar 0 is the initial open (already
+        # an OPEN side above); a roll on/after the last bar is never held into a
+        # step.
+        for r in np.flatnonzero(rolls).tolist():
+            r = int(r)
+            if 1 <= r < n_steps and active[r] and active[r - 1]:
+                turnover[r] += 2.0 * mag
+        return turnover
+
+    # Per-segment notional basis (futures_notional): bill each event on the
+    # SEGMENT fraction actually crossed.  ``active_prev[b] = active[b-1]``
+    # (``active[-1]=False``); ``frac_prev[b] = notional_frac[b-1]`` (``=0`` at b=0).
+    frac = np.asarray(notional_frac, dtype=np.float64)
+    active_prev = np.empty(T, dtype=bool)
+    active_prev[0] = False
+    active_prev[1:] = active[: T - 1]
+    frac_prev = np.empty(T, dtype=np.float64)
+    frac_prev[0] = 0.0
+    frac_prev[1:] = frac[: T - 1]
+    # OPEN side at bar b: a segment opens while held -- a fresh latch (was flat) OR
+    # a roll (new segment opens even across a held boundary). Charge frac[b].
+    opens = active[:T] & (rolls[:T] | ~active_prev)
+    # CLOSE side at bar b: the segment held at bar b-1 ends -- a held-across roll
+    # (old segment closes) OR an unlatch to flat. Charge frac[b-1].
+    closes = active_prev & ((rolls[:T] & active[:T]) | ~active[:T])
+    ev = np.where(opens, frac, 0.0) + np.where(closes, frac_prev, 0.0)
+    turnover += ev[:n_steps]
     return turnover
 
 
