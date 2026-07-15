@@ -286,3 +286,52 @@ describe('<Statistics> — loading and error states', () => {
     });
   });
 });
+
+describe('<Statistics> — Costs section', () => {
+  it('renders NO Costs section when the costs prop is absent (no crash)', async () => {
+    vi.mocked(fetchStatistics).mockResolvedValue(RESPONSE);
+    await act(async () => {
+      render(<Statistics dates={DATES} equity={EQUITY} />);
+    });
+    expect(screen.queryByText('Costs')).toBeNull();
+    expect(screen.queryByText('Slippage paid')).toBeNull();
+    expect(screen.queryByText('Fees paid')).toBeNull();
+  });
+
+  it('renders two separate rows (never merged), values already in percent (no ×100)', async () => {
+    vi.mocked(fetchStatistics).mockResolvedValue(RESPONSE);
+    await act(async () => {
+      render(
+        <Statistics
+          dates={DATES}
+          equity={EQUITY}
+          costs={{ slippagePct: 0.85, feesPct: 0.42 }}
+        />,
+      );
+    });
+    expect(screen.getByText('Costs (% of initial capital)')).toBeTruthy();
+    expect(screen.getByText('Slippage paid')).toBeTruthy();
+    expect(screen.getByText('Fees paid')).toBeTruthy();
+    // Already-percent inputs render verbatim (0.85 → "0.85%", NOT "85.00%").
+    expect(screen.getByText('0.85%')).toBeTruthy();
+    expect(screen.getByText('0.42%')).toBeTruthy();
+    expect(screen.queryByText('85.00%')).toBeNull();
+  });
+
+  it('renders "0.00%" for zero costs (rows always shown when prop present)', async () => {
+    vi.mocked(fetchStatistics).mockResolvedValue(RESPONSE);
+    await act(async () => {
+      render(
+        <Statistics
+          dates={DATES}
+          equity={EQUITY}
+          costs={{ slippagePct: 0, feesPct: 0 }}
+        />,
+      );
+    });
+    expect(screen.getByText('Slippage paid')).toBeTruthy();
+    expect(screen.getByText('Fees paid')).toBeTruthy();
+    // Two rows, both "0.00%".
+    expect(screen.getAllByText('0.00%').length).toBe(2);
+  });
+});

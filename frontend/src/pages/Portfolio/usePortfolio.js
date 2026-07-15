@@ -8,7 +8,7 @@ import { legsToRangesKey } from './legKey';
 import { resolvePortfolioRange, childPortfolioIds, childRangeAccessorFor } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
-import { isPortfolioCacheEnabled } from '../../lib/userSettings';
+import { isPortfolioCacheEnabled, getSlippageBps, getFeesBps } from '../../lib/userSettings';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
@@ -395,6 +395,15 @@ export default function usePortfolio() {
     const availableIndicators = await hydrateAvailableIndicators();
     const resolveChild = await resolveChildrenNow();
     const resolveChildRange = await childRangeAccessorFor(legs, { queryClient });
+    // Global execution costs read at build time (picks up the latest Settings
+    // value; non-reactive so no dep). Baked into the TOP-LEVEL body here so this
+    // ONE shared body carries slippage_bps/fees_bps for BOTH callers — the
+    // Compute path AND the auto-display cache-get — keeping the backend cache key
+    // identical to what the cache-status probe (which reads the same Settings)
+    // builds. Absent (undefined) when the rate is 0, so a default run stays
+    // byte-identical to the pre-cost body.
+    const slippageBps = getSlippageBps();
+    const feesBps = getFeesBps();
     return buildPortfolioComputeBody({
       legs,
       rebalance,
@@ -403,6 +412,8 @@ export default function usePortfolio() {
       availableIndicators,
       resolvePortfolio: resolveChild,
       resolveChildRange,
+      slippageBps,
+      feesBps,
     });
   }, [legs, rebalance, queryClient, resolveChildrenNow]);
 
@@ -481,6 +492,11 @@ export default function usePortfolio() {
           returnType: built.body.return_type,
           start: built.body.start,
           end: built.body.end,
+          // Costs are baked into ``built.body`` (top-level, only when > 0); forward
+          // them so the cache-get key matches the Compute/probe key when costs are
+          // on — otherwise a costed result would falsely read as a MISS here.
+          slippageBps: built.body.slippage_bps,
+          feesBps: built.body.fees_bps,
         });
       } catch {
         return; // cache errors never surface — stay blank, Compute still works
@@ -534,8 +550,9 @@ export default function usePortfolio() {
     const myRun = (autoDisplayRunRef.current += 1);
 
     // Build the fully-resolved compute body via the SHARED resolver (indicators +
-    // live child specs + fund-of-funds child ranges). On the pure page there are
-    // no children, so the body is byte-identical to today's.
+    // live child specs + fund-of-funds child ranges + global slippage/fees read
+    // at build time). On the pure page there are no children, so the body is
+    // byte-identical to today's (plus the cost fields when costs are on).
     const { body, missingByLeg, brokenRefs } = await resolveActiveBody(
       effectiveStart,
       effectiveEnd,
@@ -565,6 +582,11 @@ export default function usePortfolio() {
           start: body.start,
           end: body.end,
           useCache,
+          // Costs are baked into the SHARED body (top-level, only when > 0), so
+          // deriving them from it — rather than a second Settings read — keeps the
+          // compute POST byte-identical to the body the cache-status probe keys on.
+          slippageBps: body.slippage_bps,
+          feesBps: body.fees_bps,
           signal,
         });
         if (!signal.aborted && myRun === autoDisplayRunRef.current) setResults(res);

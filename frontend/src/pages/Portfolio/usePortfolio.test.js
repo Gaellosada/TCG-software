@@ -31,7 +31,10 @@ vi.mock('../../api/options', () => ({
   })),
 }));
 
-vi.mock('../Signals/requestBuilder', () => ({
+vi.mock('../Signals/requestBuilder', async (importOriginal) => ({
+  // Keep the real costFieldsForRequest (used by computeBodyBuilder) while
+  // stubbing only buildComputeRequestBody.
+  ...(await importOriginal()),
   buildComputeRequestBody: vi.fn(() => ({
     body: {
       spec: { id: 's1', name: 'Test Signal', inputs: [], rules: {} },

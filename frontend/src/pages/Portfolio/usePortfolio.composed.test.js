@@ -22,7 +22,10 @@ vi.mock('../../api/data', () => ({
 vi.mock('../../api/options', () => ({
   getOptionCoverage: vi.fn(() => Promise.resolve({ root: 'X', start: '2005-12-01', end: '2025-06-30' })),
 }));
-vi.mock('../Signals/requestBuilder', () => ({
+vi.mock('../Signals/requestBuilder', async (importOriginal) => ({
+  // Keep the real costFieldsForRequest (used by computeBodyBuilder) while
+  // stubbing only buildComputeRequestBody.
+  ...(await importOriginal()),
   buildComputeRequestBody: vi.fn(() => ({ body: {}, missing: [] })),
 }));
 vi.mock('../Signals/hydrateIndicators', () => ({

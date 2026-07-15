@@ -44,6 +44,34 @@ describe('computePortfolio — use_cache flag', () => {
   });
 });
 
+describe('computePortfolio — slippage/fees (bps)', () => {
+  const base = {
+    legs: {}, weights: {}, rebalance: 'none', returnType: 'normal',
+    start: '2020-01-01', end: '2020-12-31',
+  };
+
+  it('omits slippage_bps/fees_bps when unset (byte-identical body)', async () => {
+    await computePortfolio({ ...base });
+    const body = JSON.parse(fetchApi.mock.calls[0][1].body);
+    expect('slippage_bps' in body).toBe(false);
+    expect('fees_bps' in body).toBe(false);
+  });
+
+  it('omits both when explicitly 0', async () => {
+    await computePortfolio({ ...base, slippageBps: 0, feesBps: 0 });
+    const body = JSON.parse(fetchApi.mock.calls[0][1].body);
+    expect('slippage_bps' in body).toBe(false);
+    expect('fees_bps' in body).toBe(false);
+  });
+
+  it('sends slippage_bps/fees_bps in bps when > 0', async () => {
+    await computePortfolio({ ...base, slippageBps: 5, feesBps: 2.5 });
+    const body = JSON.parse(fetchApi.mock.calls[0][1].body);
+    expect(body.slippage_bps).toBe(5);
+    expect(body.fees_bps).toBe(2.5);
+  });
+});
+
 describe('clearPortfolioCache', () => {
   it('POSTs to /portfolio/cache/clear', async () => {
     await clearPortfolioCache();

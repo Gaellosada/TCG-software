@@ -36,6 +36,22 @@ function getStoredRiskFreeRate() {
   }
 }
 
+function getStoredSlippageBps() {
+  try {
+    return localStorage.getItem('tcg-slippage-bps') || '0';
+  } catch {
+    return '0';
+  }
+}
+
+function getStoredFeesBps() {
+  try {
+    return localStorage.getItem('tcg-fees-bps') || '0';
+  } catch {
+    return '0';
+  }
+}
+
 function applyChartType(type) {
   document.documentElement.dataset.chartType = type;
 }
@@ -48,6 +64,10 @@ function SettingsPage() {
   const [theme, setTheme] = useState(getStoredTheme);
   const [chartType, setChartType] = useState(getStoredChartType);
   const [rfPct, setRfPct] = useState(getStoredRiskFreeRate);
+  // Global execution-cost pair, stored in basis points. Sent per-run on both
+  // signal and portfolio compute calls (backend converts bps→rate).
+  const [slippageBps, setSlippageBps] = useState(getStoredSlippageBps);
+  const [feesBps, setFeesBps] = useState(getStoredFeesBps);
   // Portfolio-result cache toggle — DEFAULT ON. Persisted to localStorage;
   // read by usePortfolio at mount and sent as ``use_cache`` on compute.
   const [portfolioCache, setPortfolioCache] = useState(isPortfolioCacheEnabled);
@@ -104,6 +124,28 @@ function SettingsPage() {
     if (!Number.isFinite(pct) || pct < 0) return;
     try {
       localStorage.setItem('tcg-risk-free-rate', value);
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }
+
+  function handleSlippageChange(value) {
+    setSlippageBps(value);
+    const bps = parseFloat(value);
+    if (!Number.isFinite(bps) || bps < 0) return;
+    try {
+      localStorage.setItem('tcg-slippage-bps', value);
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }
+
+  function handleFeesChange(value) {
+    setFeesBps(value);
+    const bps = parseFloat(value);
+    if (!Number.isFinite(bps) || bps < 0) return;
+    try {
+      localStorage.setItem('tcg-fees-bps', value);
     } catch {
       // localStorage unavailable — ignore
     }
@@ -192,6 +234,38 @@ function SettingsPage() {
             ariaLabel="Default risk-free rate (percent)"
           />
           <div className={styles.settingHint}>Used for Sharpe, Sortino, and Calmar ratios.</div>
+        </div>
+      </div>
+
+      <div className={styles.settingRow}>
+        <span className={styles.settingLabel}>Slippage</span>
+        <div>
+          <RiskFreeRateInput
+            valuePct={slippageBps}
+            onChange={(e) => handleSlippageChange(e.target.value)}
+            ariaLabel="Slippage (basis points)"
+            unit="bps"
+            step="0.1"
+          />
+          <div className={styles.settingHint}>
+            Applied per trade on signal and portfolio backtests. 1 bp = 0.01%.
+          </div>
+        </div>
+      </div>
+
+      <div className={styles.settingRow}>
+        <span className={styles.settingLabel}>Fees</span>
+        <div>
+          <RiskFreeRateInput
+            valuePct={feesBps}
+            onChange={(e) => handleFeesChange(e.target.value)}
+            ariaLabel="Fees (basis points)"
+            unit="bps"
+            step="0.1"
+          />
+          <div className={styles.settingHint}>
+            Applied per trade on signal and portfolio backtests. 1 bp = 0.01%.
+          </div>
         </div>
       </div>
 

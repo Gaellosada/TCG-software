@@ -35,6 +35,17 @@ vi.mock('../../api/options', () => ({
 vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));
 vi.mock('../Signals/requestBuilder', () => ({
   buildComputeRequestBody: vi.fn(() => ({ body: {}, missing: [] })),
+  // buildPortfolioComputeBody (real) folds global costs into the top-level body
+  // via this helper; mirror the real >0-only shape so a default (zero-cost) run
+  // stays byte-identical.
+  costFieldsForRequest: (costs) => {
+    const out = {};
+    const s = costs?.slippageBps;
+    const f = costs?.feesBps;
+    if (typeof s === 'number' && Number.isFinite(s) && s > 0) out.slippage_bps = s;
+    if (typeof f === 'number' && Number.isFinite(f) && f > 0) out.fees_bps = f;
+    return out;
+  },
 }));
 vi.mock('../Signals/hydrateIndicators', () => ({
   hydrateAvailableIndicators: vi.fn(() => Promise.resolve([])),

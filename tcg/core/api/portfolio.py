@@ -47,6 +47,7 @@ from tcg.engine import (
     compute_metrics,
     compute_weighted_portfolio,
 )
+from tcg.engine.costs import CostConfig
 from tcg.engine.hold_pnl import _HoldPnLSpec, _compound_with_hold
 from tcg.engine.signal_exec import (
     IndicatorSpecInput,
@@ -712,6 +713,11 @@ class PortfolioRequest(BaseModel):
     return_type: str = "normal"
     start: str | None = None
     end: str | None = None
+    # Transaction costs (basis points, independent). Default 0 = OFF = byte-identical.
+    # A negative rate would produce negative drag (inflated equity / negative
+    # reported cost), so the boundary rejects it (422).
+    slippage_bps: float = Field(default=0.0, ge=0.0)
+    fees_bps: float = Field(default=0.0, ge=0.0)
     # Result-cache opt-out (Settings toggle). Default True = caching on
     # (unchanged behaviour). When False the compute path bypasses the on-disk
     # cache entirely (no read, no write) and always recomputes fresh; the flag
@@ -840,6 +846,7 @@ async def _evaluate_signal_leg(
     start_date: date | None,
     end_date: date | None,
     repo: WriteRepository,
+    cost_config: CostConfig | None = None,
 ) -> _SignalLegEvalResult:
     """Evaluate a signal leg and bubble up everything the portfolio path needs.
 
@@ -911,7 +918,14 @@ async def _evaluate_signal_leg(
     # 4. Create fetcher and evaluate
     fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
     try:
-        result = await evaluate_signal(signal, indicators, fetcher)
+        # Thread the run's transaction-cost config so the signal leg's INTERNAL
+        # entries/exits/rolls fold into its synthetic equity — exactly mirroring
+        # how a composed sub-portfolio pays its own internal costs. This is the
+        # signal's own turnover (distinct from the parent's ALLOCATION-weight
+        # turnover, which the portfolio engine charges separately), so there is no
+        # double-count. At 0 bps ``evaluate_signal`` early-skips all cost math →
+        # byte-identical to the pre-cost behaviour.
+        result = await evaluate_signal(signal, indicators, fetcher, cost_config)
     except SignalValidationError as exc:
         raise ValidationError(f"Leg '{label}': signal validation error: {exc}") from exc
     except SignalDataError as exc:
@@ -1808,6 +1822,14 @@ async def _compute_portfolio_uncached(
 
     # ── 4. Evaluate signal legs (if any) ──
 
+    # Transaction-cost config for the whole run (OFF by default → byte-identical).
+    # Built here so a signal leg's INTERNAL costs fold into its synthetic equity
+    # (see §7 for the parent's allocation-layer roll/turnover overlay, which reuses
+    # this same object and does NOT touch signal legs → no double-count).
+    cost_config = CostConfig(
+        slippage_bps=float(body.slippage_bps), fees_bps=float(body.fees_bps)
+    )
+
     # signal_dates[label] = YYYYMMDD array, signal_closes[label] = synthetic prices
     signal_dates_map: dict[str, npt.NDArray[np.int64]] = {}
     signal_closes: dict[str, npt.NDArray[np.float64]] = {}
@@ -1826,6 +1848,7 @@ async def _compute_portfolio_uncached(
             start_date,
             end_date,
             repo,
+            cost_config,
         )
         signal_dates_map[label] = leg_result.index
         signal_closes[label] = leg_result.synthetic
@@ -2087,12 +2110,62 @@ async def _compute_portfolio_uncached(
         )
         for label in aligned_closes
     }
+    # ── Transaction costs (OFF by default → byte-identical). Continuous-futures
+    #    rolls are charged a round-trip on the leg's notional fraction at each
+    #    interior roll bar, routed into the EQUITY computation here (the display
+    #    roll-rows in §9.5 do NOT feed equity). ``cost_config`` was built at §4 so
+    #    signal legs already folded their INTERNAL costs into their synthetic
+    #    equity; this overlay is the ALLOCATION layer (continuous + hold-option
+    #    rolls) and never touches signal legs → no double-count. ──
+    roll_turnover: npt.NDArray[np.float64] | None = None
+    if not cost_config.is_zero():
+        abs_total = sum(abs(w) for w in portfolio_weights.values()) or 1.0
+        date_to_idx = {int(d): i for i, d in enumerate(common_dates.tolist())}
+        rt = np.zeros(len(common_dates), dtype=np.float64)
+        for label, leg in body.legs.items():
+            if leg.type != "continuous" or label not in portfolio_weights:
+                continue
+            spec = legs_spec.get(label)
+            if not isinstance(spec, ContinuousLegSpec):
+                continue
+            try:
+                cseries = await svc.get_continuous(
+                    spec.collection, spec.roll_config, start=start_date, end=end_date
+                )
+            except Exception as exc:  # noqa: BLE001 — cost overlay, never fail compute
+                logger.warning(
+                    "roll-cost re-fetch failed for continuous leg %r (%s): %s",
+                    label,
+                    spec.collection,
+                    exc,
+                )
+                continue
+            frac = abs(portfolio_weights[label]) / abs_total
+            for d in cseries.roll_dates:
+                idx = date_to_idx.get(int(d))
+                if idx is not None:
+                    rt[idx] += 2.0 * frac  # round-trip = 2 sides
+        # Option hold-leg rolls (interior boundaries already computed above): the
+        # held contract is closed & reopened at each roll -> round-trip on the
+        # leg's portfolio share.
+        for label in hold_option_labels:
+            if label not in portfolio_weights:
+                continue
+            frac = abs(portfolio_weights[label]) / abs_total
+            for d in option_roll_dates_interior.get(label, []):
+                idx = date_to_idx.get(int(d))
+                if idx is not None:
+                    rt[idx] += 2.0 * frac
+        roll_turnover = rt
+
     result = compute_weighted_portfolio(
         aligned_closes,
         portfolio_weights,
         rebalance_freq.value,
         body.return_type,
         common_dates,
+        cost_config=cost_config,
+        roll_turnover=roll_turnover,
     )
 
     # ── 8. Compute metrics ──
@@ -2100,7 +2173,12 @@ async def _compute_portfolio_uncached(
     # Risk stats must use the same return basis the equity curve was built
     # with (HIGH#3): a log-built curve's vol/Sharpe/Sortino are otherwise
     # computed on the wrong (simple-return) basis.
-    metrics = compute_metrics(result.portfolio_equity, return_type=body.return_type)
+    metrics = compute_metrics(
+        result.portfolio_equity,
+        return_type=body.return_type,
+        total_slippage_paid_pct=result.total_slippage_paid_pct,
+        total_fees_paid_pct=result.total_fees_paid_pct,
+    )
     leg_metrics = {
         label: compute_metrics(eq, return_type=body.return_type)
         for label, eq in result.per_leg_equities.items()
@@ -2469,6 +2547,8 @@ async def _compute_portfolio_uncached(
             label: eq.tolist() for label, eq in result.raw_leg_equities.items()
         },
         "rebalance_dates": [int_to_iso(int(d)) for d in result.rebalance_dates],
+        "total_slippage_paid_pct": float(result.total_slippage_paid_pct),
+        "total_fees_paid_pct": float(result.total_fees_paid_pct),
         "metrics": asdict(metrics),
         "leg_metrics": {label: asdict(m) for label, m in leg_metrics.items()},
         "monthly_returns": monthly,

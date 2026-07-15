@@ -367,3 +367,109 @@ def _compound_with_hold(
                     holding[rid] = False
 
     return ratio, step_scale, hold_contrib
+
+
+def hold_leg_notional_fractions(spec: _HoldPnLSpec) -> npt.NDArray[np.float64]:
+    """Per-bar OPTION-PREMIUM notional fraction (of NAV) a held leg actually trades.
+
+    The transaction-cost turnover of a held option leg must be billed on the
+    option premium notional the sizing recurrence actually crosses -- which is the
+    ``|nav_times|`` fraction of NAV ONLY in ``premium_notional`` mode.  In
+    ``futures_notional`` mode the quantity is sized off the reference-FUTURE
+    notional (``qty = nav_times·NAV_roll/(F_ref·mult_fut)``), so the option-premium
+    notional crossed is only
+
+        |nav_times|·seg_premium·mult_opt / (seg_fref·mult_fut)
+
+    of NAV, where ``seg_premium`` (the segment's roll-day open premium) and
+    ``seg_fref`` (the reference-future price frozen at the segment's roll) are the
+    SAME frozen values :func:`_compound_with_hold` sizes ``qty`` with.  Billing
+    turnover on ``nav_times`` there over-charges by ``(seg_fref·mult_fut) /
+    (seg_premium·mult_opt)`` (e.g. ~100x for a low-premium far-OTM option).
+
+    Returns a length-``T`` array; entry ``b`` is the fraction of the segment sized
+    at the last open point ``<= b`` (0 on bars where no sized segment is held).
+    This replays the exact ``seg_premium``/``seg_fref`` state machine of
+    :func:`_compound_with_hold` MINUS its equity (``ratio``) gates -- the fraction
+    is equity-INDEPENDENT (``qty`` depends only on the frozen premium / future
+    price / multipliers), so it can be computed before compounding and fed to the
+    cost turnover primitive.  The wipeout gate is omitted for the same reason the
+    turnover primitive ignores ruin: after a wipe positions are flat and the
+    (sub-basis-point) residual cost is immaterial.
+    """
+    premium = np.asarray(spec.premium, dtype=np.float64)
+    roll_premium = np.asarray(spec.roll_premium, dtype=np.float64)
+    is_roll = np.asarray(spec.is_roll, dtype=bool)
+    pos_active = np.asarray(spec.pos_active, dtype=bool)
+    T = premium.shape[0]
+    frac = np.zeros(T, dtype=np.float64)
+    mag = abs(float(spec.nav_times))
+    if T == 0:
+        return frac
+
+    if spec.sizing_mode != "futures_notional":
+        # premium_notional: the option premium notional deployed is exactly
+        # nav_times·NAV on every held bar (identical to the scalar cost path).
+        frac[pos_active[:T]] = mag
+        return frac
+
+    def _frac(seg_prem: float, seg_f: float) -> float:
+        if (
+            np.isfinite(seg_prem)
+            and seg_prem > 0.0
+            and np.isfinite(seg_f)
+            and seg_f != 0.0
+        ):
+            return mag * seg_prem * spec.mult_opt / (seg_f * spec.mult_fut)
+        return 0.0
+
+    seg_premium = np.nan
+    seg_fref = np.nan
+    holding = False
+
+    # Seed bar 0 (mirror the seed block of ``_compound_with_hold``): a leg latched
+    # at bar 0 sizes only if it has BOTH a quotable open premium and a valid
+    # reference-future denominator; otherwise it stays flat until the first roll
+    # that has one.
+    if bool(pos_active[0]):
+        open_prem = roll_premium[0] if bool(is_roll[0]) else premium[0]
+        if np.isfinite(open_prem) and open_prem > 0.0:
+            fref0 = _fref_at(spec, 0)
+            if _futures_denom_ok(spec, fref0):
+                seg_premium = float(open_prem)
+                seg_fref = float(fref0)
+                holding = True
+    if holding:
+        frac[0] = _frac(seg_premium, seg_fref)
+
+    # Resize at each subsequent bar exactly as ``_compound_with_hold`` does AFTER
+    # booking the step (its "(re)size each hold leg" block), minus the ``ratio``
+    # gates.
+    for b in range(1, T):
+        if not bool(pos_active[b]):
+            holding = False
+            continue
+        is_open_point = bool(is_roll[b]) or not holding
+        if is_open_point:
+            open_prem = roll_premium[b] if bool(is_roll[b]) else premium[b]
+            fref_here = _fref_at(spec, b)
+            # Off-roll re-open reads NaN (roll_future_ref is finite only at rolls)
+            # -> carry the segment's frozen reference forward (same-roll-period
+            # re-entry), matching the P&L path.
+            if not bool(is_roll[b]) and not np.isfinite(fref_here):
+                fref_here = seg_fref
+            if np.isfinite(open_prem) and open_prem > 0.0:
+                seg_premium = float(open_prem)
+                if _futures_denom_ok(spec, fref_here):
+                    seg_fref = float(fref_here)
+                    holding = True
+                elif holding:
+                    pass  # tail carry-forward: keep the last sized seg_fref
+                else:
+                    holding = False
+            elif not holding:
+                holding = False
+            # else: NaN open premium but already holding -> keep prior sizing.
+        if holding:
+            frac[b] = _frac(seg_premium, seg_fref)
+    return frac

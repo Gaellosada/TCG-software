@@ -27,6 +27,43 @@ export function getRiskFreeRateFraction() {
   }
 }
 
+// Slippage & fees are a single global pair, stored in BASIS POINTS (bps).
+// Unlike the risk-free rate (percent→fraction), the wire sends bps as-is — the
+// backend converts bps→rate — so these readers return the bps number directly.
+// localStorage keys: 'tcg-slippage-bps' / 'tcg-fees-bps' (string, e.g. "5").
+
+export const DEFAULT_SLIPPAGE_BPS = 0;
+export const DEFAULT_FEES_BPS = 0;
+
+function readNonNegativeBps(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw == null || raw === '') return fallback;
+    const bps = parseFloat(raw);
+    if (!Number.isFinite(bps) || bps < 0) return fallback;
+    return bps;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Read the user-configured global slippage in basis points from localStorage.
+ * Returns a number (bps). Falls back to 0 when absent, empty, non-numeric,
+ * negative, or localStorage is unavailable.
+ */
+export function getSlippageBps() {
+  return readNonNegativeBps('tcg-slippage-bps', DEFAULT_SLIPPAGE_BPS);
+}
+
+/**
+ * Read the user-configured global fees in basis points from localStorage.
+ * Returns a number (bps). Same fallback rules as getSlippageBps.
+ */
+export function getFeesBps() {
+  return readNonNegativeBps('tcg-fees-bps', DEFAULT_FEES_BPS);
+}
+
 // localStorage key for the portfolio-result cache toggle. The toggle now drives
 // a REQUEST FLAG (``use_cache``) sent to the backend's on-disk cache — there is
 // no frontend result cache. DEFAULT ON: caching is on unless explicitly off.

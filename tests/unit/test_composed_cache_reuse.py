@@ -113,8 +113,15 @@ def compute_spy(monkeypatch):
     return calls
 
 
-def _child_dict(labels, weights, start="2024-01-02", end="2024-01-15"):
-    return {
+def _child_dict(
+    labels,
+    weights,
+    start="2024-01-02",
+    end="2024-01-15",
+    slippage_bps=None,
+    fees_bps=None,
+):
+    d = {
         "legs": {
             lbl: {"type": "instrument", "collection": "INDEX", "symbol": lbl}
             for lbl in labels
@@ -125,10 +132,22 @@ def _child_dict(labels, weights, start="2024-01-02", end="2024-01-15"):
         "start": start,
         "end": end,
     }
+    # Global costs are emitted ONLY when > 0 (mirrors the frontend
+    # costFieldsForRequest — an absent key defaults to 0 = byte-identical).
+    if slippage_bps:
+        d["slippage_bps"] = slippage_bps
+    if fees_bps:
+        d["fees_bps"] = fees_bps
+    return d
 
 
-def _composed_body(children: dict[str, dict], weights: dict[str, float]):
-    return {
+def _composed_body(
+    children: dict[str, dict],
+    weights: dict[str, float],
+    slippage_bps=None,
+    fees_bps=None,
+):
+    b = {
         "legs": {
             label: {"type": "portfolio", "portfolio_id": label, "portfolio": child}
             for label, child in children.items()
@@ -139,6 +158,11 @@ def _composed_body(children: dict[str, dict], weights: dict[str, float]):
         "start": "2024-01-02",
         "end": "2024-01-15",
     }
+    if slippage_bps:
+        b["slippage_bps"] = slippage_bps
+    if fees_bps:
+        b["fees_bps"] = fees_bps
+    return b
 
 
 async def _compute(client, body):
@@ -369,3 +393,97 @@ class TestComputeVersionSalt:
         monkeypatch.setattr(portfolio, "COMPUTE_VERSION", "9.9.9-test")
         miss = await client.post("/api/portfolio/cache/get", json=body)
         assert miss.json() == {"result": None, "from_cache": False}
+
+
+# ── Round-2 fix: composed children are charged their OWN internal costs ──
+#
+# The bug lived in the frontend body builder (an inlined child sub-body omitted
+# the global ``slippage_bps``/``fees_bps``), so the backend computed the child
+# frictionless. These tests assert the BACKEND correctly charges a composed
+# child once its sub-body carries costs (the contract the frontend fix now
+# fulfils), and that key parity STILL holds with costs on (the fix RESTORES it).
+
+
+class TestComposedCostsCharged:
+    async def test_child_internal_costs_lower_parent_equity(self, client):
+        """A composed parent wrapping a COSTED child ends strictly LOWER than the
+        same parent wrapping a FRICTIONLESS child — the child's own internal
+        trades (initial entry + any rebalance/roll) are charged inside the child's
+        compute and flow through to the parent equity. This is the behaviour the
+        frontend fix (emit costs on the child sub-body) unlocks."""
+        costs = {"slippage_bps": 50.0, "fees_bps": 20.0}
+        # Same parent cost overlay in both runs (isolates the child-cost delta).
+        frictionless = _composed_body(
+            {"C": _child_dict(["up", "down"], [60.0, 40.0])},
+            {"C": 100.0},
+            **costs,
+        )
+        costed = _composed_body(
+            {"C": _child_dict(["up", "down"], [60.0, 40.0], **costs)},
+            {"C": 100.0},
+            **costs,
+        )
+        # use_cache off so each run recomputes fresh (no cross-run contamination).
+        frictionless["use_cache"] = False
+        costed["use_cache"] = False
+        rf = await _compute(client, frictionless)
+        rc = await _compute(client, costed)
+        assert rc["portfolio_equity"][-1] < rf["portfolio_equity"][-1], (
+            "a costed child must drag the parent equity below a frictionless child"
+        )
+
+    async def test_parent_roll_overlay_never_charges_a_portfolio_leg(self, client):
+        """No double-charge at the parent/child boundary: the parent's roll-cost
+        overlay charges only its OWN continuous/option legs, never a composed
+        child's internal rolls. A pure-instrument child has NO rolls, so the
+        parent's reported roll costs must equal the parent allocation layer only
+        — i.e. identical to a NON-composed portfolio holding the same synthetic.
+        We assert the parent reports the plain allocation-layer initial-entry cost
+        (turnover 1.0 × rate), independent of the child's own internal cost."""
+        costs = {"slippage_bps": 50.0, "fees_bps": 20.0}
+        composed = _composed_body(
+            {"C": _child_dict(["up", "down"], [60.0, 40.0], **costs)},
+            {"C": 100.0},
+            **costs,
+        )
+        composed["use_cache"] = False
+        r = await _compute(client, composed)
+        # Parent allocation layer: a single 100% leg entered from cash once →
+        # turnover 1.0 → slippage 1.0 × 50bps = 0.50%, fees 1.0 × 20bps = 0.20%.
+        # The child's internal costs are NOT added to the parent's reported
+        # percentage (they live in the child's equity drag / the child's own
+        # report) — the parent report is the allocation layer only, so the
+        # boundary is charged exactly once.
+        assert r["total_slippage_paid_pct"] == pytest.approx(0.50, abs=1e-6)
+        assert r["total_fees_paid_pct"] == pytest.approx(0.20, abs=1e-6)
+
+
+class TestKeyParityWithCosts:
+    def test_child_body_key_equals_standalone_with_costs(self):
+        """SC2 with costs ON: an inlined child carrying the global costs hashes to
+        the SAME key as a standalone compute of that child carrying the same costs.
+        Before the frontend fix the inlined child omitted costs → the two keyed
+        differently (parity broken with costs on); the fix restores parity."""
+        child_dict = _child_dict(
+            ["up", "down"], [60.0, 40.0], slippage_bps=50.0, fees_bps=20.0
+        )
+        standalone = PortfolioRequest(**child_dict)
+        inlined = PortfolioRequest(**child_dict)
+        child_body = _child_request(inlined, use_cache=True)
+        assert _portfolio_cache_key(standalone) == _portfolio_cache_key(child_body)
+
+    async def test_composed_reuses_standalone_costed_child_cache(
+        self, client, compute_spy
+    ):
+        """End-to-end SC1 with costs on: a child computed standalone WITH costs is
+        served from cache when the SAME child (same costs) is composed — the
+        parent is the only extra compute. Proves the fix keeps composed reuse."""
+        costs = {"slippage_bps": 50.0, "fees_bps": 20.0}
+        child = _child_dict(["up", "down"], [60.0, 40.0], **costs)
+        await _compute(client, child)  # standalone, populates cache with costs
+        assert compute_spy["n"] == 1
+
+        composed = _composed_body({"C": child}, {"C": 100.0}, **costs)
+        resp = await _compute(client, composed)
+        assert set(resp["leg_equities"].keys()) == {"C"}
+        assert compute_spy["n"] == 2  # +1 parent only; costed child reused

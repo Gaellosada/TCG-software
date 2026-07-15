@@ -355,6 +355,35 @@ function HelpPage() {
           purple lines on the chart.
         </p>
 
+        <h3 className={styles.conceptTitle}>Transaction costs (slippage &amp; fees)</h3>
+        <p className={styles.conceptText}>
+          Slippage and fees are two independent transaction-cost rates set globally in{' '}
+          <strong>Settings</strong> (in basis points). When non-zero, they are charged on{' '}
+          <strong>every trade</strong> the backtest makes &mdash; the initial entry, each
+          rebalance, and each roll (both continuous-futures rolls and option-leg rolls,
+          charged as a round-trip: closing the old contract and opening the new one). A
+          rate of <strong>0 leaves the backtest unchanged</strong> (costs off by default).
+        </p>
+        <p className={styles.conceptText}>
+          Each rate is applied to the <em>notional traded</em> on that bar &mdash; the
+          turnover, i.e. the sum of the absolute changes in each holding&apos;s weight,
+          including the daily rebalancing needed to hold a target weight as prices drift.
+          The cost is deducted from the return before it compounds, so it flows into the
+          equity curve and <strong>every metric (return, Sharpe, drawdown, &hellip;) is
+          already net of costs</strong>.
+        </p>
+        <p className={styles.conceptText}>
+          The statistics panel then reports two separate rows &mdash;{' '}
+          <strong>Slippage paid</strong> and <strong>Fees paid</strong> &mdash; under{' '}
+          <strong>Costs (% of initial capital)</strong>. Each is the cumulative amount paid
+          across the whole run, expressed as a percentage of your{' '}
+          <strong>initial capital</strong> (not of P&amp;L or of turnover). It is a readout
+          of what was already taken out, not a further deduction; slippage&nbsp;% +
+          fees&nbsp;% is approximately the total drag versus a zero-cost run. High-turnover
+          strategies can pay more than 100% of initial capital in costs over a long
+          horizon &mdash; that is expected, not an error.
+        </p>
+
         <h3 className={styles.conceptTitle}>Composed portfolios (fund-of-funds)</h3>
         <p className={styles.conceptText}>
           A composed portfolio allocates across whole sub-portfolios rather than
@@ -363,6 +392,24 @@ function HelpPage() {
           to each. Because a sub-portfolio&apos;s equity curve is a fixed, reusable object,
           a composed portfolio computes instantly once its sub-portfolios have each been
           computed — their results are reused from the cache rather than recomputed.
+        </p>
+        <p className={styles.conceptText}>
+          <strong>Costs in a composed portfolio.</strong> When slippage/fees are on, each
+          sub-portfolio pays its <em>own</em> internal trading costs (its rebalances and
+          rolls), and those are reflected in that sub-portfolio&apos;s equity — so the
+          combined equity curve and every return/risk metric are fully net of all costs.
+          The composed portfolio&apos;s own <strong>Slippage paid</strong> /{' '}
+          <strong>Fees paid</strong> rows report only the <em>allocation-layer</em> cost
+          (the trading it does to rebalance between sub-portfolios); each sub-portfolio&apos;s
+          internal cost shows in that sub-portfolio&apos;s own readout, not summed into the
+          parent&apos;s percentage.
+        </p>
+        <p className={styles.conceptText}>
+          The same holds for a <strong>signal leg</strong> inside a portfolio: the
+          signal&apos;s own entry/exit/roll costs are charged inside its equity (so the
+          combined curve and metrics are net of them), while the parent&apos;s reported
+          Slippage/Fees rows stay at the allocation layer — identical to how a running a
+          signal on its own page reports its costs.
         </p>
 
         <h3 className={styles.conceptTitle}>Returns grid</h3>
@@ -604,6 +651,33 @@ function HelpPage() {
           <strong>Default Chart Type</strong> picks candlestick or line for all price
           charts. Individual charts still fall back to line when OHLC data is
           insufficient (see Data &rsaquo; Candlestick vs line).
+        </p>
+
+        <h3 className={styles.conceptTitle}>Risk-free rate</h3>
+        <p className={styles.conceptText}>
+          The <strong>Default Risk-Free Rate</strong> (entered as a percent) is used by
+          the Sharpe, Sortino and Calmar metrics on both the Signals and Portfolio pages.
+          It is a global default, not set per signal or per portfolio.
+        </p>
+
+        <h3 className={styles.conceptTitle}>Slippage &amp; fees</h3>
+        <p className={styles.conceptText}>
+          <strong>Slippage</strong> and <strong>Fees</strong> are two independent
+          transaction-cost rates entered in <strong>basis points</strong> (1 bp = 0.01%).
+          They are global defaults applied to <strong>every backtest</strong> &mdash; both
+          Signals and Portfolios &mdash; and charged on <strong>every trade</strong>:
+          entries and exits, portfolio rebalances, and rolls (continuous-futures and
+          option-leg, as a round-trip). Each rate is levied on the notional traded on each
+          bar (turnover), and the cost is folded into the equity curve so all return and
+          risk metrics come out net of costs.
+        </p>
+        <p className={styles.conceptText}>
+          Both default to <strong>0</strong>, which turns costs off and leaves every
+          backtest byte-for-byte identical to a run without the feature. After a run, the
+          statistics panel shows how much was paid as two separate rows &mdash;{' '}
+          <strong>Slippage paid</strong> and <strong>Fees paid</strong> &mdash; each as a
+          percentage of <strong>initial capital</strong> (see Portfolio &rsaquo;
+          Transaction costs for the full definition).
         </p>
       </section>
     </div>

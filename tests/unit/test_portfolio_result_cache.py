@@ -194,6 +194,34 @@ class TestUnifiedReuse:
             standalone_body
         ) == portfolio._portfolio_cache_key(child_sub)
 
+    def test_cost_params_are_in_cache_key(self):
+        # HARD correctness: changing slippage_bps / fees_bps MUST change the key,
+        # else a costed run would be served a stale zero-cost cached result.
+        base = portfolio.PortfolioRequest(**_pure_body(["up", "down"]))
+        slip = portfolio.PortfolioRequest(
+            **_pure_body(["up", "down"]), slippage_bps=5.0
+        )
+        fees = portfolio.PortfolioRequest(**_pure_body(["up", "down"]), fees_bps=5.0)
+        k_base = portfolio._portfolio_cache_key(base)
+        assert k_base != portfolio._portfolio_cache_key(slip)
+        assert k_base != portfolio._portfolio_cache_key(fees)
+        assert portfolio._portfolio_cache_key(slip) != portfolio._portfolio_cache_key(
+            fees
+        )
+
+    def test_omitted_cost_field_equals_explicit_zero(self):
+        # The FE omits slippage_bps/fees_bps when 0; an absent field defaults to
+        # 0.0, so an omitted-field body keys IDENTICALLY to an explicit-0 body
+        # (the /cache/status probe stays consistent with the compute body).
+        omitted = portfolio.PortfolioRequest(**_pure_body(["up", "down"]))
+        explicit = portfolio.PortfolioRequest(
+            **_pure_body(["up", "down"]), slippage_bps=0.0, fees_bps=0.0
+        )
+        assert omitted.slippage_bps == 0.0 and omitted.fees_bps == 0.0
+        assert portfolio._portfolio_cache_key(
+            omitted
+        ) == portfolio._portfolio_cache_key(explicit)
+
 
 # ── BC-3 + BC-5: transparency + from_cache flag ────────────────────────
 

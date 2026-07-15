@@ -11,10 +11,17 @@ const DEFAULT_RF = 0.04;
 // Section/metric layout. Each entry: {key, label, format, [tooltip]}.
 //
 // ``format`` is one of:
-//   - 'ratio'    → 2 decimals, no unit, no sign coloring
-//   - 'percent'  → ``XX.YY%`` with sign coloring
-//   - 'days'     → integer + " days"
+//   - 'ratio'      → 2 decimals, no unit, no sign coloring
+//   - 'percent'    → ``XX.YY%`` with sign coloring (input is a FRACTION, ×100)
+//   - 'pct_value'  → ``XX.YY%`` neutral, input is ALREADY a percent (no scaling)
+//   - 'days'       → integer + " days"
 // Null values always render as "—".
+//
+// The 'pct_value' branch exists for the Costs rows: the backend returns
+// ``total_slippage_paid_pct`` / ``total_fees_paid_pct`` already in percent
+// units, so they must NOT be multiplied by 100 the way the fraction-based
+// 'percent' metrics are. Costs are magnitudes (always ≥ 0) so they render
+// unsigned and uncoloured — a cost is neither a gain nor a loss.
 const SECTIONS = [
   {
     key: 'return',
@@ -81,6 +88,10 @@ function formatMetric(value, format) {
   if (format === 'days') {
     return { text: `${Math.round(value)} days`, signClass: null };
   }
+  if (format === 'pct_value') {
+    // Value is ALREADY a percent — render as-is, no ×100, unsigned, neutral.
+    return { text: `${value.toFixed(2)}%`, signClass: null };
+  }
   if (format === 'percent') {
     const pct = value * 100;
     // Build the sign manually so "+0.00%" doesn't slip out (we want 0 to be unsigned).
@@ -126,8 +137,22 @@ function MetricRow({ metric, value }) {
  *   dates                 {number[]}  YYYYMMDD integers (length == equity)
  *   equity                {number[]}  equity curve values
  *   defaultRiskFreeRate   {number=}   annualized decimal, default 0.04 (4%)
+ *   costs                 {{slippagePct: number, feesPct: number}=}
+ *                                     total execution costs paid over the run,
+ *                                     each ALREADY in percent units. When
+ *                                     present, a "Costs" column renders two
+ *                                     separate rows (Slippage paid / Fees paid).
+ *                                     Absent ⇒ the column is not rendered.
+ *                                     These come from the compute response
+ *                                     (total_slippage_paid_pct /
+ *                                     total_fees_paid_pct), NOT /api/statistics.
  */
-export default function Statistics({ dates, equity, defaultRiskFreeRate = DEFAULT_RF }) {
+export default function Statistics({
+  dates,
+  equity,
+  defaultRiskFreeRate = DEFAULT_RF,
+  costs,
+}) {
   // Rf is owned by this component — the input shows the percentage form (e.g. "4.00").
   const [rfPct, setRfPct] = useState(() => (defaultRiskFreeRate * 100).toFixed(2));
   const [debouncedRf, setDebouncedRf] = useState(defaultRiskFreeRate);
@@ -238,6 +263,43 @@ export default function Statistics({ dates, equity, defaultRiskFreeRate = DEFAUL
             </div>
           );
         })}
+
+        {/* Costs — rendered only when the caller supplies execution costs.
+            Slippage and fees ALWAYS show as two separate rows (never merged),
+            both already in percent units (see the 'pct_value' formatter). */}
+        {costs && (
+          <div className={styles.column} data-testid="statistics-costs">
+            <h4 className={styles.sectionTitle}>Costs (% of initial capital)</h4>
+            <div className={styles.metricList}>
+              <MetricRow
+                metric={{
+                  key: 'slippage_paid',
+                  label: 'Slippage paid',
+                  format: 'pct_value',
+                  tooltip:
+                    'Cumulative slippage paid across every trade over the backtest '
+                    + '(entries/exits, rebalances and rolls), as a percentage of your '
+                    + 'initial capital. Already deducted from the equity curve and every '
+                    + 'return/risk metric shown — this row only reports how much was paid.',
+                }}
+                value={costs.slippagePct}
+              />
+              <MetricRow
+                metric={{
+                  key: 'fees_paid',
+                  label: 'Fees paid',
+                  format: 'pct_value',
+                  tooltip:
+                    'Cumulative fees paid across every trade over the backtest '
+                    + '(entries/exits, rebalances and rolls), as a percentage of your '
+                    + 'initial capital. Already deducted from the equity curve and every '
+                    + 'return/risk metric shown — this row only reports how much was paid.',
+                }}
+                value={costs.feesPct}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

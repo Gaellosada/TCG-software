@@ -223,3 +223,96 @@ describe('buildPortfolioComputeBody — composed (portfolio) legs', () => {
     expect(without.brokenRefs).toEqual([]);
   });
 });
+
+describe('buildPortfolioComputeBody — global slippage/fees (bps)', () => {
+  const pureLegs = [
+    { id: 1, label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100 },
+  ];
+
+  it('omits cost fields when unset / zero (byte-identical body)', () => {
+    const { body } = buildPortfolioComputeBody({ ...baseArgs, legs: pureLegs });
+    expect('slippage_bps' in body).toBe(false);
+    expect('fees_bps' in body).toBe(false);
+
+    const { body: zero } = buildPortfolioComputeBody({
+      ...baseArgs, legs: pureLegs, slippageBps: 0, feesBps: 0,
+    });
+    expect('slippage_bps' in zero).toBe(false);
+    expect('fees_bps' in zero).toBe(false);
+  });
+
+  it('adds cost fields to the TOP-LEVEL body in bps when > 0', () => {
+    const { body } = buildPortfolioComputeBody({
+      ...baseArgs, legs: pureLegs, slippageBps: 5, feesBps: 2,
+    });
+    expect(body.slippage_bps).toBe(5);
+    expect(body.fees_bps).toBe(2);
+  });
+
+  it('propagates the global cost fields into an inlined child portfolio when > 0', () => {
+    // Round-2 fix: a composed child must be computed WITH the same global costs a
+    // standalone compute of that child would apply, so the child's OWN internal
+    // rebalance/roll trades are charged (previously they were computed cost-free —
+    // only the parent allocation layer was charged).
+    const resolvePortfolio = (id) => (id === 'child-1' ? childDoc() : null);
+    const { body } = buildPortfolioComputeBody({
+      ...baseArgs,
+      legs: composedLegs,
+      resolvePortfolio,
+      slippageBps: 5,
+      feesBps: 2,
+    });
+    // Top level carries the costs...
+    expect(body.slippage_bps).toBe(5);
+    expect(body.fees_bps).toBe(2);
+    // ...AND the inlined child sub-body carries the SAME costs (charged inside
+    // its own compute; parity with a standalone child body → shared cache key).
+    const child = body.legs.BuildingBlock.portfolio;
+    expect(child.slippage_bps).toBe(5);
+    expect(child.fees_bps).toBe(2);
+  });
+
+  it('omits child cost fields when costs are 0 (byte-identical composed body)', () => {
+    // Invariant 1: costs-off keeps the child sub-body exactly its pre-feature
+    // shape (the 4 §4 keys, no cost keys) at every depth.
+    const resolvePortfolio = (id) => (id === 'child-1' ? childDoc() : null);
+    const { body } = buildPortfolioComputeBody({
+      ...baseArgs, legs: composedLegs, resolvePortfolio, slippageBps: 0, feesBps: 0,
+    });
+    const child = body.legs.BuildingBlock.portfolio;
+    expect('slippage_bps' in child).toBe(false);
+    expect('fees_bps' in child).toBe(false);
+    expect(Object.keys(child).sort()).toEqual(['legs', 'rebalance', 'return_type', 'weights']);
+  });
+
+  it('SC2 key-parity WITH costs on: inlined child == standalone child body', () => {
+    // The round-2 fix RESTORES key parity when costs > 0: an inlined child and a
+    // standalone compute of the same child (both carrying the same global costs)
+    // must build a field-for-field identical child body → same backend cache key.
+    // Before the fix the standalone body carried costs and the inlined one did
+    // not, so the two keyed differently (parity broken with costs on).
+    const R = { start: '2005-01-03', end: '2024-06-28' };
+    const doc = childDoc();
+    const costs = { slippageBps: 5, feesBps: 2 };
+
+    const standalone = buildPortfolioComputeBody({
+      legs: persistedDocToLegs(doc),
+      rebalance: doc.rebalance,
+      start: R.start,
+      end: R.end,
+      availableIndicators: [],
+      ...costs,
+    });
+    const composed = buildPortfolioComputeBody({
+      ...baseArgs,
+      legs: composedLegs,
+      resolvePortfolio: (id) => (id === 'child-1' ? doc : null),
+      resolveChildRange: (id) => (id === 'child-1' ? R : null),
+      ...costs,
+    });
+
+    expect(composed.body.legs.BuildingBlock.portfolio).toEqual(standalone.body);
+    expect(standalone.body.slippage_bps).toBe(5);
+    expect(standalone.body.fees_bps).toBe(2);
+  });
+});

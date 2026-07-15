@@ -16,6 +16,7 @@ import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { getPortfolioCacheStatus } from '../../api/portfolio';
 import { getPortfolio } from '../../api/persistence';
+import { getSlippageBps, getFeesBps } from '../../lib/userSettings';
 import { queryKeys } from '../../queryKeys';
 
 const CONCURRENCY = 4;
@@ -116,6 +117,13 @@ export default function usePortfolioCacheStatus({
       }
       if (!live()) return;
 
+      // Global execution costs — read once per probe run and threaded into EVERY
+      // built body (active + rows) so a probe body matches what Compute sends;
+      // otherwise the backend cache key would differ when costs are non-zero and
+      // the "cached" indicator would be wrong.
+      const slippageBps = getSlippageBps();
+      const feesBps = getFeesBps();
+
       // ── Build the ACTIVE body (if keyable) ──
       const queries = [];       // { tag, body }
       const effStart = startDate || overlapRange?.start;
@@ -129,7 +137,7 @@ export default function usePortfolioCacheStatus({
           if (!live()) return;
           const { body, missing, brokenRefs = [] } = buildPortfolioComputeBody({
             legs, rebalance, start: effStart, end: effEnd, availableIndicators, resolvePortfolio,
-            resolveChildRange,
+            resolveChildRange, slippageBps, feesBps,
           });
           if (!missing.length && !brokenRefs.length) queries.push({ tag: ACTIVE_TAG, body });
         } catch { /* un-keyable active config → no active query (stays null) */ }
@@ -202,6 +210,8 @@ export default function usePortfolioCacheStatus({
                 availableIndicators,
                 resolvePortfolio: rowResolver,
                 resolveChildRange,
+                slippageBps,
+                feesBps,
               });
               if (!built.missing.length && !(built.brokenRefs && built.brokenRefs.length)) {
                 body = built.body;
