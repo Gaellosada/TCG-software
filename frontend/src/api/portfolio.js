@@ -61,3 +61,42 @@ export async function getPortfolioCacheStatus(queries, { signal } = {}) {
     ...(signal ? { signal } : {}),
   });
 }
+
+/**
+ * Read-only cache fetch — returns a cached compute result WITHOUT ever computing.
+ * POST /api/portfolio/cache/get with a compute-request body (the SAME shape/body
+ * ``computePortfolio`` sends, so the backend key matches). Backs the auto-display
+ * UX: a HIT returns the cached blob (``from_cache: true``); a MISS returns
+ * ``{ result: null, from_cache: false }`` and NEVER triggers a compute.
+ *
+ * @param {object} p  compute-request body { legs, weights, rebalance, returnType, start, end, slippageBps, feesBps }
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<{ result: object|null, from_cache: boolean }>}
+ */
+export async function getPortfolioCachedResult({
+  legs, weights, rebalance, returnType, start, end, slippageBps, feesBps,
+}, { signal } = {}) {
+  // Global execution costs ride the key body identically to computePortfolio (>0
+  // only, else omitted) so this read-only cache-get keys to the SAME entry a
+  // costed Compute stored — otherwise a costed result would falsely read as a MISS.
+  const costFields = {};
+  if (typeof slippageBps === 'number' && Number.isFinite(slippageBps) && slippageBps > 0) {
+    costFields.slippage_bps = slippageBps;
+  }
+  if (typeof feesBps === 'number' && Number.isFinite(feesBps) && feesBps > 0) {
+    costFields.fees_bps = feesBps;
+  }
+  return fetchApi('/portfolio/cache/get', {
+    method: 'POST',
+    body: JSON.stringify({
+      legs,
+      weights,
+      rebalance,
+      return_type: returnType,
+      start: start || undefined,
+      end: end || undefined,
+      ...costFields,
+    }),
+    ...(signal ? { signal } : {}),
+  });
+}

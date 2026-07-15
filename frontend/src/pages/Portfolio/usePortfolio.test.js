@@ -13,6 +13,8 @@ import usePortfolio from './usePortfolio';
 
 vi.mock('../../api/portfolio', () => ({
   computePortfolio: vi.fn(() => Promise.resolve({ equity: [100, 110], dates: [1, 2] })),
+  // Auto-display cache-get defaults to a MISS so results stay null until Compute.
+  getPortfolioCachedResult: vi.fn(() => Promise.resolve({ result: null, from_cache: false })),
 }));
 
 vi.mock('../../api/data', () => ({
@@ -125,7 +127,10 @@ describe('usePortfolio — signal leg support', () => {
     });
 
     // buildComputeRequestBody should have been called with the signal spec.
-    expect(buildComputeRequestBody).toHaveBeenCalledTimes(1);
+    // (May run more than once: the read-only auto-display probe builds the same
+    // body to check the cache, in addition to the Compute path — both use the
+    // shared builder.)
+    expect(buildComputeRequestBody).toHaveBeenCalled();
     expect(buildComputeRequestBody).toHaveBeenCalledWith(
       fakeSignal,
       expect.any(Array),

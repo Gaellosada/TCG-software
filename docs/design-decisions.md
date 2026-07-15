@@ -184,3 +184,47 @@ Three terminology / semantics corrections were made during the rework and are wo
 - `historical-vol` is added back into the documented library (the 2026-04 doc had it shipped but undocumented).
 
 **Locations:** `frontend/src/pages/Indicators/defaults/*.js`, `frontend/src/pages/Indicators/defaultIndicators.js`, `frontend/src/pages/Indicators/defaultIndicators.test.js`, `tests/engine/test_default_indicators_library.py`, `docs/indicators.md`.
+
+## Composed portfolios: the fund-of-funds model (2026-07)
+
+**Decision:** A composed portfolio is a *fund of funds*. Each referenced
+sub-portfolio is a self-contained strategy that rebalances internally over its
+**own full history**; its equity curve is a fixed, cacheable object. The composed
+portfolio treats each child equity curve as a synthetic price series and
+rebalances only the **allocations** across them at the parent frequency. It does
+**not** re-run each child over the parent's narrowed (intersection) window.
+
+**Mechanism.** A composed leg's child is computed over the child's OWN resolved
+range — the frontend inlines that range (the child's `overlapRange`, exactly what
+a standalone compute of the child would send) into `leg.portfolio.start/end`, and
+the backend `_evaluate_portfolio_leg` builds the child sub-request from
+`child.start`/`child.end` via `_child_request` (never the parent range). Because
+the child sub-body is then **byte-identical** to a standalone compute of that
+child, `_portfolio_cache_key` collides and the two share the on-disk cache entry:
+a composed portfolio whose sub-portfolios were each already computed is served
+entirely from cache (instant, zero heavy recompute). This is the **key-parity
+invariant** and is asserted by a dedicated test.
+
+**Why this is more correct.** The engine aggregates children as synthetic close
+series and works in returns, which are scale- and start-invariant, so using each
+child's real ongoing path (rather than re-anchoring it to the composed start)
+reflects what actually happened to each strategy. The previous behaviour
+recomputed every child over the parent's intersection range, which (a) re-anchored
+each child at the composed start — a subtly different, less faithful curve when
+children have differing coverage — and (b) produced a child body that never
+matched a standalone compute, so no child was ever reused from cache.
+
+**Invalidation.** The change is compute-affecting for composed portfolios, so
+`COMPUTE_VERSION` was bumped `0.1.11 → 0.1.12`; composed entries cached under the
+old re-anchor model are namespaced out and can never be served.
+
+**A read-only cache-get endpoint** (`POST /api/portfolio/cache/get`) returns a
+cached result without ever computing (miss → `{result: null}`), backing an
+auto-display UX: selecting a portfolio whose current config is cached shows its
+result with no Compute click and no risk of triggering a long compute.
+
+**Locations:** `tcg/core/api/portfolio.py` (`_child_request`,
+`_evaluate_portfolio_leg`, `/cache/get`, `COMPUTE_VERSION`),
+`frontend/src/pages/Portfolio/computeBodyBuilder.js`,
+`frontend/src/pages/Portfolio/resolvePortfolioRange.js` (`resolveChildRanges`),
+`frontend/src/pages/Portfolio/usePortfolio.js` (auto-display).

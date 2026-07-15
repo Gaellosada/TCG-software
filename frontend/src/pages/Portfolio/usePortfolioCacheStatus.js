@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { hydrateAvailableIndicators } from '../Signals/hydrateIndicators';
-import { resolvePortfolioRange } from './resolvePortfolioRange';
+import { resolvePortfolioRange, childRangeAccessorFor } from './resolvePortfolioRange';
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { getPortfolioCacheStatus } from '../../api/portfolio';
@@ -130,9 +130,14 @@ export default function usePortfolioCacheStatus({
       const effEnd = endDate || overlapRange?.end;
       if (legs.length > 0 && effStart && effEnd) {
         try {
+          // Fund-of-funds key parity: resolve each active child's OWN range so
+          // the composed body matches what Compute/auto-display send (shared
+          // single-source accessor keeps the id predicate + wiring identical).
+          const resolveChildRange = await childRangeAccessorFor(legs, { queryClient });
+          if (!live()) return;
           const { body, missing, brokenRefs = [] } = buildPortfolioComputeBody({
             legs, rebalance, start: effStart, end: effEnd, availableIndicators, resolvePortfolio,
-            slippageBps, feesBps,
+            resolveChildRange, slippageBps, feesBps,
           });
           if (!missing.length && !brokenRefs.length) queries.push({ tag: ACTIVE_TAG, body });
         } catch { /* un-keyable active config → no active query (stays null) */ }
@@ -192,8 +197,10 @@ export default function usePortfolioCacheStatus({
             const { overlapRange: ov } = await resolvePortfolioRange(rowLegs, { queryClient });
             if (ov && ov.start && ov.end) {
               // Resolve THIS row's own children (composed rows) — not the active
-              // editor's resolver — so its status body inlines its real specs.
+              // editor's resolver — so its status body inlines its real specs
+              // AND (fund-of-funds) each child's own range, for key parity.
               const rowResolver = hasChildRefs ? await resolveRowChildren(rowLegs) : () => null;
+              const resolveChildRange = await childRangeAccessorFor(rowLegs, { queryClient });
               if (!live()) return;
               const built = buildPortfolioComputeBody({
                 legs: rowLegs,
@@ -202,6 +209,7 @@ export default function usePortfolioCacheStatus({
                 end: ov.end,
                 availableIndicators,
                 resolvePortfolio: rowResolver,
+                resolveChildRange,
                 slippageBps,
                 feesBps,
               });

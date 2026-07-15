@@ -13,6 +13,7 @@ import usePortfolio from './usePortfolio';
 
 vi.mock('../../api/portfolio', () => ({
   computePortfolio: vi.fn(() => Promise.resolve({ portfolio_equity: [1, 1.1], dates: ['2020-01-01', '2020-01-02'] })),
+  getPortfolioCachedResult: vi.fn(() => Promise.resolve({ result: null, from_cache: false })),
 }));
 vi.mock('../../api/data', () => ({
   getInstrumentPrices: vi.fn(() => Promise.resolve({ dates: [20200101, 20201231] })),
@@ -73,6 +74,9 @@ describe('usePortfolio — composed portfolio legs', () => {
     expect(getPortfolio).toHaveBeenCalledWith('c1');
     expect(computePortfolio).toHaveBeenCalledTimes(1);
     const arg = computePortfolio.mock.calls[0][0];
+    // FUND-OF-FUNDS: the child is inlined WITH its own resolved range
+    // (start/end = its overlapRange, here the mocked 2020 window) so the child
+    // sub-body is byte-identical to a standalone compute → shared cache entry.
     expect(arg.legs.Child).toEqual({
       type: 'portfolio',
       portfolio_id: 'c1',
@@ -81,6 +85,8 @@ describe('usePortfolio — composed portfolio legs', () => {
         weights: { SPX: 100 },
         rebalance: 'none',
         return_type: 'normal',
+        start: '2020-01-01',
+        end: '2020-12-31',
       },
     });
     expect(arg.weights.Child).toBe(100);
