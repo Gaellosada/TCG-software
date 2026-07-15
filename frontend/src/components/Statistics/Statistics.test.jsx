@@ -309,7 +309,7 @@ describe('<Statistics> — Costs section', () => {
         />,
       );
     });
-    expect(screen.getByText('Costs')).toBeTruthy();
+    expect(screen.getByText('Costs (% of initial capital)')).toBeTruthy();
     expect(screen.getByText('Slippage paid')).toBeTruthy();
     expect(screen.getByText('Fees paid')).toBeTruthy();
     // Already-percent inputs render verbatim (0.85 → "0.85%", NOT "85.00%").

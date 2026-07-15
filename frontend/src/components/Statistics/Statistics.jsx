@@ -269,14 +269,18 @@ export default function Statistics({
             both already in percent units (see the 'pct_value' formatter). */}
         {costs && (
           <div className={styles.column} data-testid="statistics-costs">
-            <h4 className={styles.sectionTitle}>Costs</h4>
+            <h4 className={styles.sectionTitle}>Costs (% of initial capital)</h4>
             <div className={styles.metricList}>
               <MetricRow
                 metric={{
                   key: 'slippage_paid',
                   label: 'Slippage paid',
                   format: 'pct_value',
-                  tooltip: 'Total slippage paid over the run, as a percent of capital.',
+                  tooltip:
+                    'Cumulative slippage paid across every trade over the backtest '
+                    + '(entries/exits, rebalances and rolls), as a percentage of your '
+                    + 'initial capital. Already deducted from the equity curve and every '
+                    + 'return/risk metric shown — this row only reports how much was paid.',
                 }}
                 value={costs.slippagePct}
               />
@@ -285,7 +289,11 @@ export default function Statistics({
                   key: 'fees_paid',
                   label: 'Fees paid',
                   format: 'pct_value',
-                  tooltip: 'Total fees paid over the run, as a percent of capital.',
+                  tooltip:
+                    'Cumulative fees paid across every trade over the backtest '
+                    + '(entries/exits, rebalances and rolls), as a percentage of your '
+                    + 'initial capital. Already deducted from the equity curve and every '
+                    + 'return/risk metric shown — this row only reports how much was paid.',
                 }}
                 value={costs.feesPct}
               />
