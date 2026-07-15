@@ -240,6 +240,33 @@ def _derive_returns_from_equity(
     return returns
 
 
+def _finite_returns_for_cost(
+    returns: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """Copy ``returns`` with every non-finite per-bar entry held flat (0.0).
+
+    Used ONLY on the costs-ON branches of the buy-and-hold and periodic paths,
+    which derive per-bar returns from a GROSS equity curve, subtract the cost
+    drag, then RECOMPOUND. When gross equity touches zero (``0/0`` -> NaN) or
+    crosses it (``x/0`` -> +-inf) -- e.g. a short leg whose underlying more than
+    doubles over the backtest -- ``_derive_returns_from_equity`` emits a
+    non-finite return that would otherwise recompound into a NaN/inf equity tail
+    and, via a single ``0*inf`` in ``cumulative_cost_pct``, null BOTH cost
+    totals. Holding a non-finite bar flat (0 return) keeps the recompounded
+    curve finite and ruin-absorbing (a -100% bar wipes to ~0 and stays there),
+    mirroring the per-leg hold-flat handling above, the daily path (which
+    applies drag to raw returns pre-single-compound and never re-derives), and
+    ``_compound_clamped`` in the signal engine. Index 0 (the ignored seed) is
+    left untouched. The costs-OFF path never calls this, so it stays
+    byte-identical; when every return is already finite this is a no-op copy.
+    """
+    out = np.asarray(returns, dtype=np.float64).copy()
+    if out.shape[0] > 1:
+        tail = out[1:]
+        out[1:] = np.where(np.isfinite(tail), tail, 0.0)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Weighted portfolio with rebalancing
 # ---------------------------------------------------------------------------
@@ -582,12 +609,14 @@ def _compute_buy_and_hold(
         if roll_turnover is not None:
             turnover = turnover + np.asarray(roll_turnover, dtype=np.float64)[: n - 1]
         slip_drag, fees_drag = split_drag(turnover, cost_config)
-        adj_returns = portfolio_returns.copy()
+        adj_returns = _finite_returns_for_cost(portfolio_returns)
         adj_returns[1:] = adj_returns[1:] - slip_drag - fees_drag
         portfolio_equity = compute_equity_curve(
             adj_returns, return_type, initial_value=100.0
         )
-        portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
+        portfolio_returns = _finite_returns_for_cost(
+            _derive_returns_from_equity(portfolio_equity, return_type)
+        )
         er_start = portfolio_equity[:-1] / portfolio_equity[0]
         slippage_pct = cumulative_cost_pct(slip_drag, er_start)
         fees_pct = cumulative_cost_pct(fees_drag, er_start)
@@ -710,12 +739,14 @@ def _compute_periodic_rebalance(
         # est_turn[s] is established at bar s -> charged on step s -> s+1.
         turnover_step = total_turn[: n - 1]
         slip_drag, fees_drag = split_drag(turnover_step, cost_config)
-        adj_returns = portfolio_returns.copy()
+        adj_returns = _finite_returns_for_cost(portfolio_returns)
         adj_returns[1:] = adj_returns[1:] - slip_drag - fees_drag
         portfolio_equity = compute_equity_curve(
             adj_returns, return_type, initial_value=100.0
         )
-        portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
+        portfolio_returns = _finite_returns_for_cost(
+            _derive_returns_from_equity(portfolio_equity, return_type)
+        )
         er_start = portfolio_equity[:-1] / portfolio_equity[0]
         slippage_pct = cumulative_cost_pct(slip_drag, er_start)
         fees_pct = cumulative_cost_pct(fees_drag, er_start)

@@ -100,6 +100,126 @@ def test_continuous_roll_incurs_round_trip():
     assert with_roll.portfolio_equity[-1] < no_roll.portfolio_equity[-1]
 
 
+def test_short_leg_wipeout_stays_finite_none_and_monthly():
+    """FIX 1 -- gross equity that touches/crosses zero must not poison the
+    costs-ON tail with NaN/inf.
+
+    A single short leg whose underlying more than doubles drives gross equity
+    to 0 and beyond. The costs path derives per-bar returns from the gross
+    curve, and ``_derive_returns_from_equity`` yields 0/0 -> NaN (zero-touch)
+    or x/0 -> +-inf (zero-cross) there; that then recompounds into a
+    NaN/inf equity tail and, via a single 0*inf in ``cumulative_cost_pct``,
+    nulls BOTH cost totals. The equity curve must stay entirely finite and
+    both cost totals must be finite and >= 0.
+    """
+    cfg = CostConfig(slippage_bps=10.0, fees_bps=5.0)
+
+    # rebalance='none' (buy-and-hold): prices [100,200,210,220], short -1.0
+    # -> GROSS [100,0,-10,-20]; derived returns [nan,-1,-inf,1] pre-fix.
+    bh = compute_weighted_portfolio(
+        {"S": np.array([100.0, 200.0, 210.0, 220.0])},
+        {"S": -1.0},
+        "none",
+        "normal",
+        np.array([20200101, 20200102, 20200103, 20200106], dtype=np.int64),
+        cost_config=cfg,
+    )
+    assert np.all(np.isfinite(bh.portfolio_equity)), bh.portfolio_equity
+    assert np.isfinite(bh.total_slippage_paid_pct) and bh.total_slippage_paid_pct >= 0.0
+    assert np.isfinite(bh.total_fees_paid_pct) and bh.total_fees_paid_pct >= 0.0
+
+    # rebalance='monthly': price doubles at the (index-1) month boundary, short
+    # -1.0 -> GROSS [100,0,0,0]; derived [nan,-1,nan,nan] pre-fix -> 0*nan totals.
+    mo = compute_weighted_portfolio(
+        {"S": np.array([100.0, 200.0, 200.0, 200.0])},
+        {"S": -1.0},
+        "monthly",
+        "normal",
+        np.array([20200131, 20200203, 20200204, 20200205], dtype=np.int64),
+        cost_config=cfg,
+    )
+    assert np.all(np.isfinite(mo.portfolio_equity)), mo.portfolio_equity
+    assert np.isfinite(mo.total_slippage_paid_pct) and mo.total_slippage_paid_pct >= 0.0
+    assert np.isfinite(mo.total_fees_paid_pct) and mo.total_fees_paid_pct >= 0.0
+
+
+def test_periodic_drift_turnover_boundary_worked_example():
+    """FIX 2 -- hand-computed monthly drift-turnover ACROSS a boundary.
+
+    Two legs A/B, weights 0.5/0.5, slippage_bps=10, fees_bps=0, normal.
+    dates cross a month boundary at index 2 (Jan 30, Jan 31 | Feb 3, Feb 4),
+    and index 3 exists so the boundary trade IS held into a step (charged).
+
+    A=[100,110,110,110], B=[100,100,100,100]:
+      i=1 (Jan, no boundary): A 50->55, B 50 ; portfolio 105.
+      i=2 (Feb boundary): drifted weights 55/105, 50/105; target 0.5/0.5
+          -> drift-turnover = |0.5-55/105|+|0.5-50/105| = 5/105 = 0.047619048.
+          redistribute to 52.5/52.5; returns 0 -> portfolio stays 105.
+      i=3: returns 0 -> 105.
+
+    turnover_step (charged) = [1.0 (entry), 0 (i=1), 5/105 (boundary i=2)].
+    slip_drag = 0.001 * that. gross returns [nan,0.05,0,0].
+    adj[1:] = [0.05-0.001, 0-0, 0-0.001*5/105].
+    """
+    cfg = CostConfig(slippage_bps=10.0, fees_bps=0.0)
+    res = compute_weighted_portfolio(
+        {
+            "A": np.array([100.0, 110.0, 110.0, 110.0]),
+            "B": np.array([100.0, 100.0, 100.0, 100.0]),
+        },
+        {"A": 0.5, "B": 0.5},
+        "monthly",
+        "normal",
+        np.array([20200130, 20200131, 20200203, 20200204], dtype=np.int64),
+        cost_config=cfg,
+    )
+    boundary_turn = 5.0 / 105.0
+    exp_equity = np.array(
+        [
+            100.0,
+            104.9,
+            104.9,
+            104.9 * (1.0 - 0.001 * boundary_turn),
+        ]
+    )
+    np.testing.assert_allclose(res.portfolio_equity, exp_equity, atol=1e-9)
+    exp_slippage = 100.0 * (0.001 * 1.0 + 0.0 + 0.001 * boundary_turn * 1.049)
+    assert abs(res.total_slippage_paid_pct - exp_slippage) < 1e-9
+    assert res.total_fees_paid_pct == 0.0
+
+
+def test_periodic_short_leg_boundary_charges_drift_turnover():
+    """FIX 2 -- a periodic short (negative-weight) leg still charges the
+    boundary drift-turnover and stays finite; crossing a boundary costs more
+    than an identical same-month (no-boundary) run."""
+    closes = {
+        "L": np.array([100.0, 110.0, 110.0, 110.0]),
+        "S": np.array([100.0, 100.0, 100.0, 100.0]),
+    }
+    weights = {"L": 0.5, "S": -0.5}
+    cfg = CostConfig(slippage_bps=10.0, fees_bps=0.0)
+    crossing = compute_weighted_portfolio(
+        closes,
+        weights,
+        "monthly",
+        "normal",
+        np.array([20200130, 20200131, 20200203, 20200204], dtype=np.int64),
+        cost_config=cfg,
+    )
+    same_month = compute_weighted_portfolio(
+        closes,
+        weights,
+        "monthly",
+        "normal",
+        np.array([20200101, 20200102, 20200103, 20200106], dtype=np.int64),
+        cost_config=cfg,
+    )
+    assert np.all(np.isfinite(crossing.portfolio_equity))
+    assert crossing.total_slippage_paid_pct >= 0.0
+    # The boundary rebalance adds turnover the same-month run never incurs.
+    assert crossing.total_slippage_paid_pct > same_month.total_slippage_paid_pct
+
+
 def test_compute_metrics_carries_cost_totals():
     res = _run("daily", CostConfig(slippage_bps=10.0, fees_bps=3.0))
     m = compute_metrics(

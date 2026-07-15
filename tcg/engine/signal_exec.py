@@ -1928,6 +1928,21 @@ async def evaluate_signal(
                 with np.errstate(invalid="ignore", divide="ignore"):
                     rets_mat[1:, j] = (pv[1:] - pv[:-1]) / pv[:-1]
                 gross_net += acc.contrib_step
+            # ``gross_net`` is the drift denominator ``R = Σ pos·r`` passed to
+            # ``establish_turnover`` (drifted weight = pos·(1+r)/(1+R)). Here it
+            # sums ONLY the priced, non-hold inputs' ``contrib_step``; a hold
+            # option leg's contribution is deliberately OMITTED. This is an
+            # ACCEPTED sub-basis-point approximation, not a bug: a hold leg's
+            # per-step P&L is equity-coupled and is booked only later, inside
+            # ``_compound_with_hold`` (line ~1950), whereas the turnover drag
+            # must be known BEFORE compounding (it feeds ``net_step`` which
+            # feeds that very call) -- a genuine ordering cycle. Threading the
+            # full R would require running the sequential hold pass first,
+            # perturbing the hot loop and risking the golden-master byte
+            # identity, for a second-order error on the drifted weight of a
+            # priced leg (hold-leg premium is a sub-percent NAV fraction, and
+            # costs are off by default). So the priced sub-book drifts within
+            # its own net; the omission is negligible.
             turnover += establish_turnover(pos_mat, rets_mat, gross_net)
         # Hold-leg roll round-trips (one side at the initial open).
         for spec in hold_specs:

@@ -175,4 +175,10 @@ def cumulative_cost_pct(
     """
     drag = np.asarray(drag, dtype=np.float64)
     er = np.asarray(equity_ratio_start, dtype=np.float64)
-    return 100.0 * float(np.sum(drag * er))
+    # A non-finite running equity on some bar (e.g. a wiped/zero-crossed gross
+    # curve that slipped through) must not null the WHOLE total: a single
+    # ``0*inf``/``0*nan`` in the product poisons the sum. Treat a non-finite
+    # step as a 0-cost contribution so one bad bar can't hide every real cost.
+    contrib = drag * er
+    contrib = np.where(np.isfinite(contrib), contrib, 0.0)
+    return 100.0 * float(np.sum(contrib))
