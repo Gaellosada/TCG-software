@@ -482,6 +482,7 @@ class _CycleAwareReader(Protocol):
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]: ...
 
 
@@ -534,6 +535,7 @@ class _CycleInjectingReader:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         return await self._inner.query_chain(
             root=root,
@@ -544,6 +546,7 @@ class _CycleInjectingReader:
             strike_min=strike_min,
             strike_max=strike_max,
             expiration_cycle=self._cycle,
+            limit=limit,
         )
 
 
@@ -1346,6 +1349,12 @@ async def _resolve_bulk(
                 _root_underlying_box[0] = ""
         return _root_underlying_box[0]
 
+    # Cheap existence gate for the strike window (see ``_strike_window_for``): the
+    # OLD probe issued a FULL single-expiration ``query_chain`` purely to test
+    # whether ANY contract was quoted on ``repr_date`` (0 rows ⇒ full chain, never
+    # a narrowed band).  We keep that EXACT semantics but transfer at most ONE row.
+    _probe_reader = _CycleInjectingReader(chain_reader, cycle)
+
     async def _strike_window_for(
         exp: date, group: list[tuple[int, date]]
     ) -> tuple[float | None, float | None]:
@@ -1379,6 +1388,50 @@ async def _resolve_bulk(
         # The futures-close lookup the resolver performs is backed by the ranged
         # underlying prefetch window (a memoised cache hit), NOT a per-group fetch.
         repr_date = group[0][1]
+        # EMPTY-repr_date fallback (byte-identity with the OLD probe): narrow ONLY
+        # when ``repr_date`` actually quotes ≥1 contract for ``exp``.  When it does
+        # NOT (a dim-listed expiration not yet price-quoted on the group's first
+        # date — reachable via arithmetic maturities such as EndOfMonth), the old
+        # probe returned 0 rows → the whole group used the FULL chain, NOT a
+        # spot-narrowed band.  Synthesising a spot from the futures close (which
+        # exists regardless of option quoting) would narrow and could drop a later
+        # in-group date's out-of-band target strike → a different ``match_by_delta``
+        # selection.  So gate the narrowing on quoted-existence.
+        #
+        #   * Fast path: the ``NearestToTarget`` by-date LISTED-expiration map (a
+        #     price-quoted join built with the SAME cycle as this resolve) that
+        #     positively lists ``exp`` on ``repr_date`` ⇒ a quoted contract provably
+        #     exists ⇒ skip the probe.  One-directional-safe: map lists ``exp`` ⇒
+        #     ``query_chain(repr_date, exp, exp)`` returns ≥1 row (the map is a
+        #     subset of what ``query_chain``'s price-OR-greeks join returns, same
+        #     cycle/type), so we never wrongly skip narrowing.
+        #   * Otherwise (arithmetic maturities carry NO map; some direct callers omit
+        #     it): a cheap ``LIMIT 1`` existence query with the IDENTICAL filters the
+        #     old probe used (~275 rows → 1).
+        _listed_on_repr = (
+            available_expirations_by_date.get(repr_date)
+            if available_expirations_by_date is not None
+            else None
+        )
+        if _listed_on_repr is not None and exp in _listed_on_repr:
+            _quoted = True
+        else:
+            try:
+                _existence = await _probe_reader.query_chain(
+                    root=collection,
+                    date=repr_date,
+                    type=option_type,
+                    expiration_min=exp,
+                    expiration_max=exp,
+                    limit=1,
+                )
+                _quoted = bool(_existence)
+            except Exception:  # noqa: BLE001
+                _quoted = False
+        if not _quoted:
+            # No quoted contract on repr_date → do NOT narrow (full chain for the
+            # whole group), byte-identical to the old empty-probe fallback.
+            return None, None
         synthetic = OptionContractDoc(
             collection=collection,
             contract_id="",

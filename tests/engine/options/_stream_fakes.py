@@ -175,6 +175,7 @@ class FakeChainReader:
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         self.calls.append(
             {
@@ -184,13 +185,15 @@ class FakeChainReader:
                 "expiration_min": expiration_min,
                 "expiration_max": expiration_max,
                 "expiration_cycle": expiration_cycle,
+                "limit": limit,
             }
         )
         chain = self._chains.get(date, [])
-        return [
+        out = [
             (c, r)
             for (c, r) in chain
             if (c.type == type or type == "both")
             and expiration_min <= c.expiration <= expiration_max
             and _cycle_matches(c.expiration_cycle, expiration_cycle)
         ]
+        return out[:limit] if limit is not None else out

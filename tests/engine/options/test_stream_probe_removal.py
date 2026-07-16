@@ -24,9 +24,11 @@ from typing import Literal, Sequence
 import pytest
 
 from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
+from tcg.engine.options.maturity.resolver import DefaultMaturityResolver as _DMR
 from tcg.engine.options.series.stream_resolver import resolve_option_stream
 from tcg.types.options import (
     ByDelta,
+    EndOfMonth,
     NearestToTarget,
     OptionContractDoc,
     OptionDailyRow,
@@ -158,6 +160,15 @@ async def _run(target_delta: float, *, with_root_resolver: bool = True):
         root_underlying_resolver=_root_resolver if with_root_resolver else None,
         bulk_chain_reader=bulk,
         available_expirations=[_EXP_EARLY, _EXP_LATE],
+        # Production NearestToTarget ALWAYS threads the per-date listing map
+        # (see ``fetch_nearest_target_expirations_by_date``).  With it present the
+        # strike-window existence gate short-circuits (map positively lists ``exp``
+        # on the group's first date ⇒ provably ≥1 quoted contract ⇒ no probe query),
+        # so ZERO ``query_chain`` calls are issued.
+        available_expirations_by_date={
+            _DATE_EARLY: [_EXP_EARLY],
+            _DATE_LATE: [_EXP_LATE],
+        },
     )
     return values, errors, contracts, bulk, chain_reader, ul, root_calls
 
@@ -264,3 +275,86 @@ async def test_none_root_resolver_defaults_to_empty_and_still_selects():
     assert all(c.root_underlying == "" for c in ul.seen)
     assert contracts[1] is not None
     assert contracts[1].strike == pytest.approx(0.60 * _SPOT_BY_EXP[_EXP_LATE])
+
+
+# ── 6. Empty repr_date ⇒ FULL CHAIN (old semantics), NOT a narrowed band ─────
+# Regression for Wave-4b blocking finding B1.  When the group's FIRST date
+# (``repr_date``) has NO price-quoted contract for the resolved expiration, the
+# OLD ``_strike_window_for`` probe returned 0 rows → ``(None, None)`` = full chain
+# for the WHOLE group.  The c4995af probe-removal always synthesised a spot from
+# the futures close (which exists regardless of option quoting) and NARROWED to
+# ``[0.40, 1.30]·spot`` — so a later in-group date whose true target strike falls
+# OUTSIDE that band selects a DIFFERENT contract → byte-identity break.  Reachable
+# via arithmetic maturities (EndOfMonth) which carry NO by-date listing map, so the
+# existence gate must fall back to the cheap ``LIMIT 1`` probe.
+_EOM_EXP = date(2023, 4, 21)
+_EOM_D0 = date(2023, 3, 6)  # repr_date — NO quoted contract for _EOM_EXP
+_EOM_D1 = date(2023, 3, 20)  # later date in the SAME EndOfMonth group — full chain
+# (strike, put-delta) — the -0.50 target strike (2000) sits OUTSIDE the
+# [0.40,1.30]·spot band that a repr-date spot of 1000 would produce ([400,1300]).
+_EOM_CHAIN_D1 = [
+    (500.0, -0.05),
+    (1000.0, -0.20),
+    (1300.0, -0.35),  # deepest strike admitted by the narrowed [400,1300] band
+    (2000.0, -0.50),  # TRUE -0.50 target — EXCLUDED by the narrowed band
+    (3000.0, -0.80),
+]
+
+
+async def test_empty_repr_date_falls_back_to_full_chain_eom():
+    """EndOfMonth group whose repr_date is unquoted must select from the FULL
+    chain (old behaviour), not a spot-narrowed band, so a later date's deep target
+    strike outside the band is still admitted."""
+    chains = {
+        _EOM_D1: [
+            (
+                _contract(strike=k, expiration=_EOM_EXP, type_="P"),
+                _row(row_date=_EOM_D1, mid=5.0, iv=0.20, delta=d),
+            )
+            for k, d in _EOM_CHAIN_D1
+        ]
+        # _EOM_D0 intentionally absent → 0 quoted contracts for _EOM_EXP.
+    }
+    bulk = _StrikeFilteringBulkReader(chains)
+    chain_reader = FakeChainReader(chains)
+
+    async def _spot_1000(contract: OptionContractDoc, d: date) -> float:
+        return 1000.0  # → narrowed band would be [400, 1300]
+
+    values, errors, contracts = await resolve_option_stream(
+        dates=[_EOM_D0, _EOM_D1],
+        collection="OPT_SP_500",
+        option_type="P",
+        cycle=None,
+        maturity=EndOfMonth(),
+        selection=ByDelta(target_delta=-0.50, tolerance=0.05, strict=False),
+        stream="mid",
+        chain_reader=chain_reader,
+        maturity_resolver=_DMR(),
+        underlying_price_resolver=_spot_1000,
+        bulk_chain_reader=bulk,
+        available_expirations=[_EOM_EXP],
+        # EndOfMonth carries NO by-date map (arithmetic maturity) → the existence
+        # gate must use the cheap LIMIT-1 probe.
+    )
+    # The later date selects the TRUE -0.50 strike (2000), only reachable from the
+    # full chain.  On the buggy narrowed path it would be 1300 (nearest in-band).
+    # (``errors[1]`` carries the EndOfMonth ``snapped_to:`` success-side note — the
+    # value/contract array is the source of truth for selection, not that note.)
+    assert contracts[1] is not None
+    assert contracts[1].strike == pytest.approx(2000.0), (
+        "empty repr_date must fall back to the FULL chain, not a narrowed band"
+    )
+    # The cheap existence probe (LIMIT 1) was issued at the unquoted repr_date for
+    # exactly the resolved expiration — NOT a full-chain fetch.
+    probes = [
+        c
+        for c in chain_reader.calls
+        if c["date"] == _EOM_D0 and c["expiration_min"] == _EOM_EXP
+    ]
+    assert probes, (
+        f"expected a LIMIT-1 existence probe at {_EOM_D0}, got {chain_reader.calls}"
+    )
+    assert all(c.get("limit") == 1 for c in probes), (
+        f"existence probe must be row-limited (LIMIT 1), got {probes}"
+    )

@@ -162,6 +162,7 @@ class _PooledProbeReader:
         strike_min=None,
         strike_max=None,
         expiration_cycle=None,
+        limit=None,
     ):
         await self._pool.acquire()
         try:

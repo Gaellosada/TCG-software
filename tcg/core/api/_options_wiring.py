@@ -74,6 +74,7 @@ class _OptionsDataPortAdapter:
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         return await self._reader.query_chain(
             root=root,
@@ -84,6 +85,7 @@ class _OptionsDataPortAdapter:
             strike_min=strike_min,
             strike_max=strike_max,
             expiration_cycle=expiration_cycle,
+            limit=limit,
         )
 
 
@@ -257,7 +259,11 @@ class CachedChainReader:
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
+        # ``limit`` is part of the key: a row-limited existence probe must NEVER be
+        # served for an unbounded call (or vice versa) — a truncated cached result
+        # would silently cap a full-chain fetch.
         key = (
             root,
             date,
@@ -267,6 +273,7 @@ class CachedChainReader:
             strike_min,
             strike_max,
             expiration_cycle,
+            limit,
         )
         if key in self._cache:
             return self._cache[key]
@@ -279,6 +286,7 @@ class CachedChainReader:
             strike_min=strike_min,
             strike_max=strike_max,
             expiration_cycle=expiration_cycle,
+            limit=limit,
         )
         self._cache[key] = result
         return result

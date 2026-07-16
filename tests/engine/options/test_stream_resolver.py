@@ -138,6 +138,7 @@ class FakeChainReader:
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         self.calls.append(
             {

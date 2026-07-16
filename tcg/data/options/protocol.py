@@ -66,6 +66,7 @@ class OptionsDataReader(Protocol):
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         """Return one (contract, row) pair per option active on *date*.
 
@@ -78,6 +79,11 @@ class OptionsDataReader(Protocol):
         ``expiration_cycle`` (e.g. "M" / "W" / "D" / "Q") does not match.
         Used by the smile UI to collapse multi-cycle overlap on roots
         such as OPT_SP_500 to a single trace per strike.
+
+        ``limit`` (when non-None) caps the number of rows returned — an
+        existence-gate fast path used by the stream resolver's strike-window
+        probe (``LIMIT 1`` to test whether ANY contract is quoted for an
+        expiration on a date). ``None`` = unbounded (every other caller).
         """
         ...
 

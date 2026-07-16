@@ -137,6 +137,7 @@ class _StubOptionsReader:
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         return self._rows
 
@@ -207,9 +208,7 @@ async def _build_client(
 
     mock_svc.query_options_chain = AsyncMock(side_effect=_query_options_chain)
     mock_svc.list_option_roots = AsyncMock(side_effect=_list_option_roots)
-    mock_svc.list_option_expirations = AsyncMock(
-        side_effect=_list_option_expirations
-    )
+    mock_svc.list_option_expirations = AsyncMock(side_effect=_list_option_expirations)
 
     if get_prices_value is not None and price_target_date is not None:
         mock_svc.get_prices = AsyncMock(

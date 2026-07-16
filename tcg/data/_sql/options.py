@@ -243,6 +243,7 @@ class SqlOptionsDataReader:
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         """One-day chain (one row per contract active that day).
 
@@ -312,6 +313,14 @@ class SqlOptionsDataReader:
                 ORDER BY i.instrument_id
             """
             params.extend([target_date, target_date])
+            # ``limit`` is an EXISTENCE-GATE fast path (strike-window probe): the
+            # caller only needs to know whether ANY contract is quoted, so cap the
+            # row transfer.  ``None`` (the default / every other caller) = unbounded,
+            # byte-identical to before.  Appended AFTER the ORDER BY so a limited
+            # fetch returns a deterministic prefix.
+            if limit is not None:
+                sql += " LIMIT %s"
+                params.append(int(limit))
 
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
@@ -575,6 +584,7 @@ class SqlOptionsDataReader:
                     await cur.execute(
                         f"""SELECT root_symbol FROM {SCHEMA}.dim_instrument
                             WHERE source_collection = %s AND asset_class = 'option'
+                            ORDER BY root_symbol
                             LIMIT 1""",
                         (root,),
                     )

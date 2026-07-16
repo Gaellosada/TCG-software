@@ -101,6 +101,7 @@ class _ProbeReader:
         strike_min=None,
         strike_max=None,
         expiration_cycle=None,
+        limit=None,
     ):
         return [
             (_contract(strike=4500, expiration=e), _row(row_date=date, mid=1.0))
