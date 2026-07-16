@@ -29,6 +29,11 @@ from __future__ import annotations
 from datetime import date
 from typing import Awaitable, Callable, Literal, Sequence
 
+from tcg.core.api._options_chain_cache import (
+    ChainBulkCache,
+    get_chain_bulk_cache,
+    make_chain_bulk_key,
+)
 from tcg.data._utils import date_to_int
 from tcg.data.options.protocol import OptionsDataReader
 from tcg.data.protocols import MarketDataService
@@ -115,6 +120,107 @@ class _BulkOptionsDataPortAdapter:
             strike_max=strike_max,
             expiration_cycle=expiration_cycle,
         )
+
+
+class CachedBulkChainReader:
+    """Process/loop-scoped cache decorator around ``_BulkOptionsDataPortAdapter``.
+
+    Wraps ``query_chain_bulk`` with the byte-aware LRU + single-flight
+    ``ChainBulkCache`` (``_options_chain_cache``).  Same signature as the inner
+    adapter, so the engine's ``_CycleInjectingBulkReader`` — and
+    ``resolve_option_stream`` — need ZERO changes.
+
+    Byte-identity: on a cache HIT the cached per-date lists are shallow-copied
+    (``[:]``) into a dict rebuilt in the CURRENT call's de-duped ``dates`` order,
+    so each resolve gets its own list containers (a caller can never mutate
+    cached state) while the row elements (frozen dataclasses) are shared and
+    immutable.  The order within each list is the SQL ``ORDER BY`` order
+    preserved verbatim, so downstream ``match_by_delta`` / ``match_by_strike``
+    tie-breaks are identical to the un-cached path.
+
+    ``cache is None`` (master switch off, or a per-request ``use_cache: false``
+    bypass) delegates straight to ``inner`` — byte-identical to today, no read
+    and no write.
+    """
+
+    def __init__(
+        self,
+        inner: _BulkOptionsDataPortAdapter,
+        cache: "ChainBulkCache | None",
+    ) -> None:
+        self._inner = inner
+        self._cache = cache
+
+    async def query_chain_bulk(
+        self,
+        root: str,
+        dates: Sequence[date],
+        type: Literal["C", "P", "both"],
+        expiration_min: date,
+        expiration_max: date,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        expiration_cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        if self._cache is None:
+            # Bypass: no cache read, no cache write — identical to un-cached path.
+            return await self._inner.query_chain_bulk(
+                root=root,
+                dates=dates,
+                type=type,
+                expiration_min=expiration_min,
+                expiration_max=expiration_max,
+                strike_min=strike_min,
+                strike_max=strike_max,
+                expiration_cycle=expiration_cycle,
+            )
+
+        key = make_chain_bulk_key(
+            root=root,
+            dates=dates,
+            type=type,
+            expiration_min=expiration_min,
+            expiration_max=expiration_max,
+            strike_min=strike_min,
+            strike_max=strike_max,
+            expiration_cycle=expiration_cycle,
+        )
+
+        async def _fetch() -> dict[
+            date, list[tuple[OptionContractDoc, OptionDailyRow]]
+        ]:
+            return await self._inner.query_chain_bulk(
+                root=root,
+                dates=dates,
+                type=type,
+                expiration_min=expiration_min,
+                expiration_max=expiration_max,
+                strike_min=strike_min,
+                strike_max=strike_max,
+                expiration_cycle=expiration_cycle,
+            )
+
+        mapping = await self._cache.get_or_fetch(key, _fetch)
+        # Rebuild the dict in THIS call's de-duped date order, shallow-copying
+        # each per-date list so the caller owns its own list containers.
+        result: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+        for d in dict.fromkeys(dates):
+            rows = mapping.get(date_to_int(d))
+            if rows is None:
+                # Should not happen (the date-set is part of the key); fall back
+                # to a fresh fetch rather than serve an incomplete dict.
+                return await self._inner.query_chain_bulk(
+                    root=root,
+                    dates=dates,
+                    type=type,
+                    expiration_min=expiration_min,
+                    expiration_max=expiration_max,
+                    strike_min=strike_min,
+                    strike_max=strike_max,
+                    expiration_cycle=expiration_cycle,
+                )
+            result[d] = rows[:]
+        return result
 
 
 class CachedChainReader:
@@ -512,11 +618,13 @@ def build_options_chain(market_data: MarketDataService) -> DefaultOptionsChain:
 def build_stream_resolver_wiring(
     market_data: MarketDataService,
     underlying_prefetch_window: "tuple[date, date] | None" = None,
+    *,
+    use_chain_cache: bool = True,
 ) -> tuple[
     CachedChainReader,
     DefaultMaturityResolver,
     Callable[[OptionContractDoc, date], Awaitable[float | None]],
-    _BulkOptionsDataPortAdapter,
+    "CachedBulkChainReader | _BulkOptionsDataPortAdapter",
 ]:
     """Return the components a per-date stream materialiser needs.
 
@@ -552,7 +660,16 @@ def build_stream_resolver_wiring(
     reader = get_options_reader(market_data)
     inner = _OptionsDataPortAdapter(reader)
     cached = CachedChainReader(inner)
-    bulk = _BulkOptionsDataPortAdapter(reader)
+    # Wrap the bulk adapter in the process/loop-scoped chain cache so repeated
+    # option resolves over the same underlying/range reuse the raw
+    # ``query_chain_bulk`` fetches (the 10Δ→50Δ iterative-dev workflow).  The
+    # cache is EXTERNAL to this wiring (loop-global), so it survives the
+    # per-resolve wiring rebuild in ``_options_materialise`` AND the module-global
+    # ``_os_wiring_cache`` reuse in ``_series_fetch``.  ``use_chain_cache=False``
+    # (a per-request ``use_cache: false`` bypass) or a disabled master switch
+    # passes ``cache=None`` → byte-identical to the un-cached path.
+    _chain_cache = get_chain_bulk_cache() if use_chain_cache else None
+    bulk = CachedBulkChainReader(_BulkOptionsDataPortAdapter(reader), _chain_cache)
     maturity_resolver = DefaultMaturityResolver()
     index_port = _IndexDataPortAdapter(market_data)
     futures_port = _FuturesDataPortAdapter(
@@ -713,6 +830,7 @@ def build_options_selector(
 # Re-exports for tests / integration tests that want to construct the
 # adapters directly.
 __all__ = [
+    "CachedBulkChainReader",
     "CachedChainReader",
     "build_options_chain",
     "build_options_pricer",

@@ -111,6 +111,7 @@ async def materialise_option_streams(
     start_date: date | None,
     end_date: date | None,
     progress_callback=None,
+    use_chain_cache: bool = True,
 ) -> (
     dict[
         str,
@@ -164,7 +165,7 @@ async def materialise_option_streams(
     # trade_dates is non-empty here, so the window spans every date we look up.
     _prefetch = (trade_dates[0], trade_dates[-1])
     chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
-        svc, underlying_prefetch_window=_prefetch
+        svc, underlying_prefetch_window=_prefetch, use_chain_cache=use_chain_cache
     )
 
     # Process-wide dwh-pool concurrency gate: streams here resolve sequentially,
