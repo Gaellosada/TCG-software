@@ -559,6 +559,34 @@ class SqlOptionsDataReader:
         except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(f"SQL error listing roots: {exc}") from exc
 
+    async def get_option_root_symbol(self, root: str) -> str | None:
+        """Return the ``root_symbol`` of *root* (a ``source_collection``).
+
+        One indexed, fact-free ``LIMIT 1`` dim lookup. ``root_symbol`` is
+        constant across a collection's option contracts, so any row's value is
+        the group-invariant ``root_underlying`` the chain readers place on every
+        ``OptionContractDoc`` (``_meta_to_contract`` / ``_chain_meta_to_contract``
+        use exactly ``m["root_symbol"]``). Returns ``None`` when the collection
+        has no option contract or the column is NULL.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT root_symbol FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s AND asset_class = 'option'
+                            LIMIT 1""",
+                        (root,),
+                    )
+                    row = await cur.fetchone()
+                    if row is None:
+                        return None
+                    return row["root_symbol"]
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error reading root_symbol on '{root}': {exc}"
+            ) from exc
+
     async def list_expirations(self, root: str) -> list[date]:
         """Distinct expirations on *root*, sorted ascending."""
         try:

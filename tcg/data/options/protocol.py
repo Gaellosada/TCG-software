@@ -117,6 +117,19 @@ class OptionsDataReader(Protocol):
         """
         ...
 
+    async def get_option_root_symbol(self, root: str) -> str | None:
+        """The ``dim_instrument.root_symbol`` of *root* (a ``source_collection``).
+
+        A single indexed, fact-free ``LIMIT 1`` dim lookup returning the value
+        that :meth:`query_chain`/:meth:`query_chain_bulk` would place on every
+        contract's ``OptionContractDoc.root_underlying`` for this collection
+        (they are constant across the collection). Used by the stream resolver to
+        synthesise the underlying-price-resolver's routing contract WITHOUT a
+        full-chain probe fetch. ``None`` when the collection has no option
+        contract or the column is NULL.
+        """
+        ...
+
     async def trade_date_coverage(self, root: str) -> tuple[date | None, date | None]:
         """``(first_trade_date, last_trade_date)`` bar coverage for *root*.
 

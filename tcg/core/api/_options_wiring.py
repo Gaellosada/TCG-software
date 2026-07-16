@@ -625,6 +625,7 @@ def build_stream_resolver_wiring(
     DefaultMaturityResolver,
     Callable[[OptionContractDoc, date], Awaitable[float | None]],
     "CachedBulkChainReader | _BulkOptionsDataPortAdapter",
+    Callable[[str], Awaitable[str]],
 ]:
     """Return the components a per-date stream materialiser needs.
 
@@ -656,6 +657,15 @@ def build_stream_resolver_wiring(
         ``MongoOptionsDataReader``.  Passed to
         ``resolve_option_stream(bulk_chain_reader=...)`` to enable the
         three-phase bulk pre-fetch path.
+    root_underlying_resolver:
+        Async ``(collection) -> root_underlying`` getter (one dim-only ``LIMIT 1``
+        lookup).  The stream resolver calls it ONCE per resolve to synthesise the
+        underlying-price-resolver's routing contract (``root_underlying`` is
+        group-invariant), replacing the full-chain strike-window PROBE.  Any fault
+        degrades to ``""`` — safe for every in-scope root, whose underlying routing
+        is decided by ``collection`` alone (``_join``/``_forward`` short-circuit on
+        ``collection``); only a pathological ``root_symbol`` (BTC/ETH/VIX) on a
+        DIFFERENT ``OPT_*`` collection would depend on it, which does not occur.
     """
     reader = get_options_reader(market_data)
     inner = _OptionsDataPortAdapter(reader)
@@ -676,7 +686,24 @@ def build_stream_resolver_wiring(
         market_data, prefetch_window=underlying_prefetch_window
     )
     underlying_resolver = _build_underlying_resolver(index_port, futures_port)
-    return cached, maturity_resolver, underlying_resolver, bulk
+
+    async def root_underlying_resolver(coll: str) -> str:
+        # One dim-only LIMIT 1 lookup of the collection's root_symbol, mirroring
+        # what the chain readers place on OptionContractDoc.root_underlying.  Any
+        # fault → "" (safe for in-scope roots — see docstring); never raises so a
+        # strike-window narrow cannot be aborted by a transient dim read.
+        try:
+            return (await reader.get_option_root_symbol(coll)) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    return (
+        cached,
+        maturity_resolver,
+        underlying_resolver,
+        bulk,
+        root_underlying_resolver,
+    )
 
 
 def _pick_reference_contract(

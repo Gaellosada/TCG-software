@@ -523,9 +523,13 @@ def make_signal_fetcher(
                     underlying_prefetch_window=(trade_dates[0], trade_dates[-1]),
                     use_chain_cache=use_chain_cache,
                 )
-            chain_reader, mat_resolver, ul_resolver, bulk_reader = _os_wiring_cache[
-                "wiring"
-            ]
+            (
+                chain_reader,
+                mat_resolver,
+                ul_resolver,
+                bulk_reader,
+                root_ul_resolver,
+            ) = _os_wiring_cache["wiring"]
 
             # Shared process-wide dwh-pool gate: a basket with several option
             # legs resolves them in turn HERE, but the Data page fires the
@@ -613,6 +617,7 @@ def make_signal_fetcher(
                     chain_reader=chain_reader,
                     maturity_resolver=mat_resolver,
                     underlying_price_resolver=ul_resolver,
+                    root_underlying_resolver=root_ul_resolver,
                     bulk_chain_reader=bulk_reader,
                     available_expirations=all_expirations,
                     available_expirations_by_date=available_by_date,

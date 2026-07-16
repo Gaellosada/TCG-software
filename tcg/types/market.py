@@ -17,15 +17,17 @@ import numpy.typing as npt
 # MUST keep its concurrent dwh-connection fan-out <= this, reserving one slot for
 # the interleaved expirations / underlying-price lookups that share the pool.
 #
-# 8 (was 4): the option-stream resolver fans out one query per expiration (Phase B)
-# plus underlying lookups; a larger pool lets more run concurrently, roughly halving
-# the ceil(N / k) wall on a multi-year option leg.  The derived resolver cap and the
-# process-wide gate (``max(1, N - 1)`` = 7) scale from this automatically.  8 is
-# comfortable for the single-user desktop app against the shared RDS (well within the
-# warehouse's connection budget); do NOT raise much further — it would let more heavy
-# chain queries pile on the shared warehouse without proportional benefit.  Pure
-# parallelism: this changes ONLY concurrency, never any computed value.
-DEFAULT_DWH_POOL_MAX_SIZE: int = 8
+# 12 (was 8, was 4): the option-stream resolver fans out one query per expiration
+# (Phase B) plus underlying lookups; a larger pool lets more run concurrently, roughly
+# halving the ceil(N / k) wall on a multi-year option leg.  The derived resolver cap and
+# the process-wide gate (``max(1, N - 1)`` = 11) scale from this automatically, so the
+# resolver fan-out stays structurally <= the pool (the anti-PoolTimeout invariant that
+# fixed the OPT_SP_500 acquire-stall).  12 is comfortable for the single-user desktop app
+# against the shared RDS (well within the warehouse's connection budget); do NOT raise to
+# 16+ — it would let more heavy chain queries pile on the shared warehouse without
+# proportional benefit.  Pure parallelism: this changes ONLY concurrency, never any
+# computed value.
+DEFAULT_DWH_POOL_MAX_SIZE: int = 12
 
 
 class AssetClass(StrEnum):

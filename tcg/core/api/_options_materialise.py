@@ -164,7 +164,13 @@ async def materialise_option_streams(
     # fetch per trade date (the ByMoneyness/ByDelta Phase-C N+1).  Result-invariant.
     # trade_dates is non-empty here, so the window spans every date we look up.
     _prefetch = (trade_dates[0], trade_dates[-1])
-    chain_reader, mat_resolver, ul_resolver, bulk_reader = build_stream_resolver_wiring(
+    (
+        chain_reader,
+        mat_resolver,
+        ul_resolver,
+        bulk_reader,
+        root_ul_resolver,
+    ) = build_stream_resolver_wiring(
         svc, underlying_prefetch_window=_prefetch, use_chain_cache=use_chain_cache
     )
 
@@ -228,6 +234,7 @@ async def materialise_option_streams(
             chain_reader=chain_reader,
             maturity_resolver=mat_resolver,
             underlying_price_resolver=ul_resolver,
+            root_underlying_resolver=root_ul_resolver,
             progress_callback=progress_callback,
             bulk_chain_reader=bulk_reader,
             available_expirations=all_expirations,

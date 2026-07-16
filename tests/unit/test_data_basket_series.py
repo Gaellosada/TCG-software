@@ -377,7 +377,13 @@ async def test_compute_basket_series_option_leg_parity_with_in_signal_path(
     # underlying_prefetch_window kwarg the perf memo threads through).
     monkeypatch.setattr(
         "tcg.core.api._options_wiring.build_stream_resolver_wiring",
-        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+        lambda _svc, **_kw: (
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        ),
     )
 
     async def fake_resolve(*, dates, **_kw):
@@ -601,7 +607,13 @@ async def test_materialise_option_streams_threads_per_date_map_for_nearest_targe
 
     monkeypatch.setattr(
         "tcg.core.api._options_materialise.build_stream_resolver_wiring",
-        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+        lambda _svc, **_kw: (
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        ),
     )
 
     captured: dict = {}
@@ -659,7 +671,13 @@ async def test_signal_fetcher_nearest_target_awaits_per_date_map_expanded_cycle(
 
     monkeypatch.setattr(
         "tcg.core.api._options_wiring.build_stream_resolver_wiring",
-        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+        lambda _svc, **_kw: (
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        ),
     )
 
     captured: dict = {}
@@ -711,7 +729,13 @@ async def test_compute_basket_series_option_leg_populates_leg_coverage(
 
     monkeypatch.setattr(
         "tcg.core.api._options_wiring.build_stream_resolver_wiring",
-        lambda _svc, **_kw: (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+        lambda _svc, **_kw: (
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        ),
     )
 
     async def fake_resolve(*, dates, **_kw):

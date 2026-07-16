@@ -987,6 +987,7 @@ async def _resolve_bulk(
     bulk_chain_reader: _CycleAwareBulkReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
+    root_underlying_resolver: "Callable[[str], Awaitable[str]] | None" = None,
     last_trade_date: date | None,
     progress_callback: Callable[[], None] | None,
     available_expirations: Sequence[date] | None,
@@ -1326,7 +1327,24 @@ async def _resolve_bulk(
     # be resolved (some wirings return None) we pass NO strike bounds (full chain)
     # for that group — never a None/degenerate-bounded window that would silently
     # cap or error.
-    _probe_reader = _CycleInjectingReader(chain_reader, cycle)
+    # Group-invariant ``root_underlying`` for the synthetic routing contract (see
+    # ``_strike_window_for``).  Resolved LAZILY at most once per resolve (only
+    # ByMoneyness/ByDelta need a spot; ByStrike never calls the getter) and memoised
+    # in ``_root_underlying_box``.  ``None`` resolver (unit tests / legacy callers) →
+    # ``""``, which is the correct routing for every in-scope root (underlying
+    # routing keys on ``collection``; see ``_options_wiring`` docstring).
+    _root_underlying_box: list[str | None] = [None]
+
+    async def _get_root_underlying() -> str:
+        if _root_underlying_box[0] is None:
+            if root_underlying_resolver is not None:
+                try:
+                    _root_underlying_box[0] = await root_underlying_resolver(collection)
+                except Exception:  # noqa: BLE001
+                    _root_underlying_box[0] = ""
+            else:
+                _root_underlying_box[0] = ""
+        return _root_underlying_box[0]
 
     async def _strike_window_for(
         exp: date, group: list[tuple[int, date]]
@@ -1339,32 +1357,47 @@ async def _resolve_bulk(
             or not group
         ):
             return None, None
-        # Resolve the spot on THIS group's first date via a probe (the underlying
-        # resolver needs a real contract for option-on-future routing), then centre
-        # the band on it.
-        # PERF (follow-up): this issues a full single-expiration query_chain but
-        # uses only one contract (probe_rows[0][0]).  A row-limited query (LIMIT 1)
-        # or a spot-by-expiration resolver would avoid the full-chain fetch per
-        # group; both need a data-layer/protocol capability beyond this fix's scope
-        # (ChainReaderPort has no limit), so they are deferred.  The probe is cached
-        # once per expiration group.
+        # Resolve the spot on THIS group's first date, then centre the band on it.
+        #
+        # The underlying-price resolver needs a *contract* only for OPTION-ON-FUTURE
+        # ROUTING, and it reads just four fields — ``collection``, ``root_underlying``,
+        # ``underlying_ref``, ``expiration`` — ALL of which are CONSTANT across an
+        # expiration group (see ``tcg.engine.options.chain._join.resolve_underlying_price``
+        # / ``_forward.resolve_vix_forward``: it ignores the passed row and every
+        # per-strike field).  So instead of a full single-expiration ``query_chain``
+        # PROBE (~275 rows fetched to read ONE contract), synthesise a contract
+        # carrying those four fields and call the SAME resolver — the spot is
+        # reproduced BIT-IDENTICALLY (identical routing inputs ⇒ identical float),
+        # hence an identical strike window and identical selected contract.
+        #   * ``collection`` — the resolve root (const).
+        #   * ``root_underlying`` — the collection's dim ``root_symbol`` (group-invariant;
+        #     resolved once per resolve, ``""`` when unavailable — safe, routing keys on
+        #     ``collection`` for every in-scope root).
+        #   * ``underlying_ref`` — provably ``None`` (the SQL reader hard-codes it, see
+        #     ``tcg.data._sql.options`` ``_meta_to_contract``/``_chain_meta_to_contract``).
+        #   * ``expiration`` — ``exp`` (the group is filtered ``expiration BETWEEN exp AND exp``).
+        # The futures-close lookup the resolver performs is backed by the ranged
+        # underlying prefetch window (a memoised cache hit), NOT a per-group fetch.
         repr_date = group[0][1]
+        synthetic = OptionContractDoc(
+            collection=collection,
+            contract_id="",
+            root_underlying=await _get_root_underlying(),
+            underlying_ref=None,
+            underlying_symbol=None,
+            expiration=exp,
+            expiration_cycle="",
+            strike=0.0,
+            type=option_type,
+            contract_size=None,
+            currency=None,
+            provider="UNKNOWN",
+            strike_factor_verified=False,
+        )
         try:
-            probe_rows = await _probe_reader.query_chain(
-                root=collection,
-                date=repr_date,
-                type=option_type,
-                expiration_min=exp,
-                expiration_max=exp,
-            )
+            spot = await underlying_price_resolver(synthetic, repr_date)
         except Exception:  # noqa: BLE001
-            probe_rows = []
-        spot: float | None = None
-        if probe_rows:
-            try:
-                spot = await underlying_price_resolver(probe_rows[0][0], repr_date)
-            except Exception:  # noqa: BLE001
-                spot = None
+            spot = None
         if spot is None or spot <= 0.0:
             # No usable spot → do NOT narrow (full chain for this group).
             return None, None
@@ -1908,6 +1941,7 @@ async def resolve_option_stream(
     chain_reader: _CycleAwareReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
+    root_underlying_resolver: "Callable[[str], Awaitable[str]] | None" = None,
     last_trade_date: date | None = None,
     progress_callback: Callable[[], None] | None = None,
     bulk_chain_reader: _CycleAwareBulkReader | None = None,
@@ -2095,6 +2129,7 @@ async def resolve_option_stream(
             bulk_chain_reader=bulk_chain_reader,
             maturity_resolver=maturity_resolver,
             underlying_price_resolver=underlying_price_resolver,
+            root_underlying_resolver=root_underlying_resolver,
             last_trade_date=last_trade_date,
             progress_callback=progress_callback,
             available_expirations=available_expirations,
