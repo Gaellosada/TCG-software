@@ -10,7 +10,7 @@ Spec reference: ``OPTIONS_FEATURE_SPEC.md`` §3.1.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Protocol, Sequence
+from typing import Literal, Mapping, Protocol, Sequence
 
 from tcg.types.options import (
     OptionContractDoc,
@@ -98,6 +98,27 @@ class OptionsDataReader(Protocol):
         cycle), but materialises rows for every date in *dates* rather than
         a single target date.  Avoids N separate cursor iterations when the
         caller needs the same chain across many dates.
+        """
+        ...
+
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: Sequence[tuple[date, Sequence[date]]],
+        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
+        expiration_cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Multi-EXPIRATION bulk chain fetch in ONE query (year-chunk fast path).
+
+        OPTIONAL capability: collapses the per-expiration ``query_chain_bulk``
+        fan-out into a single round-trip covering several expirations, each
+        restricted to its OWN trade-date window (``groups`` =
+        ``[(expiration, [trade_dates...]), ...]``).  Same ``(contract, row)``
+        semantics as ``query_chain_bulk`` per (expiration, trade_date), MINUS the
+        strike window when ``strike_windows`` is None (a strict superset).
+        Callers must feature-detect (``hasattr``) and fall back to
+        ``query_chain_bulk`` when a reader does not implement it.
         """
         ...
 

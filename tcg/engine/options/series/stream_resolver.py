@@ -561,6 +561,13 @@ class _CycleInjectingBulkReader:
     ) -> None:
         self._inner = inner
         self._cycle = cycle
+        # Propagate the optional year-chunk fast-path capability from the inner
+        # reader (the wiring adapter sets this from the concrete data reader).
+        # The engine gates the fast path on this flag, falling back to the
+        # per-expiration path when it is False (unsupported reader / test fake).
+        self.supports_bulk_multi = bool(
+            getattr(inner, "supports_bulk_multi", False)
+        ) or hasattr(inner, "query_chain_bulk_multi")
 
     async def query_chain_bulk(
         self,
@@ -580,6 +587,23 @@ class _CycleInjectingBulkReader:
             expiration_max=expiration_max,
             strike_min=strike_min,
             strike_max=strike_max,
+            expiration_cycle=self._cycle,
+        )
+
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: Sequence[tuple[date, Sequence[date]]],
+        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        # Cycle injection mirrors ``query_chain_bulk`` (guardrail 11: no silent
+        # cycle mixing).  Only called when ``supports_bulk_multi`` is True.
+        return await self._inner.query_chain_bulk_multi(
+            root=root,
+            type=type,
+            groups=groups,
+            strike_windows=strike_windows,
             expiration_cycle=self._cycle,
         )
 
@@ -1453,7 +1477,80 @@ async def _resolve_bulk(
                 pass
         return result
 
-    fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
+    async def _fetch_year(
+        year: int,
+        members: list[tuple[date, list[tuple[int, date]]]],
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Fast path: ONE multi-expiration query for a whole calendar year.
+
+        ``members`` is ``[(expiration, group), ...]`` for the year; each
+        expiration is date-restricted to its own window inside the single
+        ``query_chain_bulk_multi`` round-trip (Option A — no strike window, so
+        the candidate set is a strict superset and selection is unchanged).
+        """
+        groups_arg = [(exp, [d for _idx, d in group]) for exp, group in members]
+        try:
+            async with _bulk_sem:
+                result = await bulk_reader.query_chain_bulk_multi(
+                    root=collection,
+                    type=option_type,
+                    groups=groups_arg,
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A whole year-chunk failing must NOT abort the resolve.  Second-tier
+            # fallback: re-run THIS year's expirations through the per-expiration
+            # path (``_fetch_exp`` re-acquires ``_bulk_sem`` — already released
+            # here — and degrades its OWN dates to ``data_access_error`` on
+            # failure).  This restores the old per-expiration failure granularity
+            # on the rare year-chunk failure instead of blanking the whole year.
+            _log.debug(
+                "Phase-B year-chunk fetch failed year=%s (%d expirations): %s",
+                year,
+                len(members),
+                exc,
+            )
+            fallback = await asyncio.gather(
+                *[_fetch_exp(exp, group) for exp, group in members]
+            )
+            merged: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+            for r in fallback:
+                for d, rows in r.items():
+                    merged[d] = merged.get(d, []) + rows
+            return merged
+        # Tick progress once per expiration in the chunk so the frontend sees the
+        # same Phase-B cadence as the per-expiration path (endpoint clamps [0,1]).
+        if progress_callback is not None:
+            for _ in members:
+                try:
+                    progress_callback()
+                except Exception:  # pragma: no cover (defensive)
+                    pass
+        return result
+
+    # Fast path (Option A year-chunk collapse): when the bulk reader implements
+    # the optional multi-expiration capability AND the selection/coverage shape
+    # is compatible, collapse the per-expiration bulk fan-out into ONE query PER
+    # CALENDAR YEAR (each expiration date-restricted to its own window).  This
+    # removes both the per-expiration round-trips and the strike-window probes.
+    # Ineligible cases (unsupported reader / test fake, or coverage-aware mode
+    # whose scattered candidate expirations break the contiguous-window
+    # assumption) fall back to the per-expiration path, byte-identical.
+    _fast_path_eligible = (
+        isinstance(selection, (ByStrike, ByDelta, ByMoneyness))
+        and getattr(bulk_reader, "supports_bulk_multi", False)
+        and not (coverage_aware and candidates)
+    )
+    if _fast_path_eligible:
+        year_chunks: dict[int, list[tuple[date, list[tuple[int, date]]]]] = defaultdict(
+            list
+        )
+        for exp, group in exp_groups.items():
+            year_chunks[exp.year].append((exp, group))
+        fetch_tasks = [
+            _fetch_year(year, members) for year, members in year_chunks.items()
+        ]
+    else:
+        fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
     fetch_results = await asyncio.gather(*fetch_tasks)
     for result in fetch_results:
         # MERGE (extend), do not overwrite: in HOLD mode a roll day appears in

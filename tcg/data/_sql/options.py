@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from tcg.data._sql.connection import SCHEMA, DwhConnectionPool, to_float
 from tcg.data.options._provider import _SEED_RATIOS, has_greeks_for_root
@@ -500,6 +500,220 @@ class SqlOptionsDataReader:
             raise OptionsDataAccessError(
                 f"SQL error querying chain bulk on '{root}' for "
                 f"{len(date_list)} dates: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # query_chain_bulk_multi (year-chunk fast path)
+    # ------------------------------------------------------------------
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: Sequence[tuple[date, Sequence[date]]],
+        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
+        expiration_cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Multi-EXPIRATION bulk chain fetch in ONE query (year-chunk fast path).
+
+        Collapses the per-expiration :meth:`query_chain_bulk` fan-out into a
+        SINGLE round-trip covering several expirations, each restricted to its
+        OWN trade-date window.  ``groups`` is ``[(expiration, [trade_dates...]),
+        ...]`` — typically one calendar year's worth of monthly expirations
+        (~12), the granularity the Wave 2 design proved index-only.
+
+        The per-expiration DATE restriction is LOAD-BEARING: a ``win(exp, lo,
+        hi)`` VALUES table is joined so each expiration's contracts are fetched
+        only on ``[min..max]`` of ITS OWN dates.  That keeps the keyset tiny
+        (contract × ~21 dates) so the planner stays on Index-Only PK scans (Heap
+        Fetches 0) across the whole year even WITHOUT a strike bound
+        (EXPLAIN-proven live, 1406 ms / year).  The redundant CONSTANT
+        ``trade_date BETWEEN <chunk-min> AND <chunk-max>`` on EVERY partitioned-
+        fact reference prunes to the spanned yearly partitions (the same gotcha
+        :meth:`query_chain_bulk` honours — a runtime-only join fans across all
+        ~71 partitions).
+
+        Candidate-set semantics MATCH :meth:`query_chain_bulk` per (expiration,
+        trade_date) MINUS the strike window:
+
+        * ``strike_windows=None`` (Option A, default) — ALL strikes of ``type``
+          are returned: a strict SUPERSET of the old per-group
+          ``spot*0.40..1.30`` band.  Selection (``match_by_delta`` /
+          ``match_by_strike`` / ``match_by_moneyness``) is UNCHANGED and picks
+          the identical contract for any target well inside the old band.
+        * ``strike_windows`` (Option B) — a per-expiration
+          ``{expiration: (strike_lo, strike_hi)}`` map restores EXACT
+          per-expiration strike bounds (byte-parity), pushed onto the indexed
+          ``dim_instrument`` id lookup (a ``None`` bound leaves that side open).
+
+        Result shape is identical to :meth:`query_chain_bulk`: a dict keyed by
+        EVERY requested trade_date (``[]`` when nothing traded), rows grouped
+        under the fact ``trade_date`` and ordered by ``instrument_id`` within a
+        date.  When a trade_date falls in TWO expirations' windows (a HOLD roll
+        day appended to the prior group), its list carries BOTH expirations'
+        rows — exactly what the old per-expiration gather produced once merged.
+        """
+        # Pre-seed every requested trade_date (parity with query_chain_bulk's
+        # ``results = {d: [] for d in dates}``) and build the per-expiration
+        # windows.  De-dupe each group's dates, drop empty groups.
+        results: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+        win_rows: list[tuple[date, date, date]] = []
+        all_dates_set: set[date] = set()
+        for exp, dts in groups:
+            dl = list(dict.fromkeys(dts))
+            for d in dl:
+                results.setdefault(d, [])
+            if not dl:
+                continue
+            win_rows.append((exp, min(dl), max(dl)))
+            all_dates_set.update(dl)
+        if not win_rows:
+            return results
+
+        all_dates = sorted(all_dates_set)
+        # Partition-pruning bound (CRITICAL, see query_chain_bulk): the redundant
+        # constant range over the whole chunk lets the planner prune the fact
+        # partitions to just the spanned year(s).
+        chunk_lo, chunk_hi = all_dates[0], all_dates[-1]
+
+        try:
+            dim_where = ["source_collection = %s", "asset_class = 'option'"]
+            dim_params: list[Any] = [root]
+            if type in ("C", "P"):
+                dim_where.append("option_type = %s")
+                dim_params.append(type.upper())
+            _cycle_frag, _cycle_val = _cycle_predicate(expiration_cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                dim_params.append(_cycle_val)
+
+            use_strikes = strike_windows is not None
+            # Build the win VALUES table.  The FIRST row casts each column so the
+            # CTE's column types are fixed for the joins.
+            win_params: list[Any] = []
+            value_rows: list[str] = []
+            for i, (exp, lo, hi) in enumerate(win_rows):
+                if use_strikes:
+                    slo, shi = strike_windows.get(exp, (None, None))  # type: ignore[union-attr]
+                    value_rows.append(
+                        "(%s::date, %s::date, %s::date, %s::double precision, "
+                        "%s::double precision)"
+                        if i == 0
+                        else "(%s, %s, %s, %s, %s)"
+                    )
+                    win_params.extend(
+                        [
+                            exp,
+                            lo,
+                            hi,
+                            None if slo is None else float(slo),
+                            None if shi is None else float(shi),
+                        ]
+                    )
+                else:
+                    value_rows.append(
+                        "(%s::date, %s::date, %s::date)" if i == 0 else "(%s, %s, %s)"
+                    )
+                    win_params.extend([exp, lo, hi])
+
+            win_cols = (
+                "exp, lo, hi, strike_lo, strike_hi" if use_strikes else "exp, lo, hi"
+            )
+            strike_filter = (
+                "\n                      AND (w.strike_lo IS NULL "
+                "OR d.strike >= w.strike_lo)"
+                "\n                      AND (w.strike_hi IS NULL "
+                "OR d.strike <= w.strike_hi)"
+                if use_strikes
+                else ""
+            )
+
+            # ids: option contracts of the requested type/cycle whose expiration
+            # is one of the chunk's expirations (JOIN win).  keyset: the
+            # (instrument_id, trade_date) pairs that actually traded, each
+            # expiration bounded to ITS OWN window via ``BETWEEN w.lo AND w.hi``
+            # (the load-bearing restriction) plus the chunk-constant prune.
+            sql = f"""
+                WITH win ({win_cols}) AS (
+                    VALUES {", ".join(value_rows)}
+                ),
+                ids AS (
+                    SELECT d.instrument_id, d.symbol AS option_symbol, d.root_symbol,
+                           d.underlying_symbol, d.expiration, d.expiration_cycle,
+                           d.strike, d.option_type, d.contract_size, d.currency,
+                           d.provider
+                    FROM {SCHEMA}.dim_instrument d
+                    JOIN win w ON d.expiration = w.exp
+                    WHERE {" AND ".join(dim_where)}{strike_filter}
+                ),
+                keyset AS (
+                    SELECT p.instrument_id, p.trade_date
+                    FROM {SCHEMA}.fact_price_eod p
+                    JOIN ids i ON i.instrument_id = p.instrument_id
+                    JOIN win w ON w.exp = i.expiration
+                    WHERE p.trade_date = ANY(%s)
+                      AND p.trade_date BETWEEN w.lo AND w.hi
+                      AND p.trade_date BETWEEN %s AND %s
+                    UNION
+                    SELECT g.instrument_id, g.trade_date
+                    FROM {SCHEMA}.fact_option_greeks g
+                    JOIN ids i ON i.instrument_id = g.instrument_id
+                    JOIN win w ON w.exp = i.expiration
+                    WHERE g.trade_date = ANY(%s)
+                      AND g.trade_date BETWEEN w.lo AND w.hi
+                      AND g.trade_date BETWEEN %s AND %s
+                )
+                SELECT k.trade_date,
+                       i.instrument_id AS option_instrument_id, i.option_symbol,
+                       i.root_symbol, i.underlying_symbol,
+                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
+                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
+                       g.delta, g.gamma, g.vega, g.theta,
+                       g.implied_vol, g.underlying_price,
+                       i.contract_size, i.currency, i.provider
+                FROM keyset k
+                JOIN ids i ON i.instrument_id = k.instrument_id
+                LEFT JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = k.instrument_id
+                      AND p.trade_date = k.trade_date
+                      AND p.trade_date BETWEEN %s AND %s
+                LEFT JOIN {SCHEMA}.fact_option_greeks g
+                       ON g.instrument_id = k.instrument_id
+                      AND g.trade_date = k.trade_date
+                      AND g.trade_date BETWEEN %s AND %s
+                ORDER BY k.trade_date, i.instrument_id
+            """
+            params: list[Any] = []
+            params.extend(win_params)  # VALUES
+            params.extend(dim_params)  # ids WHERE
+            params.extend([all_dates, chunk_lo, chunk_hi])  # keyset price
+            params.extend([all_dates, chunk_lo, chunk_hi])  # keyset greeks
+            params.extend([chunk_lo, chunk_hi])  # final price join
+            params.extend([chunk_lo, chunk_hi])  # final greeks join
+
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    raw = await cur.fetchall()
+
+                # [Gotcha 5] dollarize crypto premiums per trade date.
+                spot_by_date = await self._coin_spot_map(conn, root, all_dates)
+
+            for m in raw:
+                row_date: date = m["trade_date"]
+                contract = self._chain_meta_to_contract(root, m)
+                row = self._row_from_chain(
+                    m,
+                    target_date=row_date,
+                    coin_spot=spot_by_date.get(row_date),
+                )
+                bucket = results.get(row_date)
+                if bucket is not None:
+                    bucket.append((contract, row))
+            return results
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error querying multi-expiration chain bulk on '{root}' "
+                f"for {len(win_rows)} expirations: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------

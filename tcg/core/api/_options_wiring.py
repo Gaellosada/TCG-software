@@ -27,7 +27,7 @@ single request and avoids cross-request data leaks.
 from __future__ import annotations
 
 from datetime import date
-from typing import Awaitable, Callable, Literal, Sequence
+from typing import Awaitable, Callable, Literal, Mapping, Sequence
 
 from tcg.data._utils import date_to_int
 from tcg.data.options.protocol import OptionsDataReader
@@ -93,6 +93,10 @@ class _BulkOptionsDataPortAdapter:
 
     def __init__(self, reader: OptionsDataReader) -> None:
         self._reader = reader
+        # Optional year-chunk fast path: advertise the multi-expiration bulk
+        # capability only when the concrete reader implements it, so the engine
+        # feature-detects and falls back to the per-expiration path otherwise.
+        self.supports_bulk_multi = hasattr(reader, "query_chain_bulk_multi")
 
     async def query_chain_bulk(
         self,
@@ -113,6 +117,22 @@ class _BulkOptionsDataPortAdapter:
             expiration_max=expiration_max,
             strike_min=strike_min,
             strike_max=strike_max,
+            expiration_cycle=expiration_cycle,
+        )
+
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: Sequence[tuple[date, Sequence[date]]],
+        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
+        expiration_cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        return await self._reader.query_chain_bulk_multi(
+            root=root,
+            type=type,
+            groups=groups,
+            strike_windows=strike_windows,
             expiration_cycle=expiration_cycle,
         )
 
