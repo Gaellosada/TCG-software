@@ -311,31 +311,75 @@ class TestQueryChainBulkMultiDeltaPushdown:
         )
         return _main_sql(cur)
 
-    async def test_ranked_cte_row_number_partition_and_order(self):
+    async def test_symbol_rank_cte_partition_and_order(self):
+        """Symbol-granular top-k: cand (single greeks scan) -> sym (per-symbol
+        best distance/strike) -> top_syms (ROW_NUMBER over SYMBOLS per
+        (expiration, trade_date))."""
         sql, _ = await self._run_pushdown()
-        assert "ranked AS (" in sql
+        assert "cand AS (" in sql
+        assert "sym AS (" in sql
+        assert "top_syms AS (" in sql
         assert "ROW_NUMBER() OVER (" in sql
-        assert "PARTITION BY i.expiration, g.trade_date" in sql
+        assert "PARTITION BY expiration, trade_date" in sql
         # The rank key MUST be identical to match_by_delta's sort
-        # (abs(delta - target), then lower strike) — else rn=1 != Python winner.
-        assert "ORDER BY abs(g.delta - %s), i.strike" in sql
+        # (abs(delta - target), then lower strike); ranked per SYMBOL by the
+        # symbol's BEST (min) distance/strike so a symbol's whole duplicate set
+        # is kept or dropped together.
+        assert "min(dist) AS best_dist" in sql
+        assert "min(strike) AS best_strike" in sql
+        order = " ".join(sql.split())  # collapse whitespace for a robust match
+        assert (
+            "ORDER BY best_dist ASC NULLS LAST, best_strike ASC, option_symbol ASC"
+            in order
+        )
 
-    async def test_picks_rn_le_k_filter(self):
+    async def test_top_syms_srn_le_k_filter(self):
         sql, params = await self._run_pushdown()
-        assert "picks AS (" in sql
-        assert "WHERE rn <= %s" in sql
-        assert self._K in list(params), "k must be bound for the rn<=k filter"
+        assert "WHERE srn <= %s" in sql
+        assert self._K in list(params), "k must be bound for the srn<=k filter"
+
+    async def test_returns_all_rows_of_top_k_symbols(self):
+        """BYTE-IDENTITY on the duplicate-instrument_id quirk: the pick_keyset
+        returns EVERY physical row of each retained symbol — its greeks rows
+        (reusing ``cand``, no second greeks scan) UNION its price rows (a
+        top-symbol PK lookup) — so ``match_by_delta``'s pick AND
+        ``_row_for_contract``'s first-by-instrument_id row match the full chain."""
+        sql, _ = await self._run_pushdown()
+        assert "pick_keyset AS (" in sql
+        # greeks side reuses cand (NOT a re-scan of fact_option_greeks).
+        assert "FROM cand c" in sql
+        assert "JOIN top_syms t ON t.expiration = c.expiration" in sql
+        # price side is a top-symbol-restricted PK lookup on fact_price_eod.
+        assert "JOIN top_syms t ON t.expiration = i.expiration" in sql
+
+    async def test_single_greeks_scan_no_double_read(self):
+        """Only ONE greeks CANDIDACY scan (``cand``).  The earlier symbol-granular
+        build re-scanned greeks in the keyset UNION to reconstruct duplicate rows
+        — that double-read was the speed regression.  Here the keyset greeks side
+        reuses ``cand``, so ``fact_option_greeks`` appears exactly twice: the one
+        ``cand`` candidacy scan + the shared tail LEFT JOIN (a bounded top-k PK
+        lookup, present in the full-chain branch too) — the SAME reference count
+        as the non-pushdown keyset branch, NOT three."""
+        sql, _ = await self._run_pushdown()
+        assert sql.count("fact_option_greeks") == 2, (
+            "a THIRD fact_option_greeks reference means a second candidacy scan "
+            "(the double-read slowdown); the keyset greeks side must reuse ``cand``"
+        )
+        # Reference parity with the full-chain branch (keyset greeks scan + tail).
+        reader, cur = _make_reader([])
+        await reader.query_chain_bulk_multi(root="OPT_SP_500", type="P", groups=_GROUPS)
+        full_sql, _ = _main_sql(cur)
+        assert full_sql.count("fact_option_greeks") == 2
 
     async def test_null_deltas_not_filtered_for_error_parity(self):
-        """NULL deltas must NOT be filtered out of the rank: Postgres sorts them
-        LAST so rn=1 is still the non-null winner, and keeping them preserves the
-        full-chain ``missing_delta_no_compute`` classification for an all-NULL
-        chain (an empty ``picks`` would mis-report ``no_chain_for_date``).
-        Live-verified this was the ONLY divergence vs the per-expiration path."""
+        """NULL deltas must NOT be filtered out: ``min`` ignores them and
+        ``NULLS LAST`` ranks an all-NULL symbol last, so the non-null winner is
+        unaffected AND an all-NULL chain still returns rows that
+        ``match_by_delta`` classifies ``missing_delta_no_compute`` (rather than an
+        empty pick mis-reported as ``no_chain_for_date``)."""
         sql, _ = await self._run_pushdown()
         assert "g.delta IS NOT NULL" not in sql
-        # rn=1 correctness rests on the ORDER BY (nulls last) — assert the key.
-        assert "ORDER BY abs(g.delta - %s), i.strike" in sql
+        assert "NULLS LAST" in sql
 
     async def test_target_bound(self):
         _sql, params = await self._run_pushdown()
@@ -346,18 +390,14 @@ class TestQueryChainBulkMultiDeltaPushdown:
         sql, params = await self._run_pushdown()
         assert "win (exp, lo, hi)" in sql
         assert "JOIN win w ON d.expiration = w.exp" in sql
-        # per-expiration window on the ranked greeks scan + chunk-constant prune.
+        # per-expiration window on the cand greeks scan + chunk-constant prune.
         assert "BETWEEN w.lo AND w.hi" in sql
         assert "g.trade_date BETWEEN %s AND %s" in sql
         chunk_lo = min(min(_DATES_A), min(_DATES_B))
         chunk_hi = max(max(_DATES_A), max(_DATES_B))
         flat = list(params)
-        # ranked prune (1) + both final joins (2) = 3 each.
-        assert flat.count(chunk_lo) >= 3 and flat.count(chunk_hi) >= 3
-
-    async def test_no_keyset_union_in_pushdown(self):
-        sql, _ = await self._run_pushdown()
-        assert "keyset AS (" not in sql, "pushdown must NOT build the full-chain keyset"
+        # cand prune (1) + pick_keyset price prune (1) + both final joins (2) = 4.
+        assert flat.count(chunk_lo) >= 4 and flat.count(chunk_hi) >= 4
 
     async def test_row_shape_identical_to_full_chain(self):
         """The final projection must be byte-identical between branches so

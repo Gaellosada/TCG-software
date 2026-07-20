@@ -1490,16 +1490,26 @@ async def _resolve_bulk(
         return result
 
     # Delta-pushdown eligibility (Wave-8).  ENGAGE ONLY for STORED-delta
-    # ``ByDelta``: the SQL rank's ``delta IS NOT NULL`` filter mirrors
-    # ``match_by_delta`` dropping None deltas, so the candidate set is exact.
-    # This resolver NEVER computes missing deltas — Phase C ranks on
-    # ``r.delta_stored`` and the legacy per-date path pins
-    # ``compute_missing_for_delta=False`` — so ``ByDelta`` here IS structurally
-    # the stored-delta case the Wave-7 gate names.  ByStrike / ByMoneyness rank
-    # on other keys and stay on the full-chain multi branch (``None``).
+    # ``ByDelta`` AND NOT ``hold_between_rolls``.
+    #
+    # HOLD is structurally incompatible with a per-(exp,date) top-k: the held
+    # contract is frozen at each roll and needs its price on EVERY subsequent bar
+    # until the next roll, but on drift days its delta has moved away from target
+    # so it falls OUTSIDE the top-k and its row is never fetched → ~80% of held
+    # bars go NaN.  Hold legs therefore stay on the full-chain year-chunk path
+    # (``delta_pushdown=None`` below), which returns the WHOLE chain per date so
+    # the frozen contract is always present — byte-identical, still ~2.2x.
+    #
+    # For non-hold ``ByDelta``: the symbol-granular rank returns every retained
+    # symbol's full duplicate set, so the candidate set — hence both the pick and
+    # the resolved row — is byte-identical to the full chain.  This resolver NEVER
+    # computes missing deltas (Phase C ranks on ``r.delta_stored``; the legacy
+    # per-date path pins ``compute_missing_for_delta=False``), so ``ByDelta`` here
+    # IS the stored-delta case the gate names.  ByStrike / ByMoneyness rank on
+    # other keys and stay on the full-chain multi branch (``None``).
     _delta_pushdown: tuple[float, int] | None = (
         (float(selection.target_delta), _PUSHDOWN_K)
-        if isinstance(selection, ByDelta)
+        if isinstance(selection, ByDelta) and not hold_between_rolls
         else None
     )
 

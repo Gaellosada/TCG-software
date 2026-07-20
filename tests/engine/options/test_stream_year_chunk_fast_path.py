@@ -189,7 +189,20 @@ class _NoMultiBulkReader(_FakeMultiBulkReader):
     query_chain_bulk_multi = None  # type: ignore[assignment]
 
 
-async def _resolve(reader, *, underlying=None, selection=None):
+async def _resolve(reader, *, underlying=None, selection=None, hold=False):
+    kw: dict = {}
+    if hold:
+        # HOLD needs the per-date listed-expiration map + a roll-info sink; build
+        # a map that lists each date's own target expiration (NearestToTarget(30)
+        # snaps each date to its expiration).
+        by_date = {
+            d: [e] for e, ds in ((_EXP_2023, _D23), (_EXP_2024, _D24)) for d in ds
+        }
+        kw = {
+            "hold_between_rolls": True,
+            "hold_roll_info_out": {},
+            "available_expirations_by_date": by_date,
+        }
     return await resolve_option_stream(
         dates=_DATES,
         collection="OPT_SP_500",
@@ -205,6 +218,7 @@ async def _resolve(reader, *, underlying=None, selection=None):
         underlying_price_resolver=underlying,
         bulk_chain_reader=reader,
         available_expirations=_EXPIRATIONS,
+        **kw,
     )
 
 
@@ -324,6 +338,19 @@ async def test_bydelta_engages_pushdown_k8():
     assert reader.multi_calls, "fast path must run"
     assert all(c["delta_pushdown"] == (-0.10, 8) for c in reader.multi_calls), (
         reader.multi_calls
+    )
+
+
+async def test_hold_bydelta_does_not_take_pushdown():
+    """HOLD is incompatible with a per-(exp,date) top-k (the frozen held contract
+    drifts off target delta and falls outside the top-k on non-roll days -> NaN).
+    A hold ByDelta leg MUST stay on the full-chain year-chunk path
+    (delta_pushdown None) so the whole chain is fetched every bar."""
+    reader = _FakeMultiBulkReader(_chains_by_date())
+    await _resolve(reader, hold=True)
+    assert reader.multi_calls, "fast path must still run for hold (full chain)"
+    assert all(c["delta_pushdown"] is None for c in reader.multi_calls), (
+        "hold must NOT engage the delta pushdown"
     )
 
 

@@ -546,19 +546,25 @@ class SqlOptionsDataReader:
           per-expiration strike bounds (byte-parity), pushed onto the indexed
           ``dim_instrument`` id lookup (a ``None`` bound leaves that side open).
         * ``delta_pushdown`` (Option C) — a ``(target_delta, k)`` tuple engages
-          the single-read DELTA PUSHDOWN (Wave-8): the greeks fact is ranked per
-          ``(expiration, trade_date)`` by ``|delta - target|`` (tie-break lower
-          strike) via ``ROW_NUMBER`` and only the top-``k`` candidates per group
-          are materialised, instead of the whole chain.  ``ROW_NUMBER``'s key is
-          the IDENTICAL sort ``match_by_delta`` uses, so ``rn=1`` is the exact
-          full-chain winner and the returned ROW SHAPE is unchanged — selection
-          consumes ``k`` rows per group instead of the full chain, byte-parity on
-          the pick.  Pushdown is Option A only (mutually exclusive with
-          ``strike_windows``, which is ignored when set).  NULL deltas are NOT
-          filtered — Postgres sorts them LAST, so rn=1 is still the non-null
-          winner AND an all-NULL-delta chain returns rows that ``match_by_delta``
-          classifies identically (byte-parity of the error path).  Correct ONLY
-          for STORED-delta selection (the caller's engine gate guarantees that —
+          the single-scan DELTA PUSHDOWN: the greeks fact is scanned ONCE
+          (``cand``) and option SYMBOLS are ranked per ``(expiration,
+          trade_date)`` by their nearest ``|delta - target|`` (tie-break lower
+          strike, then symbol) — the IDENTICAL key ``match_by_delta`` uses — with
+          only the top-``k`` SYMBOLS retained; EVERY physical row of each retained
+          symbol is returned (via a keyset whose greeks side REUSES ``cand`` and
+          whose price side is a k-symbol PK lookup — no second greeks scan).
+          Symbol-granular (not row-level) so the ~2.68% DUPLICATE-instrument_id-
+          per-symbol quirk is byte-identical to the full chain: the winner's whole
+          duplicate set is present, so both ``match_by_delta``'s pick AND
+          ``_row_for_contract``'s first-by-instrument_id row match.  Returned ROW
+          SHAPE is unchanged — selection consumes the retained symbols' rows
+          instead of the full chain.  Pushdown is Option A only (mutually
+          exclusive with ``strike_windows``, which is ignored when set).  NULL
+          deltas are NOT filtered — ``min`` ignores them and ``NULLS LAST`` ranks
+          an all-NULL symbol last, so the non-null winner is unaffected AND an
+          all-NULL-delta chain returns rows that ``match_by_delta`` classifies
+          identically (byte-parity of the error path).  Correct ONLY for
+          STORED-delta selection (the caller's engine gate guarantees that —
           never engage it under ``compute_missing_for_delta``).
 
         Result shape is identical to :meth:`query_chain_bulk`: a dict keyed by
@@ -699,33 +705,46 @@ class SqlOptionsDataReader:
 
             if pushdown:
                 target, k = delta_pushdown  # (target_delta, top-k)
-                # DELTA PUSHDOWN: rank this root's greeks rows per (expiration,
-                # trade_date) by |delta - target| (tie-break lower strike) — the
-                # IDENTICAL key ``match_by_delta`` sorts on — and keep only the
-                # top-k (rn<=k).  rn=1 IS the full-chain winner; k>1 is cheap
-                # safety for the ~2.68% duplicate-instrument_id-per-symbol quirk
-                # and ties.  ``picks`` is k rows/group, so the second greeks touch
-                # in the tail is a k-row PK join, NOT a full double-read.
+                # DELTA PUSHDOWN (SYMBOL-granular, single-scan).  Rank this root's
+                # option SYMBOLS per (expiration, trade_date) by their nearest
+                # |delta - target| (tie-break lower strike) — the IDENTICAL key
+                # ``match_by_delta`` sorts on — keep the top-k SYMBOLS, and return
+                # EVERY physical row of each retained symbol.
                 #
-                # NULL deltas are DELIBERATELY NOT filtered here (deviation from
-                # the Wave-7 literal ``delta IS NOT NULL``): ``abs(NULL-target)``
-                # is NULL and Postgres sorts NULLS LAST on ASC, so every non-null
-                # row still ranks ahead — rn=1 is unchanged.  Keeping the null
-                # rows preserves BYTE-PARITY of the error classification: a group
-                # whose chain has rows but ALL-NULL stored delta returns those
-                # rows (rank last) so ``match_by_delta`` yields
-                # ``missing_delta_no_compute`` — exactly the full-chain path —
-                # instead of an empty ``picks`` mis-reported as
-                # ``no_chain_for_date``.  (Live-verified: this filter was the ONLY
-                # divergence on a 2019 SPX -0.10 put resolve.)  Correct only for
-                # STORED-delta selection, which the engine gate guarantees.
+                # WHY symbol-granular (not row-level ``ROW_NUMBER`` top-k):
+                # the dwh stores ~2.68% DUPLICATE instrument_ids per option symbol
+                # (same symbol/contract_id/strike, differing delta + quotes).  The
+                # full-chain path returns BOTH rows; ``match_by_delta`` picks the
+                # winning CONTRACT (by symbol) and ``_row_for_contract`` then
+                # surfaces the FIRST row of that contract_id in instrument_id order
+                # — which may be the FAR-delta sibling.  A row-level top-k keeps
+                # only the near-delta sibling and drops the far one, so
+                # ``_row_for_contract`` surfaced a DIFFERENT physical row → a ~20%
+                # mid divergence on ~16% of SPX-put bars.  Ranking by symbol and
+                # returning all of a retained symbol's rows makes the candidate set
+                # (hence both the pick AND the resolved row) byte-identical to
+                # ``query_chain_bulk``.
+                #
+                # SINGLE big greeks scan: ``cand`` reads the greeks fact ONCE (the
+                # only expensive scan) and every later CTE is a window/aggregate
+                # over ``cand`` or a targeted PK lookup on the k retained symbols'
+                # instrument_ids.  The keyset's greeks side REUSES ``cand`` (no
+                # re-scan); its price side is a k-symbol PK lookup — so byte-parity
+                # is regained WITHOUT the double greeks read that made the earlier
+                # symbol-granular build slow.
+                #
+                # NULL deltas are DELIBERATELY kept (no ``delta IS NOT NULL``):
+                # ``abs(NULL-target)`` is NULL, ``min`` ignores it, and
+                # ``ORDER BY best_dist NULLS LAST`` ranks an all-NULL symbol last —
+                # so the non-null winner's symbol is unaffected AND a chain whose
+                # rows are ALL null-delta still returns rows that ``match_by_delta``
+                # classifies ``missing_delta_no_compute`` (byte-parity of the error
+                # path).  Correct only for STORED-delta selection (engine-gated).
                 body = f""",
-                ranked AS (
-                    SELECT g.trade_date, g.instrument_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY i.expiration, g.trade_date
-                               ORDER BY abs(g.delta - %s), i.strike
-                           ) AS rn
+                cand AS (
+                    SELECT i.expiration, g.trade_date, g.instrument_id,
+                           i.option_symbol, i.strike,
+                           abs(g.delta - %s) AS dist
                     FROM {SCHEMA}.fact_option_greeks g
                     JOIN ids i ON i.instrument_id = g.instrument_id
                     JOIN win w ON w.exp = i.expiration
@@ -733,14 +752,48 @@ class SqlOptionsDataReader:
                       AND g.trade_date BETWEEN w.lo AND w.hi
                       AND g.trade_date BETWEEN %s AND %s
                 ),
-                picks AS (
-                    SELECT trade_date, instrument_id FROM ranked WHERE rn <= %s
+                sym AS (
+                    SELECT expiration, trade_date, option_symbol,
+                           min(dist) AS best_dist, min(strike) AS best_strike
+                    FROM cand
+                    GROUP BY expiration, trade_date, option_symbol
+                ),
+                top_syms AS (
+                    SELECT expiration, trade_date, option_symbol
+                    FROM (
+                        SELECT expiration, trade_date, option_symbol,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY expiration, trade_date
+                                   ORDER BY best_dist ASC NULLS LAST,
+                                            best_strike ASC, option_symbol ASC
+                               ) AS srn
+                        FROM sym
+                    ) s
+                    WHERE srn <= %s
+                ),
+                pick_keyset AS (
+                    SELECT c.instrument_id, c.trade_date
+                    FROM cand c
+                    JOIN top_syms t ON t.expiration = c.expiration
+                                   AND t.trade_date = c.trade_date
+                                   AND t.option_symbol = c.option_symbol
+                    UNION
+                    SELECT p.instrument_id, p.trade_date
+                    FROM {SCHEMA}.fact_price_eod p
+                    JOIN ids i ON i.instrument_id = p.instrument_id
+                    JOIN top_syms t ON t.expiration = i.expiration
+                                   AND t.option_symbol = i.option_symbol
+                                   AND t.trade_date = p.trade_date
+                    WHERE p.trade_date = ANY(%s)
+                      AND p.trade_date BETWEEN %s AND %s
                 )"""
-                sql = cte_prefix + body + _select_tail("picks")
-                params.append(float(target))  # ranked ORDER BY abs(delta - target)
-                params.append(all_dates)  # ranked trade_date = ANY
-                params.extend([chunk_lo, chunk_hi])  # ranked chunk prune
-                params.append(int(k))  # picks rn <= k
+                sql = cte_prefix + body + _select_tail("pick_keyset")
+                params.append(float(target))  # cand abs(delta - target)
+                params.append(all_dates)  # cand trade_date = ANY
+                params.extend([chunk_lo, chunk_hi])  # cand chunk prune
+                params.append(int(k))  # top_syms srn <= k
+                params.append(all_dates)  # pick_keyset price trade_date = ANY
+                params.extend([chunk_lo, chunk_hi])  # pick_keyset price chunk prune
                 params.extend([chunk_lo, chunk_hi])  # final price join
                 params.extend([chunk_lo, chunk_hi])  # final greeks join
             else:
