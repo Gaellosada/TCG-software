@@ -133,6 +133,28 @@ class OptionsDataReader(Protocol):
         """
         ...
 
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: Sequence[tuple[str, date, date]],
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Identity keyset fetch of specific HELD option SYMBOLS (Phase 2).
+
+        OPTIONAL capability (hold-leg two-phase pushdown).  ``held_windows`` is
+        ``[(symbol, lo, hi), ...]`` — each ALREADY-SELECTED frozen contract's
+        ``symbol`` (== ``OptionContractDoc.contract_id``) and its held date-range;
+        ``hi`` must include the next roll date (the resolver reads the OLD
+        contract's mid on the roll seam).  Returns EVERY physical row of each
+        symbol over its window (all duplicate ``instrument_id`` rows), keyed by
+        fact ``trade_date``, so ``_row_for_contract``'s first-by-``instrument_id``
+        pick is byte-identical to the full-chain hold path.  SQL never ranks or
+        picks — selection stays in Python.  Callers must feature-detect
+        (``callable(getattr(reader, "query_held_rows", None))``) and fall back to
+        the full-chain hold path when a reader does not implement it.
+        """
+        ...
+
     async def list_roots(self) -> list[OptionRootInfo]:
         """List every OPT_* collection with display metadata.
 

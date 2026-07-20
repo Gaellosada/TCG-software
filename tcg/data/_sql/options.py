@@ -852,6 +852,161 @@ class SqlOptionsDataReader:
             ) from exc
 
     # ------------------------------------------------------------------
+    # query_held_rows (hold-leg two-phase Phase 2)
+    # ------------------------------------------------------------------
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: Sequence[tuple[str, date, date]],
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Identity keyset fetch of specific HELD option SYMBOLS over per-symbol
+        date windows (hold-leg two-phase Phase 2).
+
+        ``held_windows`` is ``[(symbol, lo, hi), ...]`` — each frozen held
+        contract's dwh ``symbol`` (== ``OptionContractDoc.contract_id``) and its
+        held date-range ``[lo, hi]``.  ``hi`` MUST include the NEXT segment's roll
+        date, because ``_resolve_hold`` reads the OLD contract's mid on the roll
+        seam — see ``hold_pushdown_design.md`` §2.
+
+        Returns EVERY physical row of each symbol over its window — all duplicate
+        ``instrument_id`` rows (the ~2.68% OPT_SP_500 dup quirk) — so
+        ``_row_for_contract``'s first-by-``instrument_id`` pick is byte-identical
+        to the full-chain hold path (the dup trap R2 already handles).  Keyed by
+        the fact ``trade_date``; a date with no row is simply absent (the caller
+        reads ``.get(d, [])``).
+
+        Symbol-keyed (``VALUES(sym, lo, hi) JOIN d.symbol``): the held symbol is
+        already SELECTED in Python (from the Phase-1 candidate chain), so this is a
+        pure IDENTITY fetch — SQL never ranks or picks.  The redundant CONSTANT
+        ``trade_date BETWEEN <chunk-min> AND <chunk-max>`` prune on every
+        partitioned-fact reference collapses the yearly-partition fan-out (the same
+        gotcha :meth:`query_chain_bulk_multi` honours — a runtime-only join fans
+        across all ~71 partitions).  No ``expiration_cycle`` filter is needed: the
+        symbol identifies the contract uniquely, so a cycle predicate is redundant.
+        """
+        results: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+        # De-dupe by symbol (a symbol could in principle appear twice with the
+        # same window); drop empty/None symbols defensively.
+        seen: dict[str, tuple[str, date, date]] = {}
+        for sym, lo, hi in held_windows:
+            if not sym:
+                continue
+            key = str(sym)
+            if key in seen:
+                # Widen to cover both windows (never shrink) — a symbol held over
+                # two runs (degenerate) keeps the union range.
+                _s, _lo, _hi = seen[key]
+                seen[key] = (key, min(_lo, lo), max(_hi, hi))
+            else:
+                seen[key] = (key, lo, hi)
+        win_rows: list[tuple[str, date, date]] = list(seen.values())
+        if not win_rows:
+            return results
+
+        # Partition-pruning bound (CRITICAL, see query_chain_bulk_multi): the
+        # redundant constant range over ALL windows lets the planner prune the fact
+        # partitions to just the spanned year(s).
+        chunk_lo = min(lo for _s, lo, _h in win_rows)
+        chunk_hi = max(hi for _s, _l, hi in win_rows)
+
+        try:
+            dim_where = ["source_collection = %s", "asset_class = 'option'"]
+            dim_params: list[Any] = [root]
+            if type in ("C", "P"):
+                dim_where.append("option_type = %s")
+                dim_params.append(type.upper())
+
+            value_rows: list[str] = []
+            win_params: list[Any] = []
+            for i, (sym, lo, hi) in enumerate(win_rows):
+                value_rows.append(
+                    "(%s::text, %s::date, %s::date)" if i == 0 else "(%s, %s, %s)"
+                )
+                win_params.extend([sym, lo, hi])
+
+            sql = f"""
+                WITH heldwin (sym, lo, hi) AS (
+                    VALUES {", ".join(value_rows)}
+                ),
+                ids AS (
+                    SELECT d.instrument_id, d.symbol AS option_symbol, d.root_symbol,
+                           d.underlying_symbol, d.expiration, d.expiration_cycle,
+                           d.strike, d.option_type, d.contract_size, d.currency,
+                           d.provider
+                    FROM {SCHEMA}.dim_instrument d
+                    JOIN heldwin h ON d.symbol = h.sym
+                    WHERE {" AND ".join(dim_where)}
+                ),
+                keyset AS (
+                    SELECT p.instrument_id, p.trade_date
+                    FROM {SCHEMA}.fact_price_eod p
+                    JOIN ids i ON i.instrument_id = p.instrument_id
+                    JOIN heldwin h ON h.sym = i.option_symbol
+                    WHERE p.trade_date BETWEEN h.lo AND h.hi
+                      AND p.trade_date BETWEEN %s AND %s
+                    UNION
+                    SELECT g.instrument_id, g.trade_date
+                    FROM {SCHEMA}.fact_option_greeks g
+                    JOIN ids i ON i.instrument_id = g.instrument_id
+                    JOIN heldwin h ON h.sym = i.option_symbol
+                    WHERE g.trade_date BETWEEN h.lo AND h.hi
+                      AND g.trade_date BETWEEN %s AND %s
+                )
+                SELECT k.trade_date,
+                       i.instrument_id AS option_instrument_id, i.option_symbol,
+                       i.root_symbol, i.underlying_symbol,
+                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
+                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
+                       g.delta, g.gamma, g.vega, g.theta,
+                       g.implied_vol, g.underlying_price,
+                       i.contract_size, i.currency, i.provider
+                FROM keyset k
+                JOIN ids i ON i.instrument_id = k.instrument_id
+                LEFT JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = k.instrument_id
+                      AND p.trade_date = k.trade_date
+                      AND p.trade_date BETWEEN %s AND %s
+                LEFT JOIN {SCHEMA}.fact_option_greeks g
+                       ON g.instrument_id = k.instrument_id
+                      AND g.trade_date = k.trade_date
+                      AND g.trade_date BETWEEN %s AND %s
+                ORDER BY k.trade_date, i.instrument_id
+            """
+            params: list[Any] = []
+            params.extend(win_params)  # VALUES
+            params.extend(dim_params)  # ids WHERE
+            params.extend([chunk_lo, chunk_hi])  # keyset price prune
+            params.extend([chunk_lo, chunk_hi])  # keyset greeks prune
+            params.extend([chunk_lo, chunk_hi])  # final price join
+            params.extend([chunk_lo, chunk_hi])  # final greeks join
+
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    raw = await cur.fetchall()
+
+                # [Gotcha 5] dollarize crypto premiums per trade date.
+                row_dates = sorted({m["trade_date"] for m in raw})
+                spot_by_date = await self._coin_spot_map(conn, root, row_dates)
+
+            for m in raw:
+                row_date: date = m["trade_date"]
+                contract = self._chain_meta_to_contract(root, m)
+                row = self._row_from_chain(
+                    m,
+                    target_date=row_date,
+                    coin_spot=spot_by_date.get(row_date),
+                )
+                results.setdefault(row_date, []).append((contract, row))
+            return results
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error querying held rows on '{root}' for "
+                f"{len(win_rows)} symbols: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
     # list_roots / list_expirations
     # ------------------------------------------------------------------
     async def list_roots(self) -> list[OptionRootInfo]:

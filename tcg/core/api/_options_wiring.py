@@ -103,6 +103,11 @@ class _BulkOptionsDataPortAdapter:
         self.supports_bulk_multi = callable(
             getattr(reader, "query_chain_bulk_multi", None)
         )
+        # Optional hold-leg two-phase Phase-2 capability (same feature-detect
+        # discipline as ``supports_bulk_multi``): a reader that disables it via
+        # ``query_held_rows = None`` reports False, so the engine cleanly stays on
+        # the full-chain hold path instead of entering it → TypeError.
+        self.supports_held_rows = callable(getattr(reader, "query_held_rows", None))
 
     async def query_chain_bulk(
         self,
@@ -142,6 +147,18 @@ class _BulkOptionsDataPortAdapter:
             strike_windows=strike_windows,
             expiration_cycle=expiration_cycle,
             delta_pushdown=delta_pushdown,
+        )
+
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: "Sequence[tuple[str, date, date]]",
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        return await self._reader.query_held_rows(
+            root=root,
+            type=type,
+            held_windows=held_windows,
         )
 
 

@@ -144,6 +144,16 @@ _MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
 # quirk and delta ties (few extra rows/group; negligible cost).
 _PUSHDOWN_K = 8
 
+# Sub-chunk safety net: split a FULL-CHAIN (non-pushdown) year-chunk whose
+# expiration count exceeds this cap into contiguous sub-chunks so no single
+# ``query_chain_bulk_multi`` approaches the 60s dwh statement_timeout under
+# concurrent load (a weekly year ~47 exps splits into 2; monthly/quarterly ≤12
+# never split).  Isolated 24-exp chunk EXPLAINs at ~0.56s; extrapolated ~13s at
+# conc=11 — a >4x margin.  Only the full-chain path needs this — the delta
+# pushdown returns ~34x fewer rows and never approaches the timeout.  Replaces
+# the all-or-nothing collapse-to-per-expiration timeout fallback (Wave 12 §4).
+_MAX_EXPS_PER_SUBCHUNK = 24
+
 
 # Streams readable off ``OptionDailyRow``.  Mirrors the Pydantic
 # ``OptionStreamLabel`` literal at the API boundary; redeclared here
@@ -578,6 +588,13 @@ class _CycleInjectingBulkReader:
         self.supports_bulk_multi = bool(
             getattr(inner, "supports_bulk_multi", False)
         ) or callable(getattr(inner, "query_chain_bulk_multi", None))
+        # Optional hold-leg two-phase Phase-2 capability (mirrors
+        # ``supports_bulk_multi``): the engine gates the two-phase hold fast path
+        # on this flag and falls back to the full-chain hold path when it is
+        # False (unsupported reader / test fake).
+        self.supports_held_rows = bool(
+            getattr(inner, "supports_held_rows", False)
+        ) or callable(getattr(inner, "query_held_rows", None))
 
     async def query_chain_bulk(
         self,
@@ -617,6 +634,22 @@ class _CycleInjectingBulkReader:
             strike_windows=strike_windows,
             expiration_cycle=self._cycle,
             delta_pushdown=delta_pushdown,
+        )
+
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: "Sequence[tuple[str, date, date]]",
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        # No cycle injection: the held SYMBOL identifies the contract uniquely,
+        # so a cycle predicate is redundant (guardrail 11 does not apply — this is
+        # an identity fetch, not a chain slice).  Only called when
+        # ``supports_held_rows`` is True.
+        return await self._inner.query_held_rows(
+            root=root,
+            type=type,
+            held_windows=held_windows,
         )
 
 
@@ -708,8 +741,20 @@ async def _resolve_hold(
     kernel: "PricingKernel | None" = None,
     roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
+    held_fetch: "Callable[[list[tuple[str, date, date]]], Awaitable[dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]]] | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Select-and-hold resolution over the pre-fetched ``chain_index``.
+
+    TWO-PHASE (``held_fetch`` set): the caller pre-fetched ONLY the roll-date
+    candidate chains (Phase 1).  This function selects the held contract per
+    segment against those candidates, then calls ``held_fetch(held_windows)``
+    (Phase 2 — an IDENTITY keyset fetch of the frozen held symbols over their
+    held windows) and merges the rows into ``chain_index`` before the daily
+    marking loop reads them.  Each held window spans ``[segment_first_date,
+    NEXT_segment_first_date]`` inclusive so the OLD contract's mid is present on
+    the roll seam.  ``held_fetch=None`` (the full-chain hold path) means
+    ``chain_index`` already carries every day's chain — the marking loop reads it
+    directly, byte-identical to the pre-two-phase single-pass behaviour.
 
     Runs AFTER Phase A (per-date ``expirations``) and Phase B (``chain_index``)
     on the SAME data the per-date Phase C would use.  Instead of a daily-
@@ -816,9 +861,13 @@ async def _resolve_hold(
         )
         return (np.nan if value is None else float(value)), used_fallback
 
-    prev_seg_contract: OptionContractDoc | None = None
-    prev_seg_last_idx: int | None = None
-
+    # ── Selection pass: freeze the held contract per segment ────────────────
+    # Runs on the (Phase-1) roll-date candidate chains.  Records the held
+    # contract + its roll-day open premium / futures reference per segment into
+    # ``seg_states`` (``None`` = selection failed); marks failure error codes.
+    # In two-phase mode this MUST precede the Phase-2 held-symbol fetch, since the
+    # held SYMBOLS are the fetch keys.
+    seg_states: list[dict[str, object] | None] = [None] * len(segments)
     for seg_num, seg in enumerate(segments):
         # Select the held contract on the segment's FIRST date, then freeze it.
         first_idx, first_date = seg[0]
@@ -845,14 +894,16 @@ async def _resolve_hold(
             for idx, _d in seg:
                 if error_codes[idx] is None:
                     error_codes[idx] = sel_err or "no_chain_for_date"
-            prev_seg_contract = None
-            prev_seg_last_idx = None
+            # ``seg_states[seg_num]`` stays None → the marking pass skips it and
+            # resets the OLD-owner tracking, exactly as the single-pass did.
             continue
 
         # This segment's roll-day OPEN premium = the NEW held contract's own mid on
         # the segment's first date.  It is the base for the NEW segment's P&L and
         # for sizing the held quantity (surfaced via roll_info_out — values[first]
-        # may carry the OLD mid on a true roll date).
+        # may carry the OLD mid on a true roll date).  ``first_date`` is a roll
+        # (Phase-1) date, so ``held`` is present in ``chain_index`` here even
+        # before the Phase-2 fetch.
         seg_open_premium, seg_open_fallback = await _mid_of(held, first_date)
 
         # Live OPTION multiplier hint: the first held contract's contract_size
@@ -912,6 +963,55 @@ async def _resolve_hold(
         for idx, d in seg:
             # Record the held contract on every date of the run.
             contracts[idx] = held
+
+        seg_states[seg_num] = {
+            "held": held,
+            "seg_open_premium": seg_open_premium,
+            "seg_open_fallback": seg_open_fallback,
+            "seg_fref_value": seg_fref_value,
+        }
+
+    # ── Phase 2 (two-phase only): identity fetch of the frozen held symbols ──
+    # Build one window per SUCCESSFULLY-selected segment — ``[first_date, NEXT
+    # segment's first_date]`` inclusive so the OLD contract's mid is present on
+    # the roll seam (the marking pass reads it there) — then fetch every physical
+    # row of each held symbol over its window and MERGE (extend) into
+    # ``chain_index``.  The daily marking loop below then reads it unchanged.
+    if held_fetch is not None:
+        held_windows: list[tuple[str, date, date]] = []
+        for seg_num, seg in enumerate(segments):
+            state = seg_states[seg_num]
+            if state is None:
+                continue
+            held_c = state["held"]  # type: ignore[assignment]
+            lo = seg[0][1]
+            # ``hi`` = the NEXT segment's first (roll) date inclusive, else this
+            # segment's own last date.  A superset is harmless (extra rows are
+            # ignored by ``_row_for_contract``); the roll seam MUST be covered.
+            if seg_num + 1 < len(segments):
+                hi = segments[seg_num + 1][0][1]
+            else:
+                hi = seg[-1][1]
+            held_windows.append((held_c.contract_id, lo, hi))  # type: ignore[union-attr]
+        fetched = await held_fetch(held_windows)
+        for d, rows in fetched.items():
+            chain_index[d] = chain_index.get(d, []) + rows
+
+    # ── Marking pass: own each date's VALUE by exactly one contract's mid ────
+    prev_seg_contract: OptionContractDoc | None = None
+    prev_seg_last_idx: int | None = None
+    for seg_num, seg in enumerate(segments):
+        state = seg_states[seg_num]
+        if state is None:
+            # Selection failed — dates already carry their diagnostic; the NEXT
+            # segment's first date is a fresh open (no OLD owner to realise).
+            prev_seg_contract = None
+            prev_seg_last_idx = None
+            continue
+        held = state["held"]  # type: ignore[assignment]
+        seg_open_premium = state["seg_open_premium"]  # type: ignore[assignment]
+        seg_open_fallback = state["seg_open_fallback"]  # type: ignore[assignment]
+        seg_fref_value = state["seg_fref_value"]  # type: ignore[assignment]
 
         for j, (idx, d) in enumerate(seg):
             held_mid_today, held_fallback = await _mid_of(held, d)
@@ -1078,6 +1178,30 @@ async def _resolve_bulk(
 
     # Wrap bulk reader with cycle injection.
     bulk_reader = _CycleInjectingBulkReader(bulk_chain_reader, cycle)
+
+    # Hold-leg TWO-PHASE fast path eligibility (Wave 15).  When a hold leg's
+    # reader supports BOTH the year-chunk multi capability AND the Phase-2
+    # held-symbol identity fetch, replace the full-chain hold fetch (which ships
+    # the whole ~400-strike chain on every held/drift day because the delta
+    # pushdown is gated OFF for hold) with:
+    #   Phase 1 — candidates on ROLL (segment-open) dates ONLY (delta pushdown for
+    #             stored-delta ByDelta; roll-date full-chain for ByStrike/
+    #             ByMoneyness — few dates → cheap), feeding the UNCHANGED Python
+    #             per-segment selection; and
+    #   Phase 2 — an identity keyset fetch of the FROZEN held symbols over their
+    #             held windows (``query_held_rows``), returning all duplicate
+    #             instrument_id rows so ``_row_for_contract`` picks the identical
+    #             physical row → byte-identical P&L.
+    # When the capability is absent (test fake / older reader), stay on the
+    # full-chain hold path (``delta_pushdown=None``, all dates fetched) — the
+    # current byte-identical behaviour.  See ``hold_pushdown_design.md``.
+    _hold_two_phase = (
+        hold_between_rolls
+        and isinstance(selection, (ByStrike, ByDelta, ByMoneyness))
+        and bool(getattr(bulk_reader, "supports_bulk_multi", False))
+        and bool(getattr(bulk_reader, "supports_held_rows", False))
+        and not coverage_aware
+    )
 
     # ── Phase A: Pre-resolve expirations for all dates ──────────────
 
@@ -1338,7 +1462,11 @@ async def _resolve_bulk(
     # merged ``chain_index`` for the roll day carries BOTH chains.  (Default mode
     # never does this — each date stays in exactly one group, so Phase B is
     # byte-identical.)
-    if hold_between_rolls:
+    # (Skipped for the two-phase hold path: Phase 2 fetches the OLD held symbol's
+    # window through the NEXT roll date inclusive, so the OLD mid on the roll seam
+    # is served by ``query_held_rows`` — the roll day needs only the NEW
+    # candidates, which Phase 1 fetches under its own resolved expiration.)
+    if hold_between_rolls and not _hold_two_phase:
         prev_exp: date | None = None
         for idx, d in queryable:
             exp = expirations.get(idx)
@@ -1347,6 +1475,22 @@ async def _resolve_bulk(
                 exp_groups[prev_exp].append((idx, d))
             if exp is not None:
                 prev_exp = exp
+
+    # TWO-PHASE HOLD — Phase 1: restrict the Phase-B fetch to the ROLL
+    # (segment-open) dates ONLY.  The per-segment selection needs the NEW
+    # expiration's candidate chain on each segment's first date and nothing else;
+    # every held/drift day's price comes from the Phase-2 ``query_held_rows``
+    # identity fetch (issued after selection, inside ``_resolve_hold``).  This is
+    # what removes the full ~400-strike chain from the ~80% of bars that are
+    # held/drift days — the entire residual the Wave-14 profile measured.
+    if _hold_two_phase:
+        _p1_groups: dict[date, list[tuple[int, date]]] = defaultdict(list)
+        for _seg in _hold_segments(queryable, expirations):
+            _fi, _fd = _seg[0]
+            _se = expirations.get(_fi)
+            if _se is not None:
+                _p1_groups[_se].append((_fi, _fd))
+        exp_groups = _p1_groups
 
     # ── Per-expiration-group strike-window narrowing ─────────────────
     # Narrow each Phase-B bulk query to the strikes near the target so it
@@ -1489,16 +1633,19 @@ async def _resolve_bulk(
                 pass
         return result
 
-    # Delta-pushdown eligibility (Wave-8).  ENGAGE ONLY for STORED-delta
-    # ``ByDelta`` AND NOT ``hold_between_rolls``.
+    # Delta-pushdown eligibility (Wave-8 / Wave-15).  ENGAGE for STORED-delta
+    # ``ByDelta`` when NOT holding — OR when holding via the TWO-PHASE path.
     #
-    # HOLD is structurally incompatible with a per-(exp,date) top-k: the held
-    # contract is frozen at each roll and needs its price on EVERY subsequent bar
-    # until the next roll, but on drift days its delta has moved away from target
-    # so it falls OUTSIDE the top-k and its row is never fetched → ~80% of held
-    # bars go NaN.  Hold legs therefore stay on the full-chain year-chunk path
-    # (``delta_pushdown=None`` below), which returns the WHOLE chain per date so
-    # the frozen contract is always present — byte-identical, still ~2.2x.
+    # HOLD is structurally incompatible with a per-(exp,date) top-k applied to the
+    # WHOLE date range: the frozen contract drifts off target and falls outside the
+    # top-k on ~80% of held bars → NaN.  That is why a NON-two-phase hold leg stays
+    # on the full-chain year-chunk path (``delta_pushdown=None``) — the whole chain
+    # per date keeps the frozen contract present.  The TWO-PHASE hold path sidesteps
+    # this: Phase 1 applies the pushdown ONLY on roll (segment-open) dates (where
+    # the target IS on-target — it is exactly the selection moment), and Phase 2
+    # then fetches the frozen held symbol by IDENTITY over every held/drift day
+    # (``query_held_rows`` — no delta rank).  So the pushdown is safe here and gives
+    # hold the same ~34x row reduction it gave signals.
     #
     # For non-hold ``ByDelta``: the symbol-granular rank returns every retained
     # symbol's full duplicate set, so the candidate set — hence both the pick and
@@ -1506,10 +1653,13 @@ async def _resolve_bulk(
     # computes missing deltas (Phase C ranks on ``r.delta_stored``; the legacy
     # per-date path pins ``compute_missing_for_delta=False``), so ``ByDelta`` here
     # IS the stored-delta case the gate names.  ByStrike / ByMoneyness rank on
-    # other keys and stay on the full-chain multi branch (``None``).
+    # other keys and stay on the full-chain multi branch (``None``) — for two-phase
+    # hold too (their Phase 1 fetches only the few roll dates, so full-chain there
+    # is already cheap).
     _delta_pushdown: tuple[float, int] | None = (
         (float(selection.target_delta), _PUSHDOWN_K)
-        if isinstance(selection, ByDelta) and not hold_between_rolls
+        if isinstance(selection, ByDelta)
+        and (not hold_between_rolls or _hold_two_phase)
         else None
     )
 
@@ -1519,14 +1669,14 @@ async def _resolve_bulk(
     # up only as "it got slow"; we surface it at WARNING (per chunk + summary).
     _year_chunk_fallbacks: list[int] = []
 
-    async def _fetch_year(
+    async def _fetch_multi_chunk(
         year: int,
         members: list[tuple[date, list[tuple[int, date]]]],
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        """Fast path: ONE multi-expiration query for a whole calendar year.
+        """ONE multi-expiration query for a (sub-)chunk of a calendar year.
 
-        ``members`` is ``[(expiration, group), ...]`` for the year; each
-        expiration is date-restricted to its own window inside the single
+        ``members`` is ``[(expiration, group), ...]``; each expiration is
+        date-restricted to its own window inside the single
         ``query_chain_bulk_multi`` round-trip (Option A — no strike window, so
         the candidate set is a strict superset and selection is unchanged).
 
@@ -1535,6 +1685,10 @@ async def _resolve_bulk(
         candidates per (expiration, date) — same row SHAPE, same pick (rn=1 is
         ``match_by_delta``'s winner), far fewer rows.  ByStrike / ByMoneyness
         pass ``delta_pushdown=None`` and take the full-chain multi branch.
+
+        ``year`` is used only for the fallback WARNING/observability label; the
+        sub-chunk splitter (``_fetch_year``) passes the same year for every
+        sub-chunk of that year.
         """
         groups_arg = [(exp, [d for _idx, d in group]) for exp, group in members]
         try:
@@ -1546,17 +1700,18 @@ async def _resolve_bulk(
                     delta_pushdown=_delta_pushdown,
                 )
         except Exception as exc:  # noqa: BLE001
-            # A whole year-chunk failing must NOT abort the resolve.  Second-tier
-            # fallback: re-run THIS year's expirations through the per-expiration
+            # A (sub-)chunk failing must NOT abort the resolve.  Second-tier
+            # fallback: re-run THIS chunk's expirations through the per-expiration
             # path (``_fetch_exp`` re-acquires ``_bulk_sem`` — already released
             # here — and degrades its OWN dates to ``data_access_error`` on
             # failure).  This restores the old per-expiration failure granularity
-            # on the rare year-chunk failure instead of blanking the whole year.
-            _year_chunk_fallbacks.append(year)
+            # on the rare chunk failure instead of blanking it.
+            if year not in _year_chunk_fallbacks:
+                _year_chunk_fallbacks.append(year)
             _log.warning(
                 "Phase-B year-chunk fast path FELL BACK to per-expiration for "
                 "year=%s (%d expirations): %s. Cold-resolve speedup is degraded "
-                "for this year; investigate query_chain_bulk_multi if repeated.",
+                "for this chunk; investigate query_chain_bulk_multi if repeated.",
                 year,
                 len(members),
                 exc,
@@ -1578,6 +1733,39 @@ async def _resolve_bulk(
                 except Exception:  # pragma: no cover (defensive)
                     pass
         return result
+
+    async def _fetch_year(
+        year: int,
+        members: list[tuple[date, list[tuple[int, date]]]],
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Fetch a whole calendar year, sub-chunking the FULL-CHAIN case.
+
+        The delta-pushdown query returns ~34x fewer rows and never approaches the
+        60s dwh statement_timeout, so it runs as ONE query per year.  A FULL-CHAIN
+        (``_delta_pushdown is None``) year with MANY expirations — a weekly SPX
+        year is ~47 — can push a single ``query_chain_bulk_multi`` toward the
+        timeout under concurrent load; split it into contiguous sub-chunks of
+        ``_MAX_EXPS_PER_SUBCHUNK`` expirations each, run as independent tasks
+        (each with its own per-chunk failure isolation), and merge.  A date's rows
+        never span two sub-chunks (each date belongs to exactly one expiration
+        window here), so within-date ``instrument_id`` order is preserved →
+        byte-identical to the single-query result.
+        """
+        if _delta_pushdown is None and len(members) > _MAX_EXPS_PER_SUBCHUNK:
+            ordered = sorted(members, key=lambda m: m[0])  # contiguous by expiration
+            subchunks = [
+                ordered[i : i + _MAX_EXPS_PER_SUBCHUNK]
+                for i in range(0, len(ordered), _MAX_EXPS_PER_SUBCHUNK)
+            ]
+            parts = await asyncio.gather(
+                *[_fetch_multi_chunk(year, sc) for sc in subchunks]
+            )
+            merged: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+            for r in parts:
+                for d, rows in r.items():
+                    merged[d] = merged.get(d, []) + rows
+            return merged
+        return await _fetch_multi_chunk(year, members)
 
     # Fast path (Option A year-chunk collapse): when the bulk reader implements
     # the optional multi-expiration capability AND the selection/coverage shape
@@ -1679,6 +1867,31 @@ async def _resolve_bulk(
     #    dollar-P&L recurrence consumes — NOT a stitched level, so no option
     #    ratio-adjust.  Bypasses the per-date Phase C entirely and returns early. ─
     if hold_between_rolls:
+        # TWO-PHASE only: the Phase-2 held-symbol identity fetch, issued INSIDE
+        # ``_resolve_hold`` after per-segment selection freezes the held symbols.
+        # Failure-isolated (mirrors ``_fetch_exp``): a dwh error degrades the held
+        # dates to NaN (their error codes stand) rather than 500ing the resolve.
+        async def _fetch_held(
+            held_windows: "list[tuple[str, date, date]]",
+        ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+            if not held_windows:
+                return {}
+            try:
+                async with _bulk_sem:
+                    return await bulk_reader.query_held_rows(
+                        root=collection,
+                        type=option_type,
+                        held_windows=held_windows,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "Phase-2 held-symbol fetch failed (%d symbols): %s. Held "
+                    "dates degrade to NaN (no 500).",
+                    len(held_windows),
+                    exc,
+                )
+                return {}
+
         return await _resolve_hold(
             dates=dates,
             queryable=queryable,
@@ -1696,6 +1909,7 @@ async def _resolve_bulk(
             kernel=kernel,
             roll_info_out=hold_roll_info_out,
             futures_reference_resolver=futures_reference_resolver,
+            held_fetch=_fetch_held if _hold_two_phase else None,
         )
 
     # ── Phase C: Per-date selection + stream extraction ─────────────
