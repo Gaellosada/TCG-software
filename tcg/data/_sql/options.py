@@ -512,6 +512,7 @@ class SqlOptionsDataReader:
         groups: Sequence[tuple[date, Sequence[date]]],
         strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        delta_pushdown: "tuple[float, int] | None" = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         """Multi-EXPIRATION bulk chain fetch in ONE query (year-chunk fast path).
 
@@ -544,6 +545,21 @@ class SqlOptionsDataReader:
           ``{expiration: (strike_lo, strike_hi)}`` map restores EXACT
           per-expiration strike bounds (byte-parity), pushed onto the indexed
           ``dim_instrument`` id lookup (a ``None`` bound leaves that side open).
+        * ``delta_pushdown`` (Option C) — a ``(target_delta, k)`` tuple engages
+          the single-read DELTA PUSHDOWN (Wave-8): the greeks fact is ranked per
+          ``(expiration, trade_date)`` by ``|delta - target|`` (tie-break lower
+          strike) via ``ROW_NUMBER`` and only the top-``k`` candidates per group
+          are materialised, instead of the whole chain.  ``ROW_NUMBER``'s key is
+          the IDENTICAL sort ``match_by_delta`` uses, so ``rn=1`` is the exact
+          full-chain winner and the returned ROW SHAPE is unchanged — selection
+          consumes ``k`` rows per group instead of the full chain, byte-parity on
+          the pick.  Pushdown is Option A only (mutually exclusive with
+          ``strike_windows``, which is ignored when set).  NULL deltas are NOT
+          filtered — Postgres sorts them LAST, so rn=1 is still the non-null
+          winner AND an all-NULL-delta chain returns rows that ``match_by_delta``
+          classifies identically (byte-parity of the error path).  Correct ONLY
+          for STORED-delta selection (the caller's engine gate guarantees that —
+          never engage it under ``compute_missing_for_delta``).
 
         Result shape is identical to :meth:`query_chain_bulk`: a dict keyed by
         EVERY requested trade_date (``[]`` when nothing traded), rows grouped
@@ -586,7 +602,11 @@ class SqlOptionsDataReader:
                 dim_where.append(_cycle_frag)
                 dim_params.append(_cycle_val)
 
-            use_strikes = strike_windows is not None
+            # Pushdown (Option C) is mutually exclusive with a strike window
+            # (Option B): it replaces the full chain with a delta rank, so any
+            # ``strike_windows`` is ignored while pushing down.
+            pushdown = delta_pushdown is not None
+            use_strikes = strike_windows is not None and not pushdown
             # Build the win VALUES table.  The FIRST row casts each column so the
             # CTE's column types are fixed for the joins.
             win_params: list[Any] = []
@@ -627,12 +647,12 @@ class SqlOptionsDataReader:
                 else ""
             )
 
-            # ids: option contracts of the requested type/cycle whose expiration
-            # is one of the chunk's expirations (JOIN win).  keyset: the
-            # (instrument_id, trade_date) pairs that actually traded, each
-            # expiration bounded to ITS OWN window via ``BETWEEN w.lo AND w.hi``
-            # (the load-bearing restriction) plus the chunk-constant prune.
-            sql = f"""
+            # SHARED scaffolding (both branches): the ``win`` VALUES prune and
+            # ``ids`` (this root's contracts of the requested type/cycle whose
+            # expiration is one of the chunk's expirations, JOIN win).  Written
+            # ONCE so the load-bearing per-expiration window + chunk prune cannot
+            # drift between the full-chain and pushdown branches.
+            cte_prefix = f"""
                 WITH win ({win_cols}) AS (
                     VALUES {", ".join(value_rows)}
                 ),
@@ -644,7 +664,91 @@ class SqlOptionsDataReader:
                     FROM {SCHEMA}.dim_instrument d
                     JOIN win w ON d.expiration = w.exp
                     WHERE {" AND ".join(dim_where)}{strike_filter}
+                )"""
+
+            # SHARED final projection + price/greeks join tail.  The driving CTE
+            # (``keyset`` OR ``picks``) is aliased ``k`` in BOTH branches, so the
+            # returned ROW SHAPE is IDENTICAL and ``match_by_delta`` consumes the
+            # pushdown output unchanged (k rows/group instead of the whole chain).
+            def _select_tail(driver: str) -> str:
+                return f"""
+                SELECT k.trade_date,
+                       i.instrument_id AS option_instrument_id, i.option_symbol,
+                       i.root_symbol, i.underlying_symbol,
+                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
+                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
+                       g.delta, g.gamma, g.vega, g.theta,
+                       g.implied_vol, g.underlying_price,
+                       i.contract_size, i.currency, i.provider
+                FROM {driver} k
+                JOIN ids i ON i.instrument_id = k.instrument_id
+                LEFT JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = k.instrument_id
+                      AND p.trade_date = k.trade_date
+                      AND p.trade_date BETWEEN %s AND %s
+                LEFT JOIN {SCHEMA}.fact_option_greeks g
+                       ON g.instrument_id = k.instrument_id
+                      AND g.trade_date = k.trade_date
+                      AND g.trade_date BETWEEN %s AND %s
+                ORDER BY k.trade_date, i.instrument_id
+            """
+
+            params: list[Any] = []
+            params.extend(win_params)  # VALUES
+            params.extend(dim_params)  # ids WHERE
+
+            if pushdown:
+                target, k = delta_pushdown  # (target_delta, top-k)
+                # DELTA PUSHDOWN: rank this root's greeks rows per (expiration,
+                # trade_date) by |delta - target| (tie-break lower strike) — the
+                # IDENTICAL key ``match_by_delta`` sorts on — and keep only the
+                # top-k (rn<=k).  rn=1 IS the full-chain winner; k>1 is cheap
+                # safety for the ~2.68% duplicate-instrument_id-per-symbol quirk
+                # and ties.  ``picks`` is k rows/group, so the second greeks touch
+                # in the tail is a k-row PK join, NOT a full double-read.
+                #
+                # NULL deltas are DELIBERATELY NOT filtered here (deviation from
+                # the Wave-7 literal ``delta IS NOT NULL``): ``abs(NULL-target)``
+                # is NULL and Postgres sorts NULLS LAST on ASC, so every non-null
+                # row still ranks ahead — rn=1 is unchanged.  Keeping the null
+                # rows preserves BYTE-PARITY of the error classification: a group
+                # whose chain has rows but ALL-NULL stored delta returns those
+                # rows (rank last) so ``match_by_delta`` yields
+                # ``missing_delta_no_compute`` — exactly the full-chain path —
+                # instead of an empty ``picks`` mis-reported as
+                # ``no_chain_for_date``.  (Live-verified: this filter was the ONLY
+                # divergence on a 2019 SPX -0.10 put resolve.)  Correct only for
+                # STORED-delta selection, which the engine gate guarantees.
+                body = f""",
+                ranked AS (
+                    SELECT g.trade_date, g.instrument_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY i.expiration, g.trade_date
+                               ORDER BY abs(g.delta - %s), i.strike
+                           ) AS rn
+                    FROM {SCHEMA}.fact_option_greeks g
+                    JOIN ids i ON i.instrument_id = g.instrument_id
+                    JOIN win w ON w.exp = i.expiration
+                    WHERE g.trade_date = ANY(%s)
+                      AND g.trade_date BETWEEN w.lo AND w.hi
+                      AND g.trade_date BETWEEN %s AND %s
                 ),
+                picks AS (
+                    SELECT trade_date, instrument_id FROM ranked WHERE rn <= %s
+                )"""
+                sql = cte_prefix + body + _select_tail("picks")
+                params.append(float(target))  # ranked ORDER BY abs(delta - target)
+                params.append(all_dates)  # ranked trade_date = ANY
+                params.extend([chunk_lo, chunk_hi])  # ranked chunk prune
+                params.append(int(k))  # picks rn <= k
+                params.extend([chunk_lo, chunk_hi])  # final price join
+                params.extend([chunk_lo, chunk_hi])  # final greeks join
+            else:
+                # keyset: the (instrument_id, trade_date) pairs that actually
+                # traded, each expiration bounded to ITS OWN window via
+                # ``BETWEEN w.lo AND w.hi`` (the load-bearing restriction) plus
+                # the chunk-constant prune.
+                body = f""",
                 keyset AS (
                     SELECT p.instrument_id, p.trade_date
                     FROM {SCHEMA}.fact_price_eod p
@@ -661,34 +765,12 @@ class SqlOptionsDataReader:
                     WHERE g.trade_date = ANY(%s)
                       AND g.trade_date BETWEEN w.lo AND w.hi
                       AND g.trade_date BETWEEN %s AND %s
-                )
-                SELECT k.trade_date,
-                       i.instrument_id AS option_instrument_id, i.option_symbol,
-                       i.root_symbol, i.underlying_symbol,
-                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
-                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
-                       g.delta, g.gamma, g.vega, g.theta,
-                       g.implied_vol, g.underlying_price,
-                       i.contract_size, i.currency, i.provider
-                FROM keyset k
-                JOIN ids i ON i.instrument_id = k.instrument_id
-                LEFT JOIN {SCHEMA}.fact_price_eod p
-                       ON p.instrument_id = k.instrument_id
-                      AND p.trade_date = k.trade_date
-                      AND p.trade_date BETWEEN %s AND %s
-                LEFT JOIN {SCHEMA}.fact_option_greeks g
-                       ON g.instrument_id = k.instrument_id
-                      AND g.trade_date = k.trade_date
-                      AND g.trade_date BETWEEN %s AND %s
-                ORDER BY k.trade_date, i.instrument_id
-            """
-            params: list[Any] = []
-            params.extend(win_params)  # VALUES
-            params.extend(dim_params)  # ids WHERE
-            params.extend([all_dates, chunk_lo, chunk_hi])  # keyset price
-            params.extend([all_dates, chunk_lo, chunk_hi])  # keyset greeks
-            params.extend([chunk_lo, chunk_hi])  # final price join
-            params.extend([chunk_lo, chunk_hi])  # final greeks join
+                )"""
+                sql = cte_prefix + body + _select_tail("keyset")
+                params.extend([all_dates, chunk_lo, chunk_hi])  # keyset price
+                params.extend([all_dates, chunk_lo, chunk_hi])  # keyset greeks
+                params.extend([chunk_lo, chunk_hi])  # final price join
+                params.extend([chunk_lo, chunk_hi])  # final greeks join
 
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:

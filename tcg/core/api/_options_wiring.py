@@ -133,6 +133,7 @@ class _BulkOptionsDataPortAdapter:
         groups: Sequence[tuple[date, Sequence[date]]],
         strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        delta_pushdown: "tuple[float, int] | None" = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         return await self._reader.query_chain_bulk_multi(
             root=root,
@@ -140,6 +141,7 @@ class _BulkOptionsDataPortAdapter:
             groups=groups,
             strike_windows=strike_windows,
             expiration_cycle=expiration_cycle,
+            delta_pushdown=delta_pushdown,
         )
 
 

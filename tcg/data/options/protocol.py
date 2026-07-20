@@ -108,6 +108,7 @@ class OptionsDataReader(Protocol):
         groups: Sequence[tuple[date, Sequence[date]]],
         strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        delta_pushdown: "tuple[float, int] | None" = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         """Multi-EXPIRATION bulk chain fetch in ONE query (year-chunk fast path).
 
@@ -119,6 +120,16 @@ class OptionsDataReader(Protocol):
         strike window when ``strike_windows`` is None (a strict superset).
         Callers must feature-detect (``hasattr``) and fall back to
         ``query_chain_bulk`` when a reader does not implement it.
+
+        ``delta_pushdown`` (a ``(target_delta, k)`` tuple, optional) engages the
+        single-read DELTA PUSHDOWN: the greeks fact is ranked per (expiration,
+        trade_date) by ``|delta - target|`` (tie-break lower strike) and only the
+        top-``k`` candidates per group are returned — the ROW SHAPE is unchanged,
+        so ``match_by_delta`` picks the same contract (``rn=1`` IS its winner;
+        NULL deltas sort LAST so they never displace it, and an all-NULL chain
+        preserves the ``missing_delta_no_compute`` classification).  Correct only
+        for STORED-delta ``ByDelta`` selection; mutually exclusive with
+        ``strike_windows``.
         """
         ...
 

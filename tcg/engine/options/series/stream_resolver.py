@@ -138,6 +138,12 @@ _DWH_RESOLVE_CONCURRENCY = max(1, DEFAULT_DWH_POOL_MAX_SIZE - 1)
 # Per-date fallback path cap (was 16). Capped at the pool-derived concurrency.
 _MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
 
+# Delta-pushdown top-k (Wave-8): the SQL ``ROW_NUMBER`` key is byte-identical to
+# ``match_by_delta``'s sort, so rn=1 IS the full-chain winner — k=1 is exact.
+# k=8 is a free safety margin for the ~2.68% duplicate-instrument_id-per-symbol
+# quirk and delta ties (few extra rows/group; negligible cost).
+_PUSHDOWN_K = 8
+
 
 # Streams readable off ``OptionDailyRow``.  Mirrors the Pydantic
 # ``OptionStreamLabel`` literal at the API boundary; redeclared here
@@ -600,6 +606,7 @@ class _CycleInjectingBulkReader:
         type: Literal["C", "P", "both"],
         groups: Sequence[tuple[date, Sequence[date]]],
         strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
+        delta_pushdown: "tuple[float, int] | None" = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         # Cycle injection mirrors ``query_chain_bulk`` (guardrail 11: no silent
         # cycle mixing).  Only called when ``supports_bulk_multi`` is True.
@@ -609,6 +616,7 @@ class _CycleInjectingBulkReader:
             groups=groups,
             strike_windows=strike_windows,
             expiration_cycle=self._cycle,
+            delta_pushdown=delta_pushdown,
         )
 
 
@@ -1481,6 +1489,20 @@ async def _resolve_bulk(
                 pass
         return result
 
+    # Delta-pushdown eligibility (Wave-8).  ENGAGE ONLY for STORED-delta
+    # ``ByDelta``: the SQL rank's ``delta IS NOT NULL`` filter mirrors
+    # ``match_by_delta`` dropping None deltas, so the candidate set is exact.
+    # This resolver NEVER computes missing deltas — Phase C ranks on
+    # ``r.delta_stored`` and the legacy per-date path pins
+    # ``compute_missing_for_delta=False`` — so ``ByDelta`` here IS structurally
+    # the stored-delta case the Wave-7 gate names.  ByStrike / ByMoneyness rank
+    # on other keys and stay on the full-chain multi branch (``None``).
+    _delta_pushdown: tuple[float, int] | None = (
+        (float(selection.target_delta), _PUSHDOWN_K)
+        if isinstance(selection, ByDelta)
+        else None
+    )
+
     # Observability: which year-chunks fell back to the slow per-expiration
     # path.  A silent MASS fallback (e.g. a latent SQL defect making EVERY
     # year-chunk raise) is correct but quietly erases the speedup and would show
@@ -1497,6 +1519,12 @@ async def _resolve_bulk(
         expiration is date-restricted to its own window inside the single
         ``query_chain_bulk_multi`` round-trip (Option A — no strike window, so
         the candidate set is a strict superset and selection is unchanged).
+
+        For STORED-delta ``ByDelta`` (``_delta_pushdown`` set), the single query
+        additionally pushes the delta rank into SQL and returns only the top-k
+        candidates per (expiration, date) — same row SHAPE, same pick (rn=1 is
+        ``match_by_delta``'s winner), far fewer rows.  ByStrike / ByMoneyness
+        pass ``delta_pushdown=None`` and take the full-chain multi branch.
         """
         groups_arg = [(exp, [d for _idx, d in group]) for exp, group in members]
         try:
@@ -1505,6 +1533,7 @@ async def _resolve_bulk(
                     root=collection,
                     type=option_type,
                     groups=groups_arg,
+                    delta_pushdown=_delta_pushdown,
                 )
         except Exception as exc:  # noqa: BLE001
             # A whole year-chunk failing must NOT abort the resolve.  Second-tier

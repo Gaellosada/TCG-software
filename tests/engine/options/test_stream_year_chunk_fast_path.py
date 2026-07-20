@@ -38,6 +38,8 @@ from tcg.engine.options.series.stream_resolver import (
 _RESOLVER_LOGGER = "tcg.engine.options.series.stream_resolver"
 from tcg.types.options import (
     ByDelta,
+    ByMoneyness,
+    ByStrike,
     NearestToTarget,
     OptionContractDoc,
     OptionDailyRow,
@@ -110,22 +112,46 @@ class _FakeMultiBulkReader:
         groups: Sequence[tuple[date, Sequence[date]]],
         strike_windows=None,
         expiration_cycle=None,
+        delta_pushdown=None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         years = {exp.year for exp, _ in groups}
-        self.multi_calls.append({"years": years, "n_exp": len(list(groups))})
+        self.multi_calls.append(
+            {
+                "years": years,
+                "n_exp": len(list(groups)),
+                "delta_pushdown": delta_pushdown,
+            }
+        )
         if years & self._fail_years:
             raise RuntimeError("simulated year-chunk dwh failure")
         result: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
         for exp, dates in groups:
             for d in dates:
                 result.setdefault(d, [])
-                for c, r in self._chains.get(d, []):
-                    if (
-                        (c.type == type or type == "both")
-                        and c.expiration == exp
-                        and _cycle_matches(c.expiration_cycle, expiration_cycle)
-                    ):
-                        result[d].append((c, r))
+                matched = [
+                    (c, r)
+                    for c, r in self._chains.get(d, [])
+                    if (c.type == type or type == "both")
+                    and c.expiration == exp
+                    and _cycle_matches(c.expiration_cycle, expiration_cycle)
+                ]
+                if delta_pushdown is not None:
+                    # Simulate the SQL delta rank: top-k candidates per
+                    # (expiration, date) by |delta - target| (tie lower strike),
+                    # NULL deltas LAST but NOT dropped (matches Postgres NULLS
+                    # LAST) — the IDENTICAL key match_by_delta sorts on, so rn=1
+                    # is its winner and all-NULL groups still return rows.
+                    target, k = delta_pushdown
+                    ranked = sorted(
+                        matched,
+                        key=lambda cr: (
+                            cr[1].delta_stored is None,
+                            abs((cr[1].delta_stored or 0.0) - target),
+                            cr[0].strike,
+                        ),
+                    )
+                    matched = ranked[:k]
+                result[d].extend(matched)
         return result
 
     async def query_chain_bulk(
@@ -163,14 +189,15 @@ class _NoMultiBulkReader(_FakeMultiBulkReader):
     query_chain_bulk_multi = None  # type: ignore[assignment]
 
 
-async def _resolve(reader, *, underlying=None):
+async def _resolve(reader, *, underlying=None, selection=None):
     return await resolve_option_stream(
         dates=_DATES,
         collection="OPT_SP_500",
         option_type="P",
         cycle=None,
         maturity=NearestToTarget(target_dte_days=30),
-        selection=ByDelta(target_delta=-0.10, tolerance=0.05, strict=False),
+        selection=selection
+        or ByDelta(target_delta=-0.10, tolerance=0.05, strict=False),
         stream="mid",
         roll_offset=RollOffset(),
         chain_reader=reader,
@@ -287,6 +314,67 @@ async def test_year_fallback_emits_warning(caplog):
     ), warnings
     # Summary WARNING reports the fallback ratio (1 of the 2 year-chunks).
     assert any("1/2 year-chunk" in m for m in warnings), warnings
+
+
+async def test_bydelta_engages_pushdown_k8():
+    """Wave-8 gate: STORED-delta ByDelta drives every year-chunk with the
+    delta-pushdown (target, k=8)."""
+    reader = _FakeMultiBulkReader(_chains_by_date())
+    await _resolve(reader, selection=ByDelta(target_delta=-0.10, tolerance=0.05))
+    assert reader.multi_calls, "fast path must run"
+    assert all(c["delta_pushdown"] == (-0.10, 8) for c in reader.multi_calls), (
+        reader.multi_calls
+    )
+
+
+async def test_bystrike_takes_full_chain_multi_not_pushdown():
+    """ByStrike ranks on strike, not delta → full-chain multi (delta_pushdown
+    None), NOT the pushdown, and NOT the legacy per-expiration path."""
+    reader = _FakeMultiBulkReader(_chains_by_date())
+    _v, errors, contracts = await _resolve(reader, selection=ByStrike(strike=4300.0))
+    assert reader.multi_calls and reader.bulk_calls == []
+    assert all(c["delta_pushdown"] is None for c in reader.multi_calls)
+    assert all(c is not None and c.strike == 4300.0 for c in contracts)
+
+
+async def test_bymoneyness_takes_full_chain_multi_not_pushdown():
+    """ByMoneyness needs spot, not delta → full-chain multi (delta_pushdown
+    None)."""
+    reader = _FakeMultiBulkReader(_chains_by_date())
+
+    async def _spot(_contract_doc, _d):
+        return 5000.0
+
+    _v, _e, contracts = await _resolve(
+        reader,
+        underlying=_spot,
+        selection=ByMoneyness(target_K_over_S=0.86, tolerance=0.01),
+    )
+    assert reader.multi_calls and reader.bulk_calls == []
+    assert all(c["delta_pushdown"] is None for c in reader.multi_calls)
+    # 4300/5000 = 0.86 is the covered rung.
+    assert all(c is not None and c.strike == 4300.0 for c in contracts)
+
+
+async def test_pushdown_topk_picks_same_contract_as_full_chain():
+    """PARITY: the pushdown top-k candidates (fake applies the identical rank)
+    select the same contract as the full-chain path would — byte-identical."""
+    pushdown = _FakeMultiBulkReader(_chains_by_date())  # honors delta_pushdown
+    full = _NoMultiBulkReader(_chains_by_date())  # per-exp full chain
+
+    v_push, e_push, c_push = await _resolve(pushdown)
+    v_full, e_full, c_full = await _resolve(full)
+
+    assert pushdown.multi_calls and pushdown.multi_calls[0]["delta_pushdown"] == (
+        -0.10,
+        8,
+    )
+    np.testing.assert_array_equal(v_push, v_full)
+    assert e_push == e_full
+    assert [None if c is None else c.contract_id for c in c_push] == [
+        None if c is None else c.contract_id for c in c_full
+    ]
+    assert all(c is not None and c.strike == 4300.0 for c in c_push)
 
 
 async def test_year_failure_isolated_when_fallback_also_fails():

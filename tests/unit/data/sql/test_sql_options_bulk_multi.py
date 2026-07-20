@@ -282,3 +282,128 @@ class TestQueryChainBulkMultiResult:
             await reader.query_chain_bulk_multi(
                 root="OPT_SP_500", type="P", groups=_GROUPS
             )
+
+
+def _projection(sql: str) -> str:
+    """Extract the ``SELECT k.trade_date ... i.provider`` final projection.
+
+    Stops before the ``FROM <driver>`` clause (``picks`` vs ``keyset`` differ),
+    so equality asserts the shared ROW SHAPE only.
+    """
+    start = sql.index("SELECT k.trade_date")
+    end = sql.index("FROM", start)
+    return sql[start:end]
+
+
+class TestQueryChainBulkMultiDeltaPushdown:
+    """Wave-8 single-read delta-pushdown branch (Option C)."""
+
+    _TARGET = -0.10
+    _K = 8
+
+    async def _run_pushdown(self):
+        reader, cur = _make_reader([])
+        await reader.query_chain_bulk_multi(
+            root="OPT_SP_500",
+            type="P",
+            groups=_GROUPS,
+            delta_pushdown=(self._TARGET, self._K),
+        )
+        return _main_sql(cur)
+
+    async def test_ranked_cte_row_number_partition_and_order(self):
+        sql, _ = await self._run_pushdown()
+        assert "ranked AS (" in sql
+        assert "ROW_NUMBER() OVER (" in sql
+        assert "PARTITION BY i.expiration, g.trade_date" in sql
+        # The rank key MUST be identical to match_by_delta's sort
+        # (abs(delta - target), then lower strike) — else rn=1 != Python winner.
+        assert "ORDER BY abs(g.delta - %s), i.strike" in sql
+
+    async def test_picks_rn_le_k_filter(self):
+        sql, params = await self._run_pushdown()
+        assert "picks AS (" in sql
+        assert "WHERE rn <= %s" in sql
+        assert self._K in list(params), "k must be bound for the rn<=k filter"
+
+    async def test_null_deltas_not_filtered_for_error_parity(self):
+        """NULL deltas must NOT be filtered out of the rank: Postgres sorts them
+        LAST so rn=1 is still the non-null winner, and keeping them preserves the
+        full-chain ``missing_delta_no_compute`` classification for an all-NULL
+        chain (an empty ``picks`` would mis-report ``no_chain_for_date``).
+        Live-verified this was the ONLY divergence vs the per-expiration path."""
+        sql, _ = await self._run_pushdown()
+        assert "g.delta IS NOT NULL" not in sql
+        # rn=1 correctness rests on the ORDER BY (nulls last) — assert the key.
+        assert "ORDER BY abs(g.delta - %s), i.strike" in sql
+
+    async def test_target_bound(self):
+        _sql, params = await self._run_pushdown()
+        assert float(self._TARGET) in list(params)
+
+    async def test_values_win_join_and_chunk_prune_kept_verbatim(self):
+        """The load-bearing R1 scaffolding survives in the pushdown branch."""
+        sql, params = await self._run_pushdown()
+        assert "win (exp, lo, hi)" in sql
+        assert "JOIN win w ON d.expiration = w.exp" in sql
+        # per-expiration window on the ranked greeks scan + chunk-constant prune.
+        assert "BETWEEN w.lo AND w.hi" in sql
+        assert "g.trade_date BETWEEN %s AND %s" in sql
+        chunk_lo = min(min(_DATES_A), min(_DATES_B))
+        chunk_hi = max(max(_DATES_A), max(_DATES_B))
+        flat = list(params)
+        # ranked prune (1) + both final joins (2) = 3 each.
+        assert flat.count(chunk_lo) >= 3 and flat.count(chunk_hi) >= 3
+
+    async def test_no_keyset_union_in_pushdown(self):
+        sql, _ = await self._run_pushdown()
+        assert "keyset AS (" not in sql, "pushdown must NOT build the full-chain keyset"
+
+    async def test_row_shape_identical_to_full_chain(self):
+        """The final projection must be byte-identical between branches so
+        ``match_by_delta`` consumes the pushdown output unchanged."""
+        pushdown_sql, _ = await self._run_pushdown()
+        reader, cur = _make_reader([])
+        await reader.query_chain_bulk_multi(root="OPT_SP_500", type="P", groups=_GROUPS)
+        full_sql, _ = _main_sql(cur)
+        assert _projection(pushdown_sql) == _projection(full_sql)
+
+    async def test_strike_windows_ignored_under_pushdown(self):
+        """Pushdown is Option A only — a strike window must not leak in."""
+        reader, cur = _make_reader([])
+        await reader.query_chain_bulk_multi(
+            root="OPT_SP_500",
+            type="P",
+            groups=_GROUPS,
+            strike_windows={_EXP_A: (4000.0, 5000.0)},
+            delta_pushdown=(self._TARGET, self._K),
+        )
+        sql, _ = _main_sql(cur)
+        assert "strike_lo" not in sql and "d.strike >=" not in sql
+
+    async def test_empty_groups_no_query(self):
+        reader, cur = _make_reader([])
+        result = await reader.query_chain_bulk_multi(
+            root="OPT_SP_500",
+            type="P",
+            groups=[],
+            delta_pushdown=(self._TARGET, self._K),
+        )
+        assert result == {}
+        assert cur.calls == []
+
+    async def test_result_rows_grouped_same_as_full_chain(self):
+        rows = [
+            _chain_row(_DATES_A[0], "SPX240315P4500", 4500.0, _EXP_A),
+            _chain_row(_DATES_B[0], "SPX240621P4700", 4700.0, _EXP_B),
+        ]
+        reader, _cur = _make_reader(rows)
+        result = await reader.query_chain_bulk_multi(
+            root="OPT_SP_500",
+            type="P",
+            groups=_GROUPS,
+            delta_pushdown=(self._TARGET, self._K),
+        )
+        assert len(result[_DATES_A[0]]) == 1
+        assert len(result[_DATES_B[0]]) == 1
+        assert result[_DATES_A[1]] == []
