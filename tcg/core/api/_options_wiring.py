@@ -96,7 +96,13 @@ class _BulkOptionsDataPortAdapter:
         # Optional year-chunk fast path: advertise the multi-expiration bulk
         # capability only when the concrete reader implements it, so the engine
         # feature-detects and falls back to the per-expiration path otherwise.
-        self.supports_bulk_multi = hasattr(reader, "query_chain_bulk_multi")
+        # ``callable`` (not ``hasattr``): a reader that DISABLES the capability
+        # by setting ``query_chain_bulk_multi = None`` must NOT be advertised as
+        # capable — ``hasattr`` returns True for a None-valued attribute, which
+        # would drive the fast path into a TypeError + silent slow fallback.
+        self.supports_bulk_multi = callable(
+            getattr(reader, "query_chain_bulk_multi", None)
+        )
 
     async def query_chain_bulk(
         self,

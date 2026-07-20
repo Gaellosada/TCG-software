@@ -565,9 +565,13 @@ class _CycleInjectingBulkReader:
         # reader (the wiring adapter sets this from the concrete data reader).
         # The engine gates the fast path on this flag, falling back to the
         # per-expiration path when it is False (unsupported reader / test fake).
+        # ``callable`` (not ``hasattr``): an inner reader that disables the
+        # capability via ``query_chain_bulk_multi = None`` reports False here, so
+        # the fast path is cleanly NOT taken (rather than entered → TypeError →
+        # silent per-exp fallback that quietly erases the speedup).
         self.supports_bulk_multi = bool(
             getattr(inner, "supports_bulk_multi", False)
-        ) or hasattr(inner, "query_chain_bulk_multi")
+        ) or callable(getattr(inner, "query_chain_bulk_multi", None))
 
     async def query_chain_bulk(
         self,
@@ -1477,6 +1481,12 @@ async def _resolve_bulk(
                 pass
         return result
 
+    # Observability: which year-chunks fell back to the slow per-expiration
+    # path.  A silent MASS fallback (e.g. a latent SQL defect making EVERY
+    # year-chunk raise) is correct but quietly erases the speedup and would show
+    # up only as "it got slow"; we surface it at WARNING (per chunk + summary).
+    _year_chunk_fallbacks: list[int] = []
+
     async def _fetch_year(
         year: int,
         members: list[tuple[date, list[tuple[int, date]]]],
@@ -1503,8 +1513,11 @@ async def _resolve_bulk(
             # here — and degrades its OWN dates to ``data_access_error`` on
             # failure).  This restores the old per-expiration failure granularity
             # on the rare year-chunk failure instead of blanking the whole year.
-            _log.debug(
-                "Phase-B year-chunk fetch failed year=%s (%d expirations): %s",
+            _year_chunk_fallbacks.append(year)
+            _log.warning(
+                "Phase-B year-chunk fast path FELL BACK to per-expiration for "
+                "year=%s (%d expirations): %s. Cold-resolve speedup is degraded "
+                "for this year; investigate query_chain_bulk_multi if repeated.",
                 year,
                 len(members),
                 exc,
@@ -1552,6 +1565,17 @@ async def _resolve_bulk(
     else:
         fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
     fetch_results = await asyncio.gather(*fetch_tasks)
+    if _fast_path_eligible and _year_chunk_fallbacks:
+        # Summary WARNING so a MASS fallback (most/all chunks) is one glance,
+        # not buried in per-chunk lines.  If this ratio is high the fast path is
+        # effectively off — a real, silent perf regression.
+        _log.warning(
+            "Phase-B year-chunk fast path fell back to per-expiration for "
+            "%d/%d year-chunk(s) (years=%s).",
+            len(_year_chunk_fallbacks),
+            len(year_chunks),
+            sorted(_year_chunk_fallbacks),
+        )
     for result in fetch_results:
         # MERGE (extend), do not overwrite: in HOLD mode a roll day appears in
         # TWO expiration groups (OLD + NEW), so its rows arrive from two fetches

@@ -23,13 +23,19 @@ pin:
 
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from typing import Literal, Sequence
 
 import numpy as np
 
 from tcg.engine.options.maturity.resolver import DefaultMaturityResolver
-from tcg.engine.options.series.stream_resolver import resolve_option_stream
+from tcg.engine.options.series.stream_resolver import (
+    _CycleInjectingBulkReader,
+    resolve_option_stream,
+)
+
+_RESOLVER_LOGGER = "tcg.engine.options.series.stream_resolver"
 from tcg.types.options import (
     ByDelta,
     NearestToTarget,
@@ -221,12 +227,36 @@ async def test_parity_fast_path_equals_old_path():
     assert all(c is not None and c.strike == 4300.0 for c in c_fast)
 
 
-async def test_reader_without_capability_falls_back_to_per_expiration():
+def test_none_capability_flag_is_gated_off_via_callable_not_hasattr():
+    """GATE assertion (finding 1): a reader that DISABLES the capability with
+    ``query_chain_bulk_multi = None`` must report ``supports_bulk_multi is
+    False``.  The wrapper uses ``callable(...)``, not ``hasattr`` — ``hasattr``
+    is True for a None attribute and would drive the fast path into a TypeError
+    + silent slow fallback.  This asserts the gate DIRECTLY, so it FAILS if the
+    check reverts to ``hasattr``."""
+    disabled = _CycleInjectingBulkReader(_NoMultiBulkReader(_chains_by_date()), None)
+    assert disabled.supports_bulk_multi is False
+    # A real method still reads as capable.
+    capable = _CycleInjectingBulkReader(_FakeMultiBulkReader(_chains_by_date()), None)
+    assert capable.supports_bulk_multi is True
+
+
+async def test_reader_without_capability_falls_back_to_per_expiration(caplog):
+    """A ``None``-disabled reader must fall back via CLEAN GATING (fast path
+    never entered), NOT via the exception fallback.  The no-year-chunk-WARNING
+    assertion is the discriminator: under a ``hasattr`` gate the fast path is
+    wrongly entered → TypeError → fallback WARNING fires → this test fails."""
     reader = _NoMultiBulkReader(_chains_by_date())
-    values, errors, _ = await _resolve(reader)
+    with caplog.at_level(logging.WARNING, logger=_RESOLVER_LOGGER):
+        values, errors, _ = await _resolve(reader)
     assert reader.multi_calls == []
     assert reader.bulk_calls, "old per-expiration path must run"
     assert all(not np.isnan(v) for v in values)
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "year-chunk" in r.getMessage()
+    ], "no-capability reader must be gated off cleanly, not via the fallback"
 
 
 async def test_year_failure_recovers_via_per_expiration_fallback():
@@ -240,6 +270,23 @@ async def test_year_failure_recovers_via_per_expiration_fallback():
     # ALL dates resolved (2023 via fallback, 2024 via multi).
     assert all(not np.isnan(v) for v in values), values
     assert all(e is None for e in errors)
+
+
+async def test_year_fallback_emits_warning(caplog):
+    """Finding 2: a year-chunk failing must surface at WARNING (with year +
+    expiration count) plus a summary ratio, so a silent mass-fallback that
+    quietly erases the speedup is visible in the logs."""
+    reader = _FakeMultiBulkReader(_chains_by_date(), fail_years=frozenset({2023}))
+    with caplog.at_level(logging.WARNING, logger=_RESOLVER_LOGGER):
+        await _resolve(reader)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    # Per-chunk WARNING names the year and expiration count.
+    assert any(
+        "FELL BACK to per-expiration for year=2023" in m and "expirations" in m
+        for m in warnings
+    ), warnings
+    # Summary WARNING reports the fallback ratio (1 of the 2 year-chunks).
+    assert any("1/2 year-chunk" in m for m in warnings), warnings
 
 
 async def test_year_failure_isolated_when_fallback_also_fails():
