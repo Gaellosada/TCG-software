@@ -10,7 +10,7 @@ Spec reference: ``OPTIONS_FEATURE_SPEC.md`` §3.1.
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Mapping, Protocol, Sequence
+from typing import Literal, Protocol, Sequence
 
 from tcg.types.options import (
     OptionContractDoc,
@@ -106,7 +106,6 @@ class OptionsDataReader(Protocol):
         root: str,
         type: Literal["C", "P", "both"],
         groups: Sequence[tuple[date, Sequence[date]]],
-        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
         expiration_cycle: str | Sequence[str] | None = None,
         delta_pushdown: "tuple[float, int] | None" = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
@@ -116,9 +115,9 @@ class OptionsDataReader(Protocol):
         fan-out into a single round-trip covering several expirations, each
         restricted to its OWN trade-date window (``groups`` =
         ``[(expiration, [trade_dates...]), ...]``).  Same ``(contract, row)``
-        semantics as ``query_chain_bulk`` per (expiration, trade_date), MINUS the
-        strike window when ``strike_windows`` is None (a strict superset).
-        Callers must feature-detect (``hasattr``) and fall back to
+        semantics as ``query_chain_bulk`` per (expiration, trade_date): the full
+        chain (all strikes of ``type``) is a strict superset of the old windowed
+        fetch.  Callers must feature-detect (``callable``) and fall back to
         ``query_chain_bulk`` when a reader does not implement it.
 
         ``delta_pushdown`` (a ``(target_delta, k)`` tuple, optional) engages the
@@ -128,8 +127,7 @@ class OptionsDataReader(Protocol):
         so ``match_by_delta`` picks the same contract (``rn=1`` IS its winner;
         NULL deltas sort LAST so they never displace it, and an all-NULL chain
         preserves the ``missing_delta_no_compute`` classification).  Correct only
-        for STORED-delta ``ByDelta`` selection; mutually exclusive with
-        ``strike_windows``.
+        for STORED-delta ``ByDelta`` selection.
         """
         ...
 

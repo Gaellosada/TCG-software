@@ -14,8 +14,7 @@ plan index-only) without a live warehouse:
     EVERY partitioned-fact reference (keyset scans + final joins);
   * result dict keyed by EVERY requested trade_date (``[]`` when empty), rows
     grouped under their fact ``trade_date``;
-  * Option A (``strike_windows=None``) pushes NO strike filter (superset);
-  * Option B (``strike_windows`` map) pushes per-expiration strike bounds;
+  * the full chain pushes NO strike filter (superset);
   * failures wrap as ``OptionsDataAccessError``.
 
 A live-DB parity/perf profile is Wave 4's job.
@@ -196,28 +195,15 @@ class TestQueryChainBulkMultiShape:
             isinstance(p, (list, tuple)) and list(p) == all_dates for p in flat
         ), "the full de-duped/sorted date union must be bound as one array param"
 
-    async def test_option_a_pushes_no_strike_filter(self):
+    async def test_full_chain_pushes_no_strike_filter(self):
+        """The full-chain (non-pushdown) query fetches ALL strikes of ``type`` —
+        a strict superset; no strike bound leaks into the SQL.  (The removed
+        Option B ``strike_windows`` path is gone — superseded by delta pushdown.)"""
         reader, cur = _make_reader([])
-        await reader.query_chain_bulk_multi(
-            root="OPT_SP_500", type="P", groups=_GROUPS, strike_windows=None
-        )
+        await reader.query_chain_bulk_multi(root="OPT_SP_500", type="P", groups=_GROUPS)
         sql, _ = _main_sql(cur)
         assert "strike_lo" not in sql and "strike_hi" not in sql
         assert "d.strike >=" not in sql and "d.strike <=" not in sql
-
-    async def test_option_b_pushes_per_expiration_strike_bounds(self):
-        reader, cur = _make_reader([])
-        windows = {_EXP_A: (4000.0, 5000.0), _EXP_B: (4500.0, 5500.0)}
-        await reader.query_chain_bulk_multi(
-            root="OPT_SP_500", type="P", groups=_GROUPS, strike_windows=windows
-        )
-        sql, params = _main_sql(cur)
-        assert "win (exp, lo, hi, strike_lo, strike_hi)" in sql
-        assert "d.strike >= w.strike_lo" in sql
-        assert "d.strike <= w.strike_hi" in sql
-        flat = list(params)
-        for lo, hi in windows.values():
-            assert lo in flat and hi in flat
 
     async def test_type_and_cycle_pushed(self):
         reader, cur = _make_reader([])
@@ -408,14 +394,14 @@ class TestQueryChainBulkMultiDeltaPushdown:
         full_sql, _ = _main_sql(cur)
         assert _projection(pushdown_sql) == _projection(full_sql)
 
-    async def test_strike_windows_ignored_under_pushdown(self):
-        """Pushdown is Option A only — a strike window must not leak in."""
+    async def test_pushdown_pushes_no_strike_filter(self):
+        """The pushdown branch fetches all strikes then delta-ranks — no strike
+        window leaks in (the removed Option B path)."""
         reader, cur = _make_reader([])
         await reader.query_chain_bulk_multi(
             root="OPT_SP_500",
             type="P",
             groups=_GROUPS,
-            strike_windows={_EXP_A: (4000.0, 5000.0)},
             delta_pushdown=(self._TARGET, self._K),
         )
         sql, _ = _main_sql(cur)

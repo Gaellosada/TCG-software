@@ -43,6 +43,31 @@ resolver uses a three-phase bulk path instead of per-date chain queries:
 The fallback per-date path remains intact when ``bulk_chain_reader``
 is ``None``.
 
+Resolve paths (which gate selects each)
+---------------------------------------
+The resolver routes a resolve through exactly one FETCH shape:
+
+  * per-expiration legacy — ``bulk_chain_reader`` is None, OR
+    ``_fast_path_eligible`` is False (unsupported reader / coverage-aware with
+    candidates).  One ``query_chain_bulk`` per expiration (+ strike-window probe).
+  * year-chunk FULL-CHAIN — ``_fast_path_eligible and _delta_pushdown is None``.
+    One ``query_chain_bulk_multi`` per calendar year (whole chain, superset);
+    a year with > ``_MAX_EXPS_PER_SUBCHUNK`` expirations is split into sub-chunks.
+  * year-chunk DELTA-PUSHDOWN — ``_fast_path_eligible and _delta_pushdown is not
+    None`` (stored-delta ByDelta, non-hold OR two-phase hold).  Same query with a
+    symbol-granular top-k delta rank pushed into SQL; byte-identical pick.
+  * two-phase HOLD — ``_hold_two_phase`` (hold leg whose reader supports BOTH
+    bulk-multi AND held-rows).  Phase 1 selects on roll dates (pushdown for
+    ByDelta), Phase 2 ``query_held_rows`` identity-fetches the frozen symbols.
+  * sub-chunk net — a full-chain year over the exp cap (see above); merged in
+    contiguous-expiration order so it stays byte-identical to one query.
+
+The two SQL tuning constants below (``_PUSHDOWN_K`` = 8, ``_MAX_EXPS_PER_SUBCHUNK``
+= 24) are DWH-CALIBRATED to the dwh SQL reader (its 60s ``statement_timeout`` and
+the ~2.68% duplicate-instrument_id-per-symbol quirk); the pushdown's byte-identity
+rests on the SQL ranking contract matching ``symbol_delta_rank`` (see
+``tcg/data/_sql/options.py``).
+
 Per-date call count and concurrency (legacy per-date path)
 ------------------------------------------------------------
 The data layer exposes no date-range chain query — see recon doc and
@@ -622,7 +647,6 @@ class _CycleInjectingBulkReader:
         root: str,
         type: Literal["C", "P", "both"],
         groups: Sequence[tuple[date, Sequence[date]]],
-        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
         delta_pushdown: "tuple[float, int] | None" = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         # Cycle injection mirrors ``query_chain_bulk`` (guardrail 11: no silent
@@ -631,7 +655,6 @@ class _CycleInjectingBulkReader:
             root=root,
             type=type,
             groups=groups,
-            strike_windows=strike_windows,
             expiration_cycle=self._cycle,
             delta_pushdown=delta_pushdown,
         )
@@ -1660,9 +1683,22 @@ async def _resolve_bulk(
     # other keys and stay on the full-chain multi branch (``None``) — for two-phase
     # hold too (their Phase 1 fetches only the few roll dates, so full-chain there
     # is already cheap).
+    # Pushdown correctness precondition (audit_d1 F1): the SQL ranks STORED
+    # ``g.delta`` only — NULL/computed-delta symbols sort NULLS-LAST and would be
+    # wrongly excluded.  This resolver NEVER computes missing deltas (Phase C ranks
+    # on ``r.delta_stored``; there is no ``compute_missing_for_delta`` parameter),
+    # so stored-delta is guaranteed TODAY and ``_compute_missing_delta`` is always
+    # False.  It is an EXPLICIT guard, not a comment: if a future change threads
+    # compute-missing into this resolver, wire it into this local and the pushdown
+    # HARD-FALLS-BACK to the full-chain year-chunk path (``None``) rather than
+    # silently ranking on stored delta only.  See audit_d1_gating.md F1.
+    _compute_missing_delta = (
+        False  # COUPLED: flip if compute-missing is ever wired here
+    )
     _delta_pushdown: tuple[float, int] | None = (
         (float(selection.target_delta), _PUSHDOWN_K)
         if isinstance(selection, ByDelta)
+        and not _compute_missing_delta
         and (not hold_between_rolls or _hold_two_phase)
         else None
     )

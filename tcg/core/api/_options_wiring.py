@@ -27,7 +27,7 @@ single request and avoids cross-request data leaks.
 from __future__ import annotations
 
 from datetime import date
-from typing import Awaitable, Callable, Literal, Mapping, Sequence
+from typing import Awaitable, Callable, Literal, Sequence
 
 from tcg.data._utils import date_to_int
 from tcg.data.options.protocol import OptionsDataReader
@@ -78,88 +78,6 @@ class _OptionsDataPortAdapter:
             expiration_max=expiration_max,
             strike_min=strike_min,
             strike_max=strike_max,
-            expiration_cycle=expiration_cycle,
-        )
-
-
-class _BulkOptionsDataPortAdapter:
-    """Wrap an ``OptionsDataReader`` to satisfy the engine-side
-    ``_CycleAwareBulkReader`` Protocol (cycle-aware variant).
-
-    The engine's ``_CycleInjectingBulkReader`` strips ``expiration_cycle``
-    from its public signature and injects it here.  This adapter sits
-    between the engine wrapper and the real data reader.
-    """
-
-    def __init__(self, reader: OptionsDataReader) -> None:
-        self._reader = reader
-        # Optional year-chunk fast path: advertise the multi-expiration bulk
-        # capability only when the concrete reader implements it, so the engine
-        # feature-detects and falls back to the per-expiration path otherwise.
-        # ``callable`` (not ``hasattr``): a reader that DISABLES the capability
-        # by setting ``query_chain_bulk_multi = None`` must NOT be advertised as
-        # capable — ``hasattr`` returns True for a None-valued attribute, which
-        # would drive the fast path into a TypeError + silent slow fallback.
-        self.supports_bulk_multi = callable(
-            getattr(reader, "query_chain_bulk_multi", None)
-        )
-        # Optional hold-leg two-phase Phase-2 capability (same feature-detect
-        # discipline as ``supports_bulk_multi``): a reader that disables it via
-        # ``query_held_rows = None`` reports False, so the engine cleanly stays on
-        # the full-chain hold path instead of entering it → TypeError.
-        self.supports_held_rows = callable(getattr(reader, "query_held_rows", None))
-
-    async def query_chain_bulk(
-        self,
-        root: str,
-        dates: Sequence[date],
-        type: Literal["C", "P", "both"],
-        expiration_min: date,
-        expiration_max: date,
-        strike_min: float | None = None,
-        strike_max: float | None = None,
-        expiration_cycle: str | Sequence[str] | None = None,
-    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        return await self._reader.query_chain_bulk(
-            root=root,
-            dates=dates,
-            type=type,
-            expiration_min=expiration_min,
-            expiration_max=expiration_max,
-            strike_min=strike_min,
-            strike_max=strike_max,
-            expiration_cycle=expiration_cycle,
-        )
-
-    async def query_chain_bulk_multi(
-        self,
-        root: str,
-        type: Literal["C", "P", "both"],
-        groups: Sequence[tuple[date, Sequence[date]]],
-        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
-        expiration_cycle: str | Sequence[str] | None = None,
-        delta_pushdown: "tuple[float, int] | None" = None,
-    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        return await self._reader.query_chain_bulk_multi(
-            root=root,
-            type=type,
-            groups=groups,
-            strike_windows=strike_windows,
-            expiration_cycle=expiration_cycle,
-            delta_pushdown=delta_pushdown,
-        )
-
-    async def query_held_rows(
-        self,
-        root: str,
-        type: Literal["C", "P", "both"],
-        held_windows: "Sequence[tuple[str, date, date]]",
-        expiration_cycle: str | Sequence[str] | None = None,
-    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        return await self._reader.query_held_rows(
-            root=root,
-            type=type,
-            held_windows=held_windows,
             expiration_cycle=expiration_cycle,
         )
 
@@ -563,7 +481,7 @@ def build_stream_resolver_wiring(
     CachedChainReader,
     DefaultMaturityResolver,
     Callable[[OptionContractDoc, date], Awaitable[float | None]],
-    _BulkOptionsDataPortAdapter,
+    OptionsDataReader,
 ]:
     """Return the components a per-date stream materialiser needs.
 
@@ -591,22 +509,24 @@ def build_stream_resolver_wiring(
         Async callable ``(contract, date) -> float | None`` reusing the
         canonical ``resolve_underlying_price`` join.
     bulk_chain_reader:
-        Cycle-aware ``_BulkOptionsDataPortAdapter`` wrapping the live
-        ``MongoOptionsDataReader``.  Passed to
-        ``resolve_option_stream(bulk_chain_reader=...)`` to enable the
-        three-phase bulk pre-fetch path.
+        The RAW cycle-aware ``OptionsDataReader`` (e.g. ``SqlOptionsDataReader``).
+        Passed to ``resolve_option_stream(bulk_chain_reader=...)`` to enable the
+        three-phase bulk pre-fetch path.  The engine's ``_CycleInjectingBulkReader``
+        wraps it directly (feature-detecting ``query_chain_bulk_multi`` /
+        ``query_held_rows`` via ``callable`` and injecting the cycle), so no
+        forwarding shim is needed — the reader already satisfies the cycle-aware
+        bulk signatures.
     """
     reader = get_options_reader(market_data)
     inner = _OptionsDataPortAdapter(reader)
     cached = CachedChainReader(inner)
-    bulk = _BulkOptionsDataPortAdapter(reader)
     maturity_resolver = DefaultMaturityResolver()
     index_port = _IndexDataPortAdapter(market_data)
     futures_port = _FuturesDataPortAdapter(
         market_data, prefetch_window=underlying_prefetch_window
     )
     underlying_resolver = _build_underlying_resolver(index_port, futures_port)
-    return cached, maturity_resolver, underlying_resolver, bulk
+    return cached, maturity_resolver, underlying_resolver, reader
 
 
 def _pick_reference_contract(

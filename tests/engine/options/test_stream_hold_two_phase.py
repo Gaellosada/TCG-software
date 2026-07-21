@@ -37,6 +37,8 @@ from tcg.types.options import (
     RollOffset,
 )
 
+from tcg.data._sql.options import symbol_delta_rank
+
 from _stream_fakes import _contract, _cycle_matches, _row
 
 
@@ -67,7 +69,6 @@ class _TwoPhaseReader:
         root: str,
         type: Literal["C", "P", "both"],
         groups: Sequence[tuple[date, Sequence[date]]],
-        strike_windows=None,
         expiration_cycle=None,
         delta_pushdown=None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
@@ -92,16 +93,9 @@ class _TwoPhaseReader:
                     and _cycle_matches(c.expiration_cycle, expiration_cycle)
                 ]
                 if delta_pushdown is not None:
+                    # SHARED reference rank (no private copy — audit_d3 INV-1).
                     target, k = delta_pushdown
-                    ranked = sorted(
-                        matched,
-                        key=lambda cr: (
-                            cr[1].delta_stored is None,
-                            abs((cr[1].delta_stored or 0.0) - target),
-                            cr[0].strike,
-                        ),
-                    )
-                    matched = ranked[:k]
+                    matched = symbol_delta_rank(matched, target, k)
                 result[d].extend(matched)
         return result
 

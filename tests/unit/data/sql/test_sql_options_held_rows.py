@@ -11,7 +11,8 @@ hold path) without a live warehouse:
   * the redundant CONSTANT chunk-min/max ``trade_date BETWEEN`` partition prune
     on every partitioned-fact reference (2 keyset scans + 2 final joins);
   * ordered by ``k.trade_date, i.instrument_id`` (first-by-instrument_id pick);
-  * NO expiration_cycle predicate (the symbol identifies the contract);
+  * the SAME expiration_cycle predicate as the full-chain path when a cycle is
+    given (LOAD-BEARING — a symbol is NOT unique across cycles); none when None;
   * rows grouped under their fact ``trade_date``; empty windows → no query;
   * failures wrap as ``OptionsDataAccessError``.
 """
@@ -160,12 +161,46 @@ class TestQueryHeldRowsShape:
         sql, _ = _sql(cur)
         assert "ORDER BY k.trade_date, i.instrument_id" in sql
 
-    async def test_no_cycle_predicate(self):
-        """The symbol identifies the contract — no cycle slice needed."""
+    async def test_no_cycle_predicate_when_none(self):
+        """cycle=None (default) applies NO filter — matching the full-chain path's
+        None case.  (The SELECT still PROJECTS ``i.expiration_cycle``; only the
+        ``expiration_cycle = %s`` WHERE predicate must be absent.)"""
         reader, cur = _make_reader([])
         await reader.query_held_rows(root="OPT_SP_500", type="P", held_windows=_WINDOWS)
         sql, _ = _sql(cur)
         assert "expiration_cycle = %s" not in sql
+        assert "expiration_cycle = ANY(%s)" not in sql
+
+    async def test_scalar_cycle_predicate_applied(self):
+        """LOAD-BEARING, NOT redundant (audit_d4 P0): a held SYMBOL is NOT unique
+        across cycles — the ~2.68% duplicate-instrument_id quirk is ONE symbol
+        double-tagged (``"M"`` + ``"W3 Friday"``) with different quotes.
+        ``query_held_rows`` MUST apply the SAME cycle predicate as the full-chain
+        path so the off-cycle sibling is dropped and ``_row_for_contract``'s
+        first-by-instrument_id pick is byte-identical (live 4970_P/2024-03-06:
+        7.40 vs 4.15).  Reverting the R3 fix (the ``_cycle_predicate`` call in
+        ``query_held_rows``) makes this go RED."""
+        reader, cur = _make_reader([])
+        await reader.query_held_rows(
+            root="OPT_SP_500", type="P", held_windows=_WINDOWS, expiration_cycle="M"
+        )
+        sql, params = _sql(cur)
+        assert "expiration_cycle = %s" in sql
+        assert "M" in list(params)
+
+    async def test_multi_tag_cycle_predicate_applied(self):
+        """A monthly 3rd-Friday series expands to a two-tag sequence at the wiring
+        layer; the ``= ANY(%s)`` form must bind the tag LIST (same R3 guarantee)."""
+        reader, cur = _make_reader([])
+        await reader.query_held_rows(
+            root="OPT_SP_500",
+            type="P",
+            held_windows=_WINDOWS,
+            expiration_cycle=("M", "W3 Friday"),
+        )
+        sql, params = _sql(cur)
+        assert "expiration_cycle = ANY(%s)" in sql
+        assert ["M", "W3 Friday"] in [p for p in params if isinstance(p, list)]
 
     async def test_type_pushed_when_scalar(self):
         reader, cur = _make_reader([])

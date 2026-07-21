@@ -46,6 +46,8 @@ from tcg.types.options import (
     RollOffset,
 )
 
+from tcg.data._sql.options import symbol_delta_rank
+
 from _stream_fakes import _contract, _cycle_matches, _row
 
 # Two expirations in DIFFERENT calendar years → the fast path must bucket into
@@ -110,7 +112,6 @@ class _FakeMultiBulkReader:
         root: str,
         type: Literal["C", "P", "both"],
         groups: Sequence[tuple[date, Sequence[date]]],
-        strike_windows=None,
         expiration_cycle=None,
         delta_pushdown=None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
@@ -136,21 +137,11 @@ class _FakeMultiBulkReader:
                     and _cycle_matches(c.expiration_cycle, expiration_cycle)
                 ]
                 if delta_pushdown is not None:
-                    # Simulate the SQL delta rank: top-k candidates per
-                    # (expiration, date) by |delta - target| (tie lower strike),
-                    # NULL deltas LAST but NOT dropped (matches Postgres NULLS
-                    # LAST) — the IDENTICAL key match_by_delta sorts on, so rn=1
-                    # is its winner and all-NULL groups still return rows.
+                    # Simulate the SQL delta rank via the SHARED reference (the
+                    # single source of truth for the symbol-granular top-k — no
+                    # private copy of the rank; audit_d3 INV-1).
                     target, k = delta_pushdown
-                    ranked = sorted(
-                        matched,
-                        key=lambda cr: (
-                            cr[1].delta_stored is None,
-                            abs((cr[1].delta_stored or 0.0) - target),
-                            cr[0].strike,
-                        ),
-                    )
-                    matched = ranked[:k]
+                    matched = symbol_delta_rank(matched, target, k)
                 result[d].extend(matched)
         return result
 

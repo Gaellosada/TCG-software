@@ -100,6 +100,124 @@ def _cycle_predicate(
     return "expiration_cycle = ANY(%s)", tags
 
 
+# --------------------------------------------------------------------------- #
+# Shared SQL fragments — single-sourced so the byte-identity-critical projection
+# and ordering cannot drift between the query builders (audit_d3 INV-5 / audit_d5).
+# --------------------------------------------------------------------------- #
+
+# The 23-column chain projection, WITHOUT the leading ``k.trade_date`` (the three
+# BULK methods prepend it; :meth:`SqlOptionsDataReader.query_chain` — single-date —
+# omits it).  Duplicated verbatim across 4 query builders before this extraction.
+_CHAIN_SELECT_COLS = (
+    "i.instrument_id AS option_instrument_id, i.option_symbol,\n"
+    "                       i.root_symbol, i.underlying_symbol,\n"
+    "                       i.strike, i.option_type, i.expiration, i.expiration_cycle,\n"
+    "                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,\n"
+    "                       g.delta, g.gamma, g.vega, g.theta,\n"
+    "                       g.implied_vol, g.underlying_price,\n"
+    "                       i.contract_size, i.currency, i.provider"
+)
+
+# Final ordering of the bulk chain reads.  FIRST-by-instrument_id within a date is
+# LOAD-BEARING: ``_row_for_contract`` returns the first matching row, and the
+# symbol-granular delta pushdown relies on a stable per-symbol order (audit_d3
+# INV-5).  Single-sourced across the three bulk methods to kill drift.
+_CHAIN_ORDER_BY = "ORDER BY k.trade_date, i.instrument_id"
+
+# The delta-pushdown SYMBOL rank, expressed ONCE as SQL text.
+# COUPLED: keep byte-identical to ``symbol_delta_rank`` below and to
+# ``match_by_delta``'s PRIMARY sort key abs(delta-target) (audit_d3 INV-1).
+_DELTA_RANK_ORDER_BY = (
+    "ORDER BY best_dist ASC NULLS LAST,\n"
+    "                                            best_strike ASC, option_symbol ASC"
+)
+
+# Tolerance for treating two |delta-target| distances as tied (audit_d3 INV-2/3).
+_DELTA_TIE_TOL = 1e-12
+
+
+def symbol_delta_rank(
+    rows: "Sequence[tuple[OptionContractDoc, OptionDailyRow]]",
+    target: float,
+    k: int,
+) -> "list[tuple[OptionContractDoc, OptionDailyRow]]":
+    """SYMBOL-granular delta-rank REFERENCE for ONE (expiration, trade_date).
+
+    Pure-Python encoding of the SQL delta pushdown in
+    :meth:`SqlOptionsDataReader.query_chain_bulk_multi` — the SINGLE source of
+    truth for the ranking semantics that in-tree tests bind ``match_by_delta``
+    against.  Before this, three copies existed (the SQL string, ``match_by_delta``'s
+    sort lambda, and the engine test fakes' private rank — audit_d3 INV-1); the
+    fakes now import THIS, eliminating copy #3.
+
+    Ranks SYMBOLS (``contract_id``) per group by ``(best |delta-target|, min
+    strike, symbol)`` with NULL-delta symbols LAST, keeps the top-``k`` symbols,
+    and returns EVERY row of each kept symbol (mirroring the ~2.68%
+    duplicate-instrument_id retention) in rank order.
+
+    # COUPLED: keep in sync with the SQL ``top_syms`` ORDER BY
+    #   (``_DELTA_RANK_ORDER_BY``: best_dist ASC NULLS LAST, best_strike ASC,
+    #    option_symbol ASC) AND with ``match_by_delta``'s PRIMARY sort key
+    #   abs(delta-target).  Changing the PRIMARY distance metric on EITHER side
+    #   without the other silently diverges the pushdown (audit_d3 INV-1); a
+    #   tie-break-only change is safe (the global-min symbol stays rank-1).
+    """
+    by_symbol: "dict[str, list[tuple[OptionContractDoc, OptionDailyRow]]]" = {}
+    for c, r in rows:
+        by_symbol.setdefault(c.contract_id, []).append((c, r))
+
+    def _best_dist(sym: str) -> float | None:
+        ds = [
+            abs(r.delta_stored - target)
+            for _c, r in by_symbol[sym]
+            if r.delta_stored is not None
+        ]
+        return min(ds) if ds else None
+
+    def _sort_key(sym: str) -> tuple:
+        bd = _best_dist(sym)
+        best_strike = min(c.strike for c, _r in by_symbol[sym])
+        # NULLS LAST: an all-NULL-delta symbol sorts after every ranked symbol.
+        return (bd is None, bd if bd is not None else 0.0, best_strike, sym)
+
+    ranked = sorted(by_symbol, key=_sort_key)
+    return [cr for sym in ranked[:k] for cr in by_symbol[sym]]
+
+
+def _count_pushdown_boundary_ties(
+    results: "Mapping[date, list[tuple[OptionContractDoc, OptionDailyRow]]]",
+    target: float,
+    k: int,
+) -> int:
+    """Count (expiration, trade_date) groups whose retained top-k symbols FILL all
+    k slots AND are ALL tied at one best ``|delta-target|`` distance — the signature
+    of a possible >k tie OVERFLOW where the SQL symbol tie-break could drop
+    ``match_by_delta``'s pick (audit_d3 INV-2/3).
+
+    Heuristic, computed from the RETURNED rows only (no extra query); over-reports
+    at worst.  ``k < 2`` is never flagged (a lone retained symbol is not a droppable
+    tie signal, and production ``k=8`` never approaches this).
+    """
+    if k < 2:
+        return 0
+    groups: "dict[tuple[date, date], dict[str, list[float | None]]]" = {}
+    for _d, pairs in results.items():
+        for c, r in pairs:
+            groups.setdefault((c.expiration, r.date), {}).setdefault(
+                c.contract_id, []
+            ).append(r.delta_stored)
+    count = 0
+    for _key, syms in groups.items():
+        bests: list[float | None] = []
+        for deltas in syms.values():
+            ds = [abs(d - target) for d in deltas if d is not None]
+            bests.append(min(ds) if ds else None)
+        nn = [b for b in bests if b is not None]
+        if len(nn) == k and (max(nn) - min(nn)) <= _DELTA_TIE_TOL:
+            count += 1
+    return count
+
+
 def _display_name(collection: str) -> str:
     if collection in _ROOT_DISPLAY_NAMES:
         return _ROOT_DISPLAY_NAMES[collection]
@@ -296,13 +414,7 @@ class SqlOptionsDataReader:
                     FROM {SCHEMA}.dim_instrument
                     WHERE {" AND ".join(dim_where)}
                 )
-                SELECT i.instrument_id AS option_instrument_id, i.option_symbol,
-                       i.root_symbol, i.underlying_symbol,
-                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
-                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
-                       g.delta, g.gamma, g.vega, g.theta,
-                       g.implied_vol, g.underlying_price,
-                       i.contract_size, i.currency, i.provider
+                SELECT {_CHAIN_SELECT_COLS}
                 FROM ids i
                 LEFT JOIN {SCHEMA}.fact_price_eod p
                        ON p.instrument_id = i.instrument_id AND p.trade_date = %s
@@ -451,13 +563,7 @@ class SqlOptionsDataReader:
                       AND trade_date = ANY(%s)
                 )
                 SELECT k.trade_date,
-                       i.instrument_id AS option_instrument_id, i.option_symbol,
-                       i.root_symbol, i.underlying_symbol,
-                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
-                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
-                       g.delta, g.gamma, g.vega, g.theta,
-                       g.implied_vol, g.underlying_price,
-                       i.contract_size, i.currency, i.provider
+                       {_CHAIN_SELECT_COLS}
                 FROM keyset k
                 JOIN ids i ON i.instrument_id = k.instrument_id
                 LEFT JOIN {SCHEMA}.fact_price_eod p
@@ -468,7 +574,7 @@ class SqlOptionsDataReader:
                        ON g.instrument_id = k.instrument_id
                       AND g.trade_date = k.trade_date
                       AND g.trade_date BETWEEN %s AND %s
-                ORDER BY k.trade_date, i.instrument_id
+                {_CHAIN_ORDER_BY}
             """
             params.extend([date_list, date_list, date_lo, date_hi, date_lo, date_hi])
 
@@ -510,7 +616,6 @@ class SqlOptionsDataReader:
         root: str,
         type: Literal["C", "P", "both"],
         groups: Sequence[tuple[date, Sequence[date]]],
-        strike_windows: "Mapping[date, tuple[float | None, float | None]] | None" = None,
         expiration_cycle: str | Sequence[str] | None = None,
         delta_pushdown: "tuple[float, int] | None" = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
@@ -534,22 +639,19 @@ class SqlOptionsDataReader:
         ~71 partitions).
 
         Candidate-set semantics MATCH :meth:`query_chain_bulk` per (expiration,
-        trade_date) MINUS the strike window:
+        trade_date):
 
-        * ``strike_windows=None`` (Option A, default) — ALL strikes of ``type``
+        * FULL CHAIN (``delta_pushdown=None``, default) — ALL strikes of ``type``
           are returned: a strict SUPERSET of the old per-group
           ``spot*0.40..1.30`` band.  Selection (``match_by_delta`` /
           ``match_by_strike`` / ``match_by_moneyness``) is UNCHANGED and picks
           the identical contract for any target well inside the old band.
-        * ``strike_windows`` (Option B) — a per-expiration
-          ``{expiration: (strike_lo, strike_hi)}`` map restores EXACT
-          per-expiration strike bounds (byte-parity), pushed onto the indexed
-          ``dim_instrument`` id lookup (a ``None`` bound leaves that side open).
-        * ``delta_pushdown`` (Option C) — a ``(target_delta, k)`` tuple engages
+        * ``delta_pushdown`` — a ``(target_delta, k)`` tuple engages
           the single-scan DELTA PUSHDOWN: the greeks fact is scanned ONCE
           (``cand``) and option SYMBOLS are ranked per ``(expiration,
           trade_date)`` by their nearest ``|delta - target|`` (tie-break lower
-          strike, then symbol) — the IDENTICAL key ``match_by_delta`` uses — with
+          strike, then symbol) — the IDENTICAL key ``match_by_delta`` uses (see
+          :func:`symbol_delta_rank`, the shared Python reference) — with
           only the top-``k`` SYMBOLS retained; EVERY physical row of each retained
           symbol is returned (via a keyset whose greeks side REUSES ``cand`` and
           whose price side is a k-symbol PK lookup — no second greeks scan).
@@ -558,8 +660,7 @@ class SqlOptionsDataReader:
           duplicate set is present, so both ``match_by_delta``'s pick AND
           ``_row_for_contract``'s first-by-instrument_id row match.  Returned ROW
           SHAPE is unchanged — selection consumes the retained symbols' rows
-          instead of the full chain.  Pushdown is Option A only (mutually
-          exclusive with ``strike_windows``, which is ignored when set).  NULL
+          instead of the full chain.  NULL
           deltas are NOT filtered — ``min`` ignores them and ``NULLS LAST`` ranks
           an all-NULL symbol last, so the non-null winner is unaffected AND an
           all-NULL-delta chain returns rows that ``match_by_delta`` classifies
@@ -608,50 +709,16 @@ class SqlOptionsDataReader:
                 dim_where.append(_cycle_frag)
                 dim_params.append(_cycle_val)
 
-            # Pushdown (Option C) is mutually exclusive with a strike window
-            # (Option B): it replaces the full chain with a delta rank, so any
-            # ``strike_windows`` is ignored while pushing down.
             pushdown = delta_pushdown is not None
-            use_strikes = strike_windows is not None and not pushdown
             # Build the win VALUES table.  The FIRST row casts each column so the
             # CTE's column types are fixed for the joins.
             win_params: list[Any] = []
             value_rows: list[str] = []
             for i, (exp, lo, hi) in enumerate(win_rows):
-                if use_strikes:
-                    slo, shi = strike_windows.get(exp, (None, None))  # type: ignore[union-attr]
-                    value_rows.append(
-                        "(%s::date, %s::date, %s::date, %s::double precision, "
-                        "%s::double precision)"
-                        if i == 0
-                        else "(%s, %s, %s, %s, %s)"
-                    )
-                    win_params.extend(
-                        [
-                            exp,
-                            lo,
-                            hi,
-                            None if slo is None else float(slo),
-                            None if shi is None else float(shi),
-                        ]
-                    )
-                else:
-                    value_rows.append(
-                        "(%s::date, %s::date, %s::date)" if i == 0 else "(%s, %s, %s)"
-                    )
-                    win_params.extend([exp, lo, hi])
-
-            win_cols = (
-                "exp, lo, hi, strike_lo, strike_hi" if use_strikes else "exp, lo, hi"
-            )
-            strike_filter = (
-                "\n                      AND (w.strike_lo IS NULL "
-                "OR d.strike >= w.strike_lo)"
-                "\n                      AND (w.strike_hi IS NULL "
-                "OR d.strike <= w.strike_hi)"
-                if use_strikes
-                else ""
-            )
+                value_rows.append(
+                    "(%s::date, %s::date, %s::date)" if i == 0 else "(%s, %s, %s)"
+                )
+                win_params.extend([exp, lo, hi])
 
             # SHARED scaffolding (both branches): the ``win`` VALUES prune and
             # ``ids`` (this root's contracts of the requested type/cycle whose
@@ -659,7 +726,7 @@ class SqlOptionsDataReader:
             # ONCE so the load-bearing per-expiration window + chunk prune cannot
             # drift between the full-chain and pushdown branches.
             cte_prefix = f"""
-                WITH win ({win_cols}) AS (
+                WITH win (exp, lo, hi) AS (
                     VALUES {", ".join(value_rows)}
                 ),
                 ids AS (
@@ -669,23 +736,18 @@ class SqlOptionsDataReader:
                            d.provider
                     FROM {SCHEMA}.dim_instrument d
                     JOIN win w ON d.expiration = w.exp
-                    WHERE {" AND ".join(dim_where)}{strike_filter}
+                    WHERE {" AND ".join(dim_where)}
                 )"""
 
             # SHARED final projection + price/greeks join tail.  The driving CTE
-            # (``keyset`` OR ``picks``) is aliased ``k`` in BOTH branches, so the
-            # returned ROW SHAPE is IDENTICAL and ``match_by_delta`` consumes the
-            # pushdown output unchanged (k rows/group instead of the whole chain).
+            # (``keyset`` OR ``pick_keyset``) is aliased ``k`` in BOTH branches, so
+            # the returned ROW SHAPE is IDENTICAL and ``match_by_delta`` consumes
+            # the pushdown output unchanged (k rows/group instead of the whole
+            # chain).
             def _select_tail(driver: str) -> str:
                 return f"""
                 SELECT k.trade_date,
-                       i.instrument_id AS option_instrument_id, i.option_symbol,
-                       i.root_symbol, i.underlying_symbol,
-                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
-                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
-                       g.delta, g.gamma, g.vega, g.theta,
-                       g.implied_vol, g.underlying_price,
-                       i.contract_size, i.currency, i.provider
+                       {_CHAIN_SELECT_COLS}
                 FROM {driver} k
                 JOIN ids i ON i.instrument_id = k.instrument_id
                 LEFT JOIN {SCHEMA}.fact_price_eod p
@@ -696,7 +758,7 @@ class SqlOptionsDataReader:
                        ON g.instrument_id = k.instrument_id
                       AND g.trade_date = k.trade_date
                       AND g.trade_date BETWEEN %s AND %s
-                ORDER BY k.trade_date, i.instrument_id
+                {_CHAIN_ORDER_BY}
             """
 
             params: list[Any] = []
@@ -764,8 +826,7 @@ class SqlOptionsDataReader:
                         SELECT expiration, trade_date, option_symbol,
                                ROW_NUMBER() OVER (
                                    PARTITION BY expiration, trade_date
-                                   ORDER BY best_dist ASC NULLS LAST,
-                                            best_strike ASC, option_symbol ASC
+                                   {_DELTA_RANK_ORDER_BY}
                                ) AS srn
                         FROM sym
                     ) s
@@ -844,6 +905,27 @@ class SqlOptionsDataReader:
                 bucket = results.get(row_date)
                 if bucket is not None:
                     bucket.append((contract, row))
+
+            if pushdown:
+                # Observability (audit_d3 INV-2/3): the pushdown's ``k`` cushions
+                # the ~2.68% duplicate-instrument_id quirk + delta ties, and k=1 is
+                # exact when the rank-1 symbol is unique.  A >k tie at the rank-1
+                # best-|delta-target| distance is the ONE regime where the SQL
+                # symbol tie-break could drop ``match_by_delta``'s pick — never
+                # silent.  Warn when the retained set shows that boundary signature.
+                _ties = _count_pushdown_boundary_ties(results, float(target), int(k))
+                if _ties:
+                    logger.warning(
+                        "delta pushdown on '%s' (target=%s, k=%d): %d "
+                        "(expiration, trade_date) group(s) filled all k symbol slots "
+                        "with a best-|delta-target| TIE — a >k tie could let the SQL "
+                        "symbol tie-break drop match_by_delta's pick (audit_d3 "
+                        "INV-2/3). Investigate if the target delta is degenerate.",
+                        root,
+                        target,
+                        k,
+                        _ties,
+                    )
             return results
         except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(
@@ -971,13 +1053,7 @@ class SqlOptionsDataReader:
                       AND g.trade_date BETWEEN %s AND %s
                 )
                 SELECT k.trade_date,
-                       i.instrument_id AS option_instrument_id, i.option_symbol,
-                       i.root_symbol, i.underlying_symbol,
-                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
-                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
-                       g.delta, g.gamma, g.vega, g.theta,
-                       g.implied_vol, g.underlying_price,
-                       i.contract_size, i.currency, i.provider
+                       {_CHAIN_SELECT_COLS}
                 FROM keyset k
                 JOIN ids i ON i.instrument_id = k.instrument_id
                 LEFT JOIN {SCHEMA}.fact_price_eod p
@@ -988,7 +1064,7 @@ class SqlOptionsDataReader:
                        ON g.instrument_id = k.instrument_id
                       AND g.trade_date = k.trade_date
                       AND g.trade_date BETWEEN %s AND %s
-                ORDER BY k.trade_date, i.instrument_id
+                {_CHAIN_ORDER_BY}
             """
             params: list[Any] = []
             params.extend(win_params)  # VALUES
@@ -1355,6 +1431,11 @@ class SqlOptionsDataReader:
             iv_stored=_sanitize_iv(to_float(m["implied_vol"]))
             if allow_greeks
             else None,
+            # COUPLED (audit_d3 INV-4): the delta-pushdown SQL rank
+            # (query_chain_bulk_multi) ranks on RAW ``g.delta`` with NO transform.
+            # If any sanitize/scale/sign step is ever added to delta_stored here
+            # (mirroring _sanitize_iv / _scale), it MUST be mirrored into that CTE
+            # or the pushdown pick silently diverges from match_by_delta.
             delta_stored=to_float(m["delta"]) if allow_greeks else None,
             gamma_stored=to_float(m["gamma"]) if allow_greeks else None,
             theta_stored=to_float(m["theta"]) if allow_greeks else None,
