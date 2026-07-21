@@ -859,6 +859,7 @@ class SqlOptionsDataReader:
         root: str,
         type: Literal["C", "P", "both"],
         held_windows: Sequence[tuple[str, date, date]],
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         """Identity keyset fetch of specific HELD option SYMBOLS over per-symbol
         date windows (hold-leg two-phase Phase 2).
@@ -869,12 +870,9 @@ class SqlOptionsDataReader:
         date, because ``_resolve_hold`` reads the OLD contract's mid on the roll
         seam — see ``hold_pushdown_design.md`` §2.
 
-        Returns EVERY physical row of each symbol over its window — all duplicate
-        ``instrument_id`` rows (the ~2.68% OPT_SP_500 dup quirk) — so
-        ``_row_for_contract``'s first-by-``instrument_id`` pick is byte-identical
-        to the full-chain hold path (the dup trap R2 already handles).  Keyed by
-        the fact ``trade_date``; a date with no row is simply absent (the caller
-        reads ``.get(d, [])``).
+        Returns EVERY physical row of each symbol over its window keyed by the fact
+        ``trade_date``; a date with no row is simply absent (the caller reads
+        ``.get(d, [])``).
 
         Symbol-keyed (``VALUES(sym, lo, hi) JOIN d.symbol``): the held symbol is
         already SELECTED in Python (from the Phase-1 candidate chain), so this is a
@@ -882,8 +880,20 @@ class SqlOptionsDataReader:
         ``trade_date BETWEEN <chunk-min> AND <chunk-max>`` prune on every
         partitioned-fact reference collapses the yearly-partition fan-out (the same
         gotcha :meth:`query_chain_bulk_multi` honours — a runtime-only join fans
-        across all ~71 partitions).  No ``expiration_cycle`` filter is needed: the
-        symbol identifies the contract uniquely, so a cycle predicate is redundant.
+        across all ~71 partitions).
+
+        ``expiration_cycle`` applies the SAME cycle predicate the full-chain path
+        (:meth:`query_chain_bulk` / :meth:`query_chain_bulk_multi`) uses.  This is
+        LOAD-BEARING for byte-identity, NOT a redundant filter: a symbol is NOT
+        unique across cycles — the ~2.68% OPT_SP_500 "duplicate-instrument_id"
+        quirk is a SINGLE symbol carrying two ``instrument_id`` rows under DIFFERENT
+        ``expiration_cycle`` tags (e.g. the 3rd-Friday contract tagged both ``"M"``
+        and ``"W3 Friday"``), with different quotes.  The full-chain path's cycle
+        filter drops the off-cycle sibling, so a weekly leg only ever sees the
+        ``"W3 Friday"`` row; without the SAME filter here, this fetch re-admits the
+        ``"M"`` sibling and ``_row_for_contract``'s first-by-``instrument_id`` pick
+        surfaces the WRONG physical row (live 4970_P/2024-03-06: 7.40 vs 4.15).
+        ``None`` = no filter (all cycles), matching the full-chain ``None`` case.
         """
         results: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
         # De-dupe by symbol (a symbol could in principle appear twice with the
@@ -916,6 +926,13 @@ class SqlOptionsDataReader:
             if type in ("C", "P"):
                 dim_where.append("option_type = %s")
                 dim_params.append(type.upper())
+            # Cycle predicate — MUST match the full-chain path so a cross-cycle
+            # duplicate symbol (~2.68% OPT_SP_500) collapses to the SAME surviving
+            # instrument_id(s).  See the method docstring.
+            _cycle_frag, _cycle_val = _cycle_predicate(expiration_cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                dim_params.append(_cycle_val)
 
             value_rows: list[str] = []
             win_params: list[Any] = []

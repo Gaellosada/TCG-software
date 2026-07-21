@@ -642,14 +642,18 @@ class _CycleInjectingBulkReader:
         type: Literal["C", "P", "both"],
         held_windows: "Sequence[tuple[str, date, date]]",
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        # No cycle injection: the held SYMBOL identifies the contract uniquely,
-        # so a cycle predicate is redundant (guardrail 11 does not apply — this is
-        # an identity fetch, not a chain slice).  Only called when
-        # ``supports_held_rows`` is True.
+        # INJECT the cycle (guardrail 11): a held SYMBOL is NOT unique across
+        # cycles — the ~2.68% duplicate-instrument_id quirk is one symbol double-
+        # tagged (e.g. "M" + "W3 Friday") with different quotes.  The full-chain
+        # path filters the chain by cycle, dropping the off-cycle sibling; this
+        # identity fetch MUST apply the SAME filter or it re-admits the wrong
+        # sibling and ``_row_for_contract`` surfaces a different physical row.
+        # Only called when ``supports_held_rows`` is True.
         return await self._inner.query_held_rows(
             root=root,
             type=type,
             held_windows=held_windows,
+            expiration_cycle=self._cycle,
         )
 
 
@@ -1746,10 +1750,11 @@ async def _resolve_bulk(
         year is ~47 — can push a single ``query_chain_bulk_multi`` toward the
         timeout under concurrent load; split it into contiguous sub-chunks of
         ``_MAX_EXPS_PER_SUBCHUNK`` expirations each, run as independent tasks
-        (each with its own per-chunk failure isolation), and merge.  A date's rows
-        never span two sub-chunks (each date belongs to exactly one expiration
-        window here), so within-date ``instrument_id`` order is preserved →
-        byte-identical to the single-query result.
+        (each with its own per-chunk failure isolation), and merge.  Sub-chunks are
+        cut on a CONTIGUOUS expiration sort and merged in that order, so even a date
+        that appears in two expiration windows (a HOLD roll day carries the OLD +
+        NEW chains) keeps its rows in the same instrument-ascending, expiration-
+        ordered sequence the single query would produce → byte-identical.
         """
         if _delta_pushdown is None and len(members) > _MAX_EXPS_PER_SUBCHUNK:
             ordered = sorted(members, key=lambda m: m[0])  # contiguous by expiration
@@ -1869,28 +1874,52 @@ async def _resolve_bulk(
     if hold_between_rolls:
         # TWO-PHASE only: the Phase-2 held-symbol identity fetch, issued INSIDE
         # ``_resolve_hold`` after per-segment selection freezes the held symbols.
-        # Failure-isolated (mirrors ``_fetch_exp``): a dwh error degrades the held
-        # dates to NaN (their error codes stand) rather than 500ing the resolve.
-        async def _fetch_held(
-            held_windows: "list[tuple[str, date, date]]",
+        # Failure-isolated PER YEAR (mirrors Phase-1's per-year-chunk isolation):
+        # the windows are grouped by their segment-open year and fetched as
+        # independent tasks, so a transient dwh error NaNs only THAT year's held
+        # dates (their error codes stand) instead of blanking the whole leg — and
+        # never 500s the resolve.
+        async def _fetch_held_chunk(
+            year: int,
+            windows: "list[tuple[str, date, date]]",
         ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-            if not held_windows:
-                return {}
             try:
                 async with _bulk_sem:
                     return await bulk_reader.query_held_rows(
                         root=collection,
                         type=option_type,
-                        held_windows=held_windows,
+                        held_windows=windows,
                     )
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
-                    "Phase-2 held-symbol fetch failed (%d symbols): %s. Held "
-                    "dates degrade to NaN (no 500).",
-                    len(held_windows),
+                    "Phase-2 held-symbol fetch failed for year=%s (%d symbols): "
+                    "%s. That year's held dates degrade to NaN (no 500).",
+                    year,
+                    len(windows),
                     exc,
                 )
                 return {}
+
+        async def _fetch_held(
+            held_windows: "list[tuple[str, date, date]]",
+        ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+            if not held_windows:
+                return {}
+            # Group by segment-open (``lo``) year — the same calendar-year
+            # granularity Phase-1 chunks on.  A window that straddles a year
+            # boundary stays in its ``lo`` year (a superset tail is harmless; the
+            # marking loop reads only the dates it needs).
+            by_year: dict[int, list[tuple[str, date, date]]] = defaultdict(list)
+            for sym, lo, hi in held_windows:
+                by_year[lo.year].append((sym, lo, hi))
+            parts = await asyncio.gather(
+                *[_fetch_held_chunk(y, w) for y, w in by_year.items()]
+            )
+            merged: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+            for part in parts:
+                for d, rows in part.items():
+                    merged[d] = merged.get(d, []) + rows
+            return merged
 
         return await _resolve_hold(
             dates=dates,

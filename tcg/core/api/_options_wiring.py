@@ -154,11 +154,13 @@ class _BulkOptionsDataPortAdapter:
         root: str,
         type: Literal["C", "P", "both"],
         held_windows: "Sequence[tuple[str, date, date]]",
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         return await self._reader.query_held_rows(
             root=root,
             type=type,
             held_windows=held_windows,
+            expiration_cycle=expiration_cycle,
         )
 
 

@@ -16,6 +16,7 @@ and the sub-chunk safety net — all without a live warehouse.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Literal, Sequence
 
@@ -28,6 +29,7 @@ from tcg.engine.options.series.stream_resolver import (
 )
 from tcg.types.options import (
     ByDelta,
+    ByMoneyness,
     ByStrike,
     NearestToTarget,
     OptionContractDoc,
@@ -56,6 +58,7 @@ class _TwoPhaseReader:
         self._chains = chains
         self.multi_calls: list[dict] = []
         self.held_calls: list[list[tuple[str, date, date]]] = []
+        self.held_cycles: list[object] = []
         self.bulk_calls: list[dict] = []
 
     async def query_chain_bulk_multi(
@@ -108,8 +111,13 @@ class _TwoPhaseReader:
         root: str,
         type: Literal["C", "P", "both"],
         held_windows: Sequence[tuple[str, date, date]],
+        expiration_cycle=None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        # Mirror the SQL identity keyset: symbol + type + CYCLE filter (the cycle
+        # predicate disambiguates the ~2.68% cross-cycle duplicate-instrument_id
+        # symbols so the surviving physical rows match the full-chain path).
         self.held_calls.append(list(held_windows))
+        self.held_cycles.append(expiration_cycle)
         syms = {sym: (lo, hi) for sym, lo, hi in held_windows}
         result: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
         for d, chain in self._chains.items():
@@ -118,7 +126,11 @@ class _TwoPhaseReader:
                 if win is None:
                     continue
                 lo, hi = win
-                if lo <= d <= hi and (c.type == type or type == "both"):
+                if (
+                    lo <= d <= hi
+                    and (c.type == type or type == "both")
+                    and _cycle_matches(c.expiration_cycle, expiration_cycle)
+                ):
                     result.setdefault(d, []).append((c, r))
         return result
 
@@ -398,3 +410,184 @@ class _FullChainNoMulti(_TwoPhaseReader):
 
     query_chain_bulk_multi = None  # type: ignore[assignment]
     query_held_rows = None  # type: ignore[assignment]
+
+
+# --------------------------------------------------------------------------- #
+# Regression: cross-cycle DUPLICATE-instrument_id held symbol (the ~2.68% quirk)
+# --------------------------------------------------------------------------- #
+# The dwh tags the SAME physical option symbol under TWO ``expiration_cycle``
+# values in overlapping eras (e.g. the 3rd-Friday contract is both ``"M"`` and
+# ``"W3 Friday"``).  Both siblings share ONE ``contract_id`` (== symbol) but carry
+# DIFFERENT quotes.  The full-chain path filters the chain by the resolver's
+# (expanded) cycle, so a weekly leg only ever sees the ``"W3 Friday"`` sibling.
+# Phase-2 ``query_held_rows`` MUST apply the SAME cycle filter, or it re-admits the
+# ``"M"`` sibling and ``_row_for_contract`` (first-by-instrument_id) surfaces the
+# WRONG physical row (the live 4970_P/2024-03-06 blocker: 7.40 vs 4.15).
+_XC_EXP = date(2024, 3, 15)
+_XC_DATES = [date(2024, 3, 5), date(2024, 3, 6), date(2024, 3, 7)]
+_XC_CID = "OPT_FUT_SP_500_EMINI_20240315_4500_P"
+# Per-date (M-sibling close, W3-sibling close): the M sibling is the one the
+# weekly cycle filter must EXCLUDE; distinct values so a wrong pick is visible.
+_XC_QUOTES = {
+    _XC_DATES[0]: (7.40, 4.15),
+    _XC_DATES[1]: (3.25, 2.35),
+    _XC_DATES[2]: (3.90, 2.70),
+}
+
+
+def _xc_contract(cycle: str) -> OptionContractDoc:
+    # Both siblings share ONE contract_id but differ in expiration_cycle — the
+    # real dup shape (``_contract`` bakes cycle into the id, so override it).
+    c = _contract(strike=4500.0, expiration=_XC_EXP, type_="P", cycle=cycle)
+    return replace(c, contract_id=_XC_CID)
+
+
+def _xc_chains() -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+    chains: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+    for d in _XC_DATES:
+        m_close, w_close = _XC_QUOTES[d]
+        chains[d] = [
+            # M sibling FIRST so a cycle-blind first-by-iid pick lands on it.
+            (
+                _xc_contract("M"),
+                _row(row_date=d, mid=m_close, delta=-0.10, close=m_close),
+            ),
+            (
+                _xc_contract("W3 Friday"),
+                _row(row_date=d, mid=w_close, delta=-0.10, close=w_close),
+            ),
+        ]
+    return chains
+
+
+async def _resolve_xc(reader, *, cycle):
+    roll_info: dict = {}
+    values, errors, contracts = await resolve_option_stream(
+        dates=_XC_DATES,
+        collection="OPT_SP_500",
+        option_type="P",
+        cycle=cycle,
+        maturity=NearestToTarget(target_dte_days=9),
+        selection=_BYSTRIKE_4500,
+        stream="close",
+        roll_offset=RollOffset(),
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=None,
+        bulk_chain_reader=reader,
+        available_expirations=[_XC_EXP],
+        hold_between_rolls=True,
+        hold_roll_info_out=roll_info,
+        available_expirations_by_date={d: [_XC_EXP] for d in _XC_DATES},
+    )
+    return values, errors, contracts, roll_info
+
+
+_BYSTRIKE_4500 = ByStrike(strike=4500.0)
+# The generic-weekly cycle expands to this tuple at the wiring layer; the resolver
+# receives the expanded value.  ``"M"`` is deliberately absent → excluded.
+_WEEKLY_CYCLE = ("W", "W1 Friday", "W2 Friday", "W3 Friday", "W4 Friday")
+
+
+class TestTwoPhaseCrossCycleDupRow:
+    """A held symbol with an ``M`` and a ``W3 Friday`` sibling under a WEEKLY leg:
+    Phase-2 must mark the SAME physical row the full-chain path marks."""
+
+    async def test_held_row_matches_full_chain_under_weekly_filter(self):
+        full = _FullChainHoldReader(_xc_chains())
+        two = _TwoPhaseReader(_xc_chains())
+        v_full, _e, _c, _ri = await _resolve_xc(full, cycle=_WEEKLY_CYCLE)
+        v_two, _e2, _c2, _ri2 = await _resolve_xc(two, cycle=_WEEKLY_CYCLE)
+
+        # The full-chain path only ever sees the W3 sibling → marks its closes.
+        assert list(v_full) == [4.15, 2.35, 2.70]
+        # Two-phase MUST match it (pre-fix it re-admitted the M sibling → 7.40...).
+        assert _arr_eq(v_full, v_two), (
+            f"two-phase marked the wrong dup sibling: {list(v_two)} != {list(v_full)}"
+        )
+        # Structural: Phase-2 was told the same cycle the full-chain path filters on.
+        assert two.held_cycles and all(c == _WEEKLY_CYCLE for c in two.held_cycles)
+
+    async def test_no_cycle_still_byte_identical(self):
+        # cycle=None (all cycles): both paths keep BOTH siblings, same iid order →
+        # first-by-iid pick identical.  Guards against the fix over-filtering.
+        full = _FullChainHoldReader(_xc_chains())
+        two = _TwoPhaseReader(_xc_chains())
+        v_full, _e, _c, _ri = await _resolve_xc(full, cycle=None)
+        v_two, _e2, _c2, _ri2 = await _resolve_xc(two, cycle=None)
+        assert _arr_eq(v_full, v_two)
+
+
+# --------------------------------------------------------------------------- #
+# M3: ByMoneyness + bs_mid hold two-phase byte-identity (in the gate, untested
+#     at the value level before this).
+# --------------------------------------------------------------------------- #
+async def _resolve_hold_ex(reader, *, selection, stream, underlying):
+    roll_info: dict = {}
+    values, errors, contracts = await resolve_option_stream(
+        dates=_HOLD_DATES,
+        collection="OPT_SP_500",
+        option_type="P",
+        cycle=None,
+        maturity=NearestToTarget(target_dte_days=20),
+        selection=selection,
+        stream=stream,
+        roll_offset=RollOffset(),
+        chain_reader=reader,
+        maturity_resolver=DefaultMaturityResolver(),
+        underlying_price_resolver=underlying,
+        bulk_chain_reader=reader,
+        available_expirations=_EXPS,
+        hold_between_rolls=True,
+        hold_roll_info_out=roll_info,
+        available_expirations_by_date=_BY_DATE,
+    )
+    return values, errors, contracts, roll_info
+
+
+def _const_underlying(price: float):
+    async def _resolver(contract, d):
+        return price
+
+    return _resolver
+
+
+class TestTwoPhaseHoldByteIdentityByMoneynessAndBsMid:
+    async def test_bymoneyness_close_identical(self):
+        # S=4300 → K/S=1.0 selects the 4300 rung; generous tolerance.
+        sel = ByMoneyness(target_K_over_S=1.0, tolerance=0.30)
+        und = _const_underlying(4300.0)
+        full = _FullChainHoldReader(_hold_chains())
+        two = _TwoPhaseReader(_hold_chains())
+        v_full, e_full, _c, ri_full = await _resolve_hold_ex(
+            full, selection=sel, stream="close", underlying=und
+        )
+        v_two, e_two, _c2, ri_two = await _resolve_hold_ex(
+            two, selection=sel, stream="close", underlying=und
+        )
+        assert two.held_calls  # two-phase path actually engaged
+        assert _arr_eq(v_full, v_two)
+        assert e_full == e_two
+        for key in ri_full:
+            assert _arr_eq(ri_full[key], ri_two[key]), f"roll_info[{key}] diverged"
+
+    async def test_bsmid_stream_identical(self):
+        # bs_mid is COMPUTED (Black-76 from the row IV + the underlying future);
+        # both paths must feed the kernel the SAME row → identical prices.
+        und = _const_underlying(4500.0)
+        full = _FullChainHoldReader(_hold_chains())
+        two = _TwoPhaseReader(_hold_chains())
+        v_full, e_full, _c, ri_full = await _resolve_hold_ex(
+            full, selection=_BYDELTA, stream="bs_mid", underlying=und
+        )
+        v_two, e_two, _c2, ri_two = await _resolve_hold_ex(
+            two, selection=_BYDELTA, stream="bs_mid", underlying=und
+        )
+        assert two.held_calls
+        # Non-trivial: at least one finite computed price (guards against an
+        # all-NaN degenerate "identity").
+        assert np.any(np.isfinite(np.asarray(v_full, dtype=np.float64)))
+        assert _arr_eq(v_full, v_two)
+        assert e_full == e_two
+        for key in ri_full:
+            assert _arr_eq(ri_full[key], ri_two[key]), f"roll_info[{key}] diverged"

@@ -138,6 +138,7 @@ class OptionsDataReader(Protocol):
         root: str,
         type: Literal["C", "P", "both"],
         held_windows: Sequence[tuple[str, date, date]],
+        expiration_cycle: str | Sequence[str] | None = None,
     ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
         """Identity keyset fetch of specific HELD option SYMBOLS (Phase 2).
 
@@ -145,13 +146,19 @@ class OptionsDataReader(Protocol):
         ``[(symbol, lo, hi), ...]`` — each ALREADY-SELECTED frozen contract's
         ``symbol`` (== ``OptionContractDoc.contract_id``) and its held date-range;
         ``hi`` must include the next roll date (the resolver reads the OLD
-        contract's mid on the roll seam).  Returns EVERY physical row of each
-        symbol over its window (all duplicate ``instrument_id`` rows), keyed by
-        fact ``trade_date``, so ``_row_for_contract``'s first-by-``instrument_id``
-        pick is byte-identical to the full-chain hold path.  SQL never ranks or
+        contract's mid on the roll seam).  Returns every physical row of each
+        symbol over its window, keyed by fact ``trade_date``.  SQL never ranks or
         picks — selection stays in Python.  Callers must feature-detect
         (``callable(getattr(reader, "query_held_rows", None))``) and fall back to
         the full-chain hold path when a reader does not implement it.
+
+        ``expiration_cycle`` MUST be the SAME cycle the full-chain path filters on
+        (the wiring layer injects the caller's cycle): a symbol is NOT unique
+        across cycles — the ~2.68% duplicate-``instrument_id`` quirk is one symbol
+        double-tagged (e.g. ``"M"`` + ``"W3 Friday"``) with different quotes, and
+        only the matching-cycle sibling must survive so ``_row_for_contract``'s
+        first-by-``instrument_id`` pick is byte-identical to the full-chain path.
+        ``None`` = all cycles.
         """
         ...
 
