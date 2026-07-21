@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from tcg.data._sql.options import _count_pushdown_boundary_ties, symbol_delta_rank
+from tcg.data._sql.options import _pushdown_overflow_groups, symbol_delta_rank
 from tcg.engine.options.selection._match import match_by_delta
 from tcg.types.options import OptionContractDoc, OptionDailyRow
 
@@ -143,30 +143,68 @@ class TestReferenceMatchesMatchByDelta:
         assert res.error_code == "missing_delta_no_compute"
 
 
-class TestPushdownBoundaryTieDetection:
-    """audit_d3 INV-2/3: a >k tie at the rank-1 best-distance is the ONE regime
-    the SQL symbol tie-break could resolve differently from match_by_delta — it
-    must be observable, never silent."""
+class TestPushdownOverflowDetection:
+    """audit_d3 INV-2/3: >k symbols sharing the rank-1 (best_dist, best_strike)
+    pair is the ONE regime the SQL ``option_symbol`` tie-break could resolve
+    differently from match_by_delta's instrument_id order.  The detector runs on a
+    ``srn <= k+1`` fetch: an overflow group has ≥ k+1 symbols whose (k+1)th shares
+    the rank-1 (dist, strike); non-overflow groups that fetched k+1 symbols mark
+    the surplus one for discard (byte-identity with top-k)."""
 
-    def test_boundary_tie_detected_when_k_slots_all_tied(self):
-        # k=2, two symbols both at dist 0.05 (tied) filling both slots.
+    def test_overflow_detected_when_kplus1th_shares_dist_and_strike(self):
+        # k=1, two symbols at the SAME dist AND the SAME strike -> the ONLY regime
+        # where top-k can drop match_by_delta's pick (only the tertiary key differs:
+        # SQL option_symbol vs match_by_delta's instrument_id order).
         results = {
             _D: [
-                (_c("P-A", 4200.0), _r(_TARGET - 0.05)),
-                (_c("P-B", 4400.0), _r(_TARGET + 0.05)),
+                (_c("P-A", 4300.0), _r(_TARGET)),
+                (_c("P-B", 4300.0), _r(_TARGET)),
             ]
         }
-        assert _count_pushdown_boundary_ties(results, _TARGET, k=2) == 1
+        overflow, drop = _pushdown_overflow_groups(results, _TARGET, k=1)
+        assert overflow == {(_EXP, _D)}
+        assert drop == {}
 
-    def test_no_tie_when_distances_differ(self):
+    def test_no_overflow_when_tie_has_distinct_strikes(self):
+        # k=1, SAME dist but DISTINCT strikes (the expiry-day delta≈0 regime):
+        # match_by_delta AND SQL both pick the lowest strike -> NOT an overflow,
+        # the surplus higher-strike symbol is simply discarded (speedup preserved).
         results = {
             _D: [
-                (_c("P-A", 4200.0), _r(_TARGET)),  # dist 0.00
-                (_c("P-B", 4400.0), _r(_TARGET + 0.05)),  # dist 0.05
+                (_c("P-lo", 4200.0), _r(_TARGET)),  # dist 0.00, low strike -> rank-1
+                (_c("P-hi", 4400.0), _r(_TARGET)),  # dist 0.00, high strike -> surplus
             ]
         }
-        assert _count_pushdown_boundary_ties(results, _TARGET, k=2) == 0
+        overflow, drop = _pushdown_overflow_groups(results, _TARGET, k=1)
+        assert overflow == set()
+        assert drop == {(_EXP, _D): "P-hi"}  # the higher-strike surplus symbol
 
-    def test_k_below_two_never_flagged(self):
+    def test_no_overflow_when_kplus1th_farther(self):
+        # k=1, the (k+1)th symbol is strictly farther -> discard it, not overflow.
+        results = {
+            _D: [
+                (_c("P-A", 4200.0), _r(_TARGET)),  # dist 0.00 (rank-1)
+                (_c("P-B", 4400.0), _r(_TARGET + 0.05)),  # dist 0.05 (surplus)
+            ]
+        }
+        overflow, drop = _pushdown_overflow_groups(results, _TARGET, k=1)
+        assert overflow == set()
+        assert drop == {(_EXP, _D): "P-B"}  # the farther, alphabetically-later one
+
+    def test_no_overflow_when_only_k_symbols(self):
+        # Only k symbols returned (no surplus (k+1)th fetched) -> nothing to judge.
         results = {_D: [(_c("P-A", 4200.0), _r(_TARGET))]}
-        assert _count_pushdown_boundary_ties(results, _TARGET, k=1) == 0
+        overflow, drop = _pushdown_overflow_groups(results, _TARGET, k=1)
+        assert overflow == set()
+        assert drop == {}
+
+    def test_all_null_rank1_never_overflow(self):
+        # A rank-1 best_dist of None (all-NULL delta) has no real winner.
+        results = {
+            _D: [
+                (_c("P-A", 4200.0), _r(None)),
+                (_c("P-B", 4400.0), _r(None)),
+            ]
+        }
+        overflow, _drop = _pushdown_overflow_groups(results, _TARGET, k=1)
+        assert overflow == set()

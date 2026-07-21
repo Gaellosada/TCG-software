@@ -322,7 +322,10 @@ class TestQueryChainBulkMultiDeltaPushdown:
     async def test_top_syms_srn_le_k_filter(self):
         sql, params = await self._run_pushdown()
         assert "WHERE srn <= %s" in sql
-        assert self._K in list(params), "k must be bound for the srn<=k filter"
+        # k+1 is bound (not k): the pushdown fetches ONE surplus symbol so a >k
+        # rank-1 delta tie is detectable by the overflow safeguard (item E). The
+        # surplus symbol is discarded for non-overflow groups -> byte-identical.
+        assert self._K + 1 in list(params), "k+1 must be bound for the srn<=k+1 filter"
 
     async def test_returns_all_rows_of_top_k_symbols(self):
         """BYTE-IDENTITY on the duplicate-instrument_id quirk: the pick_keyset

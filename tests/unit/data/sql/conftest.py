@@ -116,9 +116,11 @@ class SeededDwh:
     e1: date
     e2: date
     e3: date
+    e4: date
     e1_dates: tuple[date, ...]
     e2_dates: tuple[date, ...]
     held_dates: tuple[date, ...]
+    e4_dates: tuple[date, ...]
 
 
 # --------------------------------------------------------------------------- #
@@ -129,9 +131,11 @@ ROOT = "OPT_TEST"
 E1 = date(2024, 3, 15)  # delta-pushdown group (2 trade dates)
 E2 = date(2024, 4, 19)  # delta tie group
 E3 = date(2024, 3, 22)  # held-rows cross-cycle group
+E4 = date(2024, 5, 17)  # >k RANK-1 OVERFLOW group (item E)
 E1_DATES = (date(2024, 3, 1), date(2024, 3, 6))
 E2_DATES = (date(2024, 4, 1),)
 HELD_DATES = (date(2024, 3, 5), date(2024, 3, 6))
+E4_DATES = (date(2024, 5, 2),)
 
 _DDL = """
 CREATE SCHEMA tcg_instruments;
@@ -193,6 +197,16 @@ def _dim_rows() -> list[tuple]:
         # E3 held-rows CROSS-CYCLE dup: ONE symbol, two iids under M vs W3 Friday.
         (110, "OPT_TEST_4970P", "M", 4970, E3),  # lower iid -> first-by-iid on revert
         (111, "OPT_TEST_4970P", "W3 Friday", 4970, E3),
+        # E4 >k OVERFLOW group (item E): TWO distinct symbols sharing the SAME
+        # strike AND the SAME delta (an exact rank-1 tie).  This is the ONLY
+        # regime where top-k can drop match_by_delta's pick: distinct-strike ties
+        # never bite (both rank by lower-strike, so the winner is always kept),
+        # but a same-strike tie is broken by option_symbol in SQL vs by input
+        # (instrument_id) order in match_by_delta.  Here the iid order (ZZ=210 <
+        # AA=220) is the OPPOSITE of the symbol-name order (AA < ZZ), so a naive
+        # top-1 keeps AA while match_by_delta over the full chain picks ZZ.
+        (210, "OPT_TEST_ZZ", "M", 4900, E4),  # lower iid -> full-chain winner
+        (220, "OPT_TEST_AA", "M", 4900, E4),  # lower symbol -> SQL top-1 keeps this
     ]
     return [
         (
@@ -227,6 +241,8 @@ def _greeks_rows() -> list[tuple]:
         70: -0.50,
         110: -0.10,
         111: -0.10,
+        210: -0.10,  # E4 overflow tie (exact target)
+        220: -0.10,  # E4 overflow tie (exact target)
     }
     dates_for = {
         10: E1_DATES,
@@ -239,6 +255,8 @@ def _greeks_rows() -> list[tuple]:
         70: E2_DATES,
         110: HELD_DATES,
         111: HELD_DATES,
+        210: E4_DATES,
+        220: E4_DATES,
     }
     rows: list[tuple] = []
     for iid, d in deltas.items():
@@ -260,6 +278,8 @@ def _price_rows() -> list[tuple]:
         70: (50.0, 50.4),
         110: (7.30, 7.50),  # M sibling  -> mid 7.40 (WRONG on revert)
         111: (4.10, 4.20),  # W3 Friday  -> mid 4.15 (correct)
+        210: (7.0, 7.4),  # ZZ -> mid 7.20 (the correct full-chain pick)
+        220: (3.0, 3.4),  # AA -> mid 3.20 (the WRONG naive-top-1 pick)
     }
     dates_for = {
         10: E1_DATES,
@@ -272,6 +292,8 @@ def _price_rows() -> list[tuple]:
         70: E2_DATES,
         110: HELD_DATES,
         111: HELD_DATES,
+        210: E4_DATES,
+        220: E4_DATES,
     }
     rows: list[tuple] = []
     for iid, (bid, ask) in quotes.items():
@@ -385,9 +407,11 @@ def seeded_dwh() -> SeededDwh:  # type: ignore[misc]
             e1=E1,
             e2=E2,
             e3=E3,
+            e4=E4,
             e1_dates=E1_DATES,
             e2_dates=E2_DATES,
             held_dates=HELD_DATES,
+            e4_dates=E4_DATES,
         )
     finally:
         proc.terminate()

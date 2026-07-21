@@ -184,38 +184,99 @@ def symbol_delta_rank(
     return [cr for sym in ranked[:k] for cr in by_symbol[sym]]
 
 
-def _count_pushdown_boundary_ties(
+def _pushdown_overflow_groups(
     results: "Mapping[date, list[tuple[OptionContractDoc, OptionDailyRow]]]",
     target: float,
     k: int,
-) -> int:
-    """Count (expiration, trade_date) groups whose retained top-k symbols FILL all
-    k slots AND are ALL tied at one best ``|delta-target|`` distance — the signature
-    of a possible >k tie OVERFLOW where the SQL symbol tie-break could drop
-    ``match_by_delta``'s pick (audit_d3 INV-2/3).
+) -> "tuple[set[tuple[date, date]], dict[tuple[date, date], str]]":
+    """Detect >k RANK-1 delta-tie OVERFLOW groups from a ``srn <= k+1`` fetch.
 
-    Heuristic, computed from the RETURNED rows only (no extra query); over-reports
-    at worst.  ``k < 2`` is never flagged (a lone retained symbol is not a droppable
-    tie signal, and production ``k=8`` never approaches this).
+    The pushdown SQL fetches ONE extra symbol (``srn <= k+1``) so the (k+1)th
+    retained symbol is observable.  A group is an OVERFLOW iff it retained
+    ``≥ k+1`` symbols AND the (k+1)th-ranked symbol shares the rank-1 (minimum)
+    ``(best_dist, best_strike)`` pair — best ``|delta-target|`` within
+    :data:`_DELTA_TIE_TOL` AND identical ``best_strike``.
+
+    WHY BOTH keys (not best_dist alone): ``match_by_delta`` picks the winner by
+    ``(|delta-target| ASC, strike ASC)`` and SQL's ``top_syms`` ranks symbols by
+    ``(best_dist ASC, best_strike ASC, option_symbol ASC)``.  So the winner is the
+    unique ``(min dist, min strike)`` symbol, which is ALSO SQL's rank-1 → always
+    retained.  The ONLY regime where top-k can drop the winner is when MORE than k
+    symbols share that EXACT ``(dist, strike)`` pair: then the tertiary key differs
+    (SQL ``option_symbol`` vs ``match_by_delta``'s stable input/instrument_id
+    order) and the k-subset SQL keeps may exclude ``match_by_delta``'s pick.  A >k
+    tie on distance alone but with DISTINCT strikes (e.g. every deep-OTM put at
+    delta≈0 on an expiration date) is NOT a risk — both sides pick the lowest
+    strike — so it must NOT force a fallback (that would kill the pushdown speedup
+    on every expiry-day resolve for no correctness gain).  The caller MUST fall
+    back to the full chain for the (narrower) real-overflow groups (audit_d3
+    INV-2/3, item E).
+
+    Returns ``(overflow, drop)``:
+
+    * ``overflow`` — the set of ``(expiration, trade_date)`` groups that overflow.
+    * ``drop`` — for every NON-overflow group that returned k+1 symbols, maps
+      ``(expiration, trade_date) -> contract_id`` of the (k+1)th (surplus) symbol
+      to DISCARD, so the result becomes byte-identical to a plain ``srn <= k``
+      fetch (the top-k winners are unaffected; only the extra probe symbol goes).
+
+    Symbols are ranked by the IDENTICAL key as the SQL ``top_syms`` /
+    :func:`symbol_delta_rank`: ``(best_dist ASC NULLS LAST, best_strike ASC,
+    option_symbol ASC)``.  A group whose rank-1 best_dist is ``None`` (all-NULL
+    delta) has no real winner — ``match_by_delta`` returns
+    ``missing_delta_no_compute`` regardless of which symbols survive — so it is
+    NEVER flagged as an overflow.
     """
-    if k < 2:
-        return 0
-    groups: "dict[tuple[date, date], dict[str, list[float | None]]]" = {}
+    # Gather per (expiration, trade_date) group -> per symbol its deltas + strike.
+    groups: "dict[tuple[date, date], dict[str, tuple[list[float | None], float]]]" = {}
     for _d, pairs in results.items():
         for c, r in pairs:
-            groups.setdefault((c.expiration, r.date), {}).setdefault(
-                c.contract_id, []
-            ).append(r.delta_stored)
-    count = 0
-    for _key, syms in groups.items():
-        bests: list[float | None] = []
-        for deltas in syms.values():
-            ds = [abs(d - target) for d in deltas if d is not None]
-            bests.append(min(ds) if ds else None)
-        nn = [b for b in bests if b is not None]
-        if len(nn) == k and (max(nn) - min(nn)) <= _DELTA_TIE_TOL:
-            count += 1
-    return count
+            g = groups.setdefault((c.expiration, r.date), {})
+            deltas, _ = g.setdefault(c.contract_id, ([], c.strike))
+            deltas.append(r.delta_stored)
+
+    overflow: "set[tuple[date, date]]" = set()
+    drop: "dict[tuple[date, date], str]" = {}
+    for key, syms in groups.items():
+        if len(syms) <= k:
+            continue  # ≤ k symbols returned: no surplus (k+1)th was fetched
+        ranked = sorted(
+            syms.items(),
+            key=lambda item: _symbol_rank_key(target, item[1][0], item[1][1], item[0]),
+        )
+        best_dist_1 = _symbol_best_dist(target, ranked[0][1][0])
+        best_dist_kp1 = _symbol_best_dist(target, ranked[k][1][0])
+        strike_1 = ranked[0][1][1]
+        strike_kp1 = ranked[k][1][1]
+        if (
+            best_dist_1 is not None
+            and best_dist_kp1 is not None
+            and (best_dist_kp1 - best_dist_1) <= _DELTA_TIE_TOL
+            and strike_kp1 == strike_1
+        ):
+            overflow.add(key)
+        else:
+            drop[key] = ranked[k][0]  # discard the surplus (k+1)th symbol
+    return overflow, drop
+
+
+def _symbol_best_dist(target: float, deltas: "list[float | None]") -> float | None:
+    """Best (minimum) ``|delta - target|`` over a symbol's rows; None if all NULL.
+
+    Mirrors :func:`symbol_delta_rank`'s ``_best_dist`` — the single delta-rank key.
+    """
+    ds = [abs(d - target) for d in deltas if d is not None]
+    return min(ds) if ds else None
+
+
+def _symbol_rank_key(
+    target: float, deltas: "list[float | None]", strike: float, symbol: str
+) -> tuple:
+    """The SYMBOL rank sort key shared with the SQL ``top_syms`` ORDER BY and
+    :func:`symbol_delta_rank`: ``(best_dist ASC NULLS LAST, best_strike ASC,
+    option_symbol ASC)``."""
+    bd = _symbol_best_dist(target, deltas)
+    return (bd is None, bd if bd is not None else 0.0, strike, symbol)
 
 
 def _display_name(collection: str) -> str:
@@ -655,6 +716,17 @@ class SqlOptionsDataReader:
           only the top-``k`` SYMBOLS retained; EVERY physical row of each retained
           symbol is returned (via a keyset whose greeks side REUSES ``cand`` and
           whose price side is a k-symbol PK lookup — no second greeks scan).
+          OVERFLOW SAFEGUARD: the SQL actually fetches ``k+1`` symbols so a >k
+          rank-1 tie is detectable; if MORE than k symbols share the best
+          ``(|delta-target|, strike)`` pair (the one regime the SQL
+          ``option_symbol`` tie-break could resolve differently from
+          ``match_by_delta``'s instrument_id order), the whole chunk
+          HARD-FALLS-BACK to the full chain (``delta_pushdown=None``) so the pick
+          is provably complete — otherwise the surplus (k+1)th symbol is discarded
+          so the result is byte-identical to a plain top-k fetch.  A >k tie on
+          distance alone with DISTINCT strikes (all deep-OTM puts at delta≈0 on an
+          expiration date) is NOT flagged — both sides pick the lowest strike, so
+          the pushdown speedup is preserved (audit_d3 INV-2/3, item E).
           Symbol-granular (not row-level) so the ~2.68% DUPLICATE-instrument_id-
           per-symbol quirk is byte-identical to the full chain: the winner's whole
           duplicate set is present, so both ``match_by_delta``'s pick AND
@@ -852,7 +924,10 @@ class SqlOptionsDataReader:
                 params.append(float(target))  # cand abs(delta - target)
                 params.append(all_dates)  # cand trade_date = ANY
                 params.extend([chunk_lo, chunk_hi])  # cand chunk prune
-                params.append(int(k))  # top_syms srn <= k
+                # Fetch ONE extra symbol (srn <= k+1) so the (k+1)th is observable
+                # to the overflow detector below; non-overflow groups discard it to
+                # stay byte-identical to a plain top-k fetch (audit_d3 INV-2/3).
+                params.append(int(k) + 1)  # top_syms srn <= k+1
                 params.append(all_dates)  # pick_keyset price trade_date = ANY
                 params.extend([chunk_lo, chunk_hi])  # pick_keyset price chunk prune
                 params.extend([chunk_lo, chunk_hi])  # final price join
@@ -907,25 +982,51 @@ class SqlOptionsDataReader:
                     bucket.append((contract, row))
 
             if pushdown:
-                # Observability (audit_d3 INV-2/3): the pushdown's ``k`` cushions
-                # the ~2.68% duplicate-instrument_id quirk + delta ties, and k=1 is
-                # exact when the rank-1 symbol is unique.  A >k tie at the rank-1
-                # best-|delta-target| distance is the ONE regime where the SQL
-                # symbol tie-break could drop ``match_by_delta``'s pick — never
-                # silent.  Warn when the retained set shows that boundary signature.
-                _ties = _count_pushdown_boundary_ties(results, float(target), int(k))
-                if _ties:
+                # Correctness safeguard (audit_d3 INV-2/3).  The pushdown's ``k``
+                # cushions the ~2.68% duplicate-instrument_id quirk + delta ties,
+                # and k=1 is exact when the rank-1 symbol is unique.  A >k tie at
+                # the rank-1 best-|delta-target| distance is the ONE regime where
+                # the SQL symbol tie-break (best_strike, option_symbol) could keep a
+                # DIFFERENT k-subset than ``match_by_delta`` would pick from — a
+                # possible WRONG pick.  Detect it from the k+1 fetch and, for
+                # overflow groups, HARD-FALL-BACK to the full chain so the candidate
+                # set (hence the pick) is provably complete and byte-identical to
+                # the pre-pushdown path — the fast path can NEVER return a wrong
+                # pick, even on pathological data.  Item F already rejects the only
+                # VALID input (wrong-signed target) that could reach a real
+                # overflow, so this guards an input-unreachable edge.
+                target_f, k_i = float(target), int(k)
+                overflow, drop = _pushdown_overflow_groups(results, target_f, k_i)
+                if overflow:
                     logger.warning(
-                        "delta pushdown on '%s' (target=%s, k=%d): %d "
-                        "(expiration, trade_date) group(s) filled all k symbol slots "
-                        "with a best-|delta-target| TIE — a >k tie could let the SQL "
-                        "symbol tie-break drop match_by_delta's pick (audit_d3 "
-                        "INV-2/3). Investigate if the target delta is degenerate.",
+                        "delta pushdown on '%s' (target=%s, k=%d): %d (expiration, "
+                        "trade_date) group(s) have MORE than k symbols sharing the "
+                        "rank-1 (best-|delta-target|, strike) pair — falling back to "
+                        "the FULL chain for this chunk so the pick is provably "
+                        "correct (audit_d3 INV-2/3). Investigate if the target delta "
+                        "is degenerate.",
                         root,
                         target,
-                        k,
-                        _ties,
+                        k_i,
+                        len(overflow),
                     )
+                    return await self.query_chain_bulk_multi(
+                        root=root,
+                        type=type,
+                        groups=groups,
+                        expiration_cycle=expiration_cycle,
+                        delta_pushdown=None,
+                    )
+                # No overflow: discard each non-overflow group's surplus (k+1)th
+                # symbol so the returned rows are byte-identical to a top-k fetch.
+                for (exp, dt), sym_id in drop.items():
+                    bucket = results.get(dt)
+                    if bucket:
+                        results[dt] = [
+                            (c, r)
+                            for (c, r) in bucket
+                            if not (c.expiration == exp and c.contract_id == sym_id)
+                        ]
             return results
         except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(

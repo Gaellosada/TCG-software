@@ -125,6 +125,57 @@ async def test_delta_pushdown_matches_full_chain(seeded_dwh):
 
 
 @pytest.mark.asyncio
+async def test_pushdown_overflow_falls_back_to_full_chain(seeded_dwh):
+    """A >k RANK-1 tie must NEVER let the pushdown return a wrong pick (item E).
+
+    The E4 seed has TWO symbols sharing the SAME strike AND delta (an exact
+    rank-1 tie).  Run with ``k=1`` the SQL top-k keeps ONE of them (option_symbol
+    tie-break -> ``OPT_TEST_AA``) while ``match_by_delta`` over the full chain
+    picks the other (instrument_id tie-break -> ``OPT_TEST_ZZ``).  A naive top-1
+    would therefore resolve the WRONG contract; the k+1 overflow detector must
+    fire and fall back to the FULL chain so the pick matches the full-chain
+    reference exactly.  RED before the fallback (top-1 returns AA), GREEN after.
+    """
+    root = seeded_dwh.root
+    d = seeded_dwh.e4_dates[0]
+    groups = [(seeded_dwh.e4, list(seeded_dwh.e4_dates))]
+    k = 1  # a 2-symbol rank-1 tie is a >k overflow at k=1
+
+    async with _reader(seeded_dwh) as reader:
+        full = await reader.query_chain_bulk_multi(root, "P", groups)
+        push = await reader.query_chain_bulk_multi(
+            root, "P", groups, delta_pushdown=(TARGET, k)
+        )
+
+    full_rows = full[d]
+    push_rows = push[d]
+    assert full_rows, "seed produced no full-chain rows for the overflow group"
+
+    # Detection proof: the fallback fired, so the pushdown returned the FULL
+    # candidate set (both tied symbols), NOT a truncated top-k=1.
+    full_syms = {c.contract_id for c, _r in full_rows}
+    push_syms = {c.contract_id for c, _r in push_rows}
+    assert len(full_syms) >= k + 1, "seed must present a >k tie"
+    assert push_syms == full_syms, (
+        f"overflow NOT detected: pushdown returned {push_syms} "
+        f"(truncated), expected the full set {full_syms}"
+    )
+
+    # Correctness proof: same winner + same resolved physical row as full chain.
+    ref = _pick(full_rows)
+    got = _pick(push_rows)
+    assert ref.contract is not None and got.contract is not None
+    assert got.contract.contract_id == ref.contract.contract_id, (
+        f"overflow pick {got.contract.contract_id} != full-chain winner "
+        f"{ref.contract.contract_id}"
+    )
+    ref_row = _row_for_contract(full_rows, ref.contract)
+    got_row = _row_for_contract(push_rows, got.contract)
+    assert ref_row is not None and got_row is not None
+    assert got_row.mid == ref_row.mid
+
+
+@pytest.mark.asyncio
 async def test_held_rows_cycle_predicate_matches_full_chain(seeded_dwh):
     """``query_held_rows`` returns the SAME frozen row as the full chain.
 
