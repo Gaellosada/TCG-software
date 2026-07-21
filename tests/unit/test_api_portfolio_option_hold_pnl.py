@@ -453,7 +453,14 @@ async def test_multi_leg_option_roll_pnl_scales_with_weight(client):
     body = {
         "legs": {
             "P": _hold_put_leg(),
-            "C": {**_hold_put_leg(), "option_type": "C"},
+            # Correctly-signed CALL leg (delta >= 0): the synthetic fetcher
+            # ignores the selection, so both legs still share the identical
+            # premium fixture / leg return — only the leg KEY differs.
+            "C": {
+                **_hold_put_leg(),
+                "option_type": "C",
+                "selection": {"kind": "by_delta", "target": 0.10, "tolerance": 0.20},
+            },
         },
         "weights": {"P": -70, "C": -30},
         "rebalance": "none",

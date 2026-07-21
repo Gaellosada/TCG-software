@@ -436,70 +436,29 @@ def _snap_to_listed(target: date, listed: Sequence[date]) -> date | None:
 
 
 # ---------------------------------------------------------------------------
-# Coverage-aware expiration selection (opt-in, default OFF)
+# Hold-cadence predicate
 # ---------------------------------------------------------------------------
 #
-# WHY.  ``NearestToTarget`` picks the single nearest-DTE expiration from the
-# (cycle-filtered) listed set, with NO awareness of whether that expiration
-# actually carries strikes near the requested delta / moneyness.  On options
-# with sparse or era-varying coverage (e.g. the E-mini ``OPT_SP_500`` M-cycle in
-# later years, where a target month can have ZERO delta-bearing puts), the
-# nearest-DTE expiration can be a thin listing whose only greeked strikes are
-# deep-OTM garbage.  ``ByDelta(-0.10)`` then returns that garbage (moneyness
-# ~0.17) instead of the true 10-delta put (~0.88) that exists at a neighbouring
-# expiration — corr against a ground-truth sim collapses/inverts in those eras.
-#
-# Coverage-aware selection resolves the expiration to the nearest-DTE candidate
-# that has an IN-TOLERANCE delta/moneyness match, retrying the next-nearest
-# within a bounded DTE window; if none is in tolerance it falls back to the
-# nearest-DTE best-effort (== the current behaviour) so it never regresses to
-# all-NaN.  Gated behind ``coverage_aware`` — OFF by default (byte-identical /
-# golden-preserving).
-
-#: Max number of nearest-DTE candidate expirations considered per date in
-#: coverage-aware mode.  Bounds the extra Phase-B fetch fan-out (each unique
-#: candidate expiration = one bulk query).  Conservative default; the right value
-#: depends on the root's expiry spacing (see the live-data request).
-_COVERAGE_MAX_CANDIDATES: int = 4
-
-#: Only consider candidate expirations whose DTE is within this many days of the
-#: nearest-DTE candidate's DTE.  Keeps the retry local to the target maturity
-#: (a ~2-month target should not silently jump to a 6-month expiration).
-_COVERAGE_DTE_WINDOW_DAYS: int = 45
+# A maturity whose CADENCE holds a single contract per roll period (rather than
+# re-resolving the contract on every trade date) is detected by a duck-typed
+# ``is_hold_cadence`` capability on the maturity dataclass — NOT by an
+# ``isinstance(maturity, EndOfMonth)`` check.  Only ``EndOfMonth`` sets the flag
+# today (see ``tcg.types.options``); every other rule falls through to per-date
+# stateless resolution.  Adding a new hold-style cadence is then a matter of
+# setting the flag AND wiring its roll-date math in the resolver's hold branch —
+# a cadence that sets the flag but whose roll math is not yet implemented raises
+# loudly (``NotImplementedError``) rather than silently degrading to per-date.
 
 
-def _coverage_candidates(
-    ref_date: date,
-    target_dte_days: int,
-    available: Sequence[date],
-) -> list[date]:
-    """Ordered candidate expirations for coverage-aware ``NearestToTarget``.
+def _is_hold_cadence(maturity: MaturitySpec) -> bool:
+    """True when *maturity* holds one contract per roll period (per-month hold).
 
-    Sorted by ``(|dte - target|, dte)`` — the SAME key ``resolve_with_chain``
-    ranks by, so ``candidates[0]`` is exactly the expiration the coverage-BLIND
-    path would have picked.  Truncated to :data:`_COVERAGE_MAX_CANDIDATES` and to
-    a ``±`` :data:`_COVERAGE_DTE_WINDOW_DAYS` window around the nearest
-    candidate's DTE, so the coverage retry stays near the requested maturity and
-    the Phase-B fan-out stays bounded.
-
-    Returns ``[]`` when *available* is empty.
+    Reads the duck-typed ``is_hold_cadence`` capability; unset (every non-hold
+    cadence) reads as False.  Used at BOTH hold gate sites in place of an
+    ``isinstance(..., EndOfMonth)`` check so a future hold cadence is recognised
+    without editing the predicate.
     """
-    if not available:
-        return []
-    target_date = ref_date + timedelta(days=target_dte_days)
-
-    def _key(exp: date) -> tuple[int, int]:
-        dte = (exp - ref_date).days
-        return (abs((exp - target_date).days), dte)
-
-    ordered = sorted(available, key=_key)
-    nearest_dte = (ordered[0] - ref_date).days
-    windowed = [
-        e
-        for e in ordered
-        if abs((e - ref_date).days - nearest_dte) <= _COVERAGE_DTE_WINDOW_DAYS
-    ]
-    return windowed[:_COVERAGE_MAX_CANDIDATES]
+    return bool(getattr(maturity, "is_hold_cadence", False))
 
 
 @runtime_checkable
@@ -1158,7 +1117,6 @@ async def _resolve_bulk(
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
-    coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
@@ -1193,16 +1151,6 @@ async def _resolve_bulk(
     error_codes: list[str | None] = [None] * n
     contracts: list[OptionContractDoc | None] = [None] * n
 
-    # Coverage-aware selection is a Phase-C re-pick; hold mode bypasses Phase C
-    # (it segments + freezes ONE contract per roll via ``_resolve_hold``).  The
-    # two are not composed in this pass — fail loudly rather than silently
-    # ignoring coverage in hold mode.  (A future pass can teach ``_resolve_hold``
-    # to select its per-segment contract coverage-aware.)
-    if coverage_aware and hold_between_rolls:
-        raise ValueError(
-            "coverage_aware is not supported together with hold_between_rolls yet"
-        )
-
     # Wrap bulk reader with cycle injection.
     bulk_reader = _CycleInjectingBulkReader(bulk_chain_reader, cycle)
 
@@ -1227,7 +1175,6 @@ async def _resolve_bulk(
         and isinstance(selection, (ByStrike, ByDelta, ByMoneyness))
         and bool(getattr(bulk_reader, "supports_bulk_multi", False))
         and bool(getattr(bulk_reader, "supports_held_rows", False))
-        and not coverage_aware
     )
 
     # ── Phase A: Pre-resolve expirations for all dates ──────────────
@@ -1249,14 +1196,6 @@ async def _resolve_bulk(
     # for dates that resolved to a real value (a success-side diagnostic; the
     # failure channel must stay clean so Phase C still runs selection).
     snap_notes: dict[int, str] = {}
-
-    # Coverage-aware mode only: per-date ORDERED candidate expirations
-    # (nearest-DTE first).  ``candidates[idx][0]`` is always the coverage-blind
-    # pick, so ``expirations[idx]`` (set below) still equals the legacy choice —
-    # the extra candidates are only consulted by the coverage-aware Phase-C
-    # selection, which re-picks the nearest-DTE candidate that is actually
-    # covered.  Empty dict when the mode is off (the common default).
-    candidates: dict[int, list[date]] = {}
 
     if isinstance(maturity, NearestToTarget):
         if queryable:
@@ -1338,17 +1277,6 @@ async def _resolve_bulk(
                         rule=maturity,
                         available_expirations=avail_for_d,
                     )
-                    if coverage_aware and isinstance(selection, ByDelta):
-                        # Build the ordered candidate list for the coverage-aware
-                        # Phase-C re-pick.  candidates[idx][0] == the resolve above
-                        # (same ranking key), so the coverage-blind grouping/output
-                        # below is unchanged; the extras only enable the retry.
-                        # Scoped to ByDelta — the only criterion with a delta
-                        # "coverage" notion (ByStrike is exact; ByMoneyness support
-                        # is a later pass, see the design note).
-                        candidates[idx] = _coverage_candidates(
-                            ref, maturity.target_dte_days, avail_for_d
-                        )
     else:
         # Pure date-arithmetic rules (EndOfMonth / PlusNDays / FixedDate /
         # NextThirdFriday) compute a target expiration with no chain-existence
@@ -1390,7 +1318,18 @@ async def _resolve_bulk(
                 return snapped, f"snapped_to:{snapped.isoformat()}"
             return target, None
 
-        if isinstance(maturity, EndOfMonth):
+        if _is_hold_cadence(maturity):
+            if not isinstance(maturity, EndOfMonth):
+                # A future hold-style cadence set ``is_hold_cadence`` but its
+                # roll-date math is NOT wired here yet.  Fail LOUDLY rather than
+                # falling through to per-date resolution (which would silently
+                # NOT hold — the D1 F3 footgun).  EndOfMonth is the only cadence
+                # whose per-month roll math is implemented below.
+                raise NotImplementedError(
+                    "hold cadence "
+                    f"{type(maturity).__name__} is not implemented in the "
+                    "stream resolver (is_hold_cadence set but no roll-date math)"
+                )
             # END-OF-MONTH roll (Issue #3, now triggered by the maturity itself):
             # choosing ``EndOfMonth`` as the maturity IS the request to roll at
             # month-end, so hold one contract per month — re-resolve the maturity
@@ -1468,18 +1407,6 @@ async def _resolve_bulk(
                 error_codes[idx] = "no_chain_for_date"
         else:
             exp_groups[exp].append((idx, d))
-
-    # COVERAGE-AWARE mode only: also fetch each date's NON-primary candidate
-    # expirations, so Phase C can re-pick the nearest-DTE candidate that is
-    # actually covered.  The primary candidate (== ``expirations[idx]``) is
-    # already in the group above; add the rest here.  (Default mode never
-    # populates ``candidates`` → this loop is a no-op, so Phase B is
-    # byte-identical.)
-    if coverage_aware and candidates:
-        for idx, d in queryable:
-            for cand in candidates.get(idx, ()):
-                if cand != expirations.get(idx):
-                    exp_groups[cand].append((idx, d))
 
     # HOLD mode only: the OLD contract's return INTO the roll day needs the OLD
     # contract's mid ON the roll day, but the roll day's resolved expiration is
@@ -1809,18 +1736,15 @@ async def _resolve_bulk(
         return await _fetch_multi_chunk(year, members)
 
     # Fast path (Option A year-chunk collapse): when the bulk reader implements
-    # the optional multi-expiration capability AND the selection/coverage shape
-    # is compatible, collapse the per-expiration bulk fan-out into ONE query PER
+    # the optional multi-expiration capability AND the selection shape is
+    # compatible, collapse the per-expiration bulk fan-out into ONE query PER
     # CALENDAR YEAR (each expiration date-restricted to its own window).  This
     # removes both the per-expiration round-trips and the strike-window probes.
-    # Ineligible cases (unsupported reader / test fake, or coverage-aware mode
-    # whose scattered candidate expirations break the contiguous-window
-    # assumption) fall back to the per-expiration path, byte-identical.
-    _fast_path_eligible = (
-        isinstance(selection, (ByStrike, ByDelta, ByMoneyness))
-        and getattr(bulk_reader, "supports_bulk_multi", False)
-        and not (coverage_aware and candidates)
-    )
+    # Ineligible cases (unsupported reader / test fake) fall back to the
+    # per-expiration path, byte-identical.
+    _fast_path_eligible = isinstance(
+        selection, (ByStrike, ByDelta, ByMoneyness)
+    ) and getattr(bulk_reader, "supports_bulk_multi", False)
     if _fast_path_eligible:
         year_chunks: dict[int, list[tuple[date, list[tuple[int, date]]]]] = defaultdict(
             list
@@ -1985,86 +1909,16 @@ async def _resolve_bulk(
     # routes ByStrike/ByDelta through an async gather too (like ByMoneyness).
     # ByMoneyness always needs I/O (underlying_price_resolver) for selection.
 
-    def _match_delta(
-        rows: list[tuple[OptionContractDoc, OptionDailyRow]],
-        *,
-        strict: bool,
-    ) -> SelectionResult:
-        """``ByDelta`` match over *rows* (``strict`` overridable for coverage)."""
-        deltas = [r.delta_stored for _c, r in rows]
-        return match_by_delta(
-            rows=rows,
-            deltas=deltas,
-            target=selection.target_delta,  # type: ignore[union-attr]
-            tolerance=selection.tolerance,  # type: ignore[union-attr]
-            strict=strict,
-            chain_size=len(rows),
-        )
-
-    def _coverage_aware_delta_select(
-        idx: int, d: date
-    ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
-        """Coverage-aware ``ByDelta`` selection over the date's CANDIDATE expiries.
-
-        Walks ``candidates[idx]`` nearest-DTE first (the same order the
-        coverage-blind path ranks by), restricting ``chain_index[d]`` to each
-        candidate's expiration and running a STRICT ``ByDelta`` match (delta must
-        be within ``selection.tolerance``).  Returns the FIRST candidate expiry
-        that has such a match — i.e. the nearest-DTE expiration that is actually
-        COVERED near the target delta.
-
-        Fallback: when NO candidate is covered, re-runs the match on the PRIMARY
-        candidate (``candidates[idx][0]`` == the coverage-blind pick) with the
-        selection's OWN ``strict`` — identical to the non-coverage result, so the
-        worst case never regresses to all-NaN (it degrades to today's behaviour).
-        A ``coverage_skipped:<iso>`` note is recorded when a strictly-nearer
-        candidate was skipped for a covered farther one.
-        """
-        cand = candidates.get(idx) or []
-        if not cand:
-            # No candidate list (e.g. date resolved to None) — defer to the plain
-            # path over whatever chain_index holds.
-            return _select_sync(idx, d, _restrict_expiration=None)
-        primary = cand[0]
-        for pos, exp in enumerate(cand):
-            exp_rows = [
-                (c, r) for (c, r) in chain_index.get(d, []) if c.expiration == exp
-            ]
-            if not exp_rows:
-                continue
-            result = _match_delta(exp_rows, strict=True)
-            if result.error_code is None and result.contract is not None:
-                row = _row_for_contract(exp_rows, result.contract)
-                if row is None:  # pragma: no cover (defensive)
-                    continue
-                contracts[idx] = result.contract
-                if pos > 0:
-                    # A strictly-nearer candidate existed but was not covered.
-                    snap_notes[idx] = f"coverage_skipped:{primary.isoformat()}"
-                return result.contract, row
-        # No covered candidate → fall back to the primary's best-effort match
-        # (the coverage-blind result, so no regression vs. today).
-        return _select_sync(idx, d, _restrict_expiration=primary)
-
     def _select_sync(
         idx: int,
         d: date,
-        _restrict_expiration: date | None = None,
     ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
         """Run ByStrike/ByDelta selection for date ``d`` (pure CPU).
 
         Returns the selected ``(contract, row)`` or ``None`` (having set the
         per-date error_code).  Does NOT extract the stream value — that is done
-        by the caller (sync for row-attr streams, async for bs_mid).
-
-        ``_restrict_expiration`` (coverage-aware fallback only): when set, the
-        match runs against ONLY that expiration's rows from the merged
-        ``chain_index`` (in coverage mode the index carries several candidate
-        expiries).  ``None`` (the default / non-coverage path) uses the full
-        chain, byte-identical to before."""
+        by the caller (sync for row-attr streams, async for bs_mid)."""
         rows = chain_index.get(d, [])
-        if _restrict_expiration is not None:
-            rows = [(c, r) for (c, r) in rows if c.expiration == _restrict_expiration]
         if not rows:
             error_codes[idx] = "no_chain_for_date"
             return None
@@ -2101,23 +1955,10 @@ async def _resolve_bulk(
         contracts[idx] = result.contract
         return result.contract, row
 
-    # Coverage-aware routing lives in ONE place: ByDelta in coverage mode walks
-    # the candidate expiries; everything else (ByStrike, or coverage off) uses the
-    # plain full-chain match.  (ByMoneyness is handled on its own async path
-    # below.)
-    _use_coverage_delta = coverage_aware and isinstance(selection, ByDelta)
-
-    def _do_delta_or_strike_select(
-        idx: int, d: date
-    ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
-        if _use_coverage_delta:
-            return _coverage_aware_delta_select(idx, d)
-        return _select_sync(idx, d)
-
     def _resolve_one_sync(idx: int, d: date) -> None:
         """CPU-only resolution for ByStrike/ByDelta with a ROW-ATTRIBUTE stream."""
         try:
-            sel = _do_delta_or_strike_select(idx, d)
+            sel = _select_sync(idx, d)
             if sel is None:
                 return
             contract, row = sel
@@ -2149,7 +1990,7 @@ async def _resolve_bulk(
             else asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
         )
         try:
-            sel = _do_delta_or_strike_select(idx, d)
+            sel = _select_sync(idx, d)
             if sel is None:
                 return
             contract, row = sel
@@ -2356,7 +2197,6 @@ async def resolve_option_stream(
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
-    coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
 
@@ -2465,23 +2305,6 @@ async def resolve_option_stream(
         the NEW open premium is surfaced → the seam is exact, never a raw old→new
         level gap).  The 3-tuple return is unchanged; roll info travels through
         this out-dict so every non-hold caller is unaffected.
-    coverage_aware:
-        COVERAGE-AWARE expiration selection (default ``False`` = the current
-        behaviour, byte-identical).  Effective ONLY on the bulk path, ONLY for
-        ``NearestToTarget`` maturity + ``ByDelta`` selection.  When ``True`` the
-        resolver, instead of the single nearest-DTE listed expiration, considers a
-        small bounded set of nearest-DTE candidate expirations (see
-        :data:`_COVERAGE_MAX_CANDIDATES` / :data:`_COVERAGE_DTE_WINDOW_DAYS`) and
-        picks the nearest-DTE one that actually has an IN-TOLERANCE delta strike —
-        skipping thinly-listed expirations whose only greeked strikes are far from
-        the target delta (the OPT_SP_500 later-era failure where ``ByDelta(-0.10)``
-        picked deep-OTM garbage from a gappy target month).  If NO candidate is
-        covered it falls back to the nearest-DTE best-effort match (== the
-        coverage-blind result), so it never regresses to all-NaN.  A
-        ``coverage_skipped:<iso>`` success-side note (same channel as
-        ``snapped_to:``) records when a strictly-nearer expiration was skipped.
-        Requires the bulk chain reader; not composable with ``hold_between_rolls``
-        yet — both raise ``ValueError``.
 
     Returns
     -------
@@ -2542,22 +2365,9 @@ async def resolve_option_stream(
             hold_between_rolls=hold_between_rolls,
             hold_roll_info_out=hold_roll_info_out,
             futures_reference_resolver=futures_reference_resolver,
-            coverage_aware=coverage_aware,
         )
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
-
-    # Symmetric guard: coverage-aware selection walks the pre-fetched candidate
-    # chains from Phase B, which only the bulk path materialises.  The legacy
-    # per-date path resolves + selects one expiration per date with no candidate
-    # set, so it cannot honour the flag — fail loudly rather than silently
-    # returning the coverage-BLIND series.  Production always wires the bulk
-    # reader.
-    if coverage_aware:
-        raise ValueError(
-            "coverage_aware requires the bulk chain reader; the legacy per-date "
-            "path does not support coverage-aware expiration selection"
-        )
 
     # The legacy per-date path resolves maturity inside the selector, so it
     # cannot honor an early roll (``roll_offset``) — that needs the bulk path's
@@ -2581,13 +2391,15 @@ async def resolve_option_stream(
             "hold_between_rolls requires the bulk chain reader; the legacy "
             "per-date path does not support select-and-hold"
         )
-    # Symmetric guard: the EndOfMonth monthly-hold sweep lives in the bulk
-    # Phase A, so the legacy per-date path cannot honour it (it would silently
-    # re-resolve EndOfMonth per-date, diverging from the held-monthly result).
-    if isinstance(maturity, EndOfMonth):
+    # Symmetric guard: a hold-cadence maturity (EndOfMonth today) has its
+    # per-month hold sweep in the bulk Phase A, so the legacy per-date path
+    # cannot honour it (it would silently re-resolve per-date, diverging from the
+    # held-monthly result).  Duck-typed via ``is_hold_cadence`` so a future hold
+    # cadence is rejected here without editing this guard.
+    if _is_hold_cadence(maturity):
         raise ValueError(
-            "EndOfMonth maturity requires the bulk chain reader; the legacy "
-            "per-date path does not support the monthly-hold roll"
+            f"{type(maturity).__name__} maturity requires the bulk chain reader; "
+            "the legacy per-date path does not support the monthly-hold roll"
         )
     # Symmetric guard: the COMPUTED ``bs_mid`` stream (Black-76 from IV + the
     # underlying future) is implemented on the bulk path's extraction only.
