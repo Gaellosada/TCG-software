@@ -45,11 +45,13 @@ is ``None``.
 
 Resolve paths (which gate selects each)
 ---------------------------------------
-The resolver routes a resolve through exactly one FETCH shape:
+The routing is decided ONCE, up front, by the pure ``_choose_path`` function
+(``resolve_option_stream`` calls it and reads the ``PathDecision`` it returns);
+the resolver then routes a resolve through exactly one FETCH shape:
 
   * per-expiration legacy — ``bulk_chain_reader`` is None, OR
-    ``_fast_path_eligible`` is False (unsupported reader / coverage-aware with
-    candidates).  One ``query_chain_bulk`` per expiration (+ strike-window probe).
+    ``_fast_path_eligible`` is False (unsupported reader / test fake).  One
+    ``query_chain_bulk`` per expiration (+ strike-window probe).
   * year-chunk FULL-CHAIN — ``_fast_path_eligible and _delta_pushdown is None``.
     One ``query_chain_bulk_multi`` per calendar year (whole chain, superset);
     a year with > ``_MAX_EXPS_PER_SUBCHUNK`` expirations is split into sub-chunks.
@@ -96,8 +98,10 @@ holds a pool connection, so the fan-out must stay within ``max_size``.
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import (
     Awaitable,
@@ -461,6 +465,158 @@ def _is_hold_cadence(maturity: MaturitySpec) -> bool:
     return bool(getattr(maturity, "is_hold_cadence", False))
 
 
+def _reader_supports_bulk_multi(inner: object) -> bool:
+    """True when *inner* exposes the year-chunk multi-expiration capability.
+
+    SINGLE SOURCE OF TRUTH shared by ``_CycleInjectingBulkReader`` (which sets its
+    ``supports_bulk_multi`` attribute from this) and ``resolve_option_stream``
+    (which feeds ``_choose_path``), so the routing decision reasons over the
+    IDENTICAL value the fetch wrapper uses.  ``callable`` (not ``hasattr``): a
+    reader that disables the capability via ``query_chain_bulk_multi = None``
+    reports False here, so the fast path is cleanly NOT taken.
+    """
+    return bool(getattr(inner, "supports_bulk_multi", False)) or callable(
+        getattr(inner, "query_chain_bulk_multi", None)
+    )
+
+
+def _reader_supports_held_rows(inner: object) -> bool:
+    """True when *inner* exposes the Phase-2 held-symbol identity fetch.
+
+    Mirrors :func:`_reader_supports_bulk_multi` for the two-phase hold capability
+    (``query_held_rows``).  Same single-source-of-truth contract.
+    """
+    return bool(getattr(inner, "supports_held_rows", False)) or callable(
+        getattr(inner, "query_held_rows", None)
+    )
+
+
+class ResolvePath(enum.Enum):
+    """Which FETCH shape a resolve routes through (a documentation SUMMARY).
+
+    The load-bearing routing outputs are the boolean fields on
+    :class:`PathDecision`; ``path`` is only the derived one-line summary of which
+    shape those booleans select (used for logging / the equivalence test).  The
+    engine control flow reads the individual booleans, never ``path``.
+    """
+
+    LEGACY_PER_DATE = "legacy_per_date"  # per-date (no bulk reader) OR per-expiration
+    BULK_FULLCHAIN = "bulk_fullchain"  # year-chunk full-chain multi
+    BULK_PUSHDOWN = "bulk_pushdown"  # year-chunk delta-pushdown multi
+
+
+@dataclass(frozen=True)
+class PathDecision:
+    """The one routing decision for a resolve (see :func:`_choose_path`).
+
+    ``legacy_reject`` is consumed ONLY on the no-bulk-reader legacy branch;
+    ``fast_path_eligible`` / ``delta_pushdown`` / ``hold_two_phase`` are consumed
+    ONLY inside ``_resolve_bulk``.  For any single input exactly one of those two
+    groups is relevant, so carrying both on one object is not a conflation.
+    """
+
+    path: ResolvePath
+    fast_path_eligible: bool
+    delta_pushdown: bool  # engine builds (target_delta, _PUSHDOWN_K) when True
+    hold_two_phase: bool
+    legacy_reject: str | None  # non-None => the legacy per-date path must raise it
+
+
+def _choose_path(
+    *,
+    has_bulk_reader: bool,
+    selection: SelectionCriterion,
+    maturity: MaturitySpec,
+    stream: StreamLabel,
+    hold_between_rolls: bool,
+    roll_offset_nonzero: bool,
+    supports_bulk_multi: bool,
+    supports_held_rows: bool,
+    compute_missing_delta: bool,
+) -> PathDecision:
+    """Decide the resolve's fetch path ONCE (pure — no I/O, no side effects).
+
+    This is the SINGLE place the fetch-path eligibility booleans and the legacy
+    per-date reject are computed; it is a faithful COLLAPSE of the predicates that
+    were previously scattered across ``resolve_option_stream`` / ``_resolve_bulk``,
+    NOT a behaviour change.  Each output is a verbatim transcription of the old
+    inline expression:
+
+    * ``legacy_reject`` — the four ``resolve_option_stream`` legacy-path guards, in
+      their original evaluation order (``roll_offset`` → ``hold_between_rolls`` →
+      hold-cadence maturity → ``bs_mid`` stream); FIRST match wins (order is
+      load-bearing) and the message text is unchanged.  Consumed only when
+      ``has_bulk_reader`` is False.
+    * ``hold_two_phase`` — the old ``_hold_two_phase`` conjunction.
+    * ``delta_pushdown`` — truthiness of the old ``_delta_pushdown`` (the engine
+      re-materialises the ``(target_delta, _PUSHDOWN_K)`` tuple when True).
+      ``compute_missing_delta`` is the F1 coupling guard (constant False today).
+    * ``fast_path_eligible`` — the old ``_fast_path_eligible`` conjunction.
+
+    ``supports_bulk_multi`` / ``supports_held_rows`` are the wrapper-computed
+    capability flags (see :func:`_reader_supports_bulk_multi`), passed in so this
+    function stays pure and reasons over the same value the fetch path uses.
+    """
+    # ── Legacy per-date rejects (verbatim order + messages) ──────────────────
+    legacy_reject: str | None = None
+    if roll_offset_nonzero:
+        legacy_reject = (
+            "roll_offset requires the bulk chain reader; the legacy per-date "
+            "path does not support it"
+        )
+    elif hold_between_rolls:
+        legacy_reject = (
+            "hold_between_rolls requires the bulk chain reader; the legacy "
+            "per-date path does not support select-and-hold"
+        )
+    elif _is_hold_cadence(maturity):
+        legacy_reject = (
+            f"{type(maturity).__name__} maturity requires the bulk chain reader; "
+            "the legacy per-date path does not support the monthly-hold roll"
+        )
+    elif stream == _BS_MID:
+        legacy_reject = (
+            "bs_mid stream requires the bulk chain reader; the legacy per-date "
+            "path does not support the computed Black-76 price stream"
+        )
+
+    # ── Bulk-path fetch-shape flags ──────────────────────────────────────────
+    # (transcribed from the old _hold_two_phase / _delta_pushdown /
+    # _fast_path_eligible sites — see the docstring above.)
+    hold_two_phase = bool(
+        hold_between_rolls
+        and isinstance(selection, (ByStrike, ByDelta, ByMoneyness))
+        and supports_bulk_multi
+        and supports_held_rows
+    )
+    delta_pushdown = bool(
+        isinstance(selection, ByDelta)
+        and not compute_missing_delta
+        and (not hold_between_rolls or hold_two_phase)
+    )
+    fast_path_eligible = bool(
+        isinstance(selection, (ByStrike, ByDelta, ByMoneyness)) and supports_bulk_multi
+    )
+
+    # Derived SUMMARY only (control flow reads the booleans, exactly as the old
+    # scattered sites did): no bulk reader OR ineligible → per-date; else the
+    # pushdown vs full-chain multi split.
+    if not has_bulk_reader or not fast_path_eligible:
+        path = ResolvePath.LEGACY_PER_DATE
+    elif delta_pushdown:
+        path = ResolvePath.BULK_PUSHDOWN
+    else:
+        path = ResolvePath.BULK_FULLCHAIN
+
+    return PathDecision(
+        path=path,
+        fast_path_eligible=fast_path_eligible,
+        delta_pushdown=delta_pushdown,
+        hold_two_phase=hold_two_phase,
+        legacy_reject=legacy_reject,
+    )
+
+
 @runtime_checkable
 class _CycleAwareReader(Protocol):
     """Structural shape of a chain reader that accepts ``expiration_cycle``.
@@ -568,17 +724,15 @@ class _CycleInjectingBulkReader:
         # ``callable`` (not ``hasattr``): an inner reader that disables the
         # capability via ``query_chain_bulk_multi = None`` reports False here, so
         # the fast path is cleanly NOT taken (rather than entered → TypeError →
-        # silent per-exp fallback that quietly erases the speedup).
-        self.supports_bulk_multi = bool(
-            getattr(inner, "supports_bulk_multi", False)
-        ) or callable(getattr(inner, "query_chain_bulk_multi", None))
+        # silent per-exp fallback that quietly erases the speedup).  Computed via
+        # the module helper so ``_choose_path`` (fed from the RAW reader in
+        # ``resolve_option_stream``) reasons over the byte-identical value.
+        self.supports_bulk_multi = _reader_supports_bulk_multi(inner)
         # Optional hold-leg two-phase Phase-2 capability (mirrors
         # ``supports_bulk_multi``): the engine gates the two-phase hold fast path
         # on this flag and falls back to the full-chain hold path when it is
         # False (unsupported reader / test fake).
-        self.supports_held_rows = bool(
-            getattr(inner, "supports_held_rows", False)
-        ) or callable(getattr(inner, "query_held_rows", None))
+        self.supports_held_rows = _reader_supports_held_rows(inner)
 
     async def query_chain_bulk(
         self,
@@ -1117,6 +1271,7 @@ async def _resolve_bulk(
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
+    decision: PathDecision,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
@@ -1170,12 +1325,9 @@ async def _resolve_bulk(
     # When the capability is absent (test fake / older reader), stay on the
     # full-chain hold path (``delta_pushdown=None``, all dates fetched) — the
     # current byte-identical behaviour.  See ``hold_pushdown_design.md``.
-    _hold_two_phase = (
-        hold_between_rolls
-        and isinstance(selection, (ByStrike, ByDelta, ByMoneyness))
-        and bool(getattr(bulk_reader, "supports_bulk_multi", False))
-        and bool(getattr(bulk_reader, "supports_held_rows", False))
-    )
+    # Routing decided ONCE upstream (see ``_choose_path``); this reads the
+    # transcribed decision rather than recomputing the conjunction inline.
+    _hold_two_phase = decision.hold_two_phase
 
     # ── Phase A: Pre-resolve expirations for all dates ──────────────
 
@@ -1614,19 +1766,20 @@ async def _resolve_bulk(
     # ``g.delta`` only — NULL/computed-delta symbols sort NULLS-LAST and would be
     # wrongly excluded.  This resolver NEVER computes missing deltas (Phase C ranks
     # on ``r.delta_stored``; there is no ``compute_missing_for_delta`` parameter),
-    # so stored-delta is guaranteed TODAY and ``_compute_missing_delta`` is always
-    # False.  It is an EXPLICIT guard, not a comment: if a future change threads
-    # compute-missing into this resolver, wire it into this local and the pushdown
+    # so stored-delta is guaranteed TODAY.  The F1 coupling guard
+    # (``compute_missing_delta``) lives at the ``_choose_path`` call site in
+    # ``resolve_option_stream`` (constant False): if a future change threads
+    # compute-missing into this resolver, flip it there and the pushdown
     # HARD-FALLS-BACK to the full-chain year-chunk path (``None``) rather than
     # silently ranking on stored delta only.  See audit_d1_gating.md F1.
-    _compute_missing_delta = (
-        False  # COUPLED: flip if compute-missing is ever wired here
-    )
+    #
+    # ``decision.delta_pushdown`` is True only when ``selection`` is a ByDelta, so
+    # the ``isinstance`` below is always True when the pushdown fires — it is kept
+    # solely to narrow ``selection`` to ``ByDelta`` for ``.target_delta`` (byte-
+    # identical: ``isinstance ∧ delta_pushdown`` ≡ ``delta_pushdown``).
     _delta_pushdown: tuple[float, int] | None = (
         (float(selection.target_delta), _PUSHDOWN_K)
-        if isinstance(selection, ByDelta)
-        and not _compute_missing_delta
-        and (not hold_between_rolls or _hold_two_phase)
+        if decision.delta_pushdown and isinstance(selection, ByDelta)
         else None
     )
 
@@ -1741,10 +1894,9 @@ async def _resolve_bulk(
     # CALENDAR YEAR (each expiration date-restricted to its own window).  This
     # removes both the per-expiration round-trips and the strike-window probes.
     # Ineligible cases (unsupported reader / test fake) fall back to the
-    # per-expiration path, byte-identical.
-    _fast_path_eligible = isinstance(
-        selection, (ByStrike, ByDelta, ByMoneyness)
-    ) and getattr(bulk_reader, "supports_bulk_multi", False)
+    # per-expiration path, byte-identical.  Routing decided upstream in
+    # ``_choose_path``; this reads the transcribed decision.
+    _fast_path_eligible = decision.fast_path_eligible
     if _fast_path_eligible:
         year_chunks: dict[int, list[tuple[date, list[tuple[int, date]]]]] = defaultdict(
             list
@@ -2341,6 +2493,35 @@ async def resolve_option_stream(
     if stream != _BS_MID and stream not in _STREAM_TO_ATTR:
         raise ValueError(f"unknown stream label {stream!r}")
 
+    # ── SINGLE routing decision (see ``_choose_path``): the ONE place the
+    # fetch-path eligibility booleans AND the legacy-path reject are decided.
+    # ``_compute_missing_delta`` is the audit_d1 F1 coupling guard — constant
+    # False because this resolver never computes missing deltas (Phase C ranks on
+    # ``r.delta_stored``; there is no compute-missing parameter).  If compute-
+    # missing is ever threaded in, flip this and the pushdown HARD-FALLS-BACK to
+    # the full-chain year-chunk path rather than ranking on stored delta only.
+    _compute_missing_delta = False  # COUPLED: flip if compute-missing is wired
+    _has_bulk_reader = bulk_chain_reader is not None
+    _decision = _choose_path(
+        has_bulk_reader=_has_bulk_reader,
+        selection=selection,
+        maturity=maturity,
+        stream=stream,
+        hold_between_rolls=hold_between_rolls,
+        roll_offset_nonzero=roll_offset.value != 0,
+        # Capability flags read from the RAW reader via the same helper the
+        # ``_CycleInjectingBulkReader`` wrapper uses → byte-identical value.
+        supports_bulk_multi=(
+            _reader_supports_bulk_multi(bulk_chain_reader)
+            if _has_bulk_reader
+            else False
+        ),
+        supports_held_rows=(
+            _reader_supports_held_rows(bulk_chain_reader) if _has_bulk_reader else False
+        ),
+        compute_missing_delta=_compute_missing_delta,
+    )
+
     # ── Bulk path: when a bulk reader is provided, use the pre-fetch
     # strategy for drastically fewer Mongo round-trips.
     if bulk_chain_reader is not None:
@@ -2365,51 +2546,20 @@ async def resolve_option_stream(
             hold_between_rolls=hold_between_rolls,
             hold_roll_info_out=hold_roll_info_out,
             futures_reference_resolver=futures_reference_resolver,
+            decision=_decision,
         )
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
-
-    # The legacy per-date path resolves maturity inside the selector, so it
-    # cannot honor an early roll (``roll_offset``) — that needs the bulk path's
-    # pre-resolved expirations.  Rather than silently diverge (ignore the shift
-    # and return a series that looks like the bulk result but is not), fail
-    # loudly: production always wires the bulk reader, so this only fires on a
-    # misconfigured caller.
-    if roll_offset.value != 0:
-        raise ValueError(
-            "roll_offset requires the bulk chain reader; the legacy per-date "
-            "path does not support it"
-        )
-    # Symmetric guard: select-and-hold needs the bulk path's pre-resolved
-    # per-date expirations to segment the roll boundaries and re-read the HELD
-    # contract off the pre-fetched chain.  The legacy per-date path re-selects a
-    # fresh contract each day (the churn this mode exists to eliminate), so it
-    # cannot honour the flag — fail loudly rather than silently returning the
-    # unheld daily-reselect series.  Production always wires the bulk reader.
-    if hold_between_rolls:
-        raise ValueError(
-            "hold_between_rolls requires the bulk chain reader; the legacy "
-            "per-date path does not support select-and-hold"
-        )
-    # Symmetric guard: a hold-cadence maturity (EndOfMonth today) has its
-    # per-month hold sweep in the bulk Phase A, so the legacy per-date path
-    # cannot honour it (it would silently re-resolve per-date, diverging from the
-    # held-monthly result).  Duck-typed via ``is_hold_cadence`` so a future hold
-    # cadence is rejected here without editing this guard.
-    if _is_hold_cadence(maturity):
-        raise ValueError(
-            f"{type(maturity).__name__} maturity requires the bulk chain reader; "
-            "the legacy per-date path does not support the monthly-hold roll"
-        )
-    # Symmetric guard: the COMPUTED ``bs_mid`` stream (Black-76 from IV + the
-    # underlying future) is implemented on the bulk path's extraction only.
-    # Production always wires the bulk reader; fail loudly rather than KeyError on
-    # the absent ``_STREAM_TO_ATTR`` entry or silently return a wrong series.
-    if stream == _BS_MID:
-        raise ValueError(
-            "bs_mid stream requires the bulk chain reader; the legacy per-date "
-            "path does not support the computed Black-76 price stream"
-        )
+    #
+    # The legacy per-date path re-resolves maturity inside the selector each day,
+    # so it cannot honour an early roll (``roll_offset``), select-and-hold
+    # (``hold_between_rolls``), a hold-cadence maturity (``EndOfMonth`` today), or
+    # the computed ``bs_mid`` stream — all of which need the bulk path's
+    # pre-resolved expirations / extraction.  Rather than silently diverge, fail
+    # loudly with the specific reason ``_choose_path`` selected (production always
+    # wires the bulk reader, so this only fires on a misconfigured caller).
+    if _decision.legacy_reject is not None:
+        raise ValueError(_decision.legacy_reject)
 
     # Wrap the reader so every selector-emitted query carries the cycle.
     cycle_reader = _CycleInjectingReader(chain_reader, cycle)
