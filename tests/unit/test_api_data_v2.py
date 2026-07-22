@@ -177,6 +177,29 @@ async def test_continuous_options_delta_returns_400(client):
     assert resp.json()["error_type"] == "validation_error"
 
 
+async def test_continuous_options_delta_without_target_returns_friendly_400(client):
+    # criterion=delta with NO target must surface the friendly greeks-unavailable
+    # 400 (not a generic 422 for a missing required query param).
+    resp = await client.get(
+        "/api/data-v2/continuous/options/7",
+        params={"criterion": "delta", "option_type": "put"},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error_type"] == "validation_error"
+    assert "greeks" in body["message"].lower()
+
+
+async def test_continuous_options_missing_target_returns_400(client):
+    # A non-delta criterion still requires target; omitting it is a friendly 400.
+    resp = await client.get(
+        "/api/data-v2/continuous/options/7",
+        params={"criterion": "strike", "option_type": "put"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_type"] == "validation_error"
+
+
 async def test_continuous_options_bad_roll_returns_400(client):
     resp = await client.get(
         "/api/data-v2/continuous/options/7",

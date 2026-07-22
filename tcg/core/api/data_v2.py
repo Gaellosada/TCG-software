@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 
 from tcg.core.api._dates import parse_iso_range
 from tcg.core.api.common import get_market_data_v2
-from tcg.data.service_v2 import DefaultMarketDataServiceV2
+from tcg.data.protocols import MarketDataServiceV2
 from tcg.types.errors import DataNotFoundError, ValidationError
 from tcg.types.market import AdjustmentMethod, ContinuousRollConfig, RollStrategy
 
@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/data-v2", tags=["data-v2"])
 
 @router.get("/objects")
 async def list_objects(
-    svc: DefaultMarketDataServiceV2 = Depends(get_market_data_v2),
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
 ) -> list[dict]:
     """List every v2 object (all kinds). The frontend groups by ``kind``."""
     objects = await svc.list_objects()
@@ -49,7 +49,7 @@ async def list_objects(
 @router.get("/continuous/futures/{object_id}/cycles")
 async def get_future_cycles(
     object_id: int,
-    svc: DefaultMarketDataServiceV2 = Depends(get_market_data_v2),
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
 ) -> dict:
     """Return available listing cycles for a future object."""
     cycles = await svc.get_future_cycles(object_id)
@@ -75,7 +75,7 @@ async def get_continuous_future(
     ),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),
-    svc: DefaultMarketDataServiceV2 = Depends(get_market_data_v2),
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
 ) -> dict:
     """Build a continuous futures series (v1-continuous-shape) for a v2 future."""
     try:
@@ -145,21 +145,38 @@ async def get_continuous_options(
     criterion: str = Query(
         "strike", description="Selection criterion: strike | moneyness | delta"
     ),
-    target: float = Query(..., description="Strike (absolute) or moneyness ratio"),
+    target: float | None = Query(
+        None, description="Strike (absolute) or moneyness ratio"
+    ),
     option_type: str = Query("put", description="call | put"),
     roll: str = Query("at_expiry", description="Roll rule (only at_expiry in v2)"),
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),
-    svc: DefaultMarketDataServiceV2 = Depends(get_market_data_v2),
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
 ) -> dict:
     """Build a v2 continuous options settlement stream.
 
-    ``criterion='delta'`` returns HTTP 400 (greeks unavailable in v2). ``roll``
-    only supports ``at_expiry`` this round.
+    ``criterion='delta'`` returns HTTP 400 (greeks unavailable in v2) — rejected
+    outright, whether or not ``target`` is supplied. ``roll`` only supports
+    ``at_expiry`` this round.
     """
     if roll != "at_expiry":
         raise ValidationError(
             f"Invalid roll '{roll}'. Only 'at_expiry' is supported in v2."
+        )
+    # Delta is rejected outright in v2 (no greeks) — return the friendly 400
+    # regardless of whether ``target`` was given (an omitted target would
+    # otherwise surface a generic 422 before this point).
+    if criterion == "delta":
+        raise ValidationError(
+            "Delta-based selection is unavailable in Database v2: the v2 "
+            "warehouse has no greeks (fact_greeks is empty). Use criterion "
+            "'strike' or 'moneyness'."
+        )
+    if target is None:
+        raise ValidationError(
+            f"Query param 'target' is required for criterion {criterion!r} "
+            "(absolute strike or moneyness ratio)."
         )
     try:
         start_date, end_date = parse_iso_range(start, end)
@@ -206,7 +223,7 @@ async def get_series(
     serie_id: int,
     start: str | None = Query(None, description="Start date YYYY-MM-DD"),
     end: str | None = Query(None, description="End date YYYY-MM-DD"),
-    svc: DefaultMarketDataServiceV2 = Depends(get_market_data_v2),
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
 ) -> dict:
     """Read one serie's facts (fact table dispatched by ``serie.type``)."""
     try:
@@ -222,7 +239,7 @@ async def get_series(
 @router.get("/objects/{object_id}")
 async def get_object_detail(
     object_id: int,
-    svc: DefaultMarketDataServiceV2 = Depends(get_market_data_v2),
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
 ) -> dict:
     """Return ``{object, contracts, series}`` for one object."""
     return await svc.get_object_detail(object_id)

@@ -14,6 +14,7 @@ the math is plain Python. ``criterion="delta"`` is rejected with a clean
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from datetime import date
 
 from tcg.data._sql.instruments_v2 import SqlInstrumentReaderV2
@@ -45,6 +46,19 @@ def _front_close_by_date(
         if ts_int not in out:
             out[ts_int] = close  # first (smallest expiration) wins → front
     return out
+
+
+def _front_expiration(chain_exps: list[int], ts_int: int) -> int | None:
+    """Nearest listed contract expiration >= ``ts_int`` (the active front).
+
+    ``chain_exps`` is sorted ascending (distinct contract expirations). Returns
+    ``None`` when ``ts_int`` lies beyond the last listed expiration. This is the
+    calendar front — a function of the contract chain only, NOT of which
+    settlements happen to exist today — so a settlement hole in the true front
+    cannot make the roll jump to a later expiration and back.
+    """
+    idx = bisect_left(chain_exps, ts_int)
+    return chain_exps[idx] if idx < len(chain_exps) else None
 
 
 async def resolve_options_continuous_v2(
@@ -96,12 +110,21 @@ async def resolve_options_continuous_v2(
         )
     if criterion == "moneyness" and target <= 0:
         raise ValidationError("Moneyness target must be > 0 (strike/spot ratio).")
+    if criterion == "strike" and target <= 0:
+        raise ValidationError("Strike target must be > 0 (absolute strike).")
 
     object_id = int(object_row["object_id"])  # type: ignore[arg-type]
 
     settlements = await reader.fetch_option_settlements(
         object_id, option_type, start=start, end=end
     )
+
+    # Tradeable expiration chain from the contract dimension (sorted ascending),
+    # independent of settlement availability. The active (front) expiration for
+    # each date is derived from this — NOT from that date's usable settlements —
+    # so a data hole in the true front contract cannot emit a spurious /
+    # non-monotonic roll.
+    chain_exps = await reader.fetch_option_expirations(object_id, option_type)
 
     # spot map (moneyness only) from the underlying future's front close.
     front_close: dict[int, float] = {}
@@ -137,13 +160,23 @@ async def resolve_options_continuous_v2(
     prev_active_exp: int | None = None
 
     for ts_int in sorted(by_date):
-        candidates = by_date[ts_int]
-        # Active (front) expiration on this date: nearest expiration >= date.
-        alive = [c for c in candidates if int(c["expiration_int"]) >= ts_int]  # type: ignore[arg-type]
-        if not alive:
+        # Active (front) expiration on this date from the CONTRACT chain: the
+        # nearest listed expiration >= date. Derived from the contract chain, not
+        # from which settlements exist today, so a hole in the true front cannot
+        # advance/rewind the roll.
+        active_exp = _front_expiration(chain_exps, ts_int)
+        if active_exp is None:
+            continue  # date lies beyond the last listed expiration
+        # Usable ( > 0 ) settlements in the active expiration on this date. When
+        # the true front has a settlement hole today this is empty → drop the
+        # date (do NOT roll to a later expiration).
+        chain = [
+            c
+            for c in by_date[ts_int]
+            if int(c["expiration_int"]) == active_exp  # type: ignore[arg-type]
+        ]
+        if not chain:
             continue
-        active_exp = min(int(c["expiration_int"]) for c in alive)  # type: ignore[arg-type]
-        chain = [c for c in alive if int(c["expiration_int"]) == active_exp]  # type: ignore[arg-type]
 
         # Target strike for this date.
         if criterion == "strike":

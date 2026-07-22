@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from tcg.data.protocols import MarketDataService
+from tcg.data.protocols import MarketDataService, MarketDataServiceV2
 from tcg.types.market import AdjustmentMethod
 
 
@@ -19,12 +19,12 @@ def get_market_data(request: Request) -> MarketDataService:
     return request.app.state.market_data
 
 
-def get_market_data_v2(request: Request):
+def get_market_data_v2(request: Request) -> MarketDataServiceV2:
     """Dependency: retrieve the v2 market-data service from app state.
 
-    Return type is intentionally untyped here to keep this shared helper free
-    of a ``tcg.data.service_v2`` import (the concrete class lives in the data
-    layer; the router annotates the concrete type where it is used).
+    Typed against the ``MarketDataServiceV2`` protocol (a data-layer interface,
+    not the concrete ``DefaultMarketDataServiceV2``) so this shared helper stays
+    core→data and mirrors the v1 ``get_market_data`` symmetry.
     """
     return request.app.state.market_data_v2
 

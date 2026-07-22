@@ -393,6 +393,42 @@ class SqlInstrumentReaderV2:
             )
         return out
 
+    async def fetch_option_expirations(
+        self,
+        object_id: int,
+        option_type: str,
+    ) -> list[int]:
+        """Return sorted distinct contract expirations (YYYYMMDD ints).
+
+        Reads the ``contract`` dimension for one option object + option_type —
+        the tradeable expiration *chain*, independent of whether settlement
+        facts exist on any given day. The options-continuous resolver uses this
+        to determine the active (front) expiration per date, so a settlement
+        data hole in the true front contract cannot spuriously advance (or
+        rewind) the AtExpiry roll. The whole chain is returned (no ts window):
+        the front for a date near a window edge may be an expiration outside the
+        windowed settlement set.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT DISTINCT expiration
+                            FROM {V2_SCHEMA}.contract
+                            WHERE object_id = %s
+                              AND option_type = %s
+                              AND expiration IS NOT NULL
+                            ORDER BY expiration""",
+                        (object_id, option_type),
+                    )
+                    rows = await cur.fetchall()
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"v2 SQL error fetching option expirations for object "
+                f"{object_id}: {exc}"
+            ) from exc
+        return [date_to_int(r["expiration"]) for r in rows]
+
     async def fetch_future_front_closes(
         self,
         object_id: int,

@@ -90,6 +90,17 @@ class _FakeReaderOptions:
     async def fetch_option_settlements(self, object_id, option_type, *, start, end):
         return [s for s in self._settlements if s["option_type"] == option_type]
 
+    async def fetch_option_expirations(self, object_id, option_type):
+        # Mirrors the real reader: distinct contract expirations for this
+        # option_type from the contract dimension — GLOBAL (across all dates),
+        # independent of any single date's settlement availability.
+        exps = {
+            s["expiration_int"]
+            for s in self._settlements
+            if s["option_type"] == option_type
+        }
+        return sorted(exps)
+
     async def fetch_future_front_closes(self, object_id, *, start, end):
         return list(self._future_rows)
 
@@ -333,6 +344,45 @@ async def test_resolver_moneyness_intra_segment_drift_roll_label_is_correct():
     assert _roll_marker_labels(res) != [(distinct[0], distinct[1])]
 
 
+async def test_resolver_front_hole_follows_contract_chain_not_settlements():
+    # The TRUE front expiration (A, exp 0119) has a settlement data HOLE on
+    # 2024-01-12 (no usable row that day) while the NEXT expiration (B, exp
+    # 0216) already has data. The active/front expiration must be taken from the
+    # contract chain (A is still the calendar front on 0112), so the hole date is
+    # simply dropped — NOT rolled to B and then rolled back to A on 0115.
+    #
+    # Under the OLD settlement-derived logic, 0112 would select B (min expiration
+    # among that day's usable settlements) → a spurious roll A->B on 0112 and a
+    # non-monotonic roll B->A on 0115, giving roll_dates (0112, 0115, 0122).
+    # The chain-derived logic yields a single monotonic roll on 0122.
+    settlements = [
+        _settlement(20240110, 20240119, 5000.0, 2.0, code="A5000"),
+        # 2024-01-12: A (front) has a hole; only B is present that day.
+        _settlement(20240112, 20240216, 5000.0, 5.0, code="B5000"),
+        # 2024-01-15: A is back.
+        _settlement(20240115, 20240119, 5000.0, 1.5, code="A5000"),
+        # 2024-01-22: A (0119) has expired -> real roll to B (0216).
+        _settlement(20240122, 20240216, 5000.0, 4.0, code="B5000"),
+    ]
+    reader = _FakeReaderOptions(settlements, [])
+    res = await resolve_options_continuous_v2(
+        reader,
+        _OBJ,
+        criterion="strike",
+        target=5000.0,
+        option_type="put",
+        start=None,
+        end=None,
+    )
+    # 0112 dropped (front A had a hole); no spurious/backward roll.
+    assert res.dates == (20240110, 20240115, 20240122)
+    assert res.contract_codes == ("A5000", "A5000", "B5000")
+    assert res.roll_dates == (20240122,)
+    # Roll boundaries are monotonically increasing (never roll backward).
+    assert list(res.roll_dates) == sorted(res.roll_dates)
+    assert len(res.roll_dates) == 1
+
+
 def test_front_close_by_date_picks_nearest_expiration():
     rows = [
         {"ts_int": 20240618, "expiration_int": 20240621, "close": 5495.5},
@@ -340,6 +390,168 @@ def test_front_close_by_date_picks_nearest_expiration():
     ]
     m = _front_close_by_date(rows)
     assert m == {20240618: 5495.5}  # smallest expiration >= date wins
+
+
+# --------------------------------------------------------------------------- #
+# Service response shaping + error paths (fake reader, no DB)
+# --------------------------------------------------------------------------- #
+from tcg.types.errors import DataNotFoundError  # noqa: E402
+
+
+class _FakeReaderService:
+    """Fake v2 reader for service-level shaping/error tests."""
+
+    def __init__(
+        self, *, obj=None, serie=None, facts=None, contracts=None, series=None
+    ):
+        self._obj = obj
+        self._serie = serie
+        self._facts = facts or ([], {})
+        self._contracts = contracts or []
+        self._series = series or []
+
+    async def get_object(self, object_id):
+        return self._obj
+
+    async def get_serie(self, serie_id):
+        return self._serie
+
+    async def list_contracts(self, object_id):
+        return list(self._contracts)
+
+    async def list_series(self, object_id):
+        return list(self._series)
+
+    async def read_serie_facts(self, serie_id, serie_type, *, start, end):
+        return self._facts
+
+
+def _make_service(reader):
+    svc = DefaultMarketDataServiceV2.__new__(DefaultMarketDataServiceV2)
+    svc._reader = reader
+    from tcg.data._rolling import ContinuousSeriesBuilder
+
+    svc._roller = ContinuousSeriesBuilder()
+    return svc
+
+
+async def test_get_object_detail_shapes_object_contracts_series():
+    reader = _FakeReaderService(
+        obj={"object_id": 7, "kind": "option", "symbol": "OPT_SP_500"},
+        contracts=[{"contract_id": 1, "contract_code": "X"}],
+        series=[{"serie_id": 9, "type": "value"}],
+    )
+    svc = _make_service(reader)
+    detail = await svc.get_object_detail(7)
+    assert detail["object"]["symbol"] == "OPT_SP_500"
+    assert detail["contracts"] == [{"contract_id": 1, "contract_code": "X"}]
+    assert detail["series"] == [{"serie_id": 9, "type": "value"}]
+
+
+async def test_get_object_detail_missing_object_raises_404():
+    svc = _make_service(_FakeReaderService(obj=None))
+    with pytest.raises(DataNotFoundError):
+        await svc.get_object_detail(999)
+
+
+async def test_get_series_bar_type_dispatches_bar_fields():
+    facts = (
+        [20240102, 20240103],
+        {
+            "open": [1.0, 2.0],
+            "high": [1.0, 2.0],
+            "low": [1.0, 2.0],
+            "close": [1.5, 2.5],
+            "volume": [10.0, 20.0],
+            "open_interest": [5.0, 6.0],
+        },
+    )
+    reader = _FakeReaderService(serie={"serie_id": 5, "type": "bar"}, facts=facts)
+    svc = _make_service(reader)
+    out = await svc.get_series(5)
+    assert out["type"] == "bar"
+    assert out["fields"] == list(FACT_DISPATCH["bar"][1])
+    assert out["points"]["ts"] == [20240102, 20240103]
+    assert out["points"]["close"] == [1.5, 2.5]
+    assert out["points"]["open_interest"] == [5.0, 6.0]
+
+
+async def test_get_series_value_type_dispatches_value_field():
+    reader = _FakeReaderService(
+        serie={"serie_id": 8, "type": "value"},
+        facts=([20240102], {"value": [42.0]}),
+    )
+    svc = _make_service(reader)
+    out = await svc.get_series(8)
+    assert out["type"] == "value"
+    assert out["fields"] == ["value"]
+    assert out["points"] == {"ts": [20240102], "value": [42.0]}
+
+
+async def test_get_series_empty_stream_ok():
+    reader = _FakeReaderService(
+        serie={"serie_id": 8, "type": "value"}, facts=([], {"value": []})
+    )
+    svc = _make_service(reader)
+    out = await svc.get_series(8)
+    assert out["points"] == {"ts": [], "value": []}
+
+
+async def test_get_series_missing_serie_raises_404():
+    svc = _make_service(_FakeReaderService(serie=None))
+    with pytest.raises(DataNotFoundError):
+        await svc.get_series(404)
+
+
+async def test_get_continuous_options_rejects_non_option():
+    reader = _FakeReaderService(
+        obj={"object_id": 6, "kind": "future", "symbol": "FUT_SP_500"}
+    )
+    svc = _make_service(reader)
+    with pytest.raises(ValidationError, match="not an option"):
+        await svc.get_continuous_options(
+            6, criterion="strike", target=5000.0, option_type="put"
+        )
+
+
+async def test_get_continuous_options_missing_object_raises_404():
+    svc = _make_service(_FakeReaderService(obj=None))
+    with pytest.raises(DataNotFoundError):
+        await svc.get_continuous_options(
+            999, criterion="strike", target=5000.0, option_type="put"
+        )
+
+
+async def test_resolver_empty_settlements_yields_empty_stream():
+    reader = _FakeReaderOptions([], [])
+    res = await resolve_options_continuous_v2(
+        reader,
+        _OBJ,
+        criterion="strike",
+        target=5000.0,
+        option_type="put",
+        start=None,
+        end=None,
+    )
+    assert res.dates == ()
+    assert res.values == ()
+    assert res.roll_dates == ()
+    assert res.contracts == ()
+    assert res.contract_codes == ()
+
+
+async def test_resolver_rejects_non_positive_strike():
+    reader = _FakeReaderOptions([], [])
+    with pytest.raises(ValidationError, match="Strike target must be > 0"):
+        await resolve_options_continuous_v2(
+            reader,
+            _OBJ,
+            criterion="strike",
+            target=0.0,
+            option_type="put",
+            start=None,
+            end=None,
+        )
 
 
 # --------------------------------------------------------------------------- #
