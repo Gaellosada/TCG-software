@@ -114,6 +114,53 @@ export const queryKeys = {
      * orchestrated sidebar payload, not any single endpoint.
      */
     categoryBrowser: () => ['market', 'categoryBrowser'],
+
+    // ── Database v2 (dwh star schema tcg_instruments_v2 via /api/data-v2) ──
+    // Namespaced under 'market','v2' so v2 reads share the slow-changing
+    // cache root and can be invalidated together, distinct from v1 keys.
+    v2: {
+      /** GET /data-v2/objects — object catalogue (grouped by kind in the FE) */
+      objects: () => ['market', 'v2', 'objects'],
+
+      /** GET /data-v2/objects/{id} — object detail (contracts + series) */
+      object: (objectId) => ['market', 'v2', 'object', objectId ?? null],
+
+      /** GET /data-v2/series/{id}?start&end — one series, type-dispatched */
+      series: (serieId, { start = null, end = null } = {}) => [
+        'market', 'v2', 'series', serieId ?? null, start || null, end || null,
+      ],
+
+      /**
+       * GET /data-v2/continuous/futures/{id} — rolled continuous series.
+       * ``cycle`` collapses ''/undefined/null → null; ``rollOffset``/``rank``
+       * coerced to numbers (rank defaults 1) so front-month keys are stable —
+       * mirrors the v1 ``continuous`` key contract.
+       */
+      continuousFutures: (objectId, { strategy, adjustment, cycle, rollOffset, rank } = {}) => [
+        'market', 'v2', 'continuousFutures', objectId ?? null,
+        strategy || 'front_month',
+        adjustment || 'none',
+        cycle || null,
+        Number(rollOffset) || 0,
+        Number(rank) || 1,
+      ],
+
+      /** GET /data-v2/continuous/futures/{id}/cycles — available roll cycles */
+      futuresCycles: (objectId) => ['market', 'v2', 'futuresCycles', objectId ?? null],
+
+      /**
+       * GET /data-v2/continuous/options/{id} — settlement-value continuous.
+       * Keyed on criterion + target + option_type + roll (delta criterion is
+       * disabled in the UI, so it never reaches this key).
+       */
+      continuousOptions: (objectId, { criterion, target, optionType, roll } = {}) => [
+        'market', 'v2', 'continuousOptions', objectId ?? null,
+        criterion || 'strike',
+        target ?? null,
+        optionType || 'put',
+        roll || 'at_expiry',
+      ],
+    },
   },
 
   // ── Persistence (user-mutable; invalidated on edit) ────────────────────

@@ -49,6 +49,14 @@ import {
   getOptionContract,
   getChainSnapshot,
 } from '../api/options';
+import {
+  listObjectsV2,
+  getObjectDetailV2,
+  getSeriesV2,
+  getContinuousFuturesV2,
+  getV2FuturesCycles,
+  getContinuousOptionsV2,
+} from '../api/dataV2';
 
 /**
  * Normalise a TanStack query result into the legacy ``{ data, loading, error }``
@@ -240,6 +248,107 @@ export function useChainSnapshot(root, params = {}, options = {}) {
           ...(expiration_cycle ? { expiration_cycle } : {}),
         }),
       enabled: !!root && !!date && !!expiration && (options.enabled ?? true),
+      placeholderData: keepPreviousData,
+      ...options,
+    }),
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Database v2 hooks — dwh star schema (tcg_instruments_v2) via /api/data-v2.
+// Same SWR contract + { data, loading, error } shape as the v1 hooks above.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** GET /data-v2/objects — the v2 object catalogue (FE groups by kind). */
+export function useObjectsV2(options = {}) {
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.objects(),
+      queryFn: ({ signal }) => listObjectsV2({ signal }),
+      ...options,
+    }),
+  );
+}
+
+/** GET /data-v2/objects/{id} — object detail (contracts + series). */
+export function useObjectDetailV2(objectId, options = {}) {
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.object(objectId),
+      queryFn: ({ signal }) => getObjectDetailV2(objectId, { signal }),
+      enabled: objectId != null && (options.enabled ?? true),
+      ...options,
+    }),
+  );
+}
+
+/** GET /data-v2/series/{id} — one series, type-dispatched. Disabled until id. */
+export function useSeriesV2(serieId, { start, end, ...options } = {}) {
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.series(serieId, { start, end }),
+      queryFn: ({ signal }) => getSeriesV2(serieId, { start, end, signal }),
+      enabled: serieId != null && (options.enabled ?? true),
+      placeholderData: keepPreviousData,
+      ...options,
+    }),
+  );
+}
+
+/**
+ * GET /data-v2/continuous/futures/{id} — rolled continuous series.
+ * ``placeholderData: keepPreviousData`` keeps the previous curve on screen
+ * while a new adjustment/cycle/roll-offset loads (mirrors v1).
+ */
+export function useContinuousFuturesV2(objectId, params = {}, options = {}) {
+  const { strategy = 'front_month', adjustment = 'none', cycle, rollOffset, rank = 1 } = params;
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.continuousFutures(objectId, { strategy, adjustment, cycle, rollOffset, rank }),
+      queryFn: () =>
+        getContinuousFuturesV2(objectId, {
+          strategy,
+          adjustment,
+          cycle: cycle || undefined,
+          rollOffset,
+          rank,
+        }),
+      enabled: objectId != null && (options.enabled ?? true),
+      placeholderData: keepPreviousData,
+      ...options,
+    }),
+  );
+}
+
+/** GET /data-v2/continuous/futures/{id}/cycles — available roll cycles. */
+export function useV2FuturesCycles(objectId, options = {}) {
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.futuresCycles(objectId),
+      queryFn: () => getV2FuturesCycles(objectId),
+      enabled: objectId != null && (options.enabled ?? true),
+      ...options,
+    }),
+  );
+}
+
+/**
+ * GET /data-v2/continuous/options/{id} — settlement-value continuous.
+ * Disabled until an objectId AND a numeric target are present. The Delta
+ * criterion is greyed in the UI, so ``criterion`` is only ever strike|moneyness
+ * here (a delta request would be rejected by the backend anyway).
+ */
+export function useContinuousOptionsV2(objectId, params = {}, options = {}) {
+  const { criterion = 'strike', target, optionType = 'put', roll = 'at_expiry', start, end } = params;
+  return asAsyncResult(
+    useQuery({
+      queryKey: queryKeys.market.v2.continuousOptions(objectId, { criterion, target, optionType, roll }),
+      queryFn: () =>
+        getContinuousOptionsV2(objectId, { criterion, target, optionType, roll, start, end }),
+      enabled:
+        objectId != null
+        && target !== undefined && target !== null && target !== ''
+        && (options.enabled ?? true),
       placeholderData: keepPreviousData,
       ...options,
     }),
