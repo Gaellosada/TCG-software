@@ -4,6 +4,7 @@ import useTheme from '../../hooks/useTheme';
 import useChartPreference from '../../hooks/useChartPreference';
 import Chart from '../../components/Chart';
 import { TRACE_COLORS, getChartColors } from '../../utils/chartTheme';
+import { formatDateInt } from '../../utils/format';
 import styles from '../Data/ChartBase.module.css';
 
 /**
@@ -15,8 +16,11 @@ import styles from '../Data/ChartBase.module.css';
  *   - (fallback) → one line per numeric field present in ``fields``
  *
  * The response carries ``points: { ts:[...], <field>:[...] }`` where ``ts`` are
- * ISO timestamp strings used directly as the Plotly x axis. All rendering goes
- * through the shared Chart component (no forked v2 chart).
+ * YYYYMMDD integers (e.g. 20240618). They are converted to YYYY-MM-DD strings
+ * via ``formatDateInt`` before being used as the Plotly x axis — the shared
+ * Chart forces ``xaxis.type:'date'``, so raw ints would be read as epoch-ms and
+ * collapse the whole series onto 1970. All rendering goes through the shared
+ * Chart component (no forked v2 chart).
  */
 const OHLC_FIELDS = ['open', 'high', 'low', 'close'];
 
@@ -39,6 +43,8 @@ function SeriesChartV2({ serieId, serieType, label, downloadFilename }) {
 
     const type = data.type || serieType;
     const fields = Array.isArray(data.fields) ? data.fields : Object.keys(points).filter((k) => k !== 'ts');
+    // ts are YYYYMMDD ints — convert to YYYY-MM-DD strings for the date x axis.
+    const x = ts.map(formatDateInt);
     const t = [];
 
     // ── bar: OHLC (candlestick/line) + optional volume ──
@@ -46,14 +52,14 @@ function SeriesChartV2({ serieId, serieType, label, downloadFilename }) {
       const effectiveType = chartType === 'candlestick' ? 'candlestick' : 'line';
       if (effectiveType === 'candlestick') {
         t.push({
-          x: ts, open: points.open, high: points.high, low: points.low, close: points.close,
+          x, open: points.open, high: points.high, low: points.low, close: points.close,
           type: 'candlestick', name: 'OHLC',
           increasing: { line: { color: '#10b981' } },
           decreasing: { line: { color: '#ef4444' } },
         });
       } else {
         t.push({
-          x: ts, y: points.close, type: 'scatter', mode: 'lines', name: 'Close',
+          x, y: points.close, type: 'scatter', mode: 'lines', name: 'Close',
           line: { color: TRACE_COLORS[0], width: 1 },
           hovertemplate: '%{x}<br>Close: %{y:,.2f}<extra></extra>',
         });
@@ -62,7 +68,7 @@ function SeriesChartV2({ serieId, serieType, label, downloadFilename }) {
       const hasVolume = Array.isArray(points.volume) && points.volume.some((v) => Number.isFinite(v) && v > 0);
       if (hasVolume) {
         t.push({
-          x: ts, y: points.volume, type: 'bar', name: 'Volume', yaxis: 'y2',
+          x, y: points.volume, type: 'bar', name: 'Volume', yaxis: 'y2',
           marker: { color: colors.volumeBar },
           hovertemplate: '%{x}<br>Volume: %{y:,.0f}<extra></extra>',
         });
@@ -87,7 +93,7 @@ function SeriesChartV2({ serieId, serieType, label, downloadFilename }) {
     // ── value: single line ──
     if (type === 'value' && Array.isArray(points.value)) {
       t.push({
-        x: ts, y: points.value, type: 'scatter', mode: 'lines', name: label || 'Value',
+        x, y: points.value, type: 'scatter', mode: 'lines', name: label || 'Value',
         line: { color: TRACE_COLORS[0], width: 1 },
         hovertemplate: '%{x}<br>%{y:,.4f}<extra></extra>',
         connectgaps: false,
@@ -102,7 +108,7 @@ function SeriesChartV2({ serieId, serieType, label, downloadFilename }) {
       const arr = points[f];
       if (!Array.isArray(arr)) continue;
       t.push({
-        x: ts, y: arr, type: 'scatter', mode: 'lines', name: f,
+        x, y: arr, type: 'scatter', mode: 'lines', name: f,
         line: { color: TRACE_COLORS[colorIdx % TRACE_COLORS.length], width: 1 },
         hovertemplate: `%{x}<br>${f}: %{y:,.4f}<extra></extra>`,
         connectgaps: false,

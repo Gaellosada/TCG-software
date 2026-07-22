@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { useContinuousOptionsV2 } from '../../hooks/marketQueries';
 import Chart from '../../components/Chart';
 import { TRACE_COLORS } from '../../utils/chartTheme';
+import { formatDateInt } from '../../utils/format';
 import baseStyles from '../Data/ChartBase.module.css';
 import styles from './DataV2.module.css';
 
@@ -16,10 +17,13 @@ const DEFAULT_TARGET = { strike: '', moneyness: '1.0' };
  * "greeks unavailable in v2" tooltip. Renders the settlement-value stream via
  * the shared Chart component with sell/buy roll markers.
  *
- * NOTE (reviewer): assumes the endpoint returns { points:{ ts, value },
- * roll_dates, contracts, spot_source? } with ISO ``ts``/``roll_dates`` strings.
- * Settlement ``value`` can be a false zero/NULL on some dates — non-positive
- * values are nulled out (not plotted as 0) and surfaced in a notice.
+ * The endpoint returns { points:{ ts, value }, roll_dates, contracts,
+ * spot_source? } where ``ts`` and ``roll_dates`` are YYYYMMDD integers (e.g.
+ * 20240618). They are converted to YYYY-MM-DD strings via ``formatDateInt``
+ * before use — the shared Chart forces ``xaxis.type:'date'``, so raw ints would
+ * be read as epoch-ms and land on 1970. Settlement ``value`` can be a false
+ * zero/NULL on some dates — non-positive values are nulled out (not plotted as
+ * 0) and surfaced in a notice.
  */
 function ContinuousOptionsChartV2({ objectId, symbol }) {
   const [criterion, setCriterion] = useState('strike');
@@ -57,7 +61,8 @@ function ContinuousOptionsChartV2({ objectId, symbol }) {
         nulled++;
       }
     }
-    return { xs: ts, ys: outY, nulledCount: nulled };
+    // ts are YYYYMMDD ints — convert to YYYY-MM-DD strings for the date x axis.
+    return { xs: ts.map(formatDateInt), ys: outY, nulledCount: nulled };
   }, [data]);
 
   const traces = useMemo(() => {
@@ -71,22 +76,25 @@ function ContinuousOptionsChartV2({ objectId, symbol }) {
     }];
   }, [xs, ys, optionType, criterion, target]);
 
-  // Sell+buy roll markers from roll_dates (ISO) aligned to points.ts.
+  // Sell+buy roll markers from roll_dates (YYYYMMDD ints) aligned to points.ts.
+  // Both roll_dates and xs are converted to YYYY-MM-DD strings so indexOf and
+  // the marker x placement stay on the same string date axis as the trace.
   const markers = useMemo(() => {
     const rd = data?.roll_dates;
     const contracts = data?.contracts;
     if (!Array.isArray(rd) || rd.length === 0 || xs.length === 0) return [];
     const out = [];
     for (let k = 0; k < rd.length; k++) {
-      const i = xs.indexOf(rd[k]);
+      const xLabel = formatDateInt(rd[k]);
+      const i = xs.indexOf(xLabel);
       if (i <= 0) continue;
       const sell = ys[i - 1];
       const buy = ys[i];
       if (Number.isFinite(sell)) {
-        out.push({ x: rd[k], y: sell, kind: 'sell', customdata: [contracts?.[k], sell] });
+        out.push({ x: xLabel, y: sell, kind: 'sell', customdata: [contracts?.[k], sell] });
       }
       if (Number.isFinite(buy)) {
-        out.push({ x: rd[k], y: buy, kind: 'buy', customdata: [contracts?.[k + 1], buy] });
+        out.push({ x: xLabel, y: buy, kind: 'buy', customdata: [contracts?.[k + 1], buy] });
       }
     }
     return out;
