@@ -103,6 +103,7 @@ async def client():
             values=(0.25,),
             roll_dates=(),
             contracts=("EW3M4 P5000.20240621",),
+            contract_codes=("EW3M4 P5000.20240621",),
         )
     )
     app.state.market_data_v2 = mock
@@ -158,6 +159,8 @@ async def test_continuous_options_strike(client):
     body = resp.json()
     assert body["points"]["ts"] == [20240618]
     assert body["points"]["value"] == [0.25]
+    # per-date contract codes serialized alongside ts/value (1:1)
+    assert body["points"]["contract"] == ["EW3M4 P5000.20240621"]
     assert body["contracts"] == ["EW3M4 P5000.20240621"]
 
 

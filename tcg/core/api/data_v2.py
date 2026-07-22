@@ -188,7 +188,11 @@ async def get_continuous_options(
         "spot_source": "underlying_future_front_close"
         if result.criterion == "moneyness"
         else None,
-        "points": {"ts": list(result.dates), "value": list(result.values)},
+        "points": {
+            "ts": list(result.dates),
+            "value": list(result.values),
+            "contract": list(result.contract_codes),  # per-date, 1:1 with ts
+        },
         "roll_dates": list(result.roll_dates),
         "contracts": list(result.contracts),
     }

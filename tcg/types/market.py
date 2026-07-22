@@ -199,7 +199,14 @@ class OptionsContinuousV2:
     ints (same convention as :class:`PriceSeries`); ``values`` are the selected
     contract's settlement values (all ``> 0``, false-zero settlements dropped);
     ``roll_dates`` are the YYYYMMDD dates on which the held expiration changed;
-    ``contracts`` are the distinct selected contract codes in first-seen order.
+    ``contracts`` are the distinct selected contract codes in first-seen order
+    (for a count/summary, NOT roll-aligned); ``contract_codes`` are the selected
+    contract code per trade date, aligned 1:1 with ``dates``/``values`` so a
+    consumer can label any bar (and thus each roll's sell bar i-1 and buy bar i)
+    with the exact contract active there. A per-date array — not a per-segment
+    one — is required because the moneyness criterion can re-select a different
+    strike within a single expiration segment as spot drifts, so no single
+    per-segment code can represent both a segment's first and last bar.
     """
 
     object_id: int
@@ -209,3 +216,4 @@ class OptionsContinuousV2:
     values: tuple[float, ...]
     roll_dates: tuple[int, ...]
     contracts: tuple[str, ...]
+    contract_codes: tuple[str, ...]  # per-date, 1:1 with dates

@@ -131,7 +131,8 @@ async def resolve_options_continuous_v2(
     dates_out: list[int] = []
     values_out: list[float] = []
     roll_dates: list[int] = []
-    contracts_out: list[str] = []
+    contracts_out: list[str] = []  # distinct, first-seen (count/summary only)
+    contract_codes_out: list[str] = []  # per-date, 1:1 with dates_out
     seen_contracts: set[str] = set()
     prev_active_exp: int | None = None
 
@@ -170,6 +171,7 @@ async def resolve_options_continuous_v2(
         dates_out.append(ts_int)
         values_out.append(float(chosen["value"]))  # type: ignore[arg-type]
         code = str(chosen["contract_code"])
+        contract_codes_out.append(code)  # per-date, aligned to dates_out
         if code not in seen_contracts:
             seen_contracts.add(code)
             contracts_out.append(code)
@@ -182,4 +184,5 @@ async def resolve_options_continuous_v2(
         values=tuple(values_out),
         roll_dates=tuple(roll_dates),
         contracts=tuple(contracts_out),
+        contract_codes=tuple(contract_codes_out),
     )
