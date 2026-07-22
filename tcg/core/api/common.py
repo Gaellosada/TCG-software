@@ -19,6 +19,16 @@ def get_market_data(request: Request) -> MarketDataService:
     return request.app.state.market_data
 
 
+def get_market_data_v2(request: Request):
+    """Dependency: retrieve the v2 market-data service from app state.
+
+    Return type is intentionally untyped here to keep this shared helper free
+    of a ``tcg.data.service_v2`` import (the concrete class lives in the data
+    layer; the router annotates the concrete type where it is used).
+    """
+    return request.app.state.market_data_v2
+
+
 def error_response(
     error_type: str,
     message: str,

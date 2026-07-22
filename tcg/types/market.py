@@ -186,3 +186,26 @@ class ContinuousSeries:
     prices: PriceSeries
     roll_dates: tuple[int, ...]  # YYYYMMDD at each roll boundary
     contracts: tuple[str, ...]  # Ordered contract IDs used
+
+
+@dataclass(frozen=True)
+class OptionsContinuousV2:
+    """v2-native continuous options settlement stream.
+
+    Produced by the ``tcg.data`` v2 options resolver: per trade date a single
+    option contract is selected (by absolute strike or by moneyness) from the
+    front-expiration chain, its daily settlement ``value`` is read from
+    ``fact_value``, and the contract is rolled AtExpiry. ``dates`` are YYYYMMDD
+    ints (same convention as :class:`PriceSeries`); ``values`` are the selected
+    contract's settlement values (all ``> 0``, false-zero settlements dropped);
+    ``roll_dates`` are the YYYYMMDD dates on which the held expiration changed;
+    ``contracts`` are the distinct selected contract codes in first-seen order.
+    """
+
+    object_id: int
+    criterion: str  # "strike" | "moneyness"
+    option_type: str  # "call" | "put"
+    dates: tuple[int, ...]
+    values: tuple[float, ...]
+    roll_dates: tuple[int, ...]
+    contracts: tuple[str, ...]
