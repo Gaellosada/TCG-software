@@ -56,7 +56,12 @@ from pydantic import (
     model_validator,
 )
 
-from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
+from tcg.core.api._models_options import (
+    MaturityRule,
+    RollOffset,
+    SelectionCriterion,
+    reject_contradicting_delta_sign,
+)
 
 
 def _validate_nav_times(v: float) -> float:
@@ -237,6 +242,18 @@ class OptionStreamRef(BaseModel):
         """
         if self.hold_between_rolls and "stream" not in self.model_fields_set:
             self.stream = "close"
+        return self
+
+    @model_validator(mode="after")
+    def _check_delta_sign_matches_type(self) -> "OptionStreamRef":
+        """Reject a ``ByDelta`` target whose sign contradicts ``option_type``.
+
+        This model is the only place BOTH ``option_type`` and the ``ByDelta``
+        selection are known, so the sign-vs-type rule is enforced here (a PUT
+        needs ``target_delta <= 0``, a CALL ``>= 0``; ``0`` is allowed).  NO-OP
+        for every correctly-signed selection and for non-ByDelta criteria.
+        """
+        reject_contradicting_delta_sign(self.option_type, self.selection)
         return self
 
 

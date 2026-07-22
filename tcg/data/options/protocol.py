@@ -101,6 +101,65 @@ class OptionsDataReader(Protocol):
         """
         ...
 
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: Sequence[tuple[date, Sequence[date]]],
+        expiration_cycle: str | Sequence[str] | None = None,
+        delta_pushdown: "tuple[float, int] | None" = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Multi-EXPIRATION bulk chain fetch in ONE query (year-chunk fast path).
+
+        OPTIONAL capability: collapses the per-expiration ``query_chain_bulk``
+        fan-out into a single round-trip covering several expirations, each
+        restricted to its OWN trade-date window (``groups`` =
+        ``[(expiration, [trade_dates...]), ...]``).  Same ``(contract, row)``
+        semantics as ``query_chain_bulk`` per (expiration, trade_date): the full
+        chain (all strikes of ``type``) is a strict superset of the old windowed
+        fetch.  Callers must feature-detect (``callable``) and fall back to
+        ``query_chain_bulk`` when a reader does not implement it.
+
+        ``delta_pushdown`` (a ``(target_delta, k)`` tuple, optional) engages the
+        single-read DELTA PUSHDOWN: the greeks fact is ranked per (expiration,
+        trade_date) by ``|delta - target|`` (tie-break lower strike) and only the
+        top-``k`` candidates per group are returned — the ROW SHAPE is unchanged,
+        so ``match_by_delta`` picks the same contract (``rn=1`` IS its winner;
+        NULL deltas sort LAST so they never displace it, and an all-NULL chain
+        preserves the ``missing_delta_no_compute`` classification).  Correct only
+        for STORED-delta ``ByDelta`` selection.
+        """
+        ...
+
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: Sequence[tuple[str, date, date]],
+        expiration_cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Identity keyset fetch of specific HELD option SYMBOLS (Phase 2).
+
+        OPTIONAL capability (hold-leg two-phase pushdown).  ``held_windows`` is
+        ``[(symbol, lo, hi), ...]`` — each ALREADY-SELECTED frozen contract's
+        ``symbol`` (== ``OptionContractDoc.contract_id``) and its held date-range;
+        ``hi`` must include the next roll date (the resolver reads the OLD
+        contract's mid on the roll seam).  Returns every physical row of each
+        symbol over its window, keyed by fact ``trade_date``.  SQL never ranks or
+        picks — selection stays in Python.  Callers must feature-detect
+        (``callable(getattr(reader, "query_held_rows", None))``) and fall back to
+        the full-chain hold path when a reader does not implement it.
+
+        ``expiration_cycle`` MUST be the SAME cycle the full-chain path filters on
+        (the wiring layer injects the caller's cycle): a symbol is NOT unique
+        across cycles — the ~2.68% duplicate-``instrument_id`` quirk is one symbol
+        double-tagged (e.g. ``"M"`` + ``"W3 Friday"``) with different quotes, and
+        only the matching-cycle sibling must survive so ``_row_for_contract``'s
+        first-by-``instrument_id`` pick is byte-identical to the full-chain path.
+        ``None`` = all cycles.
+        """
+        ...
+
     async def list_roots(self) -> list[OptionRootInfo]:
         """List every OPT_* collection with display metadata.
 

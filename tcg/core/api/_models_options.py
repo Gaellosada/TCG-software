@@ -205,6 +205,40 @@ SelectionCriterion = Annotated[
 ]
 
 
+def reject_contradicting_delta_sign(
+    option_type: Literal["C", "P"], selection: object
+) -> None:
+    """Reject a ByDelta ``target_delta`` whose SIGN contradicts ``option_type``.
+
+    PUT premia carry NEGATIVE delta and CALL premia POSITIVE, so a delta target
+    whose sign contradicts the leg's option type (e.g. ``+0.10`` on a PUT) is a
+    malformed spec — the frontend always emits correctly-signed targets (puts −,
+    calls +).  Raises ``ValueError`` (surfaced as a 422 by FastAPI request
+    validation) rather than silently normalising, so a genuine spec error fails
+    loud instead of resolving a wrong-sided contract.
+
+    The check lives here — NOT on :class:`ByDelta` — because ``ByDelta`` alone
+    does not know the option type; only a model that carries BOTH ``option_type``
+    and the selection (``OptionStreamRef``) can enforce it.  Neutral ``0.0`` is
+    allowed for either type (sign-free), and non-``ByDelta`` selections
+    (ByStrike / ByMoneyness) are a no-op.  This is a NO-OP for every
+    correctly-signed production selection.
+    """
+    if not isinstance(selection, ByDelta):
+        return
+    td = selection.target_delta
+    if option_type == "P" and td > 0:
+        raise ValueError(
+            f"target_delta {td:+g} contradicts option_type PUT "
+            "(puts have non-positive delta); expected target_delta <= 0"
+        )
+    if option_type == "C" and td < 0:
+        raise ValueError(
+            f"target_delta {td:+g} contradicts option_type CALL "
+            "(calls have non-negative delta); expected target_delta >= 0"
+        )
+
+
 class SelectionResult(BaseModel):
     """Outcome of a Module 3 selection call."""
 

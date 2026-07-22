@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from tcg.data._sql.connection import SCHEMA, DwhConnectionPool, to_float
 from tcg.data.options._provider import _SEED_RATIOS, has_greeks_for_root
@@ -98,6 +98,185 @@ def _cycle_predicate(
         # Collapse a 1-element sequence to the scalar form (identical SQL/bind).
         return "expiration_cycle = %s", tags[0]
     return "expiration_cycle = ANY(%s)", tags
+
+
+# --------------------------------------------------------------------------- #
+# Shared SQL fragments — single-sourced so the byte-identity-critical projection
+# and ordering cannot drift between the query builders (audit_d3 INV-5 / audit_d5).
+# --------------------------------------------------------------------------- #
+
+# The 23-column chain projection, WITHOUT the leading ``k.trade_date`` (the three
+# BULK methods prepend it; :meth:`SqlOptionsDataReader.query_chain` — single-date —
+# omits it).  Duplicated verbatim across 4 query builders before this extraction.
+_CHAIN_SELECT_COLS = (
+    "i.instrument_id AS option_instrument_id, i.option_symbol,\n"
+    "                       i.root_symbol, i.underlying_symbol,\n"
+    "                       i.strike, i.option_type, i.expiration, i.expiration_cycle,\n"
+    "                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,\n"
+    "                       g.delta, g.gamma, g.vega, g.theta,\n"
+    "                       g.implied_vol, g.underlying_price,\n"
+    "                       i.contract_size, i.currency, i.provider"
+)
+
+# Final ordering of the bulk chain reads.  FIRST-by-instrument_id within a date is
+# LOAD-BEARING: ``_row_for_contract`` returns the first matching row, and the
+# symbol-granular delta pushdown relies on a stable per-symbol order (audit_d3
+# INV-5).  Single-sourced across the three bulk methods to kill drift.
+_CHAIN_ORDER_BY = "ORDER BY k.trade_date, i.instrument_id"
+
+# The delta-pushdown SYMBOL rank, expressed ONCE as SQL text.
+# COUPLED: keep byte-identical to ``symbol_delta_rank`` below and to
+# ``match_by_delta``'s PRIMARY sort key abs(delta-target) (audit_d3 INV-1).
+_DELTA_RANK_ORDER_BY = (
+    "ORDER BY best_dist ASC NULLS LAST,\n"
+    "                                            best_strike ASC, option_symbol ASC"
+)
+
+# Tolerance for treating two |delta-target| distances as tied (audit_d3 INV-2/3).
+_DELTA_TIE_TOL = 1e-12
+
+
+def symbol_delta_rank(
+    rows: "Sequence[tuple[OptionContractDoc, OptionDailyRow]]",
+    target: float,
+    k: int,
+) -> "list[tuple[OptionContractDoc, OptionDailyRow]]":
+    """SYMBOL-granular delta-rank REFERENCE for ONE (expiration, trade_date).
+
+    Pure-Python encoding of the SQL delta pushdown in
+    :meth:`SqlOptionsDataReader.query_chain_bulk_multi` — the SINGLE source of
+    truth for the ranking semantics that in-tree tests bind ``match_by_delta``
+    against.  Before this, three copies existed (the SQL string, ``match_by_delta``'s
+    sort lambda, and the engine test fakes' private rank — audit_d3 INV-1); the
+    fakes now import THIS, eliminating copy #3.
+
+    Ranks SYMBOLS (``contract_id``) per group by ``(best |delta-target|, min
+    strike, symbol)`` with NULL-delta symbols LAST, keeps the top-``k`` symbols,
+    and returns EVERY row of each kept symbol (mirroring the ~2.68%
+    duplicate-instrument_id retention) in rank order.
+
+    # COUPLED: keep in sync with the SQL ``top_syms`` ORDER BY
+    #   (``_DELTA_RANK_ORDER_BY``: best_dist ASC NULLS LAST, best_strike ASC,
+    #    option_symbol ASC) AND with ``match_by_delta``'s PRIMARY sort key
+    #   abs(delta-target).  Changing the PRIMARY distance metric on EITHER side
+    #   without the other silently diverges the pushdown (audit_d3 INV-1); a
+    #   tie-break-only change is safe (the global-min symbol stays rank-1).
+    """
+    by_symbol: "dict[str, list[tuple[OptionContractDoc, OptionDailyRow]]]" = {}
+    for c, r in rows:
+        by_symbol.setdefault(c.contract_id, []).append((c, r))
+
+    def _best_dist(sym: str) -> float | None:
+        ds = [
+            abs(r.delta_stored - target)
+            for _c, r in by_symbol[sym]
+            if r.delta_stored is not None
+        ]
+        return min(ds) if ds else None
+
+    def _sort_key(sym: str) -> tuple:
+        bd = _best_dist(sym)
+        best_strike = min(c.strike for c, _r in by_symbol[sym])
+        # NULLS LAST: an all-NULL-delta symbol sorts after every ranked symbol.
+        return (bd is None, bd if bd is not None else 0.0, best_strike, sym)
+
+    ranked = sorted(by_symbol, key=_sort_key)
+    return [cr for sym in ranked[:k] for cr in by_symbol[sym]]
+
+
+def _pushdown_overflow_groups(
+    results: "Mapping[date, list[tuple[OptionContractDoc, OptionDailyRow]]]",
+    target: float,
+    k: int,
+) -> "tuple[set[tuple[date, date]], dict[tuple[date, date], str]]":
+    """Detect >k RANK-1 delta-tie OVERFLOW groups from a ``srn <= k+1`` fetch.
+
+    The pushdown SQL fetches ONE extra symbol (``srn <= k+1``) so the (k+1)th
+    retained symbol is observable.  A group is an OVERFLOW iff it retained
+    ``≥ k+1`` symbols AND the (k+1)th-ranked symbol shares the rank-1 (minimum)
+    ``(best_dist, best_strike)`` pair — best ``|delta-target|`` within
+    :data:`_DELTA_TIE_TOL` AND identical ``best_strike``.
+
+    WHY BOTH keys (not best_dist alone): ``match_by_delta`` picks the winner by
+    ``(|delta-target| ASC, strike ASC)`` and SQL's ``top_syms`` ranks symbols by
+    ``(best_dist ASC, best_strike ASC, option_symbol ASC)``.  So the winner is the
+    unique ``(min dist, min strike)`` symbol, which is ALSO SQL's rank-1 → always
+    retained.  The ONLY regime where top-k can drop the winner is when MORE than k
+    symbols share that EXACT ``(dist, strike)`` pair: then the tertiary key differs
+    (SQL ``option_symbol`` vs ``match_by_delta``'s stable input/instrument_id
+    order) and the k-subset SQL keeps may exclude ``match_by_delta``'s pick.  A >k
+    tie on distance alone but with DISTINCT strikes (e.g. every deep-OTM put at
+    delta≈0 on an expiration date) is NOT a risk — both sides pick the lowest
+    strike — so it must NOT force a fallback (that would kill the pushdown speedup
+    on every expiry-day resolve for no correctness gain).  The caller MUST fall
+    back to the full chain for the (narrower) real-overflow groups (audit_d3
+    INV-2/3, item E).
+
+    Returns ``(overflow, drop)``:
+
+    * ``overflow`` — the set of ``(expiration, trade_date)`` groups that overflow.
+    * ``drop`` — for every NON-overflow group that returned k+1 symbols, maps
+      ``(expiration, trade_date) -> contract_id`` of the (k+1)th (surplus) symbol
+      to DISCARD, so the result becomes byte-identical to a plain ``srn <= k``
+      fetch (the top-k winners are unaffected; only the extra probe symbol goes).
+
+    Symbols are ranked by the IDENTICAL key as the SQL ``top_syms`` /
+    :func:`symbol_delta_rank`: ``(best_dist ASC NULLS LAST, best_strike ASC,
+    option_symbol ASC)``.  A group whose rank-1 best_dist is ``None`` (all-NULL
+    delta) has no real winner — ``match_by_delta`` returns
+    ``missing_delta_no_compute`` regardless of which symbols survive — so it is
+    NEVER flagged as an overflow.
+    """
+    # Gather per (expiration, trade_date) group -> per symbol its deltas + strike.
+    groups: "dict[tuple[date, date], dict[str, tuple[list[float | None], float]]]" = {}
+    for _d, pairs in results.items():
+        for c, r in pairs:
+            g = groups.setdefault((c.expiration, r.date), {})
+            deltas, _ = g.setdefault(c.contract_id, ([], c.strike))
+            deltas.append(r.delta_stored)
+
+    overflow: "set[tuple[date, date]]" = set()
+    drop: "dict[tuple[date, date], str]" = {}
+    for key, syms in groups.items():
+        if len(syms) <= k:
+            continue  # ≤ k symbols returned: no surplus (k+1)th was fetched
+        ranked = sorted(
+            syms.items(),
+            key=lambda item: _symbol_rank_key(target, item[1][0], item[1][1], item[0]),
+        )
+        best_dist_1 = _symbol_best_dist(target, ranked[0][1][0])
+        best_dist_kp1 = _symbol_best_dist(target, ranked[k][1][0])
+        strike_1 = ranked[0][1][1]
+        strike_kp1 = ranked[k][1][1]
+        if (
+            best_dist_1 is not None
+            and best_dist_kp1 is not None
+            and (best_dist_kp1 - best_dist_1) <= _DELTA_TIE_TOL
+            and strike_kp1 == strike_1
+        ):
+            overflow.add(key)
+        else:
+            drop[key] = ranked[k][0]  # discard the surplus (k+1)th symbol
+    return overflow, drop
+
+
+def _symbol_best_dist(target: float, deltas: "list[float | None]") -> float | None:
+    """Best (minimum) ``|delta - target|`` over a symbol's rows; None if all NULL.
+
+    Mirrors :func:`symbol_delta_rank`'s ``_best_dist`` — the single delta-rank key.
+    """
+    ds = [abs(d - target) for d in deltas if d is not None]
+    return min(ds) if ds else None
+
+
+def _symbol_rank_key(
+    target: float, deltas: "list[float | None]", strike: float, symbol: str
+) -> tuple:
+    """The SYMBOL rank sort key shared with the SQL ``top_syms`` ORDER BY and
+    :func:`symbol_delta_rank`: ``(best_dist ASC NULLS LAST, best_strike ASC,
+    option_symbol ASC)``."""
+    bd = _symbol_best_dist(target, deltas)
+    return (bd is None, bd if bd is not None else 0.0, strike, symbol)
 
 
 def _display_name(collection: str) -> str:
@@ -296,13 +475,7 @@ class SqlOptionsDataReader:
                     FROM {SCHEMA}.dim_instrument
                     WHERE {" AND ".join(dim_where)}
                 )
-                SELECT i.instrument_id AS option_instrument_id, i.option_symbol,
-                       i.root_symbol, i.underlying_symbol,
-                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
-                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
-                       g.delta, g.gamma, g.vega, g.theta,
-                       g.implied_vol, g.underlying_price,
-                       i.contract_size, i.currency, i.provider
+                SELECT {_CHAIN_SELECT_COLS}
                 FROM ids i
                 LEFT JOIN {SCHEMA}.fact_price_eod p
                        ON p.instrument_id = i.instrument_id AND p.trade_date = %s
@@ -451,13 +624,7 @@ class SqlOptionsDataReader:
                       AND trade_date = ANY(%s)
                 )
                 SELECT k.trade_date,
-                       i.instrument_id AS option_instrument_id, i.option_symbol,
-                       i.root_symbol, i.underlying_symbol,
-                       i.strike, i.option_type, i.expiration, i.expiration_cycle,
-                       p.bid, p.ask, p.close AS option_close, p.volume, p.open_interest,
-                       g.delta, g.gamma, g.vega, g.theta,
-                       g.implied_vol, g.underlying_price,
-                       i.contract_size, i.currency, i.provider
+                       {_CHAIN_SELECT_COLS}
                 FROM keyset k
                 JOIN ids i ON i.instrument_id = k.instrument_id
                 LEFT JOIN {SCHEMA}.fact_price_eod p
@@ -468,7 +635,7 @@ class SqlOptionsDataReader:
                        ON g.instrument_id = k.instrument_id
                       AND g.trade_date = k.trade_date
                       AND g.trade_date BETWEEN %s AND %s
-                ORDER BY k.trade_date, i.instrument_id
+                {_CHAIN_ORDER_BY}
             """
             params.extend([date_list, date_list, date_lo, date_hi, date_lo, date_hi])
 
@@ -500,6 +667,537 @@ class SqlOptionsDataReader:
             raise OptionsDataAccessError(
                 f"SQL error querying chain bulk on '{root}' for "
                 f"{len(date_list)} dates: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # query_chain_bulk_multi (year-chunk fast path)
+    # ------------------------------------------------------------------
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: Sequence[tuple[date, Sequence[date]]],
+        expiration_cycle: str | Sequence[str] | None = None,
+        delta_pushdown: "tuple[float, int] | None" = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Multi-EXPIRATION bulk chain fetch in ONE query (year-chunk fast path).
+
+        Collapses the per-expiration :meth:`query_chain_bulk` fan-out into a
+        SINGLE round-trip covering several expirations, each restricted to its
+        OWN trade-date window.  ``groups`` is ``[(expiration, [trade_dates...]),
+        ...]`` — typically one calendar year's worth of monthly expirations
+        (~12), the granularity the Wave 2 design proved index-only.
+
+        The per-expiration DATE restriction is LOAD-BEARING: a ``win(exp, lo,
+        hi)`` VALUES table is joined so each expiration's contracts are fetched
+        only on ``[min..max]`` of ITS OWN dates.  That keeps the keyset tiny
+        (contract × ~21 dates) so the planner stays on Index-Only PK scans (Heap
+        Fetches 0) across the whole year even WITHOUT a strike bound
+        (EXPLAIN-proven live, 1406 ms / year).  The redundant CONSTANT
+        ``trade_date BETWEEN <chunk-min> AND <chunk-max>`` on EVERY partitioned-
+        fact reference prunes to the spanned yearly partitions (the same gotcha
+        :meth:`query_chain_bulk` honours — a runtime-only join fans across all
+        ~71 partitions).
+
+        Candidate-set semantics MATCH :meth:`query_chain_bulk` per (expiration,
+        trade_date):
+
+        * FULL CHAIN (``delta_pushdown=None``, default) — ALL strikes of ``type``
+          are returned: a strict SUPERSET of the old per-group
+          ``spot*0.40..1.30`` band.  Selection (``match_by_delta`` /
+          ``match_by_strike`` / ``match_by_moneyness``) is UNCHANGED and picks
+          the identical contract for any target well inside the old band.
+        * ``delta_pushdown`` — a ``(target_delta, k)`` tuple engages
+          the single-scan DELTA PUSHDOWN: the greeks fact is scanned ONCE
+          (``cand``) and option SYMBOLS are ranked per ``(expiration,
+          trade_date)`` by their nearest ``|delta - target|`` (tie-break lower
+          strike, then symbol) — the IDENTICAL key ``match_by_delta`` uses (see
+          :func:`symbol_delta_rank`, the shared Python reference) — with
+          only the top-``k`` SYMBOLS retained; EVERY physical row of each retained
+          symbol is returned (via a keyset whose greeks side REUSES ``cand`` and
+          whose price side is a k-symbol PK lookup — no second greeks scan).
+          OVERFLOW SAFEGUARD: the SQL actually fetches ``k+1`` symbols so a >k
+          rank-1 tie is detectable; if MORE than k symbols share the best
+          ``(|delta-target|, strike)`` pair (the one regime the SQL
+          ``option_symbol`` tie-break could resolve differently from
+          ``match_by_delta``'s instrument_id order), the whole chunk
+          HARD-FALLS-BACK to the full chain (``delta_pushdown=None``) so the pick
+          is provably complete — otherwise the surplus (k+1)th symbol is discarded
+          so the result is byte-identical to a plain top-k fetch.  A >k tie on
+          distance alone with DISTINCT strikes (all deep-OTM puts at delta≈0 on an
+          expiration date) is NOT flagged — both sides pick the lowest strike, so
+          the pushdown speedup is preserved (audit_d3 INV-2/3, item E).
+          Symbol-granular (not row-level) so the ~2.68% DUPLICATE-instrument_id-
+          per-symbol quirk is byte-identical to the full chain: the winner's whole
+          duplicate set is present, so both ``match_by_delta``'s pick AND
+          ``_row_for_contract``'s first-by-instrument_id row match.  Returned ROW
+          SHAPE is unchanged — selection consumes the retained symbols' rows
+          instead of the full chain.  NULL
+          deltas are NOT filtered — ``min`` ignores them and ``NULLS LAST`` ranks
+          an all-NULL symbol last, so the non-null winner is unaffected AND an
+          all-NULL-delta chain returns rows that ``match_by_delta`` classifies
+          identically (byte-parity of the error path).  Correct ONLY for
+          STORED-delta selection (the caller's engine gate guarantees that —
+          never engage it under ``compute_missing_for_delta``).
+
+        Result shape is identical to :meth:`query_chain_bulk`: a dict keyed by
+        EVERY requested trade_date (``[]`` when nothing traded), rows grouped
+        under the fact ``trade_date`` and ordered by ``instrument_id`` within a
+        date.  When a trade_date falls in TWO expirations' windows (a HOLD roll
+        day appended to the prior group), its list carries BOTH expirations'
+        rows — exactly what the old per-expiration gather produced once merged.
+        """
+        # Pre-seed every requested trade_date (parity with query_chain_bulk's
+        # ``results = {d: [] for d in dates}``) and build the per-expiration
+        # windows.  De-dupe each group's dates, drop empty groups.
+        results: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+        win_rows: list[tuple[date, date, date]] = []
+        all_dates_set: set[date] = set()
+        for exp, dts in groups:
+            dl = list(dict.fromkeys(dts))
+            for d in dl:
+                results.setdefault(d, [])
+            if not dl:
+                continue
+            win_rows.append((exp, min(dl), max(dl)))
+            all_dates_set.update(dl)
+        if not win_rows:
+            return results
+
+        all_dates = sorted(all_dates_set)
+        # Partition-pruning bound (CRITICAL, see query_chain_bulk): the redundant
+        # constant range over the whole chunk lets the planner prune the fact
+        # partitions to just the spanned year(s).
+        chunk_lo, chunk_hi = all_dates[0], all_dates[-1]
+
+        try:
+            dim_where = ["source_collection = %s", "asset_class = 'option'"]
+            dim_params: list[Any] = [root]
+            if type in ("C", "P"):
+                dim_where.append("option_type = %s")
+                dim_params.append(type.upper())
+            _cycle_frag, _cycle_val = _cycle_predicate(expiration_cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                dim_params.append(_cycle_val)
+
+            pushdown = delta_pushdown is not None
+            # Build the win VALUES table.  The FIRST row casts each column so the
+            # CTE's column types are fixed for the joins.
+            win_params: list[Any] = []
+            value_rows: list[str] = []
+            for i, (exp, lo, hi) in enumerate(win_rows):
+                value_rows.append(
+                    "(%s::date, %s::date, %s::date)" if i == 0 else "(%s, %s, %s)"
+                )
+                win_params.extend([exp, lo, hi])
+
+            # SHARED scaffolding (both branches): the ``win`` VALUES prune and
+            # ``ids`` (this root's contracts of the requested type/cycle whose
+            # expiration is one of the chunk's expirations, JOIN win).  Written
+            # ONCE so the load-bearing per-expiration window + chunk prune cannot
+            # drift between the full-chain and pushdown branches.
+            cte_prefix = f"""
+                WITH win (exp, lo, hi) AS (
+                    VALUES {", ".join(value_rows)}
+                ),
+                ids AS (
+                    SELECT d.instrument_id, d.symbol AS option_symbol, d.root_symbol,
+                           d.underlying_symbol, d.expiration, d.expiration_cycle,
+                           d.strike, d.option_type, d.contract_size, d.currency,
+                           d.provider
+                    FROM {SCHEMA}.dim_instrument d
+                    JOIN win w ON d.expiration = w.exp
+                    WHERE {" AND ".join(dim_where)}
+                )"""
+
+            # SHARED final projection + price/greeks join tail.  The driving CTE
+            # (``keyset`` OR ``pick_keyset``) is aliased ``k`` in BOTH branches, so
+            # the returned ROW SHAPE is IDENTICAL and ``match_by_delta`` consumes
+            # the pushdown output unchanged (k rows/group instead of the whole
+            # chain).
+            def _select_tail(driver: str) -> str:
+                return f"""
+                SELECT k.trade_date,
+                       {_CHAIN_SELECT_COLS}
+                FROM {driver} k
+                JOIN ids i ON i.instrument_id = k.instrument_id
+                LEFT JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = k.instrument_id
+                      AND p.trade_date = k.trade_date
+                      AND p.trade_date BETWEEN %s AND %s
+                LEFT JOIN {SCHEMA}.fact_option_greeks g
+                       ON g.instrument_id = k.instrument_id
+                      AND g.trade_date = k.trade_date
+                      AND g.trade_date BETWEEN %s AND %s
+                {_CHAIN_ORDER_BY}
+            """
+
+            params: list[Any] = []
+            params.extend(win_params)  # VALUES
+            params.extend(dim_params)  # ids WHERE
+
+            if pushdown:
+                target, k = delta_pushdown  # (target_delta, top-k)
+                # DELTA PUSHDOWN (SYMBOL-granular, single-scan).  Rank this root's
+                # option SYMBOLS per (expiration, trade_date) by their nearest
+                # |delta - target| (tie-break lower strike) — the IDENTICAL key
+                # ``match_by_delta`` sorts on — keep the top-k SYMBOLS, and return
+                # EVERY physical row of each retained symbol.
+                #
+                # WHY symbol-granular (not row-level ``ROW_NUMBER`` top-k):
+                # the dwh stores ~2.68% DUPLICATE instrument_ids per option symbol
+                # (same symbol/contract_id/strike, differing delta + quotes).  The
+                # full-chain path returns BOTH rows; ``match_by_delta`` picks the
+                # winning CONTRACT (by symbol) and ``_row_for_contract`` then
+                # surfaces the FIRST row of that contract_id in instrument_id order
+                # — which may be the FAR-delta sibling.  A row-level top-k keeps
+                # only the near-delta sibling and drops the far one, so
+                # ``_row_for_contract`` surfaced a DIFFERENT physical row → a ~20%
+                # mid divergence on ~16% of SPX-put bars.  Ranking by symbol and
+                # returning all of a retained symbol's rows makes the candidate set
+                # (hence both the pick AND the resolved row) byte-identical to
+                # ``query_chain_bulk``.
+                #
+                # SINGLE big greeks scan: ``cand`` reads the greeks fact ONCE (the
+                # only expensive scan) and every later CTE is a window/aggregate
+                # over ``cand`` or a targeted PK lookup on the k retained symbols'
+                # instrument_ids.  The keyset's greeks side REUSES ``cand`` (no
+                # re-scan); its price side is a k-symbol PK lookup — so byte-parity
+                # is regained WITHOUT the double greeks read that made the earlier
+                # symbol-granular build slow.
+                #
+                # NULL deltas are DELIBERATELY kept (no ``delta IS NOT NULL``):
+                # ``abs(NULL-target)`` is NULL, ``min`` ignores it, and
+                # ``ORDER BY best_dist NULLS LAST`` ranks an all-NULL symbol last —
+                # so the non-null winner's symbol is unaffected AND a chain whose
+                # rows are ALL null-delta still returns rows that ``match_by_delta``
+                # classifies ``missing_delta_no_compute`` (byte-parity of the error
+                # path).  Correct only for STORED-delta selection (engine-gated).
+                body = f""",
+                cand AS (
+                    SELECT i.expiration, g.trade_date, g.instrument_id,
+                           i.option_symbol, i.strike,
+                           abs(g.delta - %s) AS dist
+                    FROM {SCHEMA}.fact_option_greeks g
+                    JOIN ids i ON i.instrument_id = g.instrument_id
+                    JOIN win w ON w.exp = i.expiration
+                    WHERE g.trade_date = ANY(%s)
+                      AND g.trade_date BETWEEN w.lo AND w.hi
+                      AND g.trade_date BETWEEN %s AND %s
+                ),
+                sym AS (
+                    SELECT expiration, trade_date, option_symbol,
+                           min(dist) AS best_dist, min(strike) AS best_strike
+                    FROM cand
+                    GROUP BY expiration, trade_date, option_symbol
+                ),
+                top_syms AS (
+                    SELECT expiration, trade_date, option_symbol
+                    FROM (
+                        SELECT expiration, trade_date, option_symbol,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY expiration, trade_date
+                                   {_DELTA_RANK_ORDER_BY}
+                               ) AS srn
+                        FROM sym
+                    ) s
+                    WHERE srn <= %s
+                ),
+                pick_keyset AS (
+                    SELECT c.instrument_id, c.trade_date
+                    FROM cand c
+                    JOIN top_syms t ON t.expiration = c.expiration
+                                   AND t.trade_date = c.trade_date
+                                   AND t.option_symbol = c.option_symbol
+                    UNION
+                    SELECT p.instrument_id, p.trade_date
+                    FROM {SCHEMA}.fact_price_eod p
+                    JOIN ids i ON i.instrument_id = p.instrument_id
+                    JOIN top_syms t ON t.expiration = i.expiration
+                                   AND t.option_symbol = i.option_symbol
+                                   AND t.trade_date = p.trade_date
+                    WHERE p.trade_date = ANY(%s)
+                      AND p.trade_date BETWEEN %s AND %s
+                )"""
+                sql = cte_prefix + body + _select_tail("pick_keyset")
+                params.append(float(target))  # cand abs(delta - target)
+                params.append(all_dates)  # cand trade_date = ANY
+                params.extend([chunk_lo, chunk_hi])  # cand chunk prune
+                # Fetch ONE extra symbol (srn <= k+1) so the (k+1)th is observable
+                # to the overflow detector below; non-overflow groups discard it to
+                # stay byte-identical to a plain top-k fetch (audit_d3 INV-2/3).
+                params.append(int(k) + 1)  # top_syms srn <= k+1
+                params.append(all_dates)  # pick_keyset price trade_date = ANY
+                params.extend([chunk_lo, chunk_hi])  # pick_keyset price chunk prune
+                params.extend([chunk_lo, chunk_hi])  # final price join
+                params.extend([chunk_lo, chunk_hi])  # final greeks join
+            else:
+                # keyset: the (instrument_id, trade_date) pairs that actually
+                # traded, each expiration bounded to ITS OWN window via
+                # ``BETWEEN w.lo AND w.hi`` (the load-bearing restriction) plus
+                # the chunk-constant prune.
+                body = f""",
+                keyset AS (
+                    SELECT p.instrument_id, p.trade_date
+                    FROM {SCHEMA}.fact_price_eod p
+                    JOIN ids i ON i.instrument_id = p.instrument_id
+                    JOIN win w ON w.exp = i.expiration
+                    WHERE p.trade_date = ANY(%s)
+                      AND p.trade_date BETWEEN w.lo AND w.hi
+                      AND p.trade_date BETWEEN %s AND %s
+                    UNION
+                    SELECT g.instrument_id, g.trade_date
+                    FROM {SCHEMA}.fact_option_greeks g
+                    JOIN ids i ON i.instrument_id = g.instrument_id
+                    JOIN win w ON w.exp = i.expiration
+                    WHERE g.trade_date = ANY(%s)
+                      AND g.trade_date BETWEEN w.lo AND w.hi
+                      AND g.trade_date BETWEEN %s AND %s
+                )"""
+                sql = cte_prefix + body + _select_tail("keyset")
+                params.extend([all_dates, chunk_lo, chunk_hi])  # keyset price
+                params.extend([all_dates, chunk_lo, chunk_hi])  # keyset greeks
+                params.extend([chunk_lo, chunk_hi])  # final price join
+                params.extend([chunk_lo, chunk_hi])  # final greeks join
+
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    raw = await cur.fetchall()
+
+                # [Gotcha 5] dollarize crypto premiums per trade date.
+                spot_by_date = await self._coin_spot_map(conn, root, all_dates)
+
+            for m in raw:
+                row_date: date = m["trade_date"]
+                contract = self._chain_meta_to_contract(root, m)
+                row = self._row_from_chain(
+                    m,
+                    target_date=row_date,
+                    coin_spot=spot_by_date.get(row_date),
+                )
+                bucket = results.get(row_date)
+                if bucket is not None:
+                    bucket.append((contract, row))
+
+            if pushdown:
+                # Correctness safeguard (audit_d3 INV-2/3).  The pushdown's ``k``
+                # cushions the ~2.68% duplicate-instrument_id quirk + delta ties,
+                # and k=1 is exact when the rank-1 symbol is unique.  A >k tie at
+                # the rank-1 best-|delta-target| distance is the ONE regime where
+                # the SQL symbol tie-break (best_strike, option_symbol) could keep a
+                # DIFFERENT k-subset than ``match_by_delta`` would pick from — a
+                # possible WRONG pick.  Detect it from the k+1 fetch and, for
+                # overflow groups, HARD-FALL-BACK to the full chain so the candidate
+                # set (hence the pick) is provably complete and byte-identical to
+                # the pre-pushdown path — the fast path can NEVER return a wrong
+                # pick, even on pathological data.  Item F already rejects the only
+                # VALID input (wrong-signed target) that could reach a real
+                # overflow, so this guards an input-unreachable edge.
+                target_f, k_i = float(target), int(k)
+                overflow, drop = _pushdown_overflow_groups(results, target_f, k_i)
+                if overflow:
+                    logger.warning(
+                        "delta pushdown on '%s' (target=%s, k=%d): %d (expiration, "
+                        "trade_date) group(s) have MORE than k symbols sharing the "
+                        "rank-1 (best-|delta-target|, strike) pair — falling back to "
+                        "the FULL chain for this chunk so the pick is provably "
+                        "correct (audit_d3 INV-2/3). Investigate if the target delta "
+                        "is degenerate.",
+                        root,
+                        target,
+                        k_i,
+                        len(overflow),
+                    )
+                    return await self.query_chain_bulk_multi(
+                        root=root,
+                        type=type,
+                        groups=groups,
+                        expiration_cycle=expiration_cycle,
+                        delta_pushdown=None,
+                    )
+                # No overflow: discard each non-overflow group's surplus (k+1)th
+                # symbol so the returned rows are byte-identical to a top-k fetch.
+                for (exp, dt), sym_id in drop.items():
+                    bucket = results.get(dt)
+                    if bucket:
+                        results[dt] = [
+                            (c, r)
+                            for (c, r) in bucket
+                            if not (c.expiration == exp and c.contract_id == sym_id)
+                        ]
+            return results
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error querying multi-expiration chain bulk on '{root}' "
+                f"for {len(win_rows)} expirations: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # query_held_rows (hold-leg two-phase Phase 2)
+    # ------------------------------------------------------------------
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: Sequence[tuple[str, date, date]],
+        expiration_cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Identity keyset fetch of specific HELD option SYMBOLS over per-symbol
+        date windows (hold-leg two-phase Phase 2).
+
+        ``held_windows`` is ``[(symbol, lo, hi), ...]`` — each frozen held
+        contract's dwh ``symbol`` (== ``OptionContractDoc.contract_id``) and its
+        held date-range ``[lo, hi]``.  ``hi`` MUST include the NEXT segment's roll
+        date, because ``_resolve_hold`` reads the OLD contract's mid on the roll
+        seam — see ``hold_pushdown_design.md`` §2.
+
+        Returns EVERY physical row of each symbol over its window keyed by the fact
+        ``trade_date``; a date with no row is simply absent (the caller reads
+        ``.get(d, [])``).
+
+        Symbol-keyed (``VALUES(sym, lo, hi) JOIN d.symbol``): the held symbol is
+        already SELECTED in Python (from the Phase-1 candidate chain), so this is a
+        pure IDENTITY fetch — SQL never ranks or picks.  The redundant CONSTANT
+        ``trade_date BETWEEN <chunk-min> AND <chunk-max>`` prune on every
+        partitioned-fact reference collapses the yearly-partition fan-out (the same
+        gotcha :meth:`query_chain_bulk_multi` honours — a runtime-only join fans
+        across all ~71 partitions).
+
+        ``expiration_cycle`` applies the SAME cycle predicate the full-chain path
+        (:meth:`query_chain_bulk` / :meth:`query_chain_bulk_multi`) uses.  This is
+        LOAD-BEARING for byte-identity, NOT a redundant filter: a symbol is NOT
+        unique across cycles — the ~2.68% OPT_SP_500 "duplicate-instrument_id"
+        quirk is a SINGLE symbol carrying two ``instrument_id`` rows under DIFFERENT
+        ``expiration_cycle`` tags (e.g. the 3rd-Friday contract tagged both ``"M"``
+        and ``"W3 Friday"``), with different quotes.  The full-chain path's cycle
+        filter drops the off-cycle sibling, so a weekly leg only ever sees the
+        ``"W3 Friday"`` row; without the SAME filter here, this fetch re-admits the
+        ``"M"`` sibling and ``_row_for_contract``'s first-by-``instrument_id`` pick
+        surfaces the WRONG physical row (live 4970_P/2024-03-06: 7.40 vs 4.15).
+        ``None`` = no filter (all cycles), matching the full-chain ``None`` case.
+        """
+        results: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+        # De-dupe by symbol (a symbol could in principle appear twice with the
+        # same window); drop empty/None symbols defensively.
+        seen: dict[str, tuple[str, date, date]] = {}
+        for sym, lo, hi in held_windows:
+            if not sym:
+                continue
+            key = str(sym)
+            if key in seen:
+                # Widen to cover both windows (never shrink) — a symbol held over
+                # two runs (degenerate) keeps the union range.
+                _s, _lo, _hi = seen[key]
+                seen[key] = (key, min(_lo, lo), max(_hi, hi))
+            else:
+                seen[key] = (key, lo, hi)
+        win_rows: list[tuple[str, date, date]] = list(seen.values())
+        if not win_rows:
+            return results
+
+        # Partition-pruning bound (CRITICAL, see query_chain_bulk_multi): the
+        # redundant constant range over ALL windows lets the planner prune the fact
+        # partitions to just the spanned year(s).
+        chunk_lo = min(lo for _s, lo, _h in win_rows)
+        chunk_hi = max(hi for _s, _l, hi in win_rows)
+
+        try:
+            dim_where = ["source_collection = %s", "asset_class = 'option'"]
+            dim_params: list[Any] = [root]
+            if type in ("C", "P"):
+                dim_where.append("option_type = %s")
+                dim_params.append(type.upper())
+            # Cycle predicate — MUST match the full-chain path so a cross-cycle
+            # duplicate symbol (~2.68% OPT_SP_500) collapses to the SAME surviving
+            # instrument_id(s).  See the method docstring.
+            _cycle_frag, _cycle_val = _cycle_predicate(expiration_cycle)
+            if _cycle_frag is not None:
+                dim_where.append(_cycle_frag)
+                dim_params.append(_cycle_val)
+
+            value_rows: list[str] = []
+            win_params: list[Any] = []
+            for i, (sym, lo, hi) in enumerate(win_rows):
+                value_rows.append(
+                    "(%s::text, %s::date, %s::date)" if i == 0 else "(%s, %s, %s)"
+                )
+                win_params.extend([sym, lo, hi])
+
+            sql = f"""
+                WITH heldwin (sym, lo, hi) AS (
+                    VALUES {", ".join(value_rows)}
+                ),
+                ids AS (
+                    SELECT d.instrument_id, d.symbol AS option_symbol, d.root_symbol,
+                           d.underlying_symbol, d.expiration, d.expiration_cycle,
+                           d.strike, d.option_type, d.contract_size, d.currency,
+                           d.provider
+                    FROM {SCHEMA}.dim_instrument d
+                    JOIN heldwin h ON d.symbol = h.sym
+                    WHERE {" AND ".join(dim_where)}
+                ),
+                keyset AS (
+                    SELECT p.instrument_id, p.trade_date
+                    FROM {SCHEMA}.fact_price_eod p
+                    JOIN ids i ON i.instrument_id = p.instrument_id
+                    JOIN heldwin h ON h.sym = i.option_symbol
+                    WHERE p.trade_date BETWEEN h.lo AND h.hi
+                      AND p.trade_date BETWEEN %s AND %s
+                    UNION
+                    SELECT g.instrument_id, g.trade_date
+                    FROM {SCHEMA}.fact_option_greeks g
+                    JOIN ids i ON i.instrument_id = g.instrument_id
+                    JOIN heldwin h ON h.sym = i.option_symbol
+                    WHERE g.trade_date BETWEEN h.lo AND h.hi
+                      AND g.trade_date BETWEEN %s AND %s
+                )
+                SELECT k.trade_date,
+                       {_CHAIN_SELECT_COLS}
+                FROM keyset k
+                JOIN ids i ON i.instrument_id = k.instrument_id
+                LEFT JOIN {SCHEMA}.fact_price_eod p
+                       ON p.instrument_id = k.instrument_id
+                      AND p.trade_date = k.trade_date
+                      AND p.trade_date BETWEEN %s AND %s
+                LEFT JOIN {SCHEMA}.fact_option_greeks g
+                       ON g.instrument_id = k.instrument_id
+                      AND g.trade_date = k.trade_date
+                      AND g.trade_date BETWEEN %s AND %s
+                {_CHAIN_ORDER_BY}
+            """
+            params: list[Any] = []
+            params.extend(win_params)  # VALUES
+            params.extend(dim_params)  # ids WHERE
+            params.extend([chunk_lo, chunk_hi])  # keyset price prune
+            params.extend([chunk_lo, chunk_hi])  # keyset greeks prune
+            params.extend([chunk_lo, chunk_hi])  # final price join
+            params.extend([chunk_lo, chunk_hi])  # final greeks join
+
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    raw = await cur.fetchall()
+
+                # [Gotcha 5] dollarize crypto premiums per trade date.
+                row_dates = sorted({m["trade_date"] for m in raw})
+                spot_by_date = await self._coin_spot_map(conn, root, row_dates)
+
+            for m in raw:
+                row_date: date = m["trade_date"]
+                contract = self._chain_meta_to_contract(root, m)
+                row = self._row_from_chain(
+                    m,
+                    target_date=row_date,
+                    coin_spot=spot_by_date.get(row_date),
+                )
+                results.setdefault(row_date, []).append((contract, row))
+            return results
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error querying held rows on '{root}' for "
+                f"{len(win_rows)} symbols: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------
@@ -834,6 +1532,11 @@ class SqlOptionsDataReader:
             iv_stored=_sanitize_iv(to_float(m["implied_vol"]))
             if allow_greeks
             else None,
+            # COUPLED (audit_d3 INV-4): the delta-pushdown SQL rank
+            # (query_chain_bulk_multi) ranks on RAW ``g.delta`` with NO transform.
+            # If any sanitize/scale/sign step is ever added to delta_stored here
+            # (mirroring _sanitize_iv / _scale), it MUST be mirrored into that CTE
+            # or the pushdown pick silently diverges from match_by_delta.
             delta_stored=to_float(m["delta"]) if allow_greeks else None,
             gamma_stored=to_float(m["gamma"]) if allow_greeks else None,
             theta_stored=to_float(m["theta"]) if allow_greeks else None,

@@ -43,6 +43,33 @@ resolver uses a three-phase bulk path instead of per-date chain queries:
 The fallback per-date path remains intact when ``bulk_chain_reader``
 is ``None``.
 
+Resolve paths (which gate selects each)
+---------------------------------------
+The routing is decided ONCE, up front, by the pure ``_choose_path`` function
+(``resolve_option_stream`` calls it and reads the ``PathDecision`` it returns);
+the resolver then routes a resolve through exactly one FETCH shape:
+
+  * per-expiration legacy — ``bulk_chain_reader`` is None, OR
+    ``_fast_path_eligible`` is False (unsupported reader / test fake).  One
+    ``query_chain_bulk`` per expiration (+ strike-window probe).
+  * year-chunk FULL-CHAIN — ``_fast_path_eligible and _delta_pushdown is None``.
+    One ``query_chain_bulk_multi`` per calendar year (whole chain, superset);
+    a year with > ``_MAX_EXPS_PER_SUBCHUNK`` expirations is split into sub-chunks.
+  * year-chunk DELTA-PUSHDOWN — ``_fast_path_eligible and _delta_pushdown is not
+    None`` (stored-delta ByDelta, non-hold OR two-phase hold).  Same query with a
+    symbol-granular top-k delta rank pushed into SQL; byte-identical pick.
+  * two-phase HOLD — ``_hold_two_phase`` (hold leg whose reader supports BOTH
+    bulk-multi AND held-rows).  Phase 1 selects on roll dates (pushdown for
+    ByDelta), Phase 2 ``query_held_rows`` identity-fetches the frozen symbols.
+  * sub-chunk net — a full-chain year over the exp cap (see above); merged in
+    contiguous-expiration order so it stays byte-identical to one query.
+
+The two SQL tuning constants below (``_PUSHDOWN_K`` = 8, ``_MAX_EXPS_PER_SUBCHUNK``
+= 24) are DWH-CALIBRATED to the dwh SQL reader (its 60s ``statement_timeout`` and
+the ~2.68% duplicate-instrument_id-per-symbol quirk); the pushdown's byte-identity
+rests on the SQL ranking contract matching ``symbol_delta_rank`` (see
+``tcg/data/_sql/options.py``).
+
 Per-date call count and concurrency (legacy per-date path)
 ------------------------------------------------------------
 The data layer exposes no date-range chain query — see recon doc and
@@ -71,8 +98,10 @@ holds a pool connection, so the fan-out must stay within ``max_size``.
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import (
     Awaitable,
@@ -137,6 +166,22 @@ _DWH_RESOLVE_CONCURRENCY = max(1, DEFAULT_DWH_POOL_MAX_SIZE - 1)
 
 # Per-date fallback path cap (was 16). Capped at the pool-derived concurrency.
 _MAX_INFLIGHT_PER_DATE = _DWH_RESOLVE_CONCURRENCY
+
+# Delta-pushdown top-k (Wave-8): the SQL ``ROW_NUMBER`` key is byte-identical to
+# ``match_by_delta``'s sort, so rn=1 IS the full-chain winner — k=1 is exact.
+# k=8 is a free safety margin for the ~2.68% duplicate-instrument_id-per-symbol
+# quirk and delta ties (few extra rows/group; negligible cost).
+_PUSHDOWN_K = 8
+
+# Sub-chunk safety net: split a FULL-CHAIN (non-pushdown) year-chunk whose
+# expiration count exceeds this cap into contiguous sub-chunks so no single
+# ``query_chain_bulk_multi`` approaches the 60s dwh statement_timeout under
+# concurrent load (a weekly year ~47 exps splits into 2; monthly/quarterly ≤12
+# never split).  Isolated 24-exp chunk EXPLAINs at ~0.56s; extrapolated ~13s at
+# conc=11 — a >4x margin.  Only the full-chain path needs this — the delta
+# pushdown returns ~34x fewer rows and never approaches the timeout.  Replaces
+# the all-or-nothing collapse-to-per-expiration timeout fallback (Wave 12 §4).
+_MAX_EXPS_PER_SUBCHUNK = 24
 
 
 # Streams readable off ``OptionDailyRow``.  Mirrors the Pydantic
@@ -395,70 +440,210 @@ def _snap_to_listed(target: date, listed: Sequence[date]) -> date | None:
 
 
 # ---------------------------------------------------------------------------
-# Coverage-aware expiration selection (opt-in, default OFF)
+# Hold-cadence predicate
 # ---------------------------------------------------------------------------
 #
-# WHY.  ``NearestToTarget`` picks the single nearest-DTE expiration from the
-# (cycle-filtered) listed set, with NO awareness of whether that expiration
-# actually carries strikes near the requested delta / moneyness.  On options
-# with sparse or era-varying coverage (e.g. the E-mini ``OPT_SP_500`` M-cycle in
-# later years, where a target month can have ZERO delta-bearing puts), the
-# nearest-DTE expiration can be a thin listing whose only greeked strikes are
-# deep-OTM garbage.  ``ByDelta(-0.10)`` then returns that garbage (moneyness
-# ~0.17) instead of the true 10-delta put (~0.88) that exists at a neighbouring
-# expiration — corr against a ground-truth sim collapses/inverts in those eras.
-#
-# Coverage-aware selection resolves the expiration to the nearest-DTE candidate
-# that has an IN-TOLERANCE delta/moneyness match, retrying the next-nearest
-# within a bounded DTE window; if none is in tolerance it falls back to the
-# nearest-DTE best-effort (== the current behaviour) so it never regresses to
-# all-NaN.  Gated behind ``coverage_aware`` — OFF by default (byte-identical /
-# golden-preserving).
-
-#: Max number of nearest-DTE candidate expirations considered per date in
-#: coverage-aware mode.  Bounds the extra Phase-B fetch fan-out (each unique
-#: candidate expiration = one bulk query).  Conservative default; the right value
-#: depends on the root's expiry spacing (see the live-data request).
-_COVERAGE_MAX_CANDIDATES: int = 4
-
-#: Only consider candidate expirations whose DTE is within this many days of the
-#: nearest-DTE candidate's DTE.  Keeps the retry local to the target maturity
-#: (a ~2-month target should not silently jump to a 6-month expiration).
-_COVERAGE_DTE_WINDOW_DAYS: int = 45
+# A maturity whose CADENCE holds a single contract per roll period (rather than
+# re-resolving the contract on every trade date) is detected by a duck-typed
+# ``is_hold_cadence`` capability on the maturity dataclass — NOT by an
+# ``isinstance(maturity, EndOfMonth)`` check.  Only ``EndOfMonth`` sets the flag
+# today (see ``tcg.types.options``); every other rule falls through to per-date
+# stateless resolution.  Adding a new hold-style cadence is then a matter of
+# setting the flag AND wiring its roll-date math in the resolver's hold branch —
+# a cadence that sets the flag but whose roll math is not yet implemented raises
+# loudly (``NotImplementedError``) rather than silently degrading to per-date.
 
 
-def _coverage_candidates(
-    ref_date: date,
-    target_dte_days: int,
-    available: Sequence[date],
-) -> list[date]:
-    """Ordered candidate expirations for coverage-aware ``NearestToTarget``.
+def _is_hold_cadence(maturity: MaturitySpec) -> bool:
+    """True when *maturity* holds one contract per roll period (per-month hold).
 
-    Sorted by ``(|dte - target|, dte)`` — the SAME key ``resolve_with_chain``
-    ranks by, so ``candidates[0]`` is exactly the expiration the coverage-BLIND
-    path would have picked.  Truncated to :data:`_COVERAGE_MAX_CANDIDATES` and to
-    a ``±`` :data:`_COVERAGE_DTE_WINDOW_DAYS` window around the nearest
-    candidate's DTE, so the coverage retry stays near the requested maturity and
-    the Phase-B fan-out stays bounded.
-
-    Returns ``[]`` when *available* is empty.
+    Reads the duck-typed ``is_hold_cadence`` capability; unset (every non-hold
+    cadence) reads as False.  Used at BOTH hold gate sites in place of an
+    ``isinstance(..., EndOfMonth)`` check so a future hold cadence is recognised
+    without editing the predicate.
     """
-    if not available:
-        return []
-    target_date = ref_date + timedelta(days=target_dte_days)
+    return bool(getattr(maturity, "is_hold_cadence", False))
 
-    def _key(exp: date) -> tuple[int, int]:
-        dte = (exp - ref_date).days
-        return (abs((exp - target_date).days), dte)
 
-    ordered = sorted(available, key=_key)
-    nearest_dte = (ordered[0] - ref_date).days
-    windowed = [
-        e
-        for e in ordered
-        if abs((e - ref_date).days - nearest_dte) <= _COVERAGE_DTE_WINDOW_DAYS
-    ]
-    return windowed[:_COVERAGE_MAX_CANDIDATES]
+def _reader_supports_bulk_multi(inner: object) -> bool:
+    """True when *inner* exposes the year-chunk multi-expiration capability.
+
+    SINGLE SOURCE OF TRUTH shared by ``_CycleInjectingBulkReader`` (which sets its
+    ``supports_bulk_multi`` attribute from this) and ``resolve_option_stream``
+    (which feeds ``_choose_path``), so the routing decision reasons over the
+    IDENTICAL value the fetch wrapper uses.  ``callable`` (not ``hasattr``): a
+    reader that disables the capability via ``query_chain_bulk_multi = None``
+    reports False here, so the fast path is cleanly NOT taken.
+    """
+    return bool(getattr(inner, "supports_bulk_multi", False)) or callable(
+        getattr(inner, "query_chain_bulk_multi", None)
+    )
+
+
+def _reader_supports_held_rows(inner: object) -> bool:
+    """True when *inner* exposes the Phase-2 held-symbol identity fetch.
+
+    Mirrors :func:`_reader_supports_bulk_multi` for the two-phase hold capability
+    (``query_held_rows``).  Same single-source-of-truth contract.
+    """
+    return bool(getattr(inner, "supports_held_rows", False)) or callable(
+        getattr(inner, "query_held_rows", None)
+    )
+
+
+class ResolvePath(enum.Enum):
+    """Which FETCH shape a resolve routes through (a documentation SUMMARY).
+
+    The load-bearing routing outputs are the boolean fields on
+    :class:`PathDecision`; ``path`` is only the derived one-line summary of which
+    shape those booleans select (used for logging / the equivalence test).  The
+    engine control flow reads the individual booleans, never ``path``.
+    """
+
+    LEGACY_PER_DATE = "legacy_per_date"  # per-date (no bulk reader) OR per-expiration
+    BULK_FULLCHAIN = "bulk_fullchain"  # year-chunk full-chain multi
+    BULK_PUSHDOWN = "bulk_pushdown"  # year-chunk delta-pushdown multi
+
+
+@dataclass(frozen=True)
+class PathDecision:
+    """The one routing decision for a resolve (see :func:`_choose_path`).
+
+    ``legacy_reject`` is consumed ONLY on the no-bulk-reader legacy branch;
+    ``fast_path_eligible`` / ``delta_pushdown`` / ``hold_two_phase`` are consumed
+    ONLY inside ``_resolve_bulk``.  For any single input exactly one of those two
+    groups is relevant, so carrying both on one object is not a conflation.
+    """
+
+    path: ResolvePath
+    fast_path_eligible: bool
+    delta_pushdown: bool  # engine builds (target_delta, _PUSHDOWN_K) when True
+    hold_two_phase: bool
+    legacy_reject: str | None  # non-None => the legacy per-date path must raise it
+
+
+def _require_stored_delta_pushdown(
+    *, pushdown_engaged: bool, compute_missing_delta: bool
+) -> None:
+    """Runtime safeguard (audit_d1/d2 F1): the delta pushdown ranks on STORED
+    ``g.delta`` ONLY.
+
+    The SQL CTE ranks symbols by ``abs(g.delta - target)`` with NULL/computed-delta
+    symbols sorted NULLS-LAST — so a symbol whose delta would only exist AFTER a
+    compute-missing pass is silently EXCLUDED from the top-k, yielding a wrong
+    (under-inclusive) pick that the k-overflow guard does NOT cover.  The pushdown
+    is therefore correct ONLY when compute-missing is OFF.
+
+    ``_choose_path`` already suppresses the pushdown under compute-missing
+    (``delta_pushdown = ... and not compute_missing_delta``), so this is a strict
+    NO-OP today: ``pushdown_engaged`` can never be True while
+    ``compute_missing_delta`` is True.  It exists so a FUTURE change that threads
+    real compute-missing into this resolver but forgets to feed it to
+    ``_choose_path`` fails LOUD here instead of returning a silently wrong pick —
+    "never silently wrong" over "fast".
+    """
+    if pushdown_engaged and compute_missing_delta:
+        raise ValueError(
+            "delta pushdown engaged while compute-missing is in effect: the "
+            "stored-delta SQL rank would silently exclude computed-delta symbols "
+            "(NULLS-LAST) and return an under-inclusive pick. Pass "
+            "delta_pushdown=None (full chain) whenever compute-missing is on."
+        )
+
+
+def _choose_path(
+    *,
+    has_bulk_reader: bool,
+    selection: SelectionCriterion,
+    maturity: MaturitySpec,
+    stream: StreamLabel,
+    hold_between_rolls: bool,
+    roll_offset_nonzero: bool,
+    supports_bulk_multi: bool,
+    supports_held_rows: bool,
+    compute_missing_delta: bool,
+) -> PathDecision:
+    """Decide the resolve's fetch path ONCE (pure — no I/O, no side effects).
+
+    This is the SINGLE place the fetch-path eligibility booleans and the legacy
+    per-date reject are computed; it is a faithful COLLAPSE of the predicates that
+    were previously scattered across ``resolve_option_stream`` / ``_resolve_bulk``,
+    NOT a behaviour change.  Each output is a verbatim transcription of the old
+    inline expression:
+
+    * ``legacy_reject`` — the four ``resolve_option_stream`` legacy-path guards, in
+      their original evaluation order (``roll_offset`` → ``hold_between_rolls`` →
+      hold-cadence maturity → ``bs_mid`` stream); FIRST match wins (order is
+      load-bearing) and the message text is unchanged.  Consumed only when
+      ``has_bulk_reader`` is False.
+    * ``hold_two_phase`` — the old ``_hold_two_phase`` conjunction.
+    * ``delta_pushdown`` — truthiness of the old ``_delta_pushdown`` (the engine
+      re-materialises the ``(target_delta, _PUSHDOWN_K)`` tuple when True).
+      ``compute_missing_delta`` is the F1 coupling guard (constant False today).
+    * ``fast_path_eligible`` — the old ``_fast_path_eligible`` conjunction.
+
+    ``supports_bulk_multi`` / ``supports_held_rows`` are the wrapper-computed
+    capability flags (see :func:`_reader_supports_bulk_multi`), passed in so this
+    function stays pure and reasons over the same value the fetch path uses.
+    """
+    # ── Legacy per-date rejects (verbatim order + messages) ──────────────────
+    legacy_reject: str | None = None
+    if roll_offset_nonzero:
+        legacy_reject = (
+            "roll_offset requires the bulk chain reader; the legacy per-date "
+            "path does not support it"
+        )
+    elif hold_between_rolls:
+        legacy_reject = (
+            "hold_between_rolls requires the bulk chain reader; the legacy "
+            "per-date path does not support select-and-hold"
+        )
+    elif _is_hold_cadence(maturity):
+        legacy_reject = (
+            f"{type(maturity).__name__} maturity requires the bulk chain reader; "
+            "the legacy per-date path does not support the monthly-hold roll"
+        )
+    elif stream == _BS_MID:
+        legacy_reject = (
+            "bs_mid stream requires the bulk chain reader; the legacy per-date "
+            "path does not support the computed Black-76 price stream"
+        )
+
+    # ── Bulk-path fetch-shape flags ──────────────────────────────────────────
+    # (transcribed from the old _hold_two_phase / _delta_pushdown /
+    # _fast_path_eligible sites — see the docstring above.)
+    hold_two_phase = bool(
+        hold_between_rolls
+        and isinstance(selection, (ByStrike, ByDelta, ByMoneyness))
+        and supports_bulk_multi
+        and supports_held_rows
+    )
+    delta_pushdown = bool(
+        isinstance(selection, ByDelta)
+        and not compute_missing_delta
+        and (not hold_between_rolls or hold_two_phase)
+    )
+    fast_path_eligible = bool(
+        isinstance(selection, (ByStrike, ByDelta, ByMoneyness)) and supports_bulk_multi
+    )
+
+    # Derived SUMMARY only (control flow reads the booleans, exactly as the old
+    # scattered sites did): no bulk reader OR ineligible → per-date; else the
+    # pushdown vs full-chain multi split.
+    if not has_bulk_reader or not fast_path_eligible:
+        path = ResolvePath.LEGACY_PER_DATE
+    elif delta_pushdown:
+        path = ResolvePath.BULK_PUSHDOWN
+    else:
+        path = ResolvePath.BULK_FULLCHAIN
+
+    return PathDecision(
+        path=path,
+        fast_path_eligible=fast_path_eligible,
+        delta_pushdown=delta_pushdown,
+        hold_two_phase=hold_two_phase,
+        legacy_reject=legacy_reject,
+    )
 
 
 @runtime_checkable
@@ -561,6 +746,22 @@ class _CycleInjectingBulkReader:
     ) -> None:
         self._inner = inner
         self._cycle = cycle
+        # Propagate the optional year-chunk fast-path capability from the inner
+        # reader (the wiring adapter sets this from the concrete data reader).
+        # The engine gates the fast path on this flag, falling back to the
+        # per-expiration path when it is False (unsupported reader / test fake).
+        # ``callable`` (not ``hasattr``): an inner reader that disables the
+        # capability via ``query_chain_bulk_multi = None`` reports False here, so
+        # the fast path is cleanly NOT taken (rather than entered → TypeError →
+        # silent per-exp fallback that quietly erases the speedup).  Computed via
+        # the module helper so ``_choose_path`` (fed from the RAW reader in
+        # ``resolve_option_stream``) reasons over the byte-identical value.
+        self.supports_bulk_multi = _reader_supports_bulk_multi(inner)
+        # Optional hold-leg two-phase Phase-2 capability (mirrors
+        # ``supports_bulk_multi``): the engine gates the two-phase hold fast path
+        # on this flag and falls back to the full-chain hold path when it is
+        # False (unsupported reader / test fake).
+        self.supports_held_rows = _reader_supports_held_rows(inner)
 
     async def query_chain_bulk(
         self,
@@ -580,6 +781,43 @@ class _CycleInjectingBulkReader:
             expiration_max=expiration_max,
             strike_min=strike_min,
             strike_max=strike_max,
+            expiration_cycle=self._cycle,
+        )
+
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: Sequence[tuple[date, Sequence[date]]],
+        delta_pushdown: "tuple[float, int] | None" = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        # Cycle injection mirrors ``query_chain_bulk`` (guardrail 11: no silent
+        # cycle mixing).  Only called when ``supports_bulk_multi`` is True.
+        return await self._inner.query_chain_bulk_multi(
+            root=root,
+            type=type,
+            groups=groups,
+            expiration_cycle=self._cycle,
+            delta_pushdown=delta_pushdown,
+        )
+
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: "Sequence[tuple[str, date, date]]",
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        # INJECT the cycle (guardrail 11): a held SYMBOL is NOT unique across
+        # cycles — the ~2.68% duplicate-instrument_id quirk is one symbol double-
+        # tagged (e.g. "M" + "W3 Friday") with different quotes.  The full-chain
+        # path filters the chain by cycle, dropping the off-cycle sibling; this
+        # identity fetch MUST apply the SAME filter or it re-admits the wrong
+        # sibling and ``_row_for_contract`` surfaces a different physical row.
+        # Only called when ``supports_held_rows`` is True.
+        return await self._inner.query_held_rows(
+            root=root,
+            type=type,
+            held_windows=held_windows,
             expiration_cycle=self._cycle,
         )
 
@@ -672,8 +910,20 @@ async def _resolve_hold(
     kernel: "PricingKernel | None" = None,
     roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
+    held_fetch: "Callable[[list[tuple[str, date, date]]], Awaitable[dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]]] | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Select-and-hold resolution over the pre-fetched ``chain_index``.
+
+    TWO-PHASE (``held_fetch`` set): the caller pre-fetched ONLY the roll-date
+    candidate chains (Phase 1).  This function selects the held contract per
+    segment against those candidates, then calls ``held_fetch(held_windows)``
+    (Phase 2 — an IDENTITY keyset fetch of the frozen held symbols over their
+    held windows) and merges the rows into ``chain_index`` before the daily
+    marking loop reads them.  Each held window spans ``[segment_first_date,
+    NEXT_segment_first_date]`` inclusive so the OLD contract's mid is present on
+    the roll seam.  ``held_fetch=None`` (the full-chain hold path) means
+    ``chain_index`` already carries every day's chain — the marking loop reads it
+    directly, byte-identical to the pre-two-phase single-pass behaviour.
 
     Runs AFTER Phase A (per-date ``expirations``) and Phase B (``chain_index``)
     on the SAME data the per-date Phase C would use.  Instead of a daily-
@@ -780,9 +1030,13 @@ async def _resolve_hold(
         )
         return (np.nan if value is None else float(value)), used_fallback
 
-    prev_seg_contract: OptionContractDoc | None = None
-    prev_seg_last_idx: int | None = None
-
+    # ── Selection pass: freeze the held contract per segment ────────────────
+    # Runs on the (Phase-1) roll-date candidate chains.  Records the held
+    # contract + its roll-day open premium / futures reference per segment into
+    # ``seg_states`` (``None`` = selection failed); marks failure error codes.
+    # In two-phase mode this MUST precede the Phase-2 held-symbol fetch, since the
+    # held SYMBOLS are the fetch keys.
+    seg_states: list[dict[str, object] | None] = [None] * len(segments)
     for seg_num, seg in enumerate(segments):
         # Select the held contract on the segment's FIRST date, then freeze it.
         first_idx, first_date = seg[0]
@@ -809,14 +1063,16 @@ async def _resolve_hold(
             for idx, _d in seg:
                 if error_codes[idx] is None:
                     error_codes[idx] = sel_err or "no_chain_for_date"
-            prev_seg_contract = None
-            prev_seg_last_idx = None
+            # ``seg_states[seg_num]`` stays None → the marking pass skips it and
+            # resets the OLD-owner tracking, exactly as the single-pass did.
             continue
 
         # This segment's roll-day OPEN premium = the NEW held contract's own mid on
         # the segment's first date.  It is the base for the NEW segment's P&L and
         # for sizing the held quantity (surfaced via roll_info_out — values[first]
-        # may carry the OLD mid on a true roll date).
+        # may carry the OLD mid on a true roll date).  ``first_date`` is a roll
+        # (Phase-1) date, so ``held`` is present in ``chain_index`` here even
+        # before the Phase-2 fetch.
         seg_open_premium, seg_open_fallback = await _mid_of(held, first_date)
 
         # Live OPTION multiplier hint: the first held contract's contract_size
@@ -876,6 +1132,55 @@ async def _resolve_hold(
         for idx, d in seg:
             # Record the held contract on every date of the run.
             contracts[idx] = held
+
+        seg_states[seg_num] = {
+            "held": held,
+            "seg_open_premium": seg_open_premium,
+            "seg_open_fallback": seg_open_fallback,
+            "seg_fref_value": seg_fref_value,
+        }
+
+    # ── Phase 2 (two-phase only): identity fetch of the frozen held symbols ──
+    # Build one window per SUCCESSFULLY-selected segment — ``[first_date, NEXT
+    # segment's first_date]`` inclusive so the OLD contract's mid is present on
+    # the roll seam (the marking pass reads it there) — then fetch every physical
+    # row of each held symbol over its window and MERGE (extend) into
+    # ``chain_index``.  The daily marking loop below then reads it unchanged.
+    if held_fetch is not None:
+        held_windows: list[tuple[str, date, date]] = []
+        for seg_num, seg in enumerate(segments):
+            state = seg_states[seg_num]
+            if state is None:
+                continue
+            held_c = state["held"]  # type: ignore[assignment]
+            lo = seg[0][1]
+            # ``hi`` = the NEXT segment's first (roll) date inclusive, else this
+            # segment's own last date.  A superset is harmless (extra rows are
+            # ignored by ``_row_for_contract``); the roll seam MUST be covered.
+            if seg_num + 1 < len(segments):
+                hi = segments[seg_num + 1][0][1]
+            else:
+                hi = seg[-1][1]
+            held_windows.append((held_c.contract_id, lo, hi))  # type: ignore[union-attr]
+        fetched = await held_fetch(held_windows)
+        for d, rows in fetched.items():
+            chain_index[d] = chain_index.get(d, []) + rows
+
+    # ── Marking pass: own each date's VALUE by exactly one contract's mid ────
+    prev_seg_contract: OptionContractDoc | None = None
+    prev_seg_last_idx: int | None = None
+    for seg_num, seg in enumerate(segments):
+        state = seg_states[seg_num]
+        if state is None:
+            # Selection failed — dates already carry their diagnostic; the NEXT
+            # segment's first date is a fresh open (no OLD owner to realise).
+            prev_seg_contract = None
+            prev_seg_last_idx = None
+            continue
+        held = state["held"]  # type: ignore[assignment]
+        seg_open_premium = state["seg_open_premium"]  # type: ignore[assignment]
+        seg_open_fallback = state["seg_open_fallback"]  # type: ignore[assignment]
+        seg_fref_value = state["seg_fref_value"]  # type: ignore[assignment]
 
         for j, (idx, d) in enumerate(seg):
             held_mid_today, held_fallback = await _mid_of(held, d)
@@ -995,7 +1300,8 @@ async def _resolve_bulk(
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
-    coverage_aware: bool = False,
+    decision: PathDecision,
+    compute_missing_delta: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
@@ -1030,18 +1336,28 @@ async def _resolve_bulk(
     error_codes: list[str | None] = [None] * n
     contracts: list[OptionContractDoc | None] = [None] * n
 
-    # Coverage-aware selection is a Phase-C re-pick; hold mode bypasses Phase C
-    # (it segments + freezes ONE contract per roll via ``_resolve_hold``).  The
-    # two are not composed in this pass — fail loudly rather than silently
-    # ignoring coverage in hold mode.  (A future pass can teach ``_resolve_hold``
-    # to select its per-segment contract coverage-aware.)
-    if coverage_aware and hold_between_rolls:
-        raise ValueError(
-            "coverage_aware is not supported together with hold_between_rolls yet"
-        )
-
     # Wrap bulk reader with cycle injection.
     bulk_reader = _CycleInjectingBulkReader(bulk_chain_reader, cycle)
+
+    # Hold-leg TWO-PHASE fast path eligibility (Wave 15).  When a hold leg's
+    # reader supports BOTH the year-chunk multi capability AND the Phase-2
+    # held-symbol identity fetch, replace the full-chain hold fetch (which ships
+    # the whole ~400-strike chain on every held/drift day because the delta
+    # pushdown is gated OFF for hold) with:
+    #   Phase 1 — candidates on ROLL (segment-open) dates ONLY (delta pushdown for
+    #             stored-delta ByDelta; roll-date full-chain for ByStrike/
+    #             ByMoneyness — few dates → cheap), feeding the UNCHANGED Python
+    #             per-segment selection; and
+    #   Phase 2 — an identity keyset fetch of the FROZEN held symbols over their
+    #             held windows (``query_held_rows``), returning all duplicate
+    #             instrument_id rows so ``_row_for_contract`` picks the identical
+    #             physical row → byte-identical P&L.
+    # When the capability is absent (test fake / older reader), stay on the
+    # full-chain hold path (``delta_pushdown=None``, all dates fetched) — the
+    # current byte-identical behaviour.  See ``hold_pushdown_design.md``.
+    # Routing decided ONCE upstream (see ``_choose_path``); this reads the
+    # transcribed decision rather than recomputing the conjunction inline.
+    _hold_two_phase = decision.hold_two_phase
 
     # ── Phase A: Pre-resolve expirations for all dates ──────────────
 
@@ -1062,14 +1378,6 @@ async def _resolve_bulk(
     # for dates that resolved to a real value (a success-side diagnostic; the
     # failure channel must stay clean so Phase C still runs selection).
     snap_notes: dict[int, str] = {}
-
-    # Coverage-aware mode only: per-date ORDERED candidate expirations
-    # (nearest-DTE first).  ``candidates[idx][0]`` is always the coverage-blind
-    # pick, so ``expirations[idx]`` (set below) still equals the legacy choice —
-    # the extra candidates are only consulted by the coverage-aware Phase-C
-    # selection, which re-picks the nearest-DTE candidate that is actually
-    # covered.  Empty dict when the mode is off (the common default).
-    candidates: dict[int, list[date]] = {}
 
     if isinstance(maturity, NearestToTarget):
         if queryable:
@@ -1151,17 +1459,6 @@ async def _resolve_bulk(
                         rule=maturity,
                         available_expirations=avail_for_d,
                     )
-                    if coverage_aware and isinstance(selection, ByDelta):
-                        # Build the ordered candidate list for the coverage-aware
-                        # Phase-C re-pick.  candidates[idx][0] == the resolve above
-                        # (same ranking key), so the coverage-blind grouping/output
-                        # below is unchanged; the extras only enable the retry.
-                        # Scoped to ByDelta — the only criterion with a delta
-                        # "coverage" notion (ByStrike is exact; ByMoneyness support
-                        # is a later pass, see the design note).
-                        candidates[idx] = _coverage_candidates(
-                            ref, maturity.target_dte_days, avail_for_d
-                        )
     else:
         # Pure date-arithmetic rules (EndOfMonth / PlusNDays / FixedDate /
         # NextThirdFriday) compute a target expiration with no chain-existence
@@ -1203,7 +1500,18 @@ async def _resolve_bulk(
                 return snapped, f"snapped_to:{snapped.isoformat()}"
             return target, None
 
-        if isinstance(maturity, EndOfMonth):
+        if _is_hold_cadence(maturity):
+            if not isinstance(maturity, EndOfMonth):
+                # A future hold-style cadence set ``is_hold_cadence`` but its
+                # roll-date math is NOT wired here yet.  Fail LOUDLY rather than
+                # falling through to per-date resolution (which would silently
+                # NOT hold — the D1 F3 footgun).  EndOfMonth is the only cadence
+                # whose per-month roll math is implemented below.
+                raise NotImplementedError(
+                    "hold cadence "
+                    f"{type(maturity).__name__} is not implemented in the "
+                    "stream resolver (is_hold_cadence set but no roll-date math)"
+                )
             # END-OF-MONTH roll (Issue #3, now triggered by the maturity itself):
             # choosing ``EndOfMonth`` as the maturity IS the request to roll at
             # month-end, so hold one contract per month — re-resolve the maturity
@@ -1282,18 +1590,6 @@ async def _resolve_bulk(
         else:
             exp_groups[exp].append((idx, d))
 
-    # COVERAGE-AWARE mode only: also fetch each date's NON-primary candidate
-    # expirations, so Phase C can re-pick the nearest-DTE candidate that is
-    # actually covered.  The primary candidate (== ``expirations[idx]``) is
-    # already in the group above; add the rest here.  (Default mode never
-    # populates ``candidates`` → this loop is a no-op, so Phase B is
-    # byte-identical.)
-    if coverage_aware and candidates:
-        for idx, d in queryable:
-            for cand in candidates.get(idx, ()):
-                if cand != expirations.get(idx):
-                    exp_groups[cand].append((idx, d))
-
     # HOLD mode only: the OLD contract's return INTO the roll day needs the OLD
     # contract's mid ON the roll day, but the roll day's resolved expiration is
     # the NEW one — so Phase B would fetch only the NEW chain there.  Add each
@@ -1302,7 +1598,11 @@ async def _resolve_bulk(
     # merged ``chain_index`` for the roll day carries BOTH chains.  (Default mode
     # never does this — each date stays in exactly one group, so Phase B is
     # byte-identical.)
-    if hold_between_rolls:
+    # (Skipped for the two-phase hold path: Phase 2 fetches the OLD held symbol's
+    # window through the NEXT roll date inclusive, so the OLD mid on the roll seam
+    # is served by ``query_held_rows`` — the roll day needs only the NEW
+    # candidates, which Phase 1 fetches under its own resolved expiration.)
+    if hold_between_rolls and not _hold_two_phase:
         prev_exp: date | None = None
         for idx, d in queryable:
             exp = expirations.get(idx)
@@ -1311,6 +1611,22 @@ async def _resolve_bulk(
                 exp_groups[prev_exp].append((idx, d))
             if exp is not None:
                 prev_exp = exp
+
+    # TWO-PHASE HOLD — Phase 1: restrict the Phase-B fetch to the ROLL
+    # (segment-open) dates ONLY.  The per-segment selection needs the NEW
+    # expiration's candidate chain on each segment's first date and nothing else;
+    # every held/drift day's price comes from the Phase-2 ``query_held_rows``
+    # identity fetch (issued after selection, inside ``_resolve_hold``).  This is
+    # what removes the full ~400-strike chain from the ~80% of bars that are
+    # held/drift days — the entire residual the Wave-14 profile measured.
+    if _hold_two_phase:
+        _p1_groups: dict[date, list[tuple[int, date]]] = defaultdict(list)
+        for _seg in _hold_segments(queryable, expirations):
+            _fi, _fd = _seg[0]
+            _se = expirations.get(_fi)
+            if _se is not None:
+                _p1_groups[_se].append((_fi, _fd))
+        exp_groups = _p1_groups
 
     # ── Per-expiration-group strike-window narrowing ─────────────────
     # Narrow each Phase-B bulk query to the strikes near the target so it
@@ -1453,8 +1769,197 @@ async def _resolve_bulk(
                 pass
         return result
 
-    fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
+    # Delta-pushdown eligibility (Wave-8 / Wave-15).  ENGAGE for STORED-delta
+    # ``ByDelta`` when NOT holding — OR when holding via the TWO-PHASE path.
+    #
+    # HOLD is structurally incompatible with a per-(exp,date) top-k applied to the
+    # WHOLE date range: the frozen contract drifts off target and falls outside the
+    # top-k on ~80% of held bars → NaN.  That is why a NON-two-phase hold leg stays
+    # on the full-chain year-chunk path (``delta_pushdown=None``) — the whole chain
+    # per date keeps the frozen contract present.  The TWO-PHASE hold path sidesteps
+    # this: Phase 1 applies the pushdown ONLY on roll (segment-open) dates (where
+    # the target IS on-target — it is exactly the selection moment), and Phase 2
+    # then fetches the frozen held symbol by IDENTITY over every held/drift day
+    # (``query_held_rows`` — no delta rank).  So the pushdown is safe here and gives
+    # hold the same ~34x row reduction it gave signals.
+    #
+    # For non-hold ``ByDelta``: the symbol-granular rank returns every retained
+    # symbol's full duplicate set, so the candidate set — hence both the pick and
+    # the resolved row — is byte-identical to the full chain.  This resolver NEVER
+    # computes missing deltas (Phase C ranks on ``r.delta_stored``; the legacy
+    # per-date path pins ``compute_missing_for_delta=False``), so ``ByDelta`` here
+    # IS the stored-delta case the gate names.  ByStrike / ByMoneyness rank on
+    # other keys and stay on the full-chain multi branch (``None``) — for two-phase
+    # hold too (their Phase 1 fetches only the few roll dates, so full-chain there
+    # is already cheap).
+    # Pushdown correctness precondition (audit_d1 F1): the SQL ranks STORED
+    # ``g.delta`` only — NULL/computed-delta symbols sort NULLS-LAST and would be
+    # wrongly excluded.  This resolver NEVER computes missing deltas (Phase C ranks
+    # on ``r.delta_stored``; there is no ``compute_missing_for_delta`` parameter),
+    # so stored-delta is guaranteed TODAY.  The F1 coupling guard
+    # (``compute_missing_delta``) lives at the ``_choose_path`` call site in
+    # ``resolve_option_stream`` (constant False): if a future change threads
+    # compute-missing into this resolver, flip it there and the pushdown
+    # HARD-FALLS-BACK to the full-chain year-chunk path (``None``) rather than
+    # silently ranking on stored delta only.  See audit_d1_gating.md F1.
+    #
+    # ``decision.delta_pushdown`` is True only when ``selection`` is a ByDelta, so
+    # the ``isinstance`` below is always True when the pushdown fires — it is kept
+    # solely to narrow ``selection`` to ``ByDelta`` for ``.target_delta`` (byte-
+    # identical: ``isinstance ∧ delta_pushdown`` ≡ ``delta_pushdown``).
+    _delta_pushdown: tuple[float, int] | None = (
+        (float(selection.target_delta), _PUSHDOWN_K)
+        if decision.delta_pushdown and isinstance(selection, ByDelta)
+        else None
+    )
+    # Runtime safeguard (audit_d1/d2 F1): a NO-OP today (``_choose_path`` already
+    # excludes the pushdown under compute-missing), but converts a future edit that
+    # wires compute-missing yet leaves the pushdown engaged from a SILENT wrong
+    # pick into a loud failure.  Fed the compute-missing flag directly (NOT via
+    # ``decision.delta_pushdown``, which already folds it in) so the two are
+    # cross-checked rather than tautologically agreeing.
+    _require_stored_delta_pushdown(
+        pushdown_engaged=_delta_pushdown is not None,
+        compute_missing_delta=compute_missing_delta,
+    )
+
+    # Observability: which year-chunks fell back to the slow per-expiration
+    # path.  A silent MASS fallback (e.g. a latent SQL defect making EVERY
+    # year-chunk raise) is correct but quietly erases the speedup and would show
+    # up only as "it got slow"; we surface it at WARNING (per chunk + summary).
+    _year_chunk_fallbacks: list[int] = []
+
+    async def _fetch_multi_chunk(
+        year: int,
+        members: list[tuple[date, list[tuple[int, date]]]],
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """ONE multi-expiration query for a (sub-)chunk of a calendar year.
+
+        ``members`` is ``[(expiration, group), ...]``; each expiration is
+        date-restricted to its own window inside the single
+        ``query_chain_bulk_multi`` round-trip (Option A — no strike window, so
+        the candidate set is a strict superset and selection is unchanged).
+
+        For STORED-delta ``ByDelta`` (``_delta_pushdown`` set), the single query
+        additionally pushes the delta rank into SQL and returns only the top-k
+        candidates per (expiration, date) — same row SHAPE, same pick (rn=1 is
+        ``match_by_delta``'s winner), far fewer rows.  ByStrike / ByMoneyness
+        pass ``delta_pushdown=None`` and take the full-chain multi branch.
+
+        ``year`` is used only for the fallback WARNING/observability label; the
+        sub-chunk splitter (``_fetch_year``) passes the same year for every
+        sub-chunk of that year.
+        """
+        groups_arg = [(exp, [d for _idx, d in group]) for exp, group in members]
+        try:
+            async with _bulk_sem:
+                result = await bulk_reader.query_chain_bulk_multi(
+                    root=collection,
+                    type=option_type,
+                    groups=groups_arg,
+                    delta_pushdown=_delta_pushdown,
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A (sub-)chunk failing must NOT abort the resolve.  Second-tier
+            # fallback: re-run THIS chunk's expirations through the per-expiration
+            # path (``_fetch_exp`` re-acquires ``_bulk_sem`` — already released
+            # here — and degrades its OWN dates to ``data_access_error`` on
+            # failure).  This restores the old per-expiration failure granularity
+            # on the rare chunk failure instead of blanking it.
+            if year not in _year_chunk_fallbacks:
+                _year_chunk_fallbacks.append(year)
+            _log.warning(
+                "Phase-B year-chunk fast path FELL BACK to per-expiration for "
+                "year=%s (%d expirations): %s. Cold-resolve speedup is degraded "
+                "for this chunk; investigate query_chain_bulk_multi if repeated.",
+                year,
+                len(members),
+                exc,
+            )
+            fallback = await asyncio.gather(
+                *[_fetch_exp(exp, group) for exp, group in members]
+            )
+            merged: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+            for r in fallback:
+                for d, rows in r.items():
+                    merged[d] = merged.get(d, []) + rows
+            return merged
+        # Tick progress once per expiration in the chunk so the frontend sees the
+        # same Phase-B cadence as the per-expiration path (endpoint clamps [0,1]).
+        if progress_callback is not None:
+            for _ in members:
+                try:
+                    progress_callback()
+                except Exception:  # pragma: no cover (defensive)
+                    pass
+        return result
+
+    async def _fetch_year(
+        year: int,
+        members: list[tuple[date, list[tuple[int, date]]]],
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        """Fetch a whole calendar year, sub-chunking the FULL-CHAIN case.
+
+        The delta-pushdown query returns ~34x fewer rows and never approaches the
+        60s dwh statement_timeout, so it runs as ONE query per year.  A FULL-CHAIN
+        (``_delta_pushdown is None``) year with MANY expirations — a weekly SPX
+        year is ~47 — can push a single ``query_chain_bulk_multi`` toward the
+        timeout under concurrent load; split it into contiguous sub-chunks of
+        ``_MAX_EXPS_PER_SUBCHUNK`` expirations each, run as independent tasks
+        (each with its own per-chunk failure isolation), and merge.  Sub-chunks are
+        cut on a CONTIGUOUS expiration sort and merged in that order, so even a date
+        that appears in two expiration windows (a HOLD roll day carries the OLD +
+        NEW chains) keeps its rows in the same instrument-ascending, expiration-
+        ordered sequence the single query would produce → byte-identical.
+        """
+        if _delta_pushdown is None and len(members) > _MAX_EXPS_PER_SUBCHUNK:
+            ordered = sorted(members, key=lambda m: m[0])  # contiguous by expiration
+            subchunks = [
+                ordered[i : i + _MAX_EXPS_PER_SUBCHUNK]
+                for i in range(0, len(ordered), _MAX_EXPS_PER_SUBCHUNK)
+            ]
+            parts = await asyncio.gather(
+                *[_fetch_multi_chunk(year, sc) for sc in subchunks]
+            )
+            merged: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+            for r in parts:
+                for d, rows in r.items():
+                    merged[d] = merged.get(d, []) + rows
+            return merged
+        return await _fetch_multi_chunk(year, members)
+
+    # Fast path (Option A year-chunk collapse): when the bulk reader implements
+    # the optional multi-expiration capability AND the selection shape is
+    # compatible, collapse the per-expiration bulk fan-out into ONE query PER
+    # CALENDAR YEAR (each expiration date-restricted to its own window).  This
+    # removes both the per-expiration round-trips and the strike-window probes.
+    # Ineligible cases (unsupported reader / test fake) fall back to the
+    # per-expiration path, byte-identical.  Routing decided upstream in
+    # ``_choose_path``; this reads the transcribed decision.
+    _fast_path_eligible = decision.fast_path_eligible
+    if _fast_path_eligible:
+        year_chunks: dict[int, list[tuple[date, list[tuple[int, date]]]]] = defaultdict(
+            list
+        )
+        for exp, group in exp_groups.items():
+            year_chunks[exp.year].append((exp, group))
+        fetch_tasks = [
+            _fetch_year(year, members) for year, members in year_chunks.items()
+        ]
+    else:
+        fetch_tasks = [_fetch_exp(exp, group) for exp, group in exp_groups.items()]
     fetch_results = await asyncio.gather(*fetch_tasks)
+    if _fast_path_eligible and _year_chunk_fallbacks:
+        # Summary WARNING so a MASS fallback (most/all chunks) is one glance,
+        # not buried in per-chunk lines.  If this ratio is high the fast path is
+        # effectively off — a real, silent perf regression.
+        _log.warning(
+            "Phase-B year-chunk fast path fell back to per-expiration for "
+            "%d/%d year-chunk(s) (years=%s).",
+            len(_year_chunk_fallbacks),
+            len(year_chunks),
+            sorted(_year_chunk_fallbacks),
+        )
     for result in fetch_results:
         # MERGE (extend), do not overwrite: in HOLD mode a roll day appears in
         # TWO expiration groups (OLD + NEW), so its rows arrive from two fetches
@@ -1519,6 +2024,55 @@ async def _resolve_bulk(
     #    dollar-P&L recurrence consumes — NOT a stitched level, so no option
     #    ratio-adjust.  Bypasses the per-date Phase C entirely and returns early. ─
     if hold_between_rolls:
+        # TWO-PHASE only: the Phase-2 held-symbol identity fetch, issued INSIDE
+        # ``_resolve_hold`` after per-segment selection freezes the held symbols.
+        # Failure-isolated PER YEAR (mirrors Phase-1's per-year-chunk isolation):
+        # the windows are grouped by their segment-open year and fetched as
+        # independent tasks, so a transient dwh error NaNs only THAT year's held
+        # dates (their error codes stand) instead of blanking the whole leg — and
+        # never 500s the resolve.
+        async def _fetch_held_chunk(
+            year: int,
+            windows: "list[tuple[str, date, date]]",
+        ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+            try:
+                async with _bulk_sem:
+                    return await bulk_reader.query_held_rows(
+                        root=collection,
+                        type=option_type,
+                        held_windows=windows,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "Phase-2 held-symbol fetch failed for year=%s (%d symbols): "
+                    "%s. That year's held dates degrade to NaN (no 500).",
+                    year,
+                    len(windows),
+                    exc,
+                )
+                return {}
+
+        async def _fetch_held(
+            held_windows: "list[tuple[str, date, date]]",
+        ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+            if not held_windows:
+                return {}
+            # Group by segment-open (``lo``) year — the same calendar-year
+            # granularity Phase-1 chunks on.  A window that straddles a year
+            # boundary stays in its ``lo`` year (a superset tail is harmless; the
+            # marking loop reads only the dates it needs).
+            by_year: dict[int, list[tuple[str, date, date]]] = defaultdict(list)
+            for sym, lo, hi in held_windows:
+                by_year[lo.year].append((sym, lo, hi))
+            parts = await asyncio.gather(
+                *[_fetch_held_chunk(y, w) for y, w in by_year.items()]
+            )
+            merged: dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]] = {}
+            for part in parts:
+                for d, rows in part.items():
+                    merged[d] = merged.get(d, []) + rows
+            return merged
+
         return await _resolve_hold(
             dates=dates,
             queryable=queryable,
@@ -1536,6 +2090,7 @@ async def _resolve_bulk(
             kernel=kernel,
             roll_info_out=hold_roll_info_out,
             futures_reference_resolver=futures_reference_resolver,
+            held_fetch=_fetch_held if _hold_two_phase else None,
         )
 
     # ── Phase C: Per-date selection + stream extraction ─────────────
@@ -1546,86 +2101,16 @@ async def _resolve_bulk(
     # routes ByStrike/ByDelta through an async gather too (like ByMoneyness).
     # ByMoneyness always needs I/O (underlying_price_resolver) for selection.
 
-    def _match_delta(
-        rows: list[tuple[OptionContractDoc, OptionDailyRow]],
-        *,
-        strict: bool,
-    ) -> SelectionResult:
-        """``ByDelta`` match over *rows* (``strict`` overridable for coverage)."""
-        deltas = [r.delta_stored for _c, r in rows]
-        return match_by_delta(
-            rows=rows,
-            deltas=deltas,
-            target=selection.target_delta,  # type: ignore[union-attr]
-            tolerance=selection.tolerance,  # type: ignore[union-attr]
-            strict=strict,
-            chain_size=len(rows),
-        )
-
-    def _coverage_aware_delta_select(
-        idx: int, d: date
-    ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
-        """Coverage-aware ``ByDelta`` selection over the date's CANDIDATE expiries.
-
-        Walks ``candidates[idx]`` nearest-DTE first (the same order the
-        coverage-blind path ranks by), restricting ``chain_index[d]`` to each
-        candidate's expiration and running a STRICT ``ByDelta`` match (delta must
-        be within ``selection.tolerance``).  Returns the FIRST candidate expiry
-        that has such a match — i.e. the nearest-DTE expiration that is actually
-        COVERED near the target delta.
-
-        Fallback: when NO candidate is covered, re-runs the match on the PRIMARY
-        candidate (``candidates[idx][0]`` == the coverage-blind pick) with the
-        selection's OWN ``strict`` — identical to the non-coverage result, so the
-        worst case never regresses to all-NaN (it degrades to today's behaviour).
-        A ``coverage_skipped:<iso>`` note is recorded when a strictly-nearer
-        candidate was skipped for a covered farther one.
-        """
-        cand = candidates.get(idx) or []
-        if not cand:
-            # No candidate list (e.g. date resolved to None) — defer to the plain
-            # path over whatever chain_index holds.
-            return _select_sync(idx, d, _restrict_expiration=None)
-        primary = cand[0]
-        for pos, exp in enumerate(cand):
-            exp_rows = [
-                (c, r) for (c, r) in chain_index.get(d, []) if c.expiration == exp
-            ]
-            if not exp_rows:
-                continue
-            result = _match_delta(exp_rows, strict=True)
-            if result.error_code is None and result.contract is not None:
-                row = _row_for_contract(exp_rows, result.contract)
-                if row is None:  # pragma: no cover (defensive)
-                    continue
-                contracts[idx] = result.contract
-                if pos > 0:
-                    # A strictly-nearer candidate existed but was not covered.
-                    snap_notes[idx] = f"coverage_skipped:{primary.isoformat()}"
-                return result.contract, row
-        # No covered candidate → fall back to the primary's best-effort match
-        # (the coverage-blind result, so no regression vs. today).
-        return _select_sync(idx, d, _restrict_expiration=primary)
-
     def _select_sync(
         idx: int,
         d: date,
-        _restrict_expiration: date | None = None,
     ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
         """Run ByStrike/ByDelta selection for date ``d`` (pure CPU).
 
         Returns the selected ``(contract, row)`` or ``None`` (having set the
         per-date error_code).  Does NOT extract the stream value — that is done
-        by the caller (sync for row-attr streams, async for bs_mid).
-
-        ``_restrict_expiration`` (coverage-aware fallback only): when set, the
-        match runs against ONLY that expiration's rows from the merged
-        ``chain_index`` (in coverage mode the index carries several candidate
-        expiries).  ``None`` (the default / non-coverage path) uses the full
-        chain, byte-identical to before."""
+        by the caller (sync for row-attr streams, async for bs_mid)."""
         rows = chain_index.get(d, [])
-        if _restrict_expiration is not None:
-            rows = [(c, r) for (c, r) in rows if c.expiration == _restrict_expiration]
         if not rows:
             error_codes[idx] = "no_chain_for_date"
             return None
@@ -1662,23 +2147,10 @@ async def _resolve_bulk(
         contracts[idx] = result.contract
         return result.contract, row
 
-    # Coverage-aware routing lives in ONE place: ByDelta in coverage mode walks
-    # the candidate expiries; everything else (ByStrike, or coverage off) uses the
-    # plain full-chain match.  (ByMoneyness is handled on its own async path
-    # below.)
-    _use_coverage_delta = coverage_aware and isinstance(selection, ByDelta)
-
-    def _do_delta_or_strike_select(
-        idx: int, d: date
-    ) -> tuple[OptionContractDoc, OptionDailyRow] | None:
-        if _use_coverage_delta:
-            return _coverage_aware_delta_select(idx, d)
-        return _select_sync(idx, d)
-
     def _resolve_one_sync(idx: int, d: date) -> None:
         """CPU-only resolution for ByStrike/ByDelta with a ROW-ATTRIBUTE stream."""
         try:
-            sel = _do_delta_or_strike_select(idx, d)
+            sel = _select_sync(idx, d)
             if sel is None:
                 return
             contract, row = sel
@@ -1710,7 +2182,7 @@ async def _resolve_bulk(
             else asyncio.Semaphore(_MAX_INFLIGHT_PER_DATE)
         )
         try:
-            sel = _do_delta_or_strike_select(idx, d)
+            sel = _select_sync(idx, d)
             if sel is None:
                 return
             contract, row = sel
@@ -1917,7 +2389,6 @@ async def resolve_option_stream(
     hold_between_rolls: bool = False,
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
-    coverage_aware: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Resolve a per-date 1-D ``float64`` stream off the selected option.
 
@@ -2026,23 +2497,6 @@ async def resolve_option_stream(
         the NEW open premium is surfaced → the seam is exact, never a raw old→new
         level gap).  The 3-tuple return is unchanged; roll info travels through
         this out-dict so every non-hold caller is unaffected.
-    coverage_aware:
-        COVERAGE-AWARE expiration selection (default ``False`` = the current
-        behaviour, byte-identical).  Effective ONLY on the bulk path, ONLY for
-        ``NearestToTarget`` maturity + ``ByDelta`` selection.  When ``True`` the
-        resolver, instead of the single nearest-DTE listed expiration, considers a
-        small bounded set of nearest-DTE candidate expirations (see
-        :data:`_COVERAGE_MAX_CANDIDATES` / :data:`_COVERAGE_DTE_WINDOW_DAYS`) and
-        picks the nearest-DTE one that actually has an IN-TOLERANCE delta strike —
-        skipping thinly-listed expirations whose only greeked strikes are far from
-        the target delta (the OPT_SP_500 later-era failure where ``ByDelta(-0.10)``
-        picked deep-OTM garbage from a gappy target month).  If NO candidate is
-        covered it falls back to the nearest-DTE best-effort match (== the
-        coverage-blind result), so it never regresses to all-NaN.  A
-        ``coverage_skipped:<iso>`` success-side note (same channel as
-        ``snapped_to:``) records when a strictly-nearer expiration was skipped.
-        Requires the bulk chain reader; not composable with ``hold_between_rolls``
-        yet — both raise ``ValueError``.
 
     Returns
     -------
@@ -2079,6 +2533,35 @@ async def resolve_option_stream(
     if stream != _BS_MID and stream not in _STREAM_TO_ATTR:
         raise ValueError(f"unknown stream label {stream!r}")
 
+    # ── SINGLE routing decision (see ``_choose_path``): the ONE place the
+    # fetch-path eligibility booleans AND the legacy-path reject are decided.
+    # ``_compute_missing_delta`` is the audit_d1 F1 coupling guard — constant
+    # False because this resolver never computes missing deltas (Phase C ranks on
+    # ``r.delta_stored``; there is no compute-missing parameter).  If compute-
+    # missing is ever threaded in, flip this and the pushdown HARD-FALLS-BACK to
+    # the full-chain year-chunk path rather than ranking on stored delta only.
+    _compute_missing_delta = False  # COUPLED: flip if compute-missing is wired
+    _has_bulk_reader = bulk_chain_reader is not None
+    _decision = _choose_path(
+        has_bulk_reader=_has_bulk_reader,
+        selection=selection,
+        maturity=maturity,
+        stream=stream,
+        hold_between_rolls=hold_between_rolls,
+        roll_offset_nonzero=roll_offset.value != 0,
+        # Capability flags read from the RAW reader via the same helper the
+        # ``_CycleInjectingBulkReader`` wrapper uses → byte-identical value.
+        supports_bulk_multi=(
+            _reader_supports_bulk_multi(bulk_chain_reader)
+            if _has_bulk_reader
+            else False
+        ),
+        supports_held_rows=(
+            _reader_supports_held_rows(bulk_chain_reader) if _has_bulk_reader else False
+        ),
+        compute_missing_delta=_compute_missing_delta,
+    )
+
     # ── Bulk path: when a bulk reader is provided, use the pre-fetch
     # strategy for drastically fewer Mongo round-trips.
     if bulk_chain_reader is not None:
@@ -2103,62 +2586,21 @@ async def resolve_option_stream(
             hold_between_rolls=hold_between_rolls,
             hold_roll_info_out=hold_roll_info_out,
             futures_reference_resolver=futures_reference_resolver,
-            coverage_aware=coverage_aware,
+            decision=_decision,
+            compute_missing_delta=_compute_missing_delta,
         )
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──
-
-    # Symmetric guard: coverage-aware selection walks the pre-fetched candidate
-    # chains from Phase B, which only the bulk path materialises.  The legacy
-    # per-date path resolves + selects one expiration per date with no candidate
-    # set, so it cannot honour the flag — fail loudly rather than silently
-    # returning the coverage-BLIND series.  Production always wires the bulk
-    # reader.
-    if coverage_aware:
-        raise ValueError(
-            "coverage_aware requires the bulk chain reader; the legacy per-date "
-            "path does not support coverage-aware expiration selection"
-        )
-
-    # The legacy per-date path resolves maturity inside the selector, so it
-    # cannot honor an early roll (``roll_offset``) — that needs the bulk path's
-    # pre-resolved expirations.  Rather than silently diverge (ignore the shift
-    # and return a series that looks like the bulk result but is not), fail
-    # loudly: production always wires the bulk reader, so this only fires on a
-    # misconfigured caller.
-    if roll_offset.value != 0:
-        raise ValueError(
-            "roll_offset requires the bulk chain reader; the legacy per-date "
-            "path does not support it"
-        )
-    # Symmetric guard: select-and-hold needs the bulk path's pre-resolved
-    # per-date expirations to segment the roll boundaries and re-read the HELD
-    # contract off the pre-fetched chain.  The legacy per-date path re-selects a
-    # fresh contract each day (the churn this mode exists to eliminate), so it
-    # cannot honour the flag — fail loudly rather than silently returning the
-    # unheld daily-reselect series.  Production always wires the bulk reader.
-    if hold_between_rolls:
-        raise ValueError(
-            "hold_between_rolls requires the bulk chain reader; the legacy "
-            "per-date path does not support select-and-hold"
-        )
-    # Symmetric guard: the EndOfMonth monthly-hold sweep lives in the bulk
-    # Phase A, so the legacy per-date path cannot honour it (it would silently
-    # re-resolve EndOfMonth per-date, diverging from the held-monthly result).
-    if isinstance(maturity, EndOfMonth):
-        raise ValueError(
-            "EndOfMonth maturity requires the bulk chain reader; the legacy "
-            "per-date path does not support the monthly-hold roll"
-        )
-    # Symmetric guard: the COMPUTED ``bs_mid`` stream (Black-76 from IV + the
-    # underlying future) is implemented on the bulk path's extraction only.
-    # Production always wires the bulk reader; fail loudly rather than KeyError on
-    # the absent ``_STREAM_TO_ATTR`` entry or silently return a wrong series.
-    if stream == _BS_MID:
-        raise ValueError(
-            "bs_mid stream requires the bulk chain reader; the legacy per-date "
-            "path does not support the computed Black-76 price stream"
-        )
+    #
+    # The legacy per-date path re-resolves maturity inside the selector each day,
+    # so it cannot honour an early roll (``roll_offset``), select-and-hold
+    # (``hold_between_rolls``), a hold-cadence maturity (``EndOfMonth`` today), or
+    # the computed ``bs_mid`` stream — all of which need the bulk path's
+    # pre-resolved expirations / extraction.  Rather than silently diverge, fail
+    # loudly with the specific reason ``_choose_path`` selected (production always
+    # wires the bulk reader, so this only fires on a misconfigured caller).
+    if _decision.legacy_reject is not None:
+        raise ValueError(_decision.legacy_reject)
 
     # Wrap the reader so every selector-emitted query carries the cycle.
     cycle_reader = _CycleInjectingReader(chain_reader, cycle)
