@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tcg.core.api.data import router as data_router
+from tcg.core.api.data_v2 import router as data_v2_router
 from tcg.core.api.errors import tcg_error_handler
 from tcg.core.api.indicators import router as indicators_router
 from tcg.core.api.options import router as options_router
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
         await dwh_pool.connect()
         services = await create_services(dwh_pool)
         app.state.market_data = services["market_data"]
+        app.state.market_data_v2 = services["market_data_v2"]
 
         # --- tcg_app_data (PostgreSQL, read-write) for persistence ---
         # Built here (not lazily) so startup fails fast and the pool gets
@@ -319,6 +321,7 @@ def create_app() -> FastAPI:
     # locally and raise HTTPException, so those paths bypass this handler.
     app.add_exception_handler(psycopg.Error, _persistence_error_handler)
     app.include_router(data_router)
+    app.include_router(data_v2_router)
     app.include_router(portfolio_router)
     app.include_router(indicators_router)
     app.include_router(signals_router)
