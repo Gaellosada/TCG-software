@@ -6,6 +6,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import BackendBanner from './components/BackendBanner';
 import HelpPage from './pages/Help/HelpPage';
 import DataPage from './pages/Data/DataPage';
+import DataV2Page from './pages/DataV2/DataV2Page';
 import IndicatorsPage from './pages/Indicators/IndicatorsPage';
 import SignalsPage from './pages/Signals/SignalsPage';
 import PortfolioPage from './pages/Portfolio/PortfolioPage';
@@ -55,6 +56,16 @@ function App() {
                 <PageContainer>
                   <ErrorBoundary>
                     <DataPage />
+                  </ErrorBoundary>
+                </PageContainer>
+              }
+            />
+            <Route
+              path="/data-v2"
+              element={
+                <PageContainer>
+                  <ErrorBoundary>
+                    <DataV2Page />
                   </ErrorBoundary>
                 </PageContainer>
               }

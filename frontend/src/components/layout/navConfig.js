@@ -11,7 +11,8 @@ export const NAV_SECTIONS = [
     id: 'manual',
     label: 'Manual',
     items: [
-      { path: '/data',       label: 'Data',       icon: 'data' },
+      { path: '/data',       label: 'Database v1', icon: 'data' },
+      { path: '/data-v2',    label: 'Database v2', icon: 'data' },
       { path: '/indicators', label: 'Indicators', icon: 'indicators' },
       { path: '/signals',    label: 'Signals',    icon: 'signals' },
       { path: '/portfolio',  label: 'Portfolio',  icon: 'portfolio' },
