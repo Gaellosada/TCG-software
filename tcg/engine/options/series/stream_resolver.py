@@ -522,6 +522,35 @@ class PathDecision:
     legacy_reject: str | None  # non-None => the legacy per-date path must raise it
 
 
+def _require_stored_delta_pushdown(
+    *, pushdown_engaged: bool, compute_missing_delta: bool
+) -> None:
+    """Runtime safeguard (audit_d1/d2 F1): the delta pushdown ranks on STORED
+    ``g.delta`` ONLY.
+
+    The SQL CTE ranks symbols by ``abs(g.delta - target)`` with NULL/computed-delta
+    symbols sorted NULLS-LAST — so a symbol whose delta would only exist AFTER a
+    compute-missing pass is silently EXCLUDED from the top-k, yielding a wrong
+    (under-inclusive) pick that the k-overflow guard does NOT cover.  The pushdown
+    is therefore correct ONLY when compute-missing is OFF.
+
+    ``_choose_path`` already suppresses the pushdown under compute-missing
+    (``delta_pushdown = ... and not compute_missing_delta``), so this is a strict
+    NO-OP today: ``pushdown_engaged`` can never be True while
+    ``compute_missing_delta`` is True.  It exists so a FUTURE change that threads
+    real compute-missing into this resolver but forgets to feed it to
+    ``_choose_path`` fails LOUD here instead of returning a silently wrong pick —
+    "never silently wrong" over "fast".
+    """
+    if pushdown_engaged and compute_missing_delta:
+        raise ValueError(
+            "delta pushdown engaged while compute-missing is in effect: the "
+            "stored-delta SQL rank would silently exclude computed-delta symbols "
+            "(NULLS-LAST) and return an under-inclusive pick. Pass "
+            "delta_pushdown=None (full chain) whenever compute-missing is on."
+        )
+
+
 def _choose_path(
     *,
     has_bulk_reader: bool,
@@ -1272,6 +1301,7 @@ async def _resolve_bulk(
     hold_roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
     decision: PathDecision,
+    compute_missing_delta: bool = False,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Three-phase bulk resolver: pre-resolve expirations, bulk fetch,
     per-date selection.
@@ -1781,6 +1811,16 @@ async def _resolve_bulk(
         (float(selection.target_delta), _PUSHDOWN_K)
         if decision.delta_pushdown and isinstance(selection, ByDelta)
         else None
+    )
+    # Runtime safeguard (audit_d1/d2 F1): a NO-OP today (``_choose_path`` already
+    # excludes the pushdown under compute-missing), but converts a future edit that
+    # wires compute-missing yet leaves the pushdown engaged from a SILENT wrong
+    # pick into a loud failure.  Fed the compute-missing flag directly (NOT via
+    # ``decision.delta_pushdown``, which already folds it in) so the two are
+    # cross-checked rather than tautologically agreeing.
+    _require_stored_delta_pushdown(
+        pushdown_engaged=_delta_pushdown is not None,
+        compute_missing_delta=compute_missing_delta,
     )
 
     # Observability: which year-chunks fell back to the slow per-expiration
@@ -2547,6 +2587,7 @@ async def resolve_option_stream(
             hold_roll_info_out=hold_roll_info_out,
             futures_reference_resolver=futures_reference_resolver,
             decision=_decision,
+            compute_missing_delta=_compute_missing_delta,
         )
 
     # ── Legacy per-date path (fallback when no bulk reader wired) ──

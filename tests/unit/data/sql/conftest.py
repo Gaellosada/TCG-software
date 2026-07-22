@@ -45,6 +45,11 @@ import pytest
 # --------------------------------------------------------------------------- #
 # Server-binary discovery
 # --------------------------------------------------------------------------- #
+def _env_truthy(value: str | None) -> bool:
+    """A CI-style truthy env test: unset/empty/0/false/no/off are falsey."""
+    return (value or "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def _candidate_bindirs() -> list[str]:
     cands: list[str] = []
     env = os.environ.get("TCG_TEST_PG_BINDIR")
@@ -185,8 +190,23 @@ def _dim_rows() -> list[tuple]:
     # (iid, symbol, cycle, strike, expiration)
     spec = [
         # E1 delta group — winner SYM_W is a DUP symbol (two iids, same symbol/strike).
-        (10, "OPT_TEST_4800P", "M", 4800, E1),
-        (20, "OPT_TEST_4900P", "M", 4900, E1),
+        # RANK-DISCRIMINATING seed: TEN non-null-delta symbols with DISTINCT
+        # best-|delta-target| distances (target -0.10), so a k=2 pushdown (fetch
+        # k+1=3) EXCLUDES seven of them and the correct pick is unambiguous.  This
+        # is what makes ``test_delta_pushdown_matches_full_chain`` actually
+        # discriminate the SQL ORDER BY: invert ``best_dist ASC``->``DESC`` and the
+        # pushdown returns the three FARTHEST symbols (winner absent) -> RED.  With
+        # only the old 3 non-null symbols and k+1=3 the pushdown returned ALL of
+        # them regardless of rank order (rank-blind), so the test passed either way.
+        (10, "OPT_TEST_4800P", "M", 4800, E1),  # delta -0.05, dist 0.05
+        (12, "OPT_TEST_4820P", "M", 4820, E1),  # delta -0.12, dist 0.02 (2nd closest)
+        (13, "OPT_TEST_4870P", "M", 4870, E1),  # delta -0.07, dist 0.03 (3rd closest)
+        (14, "OPT_TEST_4700P", "M", 4700, E1),  # delta -0.17, dist 0.07
+        (15, "OPT_TEST_4680P", "M", 4680, E1),  # delta -0.19, dist 0.09
+        (16, "OPT_TEST_4650P", "M", 4650, E1),  # delta -0.23, dist 0.13
+        (17, "OPT_TEST_4600P", "M", 4600, E1),  # delta -0.28, dist 0.18
+        (18, "OPT_TEST_4550P", "M", 4550, E1),  # delta -0.35, dist 0.25 (farthest)
+        (20, "OPT_TEST_4900P", "M", 4900, E1),  # delta -0.30, dist 0.20
         (30, "OPT_TEST_4950P", "M", 4950, E1),  # SYM_W near sibling (lower iid)
         (31, "OPT_TEST_4950P", "M", 4950, E1),  # SYM_W far sibling (same symbol)
         (40, "OPT_TEST_5000P", "M", 5000, E1),  # NULL-delta symbol
@@ -232,6 +252,13 @@ def _greeks_rows() -> list[tuple]:
     # (iid, delta) per trade date it trades on
     deltas = {
         10: -0.05,
+        12: -0.12,  # dist 0.02 (2nd closest)
+        13: -0.07,  # dist 0.03 (3rd closest)
+        14: -0.17,  # dist 0.07
+        15: -0.19,  # dist 0.09
+        16: -0.23,  # dist 0.13
+        17: -0.28,  # dist 0.18
+        18: -0.35,  # dist 0.25 (farthest)
         20: -0.30,
         30: -0.10,  # SYM_W near: exact target -> unique winner
         31: -0.45,  # SYM_W far sibling
@@ -246,6 +273,13 @@ def _greeks_rows() -> list[tuple]:
     }
     dates_for = {
         10: E1_DATES,
+        12: E1_DATES,
+        13: E1_DATES,
+        14: E1_DATES,
+        15: E1_DATES,
+        16: E1_DATES,
+        17: E1_DATES,
+        18: E1_DATES,
         20: E1_DATES,
         30: E1_DATES,
         31: E1_DATES,
@@ -269,6 +303,13 @@ def _price_rows() -> list[tuple]:
     # (iid, bid, ask, close) per trade date; mid = (bid+ask)/2
     quotes = {
         10: (5.0, 5.2),
+        12: (6.0, 6.2),
+        13: (6.5, 6.7),
+        14: (8.0, 8.2),
+        15: (8.5, 8.7),
+        16: (9.0, 9.2),
+        17: (10.0, 10.2),
+        18: (11.0, 11.2),
         20: (30.0, 30.4),
         30: (12.0, 12.2),  # SYM_W near -> mid 12.1 (the resolved row)
         31: (40.0, 40.2),  # SYM_W far  -> mid 40.1
@@ -283,6 +324,13 @@ def _price_rows() -> list[tuple]:
     }
     dates_for = {
         10: E1_DATES,
+        12: E1_DATES,
+        13: E1_DATES,
+        14: E1_DATES,
+        15: E1_DATES,
+        16: E1_DATES,
+        17: E1_DATES,
+        18: E1_DATES,
         20: E1_DATES,
         30: E1_DATES,
         31: E1_DATES,
@@ -328,17 +376,33 @@ def _seed(conninfo: str) -> None:
             )
 
 
-@pytest.fixture(scope="session")
-def seeded_dwh() -> SeededDwh:  # type: ignore[misc]
-    """Spin an ephemeral PostgreSQL, seed the fixture chain, yield conn params."""
+def _select_bindir() -> str:
+    """Return the pg server bindir, else skip (or HARD-FAIL under the CI gate).
+
+    Pure w.r.t. its inputs (env + ``_candidate_bindirs``) so it is unit-testable
+    without spinning a server.  When no server binary is discoverable this
+    normally ``pytest.skip``s the module (clean offline degradation); when
+    ``$TCG_REQUIRE_PG_TESTS`` is truthy it ``pytest.fail``s instead, so a
+    runner-image change that silently drops the pg binary cannot quietly re-open
+    the real-SQL semantic-drift hole (a skip is green).
+    """
     bindirs = _candidate_bindirs()
     if not bindirs:
-        pytest.skip(
+        msg = (
             "no PostgreSQL server binary discoverable "
             "(set $TCG_TEST_PG_BINDIR or install a local server); "
             "real-SQL equivalence guard cannot run offline here"
         )
-    bindir = bindirs[0]
+        if _env_truthy(os.environ.get("TCG_REQUIRE_PG_TESTS")):
+            pytest.fail(msg + " [TCG_REQUIRE_PG_TESTS is set — refusing to skip]")
+        pytest.skip(msg)
+    return bindirs[0]
+
+
+@pytest.fixture(scope="session")
+def seeded_dwh() -> SeededDwh:  # type: ignore[misc]
+    """Spin an ephemeral PostgreSQL, seed the fixture chain, yield conn params."""
+    bindir = _select_bindir()
 
     env = dict(os.environ)
     libs = _libdirs_for(bindir)

@@ -17,7 +17,12 @@ from __future__ import annotations
 
 from datetime import date
 
-from tcg.data._sql.options import _pushdown_overflow_groups, symbol_delta_rank
+from tcg.data._sql.connection import to_float
+from tcg.data._sql.options import (
+    SqlOptionsDataReader,
+    _pushdown_overflow_groups,
+    symbol_delta_rank,
+)
 from tcg.engine.options.selection._match import match_by_delta
 from tcg.types.options import OptionContractDoc, OptionDailyRow
 
@@ -208,3 +213,60 @@ class TestPushdownOverflowDetection:
         }
         overflow, _drop = _pushdown_overflow_groups(results, _TARGET, k=1)
         assert overflow == set()
+
+
+
+class TestDeltaStoredRawCoupling:
+    """audit_d3 INV-4: the delta-pushdown SQL CTE ranks on RAW ``g.delta`` while
+    Python (``symbol_delta_rank`` AND ``match_by_delta``) ranks on
+    ``delta_stored``.  Byte-identity of the pushdown pick therefore REQUIRES
+    ``_row_from_chain`` to map raw ``g.delta`` -> ``delta_stored`` by IDENTITY
+    (no sanitize/scale/sign transform).  The reference-parity tests above are
+    BLIND to a divergence here (both Python sides read ``delta_stored``, so they
+    agree with each other while diverging from the raw-delta SQL).
+
+    This pins the coupling directly: it goes RED the instant a transform is added
+    to ``delta_stored`` in ``_row_from_chain`` without mirroring it into the CTE.
+    (The real-SQL ``test_delta_pushdown_matches_full_chain`` catches the same edit
+    end-to-end wherever a pg binary exists; this is its hermetic counterpart.)
+
+    # COUPLED: keep ``delta_stored=to_float(m["delta"])`` an identity of the raw
+    #   fact ``g.delta`` — the ONLY value the pushdown ``_DELTA_RANK_ORDER_BY``
+    #   ranks on.  A transform here MUST be mirrored into that CTE.
+    """
+
+    @staticmethod
+    def _chain_row(raw_delta: float | None) -> dict:
+        # A merged v_option_chain row shape (only fields _row_from_chain reads).
+        return {
+            "option_symbol": "OPT_TEST_4950P",  # non-ETH -> greeks allowed
+            "bid": 12.0,
+            "ask": 12.2,
+            "option_close": 12.1,
+            "volume": 100,
+            "open_interest": 200,
+            "implied_vol": 0.20,
+            "delta": raw_delta,
+            "gamma": 0.01,
+            "theta": -0.5,
+            "vega": 1.0,
+            "underlying_price": 5000.0,
+        }
+
+    def test_row_from_chain_delta_stored_is_identity_of_raw_delta(self):
+        # Bypass __init__ (no pool needed): _row_from_chain only reads self via
+        # _collection_from_symbol, which touches no I/O.
+        reader = SqlOptionsDataReader.__new__(SqlOptionsDataReader)
+        for raw in (-0.1234567, -0.10, -0.5, 0.05, None):
+            m = self._chain_row(raw)
+            row = reader._row_from_chain(
+                m, target_date=date(2024, 3, 15), coin_spot=None
+            )
+            # IDENTITY: delta_stored == the raw fact delta the SQL CTE ranks on.
+            # A scale/sign/sanitize transform would break this (and silently move
+            # the pushdown pick) -> RED.
+            assert row.delta_stored == to_float(m["delta"]), (
+                f"delta_stored {row.delta_stored} != raw g.delta "
+                f"{to_float(m['delta'])} — an unmirrored transform diverges the "
+                "pushdown from match_by_delta (audit_d3 INV-4)"
+            )

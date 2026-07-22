@@ -227,3 +227,48 @@ def test_delta_pushdown_only_fires_for_bydelta_so_engine_tuple_is_safe():
             # The tuple the engine would build is well-formed.
             assert (float(kw["selection"].target_delta), _PUSHDOWN_K) == (-0.10, 8)
     assert fired > 0  # the pushdown path IS exercised by the grid
+
+
+# --------------------------------------------------------------------------- #
+# Runtime safeguard: _require_stored_delta_pushdown (audit_d1/d2 F1)
+# --------------------------------------------------------------------------- #
+import pytest  # noqa: E402
+
+from tcg.engine.options.series.stream_resolver import (  # noqa: E402
+    _require_stored_delta_pushdown,
+)
+
+
+def test_pushdown_guard_is_a_noop_across_the_whole_grid():
+    """The guard NEVER fires for any routing decision the resolver produces:
+    ``_choose_path`` only sets ``delta_pushdown`` when ``compute_missing_delta``
+    is False, so ``pushdown_engaged and compute_missing`` is unreachable today.
+    Feeding the guard the SAME two flags the resolver would feed it must not raise
+    for any of the 3072 combos.
+    """
+    for kw in _grid():
+        d = _choose_path(**kw)
+        # No exception == no-op.  (delta_pushdown True ⟹ compute_missing False.)
+        _require_stored_delta_pushdown(
+            pushdown_engaged=d.delta_pushdown,
+            compute_missing_delta=kw["compute_missing_delta"],
+        )
+        if d.delta_pushdown:
+            assert kw["compute_missing_delta"] is False, kw
+
+
+def test_pushdown_guard_fires_when_precondition_violated():
+    """If a future edit ever engages the pushdown while compute-missing is on,
+    the guard raises LOUD (never a silent under-inclusive pick)."""
+    with pytest.raises(ValueError, match="compute-missing"):
+        _require_stored_delta_pushdown(
+            pushdown_engaged=True, compute_missing_delta=True
+        )
+
+
+def test_pushdown_guard_permits_every_valid_combination():
+    """The three reachable combinations are all no-ops."""
+    for engaged, cm in ((True, False), (False, True), (False, False)):
+        _require_stored_delta_pushdown(
+            pushdown_engaged=engaged, compute_missing_delta=cm
+        )
