@@ -10,13 +10,23 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from tcg.data.protocols import MarketDataService
+from tcg.data.protocols import MarketDataService, MarketDataServiceV2
 from tcg.types.market import AdjustmentMethod
 
 
 def get_market_data(request: Request) -> MarketDataService:
     """Dependency: retrieve the MarketDataService from app state."""
     return request.app.state.market_data
+
+
+def get_market_data_v2(request: Request) -> MarketDataServiceV2:
+    """Dependency: retrieve the v2 market-data service from app state.
+
+    Typed against the ``MarketDataServiceV2`` protocol (a data-layer interface,
+    not the concrete ``DefaultMarketDataServiceV2``) so this shared helper stays
+    core→data and mirrors the v1 ``get_market_data`` symmetry.
+    """
+    return request.app.state.market_data_v2
 
 
 def error_response(

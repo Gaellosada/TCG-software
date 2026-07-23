@@ -188,3 +188,34 @@ class ContinuousSeries:
     prices: PriceSeries
     roll_dates: tuple[int, ...]  # YYYYMMDD at each roll boundary
     contracts: tuple[str, ...]  # Ordered contract IDs used
+
+
+@dataclass(frozen=True)
+class OptionsContinuousV2:
+    """v2-native continuous options settlement stream.
+
+    Produced by the ``tcg.data`` v2 options resolver: per trade date a single
+    option contract is selected (by absolute strike or by moneyness) from the
+    front-expiration chain, its daily settlement ``value`` is read from
+    ``fact_value``, and the contract is rolled AtExpiry. ``dates`` are YYYYMMDD
+    ints (same convention as :class:`PriceSeries`); ``values`` are the selected
+    contract's settlement values (all ``> 0``, false-zero settlements dropped);
+    ``roll_dates`` are the YYYYMMDD dates on which the held expiration changed;
+    ``contracts`` are the distinct selected contract codes in first-seen order
+    (for a count/summary, NOT roll-aligned); ``contract_codes`` are the selected
+    contract code per trade date, aligned 1:1 with ``dates``/``values`` so a
+    consumer can label any bar (and thus each roll's sell bar i-1 and buy bar i)
+    with the exact contract active there. A per-date array — not a per-segment
+    one — is required because the moneyness criterion can re-select a different
+    strike within a single expiration segment as spot drifts, so no single
+    per-segment code can represent both a segment's first and last bar.
+    """
+
+    object_id: int
+    criterion: str  # "strike" | "moneyness"
+    option_type: str  # "call" | "put"
+    dates: tuple[int, ...]
+    values: tuple[float, ...]
+    roll_dates: tuple[int, ...]
+    contracts: tuple[str, ...]
+    contract_codes: tuple[str, ...]  # per-date, 1:1 with dates

@@ -1,0 +1,121 @@
+/* v2-specific layout bits. Chart cards / controls / status reuse the shared
+   Data/ChartBase.module.css; the tab strip reuses Data/DataPage.module.css.
+   Only the series-picker column + contracts summary + disabled-criterion
+   styles live here. */
+
+.seriesLayout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.seriesList {
+  width: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border-primary);
+  padding: 8px 0;
+}
+
+.seriesListHeader {
+  padding: 6px 12px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.seriesItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 12px;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.seriesItem:hover {
+  background: var(--bg-hover);
+}
+
+.seriesItemActive {
+  background: var(--accent-subtle);
+  border-left-color: var(--accent);
+}
+
+.seriesItemPrimary {
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seriesItemActive .seriesItemPrimary {
+  color: var(--accent);
+}
+
+.seriesItemMeta {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.seriesChartCol {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.seriesEmpty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+/* Disabled criterion (Delta) — greyed with a not-allowed cursor. The wrapping
+   label carries the title tooltip "greeks unavailable in v2". */
+.criterionOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.criterionDisabled {
+  color: var(--text-muted);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.criterionDisabled input {
+  cursor: not-allowed;
+}
+
+.kindBadge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}

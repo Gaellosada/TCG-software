@@ -89,69 +89,90 @@ class _OptionsDataPortAdapter:
         )
 
 
-class _BulkOptionsDataPortAdapter:
-    """Wrap an ``OptionsDataReader`` to satisfy the engine-side
-    ``_CycleAwareBulkReader`` Protocol (cycle-aware variant).
+def _reader_supports_bulk_multi(inner: object) -> bool:
+    """True when *inner* exposes the year-chunk multi-expiration capability.
 
-    The engine's ``_CycleInjectingBulkReader`` strips ``expiration_cycle``
-    from its public signature and injects it here.  This adapter sits
-    between the engine wrapper and the real data reader.
+    Mirror of the engine-side ``_reader_supports_bulk_multi`` (kept local so the
+    core wiring never imports an engine private): ``callable`` (not ``hasattr``)
+    so a reader that disables the capability via ``query_chain_bulk_multi = None``
+    reports False.
     """
+    return bool(getattr(inner, "supports_bulk_multi", False)) or callable(
+        getattr(inner, "query_chain_bulk_multi", None)
+    )
 
-    def __init__(self, reader: OptionsDataReader) -> None:
-        self._reader = reader
 
-    async def query_chain_bulk(
-        self,
-        root: str,
-        dates: Sequence[date],
-        type: Literal["C", "P", "both"],
-        expiration_min: date,
-        expiration_max: date,
-        strike_min: float | None = None,
-        strike_max: float | None = None,
-        expiration_cycle: str | Sequence[str] | None = None,
-    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
-        return await self._reader.query_chain_bulk(
-            root=root,
-            dates=dates,
-            type=type,
-            expiration_min=expiration_min,
-            expiration_max=expiration_max,
-            strike_min=strike_min,
-            strike_max=strike_max,
-            expiration_cycle=expiration_cycle,
-        )
+def _reader_supports_held_rows(inner: object) -> bool:
+    """True when *inner* exposes the Phase-2 held-symbol identity fetch."""
+    return bool(getattr(inner, "supports_held_rows", False)) or callable(
+        getattr(inner, "query_held_rows", None)
+    )
 
 
 class CachedBulkChainReader:
-    """Process/loop-scoped cache decorator around ``_BulkOptionsDataPortAdapter``.
+    """Process/loop-scoped caching PROXY over the raw cycle-aware bulk reader.
 
-    Wraps ``query_chain_bulk`` with the byte-aware LRU + single-flight
-    ``ChainBulkCache`` (``_options_chain_cache``).  Same signature as the inner
-    adapter, so the engine's ``_CycleInjectingBulkReader`` — and
-    ``resolve_option_stream`` — need ZERO changes.
+    Re-fit onto PR #87's ``_choose_path``-routed resolver
+    ------------------------------------------------------
+    #87 rewrote the resolve path so the engine's ``_CycleInjectingBulkReader``
+    feature-detects ``query_chain_bulk_multi`` (year-chunk fast path) and
+    ``query_held_rows`` (two-phase hold) on the reader it is handed, and
+    ``resolve_option_stream`` reasons over the SAME capability flags to pick the
+    fetch path.  So this proxy must be TRANSPARENT to that detection: it mirrors
+    the inner reader's capability flags and forwards the two fast-path methods
+    verbatim, or #87's entire speedup silently disables (the router falls back to
+    the legacy per-expiration path).
 
-    Byte-identity: on a cache HIT the cached per-date lists are shallow-copied
-    (``[:]``) into a dict rebuilt in the CURRENT call's de-duped ``dates`` order,
-    so each resolve gets its own list containers (a caller can never mutate
-    cached state) while the row elements (frozen dataclasses) are shared and
-    immutable.  The order within each list is the SQL ``ORDER BY`` order
-    preserved verbatim, so downstream ``match_by_delta`` / ``match_by_strike``
-    tie-breaks are identical to the un-cached path.
+    What it caches
+    --------------
+    ``query_chain_bulk`` results are memoised through the byte-aware LRU +
+    single-flight ``ChainBulkCache`` (the iterative 10Δ→50Δ dev workflow that
+    re-issues byte-identical bulk fetches).  Byte-identity on a HIT: the cached
+    per-date lists are shallow-copied (``[:]``) into a dict rebuilt in the CURRENT
+    call's de-duped ``dates`` order, so each resolve owns its own list containers
+    while the frozen row dataclasses are shared and immutable; the order within
+    each list is the SQL ``ORDER BY`` order preserved verbatim, so downstream
+    ``match_by_delta`` / ``match_by_strike`` tie-breaks are identical to the
+    un-cached path.
+
+    ``query_chain_bulk_multi`` and ``query_held_rows`` are forwarded UNCACHED
+    (pure pass-through == calling the raw reader directly, exactly as #87 does —
+    byte-identical).  Caching them is a deferred follow-up: #87's delta-pushdown
+    already makes ByDelta year-chunk fetches delta-SPECIFIC (so the cross-delta
+    reuse this cache was built for no longer applies to the primary ByDelta
+    path), and the ``query_held_rows`` result date-set is not known a priori
+    (its int→date reconstruction on a hit needs its own byte-identity proof).
 
     ``cache is None`` (master switch off, or a per-request ``use_cache: false``
-    bypass) delegates straight to ``inner`` — byte-identical to today, no read
-    and no write.
+    bypass) delegates ``query_chain_bulk`` straight to the inner reader —
+    byte-identical to today, no read and no write.
+
+    Capability mirroring
+    --------------------
+    When the inner reader does NOT support a fast-path method, the proxy shadows
+    that method with an instance-level ``None`` (the same idiom #87's own
+    ``_CycleInjectingBulkReader`` uses) so ``callable(getattr(proxy, ...))``
+    reports False and the router cleanly does NOT take that path.
     """
 
     def __init__(
         self,
-        inner: _BulkOptionsDataPortAdapter,
+        inner: "OptionsDataReader",
         cache: "ChainBulkCache | None",
     ) -> None:
         self._inner = inner
         self._cache = cache
+        # Mirror the inner reader's fast-path capabilities so the engine's
+        # feature-detection (and ``resolve_option_stream``'s ``_choose_path``
+        # inputs) see through this proxy to the real reader.
+        self.supports_bulk_multi = _reader_supports_bulk_multi(inner)
+        self.supports_held_rows = _reader_supports_held_rows(inner)
+        # Shadow the forwarded methods with ``None`` when unsupported, so
+        # ``callable(getattr(self, ...))`` matches the inner reader exactly.
+        if not self.supports_bulk_multi:
+            self.query_chain_bulk_multi = None  # type: ignore[assignment]
+        if not self.supports_held_rows:
+            self.query_held_rows = None  # type: ignore[assignment]
 
     async def query_chain_bulk(
         self,
@@ -223,6 +244,40 @@ class CachedBulkChainReader:
                 )
             result[d] = rows[:]
         return result
+
+    async def query_chain_bulk_multi(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        groups: "Sequence[tuple[date, Sequence[date]]]",
+        expiration_cycle: str | Sequence[str] | None = None,
+        delta_pushdown: "tuple[float, int] | None" = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        # Pass-through (uncached) — byte-identical to calling the raw reader.
+        # Only defined-and-callable when the inner reader supports it (else the
+        # ``__init__`` shadow replaces this with ``None``).
+        return await self._inner.query_chain_bulk_multi(
+            root=root,
+            type=type,
+            groups=groups,
+            expiration_cycle=expiration_cycle,
+            delta_pushdown=delta_pushdown,
+        )
+
+    async def query_held_rows(
+        self,
+        root: str,
+        type: Literal["C", "P", "both"],
+        held_windows: "Sequence[tuple[str, date, date]]",
+        expiration_cycle: str | Sequence[str] | None = None,
+    ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+        # Pass-through (uncached) — byte-identical to calling the raw reader.
+        return await self._inner.query_held_rows(
+            root=root,
+            type=type,
+            held_windows=held_windows,
+            expiration_cycle=expiration_cycle,
+        )
 
 
 class CachedChainReader:
@@ -632,7 +687,7 @@ def build_stream_resolver_wiring(
     CachedChainReader,
     DefaultMaturityResolver,
     Callable[[OptionContractDoc, date], Awaitable[float | None]],
-    "CachedBulkChainReader | _BulkOptionsDataPortAdapter",
+    CachedBulkChainReader,
     Callable[[str], Awaitable[str]],
 ]:
     """Return the components a per-date stream materialiser needs.
@@ -661,10 +716,17 @@ def build_stream_resolver_wiring(
         Async callable ``(contract, date) -> float | None`` reusing the
         canonical ``resolve_underlying_price`` join.
     bulk_chain_reader:
-        Cycle-aware ``_BulkOptionsDataPortAdapter`` wrapping the live
-        ``MongoOptionsDataReader``.  Passed to
-        ``resolve_option_stream(bulk_chain_reader=...)`` to enable the
-        three-phase bulk pre-fetch path.
+        A ``CachedBulkChainReader`` PROXY over the RAW cycle-aware
+        ``OptionsDataReader`` (e.g. ``SqlOptionsDataReader``).  Passed to
+        ``resolve_option_stream(bulk_chain_reader=...)`` to enable the three-phase
+        bulk pre-fetch path.  The proxy caches ``query_chain_bulk`` (the iterative
+        dev-workflow reuse) and TRANSPARENTLY forwards ``query_chain_bulk_multi`` /
+        ``query_held_rows`` while mirroring their capability flags, so the engine's
+        ``_CycleInjectingBulkReader`` feature-detects (via ``callable``) and the
+        ``_choose_path`` router still engages #87's year-chunk / two-phase-hold /
+        delta-pushdown fast paths exactly as it would over the raw reader
+        (byte-identical).  ``use_chain_cache=False`` (or the ``TCG_CHAIN_CACHE_ENABLED``
+        master switch off) makes the proxy a straight pass-through.
     root_underlying_resolver:
         Async ``(collection) -> root_underlying`` getter (one dim-only ``LIMIT 1``
         lookup).  The stream resolver calls it ONCE per resolve to synthesise the
@@ -678,16 +740,19 @@ def build_stream_resolver_wiring(
     reader = get_options_reader(market_data)
     inner = _OptionsDataPortAdapter(reader)
     cached = CachedChainReader(inner)
-    # Wrap the bulk adapter in the process/loop-scoped chain cache so repeated
-    # option resolves over the same underlying/range reuse the raw
-    # ``query_chain_bulk`` fetches (the 10Δ→50Δ iterative-dev workflow).  The
-    # cache is EXTERNAL to this wiring (loop-global), so it survives the
-    # per-resolve wiring rebuild in ``_options_materialise`` AND the module-global
-    # ``_os_wiring_cache`` reuse in ``_series_fetch``.  ``use_chain_cache=False``
-    # (a per-request ``use_cache: false`` bypass) or a disabled master switch
-    # passes ``cache=None`` → byte-identical to the un-cached path.
+    # Wrap the RAW reader in the process/loop-scoped chain cache so repeated option
+    # resolves over the same underlying/range reuse the raw ``query_chain_bulk``
+    # fetches (the 10Δ→50Δ iterative-dev workflow).  The proxy is TRANSPARENT to
+    # #87's fast-path feature-detection — it forwards ``query_chain_bulk_multi`` /
+    # ``query_held_rows`` and mirrors their capability flags — so the router still
+    # takes the year-chunk / two-phase-hold / pushdown paths.  The cache is
+    # EXTERNAL to this wiring (loop-global), so it survives the per-resolve wiring
+    # rebuild in ``_options_materialise`` AND the module-global ``_os_wiring_cache``
+    # reuse in ``_series_fetch``.  ``use_chain_cache=False`` (a per-request
+    # ``use_cache: false`` bypass) or a disabled master switch passes ``cache=None``
+    # → byte-identical to the un-cached path.
     _chain_cache = get_chain_bulk_cache() if use_chain_cache else None
-    bulk = CachedBulkChainReader(_BulkOptionsDataPortAdapter(reader), _chain_cache)
+    bulk = CachedBulkChainReader(reader, _chain_cache)
     maturity_resolver = DefaultMaturityResolver()
     index_port = _IndexDataPortAdapter(market_data)
     futures_port = _FuturesDataPortAdapter(

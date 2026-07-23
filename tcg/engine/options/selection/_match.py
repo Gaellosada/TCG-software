@@ -117,9 +117,7 @@ def match_by_delta(
         )
 
     usable: list[tuple[OptionContractDoc, OptionDailyRow, float]] = [
-        (c, r, float(d))
-        for (c, r), d in zip(rows_list, deltas)
-        if d is not None
+        (c, r, float(d)) for (c, r), d in zip(rows_list, deltas) if d is not None
     ]
 
     if not usable:
@@ -133,6 +131,13 @@ def match_by_delta(
         )
 
     # Sort by absolute distance to target, tie-break: lower strike wins.
+    # COUPLED with the SQL delta-pushdown rank in
+    # tcg/data/_sql/options.py (query_chain_bulk_multi -> top_syms ORDER BY, and
+    # its Python mirror symbol_delta_rank).  Both rank on this EXACT PRIMARY key
+    # abs(delta - target).  Changing the PRIMARY distance metric here (relative
+    # distance, a pre-filter, sign/moneyness blend) WITHOUT updating that SQL rank
+    # silently diverges the pushdown pick (audit_d3 INV-1).  A tie-break-only
+    # change (the lower-strike term) is safe.
     usable.sort(key=lambda crd: (abs(crd[2] - target), crd[0].strike))
     best_contract, _best_row, best_delta = usable[0]
     distance = abs(best_delta - target)
@@ -190,10 +195,7 @@ def match_by_moneyness(
             f"underlying_price={underlying_price} is non-positive",
         )
 
-    scored = [
-        (c, r, c.strike / underlying_price)
-        for (c, r) in rows_list
-    ]
+    scored = [(c, r, c.strike / underlying_price) for (c, r) in rows_list]
     scored.sort(key=lambda crk: (abs(crk[2] - target_K_over_S), crk[0].strike))
     best_contract, _best_row, best_ks = scored[0]
     # Per spec §3.3: ByMoneyness has no "strict" — we don't error on

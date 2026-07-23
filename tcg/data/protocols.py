@@ -20,6 +20,7 @@ from tcg.types.market import (
     ContinuousSeries,
     FuturesContractMeta,
     InstrumentId,
+    OptionsContinuousV2,
     PriceSeries,
 )
 from tcg.types.options import (
@@ -193,6 +194,48 @@ class MarketDataService(Protocol):
         can pass it to engine adapters without accessing private attributes.
         """
         ...
+
+
+class MarketDataServiceV2(Protocol):
+    """Read-only access to the ``tcg_instruments_v2`` star schema.
+
+    Mirrors :class:`MarketDataService` for v2: consumers in ``tcg.core`` depend
+    on this interface, not on the concrete ``DefaultMarketDataServiceV2``.
+    """
+
+    async def list_objects(self) -> list[dict]: ...
+
+    async def get_object_detail(self, object_id: int) -> dict: ...
+
+    async def get_series(
+        self,
+        serie_id: int,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> dict: ...
+
+    async def get_continuous_future(
+        self,
+        object_id: int,
+        roll_config: ContinuousRollConfig,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> ContinuousSeries | None: ...
+
+    async def get_future_cycles(self, object_id: int) -> list[str]: ...
+
+    async def get_continuous_options(
+        self,
+        object_id: int,
+        *,
+        criterion: str,
+        target: float,
+        option_type: str,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> OptionsContinuousV2: ...
 
 
 class StrategyStore(Protocol):

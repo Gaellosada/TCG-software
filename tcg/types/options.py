@@ -297,6 +297,19 @@ class EndOfMonth:
 
     offset_months: int = 0
 
+    @property
+    def is_hold_cadence(self) -> bool:
+        """This maturity HOLDS one contract per roll period (per month).
+
+        Duck-typed capability read by the stream resolver in place of an
+        ``isinstance(maturity, EndOfMonth)`` check: a maturity whose cadence
+        holds a single contract between rolls (rather than re-resolving the
+        contract on every trade date) returns True.  Only ``EndOfMonth`` does
+        today; every other rule leaves this unset (the resolver's
+        ``getattr(..., False)`` default treats them as per-date stateless).
+        """
+        return True
+
 
 @dataclass(frozen=True)
 class PlusNDays:
