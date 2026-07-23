@@ -1,6 +1,6 @@
 [package]
 name = "tcg-desktop"
-version = "0.1.11"
+version = "0.1.12"
 description = "Trajectoire CAP desktop wrapper (Tauri v2) — spawns the bundled FastAPI sidecar and shows the existing frontend."
 authors = ["Trajectoire CAP"]
 edition = "2021"
