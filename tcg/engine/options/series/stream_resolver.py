@@ -667,6 +667,7 @@ class _CycleAwareReader(Protocol):
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]: ...
 
 
@@ -719,6 +720,7 @@ class _CycleInjectingReader:
         expiration_max: date,
         strike_min: float | None = None,
         strike_max: float | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         return await self._inner.query_chain(
             root=root,
@@ -729,6 +731,7 @@ class _CycleInjectingReader:
             strike_min=strike_min,
             strike_max=strike_max,
             expiration_cycle=self._cycle,
+            limit=limit,
         )
 
 
@@ -1292,6 +1295,7 @@ async def _resolve_bulk(
     bulk_chain_reader: _CycleAwareBulkReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
+    root_underlying_resolver: "Callable[[str], Awaitable[str]] | None" = None,
     last_trade_date: date | None,
     progress_callback: Callable[[], None] | None,
     available_expirations: Sequence[date] | None,
@@ -1642,6 +1646,29 @@ async def _resolve_bulk(
     # be resolved (some wirings return None) we pass NO strike bounds (full chain)
     # for that group — never a None/degenerate-bounded window that would silently
     # cap or error.
+    # Group-invariant ``root_underlying`` for the synthetic routing contract (see
+    # ``_strike_window_for``).  Resolved LAZILY at most once per resolve (only
+    # ByMoneyness/ByDelta need a spot; ByStrike never calls the getter) and memoised
+    # in ``_root_underlying_box``.  ``None`` resolver (unit tests / legacy callers) →
+    # ``""``, which is the correct routing for every in-scope root (underlying
+    # routing keys on ``collection``; see ``_options_wiring`` docstring).
+    _root_underlying_box: list[str | None] = [None]
+
+    async def _get_root_underlying() -> str:
+        if _root_underlying_box[0] is None:
+            if root_underlying_resolver is not None:
+                try:
+                    _root_underlying_box[0] = await root_underlying_resolver(collection)
+                except Exception:  # noqa: BLE001
+                    _root_underlying_box[0] = ""
+            else:
+                _root_underlying_box[0] = ""
+        return _root_underlying_box[0]
+
+    # Cheap existence gate for the strike window (see ``_strike_window_for``): the
+    # OLD probe issued a FULL single-expiration ``query_chain`` purely to test
+    # whether ANY contract was quoted on ``repr_date`` (0 rows ⇒ full chain, never
+    # a narrowed band).  We keep that EXACT semantics but transfer at most ONE row.
     _probe_reader = _CycleInjectingReader(chain_reader, cycle)
 
     async def _strike_window_for(
@@ -1655,32 +1682,91 @@ async def _resolve_bulk(
             or not group
         ):
             return None, None
-        # Resolve the spot on THIS group's first date via a probe (the underlying
-        # resolver needs a real contract for option-on-future routing), then centre
-        # the band on it.
-        # PERF (follow-up): this issues a full single-expiration query_chain but
-        # uses only one contract (probe_rows[0][0]).  A row-limited query (LIMIT 1)
-        # or a spot-by-expiration resolver would avoid the full-chain fetch per
-        # group; both need a data-layer/protocol capability beyond this fix's scope
-        # (ChainReaderPort has no limit), so they are deferred.  The probe is cached
-        # once per expiration group.
+        # Resolve the spot on THIS group's first date, then centre the band on it.
+        #
+        # The underlying-price resolver needs a *contract* only for OPTION-ON-FUTURE
+        # ROUTING, and it reads just four fields — ``collection``, ``root_underlying``,
+        # ``underlying_ref``, ``expiration`` — ALL of which are CONSTANT across an
+        # expiration group (see ``tcg.engine.options.chain._join.resolve_underlying_price``
+        # / ``_forward.resolve_vix_forward``: it ignores the passed row and every
+        # per-strike field).  So instead of a full single-expiration ``query_chain``
+        # PROBE (~275 rows fetched to read ONE contract), synthesise a contract
+        # carrying those four fields and call the SAME resolver — the spot is
+        # reproduced BIT-IDENTICALLY (identical routing inputs ⇒ identical float),
+        # hence an identical strike window and identical selected contract.
+        #   * ``collection`` — the resolve root (const).
+        #   * ``root_underlying`` — the collection's dim ``root_symbol`` (group-invariant;
+        #     resolved once per resolve, ``""`` when unavailable — safe, routing keys on
+        #     ``collection`` for every in-scope root).
+        #   * ``underlying_ref`` — provably ``None`` (the SQL reader hard-codes it, see
+        #     ``tcg.data._sql.options`` ``_meta_to_contract``/``_chain_meta_to_contract``).
+        #   * ``expiration`` — ``exp`` (the group is filtered ``expiration BETWEEN exp AND exp``).
+        # The futures-close lookup the resolver performs is backed by the ranged
+        # underlying prefetch window (a memoised cache hit), NOT a per-group fetch.
         repr_date = group[0][1]
-        try:
-            probe_rows = await _probe_reader.query_chain(
-                root=collection,
-                date=repr_date,
-                type=option_type,
-                expiration_min=exp,
-                expiration_max=exp,
-            )
-        except Exception:  # noqa: BLE001
-            probe_rows = []
-        spot: float | None = None
-        if probe_rows:
+        # EMPTY-repr_date fallback (byte-identity with the OLD probe): narrow ONLY
+        # when ``repr_date`` actually quotes ≥1 contract for ``exp``.  When it does
+        # NOT (a dim-listed expiration not yet price-quoted on the group's first
+        # date — reachable via arithmetic maturities such as EndOfMonth), the old
+        # probe returned 0 rows → the whole group used the FULL chain, NOT a
+        # spot-narrowed band.  Synthesising a spot from the futures close (which
+        # exists regardless of option quoting) would narrow and could drop a later
+        # in-group date's out-of-band target strike → a different ``match_by_delta``
+        # selection.  So gate the narrowing on quoted-existence.
+        #
+        #   * Fast path: the ``NearestToTarget`` by-date LISTED-expiration map (a
+        #     price-quoted join built with the SAME cycle as this resolve) that
+        #     positively lists ``exp`` on ``repr_date`` ⇒ a quoted contract provably
+        #     exists ⇒ skip the probe.  One-directional-safe: map lists ``exp`` ⇒
+        #     ``query_chain(repr_date, exp, exp)`` returns ≥1 row (the map is a
+        #     subset of what ``query_chain``'s price-OR-greeks join returns, same
+        #     cycle/type), so we never wrongly skip narrowing.
+        #   * Otherwise (arithmetic maturities carry NO map; some direct callers omit
+        #     it): a cheap ``LIMIT 1`` existence query with the IDENTICAL filters the
+        #     old probe used (~275 rows → 1).
+        _listed_on_repr = (
+            available_expirations_by_date.get(repr_date)
+            if available_expirations_by_date is not None
+            else None
+        )
+        if _listed_on_repr is not None and exp in _listed_on_repr:
+            _quoted = True
+        else:
             try:
-                spot = await underlying_price_resolver(probe_rows[0][0], repr_date)
+                _existence = await _probe_reader.query_chain(
+                    root=collection,
+                    date=repr_date,
+                    type=option_type,
+                    expiration_min=exp,
+                    expiration_max=exp,
+                    limit=1,
+                )
+                _quoted = bool(_existence)
             except Exception:  # noqa: BLE001
-                spot = None
+                _quoted = False
+        if not _quoted:
+            # No quoted contract on repr_date → do NOT narrow (full chain for the
+            # whole group), byte-identical to the old empty-probe fallback.
+            return None, None
+        synthetic = OptionContractDoc(
+            collection=collection,
+            contract_id="",
+            root_underlying=await _get_root_underlying(),
+            underlying_ref=None,
+            underlying_symbol=None,
+            expiration=exp,
+            expiration_cycle="",
+            strike=0.0,
+            type=option_type,
+            contract_size=None,
+            currency=None,
+            provider="UNKNOWN",
+            strike_factor_verified=False,
+        )
+        try:
+            spot = await underlying_price_resolver(synthetic, repr_date)
+        except Exception:  # noqa: BLE001
+            spot = None
         if spot is None or spot <= 0.0:
             # No usable spot → do NOT narrow (full chain for this group).
             return None, None
@@ -2380,6 +2466,7 @@ async def resolve_option_stream(
     chain_reader: _CycleAwareReader,
     maturity_resolver: MaturityResolver,
     underlying_price_resolver: UnderlyingPriceResolver | None,
+    root_underlying_resolver: "Callable[[str], Awaitable[str]] | None" = None,
     last_trade_date: date | None = None,
     progress_callback: Callable[[], None] | None = None,
     bulk_chain_reader: _CycleAwareBulkReader | None = None,
@@ -2578,6 +2665,7 @@ async def resolve_option_stream(
             bulk_chain_reader=bulk_chain_reader,
             maturity_resolver=maturity_resolver,
             underlying_price_resolver=underlying_price_resolver,
+            root_underlying_resolver=root_underlying_resolver,
             last_trade_date=last_trade_date,
             progress_callback=progress_callback,
             available_expirations=available_expirations,

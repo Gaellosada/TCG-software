@@ -422,6 +422,7 @@ class SqlOptionsDataReader:
         strike_min: float | None = None,
         strike_max: float | None = None,
         expiration_cycle: str | Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
         """One-day chain (one row per contract active that day).
 
@@ -485,6 +486,14 @@ class SqlOptionsDataReader:
                 ORDER BY i.instrument_id
             """
             params.extend([target_date, target_date])
+            # ``limit`` is an EXISTENCE-GATE fast path (strike-window probe): the
+            # caller only needs to know whether ANY contract is quoted, so cap the
+            # row transfer.  ``None`` (the default / every other caller) = unbounded,
+            # byte-identical to before.  Appended AFTER the ORDER BY so a limited
+            # fetch returns a deterministic prefix.
+            if limit is not None:
+                sql += " LIMIT %s"
+                params.append(int(limit))
 
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
@@ -1256,6 +1265,35 @@ class SqlOptionsDataReader:
                     return out
         except Exception as exc:  # noqa: BLE001
             raise OptionsDataAccessError(f"SQL error listing roots: {exc}") from exc
+
+    async def get_option_root_symbol(self, root: str) -> str | None:
+        """Return the ``root_symbol`` of *root* (a ``source_collection``).
+
+        One indexed, fact-free ``LIMIT 1`` dim lookup. ``root_symbol`` is
+        constant across a collection's option contracts, so any row's value is
+        the group-invariant ``root_underlying`` the chain readers place on every
+        ``OptionContractDoc`` (``_meta_to_contract`` / ``_chain_meta_to_contract``
+        use exactly ``m["root_symbol"]``). Returns ``None`` when the collection
+        has no option contract or the column is NULL.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT root_symbol FROM {SCHEMA}.dim_instrument
+                            WHERE source_collection = %s AND asset_class = 'option'
+                            ORDER BY root_symbol
+                            LIMIT 1""",
+                        (root,),
+                    )
+                    row = await cur.fetchone()
+                    if row is None:
+                        return None
+                    return row["root_symbol"]
+        except Exception as exc:  # noqa: BLE001
+            raise OptionsDataAccessError(
+                f"SQL error reading root_symbol on '{root}': {exc}"
+            ) from exc
 
     async def list_expirations(self, root: str) -> list[date]:
         """Distinct expirations on *root*, sorted ascending."""

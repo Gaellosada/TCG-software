@@ -124,6 +124,7 @@ class FakeChainReader:
         strike_min=None,
         strike_max=None,
         expiration_cycle=None,
+        limit=None,
     ):
         self.calls.append({"date": date, "expiration_cycle": expiration_cycle})
         chain = self._chains.get(date, [])
