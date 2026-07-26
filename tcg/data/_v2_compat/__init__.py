@@ -17,9 +17,11 @@ from tcg.data._v2_compat.errors import (
     V2UnsupportedCycle,
     V2UnsupportedField,
 )
+from tcg.data._v2_compat.options_reader import V2OptionsDataReader
 
 __all__ = [
     "V2MarketDataAdapter",
+    "V2OptionsDataReader",
     "V2CollectionUnavailable",
     "V2DataUnavailable",
     "V2InstrumentUnavailable",
