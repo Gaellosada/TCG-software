@@ -157,4 +157,37 @@ describe('usePortfolioCacheStatus', () => {
     await waitFor(() => expect(result.current.rowStatusById['pure-1']).toBe('cached'), { timeout: 2000 });
     expect(getPortfolio).not.toHaveBeenCalled(); // pure rows fetch no children
   });
+
+  // STALE-MEMO GUARD for the per-row body memo. Pure rows are memoized by
+  // docSignature(doc, dataSource); the data source is part of the compute body,
+  // so it MUST be part of that signature. If it is dropped, flipping v1→v2
+  // re-runs the effect but every pure row's signature is unchanged, so each row
+  // is re-probed with the PREVIOUS source's memoized body and the saved-row
+  // cache indicators report v1's status while the selector reads "Database v2".
+  it('re-probes a memoized PURE row with the NEW source body after a v1→v2 flip', async () => {
+    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }] });
+    const pureRow = {
+      id: 'pure-1', rebalance: 'none',
+      legs: [{ label: 'NDX', type: 'instrument', collection: 'INDEX', symbol: 'NDX', weight: 100 }],
+    };
+    // No active legs → the ONLY probed body is the row's.
+    const props = (dataSource) => baseProps({ legs: [], portfolios: [pureRow], dataSource });
+
+    const { rerender } = renderHook((p) => usePortfolioCacheStatus(p), {
+      initialProps: props('v1'),
+    });
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    // v1 emits no wire field at all (byte-identity with the pre-feature payload).
+    expect(getPortfolioCacheStatus.mock.calls[0][0][0].data_source).toBeUndefined();
+
+    // Flip the source; the row is memoized, so only a source-aware signature
+    // invalidates it.
+    act(() => rerender(props('v2')));
+    await waitFor(
+      () => expect(getPortfolioCacheStatus.mock.calls.length).toBeGreaterThanOrEqual(2),
+      { timeout: 2000 },
+    );
+    const lastCall = getPortfolioCacheStatus.mock.calls[getPortfolioCacheStatus.mock.calls.length - 1];
+    expect(lastCall[0][0].data_source).toBe('v2');
+  });
 });

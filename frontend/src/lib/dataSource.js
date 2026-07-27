@@ -56,7 +56,7 @@ export const V2_LIMITATIONS = [
   'Monthly (M) option cycles do not exist in v2, and an option leg with no cycle filter errors.',
   'The mid option stream is unavailable (settlement only, no quotes) — use close or bs_mid.',
   'History floors: options from 2011 (EW1/EW2/EW4) and 2016-02-22 (EW3); futures settlement from 2010-06-07. v1 reaches further back.',
-  'v1 data ends 2026-06-12 while v2 runs to 2026-07-21 — clamp both runs to a common window or the tails diverge for a trivial reason.',
+  'v1 ends 2026-06-10 (futures) / 2026-06-11 (index) / 2026-06-12 (options) while v2 runs to 2026-07-21 — end both runs at 2026-06-10 so no leg runs past its v1 data, or the tails diverge for a trivial reason.',
   'On v2 futures, open/high/low/volume are often NaN (only ~40.6% of settlement days have a matching daily bar).',
 ];
 
@@ -64,4 +64,4 @@ export const V2_LIMITATIONS = [
 // user is most likely to trip while doing the v1-vs-v2 comparison this feature
 // exists for.
 export const V2_COMMON_WINDOW_HINT =
-  'v2 runs to 2026-07-21 while v1 ends 2026-06-12 — clamp both runs to a common end date to compare like for like.';
+  'v2 runs to 2026-07-21 while v1 ends 2026-06-10 (futures) / 2026-06-11 (index) / 2026-06-12 (options) — end both runs at 2026-06-10 to compare like for like.';

@@ -615,12 +615,17 @@ function SignalsPage() {
     });
   }, [selectedSignal, availableIndicators, runAbortable, dataSource]);
 
-  // Cancel any in-flight run and clear stale results when switching signals.
+  // Cancel any in-flight run and clear stale results when switching signals —
+  // or when switching the data source. The source is an input to the run exactly
+  // like the signal is: leaving v1's chart/stats/trade log on screen after a flip
+  // to v2 lets an unchanged chart read as "v2 gives the same answer" when in fact
+  // nothing was recomputed. An in-flight run is aborted for the same reason (it
+  // would land under the NEW selector label carrying the OLD source's result).
   useEffect(() => {
     abortRun();
     setLastResult(null);
     setError(null);
-  }, [selectedId, abortRun]);
+  }, [selectedId, dataSource, abortRun]);
 
   // Drive the grid results-row height from the number of ownPanel indicators
   // so the row grows and the flex chain inside fills it naturally.
