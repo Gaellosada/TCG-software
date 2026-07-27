@@ -20,6 +20,7 @@ from tcg.data._v2_compat import _sql_v2
 from tcg.data._v2_compat.adapter import V2MarketDataAdapter
 from tcg.data._v2_compat.errors import (
     V2CollectionUnavailable,
+    V2FuturesContractUnavailable,
     V2InstrumentUnavailable,
     V2SymbolError,
 )
@@ -463,3 +464,95 @@ def test_adapter_satisfies_the_market_data_service_protocol():
         if not name.startswith("_") and not hasattr(V2MarketDataAdapter, name)
     ]
     assert missing == []
+
+
+# --- M1: an unlisted futures expiration must be LOUD, not None --------------- #
+#
+# v1 and v2 do not agree on every ES expiration (live-verified 2026-07-27): v1
+# lists 20260618/20270617 where v2 lists 20260619/20270618, plus 18 pre-2010
+# contracts v2 never had. Keying futures identity on the expiration date made
+# those symbols resolve to zero rows and answer ``None``. In a v1-vs-v2
+# COMPARISON that reads as missing data or a strategy effect, not as an
+# identity mismatch — so it must raise.
+
+
+@pytest.fixture
+def adapter_unlisted(adapter, monkeypatch):
+    """v2 lists the 19th; the caller will ask for v1's 18th."""
+
+    async def no_rows(pool, expiration_int, *, start=None, end=None):
+        return None
+
+    async def expirations(pool):
+        return [date(2026, 3, 20), date(2026, 6, 19), date(2026, 9, 18)]
+
+    monkeypatch.setattr(_sql_v2, "read_futures_prices", no_rows)
+    monkeypatch.setattr(_sql_v2, "list_futures_expirations", expirations)
+    return adapter
+
+
+async def test_get_prices_raises_on_expiration_v2_does_not_list(adapter_unlisted):
+    with pytest.raises(V2FuturesContractUnavailable) as exc:
+        await adapter_unlisted.get_prices("FUT_SP_500", "FUT_SP_500_EMINI_20260618")
+
+    msg = str(exc.value)
+    # Names the symbol asked for...
+    assert "FUT_SP_500_EMINI_20260618" in msg
+    # ...and the nearest v2 expiration, so the one-day offset is legible.
+    assert "20260619" in msg
+    assert exc.value.nearest == 20260619
+    # Reaches the API as 400, like its siblings — not 502.
+    assert exc.value.error_type == "validation_error"
+
+
+async def test_unlisted_expiration_error_is_an_instrument_unavailable(adapter_unlisted):
+    """Existing handlers catching the base class keep working."""
+    with pytest.raises(V2InstrumentUnavailable):
+        await adapter_unlisted.get_prices("FUT_SP_500", "FUT_SP_500_EMINI_20260618")
+
+
+async def test_empty_window_on_a_listed_contract_still_returns_none(
+    adapter, monkeypatch
+):
+    """The narrow fix must not over-reject.
+
+    A contract v2 DOES list, asked for a window it has no bars in, is an
+    ordinary empty range — v1 returns None there and so must v2.
+    """
+
+    async def no_rows(pool, expiration_int, *, start=None, end=None):
+        return None
+
+    async def expirations(pool):
+        return [date(2026, 6, 19)]
+
+    monkeypatch.setattr(_sql_v2, "read_futures_prices", no_rows)
+    monkeypatch.setattr(_sql_v2, "list_futures_expirations", expirations)
+
+    got = await adapter.get_prices(
+        "FUT_SP_500",
+        "FUT_SP_500_EMINI_20260619",
+        start=date(1999, 1, 1),
+        end=date(1999, 12, 31),
+    )
+    assert got is None
+
+
+async def test_dimension_is_not_queried_when_rows_exist(adapter, monkeypatch):
+    """The guard is cold-path only: a successful read must not pay for it."""
+    calls = 0
+
+    async def rows(pool, expiration_int, *, start=None, end=None):
+        return _series([20260101], [5000.0])
+
+    async def expirations(pool):
+        nonlocal calls
+        calls += 1
+        return [date(2026, 6, 19)]
+
+    monkeypatch.setattr(_sql_v2, "read_futures_prices", rows)
+    monkeypatch.setattr(_sql_v2, "list_futures_expirations", expirations)
+
+    got = await adapter.get_prices("FUT_SP_500", "FUT_SP_500_EMINI_20260619")
+    assert got is not None
+    assert calls == 0

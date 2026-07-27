@@ -77,6 +77,51 @@ class V2InstrumentUnavailable(V2DataUnavailable):
         self.collection = collection
 
 
+class V2FuturesContractUnavailable(V2InstrumentUnavailable):
+    """A v1 ES futures symbol names an expiration v2 does not list.
+
+    The two warehouses do NOT agree on every ES expiration: 84 of the 86 v2
+    contracts round-trip, but v1 lists ``20260618``/``20270617`` where v2 lists
+    ``20260619``/``20270618`` — an off-by-one *listing* difference, not missing
+    data (live-verified 2026-07-27). v1 additionally lists 18 pre-2010
+    contracts that predate v2's history entirely.
+
+    Because the adapter keys futures identity on the expiration date, such a
+    symbol resolved to zero rows and the request answered ``None``. In a
+    v1-vs-v2 COMPARISON feature that is the worst failure mode: the user reads
+    the hole as a strategy or coverage effect rather than an identity
+    mismatch. So it raises, and names the nearest v2 expiration to make the
+    off-by-one legible.
+
+    Deliberately NOT fuzzy-matched: snapping ``20260618`` onto v2's
+    ``20260619`` would fabricate an identity the warehouses do not share and
+    would mask genuine gaps.
+
+    Subclasses :class:`V2InstrumentUnavailable` (so existing handlers and
+    ``pytest.raises`` sites keep working) but builds its own message — the
+    parent's is INDEX-specific.
+    """
+
+    def __init__(self, symbol: str, nearest: int | None = None) -> None:
+        hint = (
+            f" The nearest v2 contract expires {nearest} "
+            f"(symbol 'FUT_SP_500_EMINI_{nearest}') — the two warehouses list "
+            f"this contract one day apart."
+            if nearest is not None
+            else ""
+        )
+        # Skips V2InstrumentUnavailable.__init__ (INDEX wording) on purpose.
+        V2DataUnavailable.__init__(
+            self,
+            f"Data source \"v2\" has no futures contract '{symbol}': the v2 "
+            f"warehouse lists no ES contract with that expiration date.{hint} "
+            f'Switch this run to data source "v1", or use a contract v2 lists.',
+        )
+        self.symbol = symbol
+        self.collection = "FUT_SP_500"
+        self.nearest = nearest
+
+
 class V2UnsupportedCycle(V2DataUnavailable):
     """Spec §11 E3 — a non-weekly expiration cycle (``M`` / ``''``).
 
