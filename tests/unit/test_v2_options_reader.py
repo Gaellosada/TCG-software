@@ -39,6 +39,7 @@ from tcg.data._v2_compat._mapping import (
 )
 from tcg.data._v2_compat.errors import (
     V2CollectionUnavailable,
+    V2MissingCycleFilter,
     V2SymbolError,
     V2UnsupportedCycle,
     V2UnsupportedField,
@@ -207,9 +208,15 @@ async def test_monthly_cycle_on_a_chain_read_is_a_hard_error():
 
 
 async def test_absent_cycle_filter_on_a_chain_read_is_a_hard_error():
-    """spec §3.3c — v1 would return monthlies AND weeklies for no filter."""
+    """spec §3.3c — v1 would return monthlies AND weeklies for no filter.
+
+    Raises ``V2MissingCycleFilter`` (E4), NOT ``V2UnsupportedCycle`` (E3).
+    E3 names an offending cycle VALUE and interpolates it into its message;
+    this case has no value to name, and passing the sentence to E3 nested the
+    whole paragraph inside "...expiration cycle \'{cycle}\'...".
+    """
     reader = V2OptionsDataReader(_FakePool())
-    with pytest.raises(V2UnsupportedCycle) as exc:
+    with pytest.raises(V2MissingCycleFilter) as exc:
         await reader.query_chain_bulk(
             "OPT_SP_500",
             [date(2026, 6, 1)],
@@ -218,7 +225,44 @@ async def test_absent_cycle_filter_on_a_chain_read_is_a_hard_error():
             date(2026, 6, 5),
             expiration_cycle=None,
         )
-    assert "not be comparable" in str(exc.value)
+    message = str(exc.value)
+    assert "not be comparable" in message
+    # Not nested inside E3's wording, and stated exactly once.
+    assert "This leg requests expiration cycle" not in message
+    assert message.count('Data source "v2" requires an explicit') == 1
+    for literal in ("'W1 Friday'", "'W2 Friday'", "'W3 Friday'", "'W4 Friday'"):
+        assert literal in message
+
+
+@pytest.mark.parametrize(
+    "call, expected_once",
+    [
+        (
+            lambda r: r.query_chain(
+                "FUT_VIX", date(2026, 6, 1), "P", date(2026, 6, 5), date(2026, 6, 5)
+            ),
+            "does not have data for collection",
+        ),
+    ],
+)
+async def test_unsupported_option_root_message_is_not_nested(call, expected_once):
+    """The root guard used to pass its whole sentence to a constructor that
+    interpolates the COLLECTION NAME, tripling the message."""
+    reader = V2OptionsDataReader(_FakePool())
+    with pytest.raises(V2CollectionUnavailable) as exc:
+        await call(reader)
+    message = str(exc.value)
+    assert "FUT_VIX" in message
+    assert message.count(expected_once) == 1
+
+
+@pytest.mark.parametrize("stream", ["mid", "volume", "open_interest"])
+def test_unavailable_stream_message_is_not_nested(stream):
+    with pytest.raises(V2UnsupportedField) as exc:
+        assert_option_stream_available(stream)
+    message = str(exc.value)
+    assert message.count('Data source "v2" has no') == 1
+    assert f"no {stream} data" in message
 
 
 async def test_generic_weekly_tag_routes_to_all_four_objects():

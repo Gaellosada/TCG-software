@@ -112,6 +112,7 @@ from tcg.core.api._series_fetch import (
     make_signal_fetcher,
 )
 from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api._v2_preconditions import check_v2_preconditions
 from tcg.core.api.common import (
     DataSource,
     error_response,
@@ -1219,6 +1220,13 @@ async def compute_signal(
     """
     if body.data_source != "v1":
         svc = get_market_data_for(request, body.data_source)
+        # Same reason as the portfolio route: a v2 error raised inside an
+        # option resolve is swallowed by the engine's per-chunk fallback and
+        # reaches the user as an unattributable all-NaN curve. Check the pure
+        # preconditions here, where the message still means something.
+        check_v2_preconditions(
+            body.model_dump(mode="json"), data_source=body.data_source
+        )
 
     try:
         start_date, end_date = parse_iso_range(body.start, body.end)

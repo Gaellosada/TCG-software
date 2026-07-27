@@ -93,6 +93,26 @@ class V2UnsupportedCycle(V2DataUnavailable):
         self.cycle = cycle
 
 
+class V2MissingCycleFilter(V2DataUnavailable):
+    """Spec §11 E4 — an option leg carries NO cycle filter at all.
+
+    Distinct from :class:`V2UnsupportedCycle`, which names an offending cycle
+    VALUE. This one takes no argument precisely so it cannot be handed a whole
+    sentence that the sibling's ``'{cycle}'`` slot would then nest inside its
+    own message.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            'Data source "v2" requires an explicit weekly expiration cycle on '
+            "an option leg. With no cycle filter, v1 returns monthly AND "
+            "weekly contracts while v2 can only return weeklies — the two "
+            "results would not be comparable. Choose one of 'W1 Friday', "
+            "'W2 Friday', 'W3 Friday', 'W4 Friday', or switch this run to "
+            'data source "v1".'
+        )
+
+
 class V2UnsupportedField(V2DataUnavailable):
     """Spec §11 E5 — a requested field/stream has no v2 source.
 

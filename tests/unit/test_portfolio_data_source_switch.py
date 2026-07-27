@@ -426,3 +426,239 @@ async def test_v1_run_never_consults_the_v2_coverage_floor(client, services):
     with contextlib.suppress(Exception):
         await client.post("/api/portfolio/compute", json=body)
     assert services["v1"].option_trade_date_coverage.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# 9. The SIGNALS route gets the same boundary, on the same nesting walk.        #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+async def signals_client(services):
+    from fastapi import FastAPI
+
+    from tcg.core.api.errors import tcg_error_handler
+    from tcg.core.api.signals import router as signals_router
+    from tcg.types.errors import TCGError
+
+    app = FastAPI()
+    app.add_exception_handler(TCGError, tcg_error_handler)
+    app.include_router(signals_router)
+    app.state.market_data = services["v1"]
+    app.state.market_data_v2_compat = services["v2"]
+    app.state.app_db_repo = object()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+def _signal_body(instrument: dict, **overrides) -> dict:
+    body = {
+        "spec": {"id": "s", "name": "s", "inputs": [], "rules": {}},
+        "indicators": [],
+        "instruments": {"px": instrument},
+        "start": "2020-01-01",
+        "end": "2020-06-30",
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.parametrize(
+    "instrument, expected_fragment",
+    [
+        (
+            {
+                "type": "option_stream",
+                "collection": "OPT_SP_500",
+                "option_type": "P",
+                "maturity": {"kind": "end_of_month", "offset_months": 0},
+                "selection": {"kind": "by_delta", "target": -0.10, "tolerance": 0.2},
+                "stream": "mid",
+                "cycle": "W3 Friday",
+            },
+            "no mid data",
+        ),
+        (
+            {"type": "spot", "collection": "FUT_VIX", "instrument_id": "FUT_VIX_X"},
+            "FUT_VIX",
+        ),
+    ],
+    ids=["option-mid-stream", "unsupported-collection"],
+)
+async def test_signals_route_rejects_unservable_v2_instruments(
+    signals_client, instrument, expected_fragment
+):
+    """``SignalComputeRequest.instruments`` is typed ``dict[str, Any]``, so the
+    generic walk — not a typed model traversal — is what reaches these."""
+    resp = await signals_client.post(
+        "/api/signals/compute", json=_signal_body(instrument, data_source="v2")
+    )
+    assert resp.status_code == 400, resp.text
+    assert expected_fragment in resp.json()["message"]
+
+
+async def test_signals_route_v1_is_unaffected(signals_client):
+    """Sign 1 — the same body on v1 must never see a v2 precondition."""
+    instrument = {"type": "spot", "collection": "FUT_VIX", "instrument_id": "FUT_VIX_X"}
+    resp = await signals_client.post(
+        "/api/signals/compute", json=_signal_body(instrument, data_source="v1")
+    )
+    assert 'data source "v2"' not in resp.text.lower()
+
+
+# --------------------------------------------------------------------------- #
+# 10. Boundary preconditions (wfix) — every v2 shortfall the ENGINE would       #
+#     otherwise swallow must surface as a clean, actionable 400.                #
+#                                                                               #
+#     Route-level on purpose: the defect being fixed is precisely that a unit   #
+#     test of the reader passes while the user still sees an all-NaN curve.     #
+# --------------------------------------------------------------------------- #
+
+
+async def test_option_leg_without_cycle_is_400_with_a_clean_message(real_v2_client):
+    """E4 — and the message must NOT be the nested/garbled one.
+
+    ``options_reader`` used to pass this whole sentence as the ``cycle``
+    ARGUMENT of ``V2UnsupportedCycle``, which interpolates it into
+    "...expiration cycle '{cycle}'..." — nesting the paragraph inside itself.
+    """
+    body = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"o": _option_leg(cycle=None)}
+    body["weights"] = {"o": 100.0}
+    resp = await real_v2_client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    message = resp.json()["message"]
+
+    assert "explicit weekly expiration cycle" in message
+    for literal in ("'W1 Friday'", "'W2 Friday'", "'W3 Friday'", "'W4 Friday'"):
+        assert literal in message
+    assert "o" in message  # names the offending leg
+    # NOT nested: the E3 wrapper's phrasing must be absent entirely, and the
+    # sentence must appear exactly once.
+    assert "This leg requests expiration cycle" not in message
+    assert message.count('Data source "v2" requires an explicit') == 1
+
+
+async def test_option_leg_requesting_mid_is_400_naming_the_alternatives(real_v2_client):
+    """E5 — ``mid`` is the model DEFAULT stream and does not exist on v2 at all.
+
+    Before the boundary check this was the single most likely v2 option run,
+    and it died inside the resolver as an unattributable all-NaN curve.
+    """
+    body = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"o": _option_leg(cycle="W3 Friday", stream="mid")}
+    body["weights"] = {"o": 100.0}
+    resp = await real_v2_client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    message = resp.json()["message"]
+
+    assert "no mid data" in message
+    assert '"close"' in message and '"bs_mid"' in message  # the way forward
+    assert "settlement" in message
+    assert message.count('Data source "v2" has no') == 1  # not nested
+
+
+@pytest.mark.parametrize("stream", ["volume", "open_interest"])
+async def test_option_level_streams_absent_from_v2_are_400(real_v2_client, stream):
+    body = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"o": _option_leg(cycle="W3 Friday", stream=stream)}
+    body["weights"] = {"o": 100.0}
+    resp = await real_v2_client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    assert f"no {stream} data" in resp.json()["message"]
+
+
+async def test_option_leg_with_monthly_cycle_is_400(real_v2_client):
+    """E3 — v2 has no 3rd-Friday monthlies; serving the weekly half silently
+    would compare two different strategies."""
+    body = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"o": _option_leg(cycle="M")}
+    body["weights"] = {"o": 100.0}
+    resp = await real_v2_client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    message = resp.json()["message"]
+    assert "monthly" in message
+    assert "'M'" in message  # names the offending value
+    assert "'W3 Friday'" in message
+
+
+async def test_option_leg_on_an_unsupported_collection_is_400(real_v2_client):
+    """E1 on an OPTION leg — the collection error is raised inside the reader,
+    i.e. inside the resolve the engine swallows. Only the boundary check makes
+    it visible."""
+    body = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"o": _option_leg(cycle="W3 Friday", collection="OPT_VIX")}
+    body["weights"] = {"o": 100.0}
+    resp = await real_v2_client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    message = resp.json()["message"]
+    assert "OPT_VIX" in message
+    assert "OPT_SP_500" in message  # what v2 DOES serve
+    assert message.count("does not have data for collection") == 1  # not nested
+
+
+@pytest.mark.parametrize(
+    "leg_overrides",
+    [
+        {"cycle": None},
+        {"cycle": "M"},
+        {"cycle": "W3 Friday", "stream": "mid"},
+        {"cycle": "W3 Friday", "collection": "OPT_VIX"},
+    ],
+    ids=["no-cycle", "monthly", "mid-stream", "bad-collection"],
+)
+async def test_v1_is_unaffected_by_every_v2_precondition(
+    client, services, leg_overrides
+):
+    """Sign 1 — the SAME requests on v1 must never hit any of these checks.
+
+    Asserting on the message is not enough here (v1 may legitimately fail for
+    an unrelated reason), so this pins the mechanism: the v2 service is never
+    consulted, and no v2 wording appears.
+    """
+    # The v1 stub is a MagicMock; give it the one async method the option path
+    # reaches so the request gets PAST the boundary and fails (if at all) for a
+    # data reason rather than on an un-awaitable mock.
+    services["v1"].list_option_expirations_filtered = AsyncMock(return_value=[])
+
+    body = _body(data_source="v1", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"o": _option_leg(**leg_overrides)}
+    body["weights"] = {"o": 100.0}
+    resp = await client.post("/api/portfolio/compute", json=body)
+
+    services["v2"].get_aligned_prices.assert_not_awaited()
+    services["v2"].option_trade_date_coverage.assert_not_awaited()
+    assert 'data source "v2"' not in resp.text.lower()
+
+
+async def test_a_nested_composed_child_leg_is_checked_too(real_v2_client):
+    """A composed child inlines a whole portfolio body; its legs are as capable
+    of being unservable as the parent's, and the child is computed with the
+    parent's already-bound v2 service."""
+    child = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    child["legs"] = {"inner": _option_leg(cycle="W3 Friday", stream="mid")}
+    child["weights"] = {"inner": 100.0}
+
+    body = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"c": {"type": "portfolio", "portfolio": child}}
+    body["weights"] = {"c": 100.0}
+
+    resp = await real_v2_client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    assert "no mid data" in resp.json()["message"]
+
+
+async def test_a_servable_v2_option_leg_is_not_rejected(real_v2_client):
+    """Over-rejection guard: a weekly + settlement-stream leg is exactly what
+    v2 CAN serve, so the boundary must let it through to the compute path."""
+    body = _body(data_source="v2", start="2020-01-01", end="2020-06-30")
+    body["legs"] = {"o": _option_leg(cycle="W3 Friday", stream="close")}
+    body["weights"] = {"o": 100.0}
+    resp = await real_v2_client.post("/api/portfolio/compute", json=body)
+
+    # It will fail later (the pool is a MagicMock — no rows), but it must NOT
+    # fail on a precondition: none of the boundary wordings may appear.
+    for wording in ("expiration cycle", "does not have data for collection", "has no"):
+        assert wording not in resp.text
