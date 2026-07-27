@@ -250,7 +250,7 @@ class TestNoneRangeComposedChild:
     def test_child_request_preserves_none_range_and_key_matches_standalone(self):
         standalone = portfolio.PortfolioRequest(**self._CHILD_NO_RANGE)  # None range
         inlined = portfolio.PortfolioRequest(**self._CHILD_NO_RANGE)
-        child_body = portfolio._child_request(inlined, use_cache=True)
+        child_body = portfolio._child_request(inlined, use_cache=True, data_source="v1")
         assert child_body.start is None
         assert child_body.end is None
         # Key parity with a standalone None-range compute (NOT the parent range).

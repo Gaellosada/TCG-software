@@ -91,7 +91,7 @@ from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from tcg.core.api._dates import parse_iso_range
@@ -112,7 +112,12 @@ from tcg.core.api._series_fetch import (
     make_signal_fetcher,
 )
 from tcg.core.api._serializers import nan_safe_floats
-from tcg.core.api.common import error_response, get_market_data
+from tcg.core.api.common import (
+    DataSource,
+    error_response,
+    get_market_data,
+    get_market_data_for,
+)
 from tcg.persistence import WriteRepository
 from tcg.data._utils import int_to_iso
 from tcg.data.protocols import MarketDataService
@@ -319,6 +324,10 @@ class SignalComputeRequest(BaseModel):
     # reported cost), so the boundary rejects it (422).
     slippage_bps: float = Field(default=0.0, ge=0.0)
     fees_bps: float = Field(default=0.0, ge=0.0)
+    # Which warehouse this run reads. "v1" (DEFAULT) = tcg_instruments, the
+    # frozen reference; "v2" = tcg_instruments_v2 through the compat adapter.
+    # Bound to a service ONCE, at the route (see ``compute_signal``).
+    data_source: DataSource = "v1"
 
 
 # ---------------------------------------------------------------------------
@@ -1196,10 +1205,20 @@ def _instrument_payload(inst: InputInstrument) -> dict:
 @router.post("/compute")
 async def compute_signal(
     body: SignalComputeRequest,
+    request: Request,
     svc: MarketDataService = Depends(get_market_data),
     repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
-    """Evaluate a v4 Signal and return per-input positions + events."""
+    """Evaluate a v4 Signal and return per-input positions + events.
+
+    ``body.data_source`` selects the warehouse. It is bound to a service HERE
+    and nowhere else: ``_resolve_basket_inputs``, ``compute_input_overlap`` and
+    ``make_signal_fetcher`` all take ``svc`` as a plain argument and none reads
+    ``app.state``, so rebinding it here reaches the engine for free. The default
+    "v1" keeps the object ``Depends(get_market_data)`` resolved (Sign 1).
+    """
+    if body.data_source != "v1":
+        svc = get_market_data_for(request, body.data_source)
 
     try:
         start_date, end_date = parse_iso_range(body.start, body.end)

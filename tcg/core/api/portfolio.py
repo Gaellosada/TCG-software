@@ -29,7 +29,7 @@ from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCrit
 from tcg.core.api._options_materialise import materialise_option_streams
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.cache import DiskResultCache, canonical_hash
-from tcg.core.api.common import get_market_data
+from tcg.core.api.common import DataSource, get_market_data, get_market_data_for
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
     IndicatorSpecIn,
@@ -726,6 +726,13 @@ class PortfolioRequest(BaseModel):
     # WHETHER to use the cache, not WHICH entry, so a later ``use_cache=True``
     # compute of the same body still hits an entry a prior cached compute wrote.
     use_cache: bool = True
+    # Which warehouse this run reads. "v1" (DEFAULT) = tcg_instruments, the
+    # frozen reference; "v2" = tcg_instruments_v2 through the compat adapter.
+    # UNLIKE ``use_cache`` this is compute-affecting, so it is DELIBERATELY part
+    # of the cache key (``_portfolio_cache_key`` hashes the whole body and
+    # ``_strip_use_cache`` must never learn about it) — two runs differing only
+    # in source are two different results.
+    data_source: DataSource = "v1"
 
 
 # ``LegSpec.portfolio`` is typed ``PortfolioRequest`` (a composed leg inlines a
@@ -1517,7 +1524,12 @@ def _get_result_cache() -> DiskResultCache:
 # shared cache entry) instead of the parent's narrowed range. Composed entries
 # cached under the old re-anchor model are numerically different, so this bump
 # invalidates them (they can never be served with ``from_cache: true``).
-COMPUTE_VERSION = "0.1.12"
+#
+# 0.1.12 → 0.1.13: per-run ``data_source`` switch. Adding a defaulted field to
+# ``PortfolioRequest`` changes ``model_dump()`` and therefore EVERY key, so all
+# pre-existing durable entries are invalidated. That is deliberate and harmless:
+# the recomputed v1 output is byte-identical to what those entries held.
+COMPUTE_VERSION = "0.1.13"
 
 
 def _strip_use_cache(obj: object) -> object:
@@ -1560,7 +1572,9 @@ def _portfolio_cache_key(body: PortfolioRequest) -> str:
     return canonical_hash({"_cv": COMPUTE_VERSION, "body": payload})
 
 
-def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest:
+def _child_request(
+    child: PortfolioRequest, use_cache: bool, data_source: DataSource
+) -> PortfolioRequest:
     """Build the compute sub-request for a composed leg's child (fund-of-funds).
 
     The child is computed over its OWN resolved range — ``child.start`` /
@@ -1578,11 +1592,19 @@ def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest
     """
     # model_copy preserves EVERY current and future PortfolioRequest field
     # verbatim (so a schema addition can never silently diverge the composed
-    # child key from a standalone compute), overriding ONLY ``use_cache``. That
-    # is the sole intentional override — it propagates the parent's cache
-    # preference (a use_cache=False compute recomputes every child fresh) and is
-    # stripped from the key anyway, so it never breaks unified reuse (SC2).
-    return child.model_copy(update={"use_cache": use_cache})
+    # child key from a standalone compute), overriding ONLY ``use_cache`` and
+    # ``data_source``:
+    #
+    # * ``use_cache`` propagates the parent's cache preference (a
+    #   use_cache=False compute recomputes every child fresh) and is stripped
+    #   from the key anyway, so it never breaks unified reuse (SC2).
+    # * ``data_source`` is FORCED to the parent's. The child is computed with
+    #   the parent's already-bound ``svc``, so a child body claiming a different
+    #   source would key a v2-read result under a v1 key — the worst failure
+    #   mode available here. Forcing it keeps body and reality in lock-step, and
+    #   preserves key-parity with a standalone compute of that child ON THE SAME
+    #   SOURCE (which is the only compute it is comparable to).
+    return child.model_copy(update={"use_cache": use_cache, "data_source": data_source})
 
 
 async def _evaluate_portfolio_leg(
@@ -1592,6 +1614,7 @@ async def _evaluate_portfolio_leg(
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
     use_cache: bool,
+    data_source: DataSource,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Evaluate a composed-portfolio leg to a synthetic equity price series.
 
@@ -1650,8 +1673,13 @@ async def _evaluate_portfolio_leg(
     # wrapper with a body byte-identical to a standalone compute of that child, so
     # an already-computed child is served from the SAME on-disk cache entry
     # (unified reuse; the key-parity invariant, SC2). See ``_child_request``.
-    child_body = _child_request(child, use_cache)
-    child_result = await compute_portfolio(child_body, svc, classify, repo)
+    child_body = _child_request(child, use_cache, data_source)
+    # Recurse into the CACHE WRAPPER, not the route function: the route's only
+    # extra job is binding ``svc`` from ``body.data_source``, and we already hold
+    # the parent's bound service (which ``_child_request`` has just made the
+    # child body agree with). Going through the route would need a ``Request``
+    # this layer does not have.
+    child_result = await _compute_portfolio_cached(child_body, svc, classify, repo)
 
     # Convert the child response back to the engine's YYYYMMDD-int date grid +
     # float64 equity array.  ``portfolio_equity`` was passed through
@@ -1671,6 +1699,67 @@ async def _evaluate_portfolio_leg(
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+async def _check_v2_option_legs(
+    body: PortfolioRequest,
+    svc: MarketDataService,
+    start_date: date | None,
+) -> None:
+    """Reject the two v2 option shortfalls the layers below cannot report.
+
+    Both checks exist HERE rather than in the options reader because the reader
+    is called per expiration group and never sees the run as a whole. Neither is
+    an engine change (Sign 3): the engine is handed a request it can serve, or
+    the request never reaches it.
+
+    **Missing cycle filter.** The v2 reader DOES raise on this, but the engine's
+    Phase-B year-chunk resolver catches every per-chunk exception and degrades to
+    the per-expiration path, which then yields an all-NaN stream. The user sees
+    "all option stream values are NaN … no_chain_for_date" — a 400, but one that
+    names neither the cause nor the fix. Checking at the boundary keeps the
+    actionable message (SC8). v1 returns monthlies AND weeklies for an unfiltered
+    leg while v2 can only return weeklies, so serving it would silently compare
+    two different strategies.
+
+    **Start before the v2 floor (spec E7).** v2's option series begin years after
+    v1's (EW1/EW2/EW4 ≈ 2011, EW3 from 2016-02-22). An earlier start fails
+    nowhere below — it silently returns a SHORTER curve, which read against a v1
+    run of the same spec looks like a strategy difference rather than a data gap.
+    Fail loudly and NAME the floor.
+
+    No-ops entirely for ``data_source="v1"`` (Sign 1) and for a portfolio with no
+    option legs; the floor check additionally no-ops for an open-ended start.
+    """
+    if body.data_source == "v1":
+        return
+    option_legs = {
+        label: leg for label, leg in body.legs.items() if leg.type == "option_stream"
+    }
+    for label, leg in sorted(option_legs.items()):
+        if not leg.cycle:
+            raise ValidationError(
+                f"Leg '{label}': data source \"v2\" requires an explicit weekly "
+                f"expiration cycle on an option leg. With no cycle filter, v1 "
+                f"returns monthly AND weekly contracts while v2 can only return "
+                f"weeklies — the two results would not be comparable. Choose one "
+                f"of 'W1 Friday', 'W2 Friday', 'W3 Friday', 'W4 Friday', or "
+                f'switch this run to data source "v1".'
+            )
+
+    if start_date is None:
+        return
+    roots = {leg.collection for leg in option_legs.values() if leg.collection}
+    for root in sorted(roots):
+        first, _last = await svc.option_trade_date_coverage(root)
+        if first is not None and start_date < first:
+            raise ValidationError(
+                f'Data source "v2" has no {root} option data before '
+                f"{first.isoformat()}, but this run starts "
+                f"{start_date.isoformat()}. Move the start date to "
+                f"{first.isoformat()} or later, or switch this run to data "
+                f'source "v1".'
+            )
 
 
 async def _compute_portfolio_uncached(
@@ -1748,6 +1837,8 @@ async def _compute_portfolio_uncached(
         start_date, end_date = parse_iso_range(body.start, body.end)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
+
+    await _check_v2_option_legs(body, svc, start_date)
 
     # ── 2. Separate legs by type ──
 
@@ -1957,6 +2048,7 @@ async def _compute_portfolio_uncached(
             classify,
             repo,
             body.use_cache,
+            body.data_source,
         )
         portfolio_leg_dates_map[label] = pf_dates
         portfolio_leg_closes[label] = pf_equity
@@ -2579,9 +2671,35 @@ async def _compute_portfolio_uncached(
 @router.post("/compute")
 async def compute_portfolio(
     body: PortfolioRequest,
+    request: Request,
     svc: MarketDataService = Depends(get_market_data),
     classify: Callable[[str], AssetClass | None] = Depends(get_collection_classifier),
     repo: WriteRepository = Depends(get_write_repository),
+) -> dict:
+    """Bind the run's data source, then compute (see ``_compute_portfolio_cached``).
+
+    This is the ONLY place a compute learns which warehouse it reads. Everything
+    below takes ``svc`` as a plain argument, so rebinding it here propagates to
+    the engine fetcher, the option-stream wiring and every nested leg without a
+    single further edit.
+
+    ``data_source="v1"`` (the default, and every request that omits the field)
+    keeps the exact object ``Depends(get_market_data)`` resolved, so the default
+    path is bit-for-bit what it was (Sign 1). The classifier is rebound from the
+    SAME service for v2 rather than shared, so the two can never drift even
+    though their ``asset_class_for`` implementations are currently identical.
+    """
+    if body.data_source != "v1":
+        svc = get_market_data_for(request, body.data_source)
+        classify = svc.asset_class_for
+    return await _compute_portfolio_cached(body, svc, classify, repo)
+
+
+async def _compute_portfolio_cached(
+    body: PortfolioRequest,
+    svc: MarketDataService,
+    classify: Callable[[str], AssetClass | None],
+    repo: WriteRepository,
 ) -> dict:
     """Compute a weighted portfolio, served from the on-disk result cache.
 

@@ -7,15 +7,41 @@ drift apart.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from tcg.data.protocols import MarketDataService, MarketDataServiceV2
 from tcg.types.market import AdjustmentMethod
 
+# The per-run warehouse selector carried on compute request bodies.
+# ``"v1"`` = ``tcg_instruments`` (the frozen reference), ``"v2"`` =
+# ``tcg_instruments_v2`` through the compat adapter. Declared here so the
+# portfolio and signal request models cannot drift.
+DataSource = Literal["v1", "v2"]
+
 
 def get_market_data(request: Request) -> MarketDataService:
     """Dependency: retrieve the MarketDataService from app state."""
+    return request.app.state.market_data
+
+
+def get_market_data_for(request: Request, source: DataSource) -> MarketDataService:
+    """Return the ``MarketDataService`` a compute should bind for ``source``.
+
+    Both returned objects satisfy the SAME protocol, so every layer below the
+    route (``make_signal_fetcher``, ``materialise_option_streams``,
+    ``build_stream_resolver_wiring``, the per-leg evaluators) takes the service
+    as a plain argument and none of them re-reads ``app.state`` — swapping the
+    bound object at the route therefore propagates for free.
+
+    ``"v1"`` returns the exact object ``get_market_data`` would, so the default
+    path is unchanged (guardrail Sign 1). Any other value than the two literals
+    is impossible: the request models constrain it to ``DataSource``.
+    """
+    if source == "v2":
+        return request.app.state.market_data_v2_compat
     return request.app.state.market_data
 
 
