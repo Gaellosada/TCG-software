@@ -32,7 +32,7 @@ import numpy.typing as npt
 from tcg.data._cache import LRUCache
 from tcg.data._rolling import ContinuousSeriesBuilder
 from tcg.data._sql.connection import DwhConnectionPool
-from tcg.data._utils import date_to_int, filter_date_range
+from tcg.data._utils import date_to_int, filter_date_range, int_to_date
 from tcg.data._v2_compat import _sql_v2
 from tcg.data._v2_compat._mapping import (
     V2_FUTURES_COLLECTION,
@@ -45,6 +45,7 @@ from tcg.data._v2_compat._mapping import (
 )
 from tcg.data._v2_compat.errors import (
     V2CollectionUnavailable,
+    V2FuturesContractUnavailable,
     V2InstrumentUnavailable,
 )
 from tcg.data.options.protocol import OptionsDataReader
@@ -176,9 +177,15 @@ class V2MarketDataAdapter:
         ``provider`` is accepted for protocol parity; v2 stores one curated
         series per instrument, so it does not branch the query.
 
-        An unknown collection or a non-``IND_SP_500`` index symbol RAISES. An
-        unknown *futures* symbol that parses correctly but has no rows returns
-        ``None`` (404 at the route), matching v1.
+        An unknown collection or a non-``IND_SP_500`` index symbol RAISES. So
+        does a futures symbol whose expiration v2 does not list at all
+        (:class:`V2FuturesContractUnavailable`) — v1 and v2 disagree on two ES
+        expirations, and answering ``None`` there made an identity mismatch
+        look like missing data.
+
+        A symbol v2 DOES list but which has no bars inside the requested
+        ``start``/``end`` window still returns ``None``, exactly as v1 does:
+        that is an ordinary empty window, not an identity failure.
         """
         self._require_collection(collection)
         key = f"v2:{collection}:{instrument_id}:{provider}:{start}:{end}"
@@ -195,6 +202,13 @@ class V2MarketDataAdapter:
             result = await _sql_v2.read_futures_prices(
                 self._pool, expiration_int, start=start, end=end
             )
+            if result is None:
+                # Zero rows has two very different causes. Separate them on the
+                # DIMENSION (one cheap indexed read, only on this cold path):
+                # an expiration v2 never listed is an identity mismatch and
+                # must be loud; an expiration it lists but with no bars in the
+                # window is an ordinary empty range and stays ``None``.
+                await self._require_v2_futures_expiration(instrument_id, expiration_int)
 
         if result is not None:
             self._cache.put(key, result)
@@ -460,3 +474,27 @@ class V2MarketDataAdapter:
         """Gate every entry point. NEVER falls through to v1 (spec §1.4)."""
         if not v2_supports_collection(collection):
             raise V2CollectionUnavailable(collection)
+
+    async def _require_v2_futures_expiration(
+        self,
+        symbol: str,
+        expiration_int: int,
+    ) -> None:
+        """Raise unless v2 lists an ES contract with exactly this expiration.
+
+        Called ONLY when a single-contract read came back empty, so the extra
+        dimension query never touches the hot path. Reports the nearest listed
+        expiration because the realistic cause is the known one-day listing
+        offset, not absent data — see
+        :class:`~tcg.data._v2_compat.errors.V2FuturesContractUnavailable`.
+        """
+        listed = await _sql_v2.list_futures_expirations(self._pool)
+        if any(date_to_int(e) == expiration_int for e in listed):
+            return
+        nearest: int | None = None
+        if listed:
+            # Compare real dates, not YYYYMMDD ints — integer distance is not
+            # day distance across a month or year boundary.
+            target = int_to_date(expiration_int)
+            nearest = date_to_int(min(listed, key=lambda e: abs((e - target).days)))
+        raise V2FuturesContractUnavailable(symbol, nearest)

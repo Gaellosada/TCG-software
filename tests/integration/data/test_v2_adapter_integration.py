@@ -161,3 +161,80 @@ async def test_list_instruments_live(adapter):
     page = await adapter.list_instruments("FUT_SP_500", limit=500)
     assert page.total > 50
     assert all(i.collection == "FUT_SP_500" for i in page.items)
+
+
+# --- M1: v1 ⇄ v2 futures identity is NOT a bijection ------------------------- #
+
+
+@pytest.fixture
+async def pool():
+    try:
+        cfg = load_dwh_config()
+    except ValueError as exc:
+        pytest.skip(f"dwh config not available: {exc}")
+    p = DwhConnectionPool(**cfg)
+    try:
+        await p.connect()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"dwh not reachable: {exc}")
+    yield p
+    await p.close()
+
+
+# The KNOWN, PINNED discrepancy (live-verified 2026-07-27). Pinning it here
+# means a future change to either warehouse shows up as a test failure with a
+# diff, instead of as a silently short series in a comparison report.
+#
+# v1 lists these ES expirations that v2 does not:
+#   * 18 contracts expiring 2005-12..2010-03 — genuinely predate v2's history;
+#   * 20260618 and 20270617 — v2 lists 20260619 / 20270618 instead, i.e. the
+#     SAME contract recorded one day apart. This is a listing difference, not
+#     missing data, and it is why the adapter must not fuzzy-match.
+V1_ONLY_OFF_BY_ONE = {20260618, 20270617}
+V2_ONLY_OFF_BY_ONE = {20260619, 20270618}
+V2_HISTORY_STARTS = 20100601
+
+
+async def test_v1_v2_futures_expiration_sets_diverge_exactly_as_pinned(pool):
+    """Cross-source identity guard.
+
+    Every other v2 test round-trips v2 against ITSELF, which is why the
+    off-by-one was invisible. This one compares the two warehouses directly.
+    """
+    from tcg.data._sql.instruments import SqlInstrumentReader
+    from tcg.data._utils import date_to_int
+    from tcg.data._v2_compat import _sql_v2
+
+    v1_meta = await SqlInstrumentReader(pool).list_futures_contract_meta("FUT_SP_500")
+    v1 = {date_to_int(m.expiration) for m in v1_meta}
+    v2 = {date_to_int(e) for e in await _sql_v2.list_futures_expirations(pool)}
+    assert v1 and v2
+
+    v1_only = v1 - v2
+    v2_only = v2 - v1
+
+    # Inside v2's history window the ONLY v1 expirations v2 lacks are the two
+    # off-by-one ones. Anything else appearing here is a new divergence.
+    assert {e for e in v1_only if e >= V2_HISTORY_STARTS} == V1_ONLY_OFF_BY_ONE
+    assert v2_only == V2_ONLY_OFF_BY_ONE
+    # Everything v1_only below the window is pre-history, not a mismatch.
+    assert all(e < 20100601 for e in v1_only - V1_ONLY_OFF_BY_ONE)
+
+
+async def test_v1_only_futures_symbol_raises_on_v2_live(adapter):
+    """The M1 defect itself, against the real warehouse.
+
+    Before the fix this returned ``None`` while v1 returned real bars.
+    """
+    with pytest.raises(V2InstrumentUnavailable) as exc:
+        await adapter.get_prices("FUT_SP_500", "FUT_SP_500_EMINI_20260618")
+
+    msg = str(exc.value)
+    assert "FUT_SP_500_EMINI_20260618" in msg
+    assert "20260619" in msg, "must name the nearest v2 expiration"
+
+
+async def test_v2_native_futures_symbol_still_returns_bars_live(adapter):
+    """Over-rejection guard: v2's own contract must be unaffected."""
+    ps = await adapter.get_prices("FUT_SP_500", "FUT_SP_500_EMINI_20260619")
+    assert ps is not None and len(ps) > 0

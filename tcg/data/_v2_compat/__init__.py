@@ -19,6 +19,7 @@ from tcg.data._v2_compat.adapter import V2MarketDataAdapter
 from tcg.data._v2_compat.errors import (
     V2CollectionUnavailable,
     V2DataUnavailable,
+    V2FuturesContractUnavailable,
     V2InstrumentUnavailable,
     V2MissingCycleFilter,
     V2SymbolError,
@@ -35,6 +36,7 @@ __all__ = [
     "V2OptionsDataReader",
     "V2CollectionUnavailable",
     "V2DataUnavailable",
+    "V2FuturesContractUnavailable",
     "V2InstrumentUnavailable",
     "V2MissingCycleFilter",
     "V2SymbolError",
