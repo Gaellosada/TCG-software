@@ -86,8 +86,9 @@ class V2UnsupportedCycle(V2DataUnavailable):
         super().__init__(
             f'Data source "v2" has no monthly (3rd-Friday) S&P 500 options — '
             f"it covers only the weekly EW1-EW4 series. This leg requests "
-            f"expiration cycle '{cycle}'. Choose a weekly cycle "
-            f'(W1/W2/W3/W4 Friday), or switch this run to data source "v1".'
+            f"expiration cycle '{cycle}'. Choose one of the weekly cycles "
+            f"'W1 Friday', 'W2 Friday', 'W3 Friday', 'W4 Friday'"
+            f', or switch this run to data source "v1".'
         )
         self.cycle = cycle
 
