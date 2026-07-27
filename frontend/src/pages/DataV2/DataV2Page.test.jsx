@@ -76,15 +76,33 @@ describe('DataV2Page', () => {
     expect(getObjectDetailV2).toHaveBeenCalledWith(7, expect.anything());
   });
 
-  it('greys out the Delta criterion on the options continuous builder', async () => {
+  // v2's fact_greeks is populated (11,580,236 rows, live-probed 2026-07-27), so
+  // the old "greeks unavailable in v2" lockout is stale: Delta is selectable.
+  // If the backend does not serve it, it answers 400 and the error block below
+  // renders the message — graceful degradation, not a frontend guess.
+  it('lets the user select the Delta criterion on the options continuous builder', async () => {
     renderWithClient(<DataV2Page />);
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     // Switch to the Continuous (Options) tab.
     fireEvent.click(await screen.findByRole('tab', { name: /Continuous \(Options\)/i }));
     const deltaRadio = await screen.findByRole('radio', { name: /Delta/i });
-    expect(deltaRadio.disabled).toBe(true);
-    // The wrapping label carries the "greeks unavailable in v2" tooltip.
-    const label = deltaRadio.closest('label');
-    expect(label.getAttribute('title')).toBe('greeks unavailable in v2');
+    expect(deltaRadio.disabled).toBe(false);
+    // No hover-only disabled-reason left on the label.
+    expect(deltaRadio.closest('label').getAttribute('title')).toBeNull();
+
+    fireEvent.click(deltaRadio);
+    expect(deltaRadio.checked).toBe(true);
+  });
+
+  it('states the Roll lock as VISIBLE text, not a hover-only title', async () => {
+    renderWithClient(<DataV2Page />);
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    fireEvent.click(await screen.findByRole('tab', { name: /Continuous \(Options\)/i }));
+    // Visible in the DOM (readable on touch + by screen readers), and wired to
+    // the disabled control via aria-describedby.
+    const note = await screen.findByText('v2 options roll at expiry');
+    expect(note).toBeTruthy();
+    const roll = screen.getByRole('combobox', { name: /Roll/i });
+    expect(roll.getAttribute('aria-describedby')).toBe(note.id);
   });
 });

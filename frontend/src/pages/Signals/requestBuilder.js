@@ -33,6 +33,7 @@
 // ``normaliseBlock`` AND a new round-trip test in ``requestShape.test.js``.
 
 import { collectIndicatorIds } from '../../api/signals';
+import { dataSourceFieldsForRequest } from '../../lib/dataSource';
 import {
   MAX_ABS_WEIGHT,
   SECTIONS,
@@ -254,6 +255,12 @@ function normaliseOperand(operand) {
  *   NOTE: per-leg signal sub-bodies inside a portfolio call this WITHOUT costs
  *   — slippage/fees are a single global top-level field, applied once by the
  *   portfolio body, never per-leg.
+ * @param {'v1'|'v2'=} dataSource
+ *   Market data source. ``"v2"`` adds a top-level ``data_source`` key; v1 (the
+ *   default) omits it entirely, keeping the body byte-identical to a
+ *   pre-feature payload. Like costs this is a single global top-level field —
+ *   per-leg signal sub-bodies inside a portfolio are built WITHOUT it (the
+ *   portfolio body carries the source for the whole run).
  * @returns {{body: Object, missing: string[]}}
  *   ``body`` — the literal POST body
  *     ``{spec, indicators: IndicatorSpec[]}``
@@ -261,7 +268,7 @@ function normaliseOperand(operand) {
  *                 available-indicators array; callers should abort the
  *                 request and surface a validation error.
  */
-export function buildComputeRequestBody(signal, availableIndicators, costs) {
+export function buildComputeRequestBody(signal, availableIndicators, costs, dataSource) {
   const needed = collectIndicatorIds(signal);
   const indicatorList = [];
   const missing = [];
@@ -304,6 +311,8 @@ export function buildComputeRequestBody(signal, availableIndicators, costs) {
       indicators: indicatorList,
       // Global execution costs — present only when > 0 (see costFieldsForRequest).
       ...costFieldsForRequest(costs),
+      // Market data source — present only for v2 (see dataSourceFieldsForRequest).
+      ...dataSourceFieldsForRequest(dataSource),
     },
     missing,
   };

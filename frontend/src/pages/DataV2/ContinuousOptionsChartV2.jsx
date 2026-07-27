@@ -6,15 +6,22 @@ import { formatDateInt } from '../../utils/format';
 import baseStyles from '../Data/ChartBase.module.css';
 import styles from './DataV2.module.css';
 
-// Sensible default target per criterion: ATM moneyness = 1.0; strike left to
-// the user (blank until typed, since strike scale is instrument-specific).
-const DEFAULT_TARGET = { strike: '', moneyness: '1.0' };
+// Sensible default target per criterion: ATM moneyness = 1.0; strike and delta
+// are left to the user (blank until typed) — strike scale is
+// instrument-specific, and the delta target's sign/magnitude convention is the
+// backend's, so we prompt rather than guess a default here.
+const DEFAULT_TARGET = { strike: '', moneyness: '1.0', delta: '' };
+
+const TARGET_PLACEHOLDER = { strike: 'strike', moneyness: '1.0', delta: 'delta' };
 
 /**
  * v2-native options continuous builder. Per-date selection over settlement
- * values by **strike** or **moneyness**, **AtExpiry** roll (fixed). Delta-based
- * selection is present but DISABLED/greyed (fact_greeks is empty in v2) with a
- * "greeks unavailable in v2" tooltip. Renders the settlement-value stream via
+ * values by **strike**, **moneyness** or **delta**, **AtExpiry** roll (fixed).
+ * Delta selection is ENABLED: v2's ``fact_greeks`` is populated (11,580,236 rows,
+ * live-probed 2026-07-27), superseding the earlier "greeks unavailable in v2"
+ * lockout. If the backend does not yet serve delta selection it answers 400 and
+ * its message is rendered by the error block below — no silent failure, and no
+ * frontend guess about what v2 supports. Renders the settlement-value stream via
  * the shared Chart component with sell/buy roll markers.
  *
  * The endpoint returns { points:{ ts, value }, roll_dates, contracts,
@@ -32,7 +39,6 @@ function ContinuousOptionsChartV2({ objectId, symbol }) {
   const [optionType, setOptionType] = useState('put');
 
   function handleCriterionChange(next) {
-    if (next === 'delta') return; // disabled — greeks unavailable in v2
     setCriterion(next);
     setTarget(DEFAULT_TARGET[next] ?? '');
   }
@@ -131,11 +137,12 @@ function ContinuousOptionsChartV2({ objectId, symbol }) {
             />
             Moneyness
           </label>
-          <label
-            className={`${styles.criterionOption} ${styles.criterionDisabled}`}
-            title="greeks unavailable in v2"
-          >
-            <input type="radio" name="v2opt-criterion" value="delta" disabled aria-disabled="true" />
+          <label className={styles.criterionOption}>
+            <input
+              type="radio" name="v2opt-criterion" value="delta"
+              checked={criterion === 'delta'}
+              onChange={() => handleCriterionChange('delta')}
+            />
             Delta
           </label>
         </span>
@@ -147,8 +154,8 @@ function ContinuousOptionsChartV2({ objectId, symbol }) {
             className={baseStyles.select}
             style={{ width: '90px' }}
             value={target}
-            step={criterion === 'moneyness' ? 0.05 : 5}
-            placeholder={criterion === 'moneyness' ? '1.0' : 'strike'}
+            step={criterion === 'strike' ? 5 : 0.05}
+            placeholder={TARGET_PLACEHOLDER[criterion] ?? 'target'}
             onChange={(e) => setTarget(e.target.value)}
           />
         </label>
@@ -161,11 +168,22 @@ function ContinuousOptionsChartV2({ objectId, symbol }) {
           </select>
         </label>
 
+        {/* The disabled reason is rendered as VISIBLE text (and wired via
+            aria-describedby) rather than a hover-only ``title`` — a tooltip is
+            invisible on touch and unreliable for screen readers. */}
         <label className={baseStyles.controlLabel}>
           Roll
-          <select className={baseStyles.select} value="at_expiry" disabled title="v2 options roll at expiry">
+          <select
+            className={baseStyles.select}
+            value="at_expiry"
+            disabled
+            aria-describedby="v2opt-roll-note"
+          >
             <option value="at_expiry">At expiry</option>
           </select>
+          <span id="v2opt-roll-note" className={styles.controlNote}>
+            v2 options roll at expiry
+          </span>
         </label>
       </div>
 
