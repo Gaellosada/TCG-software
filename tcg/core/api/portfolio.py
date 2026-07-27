@@ -30,6 +30,7 @@ from tcg.core.api._options_materialise import materialise_option_streams
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.cache import DiskResultCache, canonical_hash
 from tcg.core.api.common import DataSource, get_market_data, get_market_data_for
+from tcg.core.api._v2_preconditions import check_v2_preconditions
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
     IndicatorSpecIn,
@@ -1706,7 +1707,7 @@ async def _check_v2_option_legs(
     svc: MarketDataService,
     start_date: date | None,
 ) -> None:
-    """Reject the two v2 option shortfalls the layers below cannot report.
+    """Reject a v2 run this warehouse cannot serve, before the engine sees it.
 
     Both checks exist HERE rather than in the options reader because the reader
     is called per expiration group and never sees the run as a whole. Neither is
@@ -1733,20 +1734,14 @@ async def _check_v2_option_legs(
     """
     if body.data_source == "v1":
         return
+
+    # The PURE preconditions — collection, cycle, stream — for every leg at
+    # every nesting depth (composed children, signal legs, basket legs).
+    check_v2_preconditions(body.model_dump(mode="json"), data_source=body.data_source)
+
     option_legs = {
         label: leg for label, leg in body.legs.items() if leg.type == "option_stream"
     }
-    for label, leg in sorted(option_legs.items()):
-        if not leg.cycle:
-            raise ValidationError(
-                f"Leg '{label}': data source \"v2\" requires an explicit weekly "
-                f"expiration cycle on an option leg. With no cycle filter, v1 "
-                f"returns monthly AND weekly contracts while v2 can only return "
-                f"weeklies — the two results would not be comparable. Choose one "
-                f"of 'W1 Friday', 'W2 Friday', 'W3 Friday', 'W4 Friday', or "
-                f'switch this run to data source "v1".'
-            )
-
     if start_date is None:
         return
     roots = {leg.collection for leg in option_legs.values() if leg.collection}

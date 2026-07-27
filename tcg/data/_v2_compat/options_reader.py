@@ -59,7 +59,7 @@ from tcg.data._v2_compat._mapping import (
 )
 from tcg.data._v2_compat.errors import (
     V2CollectionUnavailable,
-    V2UnsupportedCycle,
+    V2MissingCycleFilter,
     V2UnsupportedField,
 )
 from tcg.types.errors import OptionsContractNotFound, OptionsDataAccessError
@@ -195,14 +195,10 @@ def _route_objects(
     tags = _as_tag_list(cycle)
     if tags is None:
         if require_filter:
-            raise V2UnsupportedCycle(
-                'Data source "v2" requires an explicit weekly expiration cycle '
-                "on an option leg. With no cycle filter, v1 returns monthly AND "
-                "weekly contracts while v2 can only return weeklies — the two "
-                "results would not be comparable. Choose one of "
-                f"{', '.join(EW_OBJECT_BY_CYCLE)}, or switch this run to data "
-                'source "v1".'
-            )
+            # NOT ``V2UnsupportedCycle`` — that constructor interpolates its
+            # argument into "...expiration cycle '{cycle}'...", so passing a
+            # sentence nests the whole paragraph inside the sibling's message.
+            raise V2MissingCycleFilter()
         return list(EW_OBJECT_IDS)
 
     # Drop the generic "W" umbrella tag: OPT_SP_500 has zero rows under it on
@@ -224,12 +220,9 @@ def _route_objects(
 def _require_options_root(root: str) -> None:
     """Guard the single option collection v2 serves (spec §11 E1)."""
     if root != V2_OPTIONS_COLLECTION:
-        raise V2CollectionUnavailable(
-            f'Data source "v2" does not have data for collection {root!r}. The '
-            "v2 warehouse currently covers only IND_SP_500 (INDEX), "
-            "FUT_SP_500 and the weekly OPT_SP_500 options. Switch this run to "
-            f'data source "v1", or remove the {root!r} leg.'
-        )
+        # The constructor takes the COLLECTION NAME and builds the sentence;
+        # passing a pre-built sentence would nest it inside itself.
+        raise V2CollectionUnavailable(root)
 
 
 def assert_option_stream_available(stream: str) -> None:
@@ -241,12 +234,8 @@ def assert_option_stream_available(stream: str) -> None:
     substitute settlement for a quote even if this gate is missed.
     """
     if stream in V2_UNAVAILABLE_OPTION_STREAMS:
-        raise V2UnsupportedField(
-            f'Data source "v2" has no {stream} data for S&P 500 options — v2 '
-            "stores end-of-day settlement only, with no bid/ask quotes, volume "
-            'or open interest. Use the "close" stream (settlement) or "bs_mid" '
-            '(Black-76 from stored IV), or switch this run to data source "v1".'
-        )
+        # The constructor takes the FIELD NAME and builds the sentence.
+        raise V2UnsupportedField(stream)
 
 
 def _type_predicate(
