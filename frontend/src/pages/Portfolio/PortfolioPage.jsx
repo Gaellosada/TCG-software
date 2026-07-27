@@ -17,8 +17,10 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import LockBanner from '../../components/LockBanner';
 import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
+import DataSourceSelector from '../../components/DataSourceSelector';
 import styles from './PortfolioPage.module.css';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
+import { DATA_SOURCE_V2, V2_COMMON_WINDOW_HINT } from '../../lib/dataSource';
 import {
   createPortfolio,
   updatePortfolio,
@@ -581,6 +583,9 @@ function PortfolioPage({ mode = 'pure' }) {
     resolvePortfolio: portfolio.resolvePortfolio,
     portfolios: visiblePortfolios,
     activeId: portfolio.persistedId,
+    // Probe bodies must carry the SAME source Compute will send, or the
+    // "cached" badge would report v1's cache entry for a v2 run.
+    dataSource: portfolio.dataSource,
     refreshKey: probeVersion,
   });
 
@@ -762,6 +767,19 @@ function PortfolioPage({ mode = 'pure' }) {
 
         {/* ── Configuration bar ── */}
         <div className={`${styles.section} ${styles.configBar}`}>
+          {/* Per-run market data source — sits directly above Compute because the
+              workflow is "run it on v1, run it on v2, compare". NOT inside the
+              locked-editor fieldset: the source is a property of the RUN, not of
+              the saved portfolio, so a locked portfolio can still be computed
+              against either source. Renders the v2 capability limits itself. */}
+          <div className={styles.dataSourceRow}>
+            <DataSourceSelector
+              id="portfolio-data-source-select"
+              value={portfolio.dataSource}
+              onChange={portfolio.setDataSource}
+              disabled={portfolio.loading}
+            />
+          </div>
           <div className={styles.configRow}>
             {/* Rebalance frequency — part of the saved portfolio definition,
                 so it is disabled (via the native fieldset) when locked.
@@ -834,6 +852,15 @@ function PortfolioPage({ mode = 'pure' }) {
               }}
             />
           </div>
+
+          {/* Common-window hint — the two sources end on different dates, so a
+              v1-vs-v2 comparison run to "the end" diverges for a trivial reason.
+              Shown next to the date control only while v2 is selected. */}
+          {portfolio.dataSource === DATA_SOURCE_V2 && (
+            <div className={styles.dataSourceHint} data-testid="portfolio-v2-window-hint">
+              {V2_COMMON_WINDOW_HINT}
+            </div>
+          )}
         </div>
 
         {/* ── Loading indicator ── */}

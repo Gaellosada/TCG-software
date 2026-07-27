@@ -21,6 +21,7 @@
 // Error envelope unchanged: {error_type, message, traceback?}.
 
 import { API_BASE } from './base';
+import { dataSourceFieldsForRequest } from '../lib/dataSource';
 
 /**
  * POST a signal-compute request and return the parsed response.
@@ -45,7 +46,7 @@ import { API_BASE } from './base';
 export async function computeSignal(
   spec,
   indicators,
-  { signal, slippageBps, feesBps } = {},
+  { signal, slippageBps, feesBps, dataSource } = {},
 ) {
   // Global execution costs (basis points) ride the request body when > 0;
   // omitted otherwise so a default request stays byte-identical (backend
@@ -64,6 +65,9 @@ export async function computeSignal(
       spec,
       indicators: indicators || [],
       ...costFields,
+      // Market data source — present only for v2, so a v1 run stays
+      // byte-identical to a pre-feature payload (backend defaults absent → v1).
+      ...dataSourceFieldsForRequest(dataSource),
     }),
     signal,
   });

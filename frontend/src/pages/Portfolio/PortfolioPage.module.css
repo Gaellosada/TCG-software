@@ -214,6 +214,19 @@
   flex-wrap: wrap;
 }
 
+/* Per-run data-source selector, directly above the Compute row. */
+.dataSourceRow {
+  margin-bottom: 12px;
+}
+
+/* Common-window hint under the time-range slider (v2 only). */
+.dataSourceHint {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
 .configItem {
   display: flex;
   align-items: center;

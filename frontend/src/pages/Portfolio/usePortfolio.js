@@ -9,6 +9,7 @@ import { resolvePortfolioRange, childPortfolioIds, childRangeAccessorFor } from 
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { isPortfolioCacheEnabled, getSlippageBps, getFeesBps } from '../../lib/userSettings';
+import { DEFAULT_DATA_SOURCE, coerceDataSource } from '../../lib/dataSource';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
@@ -70,6 +71,13 @@ export default function usePortfolio() {
   // the userSettings convention). Sent as ``use_cache`` on every compute POST —
   // OFF makes the backend recompute fresh. No frontend result cache.
   const [useCache] = useState(() => isPortfolioCacheEnabled());
+
+  // Market data source for THIS run ('v1' | 'v2'). A per-run control (not a
+  // saved portfolio field and not a Settings toggle) because the workflow is
+  // "run it on v1, run it on v2, compare" — it must be one click from Compute.
+  // Always starts at v1 so a freshly-opened page is byte-identical to today.
+  const [dataSource, setDataSourceState] = useState(DEFAULT_DATA_SOURCE);
+  const setDataSource = useCallback((v) => setDataSourceState(coerceDataSource(v)), []);
 
   /* ── Fetch date ranges when legs change ── */
 
@@ -414,8 +422,13 @@ export default function usePortfolio() {
       resolveChildRange,
       slippageBps,
       feesBps,
+      // Per-run market data source, baked into the ONE shared body so the
+      // Compute POST, the auto-display cache-get and the cache-status probe all
+      // key on the same source (a mismatch would serve v1's cached result for a
+      // v2 run — the silent "no difference" failure this feature must avoid).
+      dataSource,
     });
-  }, [legs, rebalance, queryClient, resolveChildrenNow]);
+  }, [legs, rebalance, queryClient, resolveChildrenNow, dataSource]);
 
   /* ── Auto-display cached result (read-only, never computes) ── */
   // Monotonic run-id shared by the auto-display effect AND handleCalculate so a
@@ -449,8 +462,13 @@ export default function usePortfolio() {
       endDate,
       overlapRange?.start || '',
       overlapRange?.end || '',
+      // STALE-CACHE GUARD: the data source enters the backend cache key, so it
+      // MUST enter this signature. Without it, flipping v1→v2 would leave the
+      // v1 result on screen (the effect never re-fires) and the comparison would
+      // silently read as "no difference" — the highest-risk bug in this feature.
+      dataSource,
     ].join('#');
-  }, [legs, rebalance, startDate, endDate, overlapRange]);
+  }, [legs, rebalance, startDate, endDate, overlapRange, dataSource]);
 
   useEffect(() => {
     // Caching off → never auto-display (matches the badge gate). Empty config →
@@ -497,6 +515,9 @@ export default function usePortfolio() {
           // on — otherwise a costed result would falsely read as a MISS here.
           slippageBps: built.body.slippage_bps,
           feesBps: built.body.fees_bps,
+          // Derived from the built body (present only for v2) — same reason as
+          // the costs: the cache-get key must match the Compute key exactly.
+          dataSource: built.body.data_source,
         });
       } catch {
         return; // cache errors never surface — stay blank, Compute still works
@@ -587,6 +608,9 @@ export default function usePortfolio() {
           // compute POST byte-identical to the body the cache-status probe keys on.
           slippageBps: body.slippage_bps,
           feesBps: body.fees_bps,
+          // Derived from the shared body (present only for v2) so the compute
+          // POST is byte-identical to the body the probe/cache-get key on.
+          dataSource: body.data_source,
           signal,
         });
         if (!signal.aborted && myRun === autoDisplayRunRef.current) setResults(res);
@@ -637,6 +661,10 @@ export default function usePortfolio() {
     // Caching toggle (Settings, DEFAULT ON) read once at mount. Sent as
     // ``use_cache`` on compute AND gates the proactive cache-status indicators.
     cacheEnabled: useCache,
+    // Per-run market data source + setter (rendered by the shared
+    // DataSourceSelector next to Compute).
+    dataSource,
+    setDataSource,
     portfolioName,
     setPortfolioName,
     autosave,

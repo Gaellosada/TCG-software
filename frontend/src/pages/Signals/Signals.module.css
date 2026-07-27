@@ -1508,6 +1508,19 @@
   margin-bottom: 6px;
 }
 
+/* Per-run data-source selector, directly above the Run button. */
+.dataSourceRow {
+  margin-bottom: 8px;
+}
+
+/* Common-window hint (v2 only). */
+.dataSourceHint {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
 .capitalLabel {
   font-size: 0.78rem;
   color: var(--text-secondary);

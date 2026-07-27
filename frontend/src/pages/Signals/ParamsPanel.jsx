@@ -1,3 +1,5 @@
+import DataSourceSelector from '../../components/DataSourceSelector';
+import { DATA_SOURCE_V2, V2_COMMON_WINDOW_HINT } from '../../lib/dataSource';
 import styles from './Signals.module.css';
 
 /**
@@ -11,8 +13,13 @@ import styles from './Signals.module.css';
  *   runDisabledReason  {string|null}
  *   capital            {number}       display-only initial capital for P&L scaling
  *   onCapitalChange    {Function}     (number) => void
+ *   dataSource         {'v1'|'v2'}    per-run market data source
+ *   onDataSourceChange {Function}     ('v1'|'v2') => void
  */
-function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange }) {
+function ParamsPanel({
+  signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange,
+  dataSource, onDataSourceChange,
+}) {
   // v4: rules shape is now `{ entries, exits }` (section model); weight sign
   // carries long/short on each entry block.
   const rules = signal?.rules || {};
@@ -55,6 +62,25 @@ function ParamsPanel({ signal, onRun, running, canRun, runDisabledReason, capita
             data-testid="initial-capital"
           />
         </div>
+        {/* Per-run market data source — the SAME shared component the Portfolio
+            page renders (no page-specific variant), placed directly above Run
+            because the workflow is "run it on v1, run it on v2, compare". It
+            renders the v2 capability limits itself when v2 is selected. */}
+        {onDataSourceChange && (
+          <div className={styles.dataSourceRow}>
+            <DataSourceSelector
+              id="signal-data-source-select"
+              value={dataSource}
+              onChange={onDataSourceChange}
+              disabled={running}
+            />
+            {dataSource === DATA_SOURCE_V2 && (
+              <div className={styles.dataSourceHint} data-testid="signal-v2-window-hint">
+                {V2_COMMON_WINDOW_HINT}
+              </div>
+            )}
+          </div>
+        )}
         <button
           type="button"
           className={styles.runBtn}

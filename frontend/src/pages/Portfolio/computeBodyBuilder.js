@@ -10,6 +10,7 @@
 // aborts; the status probe treats such a body as un-keyable).
 
 import { buildComputeRequestBody, costFieldsForRequest } from '../Signals/requestBuilder';
+import { dataSourceFieldsForRequest } from '../../lib/dataSource';
 import { persistedDocToLegs } from './persistedDoc';
 import { getChildPortfolioId } from './resolvePortfolioRange';
 
@@ -74,6 +75,14 @@ export function buildPortfolioComputeBody({
   // passed identically by the compute path AND the cache-status probe.
   slippageBps,
   feesBps,
+  // Market data source ('v1' | 'v2'). Emitted (via dataSourceFieldsForRequest —
+  // present only for 'v2') on the TOP-LEVEL body AND on every inlined child
+  // ``portfolio`` sub-body, exactly as the cost fields are: a composed v2
+  // portfolio must not compute its children against v1. The value is a single
+  // global per-run setting, so the child sub-body stays byte-identical to a
+  // standalone v2 child body → shared backend cache key (key-parity invariant).
+  // Must be passed identically by the compute path AND the cache-status probe.
+  dataSource,
   _depth = 0,
 }) {
   const apiLegs = {};
@@ -85,6 +94,10 @@ export function buildPortfolioComputeBody({
   // so a 0-bps compute stays byte-identical to a pre-feature payload at every
   // depth, and children carry no cost keys (byte-identity invariant).
   const costFields = costFieldsForRequest({ slippageBps, feesBps });
+  // Same one-shot-and-reuse treatment as ``costFields``: the top-level body and
+  // every inlined child sub-body carry the identical source field, and v1 emits
+  // {} so a v1 body is byte-identical to a pre-feature payload at every depth.
+  const dataSourceFields = dataSourceFieldsForRequest(dataSource);
 
   for (const leg of legs) {
     if (leg.type === 'portfolio') {
@@ -162,6 +175,9 @@ export function buildPortfolioComputeBody({
           // The parent's roll overlay never touches a portfolio leg, so the
           // child's internal rolls are charged exactly once (no double-charge).
           ...costFields,
+          // Market data source on the child too (present only for v2) — a
+          // composed v2 portfolio must not silently compute v1 children.
+          ...dataSourceFields,
         },
       };
     } else if (leg.type === 'signal') {
@@ -253,6 +269,8 @@ export function buildPortfolioComputeBody({
       // discarded (the parent re-emits them onto the inlined child sub-body via
       // ``costFields`` above), so guard on depth to keep childBuilt.body clean.
       ...(_depth === 0 ? costFields : {}),
+      // Market data source — same depth guard as the cost fields.
+      ...(_depth === 0 ? dataSourceFields : {}),
     },
     missing: [...new Set(missing)],
     missingByLeg,
