@@ -112,7 +112,11 @@ from tcg.core.api._series_fetch import (
     make_signal_fetcher,
 )
 from tcg.core.api._serializers import nan_safe_floats
-from tcg.core.api._v2_preconditions import check_v2_preconditions
+from tcg.core.api._v2_preconditions import (
+    check_v2_option_coverage_floor,
+    check_v2_preconditions,
+    collect_v2_option_roots,
+)
 from tcg.core.api.common import (
     DataSource,
     error_response,
@@ -1238,6 +1242,26 @@ async def compute_signal(
         signal = parse_signal(body.spec, resolved_inputs=resolved_inputs)
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
+
+    if body.data_source != "v1":
+        # E7 option coverage floor — the ONE v2 precondition that needs a query,
+        # so it runs here rather than in the pure checker above. Deferred until
+        # after basket resolution because a SAVED basket's legs are not on the
+        # wire (the payload carries only its id), and an option leg reached
+        # through a basket needs the same floor as a directly-named one.
+        roots = collect_v2_option_roots(
+            body.model_dump(mode="json"), data_source=body.data_source
+        )
+        roots |= {
+            inst.collection
+            for inp in resolved_inputs
+            if isinstance(inp, _ResolvedBasketInput)
+            for inst, _weight in inp.legs
+            if isinstance(inst, InstrumentOptionStream) and inst.collection
+        }
+        await check_v2_option_coverage_floor(
+            roots, svc, start_date, data_source=body.data_source
+        )
 
     indicators: dict[str, IndicatorSpecInput] = {}
     for ind_spec in body.indicators:

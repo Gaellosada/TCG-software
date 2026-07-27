@@ -16,9 +16,12 @@ STRING, not by the exception class. These errors therefore declare
 subclassing :class:`DataAccessError` as the frozen cross-worker API requires.
 
 That pairing is deliberate but is the one wart here: the class says
-"storage backend failure" while the payload says "validation error". Nothing
-in ``tcg`` catches ``DataAccessError`` outside ``tcg/data/_sql/instruments.py``
-(where it is only re-raised), so the mismatch is inert today. The clean fix is
+"storage backend failure" while the payload says "validation error". The two
+places in ``tcg`` that catch ``DataAccessError`` — ``tcg/data/_sql/instruments.py``
+and ``tcg/data/_v2_compat/_sql_v2.py`` — only re-raise it, preserving the
+subclass, so the mismatch is inert today. Adding a handler that SWALLOWS or
+downgrades a ``DataAccessError`` on a v2 path would turn an actionable 400 into
+a 502, which is what makes this sentence worth keeping true. The clean fix is
 a dedicated ``"v2_unavailable": 400`` entry in ``STATUS_MAP`` — an edit to an
 existing file, and therefore Wave 3a's call, not this module's.
 """

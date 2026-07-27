@@ -22,9 +22,15 @@ engine is one v2 can serve.
 
 Scope
 -----
-Every check below is PURE (no DB) and runs only for ``data_source != "v1"``.
-The one precondition that needs a query — the option coverage floor (spec §11
-E7) — stays in ``portfolio.py`` where it already has a service handle.
+:func:`check_v2_preconditions` and everything it calls is PURE (no DB). The one
+precondition that needs a query — the option coverage floor (spec §11 E7) —
+lives here too, as :func:`check_v2_option_coverage_floor`, taking the service as
+a plain argument. It used to sit inline in ``portfolio.py``; that left the
+signals route without a floor check at all, so a v2 signal starting before the
+EW3 floor silently returned a short curve that read as a strategy difference
+against the v1 run. Both routes now call the same helper.
+
+Everything in this module no-ops for ``data_source == "v1"``.
 
 What is deliberately NOT checked here: futures/index coverage floors (no
 ``price_trade_date_coverage`` on the service protocol — a documented gap, not an
@@ -34,8 +40,10 @@ non-blocking warning rather than an error.
 
 from __future__ import annotations
 
-from typing import Any, Iterator, Mapping
+from datetime import date
+from typing import Any, Iterable, Iterator, Mapping
 
+from tcg.data.protocols import MarketDataService
 from tcg.data._v2_compat import (
     EW_OBJECT_BY_CYCLE,
     V2_OPTIONS_COLLECTION,
@@ -97,9 +105,11 @@ def _check_option_node(node: Mapping[str, Any]) -> None:
         raise V2UnsupportedCycle(str(cycle))
 
     # Stream. ``mid`` is the model DEFAULT and by far the most common stream in
-    # saved signals, and v2 has no bid/ask at all — so without this check the
-    # single most likely v2 option run is exactly the one that dies as an
-    # unattributable all-NaN curve.
+    # saved signals, and v2 cannot serve it — so without this check the single
+    # most likely v2 option run is exactly the one that dies as an
+    # unattributable all-NaN curve. Only streams ``OptionStreamLabel`` actually
+    # admits are listed in ``V2_UNAVAILABLE_OPTION_STREAMS``; there is no point
+    # guarding a spelling the request model already rejects.
     stream = node.get("stream")
     if isinstance(stream, str) and stream in V2_UNAVAILABLE_OPTION_STREAMS:
         raise V2UnsupportedField(stream)
@@ -148,6 +158,63 @@ def check_v2_preconditions(payload: Mapping[str, Any], *, data_source: str) -> N
             check(node)
         except V2DataUnavailable as exc:
             raise ValidationError(f"{_label(path)}: {exc}") from exc
+
+
+def collect_v2_option_roots(
+    payload: Mapping[str, Any], *, data_source: str
+) -> set[str]:
+    """Option collections named anywhere in *payload*, at any nesting depth.
+
+    Reuses the same walk as :func:`check_v2_preconditions`, so a shape the
+    precondition checker reaches is a shape the coverage floor reaches too —
+    the two cannot drift apart. Returns an empty set for ``data_source == "v1"``
+    so the caller's loop is a no-op on the frozen path (Sign 1).
+
+    Basket legs resolved from the DB are NOT in the payload (a saved basket ref
+    is just an id on the wire); the signals route unions those in separately.
+    """
+    if data_source == "v1":
+        return set()
+    roots: set[str] = set()
+    for _path, node in _iter_typed_nodes(payload, ""):
+        if node.get("type") in _OPTION_TYPES:
+            collection = node.get("collection")
+            if isinstance(collection, str) and collection:
+                roots.add(collection)
+    return roots
+
+
+async def check_v2_option_coverage_floor(
+    roots: Iterable[str],
+    svc: MarketDataService,
+    start_date: date | None,
+    *,
+    data_source: str,
+) -> None:
+    """Reject a v2 run that starts before the warehouse has option data (E7).
+
+    v2's option series begin years after v1's (EW1/EW2/EW4 ≈ 2011, EW3 from
+    2016-02-22). An earlier start fails nowhere below — it silently returns a
+    SHORTER curve, which read against a v1 run of the same spec looks like a
+    strategy difference rather than a data gap. Fail loudly and NAME the floor.
+
+    This is the ONE precondition that needs a query, which is why it takes *svc*
+    rather than living in the pure checker. It no-ops for ``data_source == "v1"``
+    (Sign 1), for an open-ended start, and for a run with no option legs — so
+    the common case costs zero round-trips.
+    """
+    if data_source == "v1" or start_date is None:
+        return
+    for root in sorted(set(roots)):
+        first, _last = await svc.option_trade_date_coverage(root)
+        if first is not None and start_date < first:
+            raise ValidationError(
+                f'Data source "v2" has no {root} option data before '
+                f"{first.isoformat()}, but this run starts "
+                f"{start_date.isoformat()}. Move the start date to "
+                f"{first.isoformat()} or later, or switch this run to data "
+                f'source "v1".'
+            )
 
 
 def _label(path: str) -> str:

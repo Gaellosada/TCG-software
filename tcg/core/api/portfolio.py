@@ -30,7 +30,11 @@ from tcg.core.api._options_materialise import materialise_option_streams
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.cache import DiskResultCache, canonical_hash
 from tcg.core.api.common import DataSource, get_market_data, get_market_data_for
-from tcg.core.api._v2_preconditions import check_v2_preconditions
+from tcg.core.api._v2_preconditions import (
+    check_v2_option_coverage_floor,
+    check_v2_preconditions,
+    collect_v2_option_roots,
+)
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
     IndicatorSpecIn,
@@ -1723,11 +1727,10 @@ async def _check_v2_option_legs(
     leg while v2 can only return weeklies, so serving it would silently compare
     two different strategies.
 
-    **Start before the v2 floor (spec E7).** v2's option series begin years after
-    v1's (EW1/EW2/EW4 ≈ 2011, EW3 from 2016-02-22). An earlier start fails
-    nowhere below — it silently returns a SHORTER curve, which read against a v1
-    run of the same spec looks like a strategy difference rather than a data gap.
-    Fail loudly and NAME the floor.
+    **Start before the v2 floor (spec E7).** Delegated to
+    :func:`check_v2_option_coverage_floor`, which the SIGNALS route calls too —
+    the rationale is written there. It used to be inline here, which left the
+    signals path with no floor check at all.
 
     No-ops entirely for ``data_source="v1"`` (Sign 1) and for a portfolio with no
     option legs; the floor check additionally no-ops for an open-ended start.
@@ -1735,26 +1738,21 @@ async def _check_v2_option_legs(
     if body.data_source == "v1":
         return
 
+    payload = body.model_dump(mode="json")
+
     # The PURE preconditions — collection, cycle, stream — for every leg at
     # every nesting depth (composed children, signal legs, basket legs).
-    check_v2_preconditions(body.model_dump(mode="json"), data_source=body.data_source)
+    check_v2_preconditions(payload, data_source=body.data_source)
 
-    option_legs = {
-        label: leg for label, leg in body.legs.items() if leg.type == "option_stream"
-    }
-    if start_date is None:
-        return
-    roots = {leg.collection for leg in option_legs.values() if leg.collection}
-    for root in sorted(roots):
-        first, _last = await svc.option_trade_date_coverage(root)
-        if first is not None and start_date < first:
-            raise ValidationError(
-                f'Data source "v2" has no {root} option data before '
-                f"{first.isoformat()}, but this run starts "
-                f"{start_date.isoformat()}. Move the start date to "
-                f"{first.isoformat()} or later, or switch this run to data "
-                f'source "v1".'
-            )
+    # Roots come from the same walk as the preconditions rather than from
+    # ``body.legs`` alone, so an option nested inside a signal or basket leg
+    # gets the same floor as a top-level one.
+    await check_v2_option_coverage_floor(
+        collect_v2_option_roots(payload, data_source=body.data_source),
+        svc,
+        start_date,
+        data_source=body.data_source,
+    )
 
 
 async def _compute_portfolio_uncached(

@@ -499,6 +499,54 @@ async def test_signals_route_rejects_unservable_v2_instruments(
     assert expected_fragment in resp.json()["message"]
 
 
+_FLOOR_OPTION_INSTRUMENT = {
+    "type": "option_stream",
+    "collection": "OPT_SP_500",
+    "option_type": "P",
+    "maturity": {"kind": "end_of_month", "offset_months": 0},
+    "selection": {"kind": "by_delta", "target": -0.10, "tolerance": 0.2},
+    "stream": "close",
+    "cycle": "W3 Friday",
+}
+
+
+async def test_signals_route_enforces_the_v2_option_floor(signals_client, services):
+    """E7 on the SIGNALS route — the half that was missing.
+
+    Every pure precondition passes here (weekly cycle, servable collection,
+    servable stream), so nothing below the route objects: the run reaches the
+    engine and comes back starting at the v2 EW3 floor instead of 2013. Read
+    against the v1 run of the same definition that is a five-year data gap
+    wearing the costume of a strategy difference — exactly what this feature
+    exists to prevent.
+    """
+    services["v2"].option_trade_date_coverage = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2026, 7, 21))
+    )
+    body = _signal_body(
+        _FLOOR_OPTION_INSTRUMENT, data_source="v2", start="2013-01-01", end="2020-06-30"
+    )
+    resp = await signals_client.post("/api/signals/compute", json=body)
+
+    assert resp.status_code == 400, resp.text
+    message = resp.json()["message"]
+    assert "2016-02-22" in message  # names the floor
+    assert "2013-01-01" in message  # and what was asked for
+    assert "OPT_SP_500" in message  # and which root
+
+
+async def test_signals_route_v1_never_consults_the_v2_floor(signals_client, services):
+    """Sign 1 — the same definition on v1 must not reach the floor at all."""
+    body = _signal_body(
+        _FLOOR_OPTION_INSTRUMENT, data_source="v1", start="2013-01-01", end="2020-06-30"
+    )
+    with contextlib.suppress(Exception):
+        await signals_client.post("/api/signals/compute", json=body)
+
+    services["v2"].option_trade_date_coverage.assert_not_awaited()
+    assert services["v1"].option_trade_date_coverage.await_count == 0
+
+
 async def test_signals_route_v1_is_unaffected(signals_client):
     """Sign 1 — the same body on v1 must never see a v2 precondition."""
     instrument = {"type": "spot", "collection": "FUT_VIX", "instrument_id": "FUT_VIX_X"}
