@@ -49,6 +49,9 @@ describe('V2_LIMITATIONS', () => {
     expect(all).toContain('2016-02-22');
     expect(all).toContain('2010-06-07');
     expect(all).toContain('2026-06-12');
+    // The SAFE common end is the EARLIEST v1 end (futures), not the options end:
+    // a user who clamps to 2026-06-12 still overruns v1 on a futures/index leg.
+    expect(all).toContain('2026-06-10');
     expect(all).toContain('2026-07-21');
     expect(all).toMatch(/NaN/);
   });
