@@ -78,31 +78,39 @@ describe('usePortfolio — data source', () => {
     );
   });
 
-  it('the cache-get key carries data_source only on v2', async () => {
+  it('the cache-get key carries the source PER LEG only on v2 (no top-level field)', async () => {
     const { result } = renderHook(() => usePortfolio());
     act(() => { result.current.addLeg(INSTR_LEG); });
     await waitFor(() => expect(getPortfolioCachedResult).toHaveBeenCalled());
-    // v1 (default) — no source on the key body.
-    expect(getPortfolioCachedResult.mock.calls[0][0].dataSource).toBeUndefined();
+    // v1 (default) — no source on the key body, nor on the leg.
+    const first = getPortfolioCachedResult.mock.calls[0][0];
+    expect(first.dataSource).toBeUndefined();          // no top-level field
+    expect('data_source' in first.legs.SPX).toBe(false); // leg omits it on v1
 
+    // Flipping the page default seeds v2 onto the (unset) leaf via the fold.
     act(() => { result.current.setDataSource('v2'); });
     await waitFor(() => {
       const last = getPortfolioCachedResult.mock.calls.at(-1)[0];
-      expect(last.dataSource).toBe('v2');
+      expect(last.dataSource).toBeUndefined();          // still no top-level field
+      expect(last.legs.SPX.data_source).toBe('v2');     // per-leg source
     });
   });
 
-  it('Compute sends dataSource undefined on v1 and "v2" on v2', async () => {
+  it('Compute sends the source PER LEG (v2), never as a top-level field', async () => {
     const { result } = renderHook(() => usePortfolio());
     act(() => { result.current.addLeg(INSTR_LEG); });
     await waitFor(() => expect(result.current.overlapRange).not.toBeNull());
 
     await act(async () => { await result.current.handleCalculate(); });
     expect(computePortfolio).toHaveBeenCalled();
-    expect(computePortfolio.mock.calls.at(-1)[0].dataSource).toBeUndefined();
+    const v1Call = computePortfolio.mock.calls.at(-1)[0];
+    expect(v1Call.dataSource).toBeUndefined();
+    expect('data_source' in v1Call.legs.SPX).toBe(false);
 
     act(() => { result.current.setDataSource('v2'); });
     await act(async () => { await result.current.handleCalculate(); });
-    expect(computePortfolio.mock.calls.at(-1)[0].dataSource).toBe('v2');
+    const v2Call = computePortfolio.mock.calls.at(-1)[0];
+    expect(v2Call.dataSource).toBeUndefined();
+    expect(v2Call.legs.SPX.data_source).toBe('v2');
   });
 });

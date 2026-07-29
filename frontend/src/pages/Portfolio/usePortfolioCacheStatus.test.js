@@ -177,17 +177,21 @@ describe('usePortfolioCacheStatus', () => {
       initialProps: props('v1'),
     });
     await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalledTimes(1), { timeout: 2000 });
-    // v1 emits no wire field at all (byte-identity with the pre-feature payload).
-    expect(getPortfolioCacheStatus.mock.calls[0][0][0].data_source).toBeUndefined();
+    // v1 emits no wire field at all (byte-identity) — not top-level, not per-leg.
+    const v1Body = getPortfolioCacheStatus.mock.calls[0][0][0];
+    expect(v1Body.data_source).toBeUndefined();
+    expect('data_source' in v1Body.legs.NDX).toBe(false);
 
     // Flip the source; the row is memoized, so only a source-aware signature
-    // invalidates it.
+    // invalidates it. PER-INSTRUMENT: the source rides the LEG, not a top-level
+    // body field, so the re-probed body carries it on legs.NDX.
     act(() => rerender(props('v2')));
     await waitFor(
       () => expect(getPortfolioCacheStatus.mock.calls.length).toBeGreaterThanOrEqual(2),
       { timeout: 2000 },
     );
     const lastCall = getPortfolioCacheStatus.mock.calls[getPortfolioCacheStatus.mock.calls.length - 1];
-    expect(lastCall[0][0].data_source).toBe('v2');
+    expect(lastCall[0][0].data_source).toBeUndefined();
+    expect(lastCall[0][0].legs.NDX.data_source).toBe('v2');
   });
 });

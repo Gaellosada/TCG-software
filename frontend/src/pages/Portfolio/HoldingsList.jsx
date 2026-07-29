@@ -4,7 +4,29 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import { formatInstrument } from './formatInstrument';
 import styles from './HoldingsList.module.css';
 
-const COL_COUNT = 7;
+const COL_COUNT = 8;
+
+// Per-instrument market-data source selector shown in the Holdings table for
+// every LEAF leg (instrument / continuous / option / composed portfolio).
+// Writes ``leg.dataSource`` ('v1' default clears the key so it is omitted from
+// the persisted spec + the wire — byte-identity). Signal legs carry their
+// source per input (edited on the Signals page), so they show no selector here.
+function LegSourceSelect({ leg, index, onUpdateLeg, disabled }) {
+  return (
+    <select
+      className={styles.sourceSelect}
+      data-testid={`leg-datasource-${leg.id}`}
+      title="Market data source for this instrument (v1 = tcg_instruments, v2 = new star schema). Saved with the portfolio."
+      value={leg.dataSource === 'v2' ? 'v2' : 'v1'}
+      disabled={disabled}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => onUpdateLeg(index, { dataSource: e.target.value === 'v2' ? 'v2' : undefined })}
+    >
+      <option value="v1">v1</option>
+      <option value="v2">v2</option>
+    </select>
+  );
+}
 
 /**
  * Displays portfolio holdings with editable weights and remove buttons.
@@ -109,6 +131,7 @@ export default function HoldingsList({
                 <th className={styles.thLabel}>Label</th>
                 <th className={styles.thType}>Type</th>
                 <th className={styles.thInstrument}>Instrument</th>
+                <th className={styles.thSource}>Source</th>
                 <th className={styles.thRange}>Start Date</th>
                 <th className={styles.thRange}>End Date</th>
                 <th className={styles.thWeight}>Weight</th>
@@ -184,21 +207,6 @@ export default function HoldingsList({
                                 {portfolioRefStatus[leg.id] === 'loading' ? 'resolving…' : 'portfolio'}
                               </span>
                             )}
-                            {/* TEMP(per-pf-datasource): per-child market-data
-                                source, so a composed portfolio can put one child
-                                on v1 and another on v2 to compare them. Compute-
-                                time only — NOT persisted (legsToWire drops it). */}
-                            {' '}
-                            <select
-                              data-testid={`portfolio-datasource-${leg.id}`}
-                              title="Market data source for this child (v1 vs v2 — for comparison). Not saved."
-                              value={leg.dataSource || 'v1'}
-                              onClick={(e) => e.stopPropagation()}
-                              onChange={(e) => onUpdateLeg(index, { dataSource: e.target.value })}
-                            >
-                              <option value="v1">v1</option>
-                              <option value="v2">v2</option>
-                            </select>
                           </span>
                         ) : leg.type === 'option_stream' ? (
                           <span {...editTriggerProps(leg, index)}>
@@ -223,6 +231,23 @@ export default function HoldingsList({
                             <span className={styles.instrumentPrimary}>{leg.symbol}</span>
                             <span className={styles.instrumentSecondary}>{leg.collection}</span>
                           </span>
+                        )}
+                      </td>
+                      <td className={styles.sourceCell}>
+                        {isSignal ? (
+                          <span
+                            className={styles.instrumentSecondary}
+                            title="Signal legs carry a market-data source per input (edit on the Signals page)."
+                          >
+                            per input
+                          </span>
+                        ) : (
+                          <LegSourceSelect
+                            leg={leg}
+                            index={index}
+                            onUpdateLeg={onUpdateLeg}
+                            disabled={readOnly}
+                          />
                         )}
                       </td>
                       <td className={styles.rangeCell}>

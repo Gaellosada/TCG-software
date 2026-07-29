@@ -38,6 +38,11 @@ export function getChildPortfolioId(leg) {
  * builder + backend guard.
  */
 export async function resolveLegRange(leg, { queryClient, dataSource = 'v1' }, _depth = 0) {
+  // PER-INSTRUMENT: this leg's coverage floor (esp. the option E7 floor, whose
+  // history differs sharply between v1 and v2) must come from the leg's OWN
+  // source, falling back to the build/page default, else v1 — mirroring the
+  // compute builder's ``leg.dataSource || dataSource`` fold.
+  const effSource = leg.dataSource || dataSource;
   if (leg.type === 'portfolio') {
     // Composed leg: its available range is the OVERLAP of its referenced child's
     // legs (the same grid the backend/compute builder use). Without this, a
@@ -54,7 +59,9 @@ export async function resolveLegRange(leg, { queryClient, dataSource = 'v1' }, _
       const childLegs = persistedDocToLegs(child);
       if (childLegs.length === 0) return { id: leg.id, start: null, end: null };
       const childResults = await Promise.all(
-        childLegs.map((cl) => resolveLegRange(cl, { queryClient, dataSource }, _depth + 1)),
+        // The child's legs inherit THIS composed leg's effective source as their
+        // fold default (a child leg with its own source still wins inside).
+        childLegs.map((cl) => resolveLegRange(cl, { queryClient, dataSource: effSource }, _depth + 1)),
       );
       const overlap = overlapRangeOf(childResults);
       return { id: leg.id, start: overlap?.start ?? null, end: overlap?.end ?? null };
@@ -66,7 +73,7 @@ export async function resolveLegRange(leg, { queryClient, dataSource = 'v1' }, _
     return fetchSignalLegRange(leg);
   }
   if (leg.type === 'option_stream') {
-    return fetchOptionLegRange(queryClient, leg, dataSource);
+    return fetchOptionLegRange(queryClient, leg, effSource);
   }
   try {
     let dates;

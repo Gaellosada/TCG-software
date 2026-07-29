@@ -75,13 +75,14 @@ export function buildPortfolioComputeBody({
   // passed identically by the compute path AND the cache-status probe.
   slippageBps,
   feesBps,
-  // Market data source ('v1' | 'v2'). Emitted (via dataSourceFieldsForRequest —
-  // present only for 'v2') on the TOP-LEVEL body AND on every inlined child
-  // ``portfolio`` sub-body, exactly as the cost fields are: a composed v2
-  // portfolio must not compute its children against v1. The value is a single
-  // global per-run setting, so the child sub-body stays byte-identical to a
-  // standalone v2 child body → shared backend cache key (key-parity invariant).
-  // Must be passed identically by the compute path AND the cache-status probe.
+  // Market data source DEFAULT ('v1' | 'v2') for this build. PER-INSTRUMENT:
+  // this is NOT a separate top-level wire field. It is the fold fallback every
+  // LEAF inherits when it carries no ``dataSource`` of its own (precedence:
+  // leg.dataSource → this default → v1). Each emitted leaf carries its own
+  // ``data_source`` (via dataSourceFieldsForRequest, present only for 'v2'), so
+  // a v1/absent leaf emits NO key and a pure-v1 body is byte-identical to a
+  // pre-feature payload. The page-level "set all v1/v2" control is a SEED into
+  // this default (folded per leaf), never emitted as its own body field.
   dataSource,
   _depth = 0,
 }) {
@@ -94,10 +95,6 @@ export function buildPortfolioComputeBody({
   // so a 0-bps compute stays byte-identical to a pre-feature payload at every
   // depth, and children carry no cost keys (byte-identity invariant).
   const costFields = costFieldsForRequest({ slippageBps, feesBps });
-  // Same one-shot-and-reuse treatment as ``costFields``: the top-level body and
-  // every inlined child sub-body carry the identical source field, and v1 emits
-  // {} so a v1 body is byte-identical to a pre-feature payload at every depth.
-  const dataSourceFields = dataSourceFieldsForRequest(dataSource);
 
   for (const leg of legs) {
     if (leg.type === 'portfolio') {
@@ -144,6 +141,11 @@ export function buildPortfolioComputeBody({
         availableIndicators,
         resolvePortfolio,
         resolveChildRange,
+        // The child's fold default = the composed leg's own source, else the
+        // parent default. So an unset leaf INSIDE the child inherits the child's
+        // effective source (rule 2 within the child); a leaf with its own source
+        // still wins (rule 1). Emitted per-leaf only when 'v2'.
+        dataSource: leg.dataSource || dataSource,
         _depth: _depth + 1,
       });
       // Propagate the child's own diagnostics so the parent surfaces them.
@@ -175,12 +177,13 @@ export function buildPortfolioComputeBody({
           // The parent's roll overlay never touches a portfolio leg, so the
           // child's internal rolls are charged exactly once (no double-charge).
           ...costFields,
-          // Market data source on the child. TEMP(per-pf-datasource): each
-          // composed child carries its OWN source (``leg.dataSource``) when set,
-          // else it inherits the parent's — so a composed portfolio can mix a v1
-          // child and a v2 child to compare them. Still emitted only for v2, so a
-          // v1 child stays byte-identical to a pre-feature payload. The backend
-          // (_evaluate_portfolio_leg) binds each child to the matching service.
+          // Market data source on the child sub-body — its inheritance DEFAULT
+          // (B.1): the composed leg's OWN source when set, else the parent's.
+          // A composed child therefore carries BOTH a body-level default (here)
+          // AND optional per-leaf overrides on its inlined legs (above, via the
+          // recursion's ``dataSource`` fold). Emitted only for 'v2', so a v1
+          // child stays byte-identical to a pre-feature payload. The backend
+          // binds each child + its leaves to the matching service.
           ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
         },
       };
@@ -206,6 +209,8 @@ export function buildPortfolioComputeBody({
         maturity: leg.maturity,
         selection: leg.selection,
         stream: leg.stream,
+        // Per-instrument source (leg's own → build default → v1); 'v2' only.
+        ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
       };
       // An option PRICE leg (mid/bs_mid) is hold-ON-only; always send hold for a
       // premium leg (covers legacy legs too). Level streams (iv/greeks) never hold.
@@ -231,6 +236,8 @@ export function buildPortfolioComputeBody({
         collection: leg.collection,
         strategy: leg.strategy || 'front_month',
         adjustment: leg.adjustment || 'none',
+        // Per-instrument source (leg's own → build default → v1); 'v2' only.
+        ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
       };
       if (leg.cycle) {
         apiLegs[leg.label].cycle = leg.cycle;
@@ -246,6 +253,8 @@ export function buildPortfolioComputeBody({
         type: 'instrument',
         collection: leg.collection,
         symbol: leg.symbol,
+        // Per-instrument source (leg's own → build default → v1); 'v2' only.
+        ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
       };
     }
   }
@@ -273,8 +282,10 @@ export function buildPortfolioComputeBody({
       // discarded (the parent re-emits them onto the inlined child sub-body via
       // ``costFields`` above), so guard on depth to keep childBuilt.body clean.
       ...(_depth === 0 ? costFields : {}),
-      // Market data source — same depth guard as the cost fields.
-      ...(_depth === 0 ? dataSourceFields : {}),
+      // NOTE: no top-level ``data_source`` field. Per-instrument, the source
+      // rides each LEAF (and each composed child's body-level default), never a
+      // separate run-level body field. A pure-v1 body is thus byte-identical to
+      // a pre-feature payload.
     },
     missing: [...new Set(missing)],
     missingByLeg,
