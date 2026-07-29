@@ -39,4 +39,25 @@ describe('DataSourceSelector', () => {
     render(<DataSourceSelector value="v1" onChange={() => {}} disabled />);
     expect(screen.getByTestId('data-source-select').disabled).toBe(true);
   });
+
+  it('renders a custom seed-only label + helper subtext when provided', () => {
+    render(
+      <DataSourceSelector
+        value="v1"
+        onChange={() => {}}
+        label="Default source for new instruments"
+        helper="Seeds new instruments; existing rows win."
+      />,
+    );
+    expect(screen.getByText('Default source for new instruments')).toBeTruthy();
+    expect(screen.getByTestId('data-source-helper').textContent).toContain('existing rows win');
+  });
+
+  it('scopes all data-testids under a custom testId base (no collision with a page instance)', () => {
+    render(<DataSourceSelector value="v1" onChange={() => {}} testId="picker-data-source" />);
+    expect(screen.getByTestId('picker-data-source-select')).toBeTruthy();
+    expect(screen.getByTestId('picker-data-source-selector')).toBeTruthy();
+    // The default ids are NOT present under a custom base.
+    expect(screen.queryByTestId('data-source-select')).toBeNull();
+  });
 });

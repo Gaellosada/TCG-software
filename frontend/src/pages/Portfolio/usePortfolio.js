@@ -169,6 +169,12 @@ export default function usePortfolio() {
           // premium_notional (which wipes a low-premium leg to -100%).
           sizing_mode: leg.sizing_mode ?? null,
           futures_reference: leg.futures_reference ?? null,
+          // Per-instrument market-data source, seeded at creation (via the
+          // AddHoldingModal source selector). Emit-only-when-v2: a v1/absent
+          // source adds NO key, so a fresh v1 leg is byte-identical to before
+          // and persists/wires no ``data_source`` (storage.js + the compute
+          // builder both key off ``dataSource === 'v2'``).
+          ...(leg.dataSource === 'v2' ? { dataSource: 'v2' } : {}),
         },
       ];
     });

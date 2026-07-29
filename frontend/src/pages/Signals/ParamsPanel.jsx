@@ -62,14 +62,20 @@ function ParamsPanel({
             data-testid="initial-capital"
           />
         </div>
-        {/* Per-run market data source — the SAME shared component the Portfolio
-            page renders (no page-specific variant), placed directly above Run
-            because the workflow is "run it on v1, run it on v2, compare". It
-            renders the v2 capability limits itself when v2 is selected. */}
+        {/* SEED-ONLY default market-data source — the SAME shared component the
+            Portfolio page renders (no page-specific variant). NOT a per-run wire
+            field: it only supplies the DEFAULT each input inherits when it has
+            not set its own source (the request builder folds it in per input via
+            ``data_source ?? dataSource``; there is no top-level ``data_source``).
+            Existing per-input choices in the Inputs panel always win. It renders
+            the v2 capability limits itself when v2 is selected. */}
         {onDataSourceChange && (
           <div className={styles.dataSourceRow}>
             <DataSourceSelector
               id="signal-data-source-select"
+              label="Default source for new inputs"
+              helper="Seeds the market-data source for inputs you add. Each input keeps its own source (set it per row in the Inputs panel); changing this never overrides an existing input."
+              title="Default market-data source seeded onto inputs that don't set their own. Not a per-run override — existing per-input choices win."
               value={dataSource}
               onChange={onDataSourceChange}
               disabled={running}

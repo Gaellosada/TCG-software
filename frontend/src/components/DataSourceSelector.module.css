@@ -41,6 +41,14 @@
   opacity: 0.6;
 }
 
+/* Seed-only explainer — clarifies the control sets a DEFAULT, not a per-run
+   override. Quiet secondary text; deliberately not an error/warning colour. */
+.helper {
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
 /* v2 capability notes — informational, deliberately NOT an error colour. */
 .notes {
   border: 1px solid var(--border-primary);

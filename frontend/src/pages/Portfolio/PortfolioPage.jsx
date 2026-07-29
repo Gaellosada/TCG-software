@@ -772,14 +772,19 @@ function PortfolioPage({ mode = 'pure' }) {
 
         {/* ── Configuration bar ── */}
         <div className={`${styles.section} ${styles.configBar}`}>
-          {/* Per-run market data source — sits directly above Compute because the
-              workflow is "run it on v1, run it on v2, compare". NOT inside the
-              locked-editor fieldset: the source is a property of the RUN, not of
-              the saved portfolio, so a locked portfolio can still be computed
-              against either source. Renders the v2 capability limits itself. */}
+          {/* SEED-ONLY default market-data source — NOT a per-run wire field.
+              This control only supplies the DEFAULT source that each instrument
+              inherits when it has not set its own (the builder folds it in per
+              leaf via ``leg.dataSource || dataSource``; there is no top-level
+              ``data_source`` on the request). Existing per-instrument choices in
+              the Holdings table always win. Relabelled so users don't read it as
+              "the source this run reads from". Renders the v2 limits itself. */}
           <div className={styles.dataSourceRow}>
             <DataSourceSelector
               id="portfolio-data-source-select"
+              label="Default source for new instruments"
+              helper="Seeds the market-data source for instruments you add. Each instrument keeps its own source (set it per row in the table); changing this never overrides an existing row."
+              title="Default market-data source seeded onto instruments that don't set their own. Not a per-run override — existing per-instrument choices win."
               value={portfolio.dataSource}
               onChange={portfolio.setDataSource}
               disabled={portfolio.loading}
@@ -1041,6 +1046,9 @@ function PortfolioPage({ mode = 'pure' }) {
         }}
         readOnly={portfolio.persistedLocked}
         referenceDate={portfolio.startDate}
+        // Seed the modal's per-instrument source selector from the page-level
+        // default (the "Default source for new instruments" control above).
+        defaultSource={portfolio.dataSource}
       />
 
       {/* ── Add Signal Modal ── */}
