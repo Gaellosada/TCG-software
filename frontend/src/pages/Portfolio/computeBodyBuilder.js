@@ -175,9 +175,13 @@ export function buildPortfolioComputeBody({
           // The parent's roll overlay never touches a portfolio leg, so the
           // child's internal rolls are charged exactly once (no double-charge).
           ...costFields,
-          // Market data source on the child too (present only for v2) — a
-          // composed v2 portfolio must not silently compute v1 children.
-          ...dataSourceFields,
+          // Market data source on the child. TEMP(per-pf-datasource): each
+          // composed child carries its OWN source (``leg.dataSource``) when set,
+          // else it inherits the parent's — so a composed portfolio can mix a v1
+          // child and a v2 child to compare them. Still emitted only for v2, so a
+          // v1 child stays byte-identical to a pre-feature payload. The backend
+          // (_evaluate_portfolio_leg) binds each child to the matching service.
+          ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
         },
       };
     } else if (leg.type === 'signal') {

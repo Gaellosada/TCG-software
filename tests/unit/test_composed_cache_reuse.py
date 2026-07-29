@@ -105,9 +105,9 @@ def compute_spy(monkeypatch):
     real = portfolio._compute_portfolio_uncached
     calls = {"n": 0}
 
-    async def _spy(body, svc, classify, repo):
+    async def _spy(body, svc, classify, repo, **kwargs):
         calls["n"] += 1
-        return await real(body, svc, classify, repo)
+        return await real(body, svc, classify, repo, **kwargs)
 
     monkeypatch.setattr(portfolio, "_compute_portfolio_uncached", _spy)
     return calls
@@ -180,7 +180,7 @@ class TestKeyParity:
         child_dict = _child_dict(["up", "down"], [60.0, 40.0])
         standalone = PortfolioRequest(**child_dict)  # what /compute parses
         inlined = PortfolioRequest(**child_dict)  # leg.portfolio, own range
-        child_body = _child_request(inlined, use_cache=True, data_source="v1")
+        child_body = _child_request(inlined, use_cache=True)
         assert _portfolio_cache_key(standalone) == _portfolio_cache_key(child_body)
 
     def test_use_cache_does_not_change_child_key(self):
@@ -189,7 +189,7 @@ class TestKeyParity:
         inlined = PortfolioRequest(**child_dict)
         # use_cache is stripped from the key at all levels → parity regardless.
         assert _portfolio_cache_key(standalone) == _portfolio_cache_key(
-            _child_request(inlined, use_cache=False, data_source="v1")
+            _child_request(inlined, use_cache=False)
         )
 
     def test_different_range_keys_differently(self):
@@ -198,8 +198,8 @@ class TestKeyParity:
         narrowed = PortfolioRequest(
             **_child_dict(["up", "down"], [60.0, 40.0], start="2024-01-05")
         )
-        assert _portfolio_cache_key(_child_request(own, True, "v1")) != _portfolio_cache_key(
-            _child_request(narrowed, True, "v1")
+        assert _portfolio_cache_key(_child_request(own, True)) != _portfolio_cache_key(
+            _child_request(narrowed, True)
         )
 
 
@@ -469,7 +469,7 @@ class TestKeyParityWithCosts:
         )
         standalone = PortfolioRequest(**child_dict)
         inlined = PortfolioRequest(**child_dict)
-        child_body = _child_request(inlined, use_cache=True, data_source="v1")
+        child_body = _child_request(inlined, use_cache=True)
         assert _portfolio_cache_key(standalone) == _portfolio_cache_key(child_body)
 
     async def test_composed_reuses_standalone_costed_child_cache(

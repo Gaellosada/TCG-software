@@ -152,13 +152,12 @@ def _nest(depth: int) -> dict:
 
 
 @pytest.mark.parametrize("depth", [1, 2, 5])
-def test_child_request_forces_the_parent_source_at_any_depth(depth):
-    """``_child_request`` OVERRIDES the child's own ``data_source``.
-
-    The child is computed with the parent's already-bound service, so a child
-    body that kept its own (stale, or v1-by-default) value would key a v2-read
-    result under a v1 key. Depth is exercised because ``model_copy`` is shallow:
-    each level must be rewritten as the recursion descends, not once at the top.
+def test_child_request_keeps_the_childs_own_source_at_any_depth(depth):
+    """TEMP(per-pf-datasource): ``_child_request`` NO LONGER overrides the
+    child's ``data_source`` — each child keeps its own so a composed portfolio
+    can mix v1/v2 children. The caller (``_evaluate_portfolio_leg``) binds the
+    matching service via ``svc_for``, so body and reality stay in lock-step
+    per-child (key-parity vs a standalone compute of the child on its own source).
     """
     parent = PortfolioRequest(**_nest(depth))
     parent = parent.model_copy(update={"data_source": "v2"})
@@ -167,22 +166,42 @@ def test_child_request_forces_the_parent_source_at_any_depth(depth):
     for _ in range(depth):
         child = node.legs["child"].portfolio
         assert child is not None
-        # Every child arrives with the default "v1" ...
-        assert child.data_source == "v1"
-        rewritten = portfolio._child_request(child, True, node.data_source)
-        # ... and leaves carrying the parent's source.
-        assert rewritten.data_source == "v2"
+        assert child.data_source == "v1"        # arrives with its own value ...
+        rewritten = portfolio._child_request(child, True)
+        assert rewritten.data_source == "v1"    # ... and KEEPS it (no forcing)
         node = rewritten
 
 
-async def test_composed_child_is_computed_on_the_parent_source(client, services):
-    """Depth-1 composed leg: the child must NOT fall back to v1."""
-    resp = await client.post(
-        "/api/portfolio/compute", json=_nest(1) | {"data_source": "v2"}
-    )
+async def test_composed_child_is_computed_on_its_own_source(client, services):
+    """TEMP(per-pf-datasource): a composed leg computes each child on the CHILD's
+    own ``data_source``, not the parent's — the basis for v1-vs-v2 comparison."""
+    body = _nest(1) | {"data_source": "v1"}          # parent v1
+    body["legs"]["child"]["portfolio"]["data_source"] = "v2"   # child explicitly v2
+    resp = await client.post("/api/portfolio/compute", json=body)
     assert resp.status_code == 200, resp.text
-    assert services["v2"].get_aligned_prices.await_count == 1
-    assert services["v1"].get_aligned_prices.await_count == 0
+    assert services["v2"].get_aligned_prices.await_count == 1   # child ran on v2
+    assert services["v1"].get_aligned_prices.await_count == 0   # NOT the parent's v1
+
+
+async def test_composed_mixes_v1_and_v2_children(client, services):
+    """TEMP(per-pf-datasource): the feature — ONE composed portfolio comparing a
+    v1 child and a v2 child, each computed on its own warehouse."""
+    body = {
+        "legs": {
+            "a": {"type": "portfolio", "portfolio": _body() | {"data_source": "v1"}},
+            "b": {"type": "portfolio", "portfolio": _body() | {"data_source": "v2"}},
+        },
+        "weights": {"a": 50.0, "b": 50.0},
+        "rebalance": "none",
+        "return_type": "normal",
+        "start": "2024-01-01",
+        "end": "2024-12-31",
+        "data_source": "v1",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    assert services["v1"].get_aligned_prices.await_count == 1   # child a → v1
+    assert services["v2"].get_aligned_prices.await_count == 1   # child b → v2
 
 
 async def test_signal_leg_is_evaluated_on_the_parent_source(monkeypatch, client):

@@ -825,16 +825,21 @@ function PortfolioPage({ mode = 'pure' }) {
             {/* Compute button — a single fresh POST to /portfolio/compute; the
                 backend serves from its own cache transparently. Reads
                 "Recompute" while the active config is already cached. */}
+            {/* Disabled while ranges resolve so Compute can never fire with a
+                STALE window: switching source (v1↔v2) re-resolves coverage
+                asynchronously, and v2's option floor (~2011) differs from v1's
+                (~2005) — computing mid-resolve would send the old start and trip
+                the v2 E7 floor error for a run the settled window would serve. */}
             <button
               className={styles.computeBtn}
               type="button"
               onClick={portfolio.handleCalculate}
-              disabled={portfolio.legs.length === 0 || portfolio.loading}
+              disabled={portfolio.legs.length === 0 || portfolio.loading || portfolio.rangesLoading}
               data-testid="portfolio-compute-btn"
             >
               {portfolio.loading
                 ? 'Computing...'
-                : (showRecomputeLabel ? 'Recompute' : 'Compute')}
+                : (portfolio.rangesLoading ? 'Loading range…' : (showRecomputeLabel ? 'Recompute' : 'Compute'))}
             </button>
           </div>
 

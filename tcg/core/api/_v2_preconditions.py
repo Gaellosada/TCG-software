@@ -45,7 +45,6 @@ from typing import Any, Iterable, Iterator, Mapping
 
 from tcg.data.protocols import MarketDataService
 from tcg.data._v2_compat import (
-    EW_OBJECT_BY_CYCLE,
     V2_OPTIONS_COLLECTION,
     V2_SUPPORTED_COLLECTIONS,
     V2_UNAVAILABLE_OPTION_STREAMS,
@@ -56,6 +55,7 @@ from tcg.data._v2_compat import (
     V2UnsupportedField,
 )
 from tcg.types.errors import ValidationError
+from tcg.types.options import WEEKLY_CYCLE_TAGS
 
 #: Leg/instrument ``type`` discriminators that carry an option contract. The
 #: portfolio router and the signal instrument refs happen to use the same
@@ -101,7 +101,14 @@ def _check_option_node(node: Mapping[str, Any]) -> None:
     cycle = node.get("cycle")
     if cycle is None:
         raise V2MissingCycleFilter()
-    if not isinstance(cycle, str) or cycle not in EW_OBJECT_BY_CYCLE:
+    # v2 serves every WEEKLY cycle: the four concrete ``"W# Friday"`` tags AND
+    # the UI's generic "Weekly" umbrella ``"W"`` — the reader routes ``"W"`` to
+    # all four EW objects (see ``options_reader._route_objects``). Accept exactly
+    # what the reader serves (``WEEKLY_CYCLE_TAGS``); the monthly ``"M"`` /
+    # quarterly ``"Q"`` / empty ``""`` cases still fall through and raise. Using
+    # ``EW_OBJECT_BY_CYCLE`` here (concrete tags only) was stricter than the
+    # reader and rejected the serviceable "all weeklies" run.
+    if not isinstance(cycle, str) or cycle not in WEEKLY_CYCLE_TAGS:
         raise V2UnsupportedCycle(str(cycle))
 
     # Stream. ``mid`` is the model DEFAULT and by far the most common stream in

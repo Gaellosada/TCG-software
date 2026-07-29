@@ -21,7 +21,7 @@ Coverage:
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import AsyncClient
@@ -291,6 +291,52 @@ async def test_coverage_data_access_error_502(client: AsyncClient, mock_svc):
     resp = await client.get("/api/options/coverage", params={"root": "OPT_SP_500"})
     assert resp.status_code == 502
     assert resp.json()["error_type"] == "options_data_access_error"
+
+
+async def test_coverage_data_source_v2_reads_the_v2_warehouse(
+    client: AsyncClient, mock_svc
+):
+    """``data_source=v2`` resolves coverage from the v2 service, NOT v1.
+
+    v2's option history starts years after v1's, so the slider/compute window
+    must reflect the v2 floor — otherwise a v2 run seeds a v1-era start and
+    trips the E7 floor at compute for a run the correct window would serve.
+    """
+    app = client._transport.app  # type: ignore[attr-defined]
+    v2_svc = MagicMock()
+    v2_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2011, 6, 15), date(2026, 7, 21))
+    )
+    app.state.market_data_v2_compat = v2_svc
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "data_source": "v2"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "root": "OPT_SP_500",
+        "start": "2011-06-15",  # v2 floor, not v1's 2005-12-01
+        "end": "2026-07-21",
+    }
+    v2_svc.option_trade_date_coverage.assert_awaited_once_with("OPT_SP_500")
+    mock_svc.option_trade_date_coverage.assert_not_awaited()  # v1 never consulted
+
+
+async def test_coverage_defaults_to_v1_when_source_absent(
+    client: AsyncClient, mock_svc
+):
+    """No ``data_source`` param ⇒ v1 (byte-identical to the pre-parameter path)."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2005, 12, 1), date(2025, 6, 30))
+    )
+    resp = await client.get("/api/options/coverage", params={"root": "OPT_SP_500"})
+    assert resp.status_code == 200
+    assert resp.json()["start"] == "2005-12-01"
+    mock_svc.option_trade_date_coverage.assert_awaited_once_with("OPT_SP_500")
 
 
 # ---------------------------------------------------------------------------

@@ -67,8 +67,13 @@ export async function getOptionExpirations(root) {
 //     collection's true history, not an artificial recent default).
 // ---------------------------------------------------------------------------
 
-export async function getOptionCoverage(root) {
+export async function getOptionCoverage(root, dataSource) {
   const qp = new URLSearchParams({ root: String(root) });
+  // Emit data_source ONLY for v2 (v1 is the default) so the v1 request stays
+  // byte-identical to the pre-parameter path. v2 option history starts years
+  // after v1, so a v2 leg must resolve its span from the v2 warehouse or the
+  // seeded compute window would begin before v2 has data (E7 floor at compute).
+  if (dataSource === 'v2') qp.set('data_source', 'v2');
   return fetchClassified(`/options/coverage?${qp}`);
 }
 

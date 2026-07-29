@@ -184,6 +184,21 @@ export default function HoldingsList({
                                 {portfolioRefStatus[leg.id] === 'loading' ? 'resolving…' : 'portfolio'}
                               </span>
                             )}
+                            {/* TEMP(per-pf-datasource): per-child market-data
+                                source, so a composed portfolio can put one child
+                                on v1 and another on v2 to compare them. Compute-
+                                time only — NOT persisted (legsToWire drops it). */}
+                            {' '}
+                            <select
+                              data-testid={`portfolio-datasource-${leg.id}`}
+                              title="Market data source for this child (v1 vs v2 — for comparison). Not saved."
+                              value={leg.dataSource || 'v1'}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => onUpdateLeg(index, { dataSource: e.target.value })}
+                            >
+                              <option value="v1">v1</option>
+                              <option value="v2">v2</option>
+                            </select>
                           </span>
                         ) : leg.type === 'option_stream' ? (
                           <span {...editTriggerProps(leg, index)}>

@@ -1578,7 +1578,7 @@ def _portfolio_cache_key(body: PortfolioRequest) -> str:
 
 
 def _child_request(
-    child: PortfolioRequest, use_cache: bool, data_source: DataSource
+    child: PortfolioRequest, use_cache: bool
 ) -> PortfolioRequest:
     """Build the compute sub-request for a composed leg's child (fund-of-funds).
 
@@ -1597,19 +1597,19 @@ def _child_request(
     """
     # model_copy preserves EVERY current and future PortfolioRequest field
     # verbatim (so a schema addition can never silently diverge the composed
-    # child key from a standalone compute), overriding ONLY ``use_cache`` and
-    # ``data_source``:
+    # child key from a standalone compute), overriding ONLY ``use_cache``:
     #
     # * ``use_cache`` propagates the parent's cache preference (a
     #   use_cache=False compute recomputes every child fresh) and is stripped
     #   from the key anyway, so it never breaks unified reuse (SC2).
-    # * ``data_source`` is FORCED to the parent's. The child is computed with
-    #   the parent's already-bound ``svc``, so a child body claiming a different
-    #   source would key a v2-read result under a v1 key — the worst failure
-    #   mode available here. Forcing it keeps body and reality in lock-step, and
-    #   preserves key-parity with a standalone compute of that child ON THE SAME
-    #   SOURCE (which is the only compute it is comparable to).
-    return child.model_copy(update={"use_cache": use_cache, "data_source": data_source})
+    #
+    # TEMP(per-pf-datasource): the child's OWN ``data_source`` is now KEPT (was
+    # forced to the parent's). The caller (_evaluate_portfolio_leg) binds the
+    # service that matches this child body's data_source via ``svc_for``, so
+    # body and reality stay in lock-step per-child — key-parity holds against a
+    # standalone compute of the child ON ITS OWN SOURCE. This lets a composed
+    # portfolio mix v1 and v2 children for comparison.
+    return child.model_copy(update={"use_cache": use_cache})
 
 
 async def _evaluate_portfolio_leg(
@@ -1620,6 +1620,7 @@ async def _evaluate_portfolio_leg(
     repo: WriteRepository,
     use_cache: bool,
     data_source: DataSource,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Evaluate a composed-portfolio leg to a synthetic equity price series.
 
@@ -1678,13 +1679,26 @@ async def _evaluate_portfolio_leg(
     # wrapper with a body byte-identical to a standalone compute of that child, so
     # an already-computed child is served from the SAME on-disk cache entry
     # (unified reuse; the key-parity invariant, SC2). See ``_child_request``.
-    child_body = _child_request(child, use_cache, data_source)
+    child_body = _child_request(child, use_cache)
+    # TEMP(per-pf-datasource): bind the service that matches THIS child's own
+    # data_source (not the parent's). ``svc_for`` resolves a source→service; it
+    # is only supplied by the top-level route (which holds the ``Request``).
+    # When absent (any non-route caller) we fall back to the parent's ``svc`` —
+    # byte-identical to the previous behaviour. Rebinding the classifier from the
+    # child's service too keeps them from ever drifting (they are identical
+    # today, but this is free correctness).
+    if svc_for is not None:
+        child_svc = svc_for(child_body.data_source)
+        child_classify = child_svc.asset_class_for
+    else:
+        child_svc, child_classify = svc, classify
     # Recurse into the CACHE WRAPPER, not the route function: the route's only
-    # extra job is binding ``svc`` from ``body.data_source``, and we already hold
-    # the parent's bound service (which ``_child_request`` has just made the
-    # child body agree with). Going through the route would need a ``Request``
-    # this layer does not have.
-    child_result = await _compute_portfolio_cached(child_body, svc, classify, repo)
+    # extra job is binding ``svc`` from ``body.data_source``, which we have just
+    # done per-child. Going through the route would need a ``Request`` this layer
+    # does not have.
+    child_result = await _compute_portfolio_cached(
+        child_body, child_svc, child_classify, repo, svc_for=svc_for
+    )
 
     # Convert the child response back to the engine's YYYYMMDD-int date grid +
     # float64 equity array.  ``portfolio_equity`` was passed through
@@ -1760,6 +1774,7 @@ async def _compute_portfolio_uncached(
     svc: MarketDataService,
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
 ) -> dict:
     """Compute a weighted portfolio with rebalancing and return full analytics.
 
@@ -2042,6 +2057,7 @@ async def _compute_portfolio_uncached(
             repo,
             body.use_cache,
             body.data_source,
+            svc_for=svc_for,  # TEMP(per-pf-datasource): route-supplied source→service resolver
         )
         portfolio_leg_dates_map[label] = pf_dates
         portfolio_leg_closes[label] = pf_equity
@@ -2685,7 +2701,15 @@ async def compute_portfolio(
     if body.data_source != "v1":
         svc = get_market_data_for(request, body.data_source)
         classify = svc.asset_class_for
-    return await _compute_portfolio_cached(body, svc, classify, repo)
+    # TEMP(per-pf-datasource): supply a source→service resolver so a composed
+    # leg can bind each child to its OWN data_source (v1/v2). Only this route
+    # holds the ``Request`` needed to reach both services on app.state, so the
+    # resolver is created here and threaded down; every other caller passes None
+    # and keeps the single-service behaviour.
+    def _svc_for(ds: DataSource) -> MarketDataService:
+        return get_market_data_for(request, ds)
+
+    return await _compute_portfolio_cached(body, svc, classify, repo, svc_for=_svc_for)
 
 
 async def _compute_portfolio_cached(
@@ -2693,8 +2717,14 @@ async def _compute_portfolio_cached(
     svc: MarketDataService,
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
 ) -> dict:
     """Compute a weighted portfolio, served from the on-disk result cache.
+
+    TEMP(per-pf-datasource): ``svc_for`` (source→service resolver, route-only)
+    is threaded through so a composed leg can compute each child against its own
+    ``data_source``. Defaults to None → the parent ``svc`` is used everywhere
+    (byte-identical to before) for every non-route caller.
 
     The result is content-addressed on the request body (children already
     inlined), so:
@@ -2721,7 +2751,7 @@ async def _compute_portfolio_cached(
     # Cache opt-out: skip the cache on both ends — never read, never write.
     if not body.use_cache:
         started = time.perf_counter()
-        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        result = await _compute_portfolio_uncached(body, svc, classify, repo, svc_for=svc_for)
         computed_ms = int((time.perf_counter() - started) * 1000)
         return {**result, "from_cache": False, "computed_ms": computed_ms}
 
@@ -2736,7 +2766,7 @@ async def _compute_portfolio_cached(
 
     async def _compute() -> dict:
         compute_started = time.perf_counter()
-        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        result = await _compute_portfolio_uncached(body, svc, classify, repo, svc_for=svc_for)
         meta["computed_ms"] = int((time.perf_counter() - compute_started) * 1000)
         return result
 

@@ -104,4 +104,37 @@ describe('buildPortfolioComputeBody — data_source', () => {
     const v2 = buildPortfolioComputeBody({ ...baseArgs, legs: pureLegs, dataSource: 'v2' }).body;
     expect(JSON.stringify(v1)).not.toBe(JSON.stringify(v2));
   });
+
+  // TEMP(per-pf-datasource): a composed child's OWN dataSource override wins over
+  // the parent's, so one composed portfolio can mix a v1 child and a v2 child.
+  describe('per-child dataSource override (composed comparison)', () => {
+    it("uses the child leg's own dataSource, overriding the parent's", () => {
+      const legs = [{ ...composedLegs[0], dataSource: 'v2' }];
+      // Parent is v1, but the child leg is pinned to v2 → child sub-body is v2.
+      const { body } = buildPortfolioComputeBody({
+        ...baseArgs, legs, resolvePortfolio, dataSource: 'v1',
+      });
+      expect('data_source' in body).toBe(false);                       // parent stays v1
+      expect(body.legs.BuildingBlock.portfolio.data_source).toBe('v2'); // child pinned v2
+    });
+
+    it('inherits the parent source when the child has no override', () => {
+      const { body } = buildPortfolioComputeBody({
+        ...baseArgs, legs: composedLegs, resolvePortfolio, dataSource: 'v2',
+      });
+      expect(body.legs.BuildingBlock.portfolio.data_source).toBe('v2');
+    });
+
+    it('mixes v1 and v2 children in one composed body', () => {
+      const legs = [
+        { id: 1, label: 'A', type: 'portfolio', portfolioId: 'child-1', weight: 50, dataSource: 'v1' },
+        { id: 2, label: 'B', type: 'portfolio', portfolioId: 'child-1', weight: 50, dataSource: 'v2' },
+      ];
+      const { body } = buildPortfolioComputeBody({
+        ...baseArgs, legs, resolvePortfolio, dataSource: 'v1',
+      });
+      expect('data_source' in body.legs.A.portfolio).toBe(false);   // v1 child → no key
+      expect(body.legs.B.portfolio.data_source).toBe('v2');         // v2 child → keyed
+    });
+  });
 });

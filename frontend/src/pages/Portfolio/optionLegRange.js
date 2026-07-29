@@ -16,14 +16,14 @@
 import { getOptionCoverage } from '../../api/options';
 import { queryKeys } from '../../queryKeys';
 
-export async function fetchOptionLegRange(queryClient, leg) {
+export async function fetchOptionLegRange(queryClient, leg, dataSource = 'v1') {
   if (!leg.collection) {
     return { id: leg.id, start: null, end: null };
   }
   try {
     const res = await queryClient.fetchQuery({
-      queryKey: queryKeys.market.optionCoverage(leg.collection),
-      queryFn: () => getOptionCoverage(leg.collection),
+      queryKey: queryKeys.market.optionCoverage(leg.collection, dataSource),
+      queryFn: () => getOptionCoverage(leg.collection, dataSource),
     });
     const start = res?.start || null;
     const end = res?.end || null;

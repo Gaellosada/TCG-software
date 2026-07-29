@@ -29,7 +29,7 @@ import logging
 from datetime import date
 from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
@@ -56,8 +56,10 @@ from tcg.core.api._options_wiring import (
 )
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import (
+    DataSource,
     error_response,
     get_market_data,
+    get_market_data_for,
     progress_clear,
     progress_register,
     progress_snapshot,
@@ -306,8 +308,11 @@ async def list_expirations(
 
 @router.get("/coverage")
 async def get_coverage(
+    request: Request,
     root: str = Query(..., description="OPT_* collection name"),
-    svc: MarketDataService = Depends(get_market_data),
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
     """First/last bar ``trade_date`` for *root* (the collection's data span).
 
@@ -317,9 +322,17 @@ async def get_coverage(
     history (~2005/2006 for SPX/VIX) instead of an artificial recent default.
     ``start``/``end`` are ``null`` when the root has no usable contract.
 
+    ``data_source`` picks the warehouse the coverage is read from. This matters
+    because v2's option history starts YEARS after v1's (~2011 vs ~2005), so a
+    v2 run seeded from v1 coverage would begin before v2 has any data and fail
+    the E7 floor check at compute. The slider/compute window must therefore
+    reflect the SELECTED source's real span. ``"v1"`` returns the exact object
+    the default dependency would (byte-identical to the pre-parameter path).
+
     Errors:
         ``OptionsDataAccessError`` from the reader → 502.
     """
+    svc = get_market_data_for(request, data_source)
     first, last = await svc.option_trade_date_coverage(root)
     return {
         "root": root,
@@ -1014,6 +1027,9 @@ class OptionStreamRequest(BaseModel):
     start: str
     end: str
     task_id: str | None = None
+    # TEMP(per-pf-datasource / debug): pick the warehouse for this stream so
+    # v1 vs v2 roll markers can be compared on an identical isolated leg.
+    data_source: DataSource = "v1"
 
 
 # GREEKS_GATED_STREAMS is imported from _models_options (shared with
@@ -1036,6 +1052,7 @@ async def get_stream_progress(task_id: str) -> dict:
 async def materialise_streams(
     body: OptionStreamRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     svc: MarketDataService = Depends(get_market_data),
 ) -> dict | JSONResponse:
     """Materialise one or more option stream refs over a date range.
@@ -1052,6 +1069,10 @@ async def materialise_streams(
         materialise_option_streams,
     )
     from tcg.data._utils import int_to_iso
+
+    # TEMP(per-pf-datasource / debug): bind the requested warehouse.
+    if body.data_source != "v1":
+        svc = get_market_data_for(request, body.data_source)
 
     # ── 1. Validate request ──
 

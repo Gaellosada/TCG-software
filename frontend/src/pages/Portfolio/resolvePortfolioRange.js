@@ -37,7 +37,7 @@ export function getChildPortfolioId(leg) {
  * nested inside a child is not resolved (returns nulls), mirroring the compute
  * builder + backend guard.
  */
-export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
+export async function resolveLegRange(leg, { queryClient, dataSource = 'v1' }, _depth = 0) {
   if (leg.type === 'portfolio') {
     // Composed leg: its available range is the OVERLAP of its referenced child's
     // legs (the same grid the backend/compute builder use). Without this, a
@@ -54,7 +54,7 @@ export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
       const childLegs = persistedDocToLegs(child);
       if (childLegs.length === 0) return { id: leg.id, start: null, end: null };
       const childResults = await Promise.all(
-        childLegs.map((cl) => resolveLegRange(cl, { queryClient }, _depth + 1)),
+        childLegs.map((cl) => resolveLegRange(cl, { queryClient, dataSource }, _depth + 1)),
       );
       const overlap = overlapRangeOf(childResults);
       return { id: leg.id, start: overlap?.start ?? null, end: overlap?.end ?? null };
@@ -66,7 +66,7 @@ export async function resolveLegRange(leg, { queryClient }, _depth = 0) {
     return fetchSignalLegRange(leg);
   }
   if (leg.type === 'option_stream') {
-    return fetchOptionLegRange(queryClient, leg);
+    return fetchOptionLegRange(queryClient, leg, dataSource);
   }
   try {
     let dates;
@@ -199,9 +199,11 @@ export async function childRangeAccessorFor(legs, { queryClient }) {
  * @returns {Promise<{ ranges: Record<string,{start,end}>, overlapRange: {start,end}|null }>}
  * Never throws (each leg read is wrapped).
  */
-export async function resolvePortfolioRange(legs, { queryClient }) {
+export async function resolvePortfolioRange(legs, { queryClient, dataSource = 'v1' }) {
   if (!legs || legs.length === 0) return { ranges: {}, overlapRange: null };
-  const results = await Promise.all(legs.map((leg) => resolveLegRange(leg, { queryClient })));
+  const results = await Promise.all(
+    legs.map((leg) => resolveLegRange(leg, { queryClient, dataSource })),
+  );
   const ranges = {};
   for (const r of results) ranges[r.id] = { start: r.start, end: r.end };
   return { ranges, overlapRange: overlapRangeOf(results) };

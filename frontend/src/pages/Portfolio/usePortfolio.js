@@ -107,8 +107,12 @@ export default function usePortfolio() {
     setRangesLoading(true);
 
     // Resolve each leg's coverage + the portfolio overlap via the SHARED
-    // resolver (also used to seed the compute window).
-    resolvePortfolioRange(legs, { queryClient })
+    // resolver (also used to seed the compute window). ``dataSource`` is
+    // threaded through because v2's option history starts years after v1's — a
+    // v2 run seeded from v1 coverage begins before v2 has data and fails the E7
+    // floor at compute. Re-resolving on a source switch moves the slider floor
+    // (and the seeded start) onto the selected warehouse's real span.
+    resolvePortfolioRange(legs, { queryClient, dataSource })
       .then(({ ranges, overlapRange: overlap }) => {
         if (cancelled) return;
         setLegDateRanges(ranges);
@@ -120,7 +124,7 @@ export default function usePortfolio() {
       });
 
     return () => { cancelled = true; };
-  }, [rangesKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rangesKey, dataSource]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Leg management ── */
 
