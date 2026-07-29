@@ -81,8 +81,16 @@ export const queryKeys = {
     /** GET /options/expirations?root= — distinct expirations for a root */
     optionExpirations: (root) => ['market', 'optionExpirations', root],
 
-    /** GET /options/coverage?root= — first/last bar trade_date (data span) */
-    optionCoverage: (root, dataSource = 'v1') => ['market', 'optionCoverage', root, dataSource],
+    /**
+     * GET /options/coverage?root= — first/last bar trade_date (data span).
+     * ``cycle`` scopes the span to one expiration cycle (e.g. 'W3 Friday',
+     * whose data starts years after the collection). ''/undefined/null all
+     * collapse to null (the "whole collection" case) so a cycle-less leg keeps
+     * the same cache entry as before. Positional — appended LAST so an existing
+     * cycle-less key is unchanged in meaning.
+     */
+    optionCoverage: (root, dataSource = 'v1', cycle = null) =>
+      ['market', 'optionCoverage', root, dataSource, cycle || null],
 
     /** GET /options/contract/{coll}/{id} — per-contract time series */
     optionContract: (collection, contractId, { computeMissing, dateFrom, dateTo } = {}) => [

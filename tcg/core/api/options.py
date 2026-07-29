@@ -322,12 +322,48 @@ async def list_expirations(
 # ---------------------------------------------------------------------------
 
 
+async def _cycle_trade_date_coverage(
+    svc: MarketDataService, root: str, cycle: str
+) -> tuple[date | None, date | None]:
+    """Min/max ``trade_date`` over the contracts of ONE ``expiration_cycle``.
+
+    Cycle-scoped coverage cannot go through ``option_trade_date_coverage`` (a
+    collection-wide, cycle-blind heuristic), so it is derived source-agnostically
+    from :meth:`MarketDataService.list_option_expirations_by_date` — which BOTH
+    the v1 service and the v2 adapter already expose with a ``cycle`` filter, and
+    whose keys ARE the listed ``trade_date``s.  The scan is bounded to the
+    collection's real data window (from the cheap collection-coverage heuristic)
+    so the planner prunes to the spanned partitions.  Returns ``(None, None)``
+    when the collection has no coverage or the cycle lists no bar in the window.
+    """
+    coll_first, coll_last = await svc.option_trade_date_coverage(root)
+    if coll_first is None or coll_last is None:
+        return None, None
+    by_date = await svc.list_option_expirations_by_date(
+        root, coll_first, coll_last, cycle=cycle
+    )
+    if not by_date:
+        return None, None
+    keys = by_date.keys()
+    return min(keys), max(keys)
+
+
 @router.get("/coverage")
 async def get_coverage(
     request: Request,
     root: str = Query(..., description="OPT_* collection name"),
     data_source: DataSource = Query(
         "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
+    expiration_cycle: str | None = Query(
+        None,
+        description=(
+            "Optional ``OptionContractDoc.expiration_cycle`` filter.  When "
+            "provided, coverage is scoped to the min/max ``trade_date`` of THAT "
+            "cycle only (e.g. an EW3 / \"W3 Friday\" cycle starts years after the "
+            "collection).  Empty string is coerced to ``None`` (collection-wide, "
+            "byte-identical to the pre-parameter path)."
+        ),
     ),
 ) -> dict:
     """First/last bar ``trade_date`` for *root* (the collection's data span).
@@ -345,11 +381,23 @@ async def get_coverage(
     reflect the SELECTED source's real span. ``"v1"`` returns the exact object
     the default dependency would (byte-identical to the pre-parameter path).
 
+    ``expiration_cycle`` (optional) narrows the coverage to a single cycle.  A
+    specific cycle (e.g. EW3 / "W3 Friday") can start much later than the
+    collection (whose span is the union of ALL cycles), so an option leg pinned
+    to that cycle would otherwise resolve a portfolio range beginning before the
+    cycle has any data — producing a misleading flat pre-data segment.  When the
+    param is OMITTED (or empty) the behaviour is UNCHANGED and byte-identical to
+    the collection-wide path.
+
     Errors:
         ``OptionsDataAccessError`` from the reader → 502.
     """
     svc = get_market_data_for(request, data_source)
-    first, last = await svc.option_trade_date_coverage(root)
+    cycle = expiration_cycle or None
+    if cycle is None:
+        first, last = await svc.option_trade_date_coverage(root)
+    else:
+        first, last = await _cycle_trade_date_coverage(svc, root, cycle)
     return {
         "root": root,
         "start": first.isoformat() if first else None,

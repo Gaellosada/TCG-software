@@ -73,13 +73,20 @@ export async function getOptionExpirations(root, dataSource) {
 //     collection's true history, not an artificial recent default).
 // ---------------------------------------------------------------------------
 
-export async function getOptionCoverage(root, dataSource) {
+export async function getOptionCoverage(root, dataSource, expirationCycle) {
   const qp = new URLSearchParams({ root: String(root) });
   // Emit data_source ONLY for v2 (v1 is the default) so the v1 request stays
   // byte-identical to the pre-parameter path. v2 option history starts years
   // after v1, so a v2 leg must resolve its span from the v2 warehouse or the
   // seeded compute window would begin before v2 has data (E7 floor at compute).
   if (dataSource === 'v2') qp.set('data_source', 'v2');
+  // Emit expiration_cycle ONLY when the caller passes a truthy cycle. Omitted →
+  // the URL is byte-identical to the pre-cycle path (the backend then reports
+  // whole-collection coverage). Provided → the span is scoped to that cycle
+  // (e.g. 'W3 Friday' data starts ~2016, years after the collection floor).
+  if (expirationCycle != null && String(expirationCycle).trim() !== '') {
+    qp.set('expiration_cycle', String(expirationCycle));
+  }
   return fetchClassified(`/options/coverage?${qp}`);
 }
 
