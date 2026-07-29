@@ -25,6 +25,18 @@ import styles from './DataSourceSelector.module.css';
  * @param {boolean=} p.disabled
  * @param {string=}  p.id        select element id (unique per page instance)
  * @param {boolean=} p.showNotes render the v2 limitation notes (default true)
+ * @param {string=}  p.label     control label (default "Data source"). Callers
+ *                               that use the control as a SEED default (not a
+ *                               per-run wire field) pass a seed-only label.
+ * @param {string=}  p.helper    optional sub-text under the row (seed-only
+ *                               explainer). Omitted when null (default).
+ * @param {string=}  p.title     select tooltip. Defaults to the per-run wording;
+ *                               seed sites override it to say so.
+ * @param {string=}  p.testId    base for the data-testids so multiple instances
+ *                               (e.g. a page selector + a modal selector) never
+ *                               collide. Default "data-source" reproduces the
+ *                               original ``data-source-selector`` / ``-select`` /
+ *                               ``-v2-notes`` ids verbatim.
  */
 function DataSourceSelector({
   value,
@@ -32,28 +44,35 @@ function DataSourceSelector({
   disabled = false,
   id = 'data-source-select',
   showNotes = true,
+  label = 'Data source',
+  helper = null,
+  title = 'Which market-data warehouse this run reads from. v1 is the reference; v2 is the new star schema.',
+  testId = 'data-source',
 }) {
   const isV2 = value === DATA_SOURCE_V2;
   return (
-    <div className={styles.wrap} data-testid="data-source-selector">
+    <div className={styles.wrap} data-testid={`${testId}-selector`}>
       <div className={styles.row}>
-        <label className={styles.label} htmlFor={id}>Data source</label>
+        <label className={styles.label} htmlFor={id}>{label}</label>
         <select
           id={id}
           className={styles.select}
           value={value}
           disabled={disabled}
           onChange={(e) => onChange(e.target.value)}
-          data-testid="data-source-select"
-          title="Which market-data warehouse this run reads from. v1 is the reference; v2 is the new star schema."
+          data-testid={`${testId}-select`}
+          title={title}
         >
           {DATA_SOURCE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
       </div>
+      {helper && (
+        <div className={styles.helper} data-testid={`${testId}-helper`}>{helper}</div>
+      )}
       {isV2 && showNotes && (
-        <div className={styles.notes} data-testid="data-source-v2-notes" role="note">
+        <div className={styles.notes} data-testid={`${testId}-v2-notes`} role="note">
           <div className={styles.notesTitle}>Database v2 limits</div>
           <ul className={styles.notesList}>
             {V2_LIMITATIONS.map((text) => (

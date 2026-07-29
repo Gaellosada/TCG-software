@@ -150,3 +150,41 @@ describe('AddHoldingModal — option_stream leg mapping', () => {
     expect(leg.futures_reference).toBe('nearest_on_or_after');
   });
 });
+
+describe('AddHoldingModal — per-instrument data source at creation', () => {
+  it('opts the picker into the source selector and seeds it from the page default (add mode)', () => {
+    render(<AddHoldingModal isOpen onClose={vi.fn()} onAddLeg={vi.fn()} defaultSource="v2" />);
+    expect(capturedPickerProps.showDataSourceSelector).toBe(true);
+    expect(capturedPickerProps.defaultSource).toBe('v2');
+  });
+
+  it('a v2 pick lands dataSource:v2 on the new leg', () => {
+    const onAddLeg = vi.fn();
+    render(<AddHoldingModal isOpen onClose={vi.fn()} onAddLeg={onAddLeg} defaultSource="v2" />);
+    capturedOnSelect({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX', data_source: 'v2' });
+    const leg = onAddLeg.mock.calls[0][0];
+    expect(leg.dataSource).toBe('v2');
+  });
+
+  it('a v1 pick carries NO dataSource key (byte-identity)', () => {
+    const onAddLeg = vi.fn();
+    render(<AddHoldingModal isOpen onClose={vi.fn()} onAddLeg={onAddLeg} defaultSource="v1" />);
+    capturedOnSelect({ type: 'spot', collection: 'INDEX', instrument_id: 'SPX' });
+    const leg = onAddLeg.mock.calls[0][0];
+    expect('dataSource' in leg).toBe(false);
+  });
+
+  it('edit mode seeds the selector from the leg OWN source, not the page default', () => {
+    render(
+      <AddHoldingModal
+        isOpen
+        onClose={vi.fn()}
+        onAddLeg={vi.fn()}
+        onUpdateLeg={vi.fn()}
+        editLeg={{ type: 'continuous', collection: 'FUT_ES', dataSource: 'v2' }}
+        defaultSource="v1"
+      />,
+    );
+    expect(capturedPickerProps.defaultSource).toBe('v2');
+  });
+});

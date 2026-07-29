@@ -4,6 +4,7 @@ import { getOptionRoots } from '../../api/options';
 import { createBasket } from '../../api/persistence';
 import { useBasketsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
 import OptionStreamForm, { buildDefaultOptionStream, validateOptionStream } from '../OptionStreamForm';
+import DataSourceSelector from '../DataSourceSelector';
 import styles from './InstrumentPickerModal.module.css';
 
 /**
@@ -140,6 +141,21 @@ export default function InstrumentPickerModal({
   // Literal[front_month, end_of_month] with no ``rank``), so they leave this
   // false and never surface nth_nearest (offering it there would 422 at run).
   allowNthNearest = false,
+  // PER-INSTRUMENT data source (opt-in). When true, a compact market-data source
+  // selector renders at the top of the modal so a source can be chosen AT
+  // creation instead of defaulting to v1 until the row is edited. It seeds from
+  // ``defaultSource`` and stamps ``data_source: 'v2'`` onto the emitted
+  // descriptor when v2 (never for v1 — byte-identity is preserved exactly as the
+  // per-row selectors do). Default false so every existing caller (Data /
+  // Signals inputs / Indicators series, which already carry their own per-row
+  // selector) is byte-unchanged. NEVER attached to a ``basket`` descriptor: a
+  // basket carries source PER LEG, so a single modal-level source is meaningless
+  // there and the selector is hidden inside the composer.
+  showDataSourceSelector = false,
+  // The value the source selector seeds to on open ('v1' | 'v2'). Callers pass
+  // their page-level default (or, when editing, the entity's own source) so the
+  // modal opens reflecting the effective source rather than a hard v1.
+  defaultSource = 'v1',
 }) {
   const [allCollections, setAllCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
@@ -175,6 +191,11 @@ export default function InstrumentPickerModal({
 
   // Basket composer state — see Composer state machine below.
   const [inBasketComposer, setInBasketComposer] = useState(false);
+
+  // Per-instrument data source chosen in this modal (opt-in; see the
+  // ``showDataSourceSelector`` prop). 'v1' | 'v2'. Seeded from ``defaultSource``
+  // on each open by the effect below.
+  const [source, setSource] = useState(defaultSource === 'v2' ? 'v2' : 'v1');
 
   const overlayRef = useRef(null);
 
@@ -318,6 +339,17 @@ export default function InstrumentPickerModal({
     return () => { cancelled = true; };
   }, [selectedFutCollection]);
 
+  /* ── Seed the per-instrument source from ``defaultSource`` on OPEN ──
+   *
+   * Keyed on ``[isOpen]`` alone (NOT defaultSource) so a parent re-render that
+   * hands a fresh ``defaultSource`` mid-session does not clobber a choice the
+   * user just made in the modal — we seed exactly once per open, mirroring the
+   * ``initialConfig`` seed effect below. */
+  useEffect(() => {
+    if (isOpen) setSource(defaultSource === 'v2' ? 'v2' : 'v1');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
   /* ── ESC to close ── */
   useEffect(() => {
     if (!isOpen) return;
@@ -397,8 +429,16 @@ export default function InstrumentPickerModal({
   // readOnly ⇒ onSelect never fires; create/editable flows are unaffected.
   const emitSelect = useCallback((descriptor) => {
     if (readOnly) return;
-    onSelect(descriptor);
-  }, [readOnly, onSelect]);
+    // Stamp the per-instrument source onto the emitted ref ONLY when the source
+    // selector is enabled AND v2, and NEVER onto a basket (baskets carry source
+    // per leg). A v1 selection adds no key, so a v1 emit is byte-identical to a
+    // pre-feature emit — same emit-only-when-v2 idiom as the per-row selectors.
+    const withSource = (showDataSourceSelector && source === 'v2'
+      && descriptor && descriptor.type !== 'basket')
+      ? { ...descriptor, data_source: 'v2' }
+      : descriptor;
+    onSelect(withSource);
+  }, [readOnly, onSelect, showDataSourceSelector, source]);
 
   const handleSelectInstrument = useCallback(
     (symbol, collection) => {
@@ -525,6 +565,25 @@ export default function InstrumentPickerModal({
 
         {/* Body */}
         <div className={styles.body}>
+          {/* Per-instrument source (opt-in) — lets the source be chosen AT
+              creation. Shown across the spot / futures / options steps (it sits
+              above them all), hidden inside the basket composer where source is
+              a per-leg concern. Uses a distinct testId base so it never collides
+              with a page-level DataSourceSelector mounted behind the modal. */}
+          {showDataSourceSelector && !inBasketComposer && (
+            <div className={styles.dataSourceBar}>
+              <DataSourceSelector
+                id="picker-data-source-select"
+                testId="picker-data-source"
+                label="Source"
+                showNotes={false}
+                title="Market-data source for the instrument you are adding (v1 = tcg_instruments, v2 = new star schema). You can also change it per row after adding."
+                value={source}
+                onChange={setSource}
+                disabled={readOnly}
+              />
+            </div>
+          )}
           {collectionsLoading && (
             <div className={styles.state}>Loading...</div>
           )}
