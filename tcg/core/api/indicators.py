@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import date
 
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -34,12 +34,18 @@ from tcg.core.api._models import (
 from tcg.core.api._options_materialise import (
     _business_dates_in_range,
     _materialise_option_stream,
-    materialise_option_streams,
 )
 from tcg.core.api._serializers import nan_safe_floats
+from tcg.core.api._v2_preconditions import (
+    check_v2_option_coverage_floor,
+    check_v2_preconditions,
+    collect_v2_option_roots,
+)
 from tcg.core.api.common import (
+    DataSource,
+    effective_data_source,
     error_response,
-    get_market_data,
+    get_market_data_for,
     progress_clear,
     progress_register,
     progress_snapshot,
@@ -52,7 +58,7 @@ from tcg.engine.indicator_exec import (
     IndicatorValidationError,
     run_indicator,
 )
-from tcg.types.errors import DataNotFoundError
+from tcg.types.errors import DataNotFoundError, ValidationError
 
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
 
@@ -70,6 +76,11 @@ class IndicatorComputeRequest(BaseModel):
     series: dict[str, SeriesRef]
     start: str | None = None
     end: str | None = None
+    # Inherited-default warehouse for this compute (per-instrument selection):
+    # each series ref carries its OWN ``data_source`` and falls back to this
+    # per-run value when it omitted the field. "v1" (DEFAULT) = the frozen
+    # reference; indicators gain v2 support here for the first time.
+    data_source: DataSource = "v1"
     # Asset-type compatibility guard (Wave 2b). Both fields are optional —
     # the check only fires when BOTH are populated. ``str``-typed at the
     # request boundary so legacy / free-form clients aren't rejected by
@@ -228,9 +239,25 @@ def _count_option_stream_dates(
 async def compute_indicator(
     body: IndicatorComputeRequest,
     background_tasks: BackgroundTasks,
-    svc: MarketDataService = Depends(get_market_data),
+    request: Request,
 ) -> dict:
-    """Execute a user-defined indicator against one or more price series."""
+    """Execute a user-defined indicator against one or more price series.
+
+    Per-instrument v1/v2 selection: each series ref reads from the warehouse
+    matching its own ``data_source`` (inheriting ``body.data_source`` when
+    omitted). ``svc_for`` maps a concrete source → service; ``inst_svc_for``
+    bakes the body default into a ref-source→service map. An all-v1 compute
+    resolves every ref to the same object the old ``Depends(get_market_data)``
+    gave (Sign 1).
+    """
+
+    def svc_for(source: DataSource) -> MarketDataService:
+        return get_market_data_for(request, source)
+
+    def inst_svc_for(ref: SeriesRef) -> MarketDataService:
+        return svc_for(
+            effective_data_source(getattr(ref, "data_source", None), body.data_source)
+        )
 
     # ── 1. Basic request validation ──
 
@@ -257,6 +284,25 @@ async def compute_indicator(
     except ValueError as exc:
         return error_response("validation", str(exc))
 
+    # v2 boundary preconditions — indicators' FIRST v2 support. Per-node: gates
+    # only the v2 refs and no-ops for an all-v1 compute (Sign 1). Without this a
+    # v2 ref the warehouse cannot serve dies as an unattributable all-NaN series
+    # (the engine swallows the reader's typed error); check it here where the
+    # message still names the offending series and the fix.
+    payload = body.model_dump(mode="json")
+    try:
+        check_v2_preconditions(payload, data_source=body.data_source)
+    except ValidationError as exc:
+        return error_response("validation", str(exc))
+    v2_option_roots = collect_v2_option_roots(payload, data_source=body.data_source)
+    if v2_option_roots:
+        try:
+            await check_v2_option_coverage_floor(
+                v2_option_roots, svc_for("v2"), start_date
+            )
+        except ValidationError as exc:
+            return error_response("validation", str(exc))
+
     # Progress tracking: only register when the request involves an
     # option_stream ref (the slow path) AND the FE supplied a task_id.
     # The progress callback ticks once per resolved trade date; the FE
@@ -272,7 +318,10 @@ async def compute_indicator(
         if total > 0:
             progress_task_id = body.task_id
             progress_register(progress_task_id, total)
-            progress_callback = lambda tid=progress_task_id: progress_tick(tid)
+
+            def progress_callback(tid: str = progress_task_id) -> None:
+                progress_tick(tid)
+
             background_tasks.add_task(progress_clear, progress_task_id)
 
     # Param validation (pydantic accepts int/float/bool; we still guard NaN
@@ -309,7 +358,9 @@ async def compute_indicator(
     # Pre-flight validation for option_stream variants — both rules emit a
     # typed 422 BEFORE we touch the database, matching
     # ``_incompatible_asset_response`` precedent.
-    cached_root_metadata: dict[str, object] | None = None
+    # Root metadata is warehouse-specific, so cache it per RESOLVED source (a
+    # mixed v1/v2 compute may need both) instead of a single slot.
+    cached_root_metadata: dict[str, dict[str, object]] = {}
     for label, ref in body.series.items():
         if ref.type != "option_stream":
             continue
@@ -319,12 +370,16 @@ async def compute_indicator(
                 indicator_id=body.indicator_id, label=label
             )
         # Rule 2 — gamma/vega/theta on a no-greeks root.  Cache the
-        # root list across labels in this request.
+        # root list per source across labels in this request.
         if ref.stream in _GREEKS_GATED_STREAMS:
-            if cached_root_metadata is None:
-                roots = await svc.list_option_roots()
-                cached_root_metadata = {r.collection: r for r in roots}
-            root_info = cached_root_metadata.get(ref.collection)
+            ref_svc = inst_svc_for(ref)
+            src_key = effective_data_source(
+                getattr(ref, "data_source", None), body.data_source
+            )
+            if src_key not in cached_root_metadata:
+                roots = await ref_svc.list_option_roots()
+                cached_root_metadata[src_key] = {r.collection: r for r in roots}
+            root_info = cached_root_metadata[src_key].get(ref.collection)
             if root_info is not None and not getattr(root_info, "has_greeks", True):
                 return _stream_unavailable_for_root_response(
                     indicator_id=body.indicator_id,
@@ -335,10 +390,11 @@ async def compute_indicator(
 
     for label, ref in body.series.items():
         diagnostics: list[str | None] | None = None
+        ref_svc = inst_svc_for(ref)
         try:
             match ref.type:
                 case "spot":
-                    series = await svc.get_prices(
+                    series = await ref_svc.get_prices(
                         ref.collection,
                         ref.instrument_id,
                         start=start_date,
@@ -368,7 +424,7 @@ async def compute_indicator(
                             "validation",
                             f"Series label {label!r}: {exc}",
                         )
-                    cseries = await svc.get_continuous(
+                    cseries = await ref_svc.get_continuous(
                         ref.collection,
                         roll_config,
                         start=start_date,
@@ -388,7 +444,7 @@ async def compute_indicator(
                 case "option_stream":
                     materialised = await _materialise_option_stream(
                         ref,
-                        svc=svc,
+                        svc=ref_svc,
                         start_date=start_date,
                         end_date=end_date,
                         progress_callback=progress_callback,

@@ -15,11 +15,25 @@ from fastapi.responses import JSONResponse
 from tcg.data.protocols import MarketDataService, MarketDataServiceV2
 from tcg.types.market import AdjustmentMethod
 
-# The per-run warehouse selector carried on compute request bodies.
+# The per-instrument warehouse selector carried on ref / leg objects (and, as an
+# inherited default, on compute request bodies).
 # ``"v1"`` = ``tcg_instruments`` (the frozen reference), ``"v2"`` =
 # ``tcg_instruments_v2`` through the compat adapter. Declared here so the
 # portfolio and signal request models cannot drift.
 DataSource = Literal["v1", "v2"]
+
+
+def effective_data_source(own: str | None, default: DataSource) -> DataSource:
+    """Resolve the warehouse a ref actually reads from, per the frozen precedence.
+
+    Precedence (highest first): the ref's OWN ``data_source`` (``"v1"``/``"v2"``);
+    else the enclosing body's ``data_source`` (``default``); else — since the
+    per-run field itself defaults to ``"v1"`` — the frozen reference. A ``None``
+    (unset) or any non-literal value inherits ``default``, so a leaf that omitted
+    the field on the wire (the emit-only-when-``"v2"`` rule) inherits the body's
+    source. ``"v1"`` and ``"v2"`` on a ref win over the body default.
+    """
+    return own if own in ("v1", "v2") else default
 
 
 def get_market_data(request: Request) -> MarketDataService:

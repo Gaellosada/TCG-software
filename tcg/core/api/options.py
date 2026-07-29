@@ -899,6 +899,7 @@ def option_stream_ref_to_instrument(
         nav_times=ref.nav_times,
         sizing_mode=ref.sizing_mode,
         futures_reference=ref.futures_reference,
+        data_source=ref.data_source,
     )
 
 
@@ -1027,9 +1028,6 @@ class OptionStreamRequest(BaseModel):
     start: str
     end: str
     task_id: str | None = None
-    # TEMP(per-pf-datasource / debug): pick the warehouse for this stream so
-    # v1 vs v2 roll markers can be compared on an identical isolated leg.
-    data_source: DataSource = "v1"
 
 
 # GREEKS_GATED_STREAMS is imported from _models_options (shared with
@@ -1069,10 +1067,6 @@ async def materialise_streams(
         materialise_option_streams,
     )
     from tcg.data._utils import int_to_iso
-
-    # TEMP(per-pf-datasource / debug): bind the requested warehouse.
-    if body.data_source != "v1":
-        svc = get_market_data_for(request, body.data_source)
 
     # ── 1. Validate request ──
 
@@ -1126,7 +1120,10 @@ async def materialise_streams(
         if total > 0:
             progress_task_id = body.task_id
             progress_register(progress_task_id, total)
-            progress_callback = lambda tid=progress_task_id: progress_tick(tid)
+
+            def progress_callback(tid: str = progress_task_id) -> None:
+                progress_tick(tid)
+
             background_tasks.add_task(progress_clear, progress_task_id)
 
     # ── 3. Materialise ──

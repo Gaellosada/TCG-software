@@ -87,7 +87,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -119,6 +119,7 @@ from tcg.core.api._v2_preconditions import (
 )
 from tcg.core.api.common import (
     DataSource,
+    effective_data_source,
     error_response,
     get_market_data,
     get_market_data_for,
@@ -524,6 +525,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
         instrument: InputInstrument = InstrumentSpot(
             collection=inst_in.collection,
             instrument_id=inst_in.instrument_id,
+            data_source=inst_in.data_source,
         )
     elif isinstance(inst_in, OptionStreamRef):
         if not inst_in.collection:
@@ -557,6 +559,7 @@ def _parse_input(inp_in: _InputIn | _ResolvedBasketInput) -> Input:
             cycle=inst_in.cycle,
             roll_offset=int(inst_in.rollOffset),
             strategy=inst_in.strategy,
+            data_source=inst_in.data_source,
         )
     return Input(id=iid, instrument=instrument, position_cap=cap)
 
@@ -1055,12 +1058,20 @@ async def compute_input_overlap(
     signal: Signal,
     start: date | None,
     end: date | None,
+    *,
+    svc_for: "Callable[[str | None], MarketDataService] | None" = None,
 ) -> tuple[date | None, date | None]:
     """Pre-fetch all input instruments and return the overlapping date range.
 
     Returns ``(start, end)`` clamped to the intersection of all inputs'
     date ranges so the engine only evaluates bars where every input is
     defined — analogous to the portfolio page's aligned-price logic.
+
+    ``svc_for`` (per-instrument v1/v2 selection): when supplied, each leaf's date
+    axis is read from the warehouse matching that leaf's ``data_source``; when
+    ``None``, the single ``svc`` is used — byte-identical to before. The overlap
+    pass MUST use the same per-instrument selection as the fetcher, or a v2 leaf's
+    real (shorter) window would be computed off the v1 axis.
     """
     if len(signal.inputs) <= 1:
         # Preserve the short-circuit for the spot/continuous case
@@ -1092,6 +1103,7 @@ async def compute_input_overlap(
                     start=start,
                     end=end,
                     err_prefix=f"input {inp.id!r}",
+                    svc_for=svc_for,
                 )
             )
         else:
@@ -1102,6 +1114,7 @@ async def compute_input_overlap(
                     start=start,
                     end=end,
                     err_prefix=f"input {inp.id!r}",
+                    svc_for=svc_for,
                 )
             )
 
@@ -1137,12 +1150,20 @@ def _int_yyyymmdd_to_unix_ms(d: int) -> int:
 
 
 def _instrument_payload(inst: InputInstrument) -> dict:
+    # Emit ``data_source`` ONLY when ``"v2"`` (mirrors the wire contract and keeps
+    # a v1 response byte-identical), so the FE can reconstruct the per-instrument
+    # source on a round-trip. Applied to every leaf-carrying branch below.
+    def _ds(payload: dict) -> dict:
+        if getattr(inst, "data_source", None) == "v2":
+            payload["data_source"] = "v2"
+        return payload
+
     if isinstance(inst, InstrumentSpot):
-        return {
+        return _ds({
             "type": "spot",
             "collection": inst.collection,
             "instrument_id": inst.instrument_id,
-        }
+        })
     if isinstance(inst, InstrumentBasket):
         # Kind-discriminated emission so the FE can re-render either
         # shape from the response.  Each leg's ``instrument`` is emitted
@@ -1170,7 +1191,7 @@ def _instrument_payload(inst: InputInstrument) -> dict:
     if isinstance(inst, InstrumentOptionStream):
         from dataclasses import asdict
 
-        return {
+        return _ds({
             "type": "option_stream",
             "collection": inst.collection,
             "option_type": inst.option_type,
@@ -1196,15 +1217,15 @@ def _instrument_payload(inst: InputInstrument) -> dict:
             # (hold mode only); round-trips through ``OptionStreamRef`` (default
             # 1.0).
             "nav_times": float(inst.nav_times),
-        }
-    return {
+        })
+    return _ds({
         "type": "continuous",
         "collection": inst.collection,
         "adjustment": inst.adjustment,
         "cycle": inst.cycle,
         "rollOffset": int(inst.roll_offset),
         "strategy": inst.strategy,
-    }
+    })
 
 
 @router.post("/compute")
@@ -1216,21 +1237,30 @@ async def compute_signal(
 ) -> dict:
     """Evaluate a v4 Signal and return per-input positions + events.
 
-    ``body.data_source`` selects the warehouse. It is bound to a service HERE
-    and nowhere else: ``_resolve_basket_inputs``, ``compute_input_overlap`` and
-    ``make_signal_fetcher`` all take ``svc`` as a plain argument and none reads
-    ``app.state``, so rebinding it here reaches the engine for free. The default
-    "v1" keeps the object ``Depends(get_market_data)`` resolved (Sign 1).
+    ``body.data_source`` is now the INHERITED DEFAULT: every input ref carries its
+    own ``data_source`` (per-instrument selection) and falls back to this per-run
+    value only when it omitted the field. ``svc_for`` resolves the concrete
+    warehouse for a source, and ``inst_svc_for`` bakes the body default into the
+    ref-source→service map that ``compute_input_overlap`` and
+    ``make_signal_fetcher`` use per instrument. An all-v1 run resolves every leaf
+    to the same object ``Depends(get_market_data)`` gave (Sign 1).
     """
-    if body.data_source != "v1":
-        svc = get_market_data_for(request, body.data_source)
-        # Same reason as the portfolio route: a v2 error raised inside an
-        # option resolve is swallowed by the engine's per-chunk fallback and
-        # reaches the user as an unattributable all-NaN curve. Check the pure
-        # preconditions here, where the message still means something.
-        check_v2_preconditions(
-            body.model_dump(mode="json"), data_source=body.data_source
-        )
+
+    def svc_for(source: DataSource) -> MarketDataService:
+        return get_market_data_for(request, source)
+
+    def inst_svc_for(own: str | None) -> MarketDataService:
+        return svc_for(effective_data_source(own, body.data_source))
+
+    # The single "default" service (the body's own source) — used by
+    # ``_resolve_basket_inputs`` (no fetch) and as the fetch-layer fallback.
+    svc = svc_for(body.data_source)
+
+    # A v2 error raised inside an option resolve is swallowed by the engine's
+    # per-chunk fallback and reaches the user as an unattributable all-NaN curve.
+    # Check the pure preconditions here, where the message still means something.
+    # Per-node: gates ONLY the v2 legs, no-ops when there is no v2 leg (Sign 1).
+    check_v2_preconditions(body.model_dump(mode="json"), data_source=body.data_source)
 
     try:
         start_date, end_date = parse_iso_range(body.start, body.end)
@@ -1243,25 +1273,26 @@ async def compute_signal(
     except SignalValidationError as exc:
         return error_response("validation", str(exc))
 
-    if body.data_source != "v1":
-        # E7 option coverage floor — the ONE v2 precondition that needs a query,
-        # so it runs here rather than in the pure checker above. Deferred until
-        # after basket resolution because a SAVED basket's legs are not on the
-        # wire (the payload carries only its id), and an option leg reached
-        # through a basket needs the same floor as a directly-named one.
-        roots = collect_v2_option_roots(
-            body.model_dump(mode="json"), data_source=body.data_source
-        )
-        roots |= {
-            inst.collection
-            for inp in resolved_inputs
-            if isinstance(inp, _ResolvedBasketInput)
-            for inst, _weight in inp.legs
-            if isinstance(inst, InstrumentOptionStream) and inst.collection
-        }
-        await check_v2_option_coverage_floor(
-            roots, svc, start_date, data_source=body.data_source
-        )
+    # E7 option coverage floor — the ONE v2 precondition that needs a query, so it
+    # runs here rather than in the pure checker above. Deferred until after basket
+    # resolution because a SAVED basket's legs are not on the wire (the payload
+    # carries only its id), and an option leg reached through a basket needs the
+    # same floor as a directly-named one. Only v2 option roots are collected
+    # (per-node), so an all-v1 run floors nothing and never touches the v2 service.
+    roots = collect_v2_option_roots(
+        body.model_dump(mode="json"), data_source=body.data_source
+    )
+    roots |= {
+        inst.collection
+        for inp in resolved_inputs
+        if isinstance(inp, _ResolvedBasketInput)
+        for inst, _weight in inp.legs
+        if isinstance(inst, InstrumentOptionStream)
+        and inst.collection
+        and effective_data_source(inst.data_source, body.data_source) == "v2"
+    }
+    if roots:
+        await check_v2_option_coverage_floor(roots, svc_for("v2"), start_date)
 
     indicators: dict[str, IndicatorSpecInput] = {}
     for ind_spec in body.indicators:
@@ -1289,11 +1320,14 @@ async def compute_signal(
             signal,
             start_date,
             end_date,
+            svc_for=inst_svc_for,
         )
     except SignalDataError as exc:
         return error_response("data", str(exc))
 
-    fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
+    fetcher = make_signal_fetcher(
+        svc, overlap_start, overlap_end, svc_for=inst_svc_for
+    )
     cost_config = CostConfig(
         slippage_bps=float(body.slippage_bps), fees_bps=float(body.fees_bps)
     )

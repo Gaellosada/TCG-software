@@ -44,16 +44,31 @@ def _price_series(base: float) -> PriceSeries:
 
 
 def _stub_service(tag: str) -> MagicMock:
-    """A ``MarketDataService``-shaped stub that records which one was used."""
+    """A ``MarketDataService``-shaped stub that records which one was used.
+
+    Per-instrument selection is proved by RECORDING what each service was asked
+    for: ``seen_aligned`` collects the set of leg labels each ``get_aligned_prices``
+    group saw (so the batched-fetch split is asserted precisely, not just via
+    ``await_count``), and ``seen_prices`` collects the ``(collection,
+    instrument_id)`` each ``get_prices`` saw (the signals routing proof).
+    """
     common_dates = np.array(DATES, dtype=np.int64)
-
-    async def _aligned(legs_spec):
-        return common_dates, {label: _price_series(100.0) for label in legs_spec}
-
     svc = MagicMock()
     svc.tag = tag
+    svc.seen_aligned = []
+    svc.seen_prices = []
+
+    async def _aligned(legs_spec):
+        svc.seen_aligned.append(set(legs_spec))
+        return common_dates, {label: _price_series(100.0) for label in legs_spec}
+
+    async def _prices(collection, instrument_id, *, start=None, end=None, provider=None):
+        svc.seen_prices.append((collection, instrument_id))
+        return _price_series(100.0)
+
     svc.asset_class_for = DefaultMarketDataService.asset_class_for
     svc.get_aligned_prices = AsyncMock(side_effect=_aligned)
+    svc.get_prices = AsyncMock(side_effect=_prices)
     svc.option_trade_date_coverage = AsyncMock(return_value=(None, None))
     return svc
 
@@ -153,11 +168,12 @@ def _nest(depth: int) -> dict:
 
 @pytest.mark.parametrize("depth", [1, 2, 5])
 def test_child_request_keeps_the_childs_own_source_at_any_depth(depth):
-    """TEMP(per-pf-datasource): ``_child_request`` NO LONGER overrides the
-    child's ``data_source`` — each child keeps its own so a composed portfolio
-    can mix v1/v2 children. The caller (``_evaluate_portfolio_leg``) binds the
-    matching service via ``svc_for``, so body and reality stay in lock-step
-    per-child (key-parity vs a standalone compute of the child on its own source).
+    """``_child_request`` does NOT override the child's ``data_source`` — each
+    child keeps its own (a special case of per-instrument selection), so a
+    composed portfolio can mix v1/v2 children. The caller
+    (``_evaluate_portfolio_leg``) binds the matching service via ``svc_for``, so
+    body and reality stay in lock-step per-child (key-parity vs a standalone
+    compute of the child on its own source).
     """
     parent = PortfolioRequest(**_nest(depth))
     parent = parent.model_copy(update={"data_source": "v2"})
@@ -173,8 +189,8 @@ def test_child_request_keeps_the_childs_own_source_at_any_depth(depth):
 
 
 async def test_composed_child_is_computed_on_its_own_source(client, services):
-    """TEMP(per-pf-datasource): a composed leg computes each child on the CHILD's
-    own ``data_source``, not the parent's — the basis for v1-vs-v2 comparison."""
+    """A composed leg computes each child on the CHILD's own ``data_source``, not
+    the parent's — the basis for v1-vs-v2 comparison (per-instrument, composed)."""
     body = _nest(1) | {"data_source": "v1"}          # parent v1
     body["legs"]["child"]["portfolio"]["data_source"] = "v2"   # child explicitly v2
     resp = await client.post("/api/portfolio/compute", json=body)
@@ -184,8 +200,8 @@ async def test_composed_child_is_computed_on_its_own_source(client, services):
 
 
 async def test_composed_mixes_v1_and_v2_children(client, services):
-    """TEMP(per-pf-datasource): the feature — ONE composed portfolio comparing a
-    v1 child and a v2 child, each computed on its own warehouse."""
+    """The feature — ONE composed portfolio comparing a v1 child and a v2 child,
+    each computed on its own warehouse (per-instrument selection, composed)."""
     body = {
         "legs": {
             "a": {"type": "portfolio", "portfolio": _body() | {"data_source": "v1"}},
@@ -212,7 +228,9 @@ async def test_signal_leg_is_evaluated_on_the_parent_source(monkeypatch, client)
     """
     seen: list[str] = []
 
-    async def _fake_signal_leg(label, leg, svc, start, end, repo, cost_config=None):
+    async def _fake_signal_leg(
+        label, leg, svc, start, end, repo, cost_config=None, **kwargs
+    ):
         seen.append(svc.tag)
         raise AssertionError("stop after capturing the service")
 
@@ -729,3 +747,186 @@ async def test_a_servable_v2_option_leg_is_not_rejected(real_v2_client):
     # fail on a precondition: none of the boundary wordings may appear.
     for wording in ("expiration cycle", "does not have data for collection", "has no"):
         assert wording not in resp.text
+
+
+# --------------------------------------------------------------------------- #
+# 11. Per-instrument selection (flat portfolio + signals-route + byte-identity) #
+# --------------------------------------------------------------------------- #
+
+
+async def test_flat_portfolio_routes_each_instrument_to_its_own_source(client, services):
+    """The generalization of the composed-child feature to leaves of ONE flat
+    portfolio: the batched instrument fetch is SPLIT by each leg's ``data_source``.
+
+    Asserting ``await_count`` alone is too weak (a single merged call on one
+    service could pass); we record the leg labels each ``get_aligned_prices``
+    group saw, so v1 must have seen ONLY its leg and v2 ONLY its leg.
+    """
+    body = {
+        "legs": {
+            "a": {"type": "instrument", "collection": "INDEX", "symbol": "SPX", "data_source": "v1"},
+            "b": {"type": "instrument", "collection": "INDEX", "symbol": "SPX", "data_source": "v2"},
+        },
+        "weights": {"a": 50.0, "b": 50.0},
+        "rebalance": "none",
+        "return_type": "normal",
+        "start": "2024-01-01",
+        "end": "2024-12-31",
+        # no top-level data_source → v1 default; per-leaf overrides win
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    # Each source's service is hit exactly once, each with ONLY its own leg.
+    assert services["v1"].get_aligned_prices.await_count == 1
+    assert services["v2"].get_aligned_prices.await_count == 1
+    assert services["v1"].seen_aligned == [{"a"}]
+    assert services["v2"].seen_aligned == [{"b"}]
+
+
+async def test_all_v1_flat_portfolio_issues_exactly_one_aligned_call(client, services):
+    """INVARIANT: a single-source (all-v1) portfolio issues EXACTLY ONE
+    ``get_aligned_prices`` call, on the v1 service, with the WHOLE leg set — so
+    behaviour and perf are identical to before the split (no intersection/merge).
+    """
+    body = {
+        "legs": {
+            "a": {"type": "instrument", "collection": "INDEX", "symbol": "SPX"},
+            "b": {"type": "instrument", "collection": "INDEX", "symbol": "SPX"},
+        },
+        "weights": {"a": 50.0, "b": 50.0},
+        "rebalance": "none",
+        "return_type": "normal",
+        "start": "2024-01-01",
+        "end": "2024-12-31",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    assert services["v1"].get_aligned_prices.await_count == 1
+    assert services["v2"].get_aligned_prices.await_count == 0
+    assert services["v1"].seen_aligned == [{"a", "b"}]  # ONE call, BOTH legs
+
+
+def _signal_input(iid: str, instrument_id: str, source: str | None) -> dict:
+    inst = {"type": "spot", "collection": "INDEX", "instrument_id": instrument_id}
+    if source is not None:
+        inst["data_source"] = source
+    return {"id": iid, "instrument": inst}
+
+
+def _entry_block(bid: str, input_id: str) -> dict:
+    return {
+        "id": bid,
+        "name": bid,
+        "input_id": input_id,
+        "weight": 100.0,
+        "conditions": [
+            {
+                "op": "gt",
+                "lhs": {"kind": "instrument", "input_id": input_id, "field": "close"},
+                "rhs": {"kind": "constant", "value": 0.0},
+            }
+        ],
+    }
+
+
+async def test_signals_route_routes_each_spot_input_to_its_own_source(
+    signals_client, services
+):
+    """Two spot inputs on DIFFERENT sources must hit ``services["v1"].get_prices``
+    vs ``services["v2"].get_prices`` respectively.
+
+    Distinct ``instrument_id``s (``V1SYM`` / ``V2SYM``) let us record which
+    warehouse each input hit. This exercises BOTH per-instrument paths threaded
+    by ``svc_for``: the overlap pass (``compute_input_overlap`` →
+    ``_date_array_for_leaf_instrument``) AND the fetcher (rules reference each
+    input via an instrument operand).
+    """
+    body = {
+        "spec": {
+            "id": "s",
+            "name": "s",
+            "inputs": [
+                _signal_input("X", "V1SYM", "v1"),
+                _signal_input("Y", "V2SYM", "v2"),
+            ],
+            "rules": {
+                "entries": [_entry_block("e1", "X"), _entry_block("e2", "Y")],
+                "exits": [],
+            },
+        },
+        "indicators": [],
+        "start": "2024-01-01",
+        "end": "2024-12-31",
+        # no top-level data_source → v1 default; per-input overrides win
+    }
+    resp = await signals_client.post("/api/signals/compute", json=body)
+    assert resp.status_code == 200, resp.text
+
+    v1_seen = services["v1"].seen_prices
+    v2_seen = services["v2"].seen_prices
+    assert ("INDEX", "V1SYM") in v1_seen
+    assert ("INDEX", "V2SYM") in v2_seen
+    # And crucially: neither input leaked to the OTHER warehouse.
+    assert ("INDEX", "V2SYM") not in v1_seen
+    assert ("INDEX", "V1SYM") not in v2_seen
+
+
+# The pre-feature (checkpoint 02180c7) cache key for a known all-v1 body, captured
+# BEFORE the per-instrument field was added. Per-leaf ``data_source`` must be
+# OMITTED from the dump for a v1/unset leg (the conditional serializer), so this
+# key is UNCHANGED — no COMPUTE_VERSION bump, no cache invalidation for v1.
+_PRE_FEATURE_ALL_V1_CACHE_KEY = (
+    "54eaeb5509c8e2a1c83120942785b7f7c3194c1404e82f68c7bbea2f8c4e84d8"
+)
+
+
+def _byte_identity_body() -> dict:
+    return {
+        "legs": {
+            "a": {"type": "instrument", "collection": "INDEX", "symbol": "SPX"},
+            "b": {
+                "type": "continuous",
+                "collection": "FUT_SP_500",
+                "strategy": "front_month",
+                "adjustment": "none",
+            },
+        },
+        "weights": {"a": 60.0, "b": 40.0},
+        "rebalance": "monthly",
+        "return_type": "normal",
+        "start": "2020-01-01",
+        "end": "2024-12-31",
+    }
+
+
+def test_all_v1_body_dump_has_no_leg_data_source_and_matches_pre_feature_key():
+    """Byte-identity: an all-v1 body's ``model_dump`` carries NO ``data_source``
+    key on any leg (the conditional serializer omits it), so its
+    ``_portfolio_cache_key`` equals the pre-feature hash — no version bump."""
+    pr = PortfolioRequest(**_byte_identity_body())
+    dump = pr.model_dump(mode="json")
+    for label, leg in dump["legs"].items():
+        assert "data_source" not in leg, f"leg {label!r} leaked data_source: {leg}"
+    assert _portfolio_cache_key(pr) == _PRE_FEATURE_ALL_V1_CACHE_KEY
+
+
+def test_v2_leg_keeps_data_source_in_dump_and_changes_the_key():
+    """A v2 leaf DOES appear in the dump (and thus the cache key) — a v1 and a v2
+    variant of the same body must never share a cache entry."""
+    v1 = PortfolioRequest(**_byte_identity_body())
+    body_v2 = _byte_identity_body()
+    body_v2["legs"]["a"]["data_source"] = "v2"
+    v2 = PortfolioRequest(**body_v2)
+    assert v2.model_dump(mode="json")["legs"]["a"]["data_source"] == "v2"
+    assert _portfolio_cache_key(v1) != _portfolio_cache_key(v2)
+
+
+def test_strip_use_cache_never_touches_data_source():
+    """``_strip_use_cache`` strips ONLY ``use_cache`` — a v2 leg's ``data_source``
+    survives into the cache key (it is compute-affecting)."""
+    body_v2 = _byte_identity_body()
+    body_v2["legs"]["a"]["data_source"] = "v2"
+    pr = PortfolioRequest(**body_v2)
+    stripped = portfolio._strip_use_cache(pr.model_dump(mode="json"))
+    assert "use_cache" not in stripped
+    assert stripped["legs"]["a"]["data_source"] == "v2"

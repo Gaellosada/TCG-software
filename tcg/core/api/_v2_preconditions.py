@@ -67,8 +67,10 @@ _OPTION_TYPES = frozenset({"option_stream"})
 _PRICE_TYPES = frozenset({"instrument", "continuous", "spot"})
 
 
-def _iter_typed_nodes(node: Any, path: str) -> Iterator[tuple[str, Mapping[str, Any]]]:
-    """Yield ``(path, node)`` for every dict in the tree carrying a ``type``.
+def _iter_typed_nodes(
+    node: Any, path: str, inherited: str
+) -> Iterator[tuple[str, Mapping[str, Any], str]]:
+    """Yield ``(path, node, effective_source)`` for every dict carrying a ``type``.
 
     Walking the JSON dump rather than the Pydantic models is deliberate: a v2
     run nests arbitrarily (composed portfolio legs inline a whole child body,
@@ -77,15 +79,27 @@ def _iter_typed_nodes(node: Any, path: str) -> Iterator[tuple[str, Mapping[str, 
     is typed ``dict[str, Any]`` — untyped by construction. One generic walk
     keyed on the ``type`` discriminator reaches every level uniformly, and a
     future nesting depth needs no wiring step anyone can forget.
+
+    ``inherited`` is the enclosing body's ``data_source`` (the per-run default,
+    now DEMOTED to an inherited default under per-instrument selection). A dict
+    that carries its OWN ``data_source`` (``"v1"``/``"v2"``) overrides it for
+    itself and its descendants — so a composed child body, whose dump always
+    carries ``data_source``, re-roots the inheritance for its own legs, and a
+    leaf ref that emitted ``data_source: "v2"`` is v2 even under a v1 default.
+    The precedence matches :func:`common.effective_data_source` exactly.
     """
     if isinstance(node, Mapping):
+        own = node.get("data_source")
+        current = own if own in ("v1", "v2") else inherited
         if isinstance(node.get("type"), str):
-            yield path, node
+            yield path, node, current
         for key, value in node.items():
-            yield from _iter_typed_nodes(value, f"{path}.{key}" if path else str(key))
+            yield from _iter_typed_nodes(
+                value, f"{path}.{key}" if path else str(key), current
+            )
     elif isinstance(node, (list, tuple)):
         for index, value in enumerate(node):
-            yield from _iter_typed_nodes(value, f"{path}[{index}]")
+            yield from _iter_typed_nodes(value, f"{path}[{index}]", inherited)
 
 
 def _check_option_node(node: Mapping[str, Any]) -> None:
@@ -138,11 +152,14 @@ def _check_price_node(node: Mapping[str, Any]) -> None:
 
 
 def check_v2_preconditions(payload: Mapping[str, Any], *, data_source: str) -> None:
-    """Reject a v2 request the warehouse cannot serve, naming the offending leg.
+    """Reject requests the v2 warehouse cannot serve, naming the offending leg.
 
-    *payload* is the request body as JSON (``model_dump(mode="json")``).
-    No-ops entirely for ``data_source == "v1"`` — the frozen reference path must
-    not gain a single new branch (guardrail Sign 1).
+    *payload* is the request body as JSON (``model_dump(mode="json")``);
+    *data_source* is the top-level run default that every leaf INHERITS unless it
+    carried its own (per-instrument selection). Each node is gated on its OWN
+    EFFECTIVE source, so this checks ONLY the v2 legs — a mixed v1/v2 body has
+    its v1 legs left untouched, and an all-v1 body (no v2 node anywhere) no-ops
+    entirely, so the frozen reference path gains no behaviour (guardrail Sign 1).
 
     The typed ``V2DataUnavailable`` messages are the SINGLE source of truth for
     the wording (spec §11 E1-E5); this re-raises them as ``ValidationError`` with
@@ -150,10 +167,9 @@ def check_v2_preconditions(payload: Mapping[str, Any], *, data_source: str) -> N
     render through the identical HTTP 400 envelope — the only difference is that
     the user now learns WHICH leg to fix.
     """
-    if data_source == "v1":
-        return
-
-    for path, node in _iter_typed_nodes(payload, ""):
+    for path, node, effective in _iter_typed_nodes(payload, "", data_source):
+        if effective != "v2":
+            continue
         node_type = node.get("type")
         if node_type in _OPTION_TYPES:
             check = _check_option_node
@@ -170,21 +186,20 @@ def check_v2_preconditions(payload: Mapping[str, Any], *, data_source: str) -> N
 def collect_v2_option_roots(
     payload: Mapping[str, Any], *, data_source: str
 ) -> set[str]:
-    """Option collections named anywhere in *payload*, at any nesting depth.
+    """Option collections whose EFFECTIVE source is v2, at any nesting depth.
 
     Reuses the same walk as :func:`check_v2_preconditions`, so a shape the
     precondition checker reaches is a shape the coverage floor reaches too —
-    the two cannot drift apart. Returns an empty set for ``data_source == "v1"``
-    so the caller's loop is a no-op on the frozen path (Sign 1).
+    the two cannot drift apart. Only v2 option legs are collected, so an all-v1
+    body returns an empty set and the caller's floor loop no-ops (Sign 1); a
+    mixed body floors only its v2 option roots.
 
     Basket legs resolved from the DB are NOT in the payload (a saved basket ref
     is just an id on the wire); the signals route unions those in separately.
     """
-    if data_source == "v1":
-        return set()
     roots: set[str] = set()
-    for _path, node in _iter_typed_nodes(payload, ""):
-        if node.get("type") in _OPTION_TYPES:
+    for _path, node, effective in _iter_typed_nodes(payload, "", data_source):
+        if effective == "v2" and node.get("type") in _OPTION_TYPES:
             collection = node.get("collection")
             if isinstance(collection, str) and collection:
                 roots.add(collection)
@@ -195,8 +210,6 @@ async def check_v2_option_coverage_floor(
     roots: Iterable[str],
     svc: MarketDataService,
     start_date: date | None,
-    *,
-    data_source: str,
 ) -> None:
     """Reject a v2 run that starts before the warehouse has option data (E7).
 
@@ -206,11 +219,13 @@ async def check_v2_option_coverage_floor(
     strategy difference rather than a data gap. Fail loudly and NAME the floor.
 
     This is the ONE precondition that needs a query, which is why it takes *svc*
-    rather than living in the pure checker. It no-ops for ``data_source == "v1"``
-    (Sign 1), for an open-ended start, and for a run with no option legs — so
-    the common case costs zero round-trips.
+    (the v2 service — callers resolve ``svc_for("v2")``) rather than living in
+    the pure checker. *roots* is already filtered to v2 option collections by
+    :func:`collect_v2_option_roots`, so an all-v1 run passes an empty set and
+    this no-ops; it also no-ops for an open-ended start — the common case costs
+    zero round-trips.
     """
-    if data_source == "v1" or start_date is None:
+    if start_date is None:
         return
     for root in sorted(set(roots)):
         first, _last = await svc.option_trade_date_coverage(root)
