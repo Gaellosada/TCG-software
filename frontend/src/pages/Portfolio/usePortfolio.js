@@ -9,7 +9,6 @@ import { resolvePortfolioRange, childPortfolioIds, childRangeAccessorFor } from 
 import { persistedDocToLegs } from './persistedDoc';
 import { buildPortfolioComputeBody } from './computeBodyBuilder';
 import { isPortfolioCacheEnabled, getSlippageBps, getFeesBps } from '../../lib/userSettings';
-import { DEFAULT_DATA_SOURCE, coerceDataSource } from '../../lib/dataSource';
 import useAbortableAction from '../../hooks/useAbortableAction';
 
 let nextId = 1;
@@ -72,13 +71,6 @@ export default function usePortfolio() {
   // OFF makes the backend recompute fresh. No frontend result cache.
   const [useCache] = useState(() => isPortfolioCacheEnabled());
 
-  // Market data source for THIS run ('v1' | 'v2'). A per-run control (not a
-  // saved portfolio field and not a Settings toggle) because the workflow is
-  // "run it on v1, run it on v2, compare" — it must be one click from Compute.
-  // Always starts at v1 so a freshly-opened page is byte-identical to today.
-  const [dataSource, setDataSourceState] = useState(DEFAULT_DATA_SOURCE);
-  const setDataSource = useCallback((v) => setDataSourceState(coerceDataSource(v)), []);
-
   /* ── Fetch date ranges when legs change ── */
 
   // Re-resolve ranges when the range SPEC changes (legsToRangesKey — instrument
@@ -107,12 +99,11 @@ export default function usePortfolio() {
     setRangesLoading(true);
 
     // Resolve each leg's coverage + the portfolio overlap via the SHARED
-    // resolver (also used to seed the compute window). ``dataSource`` is
-    // threaded through because v2's option history starts years after v1's — a
-    // v2 run seeded from v1 coverage begins before v2 has data and fails the E7
-    // floor at compute. Re-resolving on a source switch moves the slider floor
-    // (and the seeded start) onto the selected warehouse's real span.
-    resolvePortfolioRange(legs, { queryClient, dataSource })
+    // resolver (also used to seed the compute window). Each leg carries its OWN
+    // source, so the resolver reads coverage from the matching warehouse per leg
+    // (v2's option history starts years after v1's — a v2 leg's floor must come
+    // from v2). No page-level default is threaded; a leg with no source is v1.
+    resolvePortfolioRange(legs, { queryClient })
       .then(({ ranges, overlapRange: overlap }) => {
         if (cancelled) return;
         setLegDateRanges(ranges);
@@ -124,7 +115,7 @@ export default function usePortfolio() {
       });
 
     return () => { cancelled = true; };
-  }, [rangesKey, dataSource]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rangesKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Leg management ── */
 
@@ -432,13 +423,8 @@ export default function usePortfolio() {
       resolveChildRange,
       slippageBps,
       feesBps,
-      // Per-run market data source, baked into the ONE shared body so the
-      // Compute POST, the auto-display cache-get and the cache-status probe all
-      // key on the same source (a mismatch would serve v1's cached result for a
-      // v2 run — the silent "no difference" failure this feature must avoid).
-      dataSource,
     });
-  }, [legs, rebalance, queryClient, resolveChildrenNow, dataSource]);
+  }, [legs, rebalance, queryClient, resolveChildrenNow]);
 
   /* ── Auto-display cached result (read-only, never computes) ── */
   // Monotonic run-id shared by the auto-display effect AND handleCalculate so a
@@ -472,13 +458,11 @@ export default function usePortfolio() {
       endDate,
       overlapRange?.start || '',
       overlapRange?.end || '',
-      // STALE-CACHE GUARD: the data source enters the backend cache key, so it
-      // MUST enter this signature. Without it, flipping v1→v2 would leave the
-      // v1 result on screen (the effect never re-fires) and the comparison would
-      // silently read as "no difference" — the highest-risk bug in this feature.
-      dataSource,
+      // Per-leg source enters the backend cache key; it is already captured in
+      // the per-leg JSON above (each leg's ``dataSource``), so flipping a leg's
+      // warehouse (via delete + re-add) re-fires the effect.
     ].join('#');
-  }, [legs, rebalance, startDate, endDate, overlapRange, dataSource]);
+  }, [legs, rebalance, startDate, endDate, overlapRange]);
 
   useEffect(() => {
     // Caching off → never auto-display (matches the badge gate). Empty config →
@@ -525,9 +509,6 @@ export default function usePortfolio() {
           // on — otherwise a costed result would falsely read as a MISS here.
           slippageBps: built.body.slippage_bps,
           feesBps: built.body.fees_bps,
-          // Derived from the built body (present only for v2) — same reason as
-          // the costs: the cache-get key must match the Compute key exactly.
-          dataSource: built.body.data_source,
         });
       } catch {
         return; // cache errors never surface — stay blank, Compute still works
@@ -618,9 +599,6 @@ export default function usePortfolio() {
           // compute POST byte-identical to the body the cache-status probe keys on.
           slippageBps: body.slippage_bps,
           feesBps: body.fees_bps,
-          // Derived from the shared body (present only for v2) so the compute
-          // POST is byte-identical to the body the probe/cache-get key on.
-          dataSource: body.data_source,
           signal,
         });
         if (!signal.aborted && myRun === autoDisplayRunRef.current) setResults(res);
@@ -671,10 +649,6 @@ export default function usePortfolio() {
     // Caching toggle (Settings, DEFAULT ON) read once at mount. Sent as
     // ``use_cache`` on compute AND gates the proactive cache-status indicators.
     cacheEnabled: useCache,
-    // Per-run market data source + setter (rendered by the shared
-    // DataSourceSelector next to Compute).
-    dataSource,
-    setDataSource,
     portfolioName,
     setPortfolioName,
     autosave,

@@ -1,8 +1,9 @@
 // Per-instrument data_source tests for the signal compute-request builder.
 //
-// Invariants:
-//   1. The source rides each INPUT's instrument ref (precedence: the ref's own
-//      data_source → the build default fold → v1), emitted only for 'v2'.
+// New model (immutable per-instrument source): a source is chosen ONCE, at add
+// time, and rides each INPUT's instrument ref. There is NO page/run default and
+// NO fold. Invariants:
+//   1. The source rides each INPUT's instrument ref, emitted only for 'v2'.
 //   2. There is NO top-level ``data_source`` body field.
 //   3. A v1/absent input carries no key → byte-identical to a pre-feature body.
 
@@ -23,7 +24,7 @@ const spot = (extra = {}) => ({ type: 'spot', collection: 'INDEX', instrument_id
 
 describe('buildComputeRequestBody — per-instrument data_source', () => {
   it('never emits a top-level data_source field', () => {
-    const { body } = buildComputeRequestBody(specWith([{ id: 'X', instrument: spot() }]), [], undefined, 'v2');
+    const { body } = buildComputeRequestBody(specWith([{ id: 'X', instrument: spot({ data_source: 'v2' }) }]), []);
     expect('data_source' in body).toBe(false);
   });
 
@@ -37,22 +38,23 @@ describe('buildComputeRequestBody — per-instrument data_source', () => {
     expect(body.spec.inputs[1].instrument.data_source).toBe('v2');
   });
 
-  it('folds the build default onto an unset input; an explicit v1 input overrides it', () => {
+  it('an unset input and an explicit v1 input both emit no key', () => {
     const spec = specWith([
-      { id: 'X', instrument: spot() },                          // unset → folds default
+      { id: 'X', instrument: spot() },                          // unset → no key
       { id: 'Y', instrument: spot({ data_source: 'v1' }) },     // explicit v1 → omitted
     ]);
-    const { body } = buildComputeRequestBody(spec, [], undefined, 'v2');
-    expect(body.spec.inputs[0].instrument.data_source).toBe('v2');
+    const { body } = buildComputeRequestBody(spec, []);
+    expect('data_source' in body.spec.inputs[0].instrument).toBe(false);
     expect('data_source' in body.spec.inputs[1].instrument).toBe(false);
   });
 
-  it('an all-v1 body is byte-identical to a no-default build', () => {
-    const spec = specWith([{ id: 'X', instrument: spot() }]);
-    const a = buildComputeRequestBody(spec, []).body;
-    const b = buildComputeRequestBody(spec, [], undefined, 'v1').body;
-    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
-    expect('data_source' in a.spec.inputs[0].instrument).toBe(false);
+  it('an all-v1 signal body emits ZERO data_source keys (byte-identity)', () => {
+    const spec = specWith([
+      { id: 'X', instrument: spot() },
+      { id: 'Y', instrument: spot({ data_source: 'v1' }) },
+    ]);
+    const { body } = buildComputeRequestBody(spec, []);
+    expect(JSON.stringify(body).includes('data_source')).toBe(false);
   });
 
   it('preserves the other instrument fields (v2 rides alongside them)', () => {

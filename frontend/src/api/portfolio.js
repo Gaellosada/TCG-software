@@ -1,9 +1,8 @@
 import { fetchApi } from './client';
-import { dataSourceFieldsForRequest } from '../lib/dataSource';
 
 export async function computePortfolio({
   legs, weights, rebalance, returnType, start, end, useCache = true,
-  slippageBps, feesBps, dataSource, signal,
+  slippageBps, feesBps, signal,
 }) {
   // Global execution costs (basis points) ride the request body when > 0;
   // omitted otherwise so a default request stays byte-identical to a
@@ -29,9 +28,9 @@ export async function computePortfolio({
       // Settings toggle is OFF this is false → the backend recomputes fresh.
       use_cache: useCache,
       ...costFields,
-      // Market data source — present only for v2, so a v1 compute POST stays
+      // NOTE: no top-level ``data_source`` — the per-instrument source rides
+      // each leg in ``legs`` (present only for v2), so a v1 body is
       // byte-identical to a pre-feature payload (backend defaults absent → v1).
-      ...dataSourceFieldsForRequest(dataSource),
     }),
     signal,
   });
@@ -78,7 +77,7 @@ export async function getPortfolioCacheStatus(queries, { signal } = {}) {
  * @returns {Promise<{ result: object|null, from_cache: boolean }>}
  */
 export async function getPortfolioCachedResult({
-  legs, weights, rebalance, returnType, start, end, slippageBps, feesBps, dataSource,
+  legs, weights, rebalance, returnType, start, end, slippageBps, feesBps,
 }, { signal } = {}) {
   // Global execution costs ride the key body identically to computePortfolio (>0
   // only, else omitted) so this read-only cache-get keys to the SAME entry a
@@ -100,9 +99,8 @@ export async function getPortfolioCachedResult({
       start: start || undefined,
       end: end || undefined,
       ...costFields,
-      // Same source field the Compute POST carries — otherwise a v2 result
-      // would falsely read as a MISS (and a v1 probe could serve a v2 entry).
-      ...dataSourceFieldsForRequest(dataSource),
+      // No top-level ``data_source`` — the per-instrument source rides each leg
+      // in ``legs``, so this cache-get keys to the SAME entry the Compute stored.
     }),
     ...(signal ? { signal } : {}),
   });

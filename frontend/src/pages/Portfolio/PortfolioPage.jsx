@@ -17,10 +17,8 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import LockBanner from '../../components/LockBanner';
 import Statistics from '../../components/Statistics';
 import TradeLog from '../../components/TradeLog';
-import DataSourceSelector from '../../components/DataSourceSelector';
 import styles from './PortfolioPage.module.css';
 import { getRiskFreeRateFraction } from '../../lib/userSettings';
-import { DATA_SOURCE_V2, V2_COMMON_WINDOW_HINT } from '../../lib/dataSource';
 import {
   createPortfolio,
   updatePortfolio,
@@ -588,9 +586,6 @@ function PortfolioPage({ mode = 'pure' }) {
     resolvePortfolio: portfolio.resolvePortfolio,
     portfolios: visiblePortfolios,
     activeId: portfolio.persistedId,
-    // Probe bodies must carry the SAME source Compute will send, or the
-    // "cached" badge would report v1's cache entry for a v2 run.
-    dataSource: portfolio.dataSource,
     refreshKey: probeVersion,
   });
 
@@ -772,24 +767,9 @@ function PortfolioPage({ mode = 'pure' }) {
 
         {/* ── Configuration bar ── */}
         <div className={`${styles.section} ${styles.configBar}`}>
-          {/* SEED-ONLY default market-data source — NOT a per-run wire field.
-              This control only supplies the DEFAULT source that each instrument
-              inherits when it has not set its own (the builder folds it in per
-              leaf via ``leg.dataSource || dataSource``; there is no top-level
-              ``data_source`` on the request). Existing per-instrument choices in
-              the Holdings table always win. Relabelled so users don't read it as
-              "the source this run reads from". Renders the v2 limits itself. */}
-          <div className={styles.dataSourceRow}>
-            <DataSourceSelector
-              id="portfolio-data-source-select"
-              label="Default source for new instruments"
-              helper="Seeds the market-data source for instruments you add. Each instrument keeps its own source (set it per row in the table); changing this never overrides an existing row."
-              title="Default market-data source seeded onto instruments that don't set their own. Not a per-run override — existing per-instrument choices win."
-              value={portfolio.dataSource}
-              onChange={portfolio.setDataSource}
-              disabled={portfolio.loading}
-            />
-          </div>
+          {/* Market-data source is chosen per instrument at add time (in the Add
+              Holding picker) and shown read-only in the Holdings table — there is
+              no page-level default and no run-level source. */}
           <div className={styles.configRow}>
             {/* Rebalance frequency — part of the saved portfolio definition,
                 so it is disabled (via the native fieldset) when locked.
@@ -867,15 +847,6 @@ function PortfolioPage({ mode = 'pure' }) {
               }}
             />
           </div>
-
-          {/* Common-window hint — the two sources end on different dates, so a
-              v1-vs-v2 comparison run to "the end" diverges for a trivial reason.
-              Shown next to the date control only while v2 is selected. */}
-          {portfolio.dataSource === DATA_SOURCE_V2 && (
-            <div className={styles.dataSourceHint} data-testid="portfolio-v2-window-hint">
-              {V2_COMMON_WINDOW_HINT}
-            </div>
-          )}
         </div>
 
         {/* ── Loading indicator ── */}
@@ -1046,9 +1017,6 @@ function PortfolioPage({ mode = 'pure' }) {
         }}
         readOnly={portfolio.persistedLocked}
         referenceDate={portfolio.startDate}
-        // Seed the modal's per-instrument source selector from the page-level
-        // default (the "Default source for new instruments" control above).
-        defaultSource={portfolio.dataSource}
       />
 
       {/* ── Add Signal Modal ── */}

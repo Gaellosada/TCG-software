@@ -1,11 +1,10 @@
-// Per-run market-data source selector (Database v1 | Database v2).
+// Market-data source selector (Database v1 | Database v2).
 //
-// ONE component, used verbatim by the Portfolio page (config bar, next to
-// Compute) and the Signals page (Run panel, above the Run button) — the
-// workflow this exists for is "run it on v1, run it on v2, compare", so the
-// control sits one click from the compute action on both pages rather than in
-// Settings. Project rule: reuse identical components across pages; do NOT build
-// a page-specific variant.
+// Used at ADD TIME only, inside InstrumentPickerModal, to pick the source for a
+// NEW instrument (portfolio holding / signal input / indicator series). A source
+// is chosen ONCE here and is immutable thereafter — existing rows show a
+// read-only <SourceBadge>, not this control. (There is no page-level default and
+// no per-run selector; the read-only badge is the only other source surface.)
 //
 // When v2 is selected it also renders the measured v2 capability limits
 // (``V2_LIMITATIONS``) so the user is never silently misled about coverage,

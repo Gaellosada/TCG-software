@@ -1,18 +1,16 @@
 // @vitest-environment jsdom
 //
-// THE stale-cache guard for the v1/v2 source switch.
+// Per-instrument source on the portfolio wire — immutable model.
 //
-// ``data_source`` enters the backend cache key, so it MUST enter
-// ``autoDisplaySig``. Without that, flipping v1→v2 leaves the v1 result on
-// screen (the auto-display effect never re-fires, nothing re-probes) and the
-// whole comparison silently reads as "no difference" — the feature looks like it
-// works while showing the wrong data. These tests fail if the signature drops it.
+// A source is chosen ONCE, at add time, and rides each LEG. There is NO
+// page/run-level source state and NO top-level ``data_source`` field. These
+// tests pin that (a) a v1 leg emits no source key anywhere, (b) a v2 leg carries
+// ``data_source:"v2"`` on the leg only, and (c) adding a v2 leg re-probes the
+// cache (the per-leg source enters ``autoDisplaySig`` via the leg's JSON).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import usePortfolio from './usePortfolio';
-
-const V1_RESULT = { portfolio_equity: [100, 110], dates: ['2020-01-01', '2020-12-31'], from_cache: true };
 
 vi.mock('../../api/portfolio', () => ({
   computePortfolio: vi.fn(() => Promise.resolve({ portfolio_equity: [1, 2], dates: ['a', 'b'], from_cache: false })),
@@ -47,70 +45,54 @@ beforeEach(() => {
   getPortfolioCachedResult.mockResolvedValue({ result: null, from_cache: false });
 });
 
-describe('usePortfolio — data source', () => {
-  it('defaults to v1', () => {
+describe('usePortfolio — per-instrument data source', () => {
+  it('exposes no page-level dataSource state or setter', () => {
     const { result } = renderHook(() => usePortfolio());
-    expect(result.current.dataSource).toBe('v1');
+    expect(result.current.dataSource).toBeUndefined();
+    expect(result.current.setDataSource).toBeUndefined();
   });
 
-  it('coerces a bogus value back to v1 — nothing can silently route a run to v2', () => {
-    const { result } = renderHook(() => usePortfolio());
-    act(() => { result.current.setDataSource('v3'); });
-    expect(result.current.dataSource).toBe('v1');
-  });
-
-  it('STALE-CACHE GUARD: flipping v1→v2 blanks the displayed result and re-probes', async () => {
-    getPortfolioCachedResult.mockResolvedValue({ result: V1_RESULT, from_cache: true });
-    const { result } = renderHook(() => usePortfolio());
-    act(() => { result.current.addLeg(INSTR_LEG); });
-    await waitFor(() => expect(result.current.results).toEqual(V1_RESULT));
-    const callsBefore = getPortfolioCachedResult.mock.calls.length;
-
-    // v2 is not cached → the re-probe misses and the display must stay blank.
-    getPortfolioCachedResult.mockResolvedValue({ result: null, from_cache: false });
-    act(() => { result.current.setDataSource('v2'); });
-
-    // If data_source were missing from autoDisplaySig, V1_RESULT would still be
-    // on screen here and no new probe would have fired.
-    await waitFor(() => expect(result.current.results).toBeNull());
-    await waitFor(() =>
-      expect(getPortfolioCachedResult.mock.calls.length).toBeGreaterThan(callsBefore),
-    );
-  });
-
-  it('the cache-get key carries the source PER LEG only on v2 (no top-level field)', async () => {
+  it('a v1 leg emits no source key — top level or leg (byte-identity)', async () => {
     const { result } = renderHook(() => usePortfolio());
     act(() => { result.current.addLeg(INSTR_LEG); });
     await waitFor(() => expect(getPortfolioCachedResult).toHaveBeenCalled());
-    // v1 (default) — no source on the key body, nor on the leg.
-    const first = getPortfolioCachedResult.mock.calls[0][0];
-    expect(first.dataSource).toBeUndefined();          // no top-level field
-    expect('data_source' in first.legs.SPX).toBe(false); // leg omits it on v1
-
-    // Flipping the page default seeds v2 onto the (unset) leaf via the fold.
-    act(() => { result.current.setDataSource('v2'); });
-    await waitFor(() => {
-      const last = getPortfolioCachedResult.mock.calls.at(-1)[0];
-      expect(last.dataSource).toBeUndefined();          // still no top-level field
-      expect(last.legs.SPX.data_source).toBe('v2');     // per-leg source
-    });
+    const body = getPortfolioCachedResult.mock.calls[0][0];
+    expect(body.dataSource).toBeUndefined();               // no top-level field
+    expect('data_source' in body.legs.SPX).toBe(false);    // leg omits it on v1
   });
 
-  it('Compute sends the source PER LEG (v2), never as a top-level field', async () => {
+  it('a v2 leg carries data_source:"v2" on the leg only, never at the top level', async () => {
     const { result } = renderHook(() => usePortfolio());
-    act(() => { result.current.addLeg(INSTR_LEG); });
-    await waitFor(() => expect(result.current.overlapRange).not.toBeNull());
+    act(() => { result.current.addLeg({ ...INSTR_LEG, dataSource: 'v2' }); });
+    await waitFor(() => expect(getPortfolioCachedResult).toHaveBeenCalled());
+    const body = getPortfolioCachedResult.mock.calls.at(-1)[0];
+    expect(body.dataSource).toBeUndefined();               // still no top-level field
+    expect(body.legs.SPX.data_source).toBe('v2');          // per-leg source
+  });
 
+  it('Compute sends the per-leg source (v2), never as a top-level field', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => { result.current.addLeg({ ...INSTR_LEG, dataSource: 'v2' }); });
+    await waitFor(() => expect(result.current.overlapRange).not.toBeNull());
     await act(async () => { await result.current.handleCalculate(); });
     expect(computePortfolio).toHaveBeenCalled();
-    const v1Call = computePortfolio.mock.calls.at(-1)[0];
-    expect(v1Call.dataSource).toBeUndefined();
-    expect('data_source' in v1Call.legs.SPX).toBe(false);
+    const call = computePortfolio.mock.calls.at(-1)[0];
+    expect(call.dataSource).toBeUndefined();
+    expect(call.legs.SPX.data_source).toBe('v2');
+  });
 
-    act(() => { result.current.setDataSource('v2'); });
-    await act(async () => { await result.current.handleCalculate(); });
-    const v2Call = computePortfolio.mock.calls.at(-1)[0];
-    expect(v2Call.dataSource).toBeUndefined();
-    expect(v2Call.legs.SPX.data_source).toBe('v2');
+  it('the per-leg source enters autoDisplaySig — a v2 leg re-probes the cache', async () => {
+    const { result } = renderHook(() => usePortfolio());
+    act(() => { result.current.addLeg(INSTR_LEG); });
+    await waitFor(() => expect(getPortfolioCachedResult).toHaveBeenCalled());
+    const callsBefore = getPortfolioCachedResult.mock.calls.length;
+    // Adding a v2 leg changes the per-leg JSON in the signature → re-probe fires.
+    act(() => { result.current.addLeg({ ...INSTR_LEG, symbol: 'ES', label: 'ES', dataSource: 'v2' }); });
+    await waitFor(() =>
+      expect(getPortfolioCachedResult.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+    const last = getPortfolioCachedResult.mock.calls.at(-1)[0];
+    expect('data_source' in last.legs.SPX).toBe(false);
+    expect(last.legs.ES.data_source).toBe('v2');
   });
 });

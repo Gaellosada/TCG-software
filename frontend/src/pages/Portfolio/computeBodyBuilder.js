@@ -75,15 +75,6 @@ export function buildPortfolioComputeBody({
   // passed identically by the compute path AND the cache-status probe.
   slippageBps,
   feesBps,
-  // Market data source DEFAULT ('v1' | 'v2') for this build. PER-INSTRUMENT:
-  // this is NOT a separate top-level wire field. It is the fold fallback every
-  // LEAF inherits when it carries no ``dataSource`` of its own (precedence:
-  // leg.dataSource → this default → v1). Each emitted leaf carries its own
-  // ``data_source`` (via dataSourceFieldsForRequest, present only for 'v2'), so
-  // a v1/absent leaf emits NO key and a pure-v1 body is byte-identical to a
-  // pre-feature payload. The page-level "set all v1/v2" control is a SEED into
-  // this default (folded per leaf), never emitted as its own body field.
-  dataSource,
   _depth = 0,
 }) {
   const apiLegs = {};
@@ -141,11 +132,6 @@ export function buildPortfolioComputeBody({
         availableIndicators,
         resolvePortfolio,
         resolveChildRange,
-        // The child's fold default = the composed leg's own source, else the
-        // parent default. So an unset leaf INSIDE the child inherits the child's
-        // effective source (rule 2 within the child); a leaf with its own source
-        // still wins (rule 1). Emitted per-leaf only when 'v2'.
-        dataSource: leg.dataSource || dataSource,
         _depth: _depth + 1,
       });
       // Propagate the child's own diagnostics so the parent surfaces them.
@@ -177,14 +163,12 @@ export function buildPortfolioComputeBody({
           // The parent's roll overlay never touches a portfolio leg, so the
           // child's internal rolls are charged exactly once (no double-charge).
           ...costFields,
-          // Market data source on the child sub-body — its inheritance DEFAULT
-          // (B.1): the composed leg's OWN source when set, else the parent's.
-          // A composed child therefore carries BOTH a body-level default (here)
-          // AND optional per-leaf overrides on its inlined legs (above, via the
-          // recursion's ``dataSource`` fold). Emitted only for 'v2', so a v1
-          // child stays byte-identical to a pre-feature payload. The backend
-          // binds each child + its leaves to the matching service.
-          ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
+          // A composed leg carries no source of its own — each of the child's
+          // inlined leaves carries its OWN per-instrument ``data_source`` (from
+          // the persisted child spec). So the child sub-body emits no body-level
+          // ``data_source`` (byte-identical to a pre-feature payload) and the
+          // backend binds each leaf to the warehouse its own source names.
+          ...dataSourceFieldsForRequest(leg.dataSource),
         },
       };
     } else if (leg.type === 'signal') {
@@ -210,7 +194,7 @@ export function buildPortfolioComputeBody({
         selection: leg.selection,
         stream: leg.stream,
         // Per-instrument source (leg's own → build default → v1); 'v2' only.
-        ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
+        ...dataSourceFieldsForRequest(leg.dataSource),
       };
       // An option PRICE leg (mid/bs_mid) is hold-ON-only; always send hold for a
       // premium leg (covers legacy legs too). Level streams (iv/greeks) never hold.
@@ -237,7 +221,7 @@ export function buildPortfolioComputeBody({
         strategy: leg.strategy || 'front_month',
         adjustment: leg.adjustment || 'none',
         // Per-instrument source (leg's own → build default → v1); 'v2' only.
-        ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
+        ...dataSourceFieldsForRequest(leg.dataSource),
       };
       if (leg.cycle) {
         apiLegs[leg.label].cycle = leg.cycle;
@@ -254,7 +238,7 @@ export function buildPortfolioComputeBody({
         collection: leg.collection,
         symbol: leg.symbol,
         // Per-instrument source (leg's own → build default → v1); 'v2' only.
-        ...dataSourceFieldsForRequest(leg.dataSource || dataSource),
+        ...dataSourceFieldsForRequest(leg.dataSource),
       };
     }
   }

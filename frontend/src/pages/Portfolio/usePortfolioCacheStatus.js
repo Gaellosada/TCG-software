@@ -30,19 +30,17 @@ export function statusForCached(cached) {
 
 // Signature of the data-affecting fields of a persisted doc — changes whenever
 // anything that alters the compute body (legs incl. weight/label, rebalance,
-// data source) changes, so a memoized row body is invalidated exactly then.
-// ``dataSource`` is part of the compute body, so it MUST be part of this
-// signature: otherwise flipping v1→v2 would re-probe every row with the
-// PREVIOUS source's memoized body and report the wrong cache status.
-function docSignature(doc, dataSource) {
+// and each leg's own per-instrument data source) changes, so a memoized row
+// body is invalidated exactly then. Per-leg ``dataSource`` rides inside
+// ``doc.legs`` so it is captured here automatically.
+function docSignature(doc) {
   try {
     return JSON.stringify({
       legs: doc.legs || [],
       rebalance: doc.rebalance || 'none',
-      dataSource,
     });
   } catch {
-    return `${doc && doc.id}#${dataSource}`;
+    return `${doc && doc.id}`;
   }
 }
 
@@ -72,7 +70,6 @@ async function runPool(items, limit, worker) {
  * @param {(id:string)=>object|null} p.resolvePortfolio  child resolver (active + rows)
  * @param {Array}   p.portfolios              visible saved rows [{id, legs, rebalance}]
  * @param {string|null} p.activeId            currently-loaded row id (status from active)
- * @param {'v1'|'v2'=} p.dataSource           active per-run market data source
  * @param {number}  p.refreshKey              bump to re-probe (e.g. after a compute)
  * @returns {{ activeCached: boolean|null, rowStatusById: Record<string,'checking'|'cached'|'not-cached'> }}
  */
@@ -86,7 +83,6 @@ export default function usePortfolioCacheStatus({
   resolvePortfolio,
   portfolios,
   activeId,
-  dataSource,
   refreshKey = 0,
 }) {
   const queryClient = useQueryClient();
@@ -146,7 +142,7 @@ export default function usePortfolioCacheStatus({
           if (!live()) return;
           const { body, missing, brokenRefs = [] } = buildPortfolioComputeBody({
             legs, rebalance, start: effStart, end: effEnd, availableIndicators, resolvePortfolio,
-            resolveChildRange, slippageBps, feesBps, dataSource,
+            resolveChildRange, slippageBps, feesBps,
           });
           if (!missing.length && !brokenRefs.length) queries.push({ tag: ACTIVE_TAG, body });
         } catch { /* un-keyable active config → no active query (stays null) */ }
@@ -195,7 +191,7 @@ export default function usePortfolioCacheStatus({
         try {
           const rowLegs = persistedDocToLegs(doc);
           const hasChildRefs = rowLegs.some((l) => l.type === 'portfolio');
-          const sig = docSignature(doc, dataSource);
+          const sig = docSignature(doc);
           const memo = bodyCacheRef.current.get(doc.id);
           // Memoize PURE rows only. A composed row's inlined child spec can
           // change without the row's OWN legs changing (docSignature unchanged),
@@ -221,7 +217,6 @@ export default function usePortfolioCacheStatus({
                 resolveChildRange,
                 slippageBps,
                 feesBps,
-                dataSource,
               });
               if (!built.missing.length && !(built.brokenRefs && built.brokenRefs.length)) {
                 body = built.body;
@@ -265,7 +260,7 @@ export default function usePortfolioCacheStatus({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     cacheEnabled, legs, rebalance, startDate, endDate, overlapRange,
-    resolvePortfolio, portfolios, activeId, dataSource, refreshKey, queryClient,
+    resolvePortfolio, portfolios, activeId, refreshKey, queryClient,
   ]);
 
   return cacheEnabled

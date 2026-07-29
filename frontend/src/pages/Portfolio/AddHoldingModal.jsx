@@ -43,17 +43,8 @@ export default function AddHoldingModal({
   onUpdateLeg,
   readOnly = false,
   referenceDate = null,
-  // SEED for the per-instrument source selector: the page-level default. In ADD
-  // mode the new leg opens on this source; in EDIT mode the modal opens on the
-  // leg's OWN source instead so it reflects reality. Either way the source is
-  // stamped onto the leg only when v2 (byte-identity for v1 legs is preserved).
-  defaultSource = 'v1',
 }) {
   const editMode = editLeg != null;
-  // Edit opens on the leg's own source; add opens on the page default.
-  const seededSource = editMode
-    ? (editLeg && editLeg.dataSource === 'v2' ? 'v2' : 'v1')
-    : (defaultSource === 'v2' ? 'v2' : 'v1');
 
   const handleSelect = useCallback(
     (instrument) => {
@@ -95,11 +86,13 @@ export default function AddHoldingModal({
       // Portfolio continuous legs (LegSpec.rank) support the NTH_NEAREST roll
       // strategy — surface it in the shared picker's strategy select.
       allowNthNearest={true}
-      // Choose the market-data source at creation (seeded from the page default;
-      // in edit mode, from the leg's own source). instrumentToLegConfig maps the
-      // emitted ``data_source`` onto the leg's ``dataSource``.
-      showDataSourceSelector={true}
-      defaultSource={seededSource}
+      // Choose the market-data source ONCE, at creation. Defaults to v1; the
+      // user may pick v2 in the picker. instrumentToLegConfig maps the emitted
+      // ``data_source`` onto the leg's ``dataSource``. In EDIT mode the selector
+      // is hidden — the source is immutable, and because the picker then emits
+      // no ``data_source``, updateLeg's merge preserves the leg's existing
+      // source untouched (settings-only edit).
+      showDataSourceSelector={!editMode}
     />
   );
 }

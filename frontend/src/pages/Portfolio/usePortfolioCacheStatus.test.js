@@ -158,40 +158,39 @@ describe('usePortfolioCacheStatus', () => {
     expect(getPortfolio).not.toHaveBeenCalled(); // pure rows fetch no children
   });
 
-  // STALE-MEMO GUARD for the per-row body memo. Pure rows are memoized by
-  // docSignature(doc, dataSource); the data source is part of the compute body,
-  // so it MUST be part of that signature. If it is dropped, flipping v1→v2
-  // re-runs the effect but every pure row's signature is unchanged, so each row
-  // is re-probed with the PREVIOUS source's memoized body and the saved-row
-  // cache indicators report v1's status while the selector reads "Database v2".
-  it('re-probes a memoized PURE row with the NEW source body after a v1→v2 flip', async () => {
-    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }] });
-    const pureRow = {
-      id: 'pure-1', rebalance: 'none',
+  // PER-INSTRUMENT: a saved row's source rides its own persisted leg. The probe
+  // body must carry the leg's source on the LEG (present only for v2), never as
+  // a top-level field. docSignature captures ``doc.legs`` (which include the
+  // per-leg source), so the memo stays content-addressed on it.
+  it('probes a v1 row with NO source key and a v2 row with data_source:"v2" on the leg', async () => {
+    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }, { cached: true }] });
+    const v1Row = {
+      id: 'v1-row', rebalance: 'none',
       legs: [{ label: 'NDX', type: 'instrument', collection: 'INDEX', symbol: 'NDX', weight: 100 }],
     };
-    // No active legs → the ONLY probed body is the row's.
-    const props = (dataSource) => baseProps({ legs: [], portfolios: [pureRow], dataSource });
-
-    const { rerender } = renderHook((p) => usePortfolioCacheStatus(p), {
-      initialProps: props('v1'),
+    const v2Row = {
+      id: 'v2-row', rebalance: 'none',
+      legs: [{ label: 'NDX', type: 'instrument', collection: 'INDEX', symbol: 'NDX', weight: 100, dataSource: 'v2' }],
+    };
+    // No active legs → the ONLY probed bodies are the rows'.
+    renderHook((p) => usePortfolioCacheStatus(p), {
+      initialProps: baseProps({ legs: [], portfolios: [v1Row, v2Row] }),
     });
-    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalledTimes(1), { timeout: 2000 });
-    // v1 emits no wire field at all (byte-identity) — not top-level, not per-leg.
-    const v1Body = getPortfolioCacheStatus.mock.calls[0][0][0];
-    expect(v1Body.data_source).toBeUndefined();
-    expect('data_source' in v1Body.legs.NDX).toBe(false);
-
-    // Flip the source; the row is memoized, so only a source-aware signature
-    // invalidates it. PER-INSTRUMENT: the source rides the LEG, not a top-level
-    // body field, so the re-probed body carries it on legs.NDX.
-    act(() => rerender(props('v2')));
-    await waitFor(
-      () => expect(getPortfolioCacheStatus.mock.calls.length).toBeGreaterThanOrEqual(2),
-      { timeout: 2000 },
-    );
-    const lastCall = getPortfolioCacheStatus.mock.calls[getPortfolioCacheStatus.mock.calls.length - 1];
-    expect(lastCall[0][0].data_source).toBeUndefined();
-    expect(lastCall[0][0].legs.NDX.data_source).toBe('v2');
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalled(), { timeout: 2000 });
+    // Collect every probed body across all calls, keyed by whether its NDX leg is v2.
+    const bodies = getPortfolioCacheStatus.mock.calls.flatMap((c) => c[0]);
+    await waitFor(() => {
+      const all = getPortfolioCacheStatus.mock.calls.flatMap((c) => c[0]);
+      expect(all.length).toBeGreaterThanOrEqual(2);
+    }, { timeout: 2000 });
+    const finalBodies = getPortfolioCacheStatus.mock.calls.flatMap((c) => c[0]);
+    for (const b of finalBodies) {
+      expect(b.data_source).toBeUndefined(); // never a top-level field
+    }
+    const v1Body = finalBodies.find((b) => !('data_source' in b.legs.NDX));
+    const v2Body = finalBodies.find((b) => b.legs.NDX.data_source === 'v2');
+    expect(v1Body).toBeTruthy();
+    expect(v2Body).toBeTruthy();
+    expect(bodies).toBeDefined();
   });
 });

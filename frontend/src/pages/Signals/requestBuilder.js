@@ -38,17 +38,17 @@ import { dataSourceFieldsForRequest } from '../../lib/dataSource';
 /**
  * Normalise the per-instrument market-data source on a signal input's
  * instrument ref for the wire. PER-INSTRUMENT: the source rides the instrument
- * ref itself (not a top-level body field). Precedence: the ref's own
- * ``data_source`` → the build-time ``defaultSource`` fold → v1. Emitted ONLY
- * for 'v2' (via the shared ``dataSourceFieldsForRequest``), so a v1/absent ref
- * carries NO ``data_source`` key and stays byte-identical to a pre-feature
- * payload. Strips any stale source key (either casing) before re-emitting so a
- * UI-held value can never leak an un-encoded key onto the wire.
+ * ref itself (chosen once, at add time; not a top-level body field and not a
+ * page/run default). Emitted ONLY for 'v2' (via the shared
+ * ``dataSourceFieldsForRequest``), so a v1/absent ref carries NO ``data_source``
+ * key and stays byte-identical to a pre-feature payload. Strips any stale source
+ * key (either casing) before re-emitting so a UI-held value can never leak an
+ * un-encoded key onto the wire.
  */
-function instrumentForWire(instrument, defaultSource) {
+function instrumentForWire(instrument) {
   if (!instrument || typeof instrument !== 'object') return instrument ?? null;
   const { data_source, dataSource, ...rest } = instrument;
-  return { ...rest, ...dataSourceFieldsForRequest(data_source ?? dataSource ?? defaultSource) };
+  return { ...rest, ...dataSourceFieldsForRequest(data_source ?? dataSource) };
 }
 import {
   MAX_ABS_WEIGHT,
@@ -96,7 +96,7 @@ export function costFieldsForRequest(costs) {
  *
  * Returns a NEW object graph — the caller's ``signal`` is not mutated.
  */
-export function normaliseSpecForRequest(signal, defaultSource) {
+export function normaliseSpecForRequest(signal) {
   if (!signal || typeof signal !== 'object') return signal;
   const rules = signal.rules || {};
   const outRules = { entries: [], exits: [], resets: [] };
@@ -105,7 +105,7 @@ export function normaliseSpecForRequest(signal, defaultSource) {
     outRules[section] = blocks.map((b) => normaliseBlock(b, section));
   }
   const inputs = Array.isArray(signal.inputs)
-    ? signal.inputs.map((inp) => normaliseInput(inp, defaultSource))
+    ? signal.inputs.map((inp) => normaliseInput(inp))
     : [];
   return { ...signal, inputs, rules: outRules };
 }
@@ -134,7 +134,7 @@ function normalisePositionCap(raw) {
   return [lo, hi];
 }
 
-function normaliseInput(input, defaultSource) {
+function normaliseInput(input) {
   if (!input || typeof input !== 'object') return input;
   // Only emit position_cap when present + well-formed — otherwise a normal
   // input stays exactly {id, instrument} (no stray key on the wire).
@@ -142,7 +142,7 @@ function normaliseInput(input, defaultSource) {
   return {
     id: typeof input.id === 'string' ? input.id : '',
     // Per-instrument market-data source rides the instrument ref (v2 only).
-    instrument: instrumentForWire(input.instrument, defaultSource),
+    instrument: instrumentForWire(input.instrument),
     ...(cap !== undefined ? { position_cap: cap } : {}),
   };
 }
@@ -274,14 +274,6 @@ function normaliseOperand(operand) {
  *   NOTE: per-leg signal sub-bodies inside a portfolio call this WITHOUT costs
  *   — slippage/fees are a single global top-level field, applied once by the
  *   portfolio body, never per-leg.
- * @param {'v1'|'v2'=} dataSource
- *   PER-INSTRUMENT source FOLD DEFAULT — NOT a top-level wire field. Every input
- *   instrument inherits it when it carries no ``data_source`` of its own
- *   (precedence: input.instrument.data_source → this default → v1). The source
- *   is emitted per input instrument, present only for 'v2'; a v1/absent input
- *   emits no key so the body stays byte-identical to a pre-feature payload.
- *   Signal sub-bodies built inside a portfolio pass no default here, so their
- *   inputs carry only their OWN (authored) per-instrument source.
  * @returns {{body: Object, missing: string[]}}
  *   ``body`` — the literal POST body
  *     ``{spec, indicators: IndicatorSpec[]}``
@@ -289,7 +281,7 @@ function normaliseOperand(operand) {
  *                 available-indicators array; callers should abort the
  *                 request and surface a validation error.
  */
-export function buildComputeRequestBody(signal, availableIndicators, costs, dataSource) {
+export function buildComputeRequestBody(signal, availableIndicators, costs) {
   const needed = collectIndicatorIds(signal);
   const indicatorList = [];
   const missing = [];
@@ -331,9 +323,9 @@ export function buildComputeRequestBody(signal, availableIndicators, costs, data
   }
   return {
     body: {
-      // Per-instrument source is folded into each input's instrument ref inside
+      // Per-instrument source rides each input's instrument ref inside
       // normaliseSpecForRequest — there is NO top-level ``data_source`` field.
-      spec: normaliseSpecForRequest(signal, dataSource),
+      spec: normaliseSpecForRequest(signal),
       indicators: indicatorList,
       // Global execution costs — present only when > 0 (see costFieldsForRequest).
       ...costFieldsForRequest(costs),

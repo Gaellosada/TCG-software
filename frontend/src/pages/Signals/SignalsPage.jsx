@@ -26,7 +26,6 @@ import { normalizeErrorEnvelope } from '../../utils/errorEnvelope';
 import { hydrateAvailableIndicators } from './hydrateIndicators';
 import { hydrateFromPersisted } from './hydrateSignal';
 import { getRiskFreeRateFraction, getSlippageBps, getFeesBps } from '../../lib/userSettings';
-import { DEFAULT_DATA_SOURCE, coerceDataSource } from '../../lib/dataSource';
 import SaveControls from '../../components/SaveControls';
 import SaveStatus from '../../components/SaveStatus/SaveStatus';
 import useBackendAutosave from '../../hooks/useBackendAutosave';
@@ -554,23 +553,17 @@ function SignalsPage() {
 
   const canRun = !!selectedSignal && !running && runDisabledReason === null;
 
-  // Per-run market data source ('v1' | 'v2'). Component state, NOT a saved
-  // signal field and NOT a Settings toggle — the workflow is "run it on v1, run
-  // it on v2, compare", so it lives one click from Run and always starts at v1
-  // (a freshly-opened page emits exactly today's payload).
-  const [dataSource, setDataSourceState] = useState(DEFAULT_DATA_SOURCE);
-  const setDataSource = useCallback((v) => setDataSourceState(coerceDataSource(v)), []);
-
   const handleRun = useCallback(async () => {
     if (!selectedSignal) return;
     // Global execution costs read once here (single localStorage read site) and
     // threaded into the built body so the wire carries slippage_bps/fees_bps.
     const costs = { slippageBps: getSlippageBps(), feesBps: getFeesBps() };
+    // Per-instrument source rides each input's instrument ref (set at add time);
+    // there is no page/run-level default to thread here.
     const { body, missing } = buildComputeRequestBody(
       selectedSignal,
       availableIndicators,
       costs,
-      dataSource,
     );
     if (missing.length > 0) {
       setError({
@@ -587,9 +580,6 @@ function SignalsPage() {
           signal,
           slippageBps: body.slippage_bps,
           feesBps: body.fees_bps,
-          // Derived from the built body (present only for v2) so the wire body
-          // and the body the builder produced can never drift apart.
-          dataSource: body.data_source,
         });
         if (signal.aborted) return;
         setLastResult(data);
@@ -613,19 +603,14 @@ function SignalsPage() {
         }
       }
     });
-  }, [selectedSignal, availableIndicators, runAbortable, dataSource]);
+  }, [selectedSignal, availableIndicators, runAbortable]);
 
-  // Cancel any in-flight run and clear stale results when switching signals —
-  // or when switching the data source. The source is an input to the run exactly
-  // like the signal is: leaving v1's chart/stats/trade log on screen after a flip
-  // to v2 lets an unchanged chart read as "v2 gives the same answer" when in fact
-  // nothing was recomputed. An in-flight run is aborted for the same reason (it
-  // would land under the NEW selector label carrying the OLD source's result).
+  // Cancel any in-flight run and clear stale results when switching signals.
   useEffect(() => {
     abortRun();
     setLastResult(null);
     setError(null);
-  }, [selectedId, dataSource, abortRun]);
+  }, [selectedId, abortRun]);
 
   // Drive the grid results-row height from the number of ownPanel indicators
   // so the row grows and the flex chain inside fills it naturally.
@@ -774,8 +759,6 @@ function SignalsPage() {
           runDisabledReason={runDisabledReason}
           capital={capital}
           onCapitalChange={setCapital}
-          dataSource={dataSource}
-          onDataSourceChange={setDataSource}
         />
       </div>
       <div className={styles.chartPanel}>

@@ -1,32 +1,11 @@
 import { Fragment, useState } from 'react';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import SourceBadge from '../../components/SourceBadge';
 import { formatInstrument } from './formatInstrument';
 import styles from './HoldingsList.module.css';
 
 const COL_COUNT = 8;
-
-// Per-instrument market-data source selector shown in the Holdings table for
-// every LEAF leg (instrument / continuous / option / composed portfolio).
-// Writes ``leg.dataSource`` ('v1' default clears the key so it is omitted from
-// the persisted spec + the wire — byte-identity). Signal legs carry their
-// source per input (edited on the Signals page), so they show no selector here.
-function LegSourceSelect({ leg, index, onUpdateLeg, disabled }) {
-  return (
-    <select
-      className={styles.sourceSelect}
-      data-testid={`leg-datasource-${leg.id}`}
-      title="Market data source for this instrument (v1 = tcg_instruments, v2 = new star schema). Saved with the portfolio."
-      value={leg.dataSource === 'v2' ? 'v2' : 'v1'}
-      disabled={disabled}
-      onClick={(e) => e.stopPropagation()}
-      onChange={(e) => onUpdateLeg(index, { dataSource: e.target.value === 'v2' ? 'v2' : undefined })}
-    >
-      <option value="v1">v1</option>
-      <option value="v2">v2</option>
-    </select>
-  );
-}
 
 /**
  * Displays portfolio holdings with editable weights and remove buttons.
@@ -237,16 +216,24 @@ export default function HoldingsList({
                         {isSignal ? (
                           <span
                             className={styles.instrumentSecondary}
-                            title="Signal legs carry a market-data source per input (edit on the Signals page)."
+                            title="Signal legs carry a market-data source per input (set when each input is added)."
                           >
                             per input
                           </span>
+                        ) : leg.type === 'portfolio' ? (
+                          <span
+                            className={styles.instrumentSecondary}
+                            title="Composed portfolios carry a market-data source per underlying instrument."
+                          >
+                            per leg
+                          </span>
                         ) : (
-                          <LegSourceSelect
-                            leg={leg}
-                            index={index}
-                            onUpdateLeg={onUpdateLeg}
-                            disabled={readOnly}
+                          // Read-only badge: the source is fixed at add time
+                          // (chosen in the Add Holding picker). To change it,
+                          // remove the holding and re-add it from the other DB.
+                          <SourceBadge
+                            source={leg.dataSource}
+                            testId={`leg-datasource-${leg.id}`}
                           />
                         )}
                       </td>

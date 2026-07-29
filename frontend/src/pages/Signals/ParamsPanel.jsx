@@ -1,5 +1,3 @@
-import DataSourceSelector from '../../components/DataSourceSelector';
-import { DATA_SOURCE_V2, V2_COMMON_WINDOW_HINT } from '../../lib/dataSource';
 import styles from './Signals.module.css';
 
 /**
@@ -13,12 +11,9 @@ import styles from './Signals.module.css';
  *   runDisabledReason  {string|null}
  *   capital            {number}       display-only initial capital for P&L scaling
  *   onCapitalChange    {Function}     (number) => void
- *   dataSource         {'v1'|'v2'}    per-run market data source
- *   onDataSourceChange {Function}     ('v1'|'v2') => void
  */
 function ParamsPanel({
   signal, onRun, running, canRun, runDisabledReason, capital, onCapitalChange,
-  dataSource, onDataSourceChange,
 }) {
   // v4: rules shape is now `{ entries, exits }` (section model); weight sign
   // carries long/short on each entry block.
@@ -62,31 +57,9 @@ function ParamsPanel({
             data-testid="initial-capital"
           />
         </div>
-        {/* SEED-ONLY default market-data source — the SAME shared component the
-            Portfolio page renders (no page-specific variant). NOT a per-run wire
-            field: it only supplies the DEFAULT each input inherits when it has
-            not set its own source (the request builder folds it in per input via
-            ``data_source ?? dataSource``; there is no top-level ``data_source``).
-            Existing per-input choices in the Inputs panel always win. It renders
-            the v2 capability limits itself when v2 is selected. */}
-        {onDataSourceChange && (
-          <div className={styles.dataSourceRow}>
-            <DataSourceSelector
-              id="signal-data-source-select"
-              label="Default source for new inputs"
-              helper="Seeds the market-data source for inputs you add. Each input keeps its own source (set it per row in the Inputs panel); changing this never overrides an existing input."
-              title="Default market-data source seeded onto inputs that don't set their own. Not a per-run override — existing per-input choices win."
-              value={dataSource}
-              onChange={onDataSourceChange}
-              disabled={running}
-            />
-            {dataSource === DATA_SOURCE_V2 && (
-              <div className={styles.dataSourceHint} data-testid="signal-v2-window-hint">
-                {V2_COMMON_WINDOW_HINT}
-              </div>
-            )}
-          </div>
-        )}
+        {/* Market-data source is chosen per input at add time (in the input's
+            instrument picker) and shown read-only in the Inputs panel — there is
+            no page-level default and no run-level source. */}
         <button
           type="button"
           className={styles.runBtn}
