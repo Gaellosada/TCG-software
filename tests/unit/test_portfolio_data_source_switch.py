@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -930,3 +931,195 @@ def test_strip_use_cache_never_touches_data_source():
     stripped = portfolio._strip_use_cache(pr.model_dump(mode="json"))
     assert "use_cache" not in stripped
     assert stripped["legs"]["a"]["data_source"] == "v2"
+
+
+# --------------------------------------------------------------------------- #
+# 12. Multi-source calendar merge (NON-identical grids)                        #
+#                                                                              #
+#     The batched instrument fetch is split by source, each service returns    #
+#     its own date grid, and the route intersects the grids + reindexes every  #
+#     ``aligned_series`` onto the shared grid (``np.isin`` mask). Every OTHER   #
+#     test in this file returns the SAME ``DATES`` from every service, so the   #
+#     intersection is trivial and the reindex is a no-op — the realistic case   #
+#     (v1 and v2 histories starting/ending on different dates) had never run    #
+#     end-to-end. These tests drive DISTINCT grids with known close values so   #
+#     the merged equity is predictable to the boundary bar.                     #
+# --------------------------------------------------------------------------- #
+
+
+def _series_on(grid: list[int], closes: list[float]) -> PriceSeries:
+    """A ``PriceSeries`` on an ARBITRARY grid with the given close values.
+
+    open/high/low/volume are given distinct offsets from ``close`` so a merge
+    that masked the wrong array (or a different mask per field) would surface as
+    a corrupted OHLC row, not just a wrong close.
+    """
+    c = np.asarray(closes, dtype=np.float64)
+    g = np.asarray(grid, dtype=np.int64)
+    assert len(c) == len(g)
+    return PriceSeries(
+        dates=g,
+        open=c - 1.0,
+        high=c + 1.0,
+        low=c - 2.0,
+        close=c,
+        volume=np.full(len(g), 1000.0, dtype=np.float64),
+    )
+
+
+def _set_calendar(svc: MagicMock, grid: list[int], closes: list[float]) -> None:
+    """Rebind a stub's ``get_aligned_prices`` to return ITS OWN grid/closes.
+
+    Records the leg-label set into the stub's existing ``seen_aligned`` so the
+    split (each service asked for ONLY its own leg) is asserted precisely.
+    """
+    g = np.asarray(grid, dtype=np.int64)
+
+    async def _aligned(legs_spec):
+        svc.seen_aligned.append(set(legs_spec))
+        return g, {label: _series_on(grid, closes) for label in legs_spec}
+
+    svc.get_aligned_prices = AsyncMock(side_effect=_aligned)
+
+
+# v1 covers 2020..2024-12 (six bars, two of them BEFORE v2 starts); v2 covers
+# 2022-06..2025-01 (five bars, one AFTER v1 ends). The dates present in BOTH are
+# the four in the middle — so BOTH masks are non-trivial (v1 drops its two
+# leading bars, v2 drops its one trailing bar).
+_V1_GRID = [20200101, 20210101, 20220601, 20230601, 20240601, 20241201]
+_V1_CLOSES = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+_V2_GRID = [20220601, 20230601, 20240601, 20241201, 20250101]
+_V2_CLOSES = [100.0, 200.0, 400.0, 800.0, 1600.0]
+_INTERSECTION_ISO = ["2022-06-01", "2023-06-01", "2024-06-01", "2024-12-01"]
+
+
+async def test_multi_source_merge_intersects_calendars_and_reindexes(client, services):
+    """v1 and v2 legs on DIFFERENT (partially overlapping) grids merge onto the
+    intersection, with every aligned series correctly reindexed.
+
+    Leg ``a`` is a v1 INSTRUMENT leg, leg ``b`` a v2 CONTINUOUS leg — both flow
+    through the split fetch. Closes are chosen so the buy-and-hold, equal-weight
+    equity is exact:
+
+      intersection closes   a=[30,40,50,60]      b=[100,200,400,800]
+      leg equity (w=0.5)    a=50·ratio           b=50·ratio
+                            a=[50,66.67,83.33,100]  b=[50,100,200,400]
+      portfolio = a+b       [100,166.67,283.33,500]
+
+    A leg silently dropped, an off-by-one in the mask, or NaN leakage would each
+    move one of these boundary numbers.
+    """
+    _set_calendar(services["v1"], _V1_GRID, _V1_CLOSES)
+    _set_calendar(services["v2"], _V2_GRID, _V2_CLOSES)
+    # The v2 leg is continuous → §9.5 re-surfaces roll boundaries via
+    # get_continuous. It is display-only (equity is already built), but it runs
+    # OUTSIDE a try/except when it returns, so hand it a real (empty) roll set.
+    services["v2"].get_continuous = AsyncMock(
+        return_value=SimpleNamespace(roll_dates=np.array([], dtype=np.int64))
+    )
+
+    body = {
+        "legs": {
+            "a": {
+                "type": "instrument",
+                "collection": "INDEX",
+                "symbol": "SPX",
+                "data_source": "v1",
+            },
+            "b": {
+                "type": "continuous",
+                "collection": "FUT_SP_500",
+                "strategy": "front_month",
+                "adjustment": "none",
+                "data_source": "v2",
+            },
+        },
+        "weights": {"a": 50.0, "b": 50.0},
+        "rebalance": "none",
+        "return_type": "normal",
+        "start": "2019-01-01",  # wide enough to NOT clip the intersection
+        "end": "2025-12-31",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    # ── The curve spans the INTERSECTION: later of the two starts, shared end ──
+    assert data["dates"] == _INTERSECTION_ISO
+    assert data["date_range"] == {"start": "2022-06-01", "end": "2024-12-01"}
+
+    # ── Each source was hit EXACTLY once, each with ONLY its own leg ──
+    assert services["v1"].get_aligned_prices.await_count == 1
+    assert services["v2"].get_aligned_prices.await_count == 1
+    assert services["v1"].seen_aligned == [{"a"}]
+    assert services["v2"].seen_aligned == [{"b"}]
+
+    # ── No leg silently dropped: BOTH contribute to the merged equity ──
+    assert set(data["leg_equities"]) == {"a", "b"}
+    assert len(data["leg_equities"]["a"]) == 4
+    assert len(data["leg_equities"]["b"]) == 4
+
+    # ── Correct reindex onto the intersected grid (exact, every bar) ──
+    # v1's leading [10,20] and v2's trailing [1600] were dropped; the surviving
+    # subsets are a=[30,40,50,60] and b=[100,200,400,800].
+    assert data["leg_equities"]["a"] == pytest.approx([50.0, 200 / 3, 250 / 3, 100.0])
+    assert data["leg_equities"]["b"] == pytest.approx([50.0, 100.0, 200.0, 400.0])
+    assert data["portfolio_equity"] == pytest.approx(
+        [100.0, 500 / 3, 850 / 3, 500.0]
+    )
+    # The end value pins BOTH legs at once: a-only would end 200, b-only 800,
+    # b-dropped 200, a-dropped 800 — only both-present gives 500.
+    assert data["portfolio_equity"][-1] == pytest.approx(500.0)
+
+    # ── No NaN leakage: every emitted value is a finite JSON number ──
+    for series in (
+        data["portfolio_equity"],
+        data["leg_equities"]["a"],
+        data["leg_equities"]["b"],
+    ):
+        assert all(isinstance(v, float) and np.isfinite(v) for v in series)
+
+
+async def test_multi_source_zero_overlap_is_a_clean_400_not_a_crash(client, services):
+    """Disjoint v1/v2 calendars → the intersection is EMPTY.
+
+    Documented behaviour: the route raises ``ValidationError`` → HTTP 400 with an
+    actionable message, NOT a 500 and NOT a silently-empty/corrupt curve. (This
+    is the guard at ``portfolio.py`` ``full_common_dates.size == 0`` inside the
+    multi-source branch, which fires before any equity is built.)
+    """
+    _set_calendar(services["v1"], [20200101, 20210101], [10.0, 20.0])
+    _set_calendar(services["v2"], [20240101, 20250101], [100.0, 200.0])
+
+    body = {
+        "legs": {
+            "a": {
+                "type": "instrument",
+                "collection": "INDEX",
+                "symbol": "SPX",
+                "data_source": "v1",
+            },
+            "b": {
+                "type": "instrument",
+                "collection": "INDEX",
+                "symbol": "SPX",
+                "data_source": "v2",
+            },
+        },
+        "weights": {"a": 50.0, "b": 50.0},
+        "rebalance": "none",
+        "return_type": "normal",
+        "start": "2019-01-01",
+        "end": "2025-12-31",
+    }
+    resp = await client.post("/api/portfolio/compute", json=body)
+    assert resp.status_code == 400, resp.text
+    message = resp.json()["message"]
+    # Actionable and specific to the multi-source case (not the generic
+    # all-legs-disjoint message emitted later at §5).
+    assert "No overlapping dates" in message
+    assert "data source" in message
+    # Both services were still consulted (the split ran); the failure is the
+    # merge, not a dropped leg.
+    assert services["v1"].get_aligned_prices.await_count == 1
+    assert services["v2"].get_aligned_prices.await_count == 1
