@@ -3,7 +3,12 @@ import { listCollections, listInstruments, getAvailableCycles } from '../../api/
 import { getOptionRoots } from '../../api/options';
 import { createBasket } from '../../api/persistence';
 import { useBasketsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
-import OptionStreamForm, { buildDefaultOptionStream, validateOptionStream } from '../OptionStreamForm';
+import OptionStreamForm, {
+  buildDefaultOptionStream,
+  validateOptionStream,
+  deriveCycleOptions,
+  pickDefaultCycle,
+} from '../OptionStreamForm';
 import DataSourceSelector from '../DataSourceSelector';
 import styles from './InstrumentPickerModal.module.css';
 
@@ -337,6 +342,46 @@ export default function InstrumentPickerModal({
     // v2 offers only its real option series.
   }, [isOpen, optionsVisible, basketsVisible, catalogSource]);
 
+  /* ── Self-heal the option-stream root when roots load / change ──
+   *
+   * ROOT-CAUSE FIX for the "Pick a root." bug. ``handleEnterOptionsDrillDown``
+   * builds the default option stream ONCE from whatever ``optionRoots`` holds at
+   * click time. If roots hadn't loaded yet (cold open) or were mid-reload after a
+   * v1⇄v2 source toggle, that default is built with an EMPTY roots list →
+   * ``collection: ''``, and nothing repaired it when roots later arrived →
+   * ``validateOptionStream`` returns NO_ROOT ("Pick a root.") forever. Worse, with
+   * a SINGLE root (v2's OPT_SP_500) the native <select> visually shows that sole
+   * root while React state stays '' (the browser auto-shows the only option), and
+   * re-picking the already-displayed option fires no change event — so the user
+   * cannot repair it by hand.
+   *
+   * This effect makes the default self-heal: whenever the loaded roots change
+   * (incl. after a source toggle) while the options drill-down is open, if the
+   * current value's collection is empty or no longer valid for the loaded roots,
+   * snap it to the first available root — preserving every other user setting and
+   * re-deriving a cycle valid for the new root. Idempotent: once the collection is
+   * valid it returns the previous value unchanged (referential no-op → no loop). */
+  useEffect(() => {
+    if (!inOptionsDrillDown) return;
+    if (optionRootsLoading) return;
+    if (!optionRoots || optionRoots.length === 0) return;
+    setOptionStreamValue((prev) => {
+      // No value yet → build a full default against the now-loaded roots.
+      if (!prev) return buildDefaultOptionStream({ availableRoots: optionRoots });
+      const collectionValid = optionRoots.some((r) => r.collection === prev.collection);
+      if (collectionValid) return prev; // valid → leave the user's choice intact.
+      // Empty or stale collection (cold-open race / post-source-toggle): snap to
+      // the first available root, keep every other field, and re-derive a cycle
+      // that the new root actually offers (keep the current cycle if still valid).
+      const nextRoot = optionRoots[0];
+      const opts = deriveCycleOptions(nextRoot.cycles, null);
+      const validCycleValues = opts.map((o) => o.value);
+      const curCycle = prev.cycle ?? null;
+      const nextCycle = validCycleValues.includes(curCycle) ? curCycle : pickDefaultCycle(opts);
+      return { ...prev, collection: nextRoot.collection, cycle: nextCycle };
+    });
+  }, [inOptionsDrillDown, optionRoots, optionRootsLoading]);
+
   /* (Saved baskets are loaded by the useBasketsList queries declared above.) */
 
   /* ── Load available cycles for futures drill-down ── */
@@ -439,11 +484,18 @@ export default function InstrumentPickerModal({
    * Fired ONLY by the DataSourceSelector's user interaction — never by the
    * open-seed effect (that calls setSource directly), so there is no race with
    * the initialConfig/open seeding. Beyond flipping the source (which the
-   * catalog effects observe via ``catalogSource`` and reload), it returns the
-   * modal to the category list: a drill-down target valid in one warehouse
-   * (e.g. FUT_VIX under v1) may not exist in the other, so a stale drill-down
-   * must not linger across a switch. Resets the same continuous defaults the
-   * "Back" handlers do. */
+   * catalog effects observe via ``catalogSource`` and reload), it unwinds the
+   * FUTURES drill-down to the category list: a futures drill-down target valid
+   * in one warehouse (e.g. FUT_VIX under v1) may not exist in the other, so a
+   * stale futures drill-down must not linger across a switch. Resets the same
+   * continuous defaults the "Back" handlers do.
+   *
+   * The OPTIONS drill-down is deliberately KEPT in place across a toggle (the
+   * source selector lives inside it, so bouncing the user back to the grid on
+   * every switch is jarring). The self-heal effect above re-snaps
+   * ``optionStreamValue.collection`` to a root valid for the newly-chosen source
+   * once its roots reload — preserving option_type / selection / stream — so
+   * staying in the drill-down is safe. */
   const handleSourceChange = useCallback((next) => {
     setSource(next);
     setSelectedFutCollection(null);
@@ -452,8 +504,6 @@ export default function InstrumentPickerModal({
     setRollOffset(2);
     setStrategy('front_month');
     setRank(3);
-    setInOptionsDrillDown(false);
-    setOptionStreamValue(null);
   }, []);
 
   // In readOnly (view-only) the modal must NEVER emit. The config-step confirm
