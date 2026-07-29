@@ -54,18 +54,28 @@ describe('api wire — data_source', () => {
   });
 });
 
-describe('buildComputeRequestBody — data_source', () => {
-  const spec = { id: 's1', name: 'S', inputs: [], rules: { entries: [], exits: [] } };
+describe('buildComputeRequestBody — per-instrument data_source', () => {
+  // PER-INSTRUMENT: there is NO top-level ``data_source`` body field — the
+  // source rides each input's instrument ref (see requestBuilder.dataSource.test).
+  const specNoInputs = { id: 's1', name: 'S', inputs: [], rules: { entries: [], exits: [] } };
+  const specWithInput = {
+    id: 's1', name: 'S',
+    inputs: [{ id: 'X', instrument: { type: 'spot', collection: 'INDEX', instrument_id: 'SPX' } }],
+    rules: { entries: [], exits: [] },
+  };
 
-  it('omits the key on v1 / unset — byte-identical to a pre-feature body', () => {
-    const noSrc = buildComputeRequestBody(spec, []).body;
-    const v1 = buildComputeRequestBody(spec, [], undefined, 'v1').body;
+  it('never emits a top-level data_source field — byte-identical to pre-feature', () => {
+    const noSrc = buildComputeRequestBody(specNoInputs, []).body;
+    const v1 = buildComputeRequestBody(specNoInputs, [], undefined, 'v1').body;
+    const v2 = buildComputeRequestBody(specNoInputs, [], undefined, 'v2').body;
     expect('data_source' in noSrc).toBe(false);
+    expect('data_source' in v2).toBe(false);
     expect(JSON.stringify(v1)).toBe(JSON.stringify(noSrc));
   });
 
-  it('emits data_source:"v2" on v2', () => {
-    const v2 = buildComputeRequestBody(spec, [], undefined, 'v2').body;
-    expect(v2.data_source).toBe('v2');
+  it('folds the v2 default onto an input instrument ref', () => {
+    const v2 = buildComputeRequestBody(specWithInput, [], undefined, 'v2').body;
+    expect('data_source' in v2).toBe(false);
+    expect(v2.spec.inputs[0].instrument.data_source).toBe('v2');
   });
 });

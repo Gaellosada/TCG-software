@@ -384,6 +384,31 @@ function ParamsPanel({
                       </button>
                     )}
                     {picked && (
+                      // Per-instrument market-data source for THIS series slot.
+                      // Writes ``data_source`` on the ref (v2 only; v1 strips the
+                      // key so a v1/absent slot stays byte-identical). Rides the
+                      // persisted seriesMap and the compute request automatically.
+                      <select
+                        className={styles.sourceSelect}
+                        data-testid={`series-datasource-${label}`}
+                        title="Market data source for this series (v1 = tcg_instruments, v2 = new star schema). Saved with the indicator."
+                        value={picked.data_source === 'v2' ? 'v2' : 'v1'}
+                        disabled={disabled || readOnly}
+                        onChange={(e) => {
+                          if (e.target.value === 'v2') {
+                            onSeriesSave(label, { ...picked, data_source: 'v2' });
+                          } else {
+                            const { data_source: _drop, ...rest } = picked;
+                            onSeriesSave(label, rest);
+                          }
+                        }}
+                        aria-label={`Data source for ${label}`}
+                      >
+                        <option value="v1">v1</option>
+                        <option value="v2">v2</option>
+                      </select>
+                    )}
+                    {picked && (
                       <button
                         className={styles.iconBtn}
                         onClick={() => toggleDetails(label, picked)}

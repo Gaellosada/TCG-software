@@ -160,6 +160,11 @@ function PortfolioPage({ mode = 'pure' }) {
     // SELECT-AND-HOLD (fixed-contract dollar-P&L) — option_stream legs only.
     hold_between_rolls: l.hold_between_rolls ?? false,
     nav_times: l.nav_times ?? 1.0,
+    // Per-instrument market-data source — PERSISTED (part of the saved spec).
+    // Emitted ONLY when 'v2' so a leg untouched on this feature stays
+    // byte-identical to a legacy doc (the autosave dirty-diff snapshots the raw
+    // stored legs); absent reads back as v1 via coerceDataSource.
+    ...(l.dataSource === 'v2' ? { dataSource: 'v2' } : {}),
     // Option hold-mode SIZING pass-through. These were dropped here, so a
     // portfolio option leg ALWAYS fell back to the backend default
     // ``premium_notional`` — which wipes out a low-premium (e.g. 10Δ) leg
