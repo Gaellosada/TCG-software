@@ -176,8 +176,3 @@
   color: var(--text-primary);
   border-color: var(--border-accent);
 }
-
-.sourceSelect {
-  font-size: 0.8rem;
-  padding: 2px 4px;
-}

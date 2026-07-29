@@ -59,9 +59,3 @@ export const V2_LIMITATIONS = [
   'v1 ends 2026-06-10 (futures) / 2026-06-11 (index) / 2026-06-12 (options) while v2 runs to 2026-07-21 — end both runs at 2026-06-10 so no leg runs past its v1 data, or the tails diverge for a trivial reason.',
   'On v2 futures, open/high/low/volume are often NaN (only ~40.6% of settlement days have a matching daily bar).',
 ];
-
-// Common-window hint surfaced near the date controls: the single limitation a
-// user is most likely to trip while doing the v1-vs-v2 comparison this feature
-// exists for.
-export const V2_COMMON_WINDOW_HINT =
-  'v2 runs to 2026-07-21 while v1 ends 2026-06-10 (futures) / 2026-06-11 (index) / 2026-06-12 (options) — end both runs at 2026-06-10 to compare like for like.';
