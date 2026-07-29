@@ -43,8 +43,12 @@ async function fetchClassified(path, options = {}) {
 //    Returns: { roots: OptionRootInfo[] }
 // ---------------------------------------------------------------------------
 
-export async function getOptionRoots({ signal } = {}) {
-  return fetchClassified('/options/roots', signal ? { signal } : {});
+// ``source`` picks the warehouse whose option roots are listed. ``data_source=v2``
+// is emitted ONLY for v2 (v1/omitted → byte-identical URL), so the picker's
+// Options tab offers only the chosen source's real roots.
+export async function getOptionRoots({ signal, source } = {}) {
+  const path = source === 'v2' ? '/options/roots?data_source=v2' : '/options/roots';
+  return fetchClassified(path, signal ? { signal } : {});
 }
 
 // ---------------------------------------------------------------------------
@@ -53,8 +57,10 @@ export async function getOptionRoots({ signal } = {}) {
 //     Returns: { root, expirations: ['YYYY-MM-DD', ...] }
 // ---------------------------------------------------------------------------
 
-export async function getOptionExpirations(root) {
+export async function getOptionExpirations(root, dataSource) {
   const qp = new URLSearchParams({ root: String(root) });
+  // Emit data_source ONLY for v2 (v1/omitted → byte-identical URL).
+  if (dataSource === 'v2') qp.set('data_source', 'v2');
   return fetchClassified(`/options/expirations?${qp}`);
 }
 

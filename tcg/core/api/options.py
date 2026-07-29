@@ -219,9 +219,18 @@ def _build_contract_row_with_greeks(
 
 @router.get("/roots")
 async def list_roots(
-    svc: MarketDataService = Depends(get_market_data),
+    request: Request,
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
     """List every OPT_* collection with display metadata.
+
+    ``data_source`` selects the warehouse so the picker's Options tab offers
+    only the chosen source's real roots (v2 serves ``OPT_SP_500`` only; a
+    Databento re-ingest may widen this — the list is warehouse-driven, never
+    hardcoded). ``"v1"`` (default/omitted) is byte-identical to the fixed v1
+    dependency.
 
     Injects engine-side metadata onto each ``OptionRootInfo`` before
     serialization (the data layer can't reach the engine per the
@@ -234,6 +243,7 @@ async def list_roots(
         ``OptionsDataAccessError`` from the reader → 502 via the global
         TCG error handler.
     """
+    svc = get_market_data_for(request, data_source)
     roots = await svc.list_option_roots()
     blocked = blocked_roots()
     # The real (non-empty) ``expiration_cycle`` tags per root, so the frontend
@@ -286,17 +296,23 @@ async def list_roots(
 
 @router.get("/expirations")
 async def list_expirations(
+    request: Request,
     root: str = Query(..., description="OPT_* collection name"),
-    svc: MarketDataService = Depends(get_market_data),
+    data_source: DataSource = Query(
+        "v1", description='Market data source: "v1" (default) or "v2".'
+    ),
 ) -> dict:
     """Distinct expirations available on *root*, sorted ascending.
 
     Backs the chain / smile date pickers so users can only choose dates
-    that actually have contracts.
+    that actually have contracts. ``data_source`` picks the warehouse so a v2
+    root offers only v2's expirations (which begin years after v1's). ``"v1"``
+    (default/omitted) is byte-identical to the fixed v1 dependency.
 
     Errors:
         ``OptionsDataAccessError`` from the reader → 502.
     """
+    svc = get_market_data_for(request, data_source)
     dates_ = await svc.list_option_expirations(root)
     return {"root": root, "expirations": [d.isoformat() for d in dates_]}
 

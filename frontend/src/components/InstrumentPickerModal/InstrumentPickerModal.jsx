@@ -197,6 +197,15 @@ export default function InstrumentPickerModal({
   // on each open by the effect below.
   const [source, setSource] = useState(defaultSource === 'v2' ? 'v2' : 'v1');
 
+  // The warehouse the catalog (collections / instruments / cycles / option
+  // roots) is loaded from. Gated on ``showDataSourceSelector`` so a page that
+  // does NOT opt into the selector always loads the v1 catalog — byte-identical
+  // to before, regardless of ``source`` state. When the selector IS shown, the
+  // offered catalog tracks the user's chosen source (v1 ⇄ v2), so v2 surfaces
+  // only what v2 actually serves (no VIX/forex/gold) and auto-corrects if v2
+  // coverage later widens.
+  const catalogSource = showDataSourceSelector ? source : 'v1';
+
   const overlayRef = useRef(null);
 
   const invalidate = useInvalidatePersistence();
@@ -260,7 +269,7 @@ export default function InstrumentPickerModal({
 
     (async () => {
       try {
-        const collections = await listCollections();
+        const collections = await listCollections(null, { source: catalogSource });
         if (cancelled) return;
         setAllCollections(collections);
 
@@ -272,7 +281,7 @@ export default function InstrumentPickerModal({
 
         const results = await Promise.all(
           nonFut.map(async (coll) => {
-            const res = await listInstruments(coll, { skip: 0, limit: 500 });
+            const res = await listInstruments(coll, { skip: 0, limit: 500, source: catalogSource });
             return [coll, res.items || []];
           }),
         );
@@ -295,7 +304,9 @@ export default function InstrumentPickerModal({
     })();
 
     return () => { cancelled = true; };
-  }, [isOpen]);
+    // ``catalogSource`` is a dep so a v1⇄v2 toggle (when the selector is shown)
+    // RELOADS the collections + instruments for the newly-chosen warehouse.
+  }, [isOpen, catalogSource]);
 
   /* ── Load option roots when modal opens ──
    *
@@ -309,7 +320,7 @@ export default function InstrumentPickerModal({
     let cancelled = false;
     setOptionRootsLoading(true);
     setOptionRootsError(null);
-    getOptionRoots()
+    getOptionRoots({ source: catalogSource })
       .then((resp) => {
         if (cancelled) return;
         setOptionRoots(resp.roots || []);
@@ -322,7 +333,9 @@ export default function InstrumentPickerModal({
         setOptionRootsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [isOpen, optionsVisible, basketsVisible]);
+    // ``catalogSource`` dep: a source toggle reloads the Options tab's roots so
+    // v2 offers only its real option series.
+  }, [isOpen, optionsVisible, basketsVisible, catalogSource]);
 
   /* (Saved baskets are loaded by the useBasketsList queries declared above.) */
 
@@ -333,11 +346,11 @@ export default function InstrumentPickerModal({
       return;
     }
     let cancelled = false;
-    getAvailableCycles(selectedFutCollection)
+    getAvailableCycles(selectedFutCollection, { source: catalogSource })
       .then((cycles) => { if (!cancelled) setAvailableCycles(cycles); })
       .catch(() => { if (!cancelled) setAvailableCycles([]); });
     return () => { cancelled = true; };
-  }, [selectedFutCollection]);
+  }, [selectedFutCollection, catalogSource]);
 
   /* ── Seed the per-instrument source from ``defaultSource`` on OPEN ──
    *
@@ -420,6 +433,28 @@ export default function InstrumentPickerModal({
     (e) => { if (e.target === overlayRef.current) onClose(); },
     [onClose],
   );
+
+  /* ── Source toggle (v1 ⇄ v2) ──
+   *
+   * Fired ONLY by the DataSourceSelector's user interaction — never by the
+   * open-seed effect (that calls setSource directly), so there is no race with
+   * the initialConfig/open seeding. Beyond flipping the source (which the
+   * catalog effects observe via ``catalogSource`` and reload), it returns the
+   * modal to the category list: a drill-down target valid in one warehouse
+   * (e.g. FUT_VIX under v1) may not exist in the other, so a stale drill-down
+   * must not linger across a switch. Resets the same continuous defaults the
+   * "Back" handlers do. */
+  const handleSourceChange = useCallback((next) => {
+    setSource(next);
+    setSelectedFutCollection(null);
+    setAdjustment('none');
+    setCycle('');
+    setRollOffset(2);
+    setStrategy('front_month');
+    setRank(3);
+    setInOptionsDrillDown(false);
+    setOptionStreamValue(null);
+  }, []);
 
   // In readOnly (view-only) the modal must NEVER emit. The config-step confirm
   // CTAs are hidden, but drill-down "Back" stays enabled (re-pick is preserved
@@ -579,7 +614,7 @@ export default function InstrumentPickerModal({
                 showNotes={false}
                 title="Market-data source for the instrument you are adding (v1 = tcg_instruments, v2 = new star schema). You can also change it per row after adding."
                 value={source}
-                onChange={setSource}
+                onChange={handleSourceChange}
                 disabled={readOnly}
               />
             </div>
