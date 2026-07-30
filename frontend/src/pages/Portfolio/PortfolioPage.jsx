@@ -476,6 +476,27 @@ function PortfolioPage({ mode = 'pure' }) {
     queryClient.invalidateQueries({
       queryKey: queryKeys.persistence.portfolios.detail(portfolio.persistedId),
     });
+    // AND patch the LIST cache entry for this doc with the just-saved payload.
+    // The working list (``portfolios`` state, synced from this query) is what
+    // ``handleSelectPersisted`` → ``loadFromPersisted`` reads when the user
+    // re-opens a portfolio (their "navigate away and back"). Without this the
+    // list retained the PRE-EDIT doc, so re-opening silently reverted the saved
+    // change — including a leg's ``dataSource:'v2'`` — even though the backend
+    // held the new version (the reported bug). ``setQueryData`` is a PURE cache
+    // update (no refetch → no flicker), so unlike a list invalidation it is safe
+    // on every save, manual AND debounced. Keys off ``body.category`` (the
+    // category the doc was just saved under) so the correct category list is
+    // patched; the timestamps/type/locked fields are preserved from the prior
+    // entry (only editable content changed here).
+    const savedBody = JSON.parse(payloadStr);
+    queryClient.setQueryData(
+      queryKeys.persistence.portfolios.list(savedBody.category || portfolio.persistedCategory),
+      (prev) => (Array.isArray(prev)
+        ? prev.map((p) => (p.id === portfolio.persistedId
+          ? { ...p, ...savedBody, id: portfolio.persistedId }
+          : p))
+        : prev),
+    );
   }, [portfolio.persistedId, portfolio.persistedCategory, portfolio.setPersistedLocked, portfolio.markSaved, queryClient]);
 
   const {
