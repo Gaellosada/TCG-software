@@ -330,23 +330,24 @@ async def _cycle_trade_date_coverage(
 
     Cycle-scoped coverage cannot go through ``option_trade_date_coverage`` (a
     collection-wide, cycle-blind heuristic), so it is derived source-agnostically
-    from :meth:`MarketDataService.list_option_expirations_by_date` — which BOTH
-    the v1 service and the v2 adapter already expose with a ``cycle`` filter, and
-    whose keys ARE the listed ``trade_date``s.  The scan is bounded to the
-    collection's real data window (from the cheap collection-coverage heuristic)
-    so the planner prunes to the spanned partitions.  Returns ``(None, None)``
-    when the collection has no coverage or the cycle lists no bar in the window.
+    from :meth:`MarketDataService.option_cycle_trade_date_span` — a bounded
+    ``min(trade_date)/max(trade_date)`` aggregate over just THIS cycle's bars,
+    which BOTH the v1 service and the v2 adapter expose with a ``cycle`` filter.
+    The scan is bounded to the collection's real data window (from the cheap
+    collection-coverage heuristic) so the planner prunes to the spanned
+    partitions.  (This supersedes deriving the extremes from the full per-date
+    map ``list_option_expirations_by_date``, which had to materialise every
+    settlement bar of the cycle — ~14M rows for W3 — only to keep min/max; the
+    aggregate returns the SAME two dates without the scan.)  Returns
+    ``(None, None)`` when the collection has no coverage or the cycle lists no
+    bar in the window.
     """
     coll_first, coll_last = await svc.option_trade_date_coverage(root)
     if coll_first is None or coll_last is None:
         return None, None
-    by_date = await svc.list_option_expirations_by_date(
+    return await svc.option_cycle_trade_date_span(
         root, coll_first, coll_last, cycle=cycle
     )
-    if not by_date:
-        return None, None
-    keys = by_date.keys()
-    return min(keys), max(keys)
 
 
 @router.get("/coverage")

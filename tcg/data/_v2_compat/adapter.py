@@ -439,6 +439,17 @@ class V2MarketDataAdapter:
     ) -> tuple[date | None, date | None]:
         return await self.options_reader.trade_date_coverage(root)
 
+    async def option_cycle_trade_date_span(
+        self,
+        root: str,
+        start: date,
+        end: date,
+        cycle: str | Sequence[str] | None = None,
+    ) -> tuple[date | None, date | None]:
+        return await self.options_reader.cycle_trade_date_span(
+            root, start, end, cycle=cycle
+        )
+
     async def list_option_expirations_filtered(
         self,
         root: str,

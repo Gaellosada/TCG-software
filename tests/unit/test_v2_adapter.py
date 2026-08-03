@@ -412,6 +412,10 @@ async def test_option_passthroughs_delegate_to_the_reader():
             self.calls.append(("trade_date_coverage", root))
             return (None, None)
 
+        async def cycle_trade_date_span(self, root, start, end, cycle=None):
+            self.calls.append(("cycle_trade_date_span", root, start, end, cycle))
+            return (None, None)
+
         async def list_expirations_filtered(self, root, option_type=None, cycle=None):
             self.calls.append(("list_expirations_filtered", root, option_type, cycle))
             return []
@@ -435,6 +439,9 @@ async def test_option_passthroughs_delegate_to_the_reader():
     assert await a.list_option_roots() == ["root"]
     await a.list_option_expirations("OPT_SP_500")
     await a.option_trade_date_coverage("OPT_SP_500")
+    await a.option_cycle_trade_date_span(
+        "OPT_SP_500", date(2026, 1, 1), date(2026, 2, 1), cycle="W1 Friday"
+    )
     await a.list_option_expirations_filtered("OPT_SP_500", cycle="W1 Friday")
     await a.list_option_expirations_by_date(
         "OPT_SP_500", date(2026, 1, 1), date(2026, 2, 1), cycle="W1 Friday"
@@ -447,6 +454,7 @@ async def test_option_passthroughs_delegate_to_the_reader():
         "list_roots",
         "list_expirations",
         "trade_date_coverage",
+        "cycle_trade_date_span",
         "list_expirations_filtered",
         "list_expirations_by_date",
         "query_chain",

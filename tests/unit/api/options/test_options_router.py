@@ -369,6 +369,9 @@ async def test_coverage_omitted_cycle_never_consults_by_date(
     mock_svc.option_trade_date_coverage = AsyncMock(
         return_value=(date(2005, 12, 1), date(2025, 6, 30))
     )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2016, 3, 18))
+    )
     mock_svc.list_option_expirations_by_date = AsyncMock(
         return_value={date(2016, 2, 22): [date(2016, 3, 18)]}
     )
@@ -383,8 +386,10 @@ async def test_coverage_omitted_cycle_never_consults_by_date(
             {"start": "2005-12-01", "end": "2025-06-30", "cadence": "monthly"}
         ],
     }
+    # The no-cycle path must NOT run the cycle span read, the per-date map, or
+    # the cadence dim scan (zero-cost default — byte-identical to pre-feature).
+    mock_svc.option_cycle_trade_date_span.assert_not_awaited()
     mock_svc.list_option_expirations_by_date.assert_not_awaited()
-    # No-cycle path must NOT run the cadence dim scan either (zero-cost default).
     mock_svc.list_option_expirations_filtered.assert_not_awaited()
 
 
@@ -412,12 +417,11 @@ async def test_coverage_cycle_narrows_start(client: AsyncClient, mock_svc):
     mock_svc.option_trade_date_coverage = AsyncMock(
         return_value=(date(2011, 6, 15), date(2026, 7, 21))
     )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2026, 6, 30))
+    )
     mock_svc.list_option_expirations_by_date = AsyncMock(
-        return_value={
-            date(2016, 2, 22): [date(2016, 3, 18)],
-            date(2016, 3, 1): [date(2016, 3, 18)],
-            date(2026, 6, 30): [date(2026, 7, 17)],
-        }
+        return_value={date(2016, 2, 22): [date(2016, 3, 18)]}
     )
     resp = await client.get(
         "/api/options/coverage",
@@ -428,13 +432,14 @@ async def test_coverage_cycle_narrows_start(client: AsyncClient, mock_svc):
     # Cycle start is LATER than the collection-wide 2011-06-15 floor.
     assert body["start"] == "2016-02-22"
     assert body["end"] == "2026-06-30"
-    # The per-date map was queried with the cycle filter, bounded to the
-    # collection window (real data extent).
-    call = mock_svc.list_option_expirations_by_date.await_args
+    # The span was read with the cycle filter, bounded to the collection window
+    # (real data extent) — NOT the heavy per-date map.
+    call = mock_svc.option_cycle_trade_date_span.await_args
     assert call.args[0] == "OPT_SP_500"
     assert call.args[1] == date(2011, 6, 15)
     assert call.args[2] == date(2026, 7, 21)
     assert call.kwargs["cycle"] == "W3 Friday"
+    mock_svc.list_option_expirations_by_date.assert_not_awaited()
 
 
 async def test_coverage_cycle_returns_cadence_segments(
@@ -448,12 +453,9 @@ async def test_coverage_cycle_returns_cadence_segments(
     mock_svc.option_trade_date_coverage = AsyncMock(
         return_value=(date(2010, 6, 7), date(2026, 7, 27))
     )
-    # _cycle_trade_date_coverage → raw (start, end) = trade_date extent.
-    mock_svc.list_option_expirations_by_date = AsyncMock(
-        return_value={
-            date(2010, 6, 7): [date(2010, 6, 18)],
-            date(2026, 7, 27): [date(2026, 7, 17)],
-        }
+    # _cycle_trade_date_coverage → raw (start, end) = cycle trade_date extent.
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2010, 6, 7), date(2026, 7, 27))
     )
     # The per-cycle DISTINCT expiries: quarterly 2010–2015, then monthly 2016+.
     quarterly = [
@@ -503,7 +505,7 @@ async def test_coverage_cycle_no_bars_returns_null(client: AsyncClient, mock_svc
     mock_svc.option_trade_date_coverage = AsyncMock(
         return_value=(date(2011, 6, 15), date(2026, 7, 21))
     )
-    mock_svc.list_option_expirations_by_date = AsyncMock(return_value={})
+    mock_svc.option_cycle_trade_date_span = AsyncMock(return_value=(None, None))
     resp = await client.get(
         "/api/options/coverage",
         params={"root": "OPT_SP_500", "expiration_cycle": "W9 Friday"},
@@ -524,7 +526,7 @@ async def test_coverage_cycle_null_collection_short_circuits(
     """When the collection itself has no coverage, the cycle path returns null
     without probing the per-date map."""
     mock_svc.option_trade_date_coverage = AsyncMock(return_value=(None, None))
-    mock_svc.list_option_expirations_by_date = AsyncMock(return_value={})
+    mock_svc.option_cycle_trade_date_span = AsyncMock(return_value=(None, None))
     resp = await client.get(
         "/api/options/coverage",
         params={"root": "OPT_EMPTY", "expiration_cycle": "M"},
@@ -537,7 +539,8 @@ async def test_coverage_cycle_null_collection_short_circuits(
         "recommended_start": None,
         "segments": [],
     }
-    mock_svc.list_option_expirations_by_date.assert_not_awaited()
+    # Collection has no coverage → the cycle span read is never attempted.
+    mock_svc.option_cycle_trade_date_span.assert_not_awaited()
 
 
 async def test_coverage_cycle_respects_data_source_v2(client: AsyncClient, mock_svc):
@@ -548,15 +551,15 @@ async def test_coverage_cycle_respects_data_source_v2(client: AsyncClient, mock_
     v2_svc.option_trade_date_coverage = AsyncMock(
         return_value=(date(2011, 6, 15), date(2026, 7, 21))
     )
-    v2_svc.list_option_expirations_by_date = AsyncMock(
-        return_value={date(2016, 2, 22): [date(2016, 3, 18)]}
+    v2_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2026, 6, 30))
     )
     v2_svc.list_option_expirations_filtered = AsyncMock(return_value=[])
     app.state.market_data_v2_compat = v2_svc
     mock_svc.option_trade_date_coverage = AsyncMock(
         return_value=(date(2005, 12, 1), date(2025, 6, 30))
     )
-    mock_svc.list_option_expirations_by_date = AsyncMock(return_value={})
+    mock_svc.option_cycle_trade_date_span = AsyncMock(return_value=(None, None))
 
     resp = await client.get(
         "/api/options/coverage",
@@ -568,8 +571,36 @@ async def test_coverage_cycle_respects_data_source_v2(client: AsyncClient, mock_
     )
     assert resp.status_code == 200
     assert resp.json()["start"] == "2016-02-22"
-    v2_svc.list_option_expirations_by_date.assert_awaited_once()
-    mock_svc.list_option_expirations_by_date.assert_not_awaited()  # v1 untouched
+    v2_svc.option_cycle_trade_date_span.assert_awaited_once()
+    mock_svc.option_cycle_trade_date_span.assert_not_awaited()  # v1 untouched
+
+
+async def test_coverage_cycle_uses_span_not_per_date_map(
+    client: AsyncClient, mock_svc
+):
+    """Perf contract: the cycle bounds come from the bounded ``min/max`` span
+    read (``option_cycle_trade_date_span``) — NEVER from the full per-date map
+    (``list_option_expirations_by_date``), which scanned every settlement bar."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2010, 6, 7), date(2026, 7, 27))
+    )
+    mock_svc.option_cycle_trade_date_span = AsyncMock(
+        return_value=(date(2016, 2, 22), date(2026, 6, 30))
+    )
+    # If the handler ever touched the map again, this would be awaited.
+    mock_svc.list_option_expirations_by_date = AsyncMock(return_value={})
+
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "expiration_cycle": "W3 Friday"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["start"] == "2016-02-22"
+    assert resp.json()["end"] == "2026-06-30"
+    mock_svc.option_cycle_trade_date_span.assert_awaited_once_with(
+        "OPT_SP_500", date(2010, 6, 7), date(2026, 7, 27), cycle="W3 Friday"
+    )
+    mock_svc.list_option_expirations_by_date.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

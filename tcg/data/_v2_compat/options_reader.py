@@ -780,6 +780,44 @@ class V2OptionsDataReader:
             out.setdefault(_ts_date(r["ts"]), []).append(r["expiration"])
         return out
 
+    async def cycle_trade_date_span(
+        self,
+        root: str,
+        start: date,
+        end: date,
+        cycle: "str | Sequence[str] | None" = None,
+    ) -> tuple[date | None, date | None]:
+        """``(first, last)`` settlement ``ts`` for ONE ``cycle`` in a window.
+
+        The bounded ``min/max`` counterpart of :meth:`list_expirations_by_date`:
+        SAME object routing (:func:`_route_objects`) and SAME half-open ``ts``
+        window, but a two-row aggregate over ``fact_value`` with NO contract
+        join and NO per-date map — so a cycle-scoped coverage read no longer
+        scans every settlement bar just to keep the extremes. A cycle's objects
+        are a subset of all option objects, so ``min/max`` over them already IS
+        the cycle span; min/max is identical to ``min``/``max`` of the map's
+        keys for the same arguments. Returns ``(None, None)`` when the cycle has
+        no bar in the window.
+        """
+        _require_options_root(root)
+        objects = _route_objects(cycle, require_filter=False)
+        lo, hi = date_int_bounds(start, end)
+        sql = f"""
+            SELECT min(fv.ts) AS lo, max(fv.ts) AS hi
+            FROM {V2_SCHEMA}.serie sv
+            JOIN {V2_SCHEMA}.fact_value fv ON fv.serie_id = sv.serie_id
+            WHERE sv.type = 'value'
+              AND sv.object_id = ANY(%s)
+              AND fv.ts >= %s
+              AND fv.ts < %s
+        """
+        rows = await self._fetch(
+            sql, [objects, lo, hi], what=f"cycle trade-date span on '{root}'"
+        )
+        if not rows:
+            return None, None
+        return (_ts_date(rows[0]["lo"]), _ts_date(rows[0]["hi"]))
+
     # ------------------------------------------------------------------ #
     # Internal
     # ------------------------------------------------------------------ #
