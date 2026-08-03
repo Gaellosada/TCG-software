@@ -9,10 +9,15 @@ must drive the same simulator (guardrail Sign 3).
 
 What is DIFFERENT from v1, and why
 ----------------------------------
-* **One logical collection, four physical objects.** ``OPT_SP_500`` fans out to
-  the EW1/EW2/EW3/EW4 objects (11/12/7/13). Every query routes through
-  :func:`~tcg.data._v2_compat._mapping.ew_object_for_cycle` and merges the
-  union deterministically by ``(ts, contract_id)`` — spec §3.2.
+* **One logical collection, five physical objects.** ``OPT_SP_500`` fans out to
+  the four EW weekly objects (EW1/EW2/EW3/EW4 = 11/12/7/13) PLUS the standard
+  quarterly ES option (14). Cycle routing goes through
+  :func:`~tcg.data._v2_compat._mapping.objects_for_cycle`, which adds 14 to the
+  ``"W3 Friday"`` route so the quarterly-month 3rd Fridays (Mar/Jun/Sep/Dec),
+  which no EW3 weekly lists, resolve; the union merges deterministically by
+  ``(ts, contract_id)`` — spec §3.2. Object 14 is quarterly-only and never
+  routes on W1/W2/W4; the futures object 6 (same dates, ``kind='future'``) is
+  never routed at all.
 * **No monthlies.** v1's ``"M"`` cycle (74,930 contracts, 2005-2030) has no v2
   counterpart. Requesting it — or requesting NO cycle at all on a chain call —
   is a hard error, never a silent weeklies-only answer (spec §3.3, D4).
@@ -46,12 +51,13 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
 from tcg.data._sql.connection import DwhConnectionPool, to_float
 from tcg.data._sql.options import _sanitize_iv, symbol_delta_rank
 from tcg.data._v2_compat._mapping import (
+    ALL_OPTION_OBJECT_IDS,
     EW_OBJECT_BY_CYCLE,
-    EW_OBJECT_IDS,
     V2_INDEX_SYMBOL,
     V2_OPTIONS_COLLECTION,
+    V2_QUARTERLY_OBJECT_ID,
     date_int_bounds,
-    ew_object_for_cycle,
+    objects_for_cycle,
     option_parts_from_symbol,
     option_symbol_from_parts,
     option_type_from_v2,
@@ -91,15 +97,23 @@ V2_UNAVAILABLE_OPTION_STREAMS: frozenset[str] = frozenset(
     {"mid", "volume", "open_interest"}
 )
 
-#: v2 EW ``object_id`` → the v1 ``expiration_cycle`` tag it stands for. Derived
-#: from the frozen forward map so the two can never disagree.
+#: v2 option ``object_id`` → the v1 ``expiration_cycle`` tag it stands for.
+#: Derived from the frozen forward map so the two can never disagree. The
+#: quarterly object (14) is tagged "W3 Friday" as well: its 3rd-Friday contracts
+#: occupy the same monthly W3 slot as EW3, in the months EW3 omits, so the roll
+#: schedule must treat them as the "W3 Friday" contract for that month.
 _CYCLE_BY_OBJECT: dict[int, str] = {v: k for k, v in EW_OBJECT_BY_CYCLE.items()}
+_CYCLE_BY_OBJECT[V2_QUARTERLY_OBJECT_ID] = "W3 Friday"
 
-#: v2 EW ``object_id`` → v1 ``underlying_symbol`` ("W1 Friday" → "EW1"), which
-#: v1 stores verbatim on every contract (spec §3.1 VERIFIED).
+#: v2 option ``object_id`` → v1 ``underlying_symbol``. The EW weeklies carry
+#: "EW1".."EW4"; the standard quarterly option carries "ES" (its true root).
+#: Display-only (spec §3.1 VERIFIED) — never used for selection or rolling.
 _UNDERLYING_BY_OBJECT: dict[int, str] = {
-    obj: f"EW{cycle[1]}" for obj, cycle in _CYCLE_BY_OBJECT.items()
+    obj: f"EW{cycle[1]}"
+    for obj, cycle in _CYCLE_BY_OBJECT.items()
+    if obj != V2_QUARTERLY_OBJECT_ID
 }
+_UNDERLYING_BY_OBJECT[V2_QUARTERLY_OBJECT_ID] = "ES"
 
 #: The literal ``"W"`` tag, which ``expand_cycle`` adds for the UI's generic
 #: "Weekly" but which OPT_SP_500 never uses (spec §3.1: zero rows on either
@@ -199,21 +213,27 @@ def _route_objects(
             # argument into "...expiration cycle '{cycle}'...", so passing a
             # sentence nests the whole paragraph inside the sibling's message.
             raise V2MissingCycleFilter()
-        return list(EW_OBJECT_IDS)
+        # Inventory "everything v2 has": include the quarterly object so the
+        # answer is complete. This is a coverage path, not cycle routing.
+        return list(ALL_OPTION_OBJECT_IDS)
 
     # Drop the generic "W" umbrella tag: OPT_SP_500 has zero rows under it on
     # BOTH sources, so dropping it changes nothing relative to v1 (spec §3.3a).
     concrete = [t for t in tags if t != _GENERIC_WEEKLY_TAG]
     if not concrete:
-        # The request was exactly ("W",) — the union of all weeklies, which is
-        # precisely what v1 returns for that filter on this root.
-        return list(EW_OBJECT_IDS)
+        # The request was exactly ("W",) — the union of every weekly cycle,
+        # which on v2 is the union of all option objects (each concrete weekly
+        # route's target, W3's quarterly included). Coverage-agnostic, so no
+        # W1/W2/W4 leak: those are only reached via their explicit concrete tag.
+        return list(ALL_OPTION_OBJECT_IDS)
 
     objects: list[int] = []
     for tag in concrete:
-        obj = ew_object_for_cycle(tag)  # raises V2UnsupportedCycle on M / ''
-        if obj not in objects:
-            objects.append(obj)
+        # ``objects_for_cycle`` raises V2UnsupportedCycle on M / '' and returns
+        # (7, 14) for "W3 Friday" — quarterly-aware routing.
+        for obj in objects_for_cycle(tag):
+            if obj not in objects:
+                objects.append(obj)
     return objects
 
 
@@ -272,12 +292,14 @@ class V2OptionsDataReader:
     ) -> OptionContractSeries:
         """One contract with its full chronological day series.
 
-        ``contract_id`` is the v1 option symbol. It does NOT encode which EW
-        root the contract belongs to, and ``get_contract`` has no cycle
-        parameter, so all four objects are searched. In practice the expiration
-        date pins the root; where two roots did list the same
-        (expiration, strike, type) the lowest ``contract_id`` wins —
-        deterministic, and the same first-by-id discipline the chain path uses.
+        ``contract_id`` is the v1 option symbol. It does NOT encode which
+        object the contract belongs to, and ``get_contract`` has no cycle
+        parameter, so all option objects are searched — the four EW weeklies
+        AND the quarterly standard option (14), else a quarterly 3rd-Friday
+        symbol would not resolve. In practice the expiration date pins the
+        object; where two objects did list the same (expiration, strike, type)
+        the lowest ``contract_id`` wins — deterministic, and the same
+        first-by-id discipline the chain path uses.
         """
         _require_options_root(collection)
         exp_int, strike, kind = option_parts_from_symbol(contract_id)
@@ -298,7 +320,7 @@ class V2OptionsDataReader:
         params = [
             lo,
             hi,
-            list(EW_OBJECT_IDS),
+            list(ALL_OPTION_OBJECT_IDS),
             lo,
             hi,
             exp_date,
@@ -619,7 +641,7 @@ class V2OptionsDataReader:
     async def list_roots(self) -> list[OptionRootInfo]:
         """The ONE union root v2 serves (spec §6.11, §12 Q4).
 
-        The four EW objects are an implementation detail of ``OPT_SP_500``;
+        The five option objects are an implementation detail of ``OPT_SP_500``;
         exposing them separately here would let a user build a leg on a root
         that has no v1 counterpart.
         """
@@ -630,7 +652,9 @@ class V2OptionsDataReader:
             FROM {V2_SCHEMA}.contract c
             WHERE c.object_id = ANY(%s)
         """
-        rows = await self._fetch(sql, [list(EW_OBJECT_IDS)], what="option roots")
+        rows = await self._fetch(
+            sql, [list(ALL_OPTION_OBJECT_IDS)], what="option roots"
+        )
         head: Mapping[str, Any] = rows[0] if rows else {}
         _first_td, last_td = await self.trade_date_coverage(V2_OPTIONS_COLLECTION)
         return [
@@ -665,7 +689,7 @@ class V2OptionsDataReader:
         return _ROOT_UNDERLYING
 
     async def trade_date_coverage(self, root: str) -> tuple[date | None, date | None]:
-        """``(first, last)`` settlement-bar coverage across the four EW roots."""
+        """``(first, last)`` settlement-bar coverage across all option objects."""
         _require_options_root(root)
         sql = f"""
             SELECT min(fv.ts) AS lo, max(fv.ts) AS hi
@@ -674,7 +698,7 @@ class V2OptionsDataReader:
             WHERE sv.type = 'value' AND sv.object_id = ANY(%s)
         """
         rows = await self._fetch(
-            sql, [list(EW_OBJECT_IDS)], what=f"trade-date coverage on '{root}'"
+            sql, [list(ALL_OPTION_OBJECT_IDS)], what=f"trade-date coverage on '{root}'"
         )
         if not rows:
             return None, None

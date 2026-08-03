@@ -265,9 +265,11 @@ def test_unavailable_stream_message_is_not_nested(stream):
     assert f"no {stream} data" in message
 
 
-async def test_generic_weekly_tag_routes_to_all_four_objects():
+async def test_generic_weekly_tag_routes_to_every_option_object():
     """OPT_SP_500 has zero rows under the literal "W" on BOTH sources, so
-    dropping it and serving the union is source-NEUTRAL (spec §3.3a)."""
+    dropping it and serving the union is source-NEUTRAL (spec §3.3a). The union
+    of every weekly cycle is every option object — the quarterly object (14),
+    which serves the W3 slot in the quarterly months, included."""
     pool = _FakePool()
     reader = V2OptionsDataReader(pool)
     await reader.query_chain(
@@ -279,7 +281,7 @@ async def test_generic_weekly_tag_routes_to_all_four_objects():
         expiration_cycle=("W", "W1 Friday", "W2 Friday", "W3 Friday", "W4 Friday"),
     )
     objects = [p for p in pool.calls[-1][1] if isinstance(p, list)][0]
-    assert sorted(objects) == [7, 11, 12, 13]
+    assert sorted(objects) == [7, 11, 12, 13, 14]
 
 
 async def test_inventory_reads_tolerate_an_absent_cycle():
@@ -422,7 +424,13 @@ async def test_contract_doc_carries_the_v1_shaped_identity():
 def test_object_ids_map_to_the_right_underlying_symbol():
     from tcg.data._v2_compat.options_reader import _UNDERLYING_BY_OBJECT
 
-    assert _UNDERLYING_BY_OBJECT == {11: "EW1", 12: "EW2", 7: "EW3", 13: "EW4"}
+    assert _UNDERLYING_BY_OBJECT == {
+        11: "EW1",
+        12: "EW2",
+        7: "EW3",
+        13: "EW4",
+        14: "ES",  # the standard quarterly option's true root (display-only)
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -660,3 +668,125 @@ async def test_root_symbol_needs_no_round_trip():
     reader = V2OptionsDataReader(pool)
     assert await reader.get_option_root_symbol("OPT_SP_500") == "IND_SP_500"
     assert pool.calls == [], "this exists to AVOID a probe fetch"
+
+
+# --------------------------------------------------------------------------- #
+# Quarterly W3 coverage (v2-quarterly-w3-fix)
+#
+# The v2 EW3 weekly (object 7) lists a 3rd-Friday contract only in the SERIAL
+# months (Jul/Aug/Oct/Nov/Jan). The quarterly-month 3rd Fridays (Mar/Jun/Sep/Dec)
+# are carried by the standard quarterly ES option (object 14). "W3 Friday" must
+# therefore route to BOTH 7 and 14 so every one of the 12 monthly 3rd Fridays
+# resolves exactly one contract. Object 14 is quarterly-only and must never leak
+# into W1/W2/W4. (W1 investigation: object 14 = OPT_SP_500_ES, kind='option'.)
+# --------------------------------------------------------------------------- #
+def _objects_of(call) -> list[int]:
+    """Pull the routed object-id list out of a captured (sql, params) call."""
+    return [p for p in call[1] if isinstance(p, list) and all(
+        isinstance(x, int) for x in p) and p][0]
+
+
+async def test_w3_route_includes_the_quarterly_object():
+    """Serial-month 3rd Fridays come from EW3 (7); quarterly-month 3rd Fridays
+    (Mar/Jun/Sep/Dec) come from the standard quarterly option (14). Omitting 14
+    is exactly why the quarterly expiries were skipped."""
+    pool = _FakePool()
+    reader = V2OptionsDataReader(pool)
+    await reader.query_chain(
+        "OPT_SP_500",
+        date(2016, 7, 15),
+        "P",
+        date(2016, 6, 1),
+        date(2017, 3, 31),
+        expiration_cycle="W3 Friday",
+    )
+    objects = _objects_of(pool.calls[-1])
+    assert 7 in objects, objects
+    assert 14 in objects, objects
+
+
+@pytest.mark.parametrize("cycle", ["W1 Friday", "W2 Friday", "W4 Friday"])
+async def test_quarterly_object_never_leaks_into_other_weekly_cycles(cycle):
+    """Object 14 expires ONLY on quarterly 3rd Fridays (the W3 slot). It must
+    not appear on any other weekly cycle's route."""
+    pool = _FakePool()
+    reader = V2OptionsDataReader(pool)
+    await reader.query_chain(
+        "OPT_SP_500",
+        date(2016, 7, 15),
+        "P",
+        date(2016, 6, 1),
+        date(2017, 3, 31),
+        expiration_cycle=cycle,
+    )
+    objects = _objects_of(pool.calls[-1])
+    assert 14 not in objects, (cycle, objects)
+
+
+def test_quarterly_object_is_tagged_as_w3_friday():
+    """The quarterly contract must SURFACE under "W3 Friday", so a roll schedule
+    picking "W3 Friday" treats it as the 3rd-Friday contract for that month."""
+    from tcg.data._v2_compat.options_reader import _CYCLE_BY_OBJECT
+
+    assert _CYCLE_BY_OBJECT[14] == "W3 Friday"
+
+
+async def test_quarterly_row_emits_the_w3_friday_cycle_tag():
+    """A row from object 14 must emit ``expiration_cycle == "W3 Friday"`` so it
+    is indistinguishable, to the roll schedule, from an EW3 3rd-Friday pick."""
+    pool = _FakePool(
+        [
+            _chain_row(
+                contract_id=1,
+                strike=1950,
+                delta=-0.1007,
+                object_id=14,
+                expiration=date(2016, 9, 16),
+                ts=datetime(2016, 7, 15, tzinfo=UTC),
+            )
+        ]
+    )
+    reader = V2OptionsDataReader(pool)
+    ((contract, _row),) = await reader.query_chain(
+        "OPT_SP_500",
+        date(2016, 7, 15),
+        "P",
+        date(2016, 9, 16),
+        date(2016, 9, 16),
+        expiration_cycle="W3 Friday",
+    )
+    assert contract.expiration_cycle == "W3 Friday"
+    assert contract.expiration == date(2016, 9, 16)
+
+
+async def test_get_contract_searches_the_quarterly_object():
+    """A quarterly symbol won't resolve unless object 14 is in the searched set
+    (``get_contract`` has no cycle parameter)."""
+    pool = _FakePool()
+    reader = V2OptionsDataReader(pool)
+    try:
+        await reader.get_contract(
+            "OPT_SP_500", "OPT_FUT_SP_500_EMINI_20160916_1950_P"
+        )
+    except Exception:  # noqa: BLE001 — empty fake pool => NotFound; we want the SQL
+        pass
+    objects = _objects_of(pool.calls[-1])
+    assert 14 in objects, objects
+
+
+async def test_inventory_and_coverage_paths_include_the_quarterly_object():
+    """Existence/coverage answers must count the quarterly object so inventory
+    is honest — but this is NOT cycle routing, so W1/W2/W4 are unaffected."""
+    pool = _FakePool([{"exp_first": None, "exp_last": None, "n": 0}])
+    reader = V2OptionsDataReader(pool)
+    # list_roots issues a contract count then a coverage query; both must span 14.
+    try:
+        await reader.list_roots()
+    except Exception:  # noqa: BLE001 — coverage sub-call on the tiny fake may error
+        pass
+    seen_14 = any(
+        14 in ([p for p in c[1] if isinstance(p, list)] or [[]])[0]
+        for c in pool.calls
+        if any(isinstance(p, list) for p in c[1])
+    )
+    assert seen_14, pool.calls

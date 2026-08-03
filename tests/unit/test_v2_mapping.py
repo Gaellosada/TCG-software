@@ -76,6 +76,37 @@ def test_ew_object_for_cycle(cycle, obj):
     assert ew_object_for_cycle(cycle) == obj
 
 
+def test_objects_for_cycle_adds_the_quarterly_object_to_w3_only():
+    """"W3 Friday" serves the standard quarterly ES option (14) IN ADDITION to
+    EW3 (7): serial-month 3rd Fridays come from 7, quarterly-month ones from 14.
+    Object 14 is quarterly-only, so it must not appear on any other cycle."""
+    from tcg.data._v2_compat._mapping import (
+        ALL_OPTION_OBJECT_IDS,
+        V2_QUARTERLY_OBJECT_ID,
+        objects_for_cycle,
+    )
+
+    assert V2_QUARTERLY_OBJECT_ID == 14
+    assert set(objects_for_cycle("W3 Friday")) == {7, 14}
+    assert objects_for_cycle("W1 Friday") == (11,)
+    assert objects_for_cycle("W2 Friday") == (12,)
+    assert objects_for_cycle("W4 Friday") == (13,)
+    for cycle in ("W1 Friday", "W2 Friday", "W4 Friday"):
+        assert 14 not in objects_for_cycle(cycle)
+    # The union used by existence/coverage paths carries every option object
+    # (never the underlying FUTURE object 6).
+    assert set(ALL_OPTION_OBJECT_IDS) == {11, 12, 7, 13, 14}
+    assert 6 not in ALL_OPTION_OBJECT_IDS
+
+
+@pytest.mark.parametrize("bad", ["M", "", "W", "Q", "W5 Friday"])
+def test_objects_for_cycle_rejects_non_weekly(bad):
+    from tcg.data._v2_compat._mapping import objects_for_cycle
+
+    with pytest.raises(V2UnsupportedCycle):
+        objects_for_cycle(bad)
+
+
 @pytest.mark.parametrize("bad", ["M", "", "W", "Q", "W5 Friday", "w1 friday"])
 def test_ew_object_for_cycle_rejects_non_weekly(bad):
     """'M' has 74,930 v1 contracts and no v2 counterpart — must fail loudly."""

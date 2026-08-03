@@ -31,6 +31,16 @@ V2_INDEX_OBJECT_ID: int = 5
 V2_INDEX_SERIE_ID: int = 5
 V2_FUTURES_OBJECT_ID: int = 6
 
+# Standard quarterly ES 3rd-Friday option (``OPT_SP_500_ES``, cycle
+# ``'quarterly'``, ``kind='option'``, live-verified). It lists a 3rd-Friday
+# contract ONLY in the quarterly months (Mar/Jun/Sep/Dec) — precisely the
+# months the EW3 weekly (object 7) does NOT, so it fills the "W3 Friday" holes
+# without ever overlapping EW3 on a date. NOTE: the FUTURES object 6 shares the
+# same quarterly 3rd-Friday DATES but is ``kind='future'`` (the underlying) and
+# must never be routed as an option — which is why every routed set below is a
+# curated list of OPTION object ids (6 is never a member).
+V2_QUARTERLY_OBJECT_ID: int = 14
+
 # --- v1 names the adapter emits (spec §1.3) -------------------------------- #
 
 V2_INDEX_SYMBOL: str = "IND_SP_500"
@@ -50,6 +60,28 @@ EW_OBJECT_BY_CYCLE: Mapping[str, int] = {
     "W4 Friday": 13,
 }
 EW_OBJECT_IDS: tuple[int, ...] = (11, 12, 7, 13)
+
+# Objects that SERVE each weekly cycle for chain/selection routing. Identical
+# to ``EW_OBJECT_BY_CYCLE`` except "W3 Friday", which ALSO routes the quarterly
+# standard option (14): serial-month 3rd Fridays resolve via EW3 (7) exactly as
+# before — byte-identical, since 14 lists no serial-month contract — while
+# quarterly-month 3rd Fridays (Mar/Jun/Sep/Dec) now resolve via 14. Object 14 is
+# quarterly-only, so it appears on NO other cycle (no W1/W2/W4 leak). There is
+# no cross-cycle (expiration, strike, type) overlap, so the union needs no dedup
+# (W1 investigation Q5/Q5b).
+OBJECTS_BY_CYCLE: Mapping[str, tuple[int, ...]] = {
+    "W1 Friday": (11,),
+    "W2 Friday": (12,),
+    "W3 Friday": (7, V2_QUARTERLY_OBJECT_ID),
+    "W4 Friday": (13,),
+}
+
+# Every OPTION object OPT_SP_500 fans out to: the four EW weeklies plus the
+# quarterly standard option. Used by cycle-AGNOSTIC existence/coverage/inventory
+# paths (``list_roots``, ``trade_date_coverage``, ``get_contract``, the
+# no-filter / generic-"W" umbrella fallback) so those answers stay honest. All
+# members are ``kind='option'``; the futures object 6 is deliberately excluded.
+ALL_OPTION_OBJECT_IDS: tuple[int, ...] = EW_OBJECT_IDS + (V2_QUARTERLY_OBJECT_ID,)
 
 # v1 ``underlying_symbol`` per routed object — mirrored verbatim onto
 # ``OptionContractDoc.underlying_symbol`` (spec §6.7).
@@ -100,6 +132,24 @@ def ew_object_for_cycle(cycle: str) -> int:
     if obj is None:
         raise V2UnsupportedCycle(cycle)
     return obj
+
+
+def objects_for_cycle(cycle: str) -> tuple[int, ...]:
+    """Map a v1 ``expiration_cycle`` tag to ALL v2 objects that serve it.
+
+    Unlike :func:`ew_object_for_cycle` (which returns the single EW weekly
+    object), this returns the full routed set: ``"W3 Friday"`` yields
+    ``(7, 14)`` — EW3 plus the quarterly standard option — while the other
+    weekly cycles yield their single EW object. Every returned id is an OPTION
+    object; the futures object 6 is never included.
+
+    Raises :class:`V2UnsupportedCycle` for ``'M'``, ``''``, the generic ``'W'``
+    umbrella and anything else — same contract as :func:`ew_object_for_cycle`.
+    """
+    objects = OBJECTS_BY_CYCLE.get(cycle)
+    if objects is None:
+        raise V2UnsupportedCycle(cycle)
+    return objects
 
 
 def futures_symbol_from_expiration(expiration_int: int) -> str:
