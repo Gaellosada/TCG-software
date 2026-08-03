@@ -26,7 +26,7 @@ import { queryKeys } from '../../queryKeys';
 
 export async function fetchOptionLegRange(queryClient, leg, dataSource = 'v1') {
   if (!leg.collection) {
-    return { id: leg.id, start: null, end: null };
+    return { id: leg.id, start: null, end: null, recommendedStart: null, segments: [] };
   }
   try {
     // Scope the coverage span to the leg's OWN expiration cycle. A cycle like
@@ -46,10 +46,21 @@ export async function fetchOptionLegRange(queryClient, leg, dataSource = 'v1') {
     const start = res?.start || null;
     const end = res?.end || null;
     if (start && end && start <= end) {
-      return { id: leg.id, start, end };
+      // Additive cadence fields (backend §A.2). ``recommended_start`` is the
+      // full-cadence floor (== start when there is no cliff); ``segments`` are
+      // the contiguous cadence spans used to seed the default window, drive the
+      // overlap warning, and shade the lower-cadence band. Absent (older backend
+      // / non-segmented) → default to the raw start / empty band.
+      return {
+        id: leg.id,
+        start,
+        end,
+        recommendedStart: res?.recommended_start ?? start,
+        segments: res?.segments ?? [],
+      };
     }
-    return { id: leg.id, start: null, end: null };
+    return { id: leg.id, start: null, end: null, recommendedStart: null, segments: [] };
   } catch {
-    return { id: leg.id, start: null, end: null };
+    return { id: leg.id, start: null, end: null, recommendedStart: null, segments: [] };
   }
 }

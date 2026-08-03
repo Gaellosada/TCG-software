@@ -260,6 +260,19 @@
   border-top: 1px solid var(--border-primary);
 }
 
+/* Non-blocking cadence warning under the slider when the selected window
+   reaches into a lower-cadence (quarterly/sparse) era. */
+.cadenceWarning {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  background: rgba(234, 179, 8, 0.1);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  border-radius: var(--radius-sm);
+}
+
 /* Cache badge cluster — sits just left of Compute. margin-left:auto here eats
    the row's free space so the badge + Compute button cluster to the right. */
 /* Proactive cache badge — whether an identical Compute would be served from the

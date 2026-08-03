@@ -66,11 +66,22 @@ export async function getOptionExpirations(root, dataSource) {
 
 // ---------------------------------------------------------------------------
 // 1c. Trade-date coverage (data span) for a root
-//     GET /api/options/coverage?root=OPT_SP_500
-//     Returns: { root, start: 'YYYY-MM-DD'|null, end: 'YYYY-MM-DD'|null }
+//     GET /api/options/coverage?root=OPT_SP_500[&expiration_cycle=...]
+//     Returns: {
+//       root,
+//       start: 'YYYY-MM-DD'|null,          // raw trade_date extent (unchanged)
+//       end:   'YYYY-MM-DD'|null,
+//       recommended_start: 'YYYY-MM-DD'|null,  // full-cadence floor (== start if no cliff)
+//       segments: [{ start, end, cadence: 'monthly'|'quarterly'|'sparse' }],
+//     }
 //     Used by the portfolio editor to resolve an option leg's real available
 //     date range (so an option-only portfolio's slider floors at the option
-//     collection's true history, not an artificial recent default).
+//     collection's true history, not an artificial recent default). The additive
+//     `recommended_start`/`segments` make the picker CADENCE-AWARE: a monthly
+//     cycle (e.g. W3) that only listed quarterly before ~2016 seeds the default
+//     window at the monthly floor and shades the quarterly era, instead of
+//     silently defaulting into it. `start`/`end` are byte-identical to before
+//     (backward-compatible passthrough).
 // ---------------------------------------------------------------------------
 
 export async function getOptionCoverage(root, dataSource, expirationCycle) {

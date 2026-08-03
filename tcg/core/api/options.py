@@ -47,6 +47,7 @@ from tcg.core.api._models_options import (
     SmilePoint,
     SmileSeries,
 )
+from tcg.core.api._cadence import Segment, classify_cadence_segments
 from tcg.core.api._models import OptionStreamRef
 from tcg.core.api._options_wiring import (
     build_options_chain,
@@ -396,12 +397,39 @@ async def get_coverage(
     cycle = expiration_cycle or None
     if cycle is None:
         first, last = await svc.option_trade_date_coverage(root)
+        # Collection-wide coverage is the union of ALL cycles → always dense.
+        # A single monthly segment is honest and keeps the default path
+        # zero-cost (no extra query, no classification).
+        if first is None or last is None:
+            recommended_start, segments = None, []
+        else:
+            recommended_start = first
+            segments = [Segment(first, last, "monthly")]
     else:
         first, last = await _cycle_trade_date_coverage(svc, root, cycle)
+        if first is None or last is None:
+            recommended_start, segments = None, []
+        else:
+            # +1 CHEAP dim scan (DISTINCT expirations) — NOT another fact join.
+            expiries = await svc.list_option_expirations_filtered(root, cycle=cycle)
+            recommended_start, segments = classify_cadence_segments(
+                expiries, first, last
+            )
     return {
         "root": root,
         "start": first.isoformat() if first else None,
         "end": last.isoformat() if last else None,
+        "recommended_start": (
+            recommended_start.isoformat() if recommended_start else None
+        ),
+        "segments": [
+            {
+                "start": s.start.isoformat(),
+                "end": s.end.isoformat(),
+                "cadence": s.cadence,
+            }
+            for s in segments
+        ],
     }
 
 

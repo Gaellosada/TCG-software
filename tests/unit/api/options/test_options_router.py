@@ -273,6 +273,11 @@ async def test_coverage_happy_path(client: AsyncClient, mock_svc):
         "root": "OPT_SP_500",
         "start": "2005-12-01",
         "end": "2025-06-30",
+        # Collection-wide (no cycle) → single monthly segment, no extra query.
+        "recommended_start": "2005-12-01",
+        "segments": [
+            {"start": "2005-12-01", "end": "2025-06-30", "cadence": "monthly"}
+        ],
     }
 
 
@@ -281,7 +286,13 @@ async def test_coverage_none_when_no_contracts(client: AsyncClient, mock_svc):
     mock_svc.option_trade_date_coverage = AsyncMock(return_value=(None, None))
     resp = await client.get("/api/options/coverage", params={"root": "OPT_EMPTY"})
     assert resp.status_code == 200
-    assert resp.json() == {"root": "OPT_EMPTY", "start": None, "end": None}
+    assert resp.json() == {
+        "root": "OPT_EMPTY",
+        "start": None,
+        "end": None,
+        "recommended_start": None,
+        "segments": [],
+    }
 
 
 async def test_coverage_data_access_error_502(client: AsyncClient, mock_svc):
@@ -321,6 +332,10 @@ async def test_coverage_data_source_v2_reads_the_v2_warehouse(
         "root": "OPT_SP_500",
         "start": "2011-06-15",  # v2 floor, not v1's 2005-12-01
         "end": "2026-07-21",
+        "recommended_start": "2011-06-15",
+        "segments": [
+            {"start": "2011-06-15", "end": "2026-07-21", "cadence": "monthly"}
+        ],
     }
     v2_svc.option_trade_date_coverage.assert_awaited_once_with("OPT_SP_500")
     mock_svc.option_trade_date_coverage.assert_not_awaited()  # v1 never consulted
@@ -363,8 +378,14 @@ async def test_coverage_omitted_cycle_never_consults_by_date(
         "root": "OPT_SP_500",
         "start": "2005-12-01",
         "end": "2025-06-30",
+        "recommended_start": "2005-12-01",
+        "segments": [
+            {"start": "2005-12-01", "end": "2025-06-30", "cadence": "monthly"}
+        ],
     }
     mock_svc.list_option_expirations_by_date.assert_not_awaited()
+    # No-cycle path must NOT run the cadence dim scan either (zero-cost default).
+    mock_svc.list_option_expirations_filtered.assert_not_awaited()
 
 
 async def test_coverage_empty_cycle_string_treated_as_omitted(
@@ -416,6 +437,67 @@ async def test_coverage_cycle_narrows_start(client: AsyncClient, mock_svc):
     assert call.kwargs["cycle"] == "W3 Friday"
 
 
+async def test_coverage_cycle_returns_cadence_segments(
+    client: AsyncClient, mock_svc
+):
+    """A cycle whose expiries are quarterly-only early then monthly (the real
+    W3-v2 shape) is segmented additively: raw ``start``/``end`` are UNCHANGED,
+    and ``segments`` + ``recommended_start`` describe the cadence cliff.  The
+    classification consumes the CHEAP ``list_option_expirations_filtered``
+    dim scan, not another per-date fact join."""
+    mock_svc.option_trade_date_coverage = AsyncMock(
+        return_value=(date(2010, 6, 7), date(2026, 7, 27))
+    )
+    # _cycle_trade_date_coverage → raw (start, end) = trade_date extent.
+    mock_svc.list_option_expirations_by_date = AsyncMock(
+        return_value={
+            date(2010, 6, 7): [date(2010, 6, 18)],
+            date(2026, 7, 27): [date(2026, 7, 17)],
+        }
+    )
+    # The per-cycle DISTINCT expiries: quarterly 2010–2015, then monthly 2016+.
+    quarterly = [
+        date(y, m, 18) for y in range(2010, 2016) for m in (3, 6, 9, 12)
+    ]
+    monthly = []
+    y, m = 2016, 1
+    while (y, m) <= (2026, 7):
+        monthly.append(date(y, m, 18))
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    mock_svc.list_option_expirations_filtered = AsyncMock(
+        return_value=quarterly + monthly
+    )
+
+    resp = await client.get(
+        "/api/options/coverage",
+        params={"root": "OPT_SP_500", "expiration_cycle": "W3 Friday"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # start/end UNCHANGED (raw trade_date extent) — backward compatible.
+    assert body["start"] == "2010-06-07"
+    assert body["end"] == "2026-07-27"
+
+    # Two cadence segments: quarterly era then monthly era, contiguous.
+    cadences = [s["cadence"] for s in body["segments"]]
+    assert cadences == ["quarterly", "monthly"]
+    assert body["segments"][0]["start"] == "2010-06-07"
+    assert body["segments"][-1]["end"] == "2026-07-27"
+
+    # recommended_start is in the monthly segment (well past the quarterly years).
+    rec = body["recommended_start"]
+    assert rec == body["segments"][1]["start"]
+    assert "2015" <= rec[:4] < "2017"  # excludes 2010–2014, lands near the cliff
+
+    # Classification used the CHEAP dim scan, filtered by the cycle.
+    call = mock_svc.list_option_expirations_filtered.await_args
+    assert call.args[0] == "OPT_SP_500"
+    assert call.kwargs["cycle"] == "W3 Friday"
+
+
 async def test_coverage_cycle_no_bars_returns_null(client: AsyncClient, mock_svc):
     """A cycle with no listed bars in the window yields null bounds, not error."""
     mock_svc.option_trade_date_coverage = AsyncMock(
@@ -427,7 +509,13 @@ async def test_coverage_cycle_no_bars_returns_null(client: AsyncClient, mock_svc
         params={"root": "OPT_SP_500", "expiration_cycle": "W9 Friday"},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"root": "OPT_SP_500", "start": None, "end": None}
+    assert resp.json() == {
+        "root": "OPT_SP_500",
+        "start": None,
+        "end": None,
+        "recommended_start": None,
+        "segments": [],
+    }
 
 
 async def test_coverage_cycle_null_collection_short_circuits(
@@ -442,7 +530,13 @@ async def test_coverage_cycle_null_collection_short_circuits(
         params={"root": "OPT_EMPTY", "expiration_cycle": "M"},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"root": "OPT_EMPTY", "start": None, "end": None}
+    assert resp.json() == {
+        "root": "OPT_EMPTY",
+        "start": None,
+        "end": None,
+        "recommended_start": None,
+        "segments": [],
+    }
     mock_svc.list_option_expirations_by_date.assert_not_awaited()
 
 
@@ -457,6 +551,7 @@ async def test_coverage_cycle_respects_data_source_v2(client: AsyncClient, mock_
     v2_svc.list_option_expirations_by_date = AsyncMock(
         return_value={date(2016, 2, 22): [date(2016, 3, 18)]}
     )
+    v2_svc.list_option_expirations_filtered = AsyncMock(return_value=[])
     app.state.market_data_v2_compat = v2_svc
     mock_svc.option_trade_date_coverage = AsyncMock(
         return_value=(date(2005, 12, 1), date(2025, 6, 30))

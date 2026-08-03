@@ -861,12 +861,32 @@ function PortfolioPage({ mode = 'pure' }) {
               maxDate={portfolio.overlapRange?.end || null}
               startDate={portfolio.startDate}
               endDate={portfolio.endDate}
+              recommendedStart={portfolio.overlapRange?.recommendedStart || null}
+              bands={portfolio.overlapRange?.segments || []}
               disabled={portfolio.loading || portfolio.rangesLoading}
               onChange={({ startDate, endDate }) => {
                 portfolio.setStartDate(startDate);
                 portfolio.setEndDate(endDate);
               }}
             />
+            {(() => {
+              // Non-blocking cadence warning: the default seeds at
+              // recommendedStart, so this only fires when the user deliberately
+              // drags the window START into the pre-cliff lower-cadence era.
+              const rec = portfolio.overlapRange?.recommendedStart;
+              const rawStart = portfolio.overlapRange?.start;
+              const effSelStart = portfolio.startDate || rec;
+              const inLowerCadence =
+                rec && rawStart && rec > rawStart && effSelStart && effSelStart < rec;
+              if (!inLowerCadence) return null;
+              return (
+                <div className={styles.cadenceWarning} role="note">
+                  Window includes a lower-cadence span (~4 rolls/yr) before{' '}
+                  {rec} — the selected cycle did not list its full monthly
+                  cadence that early.
+                </div>
+              );
+            })()}
           </div>
         </div>
 

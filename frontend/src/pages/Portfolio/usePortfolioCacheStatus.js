@@ -131,7 +131,10 @@ export default function usePortfolioCacheStatus({
 
       // ── Build the ACTIVE body (if keyable) ──
       const queries = [];       // { tag, body }
-      const effStart = startDate || overlapRange?.start;
+      // Mirror the active editor's window default (usePortfolio): the cache
+      // status must probe the SAME key the compute will use, i.e. seed from the
+      // cadence recommendation, not the raw overlap start.
+      const effStart = startDate || overlapRange?.recommendedStart || overlapRange?.start;
       const effEnd = endDate || overlapRange?.end;
       if (legs.length > 0 && effStart && effEnd) {
         try {

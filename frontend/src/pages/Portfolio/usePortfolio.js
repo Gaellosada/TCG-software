@@ -458,6 +458,10 @@ export default function usePortfolio() {
       endDate,
       overlapRange?.start || '',
       overlapRange?.end || '',
+      // recommendedStart drives the DEFAULT window start, so a change in it must
+      // re-fire the auto-display/compute key (else a resolved cliff wouldn't
+      // rebuild the window).
+      overlapRange?.recommendedStart || '',
       // Per-leg source enters the backend cache key; it is already captured in
       // the per-leg JSON above (each leg's ``dataSource``), so flipping a leg's
       // warehouse (via delete + re-add) re-fires the effect.
@@ -475,7 +479,11 @@ export default function usePortfolio() {
     // signature, so it never triggers this blank.
     setResults(null);
 
-    const effStart = startDate || overlapRange?.start;
+    // Default the window start to the cadence RECOMMENDATION (full-cadence
+    // floor), not the raw overlap start — so a "monthly" cycle never silently
+    // defaults into its pre-cliff quarterly-only era. An explicit slider drag
+    // (startDate) still wins. recommendedStart == start when there is no cliff.
+    const effStart = startDate || overlapRange?.recommendedStart || overlapRange?.start;
     const effEnd = endDate || overlapRange?.end;
     // Gate until the date range has resolved so a transient undefined range never
     // fires a wrong-key get.
@@ -541,7 +549,7 @@ export default function usePortfolio() {
     // This lets an option leg resolve over the portfolio's available window
     // without forcing a manual slider drag — the slider already renders '' as
     // the full range, so the request now matches what the user sees.
-    const effectiveStart = startDate || overlapRange?.start;
+    const effectiveStart = startDate || overlapRange?.recommendedStart || overlapRange?.start;
     const effectiveEnd = endDate || overlapRange?.end;
 
     // Option stream legs require an explicit window (the backend can't infer
