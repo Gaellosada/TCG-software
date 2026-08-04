@@ -440,6 +440,7 @@ class _FakeReaderService:
         contracts=None,
         series=None,
         facets=None,
+        filtered=None,
     ):
         self._obj = obj
         self._serie = serie
@@ -447,8 +448,10 @@ class _FakeReaderService:
         self._contracts = contracts or []
         self._series = series or []
         self._facets_data = facets
+        self._filtered = filtered if filtered is not None else ([], 0)
         self.last_freq = None
         self.last_facets_object_id = None
+        self.filter_calls = []
 
     async def get_object(self, object_id):
         return self._obj
@@ -471,6 +474,10 @@ class _FakeReaderService:
     async def fetch_object_facets(self, object_id):
         self.last_facets_object_id = object_id
         return self._facets_data
+
+    async def list_series_filtered(self, object_id, **kwargs):
+        self.filter_calls.append((object_id, kwargs))
+        return self._filtered
 
 
 def _make_service(reader):
@@ -562,6 +569,97 @@ async def test_get_object_facets_unknown_object_raises_not_found():
     reader = _FakeReaderService(obj=None, facets=_EW2_FACETS)
     with pytest.raises(DataNotFoundError):
         await _make_service(reader).get_object_facets(999)
+
+
+# --------------------------------------------------------------------------- #
+# Filtered, paginated series page (the facets form's other half)
+#
+# Reader faked out, so these pin only what the SERVICE adds: existence-checking
+# the object, forwarding every filter unaltered, and wrapping the reader's
+# ``(rows, total)`` into the PaginatedResult shape. The SQL's own semantics
+# (WHERE / ORDER BY / LIMIT-OFFSET) are pinned in
+# ``tests/unit/data/sql/test_sql_instruments_v2_series_page.py`` (text + shaping)
+# and executed for real in
+# ``tests/integration/data/test_instruments_v2_integration.py``.
+# --------------------------------------------------------------------------- #
+_EW2_PAGE_ROWS = [
+    {
+        "serie_id": 1433194,
+        "contract_id": 77,
+        "type": "bbba",
+        "freq": "1m",
+        "source": "DATABENTO:GLBX.MDP3:bbo-1m",
+        "contract_code": "EW2H6 P6260.20260313",
+        "expiration": "2026-03-13",
+        "strike": 6260.0,
+        "option_type": "put",
+    }
+]
+
+
+async def test_list_object_series_returns_paginated_shape():
+    reader = _FakeReaderService(obj=_EW2_OBJECT, filtered=(_EW2_PAGE_ROWS, 195))
+    svc = _make_service(reader)
+    out = await svc.list_object_series(12, serie_type="bbba", skip=0, limit=50)
+    assert out["total"] == 195
+    assert out["skip"] == 0
+    assert out["limit"] == 50
+    assert len(out["items"]) == 1
+    assert out["items"][0]["contract_code"] == "EW2H6 P6260.20260313"
+    # No key silently added or dropped — Task 5's client destructures all four.
+    assert set(out) == {"items", "total", "skip", "limit"}
+
+
+async def test_list_object_series_forwards_every_filter():
+    reader = _FakeReaderService(obj=_EW2_OBJECT, filtered=(_EW2_PAGE_ROWS, 195))
+    svc = _make_service(reader)
+    out = await svc.list_object_series(
+        12,
+        expiration_min=date(2026, 3, 1),
+        expiration_max=date(2026, 3, 31),
+        strike_min=6000.0,
+        strike_max=7000.0,
+        option_type="put",
+        serie_type="bbba",
+        freq="1m",
+        skip=50,
+        limit=100,
+    )
+    object_id, kwargs = reader.filter_calls[0]
+    assert object_id == 12
+    # Every filter, not a subset: a forwarder that dropped or transposed any one
+    # of these would narrow (or widen) the page silently. The min/max values
+    # differ pairwise so a transposition is visible.
+    assert kwargs == {
+        "expiration_min": date(2026, 3, 1),
+        "expiration_max": date(2026, 3, 31),
+        "strike_min": 6000.0,
+        "strike_max": 7000.0,
+        "option_type": "put",
+        "serie_type": "bbba",
+        "freq": "1m",
+        "skip": 50,
+        "limit": 100,
+    }
+    # skip/limit are ECHOED from the request, not hardcoded to the defaults.
+    # test_list_object_series_returns_paginated_shape passes skip=0/limit=50 —
+    # exactly the defaults — so only a non-default pair discriminates here.
+    assert out["skip"] == 50
+    assert out["limit"] == 100
+
+
+async def test_list_object_series_unknown_object_raises_not_found():
+    reader = _FakeReaderService(obj=None, filtered=(_EW2_PAGE_ROWS, 195))
+    with pytest.raises(DataNotFoundError):
+        await _make_service(reader).list_object_series(999)
+
+
+async def test_list_object_series_empty_result_is_not_an_error():
+    """A narrow filter is a result, not an error."""
+    reader = _FakeReaderService(obj=_EW2_OBJECT, filtered=([], 0))
+    out = await _make_service(reader).list_object_series(12, strike_min=999_999.0)
+    assert out["items"] == []
+    assert out["total"] == 0
 
 
 async def test_get_series_bar_type_dispatches_bar_fields():

@@ -251,6 +251,87 @@ async def get_object_facets(
     return await svc.get_object_facets(object_id)
 
 
+#: Filter enum domains, mirrored from the reader's whitelist so a bad value is
+#: a clean 400 at the boundary rather than a DataAccessError from the adapter.
+#: Duplicated rather than imported so the error message has a stable order (the
+#: reader's are frozensets); ``test_route_enum_whitelists_match_the_readers``
+#: pins them against each other so the copies cannot drift.
+_SERIE_TYPE_VALUES = ("bar", "value", "greeks", "bbba", "any")
+_FREQ_VALUES = ("1m", "daily", "any")
+_OPTION_TYPE_VALUES = ("call", "put", "both")
+
+
+@router.get("/objects/{object_id}/series")
+async def list_object_series(
+    object_id: int,
+    expiration_min: str | None = Query(
+        None, description="Earliest expiration YYYY-MM-DD"
+    ),
+    expiration_max: str | None = Query(
+        None, description="Latest expiration YYYY-MM-DD"
+    ),
+    strike_min: float | None = Query(None, description="Strike lower bound"),
+    strike_max: float | None = Query(None, description="Strike upper bound"),
+    option_type: str = Query("both", description="call | put | both"),
+    serie_type: str = Query("any", description="bar | value | greeks | bbba | any"),
+    freq: str = Query("any", description="1m | daily | any"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
+) -> dict:
+    """One filtered, paginated page of an object's series.
+
+    Kept with the object routes, above the ``/objects/{object_id}`` catch-all.
+    As with ``/facets``, declaration order is NOT load-bearing for a
+    two-segment path (``[^/]+`` cannot span the ``/series`` segment); the
+    placement is for consistency. ``limit`` is capped at 500 — the same cap v1
+    uses in ``tcg/core/api/data.py``.
+
+    A filter that matches nothing returns 200 with an empty ``items`` and
+    ``total: 0`` — a narrow filter is a result, not an error.
+    """
+    if serie_type not in _SERIE_TYPE_VALUES:
+        raise ValidationError(
+            f"Invalid serie_type {serie_type!r}. Must be one of: "
+            f"{', '.join(_SERIE_TYPE_VALUES)}"
+        )
+    if freq not in _FREQ_VALUES:
+        raise ValidationError(
+            f"Invalid freq {freq!r}. Must be one of: {', '.join(_FREQ_VALUES)}"
+        )
+    if option_type not in _OPTION_TYPE_VALUES:
+        raise ValidationError(
+            f"Invalid option_type {option_type!r}. Must be one of: "
+            f"{', '.join(_OPTION_TYPE_VALUES)}"
+        )
+    try:
+        exp_min, exp_max = parse_iso_range(expiration_min, expiration_max)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    if exp_min is not None and exp_max is not None and exp_min > exp_max:
+        raise ValidationError(
+            f"expiration_min ({exp_min.isoformat()}) is after "
+            f"expiration_max ({exp_max.isoformat()})"
+        )
+    if strike_min is not None and strike_max is not None and strike_min > strike_max:
+        raise ValidationError(
+            f"strike_min ({strike_min}) is greater than strike_max ({strike_max})"
+        )
+
+    return await svc.list_object_series(
+        object_id,
+        expiration_min=exp_min,
+        expiration_max=exp_max,
+        strike_min=strike_min,
+        strike_max=strike_max,
+        option_type=option_type,
+        serie_type=serie_type,
+        freq=freq,
+        skip=skip,
+        limit=limit,
+    )
+
+
 # --- Object detail (catch-all id route: declared LAST) ---
 
 

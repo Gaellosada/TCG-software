@@ -64,6 +64,44 @@ class DefaultMarketDataServiceV2:
         facets = await self._reader.fetch_object_facets(object_id)
         return {"object_id": object_id, "kind": obj["kind"], **facets}
 
+    async def list_object_series(
+        self,
+        object_id: int,
+        *,
+        expiration_min: date | None = None,
+        expiration_max: date | None = None,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        option_type: str = "both",
+        serie_type: str = "any",
+        freq: str = "any",
+        skip: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """One filtered, paginated page of an object's series.
+
+        Returns the ``PaginatedResult`` shape (``items``/``total``/``skip``/
+        ``limit``). Raises ``DataNotFoundError`` if the object does not exist —
+        but a filter matching nothing is NOT an error: it returns an empty
+        ``items`` with ``total: 0``.
+        """
+        obj = await self._reader.get_object(object_id)
+        if obj is None:
+            raise DataNotFoundError(f"Object {object_id} not found in v2")
+        items, total = await self._reader.list_series_filtered(
+            object_id,
+            expiration_min=expiration_min,
+            expiration_max=expiration_max,
+            strike_min=strike_min,
+            strike_max=strike_max,
+            option_type=option_type,
+            serie_type=serie_type,
+            freq=freq,
+            skip=skip,
+            limit=limit,
+        )
+        return {"items": items, "total": total, "skip": skip, "limit": limit}
+
     async def get_series(
         self,
         serie_id: int,

@@ -271,6 +271,127 @@ class SqlInstrumentReaderV2:
             },
         }
 
+    #: Whitelisted filter enum values. Validated before reaching SQL; the
+    #: *values* are still bound as parameters, never interpolated.
+    _SERIE_TYPES = frozenset(FACT_DISPATCH) | {"any"}
+    _FREQS = frozenset({"1m", "daily", "any"})
+    _OPTION_TYPES = frozenset({"call", "put", "both"})
+
+    async def list_series_filtered(
+        self,
+        object_id: int,
+        *,
+        expiration_min: date | None = None,
+        expiration_max: date | None = None,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        option_type: str = "both",
+        serie_type: str = "any",
+        freq: str = "any",
+        skip: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return one filtered page of an object's series, plus the total count.
+
+        LEFT JOIN, not INNER: object-level series (``contract_id IS NULL`` —
+        index and rate objects) must still list. Contract metadata is returned
+        joined so the caller needs no second round-trip and the frontend needs
+        no contract_id → contract map.
+
+        Ordering is ``expiration, strike, option_type, serie_id`` — a TOTAL
+        order. This is correctness, not presentation: under a non-deterministic
+        ORDER BY, LIMIT/OFFSET paging can repeat or skip rows between pages.
+        ``serie_id`` is the unique tiebreaker, and it is load-bearing here:
+        object 12 carries up to four series per contract (``value``/``greeks``
+        daily, ``bar``/``bbba`` 1m), so the leading three keys are NOT unique.
+
+        The count and the page share one ``WHERE`` clause string, so a filter can
+        never apply to only one of them.
+        """
+        if serie_type not in self._SERIE_TYPES:
+            raise DataAccessError(f"v2 unknown serie_type filter {serie_type!r}")
+        if freq not in self._FREQS:
+            raise DataAccessError(f"v2 unknown freq filter {freq!r}")
+        if option_type not in self._OPTION_TYPES:
+            raise DataAccessError(f"v2 unknown option_type filter {option_type!r}")
+
+        where = ["s.object_id = %s"]
+        params: list[Any] = [object_id]
+        if serie_type != "any":
+            where.append("s.type = %s")
+            params.append(serie_type)
+        if freq != "any":
+            where.append("s.freq = %s")
+            params.append(freq)
+        if option_type != "both":
+            where.append("c.option_type = %s")
+            params.append(option_type)
+        if expiration_min is not None:
+            where.append("c.expiration >= %s")
+            params.append(expiration_min)
+        if expiration_max is not None:
+            where.append("c.expiration <= %s")
+            params.append(expiration_max)
+        if strike_min is not None:
+            where.append("c.strike >= %s")
+            params.append(strike_min)
+        if strike_max is not None:
+            where.append("c.strike <= %s")
+            params.append(strike_max)
+        clause = " AND ".join(where)
+
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT COUNT(*) AS total
+                            FROM {V2_SCHEMA}.serie s
+                            LEFT JOIN {V2_SCHEMA}.contract c
+                              ON c.contract_id = s.contract_id
+                            WHERE {clause}""",
+                        tuple(params),
+                    )
+                    row = await cur.fetchone()
+                    total = int(row["total"]) if row else 0
+
+                    await cur.execute(
+                        f"""SELECT s.serie_id, s.contract_id, s.type, s.freq,
+                                   s.source, c.contract_code, c.expiration,
+                                   c.strike, c.option_type
+                            FROM {V2_SCHEMA}.serie s
+                            LEFT JOIN {V2_SCHEMA}.contract c
+                              ON c.contract_id = s.contract_id
+                            WHERE {clause}
+                            ORDER BY c.expiration NULLS FIRST,
+                                     c.strike NULLS FIRST,
+                                     c.option_type NULLS FIRST,
+                                     s.serie_id
+                            LIMIT %s OFFSET %s""",
+                        (*params, limit, skip),
+                    )
+                    rows = await cur.fetchall()
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"v2 SQL error listing filtered series for object "
+                f"{object_id}: {exc}"
+            ) from exc
+
+        items = [
+            {
+                "serie_id": r["serie_id"],
+                "contract_id": r["contract_id"],
+                "type": r["type"],
+                "freq": r["freq"],
+                "source": r["source"],
+                "contract_code": r["contract_code"],
+                "expiration": r["expiration"].isoformat() if r["expiration"] else None,
+                "strike": to_float(r["strike"]),
+                "option_type": r["option_type"],
+            }
+            for r in rows
+        ]
+        return items, total
+
     async def get_serie(self, serie_id: int) -> dict[str, Any] | None:
         """Return one serie row (incl. ``type`` for fact-table dispatch)."""
         try:

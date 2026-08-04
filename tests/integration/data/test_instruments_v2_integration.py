@@ -9,6 +9,9 @@ Verifies:
   * every live object lists with the right kind;
   * the object-facets aggregate's SQL semantics (the unit tests use a fake
     cursor and never execute a statement);
+  * the filtered series page's WHERE / ORDER BY / LIMIT-OFFSET semantics, for
+    the same reason — plus that its LEFT JOIN keeps contract-less (index / rate)
+    series listable;
   * fact-table dispatch reads the index bar series and a rate value series;
   * futures continuous on FUT_SP_500 stitches a multi-contract series;
   * options continuous on OPT_SP_500_EW3 selects by strike and by moneyness,
@@ -150,6 +153,252 @@ async def test_object_facets_semantics_live(svc):
     assert ind["strike_max"] is None
     assert ind["option_types"] == []
     assert ind["totals"]["contracts"] == 0
+
+
+@pytest.mark.integration
+async def test_series_page_filters_live(svc):
+    """Execute the filtered-page WHERE clause for real — the unit tests cannot.
+
+    ``tests/unit/data/sql/test_sql_instruments_v2_series_page.py`` drives the real
+    method through a fake cursor, so it pins the statement TEXT and the Python
+    shaping but never runs a statement. Semantics need a database.
+
+    Each assertion below is chosen because it changes value between the correct
+    SQL and a specific plausible mutation:
+
+      * ``s.type`` / ``s.freq`` rebound to each other -> zero rows (no serie has
+        ``type = '1m'``), caught by the ``total > 0`` guards;
+      * ``c.option_type`` predicate dropped -> calls appear in a put-only page;
+      * ``expiration_min``/``expiration_max`` transposed -> ``>= hi AND <= lo``
+        over an asymmetric window is empty, caught by ``total > 0``;
+      * either expiration bound DROPPED -> widening that bound would no longer
+        change the total, which is what the two ``wider_* > base`` asserts pin.
+        A per-row range check cannot see this: ordered by expiration ascending,
+        a 500-row page of a 2 261-row result never reaches the upper end of the
+        window, so rows beyond it are invisible whether or not they are excluded;
+      * either strike bound dropped or transposed -> the narrow strike window
+        below returns fewer than ``total`` rows, so every row IS observable and
+        the range check bites.
+
+    Absolute counts are never asserted: the warehouse is being backfilled and
+    every number here drifts run to run. Windows are derived from the live
+    facets on each run for the same reason.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    opt_id = objs["OPT_SP_500_EW2"]["object_id"]
+
+    facets = await svc.get_object_facets(opt_id)
+    unfiltered = await svc.list_object_series(opt_id, limit=1)
+    # The join must neither drop series nor fan them out: the unfiltered page
+    # total has to agree with the independent facets aggregate (which never
+    # joins ``contract`` at all). A join condition on the wrong column would
+    # multiply rows; an INNER join would drop the contract-less ones.
+    assert unfiltered["total"] == facets["totals"]["series"]
+    assert unfiltered["total"] > 1000, "expected a large option root to page"
+
+    exps = sorted(e["expiration"] for e in facets["expirations"])
+    assert len(exps) > 12, f"need a deep expiration ladder, got {len(exps)}"
+    # A window with expirations on BOTH sides, so each bound has something to
+    # exclude. Anchoring on exps[-1] would make expiration_max a no-op filter and
+    # the assertion below unable to fail.
+    below, lo, hi, above = exps[-10], exps[-9], exps[-4], exps[-3]
+    assert below < lo < hi < above
+
+    async def total_for(**kw):
+        return (await svc.list_object_series(opt_id, limit=1, **kw))["total"]
+
+    common = {"serie_type": "value", "option_type": "put"}
+    base = await total_for(
+        expiration_min=date.fromisoformat(lo),
+        expiration_max=date.fromisoformat(hi),
+        **common,
+    )
+    assert base > 0, f"no value/put series in {lo}..{hi} — window lost its data"
+    assert base < unfiltered["total"], "the filters did not narrow anything"
+    wider_lo = await total_for(
+        expiration_min=date.fromisoformat(below),
+        expiration_max=date.fromisoformat(hi),
+        **common,
+    )
+    wider_hi = await total_for(
+        expiration_min=date.fromisoformat(lo),
+        expiration_max=date.fromisoformat(above),
+        **common,
+    )
+    assert wider_lo > base, "expiration_min is not bounding the LOW side"
+    assert wider_hi > base, "expiration_max is not bounding the HIGH side"
+
+    # Row-level column bindings, on one expiration so the page covers the window.
+    # ``freq='1m'`` (not ``serie_type``) is filtered here on purpose: object 12
+    # carries ~188 000 daily and ~13 000 minute series, so a dropped or rebound
+    # freq predicate lets ``value``/``greeks`` rows in and the type check fails.
+    one_exp = {
+        "expiration_min": date.fromisoformat(lo),
+        "expiration_max": date.fromisoformat(lo),
+    }
+    page = await svc.list_object_series(
+        opt_id, freq="1m", option_type="put", limit=500, **one_exp
+    )
+    assert page["total"] > 0
+    assert len(page["items"]) == min(page["total"], 500)
+    for it in page["items"]:
+        assert it["freq"] == "1m", f"freq filter leaked: {it}"
+        assert it["type"] in {"bar", "bbba"}, f"a daily serie type at freq=1m: {it}"
+        assert it["option_type"] == "put", f"option_type filter leaked: {it}"
+        assert it["expiration"] == lo
+        assert isinstance(it["strike"], float), f"strike not coerced: {it['strike']!r}"
+        assert it["contract_code"], "the LEFT JOIN did not bring contract metadata"
+
+    # serie_type binds to ``s.type`` and genuinely narrows.
+    typed = await svc.list_object_series(
+        opt_id, serie_type="bbba", limit=200, **one_exp
+    )
+    assert typed["total"] > 0
+    assert {i["type"] for i in typed["items"]} == {"bbba"}
+    assert typed["total"] < await total_for(**one_exp)
+
+    # Strike bounds, over a window narrow enough that the page holds every row —
+    # only then does a per-row range check see a dropped upper bound.
+    strikes = sorted({i["strike"] for i in page["items"]})
+    assert len(strikes) > 8, f"need several strikes on {lo}, got {len(strikes)}"
+    smin, smax = strikes[2], strikes[6]
+    struck = await svc.list_object_series(
+        opt_id,
+        freq="1m",
+        option_type="put",
+        strike_min=smin,
+        strike_max=smax,
+        limit=500,
+        **one_exp,
+    )
+    assert 0 < struck["total"] < page["total"]
+    assert len(struck["items"]) == struck["total"], "narrow window must fit one page"
+    assert all(smin <= i["strike"] <= smax for i in struck["items"]), (
+        f"strike filter leaked outside [{smin}, {smax}]: "
+        f"{sorted({i['strike'] for i in struck['items']})}"
+    )
+    # Strikes exist strictly below smin and strictly above smax (strikes[0..1] and
+    # strikes[7..]), so both bounds had something to exclude and did.
+    assert strikes[0] < smin and smax < strikes[-1]
+
+    # A filter matching nothing is a result, not an error.
+    empty = await svc.list_object_series(opt_id, strike_min=10**9, limit=50)
+    assert empty["items"] == []
+    assert empty["total"] == 0
+
+
+@pytest.mark.integration
+async def test_series_page_paging_is_stable_live(svc):
+    """LIMIT/OFFSET paging must be a deterministic slice of one total order.
+
+    The ORDER BY here is correctness, not presentation. Two of the three obvious
+    ways to test it DO NOT DISCRIMINATE, measured on this warehouse against the
+    real mutation (dropping ``s.serie_id`` from the ORDER BY, three trials each):
+
+      * page 1 and page 2 being DISJOINT: overlap was 0 in BOTH states. The
+        brief's prescribed proof is a no-op here — Postgres happens to produce a
+        stable enough order for adjacent offsets under the same plan;
+      * the two pages' UNION as a SET equalling a single ``LIMIT 2*n`` fetch:
+        also equal in both states.
+
+    What does discriminate, stably:
+
+      * the full key ``(expiration, strike, option_type, serie_id)`` STRICTLY
+        increasing across the concatenated pages — without the tiebreaker,
+        rows sharing the leading three keys come back in arbitrary serie_id
+        order (measured False);
+      * the ORDERED concatenation of the two pages equalling the single
+        ``LIMIT 2*n`` fetch (measured False without the tiebreaker). This is the
+        property paging actually needs: page *k* of a walk must be slice *k* of
+        the whole ordered result.
+
+    Both are logical consequences of a TOTAL order, so they are guaranteed green
+    on correct SQL rather than merely observed green.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    opt_id = objs["OPT_SP_500_EW2"]["object_id"]
+
+    n = 50
+    p1 = (await svc.list_object_series(opt_id, skip=0, limit=n))["items"]
+    p2 = (await svc.list_object_series(opt_id, skip=n, limit=n))["items"]
+    both = (await svc.list_object_series(opt_id, skip=0, limit=2 * n))["items"]
+    assert len(p1) == len(p2) == n
+    assert len(both) == 2 * n
+
+    def key(i):
+        return (i["expiration"], i["strike"], i["option_type"], i["serie_id"])
+
+    walked = [key(i) for i in p1 + p2]
+    assert all(k[0] is not None and k[1] is not None for k in walked), (
+        "this object's series must all carry a contract for the key to be "
+        "type-comparable; see test_series_page_lists_object_level_series_live "
+        "for the contract-less case"
+    )
+
+    # The window must actually contain duplicate leading keys, or the tiebreaker
+    # is idle and none of this can fail. Object 12 carries up to four series per
+    # contract (value/greeks daily + bar/bbba 1m); measured 67 distinct leading
+    # keys in the first 100 rows.
+    leading = [k[:3] for k in walked]
+    assert len(set(leading)) < len(leading), (
+        "no duplicate (expiration, strike, option_type) in this window — the "
+        "tiebreaker assertions below cannot fail, so the test is vacuous"
+    )
+
+    assert all(walked[i] < walked[i + 1] for i in range(len(walked) - 1)), (
+        "the ordering key is not strictly increasing across the two pages — "
+        "LIMIT/OFFSET paging can repeat or skip rows"
+    )
+    assert [key(i) for i in both] == walked, (
+        "a two-page walk does not equal the single ordered fetch of the same "
+        "rows — the ORDER BY is not a total order"
+    )
+    # Non-overlap is implied by the above; asserted only as documentation of the
+    # user-visible symptom. On its own it would not discriminate (see docstring).
+    assert not ({i["serie_id"] for i in p1} & {i["serie_id"] for i in p2})
+
+    # OFFSET past the end is an empty page, not an error, and the total is
+    # unaffected by paging.
+    tail = await svc.list_object_series(opt_id, skip=10**9, limit=n)
+    assert tail["items"] == []
+    assert tail["total"] > 0
+    assert tail["skip"] == 10**9 and tail["limit"] == n
+
+
+@pytest.mark.integration
+async def test_series_page_lists_object_level_series_live(svc):
+    """The LEFT JOIN is load-bearing: index and rate series have no contract.
+
+    An object-level serie carries ``contract_id IS NULL``, so an INNER JOIN onto
+    ``contract`` drops it — and for an index or a rate object that is its ENTIRE
+    series list. The failure would read as "this object has no data" rather than
+    as an error, and no assertion on the big option root can see it (every one of
+    object 12's series has a contract).
+
+    ``total == len(detail["series"]) > 0`` is the discriminating form: under an
+    INNER JOIN both the count and the page collapse to 0 while still being
+    self-consistent, so comparing the page against its own total would stay green.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    for symbol in ("IND_SP_500", "RATE_US_CMT_1M", "RATE_US_SOFR_ON"):
+        oid = objs[symbol]["object_id"]
+        detail = await svc.get_object_detail(oid)
+        expected = {s["serie_id"] for s in detail["series"]}
+        assert expected, f"{symbol} has no series at all — fixture assumption broke"
+
+        page = await svc.list_object_series(oid, limit=500)
+        assert page["total"] == len(expected), (
+            f"{symbol}: page total {page['total']} != {len(expected)} series in "
+            f"the object — an INNER JOIN would report 0"
+        )
+        assert {i["serie_id"] for i in page["items"]} == expected
+        for i in page["items"]:
+            assert i["contract_id"] is None, f"{symbol}: unexpected contract {i}"
+            assert i["contract_code"] is None
+            assert i["expiration"] is None  # not a crash on None.isoformat()
+            assert i["strike"] is None
+            assert i["option_type"] is None
+            assert i["type"] and i["freq"], f"{symbol}: serie metadata missing {i}"
 
 
 @pytest.mark.integration

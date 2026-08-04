@@ -6,13 +6,20 @@ captured by /objects/{object_id}), and that a delta criterion surfaces a 400.
 
 from __future__ import annotations
 
+from datetime import date
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from tcg.core.api.data_v2 import (
+    _FREQ_VALUES,
+    _OPTION_TYPE_VALUES,
+    _SERIE_TYPE_VALUES,
+)
 from tcg.core.app import create_app
+from tcg.data._sql.instruments_v2 import SqlInstrumentReaderV2
 from tcg.types.errors import ValidationError
 from tcg.types.market import (
     AdjustmentMethod,
@@ -94,6 +101,26 @@ async def client():
             "option_types": ["call", "put"],
             "serie_types": [{"type": "bbba", "freq": "1m", "series": 96106}],
             "totals": {"contracts": 96106, "series": 200672},
+        }
+    )
+    mock.list_object_series = AsyncMock(
+        return_value={
+            "items": [
+                {
+                    "serie_id": 1433194,
+                    "contract_id": 77,
+                    "type": "bbba",
+                    "freq": "1m",
+                    "source": "DATABENTO:GLBX.MDP3:bbo-1m",
+                    "contract_code": "EW2H6 P6260.20260313",
+                    "expiration": "2026-03-13",
+                    "strike": 6260.0,
+                    "option_type": "put",
+                }
+            ],
+            "total": 195,
+            "skip": 0,
+            "limit": 50,
         }
     )
     mock.get_series = AsyncMock(
@@ -181,6 +208,161 @@ async def test_facets_route_dispatches_to_the_facets_handler(client):
     # Called with a parsed int (not the raw "12"), and the id route never ran.
     svc.get_object_facets.assert_awaited_once_with(12)
     svc.get_object_detail.assert_not_awaited()
+
+
+async def test_series_list_route_returns_paginated_shape(client):
+    res = await client.get("/api/data-v2/objects/12/series?serie_type=bbba&freq=1m")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total"] == 195
+    assert body["limit"] == 50
+    assert body["items"][0]["option_type"] == "put"
+    # No response_model, deliberately: the whole page shape reaches the client.
+    assert set(body) == {"items", "total", "skip", "limit"}
+
+
+async def test_series_list_route_dispatches_and_forwards_filters(client):
+    """Pins the handler the request reaches AND the kwargs it forwards.
+
+    Declaration order relative to ``/objects/{object_id}`` is NOT load-bearing
+    for a two-segment path (``[^/]+`` cannot span the ``/series`` segment — see
+    ``test_facets_route_dispatches_to_the_facets_handler``), so a "200 + a body
+    key" assertion would not discriminate placement at all. What IS worth
+    pinning is that every query param lands on the service unaltered and parsed:
+    dates as ``date``, numbers as ``float``, ``object_id`` as ``int``.
+    """
+    svc = client._transport.app.state.market_data_v2  # type: ignore[attr-defined]
+    res = await client.get(
+        "/api/data-v2/objects/12/series"
+        "?expiration_min=2026-03-01&expiration_max=2026-03-31"
+        "&strike_min=6000&strike_max=7000"
+        "&option_type=put&serie_type=bbba&freq=1m&skip=50&limit=100"
+    )
+    assert res.status_code == 200
+    svc.list_object_series.assert_awaited_once_with(
+        12,
+        expiration_min=date(2026, 3, 1),
+        expiration_max=date(2026, 3, 31),
+        strike_min=6000.0,
+        strike_max=7000.0,
+        option_type="put",
+        serie_type="bbba",
+        freq="1m",
+        skip=50,
+        limit=100,
+    )
+    svc.get_object_detail.assert_not_awaited()
+
+
+async def test_series_list_route_defaults_are_permissive(client):
+    """With no query params the page must be unfiltered, not accidentally narrow."""
+    svc = client._transport.app.state.market_data_v2  # type: ignore[attr-defined]
+    res = await client.get("/api/data-v2/objects/12/series")
+    assert res.status_code == 200
+    svc.list_object_series.assert_awaited_once_with(
+        12,
+        expiration_min=None,
+        expiration_max=None,
+        strike_min=None,
+        strike_max=None,
+        option_type="both",
+        serie_type="any",
+        freq="any",
+        skip=0,
+        limit=50,
+    )
+
+
+async def test_series_list_route_rejects_inverted_strike_range(client):
+    res = await client.get(
+        "/api/data-v2/objects/12/series?strike_min=7000&strike_max=6000"
+    )
+    assert res.status_code == 400
+    assert "strike_min" in res.json()["message"]
+
+
+async def test_series_list_route_rejects_inverted_expiration_range(client):
+    res = await client.get(
+        "/api/data-v2/objects/12/series"
+        "?expiration_min=2026-03-31&expiration_max=2026-03-01"
+    )
+    assert res.status_code == 400
+    assert "expiration_min" in res.json()["message"]
+
+
+async def test_series_list_route_rejects_unknown_serie_type(client):
+    res = await client.get("/api/data-v2/objects/12/series?serie_type=nope")
+    assert res.status_code == 400
+    assert "serie_type" in res.json()["message"]
+
+
+@pytest.mark.parametrize("param", ["freq", "option_type"])
+async def test_series_list_route_rejects_unknown_enum(client, param):
+    res = await client.get(f"/api/data-v2/objects/12/series?{param}=nope")
+    assert res.status_code == 400
+    assert param in res.json()["message"]
+
+
+async def test_series_list_route_rejects_unparseable_expiration(client):
+    res = await client.get("/api/data-v2/objects/12/series?expiration_min=not-a-date")
+    assert res.status_code == 400
+    assert "Invalid date format" in res.json()["message"]
+
+
+async def test_series_list_route_caps_limit_at_500(client):
+    """The cap is 500 exactly — the same one v1 uses (``tcg/core/api/data.py``).
+
+    Both halves are needed. ``limit=5000`` rejected alone passes for ANY cap
+    below 5000; ``limit=500`` accepted alone passes with no cap whatsoever. The
+    501/500 pair is what pins the boundary at 500 rather than at 100 or 1000.
+
+    The status is 400, not FastAPI's default 422: this app installs a
+    ``RequestValidationError`` handler (``tcg/core/app.py``) that remaps query
+    validation into the project envelope so the frontend can read
+    ``body.message``. The message is asserted too — a bare ``== 400`` would also
+    be satisfied by, say, an unrelated enum rejection.
+    """
+    over = await client.get("/api/data-v2/objects/12/series?limit=5000")
+    assert over.status_code == 400
+    assert "limit" in over.json()["message"]
+    assert over.json()["error_type"] == "validation_error"
+
+    boundary = await client.get("/api/data-v2/objects/12/series?limit=501")
+    assert boundary.status_code == 400
+    assert "limit" in boundary.json()["message"]
+
+    ok = await client.get("/api/data-v2/objects/12/series?limit=500")
+    assert ok.status_code == 200
+    assert ok.json()["total"] == 195
+
+
+BASE = "/api/data-v2/objects/12/series"
+
+
+async def test_series_list_route_rejects_out_of_range_paging(client):
+    """``skip >= 0`` and ``limit >= 1``. Same 400 remapping as the cap above."""
+    neg_skip = await client.get("/api/data-v2/objects/12/series?skip=-1")
+    assert neg_skip.status_code == 400
+    assert "skip" in neg_skip.json()["message"]
+    assert (await client.get(BASE + "?skip=0")).status_code == 200
+
+    zero_limit = await client.get("/api/data-v2/objects/12/series?limit=0")
+    assert zero_limit.status_code == 400
+    assert "limit" in zero_limit.json()["message"]
+    assert (await client.get(BASE + "?limit=1")).status_code == 200
+
+
+def test_route_enum_whitelists_match_the_readers():
+    """The route's 400-guard domains must not drift from the reader's whitelist.
+
+    They are duplicated on purpose — the route wants a stable, ordered error
+    message and must not import a frozenset's arbitrary iteration order — so the
+    duplication needs a pin. Without it, adding a fifth ``FACT_DISPATCH`` type
+    would give a 400 at the boundary for a value the adapter accepts.
+    """
+    assert set(_SERIE_TYPE_VALUES) == SqlInstrumentReaderV2._SERIE_TYPES
+    assert set(_FREQ_VALUES) == SqlInstrumentReaderV2._FREQS
+    assert set(_OPTION_TYPE_VALUES) == SqlInstrumentReaderV2._OPTION_TYPES
 
 
 async def test_series_route_not_captured_by_object_id(client):
