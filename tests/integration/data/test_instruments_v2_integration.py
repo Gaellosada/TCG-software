@@ -7,6 +7,8 @@ IND_SP_500, FUT_SP_500, OPT_SP_500_EW3) READ-ONLY via ``tcg_read``.
 
 Verifies:
   * every live object lists with the right kind;
+  * the object-facets aggregate's SQL semantics (the unit tests use a fake
+    cursor and never execute a statement);
   * fact-table dispatch reads the index bar series and a rate value series;
   * futures continuous on FUT_SP_500 stitches a multi-contract series;
   * options continuous on OPT_SP_500_EW3 selects by strike and by moneyness,
@@ -81,6 +83,73 @@ async def test_object_detail_and_series_dispatch(svc):
     assert "close" in result["fields"]
     assert len(result["points"]["ts"]) > 100  # a year of index bars
     assert len(result["points"]["close"]) == len(result["points"]["ts"])
+
+
+@pytest.mark.integration
+async def test_object_facets_semantics_live(svc):
+    """Execute the facets SQL for real — the unit tests cannot.
+
+    ``tests/unit/data/sql/test_sql_instruments_v2_facets.py`` drives the real
+    method through a fake cursor, so it pins the Python shaping and the SQL
+    *text* but never runs a statement. Three plausible edits to the SQL therefore
+    leave all ten unit tests green while corrupting the filter form:
+
+      * ``MIN(strike)``/``MAX(strike)`` transposed -> an inverted slider
+        (``strike_min: 10600.0, strike_max: 15.0``), silently;
+      * the serie read's predicate changed to ``WHERE contract_id = %s`` ->
+        ``serie_types: []`` and ``totals.series: 0`` for every object. Note the
+        unit test's ``assert params == (12,)`` looks like it pins the predicate
+        but does not: both variants bind the same parameter;
+      * ``ARRAY_AGG(DISTINCT option_type)`` losing its ``DISTINCT`` -> one entry
+        per contract, so a ~9 KB payload becomes a ~96 000-element list.
+
+    Assertions are relationships, not frozen counts: the warehouse is being
+    backfilled, so every absolute number here drifts run to run.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    opt_id = objs["OPT_SP_500_EW2"]["object_id"]
+    facets = await svc.get_object_facets(opt_id)
+
+    assert facets["kind"] == "option"
+
+    # Ordered strike bounds. An option root spans many strikes, so min and max
+    # genuinely differ and a transposition is visible.
+    assert facets["strike_min"] is not None
+    assert facets["strike_max"] is not None
+    assert facets["strike_min"] < facets["strike_max"]
+
+    # Exactly the two option types, deduplicated. A missing DISTINCT returns one
+    # element per contract instead of one per type.
+    assert facets["option_types"] == ["call", "put"]
+
+    # The serie groups must be read for the OBJECT. Bound to contract_id instead
+    # this returns nothing (contract_id 12 carries no series at all).
+    pairs = {(s["type"], s["freq"]) for s in facets["serie_types"]}
+    assert pairs, "serie_types empty — the serie read is not scoped by object_id"
+    assert ("bbba", "1m") in pairs, f"expected a bbba:1m group, got {sorted(pairs)}"
+    # Every one of this object's contracts carries at least one serie (verified
+    # live: 0 of 96 194 without), and every expiration carries at least one
+    # contract, so the series total cannot be smaller than the expiration count.
+    # A single contract's groups total single digits, hundreds short of this.
+    assert facets["totals"]["series"] >= len(facets["expirations"])
+
+    # The two ``contract`` reads must agree: the per-expiration counts sum to the
+    # total. Losing the object_id predicate on either one breaks this (the whole
+    # table is ~5x this object).
+    assert facets["expirations"], "an option root must have expirations"
+    assert (
+        sum(e["contracts"] for e in facets["expirations"])
+        == facets["totals"]["contracts"]
+    )
+
+    # An index has no contracts at all: empty expirations and NULL strike bounds
+    # are the correct answer, not an error.
+    ind = await svc.get_object_facets(objs["IND_SP_500"]["object_id"])
+    assert ind["expirations"] == []
+    assert ind["strike_min"] is None
+    assert ind["strike_max"] is None
+    assert ind["option_types"] == []
+    assert ind["totals"]["contracts"] == 0
 
 
 @pytest.mark.integration

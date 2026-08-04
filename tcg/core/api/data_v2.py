@@ -240,8 +240,13 @@ async def get_object_facets(
 ) -> dict:
     """Filterable dimensions of one object — feeds the series filter form.
 
-    Declared before the ``/objects/{object_id}`` catch-all so the literal
-    ``facets`` segment is never captured as an id.
+    Kept with the object routes, above the ``/objects/{object_id}`` catch-all.
+    Unlike the single-segment routes above, declaration order is NOT
+    load-bearing here: the catch-all compiles to ``objects/(?P<object_id>[^/]+)$``
+    and ``[^/]+`` cannot span the ``/facets`` segment, so it can never capture
+    this path whatever the order (measured — see
+    ``test_facets_route_dispatches_to_the_facets_handler``). It would start to
+    matter if that convertor were ever widened to ``{object_id:path}``.
     """
     return await svc.get_object_facets(object_id)
 
