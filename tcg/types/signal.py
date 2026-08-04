@@ -159,6 +159,15 @@ class InstrumentOptionStream:
     futures_reference: Literal[
         "nearest_on_or_after", "continuous_front", "nearest_abs"
     ] = "nearest_on_or_after"
+    # DELTA-HEDGE overlay (feature F2, SPEC §5.5/§5.6): a VX1 futures hedge sized
+    # off THIS option leg's net delta, rebalanced daily, gated (VVIX>150) and
+    # accrued into the SAME leg equity ("call + VX1 hedge" is ONE leg).  Only
+    # meaningful on a hold-mode (``hold_between_rolls=True``) ``premium_notional``
+    # leg; the core-layer fetcher resolves the runtime delta/VX1/gate arrays and
+    # ``signal_exec`` feeds them to ``_HoldPnLSpec``.  ``None`` (default) = NO
+    # hedge → the new path is fully skipped (byte-identical).  This is the SIGNAL
+    # analog of the portfolio path's ``LegSpec.delta_hedge``.
+    delta_hedge: "DeltaHedgeSpec | None" = None
     kind: Literal["option_stream"] = "option_stream"
 
 

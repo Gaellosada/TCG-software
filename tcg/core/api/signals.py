@@ -110,6 +110,7 @@ from tcg.core.api._series_fetch import (
     _saved_basket_leg_to_typed,
     basket_leg_date_intersection,
     make_signal_fetcher,
+    resolve_delta_hedge_raw,
 )
 from tcg.core.api._serializers import nan_safe_floats
 from tcg.core.api.common import error_response, get_market_data
@@ -1391,5 +1392,6 @@ __all__ = [
     "IndicatorSpecIn",
     "parse_signal",
     "make_signal_fetcher",
+    "resolve_delta_hedge_raw",
     "compute_input_overlap",
 ]

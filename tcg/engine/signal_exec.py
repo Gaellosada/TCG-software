@@ -1540,6 +1540,112 @@ async def evaluate_signal(
                 float(mult_opt),
             )
 
+    # ── 3c. Delta-hedge overlay side-channel (F2, SPEC §5.5/§5.6) ──
+    #
+    # The SIGNAL analog of the portfolio path's ``_build_delta_hedge_arrays``.  A
+    # hold-mode option input carrying a ``delta_hedge`` config gets a VX1 futures
+    # HEDGE sized off its net delta, gated (VVIX>150), rebalanced daily, accrued
+    # into the SAME leg equity.  The core-layer fetcher exposes the RAW delta / VX1 /
+    # gate series + config via ``fetch_delta_hedge_series`` (the engine never reads
+    # dwh); we re-index each onto ``index`` EXACTLY as ``hold_roll_info`` does, apply
+    # ``gate_op`` vs ``gate_threshold`` (reusing ``_COMPARE_OPS``) and AND with
+    # ``~is_roll`` (SPEC §5.5 hedge-exit (3) "the call rolls"), then hand
+    # (factor, delta, VX1, active) to the hold spec in 6a.  No config ⇒ this loop
+    # skips the input entirely ⇒ the hold spec's hedge fields stay None ⇒ the F2
+    # accrual path is fully guarded (byte-identical to a non-hedged signal leg).
+    # Each entry: (factor, hedge_delta_aligned, hedge_price_aligned, hedge_active).
+    hold_hedge_info: dict[
+        str,
+        tuple[
+            float,
+            npt.NDArray[np.float64],
+            npt.NDArray[np.float64],
+            npt.NDArray[np.bool_],
+        ],
+    ] = {}
+    if T > 0:
+        _hedge_fetch = getattr(fetcher, "fetch_delta_hedge_series", None)
+        for ref_id in referenced_ids:
+            inp = inputs[ref_id]
+            if not (
+                isinstance(inp.instrument, InstrumentOptionStream)
+                and inp.instrument.hold_between_rolls
+                and inp.instrument.delta_hedge is not None
+            ):
+                continue
+            # The hedge accrues only in premium_notional mode (its qty is sized off
+            # the premium-notional option quantity); reject on a futures_notional
+            # hold leg exactly like the portfolio path does (loud, never silent).
+            if inp.instrument.sizing_mode == "futures_notional":
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta_hedge is only supported on a "
+                    f"premium_notional option leg (the hedge sizes off the "
+                    f"premium-notional option quantity), not futures_notional"
+                )
+            if ref_id not in hold_roll_info:
+                # A hedged hold input MUST have its roll structure (the gate ANDs
+                # with ~is_roll); its absence is the same loud wiring error the
+                # roll-info path raises above.
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta_hedge requires the hold-mode roll "
+                    f"structure (is_roll) which is unavailable"
+                )
+            if _hedge_fetch is None:
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta_hedge option requires the fetcher to "
+                    f"provide 'fetch_delta_hedge_series' (delta/VX1/gate arrays); "
+                    f"none available"
+                )
+            (
+                (dh_dates, dh_vals),
+                (vx_dates, vx_vals),
+                (gate_dates, gate_vals),
+                hedge_factor,
+                gate_threshold,
+                gate_op,
+            ) = await _hedge_fetch(inp.instrument)
+            hedge_delta = _align_series_to_index(
+                np.asarray(dh_dates, dtype=np.int64),
+                np.asarray(dh_vals, dtype=np.float64),
+                index,
+                fill=np.nan,
+            )
+            if not np.any(np.isfinite(hedge_delta)):
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta-hedge got an all-NaN option delta "
+                    f"series (no stored delta on the held contract) — the hedge "
+                    f"cannot be sized"
+                )
+            hedge_price = _align_series_to_index(
+                np.asarray(vx_dates, dtype=np.int64),
+                np.asarray(vx_vals, dtype=np.float64),
+                index,
+                fill=np.nan,
+            )
+            gate_level = _align_series_to_index(
+                np.asarray(gate_dates, dtype=np.int64),
+                np.asarray(gate_vals, dtype=np.float64),
+                index,
+                fill=np.nan,
+            )
+            if gate_op not in _COMPARE_OPS:
+                raise SignalDataError(
+                    f"input {ref_id!r}: delta-hedge unknown gate_op {gate_op!r}"
+                )
+            with np.errstate(invalid="ignore"):
+                gate_on = _COMPARE_OPS[gate_op](gate_level, float(gate_threshold))
+            gate_on = gate_on & np.isfinite(gate_level)
+            # ``hold_roll_info[ref_id][0]`` is ``is_roll_aligned`` (float 0/1 on the
+            # union axis); the hedge is OFF on a roll bar (SPEC §5.5 exit (3)).
+            is_roll_aligned = hold_roll_info[ref_id][0]
+            hedge_active = gate_on & (is_roll_aligned <= 0.5)
+            hold_hedge_info[ref_id] = (
+                float(hedge_factor),
+                hedge_delta,
+                hedge_price,
+                hedge_active.astype(np.bool_),
+            )
+
     if T == 0:
         return SignalEvalResult(
             index=np.array([], dtype=np.int64),
@@ -1947,6 +2053,11 @@ async def evaluate_signal(
             # governs (same as the price path's net position).
             nonzero = pos_sign[pos_sign != 0.0]
             leg_sign = float(nonzero[0]) if nonzero.size else 1.0
+            # Delta-hedge overlay (F2): attach the resolved (factor, delta, VX1,
+            # active) arrays built in 3c so the VX1 hedge accrues into THIS leg's
+            # equity.  Absent config ⇒ all None ⇒ the F2 accrual path in
+            # ``_compound_with_hold`` is fully guarded (byte-identical).
+            _hedge = hold_hedge_info.get(ref_id)
             hold_spec = _HoldPnLSpec(
                 ref_id=ref_id,
                 sign=leg_sign,
@@ -1959,6 +2070,10 @@ async def evaluate_signal(
                 roll_future_ref=roll_fref_arr,
                 mult_fut=mult_fut,
                 mult_opt=mult_opt,
+                hedge_factor=(_hedge[0] if _hedge is not None else None),
+                hedge_delta=(_hedge[1] if _hedge is not None else None),
+                hedge_price=(_hedge[2] if _hedge is not None else None),
+                hedge_active=(_hedge[3] if _hedge is not None else None),
             )
         elif price_values is not None and T >= 2:
             prev_price = price_values[:-1]

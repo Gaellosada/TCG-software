@@ -20,6 +20,7 @@ behaviour is unchanged; ``signals.py`` re-imports them.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
@@ -34,9 +35,15 @@ from tcg.core.api._models import (
 )
 from tcg.data.protocols import MarketDataService
 from tcg.engine.signal_exec import SignalDataError, SignalValidationError
-from tcg.types.errors import DataNotFoundError
+from tcg.types.errors import DataNotFoundError, ValidationError
+from tcg.types.market import (
+    AdjustmentMethod,
+    ContinuousRollConfig,
+    RollStrategy,
+)
 from tcg.types.options import expand_cycle
 from tcg.types.signal import (
+    DeltaHedgeSpec,
     InputInstrument,
     InstrumentBasket,
     InstrumentContinuous,
@@ -413,6 +420,89 @@ def _pick_field(series, field: str) -> npt.NDArray[np.float64]:
     raise SignalValidationError(
         f"instrument field {field!r} is not supported; "
         f"expected one of close/open/high/low/volume"
+    )
+
+
+async def resolve_delta_hedge_raw(
+    *,
+    label: str,
+    hedge: DeltaHedgeSpec,
+    instrument: InstrumentOptionStream,
+    fetch_fn: Any,
+    svc: MarketDataService,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+]:
+    """Fetch the RAW (unaligned) delta / VX1 / gate series a delta-hedge needs (F2).
+
+    Shared by BOTH hedge-attach sites so the DATA FETCH is defined once (the
+    reviewer's ``do-not-duplicate`` for P-F2-1): the portfolio-leg path
+    (``portfolio._build_delta_hedge_arrays``) and the signal-leg side-channel
+    (``fetch_delta_hedge_series`` below).  Each caller then re-indexes the three
+    ``(dates, values)`` pairs onto ITS OWN date axis (the leg axis / the signal
+    union axis) and computes the gate + roll mask — the only per-site difference.
+
+    * DELTA — the HELD option contract's per-day delta.  Sourced by resolving the
+      SAME option instrument a SECOND time with ``stream="delta"`` (hold ON,
+      ``delta_hedge`` cleared so the resolve never recurses), so the held-contract
+      SELECTION is identical and the delta lands on the same trade-date axis.
+    * VX1 — the hedge future's front-month continuous, DIFFERENCE-adjusted so daily
+      diffs are the true front-future daily P&L (roll gaps removed).
+    * GATE — the raw gate index LEVEL (SPEC: VVIX via ``INDEX``/``IND_VVIX``);
+      the caller applies ``gate_op``/``gate_threshold`` after aligning.
+
+    Returns ``((d_dates, d_vals), (vx_dates, vx_close), (gate_dates, gate_close))``.
+    Raises :class:`ValidationError` (the portfolio convention) on a resolve error /
+    empty series; the signal side-channel converts it to ``SignalDataError`` so the
+    engine's error handling stays uniform.
+    """
+    # ── DELTA: second hold resolve of the same contract, stream="delta" ──
+    delta_instrument = replace(instrument, stream="delta", delta_hedge=None)
+    try:
+        d_dates, d_vals = await fetch_fn(delta_instrument, "delta")
+    except (SignalDataError, SignalValidationError) as exc:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not resolve the option delta "
+            f"series: {exc}"
+        ) from exc
+
+    # ── VX1: front-month continuous (difference-adjusted) ──
+    vx_series = await svc.get_continuous(
+        hedge.hedge_collection,
+        ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.DIFFERENCE,
+        ),
+        start=start_date,
+        end=end_date,
+    )
+    if vx_series is None or len(vx_series.prices) == 0:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not load the hedge future "
+            f"'{hedge.hedge_collection}' (VX1 continuous is empty)"
+        )
+
+    # ── GATE: raw index LEVEL (op/threshold applied by the caller) ──
+    gate_series = await svc.get_prices(
+        hedge.gate_collection, hedge.gate_symbol, start=start_date, end=end_date
+    )
+    if gate_series is None or len(gate_series) == 0:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not load the gate series "
+            f"'{hedge.gate_collection}/{hedge.gate_symbol}'"
+        )
+
+    return (
+        (
+            np.asarray(d_dates, dtype=np.int64),
+            np.asarray(d_vals, dtype=np.float64),
+        ),
+        (vx_series.prices.dates, vx_series.prices.close),
+        (gate_series.dates, gate_series.close),
     )
 
 
@@ -906,9 +996,62 @@ def make_signal_fetcher(
             return np.array([], dtype=np.int64)
         return np.asarray(cached, dtype=np.int64)
 
+    async def fetch_delta_hedge_series(
+        instrument: InstrumentOptionStream,
+    ) -> tuple[
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+        tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]],
+        float,
+        float,
+        str,
+    ]:
+        """Resolve the RAW delta-hedge series + config for a hold-mode option
+        input's :class:`DeltaHedgeSpec` (F2, SPEC §5.5/§5.6 — the SIGNAL-leg
+        analog of the portfolio path's ``_build_delta_hedge_arrays``).
+
+        Returns ``((d_dates, d_vals), (vx_dates, vx_close), (gate_dates,
+        gate_close), factor, gate_threshold, gate_op)``.  ``signal_exec`` re-indexes
+        the three series onto the signal's union axis, applies ``gate_op`` vs
+        ``gate_threshold`` and ANDs with ``~is_roll`` to form ``hedge_active``, then
+        feeds ``factor``/delta/VX1/active to ``_HoldPnLSpec``.  The DATA FETCH is the
+        shared :func:`resolve_delta_hedge_raw`; only the axis differs from the
+        portfolio path.  A missing/disabled ``delta_hedge`` never reaches here (the
+        engine guards on it) — this is only called for a hedged hold input."""
+        hedge = instrument.delta_hedge
+        if hedge is None:  # pragma: no cover (engine only calls this when set)
+            raise SignalDataError(
+                "fetch_delta_hedge_series called for an option input without a "
+                "delta_hedge config"
+            )
+        try:
+            (d_pair, vx_pair, gate_pair) = await resolve_delta_hedge_raw(
+                label=str(instrument.collection),
+                hedge=hedge,
+                instrument=instrument,
+                fetch_fn=fetch,
+                svc=svc,
+                start_date=start,
+                end_date=end,
+            )
+        except ValidationError as exc:
+            # Convert the portfolio-convention error to the engine's domain error so
+            # ``evaluate_signal`` handles it uniformly (same flow as a hold-roll
+            # data failure).
+            raise SignalDataError(str(exc)) from exc
+        return (
+            d_pair,
+            vx_pair,
+            gate_pair,
+            float(hedge.factor),
+            float(hedge.gate_threshold),
+            str(hedge.gate_op),
+        )
+
     fetch.fetch_hold_roll_info = fetch_hold_roll_info  # type: ignore[attr-defined]
     fetch.fetch_continuous_roll_info = fetch_continuous_roll_info  # type: ignore[attr-defined]
     fetch.fetch_hold_diagnostics = fetch_hold_diagnostics  # type: ignore[attr-defined]
     fetch.fetch_hold_multipliers = fetch_hold_multipliers  # type: ignore[attr-defined]
     fetch.fetch_hold_close_fallback = fetch_hold_close_fallback  # type: ignore[attr-defined]
+    fetch.fetch_delta_hedge_series = fetch_delta_hedge_series  # type: ignore[attr-defined]
     return fetch

@@ -38,6 +38,7 @@ from tcg.core.api.signals import (
     compute_input_overlap,
     make_signal_fetcher,
     parse_signal,
+    resolve_delta_hedge_raw,
 )
 from tcg.data._utils import date_to_int, int_to_iso
 from tcg.data.protocols import MarketDataService
@@ -1318,16 +1319,27 @@ async def _build_delta_hedge_arrays(
       diffs are the true front-future daily P&L, roll gaps removed).
     * HEDGE_ACTIVE — gate ``VVIX <op> threshold`` AND NOT an option roll bar
       (SPEC §5.5 hedge-exit (3) "the call rolls").
+
+    The DATA FETCH (delta second-resolve / VX1 continuous / gate) is the SHARED
+    :func:`resolve_delta_hedge_raw` — the SAME helper the signal-leg side-channel
+    uses (P-F2-1 dedup); only the alignment axis + gate/roll masking below is
+    per-site.
     """
-    # ── DELTA: second hold resolve of the same contract, stream="delta" ──
-    delta_instrument = replace(instrument, stream="delta")
-    try:
-        d_dates, d_vals = await fetcher(delta_instrument, "delta")  # type: ignore[operator]
-    except (SignalDataError, SignalValidationError) as exc:
-        raise ValidationError(
-            f"Leg '{label}': delta-hedge could not resolve the option delta "
-            f"series: {exc}"
-        ) from exc
+    (
+        (d_dates, d_vals),
+        (vx_dates, vx_close),
+        (gate_dates, gate_close),
+    ) = await resolve_delta_hedge_raw(
+        label=label,
+        hedge=hedge,
+        instrument=instrument,
+        fetch_fn=fetcher,
+        svc=svc,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    # ── DELTA: align the held contract's delta onto the leg axis ──
     hedge_delta = _align_to_axis(
         dates_arr,
         np.asarray(d_dates, dtype=np.int64),
@@ -1339,35 +1351,11 @@ async def _build_delta_hedge_arrays(
             f"(no stored delta on the held contract) — the hedge cannot be sized"
         )
 
-    # ── HEDGE_PRICE: VX1 front-month continuous (difference-adjusted) ──
-    vx_series = await svc.get_continuous(
-        hedge.hedge_collection,
-        ContinuousRollConfig(
-            strategy=RollStrategy.FRONT_MONTH,
-            adjustment=AdjustmentMethod.DIFFERENCE,
-        ),
-        start=start_date,
-        end=end_date,
-    )
-    if vx_series is None or len(vx_series.prices) == 0:
-        raise ValidationError(
-            f"Leg '{label}': delta-hedge could not load the hedge future "
-            f"'{hedge.hedge_collection}' (VX1 continuous is empty)"
-        )
-    hedge_price = _align_to_axis(
-        dates_arr, vx_series.prices.dates, vx_series.prices.close
-    )
+    # ── HEDGE_PRICE: align the VX1 front-month continuous onto the leg axis ──
+    hedge_price = _align_to_axis(dates_arr, vx_dates, vx_close)
 
     # ── HEDGE_ACTIVE: gate(VVIX) AND not-a-roll-bar ──
-    gate_series = await svc.get_prices(
-        hedge.gate_collection, hedge.gate_symbol, start=start_date, end=end_date
-    )
-    if gate_series is None or len(gate_series) == 0:
-        raise ValidationError(
-            f"Leg '{label}': delta-hedge could not load the gate series "
-            f"'{hedge.gate_collection}/{hedge.gate_symbol}'"
-        )
-    gate_level = _align_to_axis(dates_arr, gate_series.dates, gate_series.close)
+    gate_level = _align_to_axis(dates_arr, gate_dates, gate_close)
     thr = hedge.gate_threshold
     with np.errstate(invalid="ignore"):
         if hedge.gate_op == "gt":
