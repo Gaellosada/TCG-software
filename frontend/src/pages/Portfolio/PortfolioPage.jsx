@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import usePortfolio from './usePortfolio';
 import HoldingsList from './HoldingsList';
+import { makeCashRateLeg } from './cashRateLeg';
 import AddHoldingModal from './AddHoldingModal';
 import SignalPickerModal from './SignalPickerModal';
 import PortfolioPickerModal from './PortfolioPickerModal';
@@ -174,6 +175,10 @@ function PortfolioPage({ mode = 'pure' }) {
     ...(l.type === 'portfolio'
       ? { portfolioId: l.portfolioId || null, portfolioName: l.portfolioName || null }
       : {}),
+    // Cash-rate leg (F4): persist its rate source under ``cash_rate`` (snake_case
+    // CashRateSpec shape). Emitted ONLY for cash legs so every other leg's wire
+    // shape stays byte-identical (autosave dirty-diff parity).
+    ...(l.type === 'cash_rate' ? { cash_rate: l.cash_rate || null } : {}),
   })), []);
 
   // Save current portfolio state to backend in the selected category.
@@ -752,6 +757,7 @@ function PortfolioPage({ mode = 'pure' }) {
             onRemoveLeg={portfolio.removeLeg}
             onOpenAddModal={handleOpenModal}
             onOpenSignalModal={() => setSignalModalOpen(true)}
+            onAddCashLeg={() => portfolio.addLeg(makeCashRateLeg())}
             onEditLeg={handleEditLeg}
             readOnly={portfolio.persistedLocked}
             allowPortfolioLegs={allowPortfolioLegs}

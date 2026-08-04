@@ -12,6 +12,7 @@
 import { buildComputeRequestBody, costFieldsForRequest } from '../Signals/requestBuilder';
 import { persistedDocToLegs } from './persistedDoc';
 import { getChildPortfolioId } from './resolvePortfolioRange';
+import { cashRateApiSpec } from './cashRateLeg';
 
 /**
  * Build the resolved compute request body.
@@ -221,6 +222,14 @@ export function buildPortfolioComputeBody({
       if (leg.rank > 1) {
         apiLegs[leg.label].rank = leg.rank;
       }
+    } else if (leg.type === 'cash_rate') {
+      // Cash / financing accrual leg (F4). The rate SOURCE (flat / series) is
+      // emitted under ``cash_rate`` in the backend's CashRateSpec shape; the
+      // backend accrues it on the portfolio's common calendar (SPEC §5.7).
+      apiLegs[leg.label] = {
+        type: 'cash_rate',
+        cash_rate: cashRateApiSpec(leg),
+      };
     } else {
       apiLegs[leg.label] = {
         type: 'instrument',

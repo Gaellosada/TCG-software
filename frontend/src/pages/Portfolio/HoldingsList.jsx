@@ -2,6 +2,7 @@ import { Fragment, useState } from 'react';
 import Card from '../../components/Card';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import { formatInstrument } from './formatInstrument';
+import { DEFAULT_CASH_RATE_SOURCE } from './cashRateLeg';
 import styles from './HoldingsList.module.css';
 
 const COL_COUNT = 7;
@@ -19,6 +20,7 @@ export default function HoldingsList({
   onRemoveLeg,
   onOpenAddModal,
   onOpenSignalModal,
+  onAddCashLeg,
   onEditLeg,
   readOnly = false,
   // Composed page only: enables the "+ Add Portfolio" action and renders
@@ -83,6 +85,17 @@ export default function HoldingsList({
           >
             + Add Signal
           </button>
+          {onAddCashLeg && (
+            <button
+              className={`${styles.addBtn} ${styles.addCashBtn}`}
+              type="button"
+              onClick={onAddCashLeg}
+              aria-label="Add cash rate leg"
+              data-testid="add-cash-btn"
+            >
+              + Add Cash
+            </button>
+          )}
           {allowPortfolioLegs && (
             <button
               className={`${styles.addBtn} ${styles.addPortfolioBtn}`}
@@ -144,7 +157,9 @@ export default function HoldingsList({
                                 ? 'Option'
                                 : leg.type === 'continuous'
                                   ? 'Continuous'
-                                  : 'Instrument'}
+                                  : leg.type === 'cash_rate'
+                                    ? 'Cash'
+                                    : 'Instrument'}
                         </span>
                       </td>
                       <td className={styles.monoCell}>
@@ -201,6 +216,51 @@ export default function HoldingsList({
                             <span className={styles.instrumentPrimary}>{leg.collection}</span>
                             <span className={styles.instrumentSecondary}>{leg.strategy || 'front_month'}</span>
                           </span>
+                        ) : leg.type === 'cash_rate' ? (
+                          // Cash-rate leg (F4): an inline flat-% rate editor
+                          // (RiskFreeRateInput pattern). A series source (no dwh
+                          // series exists yet) shows its instrument reference,
+                          // read-only here.
+                          (() => {
+                            const src = leg.cash_rate || DEFAULT_CASH_RATE_SOURCE;
+                            if (src.kind === 'series') {
+                              return (
+                                <span>
+                                  <span className={styles.instrumentPrimary}>
+                                    {[src.collection, src.symbol].filter(Boolean).join('/') || '(unset)'}
+                                  </span>
+                                  <span className={styles.instrumentSecondary}>rate series</span>
+                                </span>
+                              );
+                            }
+                            return (
+                              <span className={styles.cashRateEdit}>
+                                <input
+                                  className={styles.weightInput}
+                                  type="number"
+                                  step="0.05"
+                                  min="0"
+                                  value={src.rate_pct ?? 1.0}
+                                  disabled={readOnly}
+                                  aria-label={`Annual rate for ${leg.label}`}
+                                  data-testid={`cash-rate-input-${leg.id}`}
+                                  onChange={(e) =>
+                                    onUpdateLeg(index, {
+                                      cash_rate: {
+                                        ...src,
+                                        kind: 'flat',
+                                        rate_pct:
+                                          e.target.value === ''
+                                            ? ''
+                                            : Number(e.target.value),
+                                      },
+                                    })
+                                  }
+                                />
+                                <span className={styles.instrumentSecondary}>%/yr (flat)</span>
+                              </span>
+                            );
+                          })()
                         ) : (
                           // Spot/index legs have no config step to seed, so they
                           // are NOT click-to-edit (plain, non-interactive).

@@ -47,6 +47,7 @@ from tcg.engine import (
     compute_metrics,
     compute_weighted_portfolio,
 )
+from tcg.engine.cash_rate import accrue_cash_equity, reindex_rate_series
 from tcg.engine.costs import CostConfig
 from tcg.engine.hold_pnl import _HoldPnLSpec, _compound_with_hold
 from tcg.engine.signal_exec import (
@@ -563,6 +564,53 @@ class SignalLegSpec(BaseModel):
     indicators: list[IndicatorSpecIn] = Field(default_factory=list)
 
 
+class CashRateSpec(BaseModel):
+    """Rate source for a ``cash_rate`` leg (SPEC §5.7, feature F4).
+
+    Two pluggable sources; ``flat`` is the always-available default (zero data
+    dependency, legacy ~1 %/yr behaviour).  ``series`` reads an annualized-rate
+    instrument from the dwh (e.g. a future ``RATE_USD`` USD-1M series) through
+    the ordinary market-data path.  As of build time NO usable USD short-rate
+    series exists in the warehouse (probe found only VIX-family indices), so the
+    ``series`` source is wired-and-tested but awaits Gael loading the instrument
+    (SPEC P-DATA-2); the operative source is ``flat``.
+    """
+
+    # "flat": constant ``rate_pct`` %/yr. "series": read (collection, symbol)
+    # from the dwh, interpret values per ``unit``; ``rate_pct`` is the fallback
+    # for target bars BEFORE the series' first observation.
+    kind: Literal["flat", "series"] = "flat"
+    # Annual rate in PERCENT (1.0 == 1 %/yr). Legacy §5.7 default.
+    rate_pct: float = 1.0
+    collection: str | None = None  # series source
+    symbol: str | None = None  # series source
+    # How the fetched series values are quoted: "percent" (4.5 == 4.5 %/yr,
+    # divided by 100) or "fraction" (0.045 == 4.5 %/yr, used as-is).
+    unit: Literal["percent", "fraction"] = "percent"
+    # Compound the annual rate one trading-day at a time ((1+r)^(1/252)-1);
+    # False = simple interest (r/252). Compound is the default / more correct.
+    compound: bool = True
+
+    @field_validator("rate_pct")
+    @classmethod
+    def _finite_rate(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("rate_pct must be finite")
+        # A rate <= -100 %/yr makes the compound factor undefined; reject early
+        # with the same bound the engine enforces.
+        if v <= -100.0:
+            raise ValueError("rate_pct must be > -100 (i.e. rate > -100 %/yr)")
+        return v
+
+    @model_validator(mode="after")
+    def _series_requires_ref(self) -> CashRateSpec:
+        if self.kind == "series" and (not self.collection or not self.symbol):
+            raise ValueError(
+                "cash_rate series source requires 'collection' and 'symbol'"
+            )
+        return self
+
+
 class LegSpec(BaseModel):
     type: str  # "instrument", "continuous", "signal", or "option_stream"
     collection: str | None = (
@@ -623,6 +671,10 @@ class LegSpec(BaseModel):
     # a child that itself contains a ``portfolio`` leg is rejected at evaluation.
     portfolio_id: str | None = None
     portfolio: PortfolioRequest | None = None
+    # CASH-RATE fields (used when type == "cash_rate").  A cash leg earns a
+    # short rate on cash collateral (SPEC §5.7 / feature F4).  Absent config
+    # defaults to a flat 1 %/yr source (see ``validate_cash_rate_has_spec``).
+    cash_rate: CashRateSpec | None = None
 
     @field_validator("nav_times")
     @classmethod
@@ -640,12 +692,20 @@ class LegSpec(BaseModel):
             "signal",
             "option_stream",
             "portfolio",
+            "cash_rate",
         ):
             raise ValueError(
                 f"leg type must be 'instrument', 'continuous', 'signal', "
-                f"'option_stream', or 'portfolio', got {v!r}"
+                f"'option_stream', 'portfolio', or 'cash_rate', got {v!r}"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_cash_rate_has_spec(self) -> LegSpec:
+        """A cash_rate leg without an explicit source defaults to flat 1 %/yr."""
+        if self.type == "cash_rate" and self.cash_rate is None:
+            object.__setattr__(self, "cash_rate", CashRateSpec())
+        return self
 
     @model_validator(mode="after")
     def validate_signal_has_spec(self) -> LegSpec:
@@ -755,13 +815,13 @@ def _parse_legs(
 ) -> dict[str, InstrumentId | ContinuousLegSpec]:
     """Convert request leg specs to service-layer types with validation.
 
-    Only processes instrument/continuous legs; signal, option_stream and
-    portfolio legs are skipped (handled separately).
+    Only processes instrument/continuous legs; signal, option_stream,
+    portfolio and cash_rate legs are skipped (handled separately).
     """
     legs_spec: dict[str, InstrumentId | ContinuousLegSpec] = {}
 
     for label, leg in legs.items():
-        if leg.type in ("signal", "option_stream", "portfolio"):
+        if leg.type in ("signal", "option_stream", "portfolio", "cash_rate"):
             continue
 
         if leg.type == "instrument":
@@ -1775,6 +1835,13 @@ async def _compute_portfolio_uncached(
     portfolio_legs = {
         label: leg for label, leg in body.legs.items() if leg.type == "portfolio"
     }
+    # CASH-RATE legs (F4 / SPEC §5.7): earn a short rate on cash. They carry no
+    # market series of their own on the FLAT source, so they ADOPT the
+    # portfolio's common trading calendar (evaluated after §5); a SERIES source
+    # contributes its own dwh date grid (so a cash leg can also stand alone).
+    cash_rate_legs = {
+        label: leg for label, leg in body.legs.items() if leg.type == "cash_rate"
+    }
 
     # ── 3. Fetch instrument prices (if any) ──
 
@@ -1970,6 +2037,51 @@ async def _compute_portfolio_uncached(
         portfolio_leg_closes[label] = pf_equity
         all_date_grids.append(pf_dates)
 
+    # ── 4.7. Fetch SERIES-source cash-rate legs (if any) ──
+    #
+    # A cash_rate leg's equity is built AFTER the common calendar is known (§5.5)
+    # so it simply accrues on whatever days the portfolio trades — a cash leg
+    # NEVER constrains the calendar (flat OR series): a real short-rate series is
+    # piecewise-constant / sparsely quoted, so intersecting the portfolio grid
+    # with it would wrongly collapse the calendar to the rate's change dates.
+    # We fetch the SERIES values here (converted to FRACTION units) and reindex
+    # them (hold-last) onto common_dates in §5.5. A cash-only portfolio therefore
+    # has no calendar of its own and is rejected below.
+    cash_series_rates_frac: dict[str, npt.NDArray[np.float64]] = {}
+    cash_series_dates_map: dict[str, npt.NDArray[np.int64]] = {}
+    for label, leg in cash_rate_legs.items():
+        spec = leg.cash_rate
+        assert spec is not None  # guaranteed by validate_cash_rate_has_spec
+        if spec.kind != "series":
+            continue
+        # Read the annualized-rate instrument through the ordinary market path
+        # (READ-ONLY dwh). ``get_prices`` returns a PriceSeries (dates + close).
+        series = await svc.get_prices(
+            spec.collection or "",
+            spec.symbol or "",
+            start=start_date,
+            end=end_date,
+        )
+        if series is None:
+            raise ValidationError(
+                f"Leg '{label}': cash-rate series "
+                f"{spec.collection}/{spec.symbol} returned no data"
+            )
+        src_dates = np.asarray(series.dates, dtype=np.int64)
+        src_vals = np.asarray(series.close, dtype=np.float64)
+        # Interpret the quoted values as an annual rate; percent -> fraction.
+        divisor = 100.0 if spec.unit == "percent" else 1.0
+        cash_series_rates_frac[label] = src_vals / divisor
+        cash_series_dates_map[label] = src_dates
+
+    # A cash-only portfolio has no calendar of its own — reject with a clear
+    # message rather than the generic "no price-like legs".
+    if cash_rate_legs and not all_date_grids:
+        raise ValidationError(
+            "a cash-rate leg has no calendar of its own; add at least one dated "
+            "leg (instrument / continuous / signal / option)"
+        )
+
     # ── 5. Align all series to common dates ──
 
     if not all_date_grids:
@@ -2042,6 +2154,33 @@ async def _compute_portfolio_uncached(
         )
         aligned_closes[label] = portfolio_leg_closes[label][pf_mask]
 
+    # ── 5.5. Build cash-rate leg equity on the common calendar ──
+    #
+    # A cash_rate leg accrues its short rate on EVERY bar the portfolio trades
+    # (``common_dates``), producing a base-100, near-zero-vol, all-positive-drift
+    # equity curve (SPEC §5.7). Its DIRECTION is the leg weight sign (NOT baked
+    # into the curve), so it is an ordinary +weight leg in the combine — never a
+    # hold_option_label. FLAT source: a constant rate over common_dates. SERIES
+    # source: the fetched rate reindexed (piecewise-constant hold) onto
+    # common_dates, with the flat ``rate_pct`` covering any bars before the
+    # series begins.
+    for label, leg in cash_rate_legs.items():
+        spec = leg.cash_rate
+        assert spec is not None
+        fallback_frac = spec.rate_pct / 100.0
+        if spec.kind == "series":
+            rate_frac = reindex_rate_series(
+                cash_series_dates_map[label],
+                cash_series_rates_frac[label],
+                common_dates,
+                fallback=fallback_frac,
+            )
+        else:
+            rate_frac = np.full(len(common_dates), fallback_frac, dtype=np.float64)
+        aligned_closes[label] = accrue_cash_equity(
+            rate_frac, compound=spec.compound
+        )
+
     # Align each hold-mode option leg's DISPLAY-ONLY side-channels to common_dates
     # (same os_mask as the synthetic close, computed once per label in the shared
     # ``_align_hold_series`` helper) so the trade-log roll rows are sized/priced off
@@ -2088,6 +2227,8 @@ async def _compute_portfolio_uncached(
         full_date_grids.append(option_stream_dates_map[label])
     for label in portfolio_leg_dates_map:
         full_date_grids.append(portfolio_leg_dates_map[label])
+    # Cash-rate legs (flat OR series) adopt the common calendar and contribute no
+    # date grid of their own (see §4.7), so nothing to add here.
 
     full_common_all = full_date_grids[0]
     for grid in full_date_grids[1:]:
