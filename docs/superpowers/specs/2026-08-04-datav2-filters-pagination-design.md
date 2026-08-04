@@ -143,7 +143,9 @@ changing a dimension costs one interaction and never requires re-entering the ot
 └────────────────────────┘  └───────────────────────────────────┘
 ```
 
-- **`SeriesFilterPanel`** — new; driven by `/facets`, renders only existing dimensions.
+- **`SeriesFilterPanel`** — new; driven by `/facets`, renders only existing dimensions. `freq`
+  is a **user-facing control**, not an internal detail: it is how the user chooses between the
+  minute quotes and the daily marks, which is the most consequential choice on this page.
 - **`SeriesResultList`** — new; paginated. No virtualisation needed at 50 rows per page.
 - **`ObjectDetail.jsx`** — drops the 200 672-entry `map()` and the `contractsById` map.
 - **`SeriesChartV2.jsx`** — passes ISO strings straight to Plotly (which handles a datetime
