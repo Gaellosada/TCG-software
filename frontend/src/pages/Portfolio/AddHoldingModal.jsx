@@ -82,6 +82,8 @@ export default function AddHoldingModal({
       readOnly={readOnly}
       optionStreamAllowedStreams={PORTFOLIO_OPTION_STREAMS}
       optionHoldRequired={true}
+      // Portfolio option legs can carry a VX1 delta-hedge overlay (F2).
+      showOptionDeltaHedge={true}
       optionReferenceDate={referenceDate}
       // Portfolio continuous legs (LegSpec.rank) support the NTH_NEAREST roll
       // strategy — surface it in the shared picker's strategy select.

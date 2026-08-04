@@ -460,6 +460,67 @@ function SizeAndLeverage({
 }
 
 /**
+ * Delta-hedge overlay controls (F2, SPEC §5.5/§5.6). Enable checkbox + hedge
+ * factor (default 1/3) + gate threshold (default VVIX>150). Emits/clears the
+ * ``delta_hedge`` field via the supplied setters. Rendered only when the
+ * consumer sets ``showDeltaHedge`` (the Portfolio option-leg picker).
+ */
+function DeltaHedgeControls({ enabled, factor, threshold, onEnabled, onFactor, onThreshold, disabled }) {
+  return (
+    <label className={styles.row}>
+      <span className={styles.label}>Delta hedge</span>
+      <div className={styles.subgroup}>
+        <label
+          className={styles.fieldInline}
+          title="Short a VX1 (front VIX future) hedge sized off this option leg's net delta: qty_hedge = -factor·Σ(option_qty·delta), rebalanced daily. Active only on days the gate holds (VVIX>threshold). The hedge P&L accrues into this leg's equity."
+        >
+          <input
+            type="checkbox"
+            checked={!!enabled}
+            onChange={(e) => onEnabled(e.target.checked)}
+            disabled={disabled}
+            aria-label="Enable delta hedge (VX1)"
+            data-testid="delta-hedge-enabled"
+          />
+          <span>VX1 delta hedge (⅓-delta, VVIX-gated)</span>
+        </label>
+        {enabled ? (
+          <>
+            <label className={styles.fieldInline} title="Fraction of the option delta to hedge in VX1 futures (SPEC default 1/3).">
+              Factor
+              <input
+                type="number"
+                className={styles.input}
+                min={0}
+                step="any"
+                value={factor}
+                onChange={(e) => onFactor(e.target.value)}
+                disabled={disabled}
+                aria-label="Delta-hedge factor"
+                data-testid="delta-hedge-factor"
+              />
+            </label>
+            <label className={styles.fieldInline} title="The hedge is active only on days the gate index (VVIX) is above this level (SPEC default 150).">
+              Gate VVIX &gt;
+              <input
+                type="number"
+                className={styles.input}
+                step="any"
+                value={threshold}
+                onChange={(e) => onThreshold(e.target.value)}
+                disabled={disabled}
+                aria-label="Delta-hedge gate threshold"
+                data-testid="delta-hedge-threshold"
+              />
+            </label>
+          </>
+        ) : null}
+      </div>
+    </label>
+  );
+}
+
+/**
  * Standalone form. Reads everything from props; emits the next value via
  * `onChange`. Does no fetching. The parent owns the value/state.
  */
@@ -500,6 +561,12 @@ export default function OptionStreamForm({
   // hold form. When omitted, the readout falls back to the selected root's
   // last_trade_date. Read-only side-effect (a GET) — never mutates the value.
   referenceDate = null,
+  // PORTFOLIO option-leg only: surface the delta-hedge overlay controls (F2,
+  // SPEC §5.5/§5.6) — an enable checkbox + hedge factor + gate threshold that
+  // emit a ``delta_hedge`` field on the value. Default false so every other
+  // consumer (Signals, Data-page chart, basket composer) is byte-identical and
+  // never carries the field.
+  showDeltaHedge = false,
 }) {
   // Per-instance stable id used to scope the option-type radio group's
   // `name` attribute.  Without this, two simultaneously-mounted forms
@@ -678,6 +745,40 @@ export default function OptionStreamForm({
     const ref = raw === 'nearest_abs' ? 'nearest_abs' : 'nearest_on_or_after';
     emit({ futures_reference: ref });
   }, [emit]);
+
+  // ── Delta-hedge overlay (F2) ──────────────────────────────────────────────
+  // A VX1 futures hedge sized off the option leg's net delta (SPEC §5.5/§5.6):
+  // qty_hedge = -factor·Σ(option_qty·delta), rebalanced daily, active only while
+  // the gate (VVIX>threshold) holds. Emitted as ``delta_hedge`` (a LegSpec
+  // field); absent/undefined = no hedge (byte-identical). Only offered when the
+  // consumer sets ``showDeltaHedge`` (the Portfolio option-leg picker).
+  const dh = (v.delta_hedge && typeof v.delta_hedge === 'object') ? v.delta_hedge : null;
+  const dhEnabled = !!(dh && dh.enabled);
+  const setDeltaHedgeEnabled = useCallback((checked) => {
+    if (!checked) {
+      emit({ delta_hedge: undefined });
+      return;
+    }
+    emit({
+      delta_hedge: {
+        enabled: true,
+        factor: (dh && typeof dh.factor === 'number') ? dh.factor : 1 / 3,
+        hedge_collection: (dh && dh.hedge_collection) || 'FUT_VIX',
+        gate_collection: (dh && dh.gate_collection) || 'INDEX',
+        gate_symbol: (dh && dh.gate_symbol) || 'IND_VVIX',
+        gate_threshold: (dh && typeof dh.gate_threshold === 'number') ? dh.gate_threshold : 150,
+        gate_op: (dh && dh.gate_op) || 'gt',
+      },
+    });
+  }, [emit, dh]);
+  const setDeltaHedgeFactor = useCallback((raw) => {
+    const n = Number.parseFloat(raw);
+    emit({ delta_hedge: { ...(dh || { enabled: true }), factor: Number.isFinite(n) ? n : raw } });
+  }, [emit, dh]);
+  const setDeltaHedgeThreshold = useCallback((raw) => {
+    const n = Number.parseFloat(raw);
+    emit({ delta_hedge: { ...(dh || { enabled: true }), gate_threshold: Number.isFinite(n) ? n : raw } });
+  }, [emit, dh]);
 
   // Roll offset is the unified {value, unit}. A legacy int (days-only) is read
   // as {value:int, unit:'days'}. Per-unit cap: days 0..365, months 0..12.
@@ -1132,6 +1233,17 @@ export default function OptionStreamForm({
               onFuturesReference={setFuturesReference}
               disabled={disabled}
             />
+            {showDeltaHedge ? (
+              <DeltaHedgeControls
+                enabled={dhEnabled}
+                factor={(dh && dh.factor != null) ? dh.factor : 1 / 3}
+                threshold={(dh && dh.gate_threshold != null) ? dh.gate_threshold : 150}
+                onEnabled={setDeltaHedgeEnabled}
+                onFactor={setDeltaHedgeFactor}
+                onThreshold={setDeltaHedgeThreshold}
+                disabled={disabled || sizingMode === 'futures_notional'}
+              />
+            ) : null}
           </div>
         </label>
       ) : showHoldControls ? (

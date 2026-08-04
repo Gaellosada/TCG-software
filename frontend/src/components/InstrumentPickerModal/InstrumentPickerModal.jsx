@@ -120,6 +120,10 @@ export default function InstrumentPickerModal({
   // requires it). Forwarded to OptionStreamForm as ``holdRequired``. Never passed
   // to the basket-leg sub-picker (basket held books are unsupported).
   optionHoldRequired = false,
+  // PORTFOLIO option price legs: surface the delta-hedge overlay controls (F2).
+  // Forwarded to OptionStreamForm as ``showDeltaHedge``. Default false so every
+  // other picker surface (basket legs, Data page) never shows the hedge block.
+  showOptionDeltaHedge = false,
   // Optional reference date (YYYY-MM-DD string or Date) forwarded to
   // OptionStreamForm as ``referenceDate`` — the date at which the implied-
   // leverage readout probes the representative (strike, premium). Falls back to
@@ -546,6 +550,7 @@ export default function InstrumentPickerModal({
                     disabled={readOnly}
                     showHoldControls={showOptionHoldControls}
                     holdRequired={optionHoldRequired}
+                    showDeltaHedge={showOptionDeltaHedge}
                     // Edit mode is DERIVED as initialConfig != null (same as the
                     // seed effect + JSDoc): suppresses the CREATE-only cycle
                     // nudge so an edited leg's saved cycle is preserved.

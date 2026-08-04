@@ -26,6 +26,21 @@ def _fref_at(spec: "_HoldPnLSpec", idx: int) -> float:
     return float(arr[idx])
 
 
+def delta_hedge_qty(factor: float, option_qty: float, option_delta: float) -> float:
+    """Delta-hedge futures quantity for a single option position (F2 core mechanic).
+
+    ``qty_hedge = -factor · (option_qty · option_delta)`` — a future's per-unit
+    delta is ``1``, so the hedge that neutralises ``factor`` of the option's net
+    delta is simply ``-factor`` times the option's signed delta exposure.  For a
+    LONG call (``option_qty·option_delta > 0``) this is NEGATIVE ⇒ SHORT the
+    future, the sign the spec requires.  Pure scalar; used both by
+    :func:`_compound_with_hold` (per-step, aggregated over the leg's single held
+    contract) and directly by the unit oracle so the sizing law is verified in
+    isolation.
+    """
+    return -factor * option_qty * option_delta
+
+
 def _futures_denom_ok(spec: "_HoldPnLSpec", fref: float) -> bool:
     """True iff a futures-notional quantity can be sized at ``fref``.
 
@@ -96,6 +111,29 @@ class _HoldPnLSpec:
     # values (or NaN → tail carry-forward) — NEVER a silent 1.0 (Guardrail Sign 2).
     mult_fut: float = 1.0
     mult_opt: float = 1.0
+    # ── Delta-hedge overlay (F2; None = NO hedge → byte-identical, the new path is
+    #    fully guarded).  Models a futures HEDGE sized off THIS option's net delta
+    #    and accrued into the SAME leg equity (faithful to SPEC §5.5/§5.6:
+    #    "call + VX1 hedge" is ONE leg whose equity already includes the hedge). ──
+    # ``hedge_factor`` — the fraction of the option's delta to hedge (SPEC = 1/3);
+    #   None disables the overlay entirely.
+    # ``hedge_delta`` — the HELD option contract's per-bar delta (length ``T``);
+    #   NaN on a bar ⇒ that step's hedge books 0 (never a silent fill).
+    # ``hedge_price`` — the hedge future's (VX1) per-bar price (length ``T``); the
+    #   daily hedge P&L is ``qty_hedge·(hedge_price[s+1]−hedge_price[s])``.  NaN at
+    #   either end of a step ⇒ that step's hedge books 0.
+    # ``hedge_active`` — per-bar 0/1 gate (length ``T``): the hedge accrues on step
+    #   ``s`` only when ``hedge_active[s]`` (default None = always active while the
+    #   position is held).  The gate/exit LIFECYCLE (VVIX>150, VIX<MA5 …) is
+    #   precomputed by the caller and passed in — the engine only SIZES + rebalances.
+    # Only supported in ``premium_notional`` mode (the option qty the hedge sizes
+    # off is the premium-notional qty ``nav_times·NAV_roll/premium_roll``); a hedge
+    # configured on a ``futures_notional`` leg is IGNORED by the engine (the caller
+    # rejects that combination).
+    hedge_factor: "float | None" = None
+    hedge_delta: "npt.NDArray[np.float64] | None" = None
+    hedge_price: "npt.NDArray[np.float64] | None" = None
+    hedge_active: "npt.NDArray[np.bool_] | None" = None
 
 
 def _compound_with_hold(
@@ -271,6 +309,48 @@ def _compound_with_hold(
                 # premium — a NaN leaves the base unchanged).
                 if np.isfinite(cur):
                     last_finite[rid] = float(cur)
+
+                # ── Delta-hedge overlay (F2) ──────────────────────────────────
+                # A futures HEDGE sized off THIS option's net delta, rebalanced
+                # DAILY, accrued into the SAME leg contrib.  qty_hedge(s) =
+                # -factor·option_qty·delta[s]; hedge $ P&L = qty_hedge·ΔVX1[s].
+                # ``option_qty`` (per initial capital) = sign·nav_times·NAV_roll/
+                # premium_roll = sign·nav_times·seg_er/seg_premium — the SAME
+                # frozen quantity the premium-notional option contrib is sized
+                # with; the extra 1/ratio[s] converts the $ P&L to a fraction of
+                # CURRENT NAV, exactly as the option contrib does.  The hedge is
+                # INDEPENDENT of the option's own premium move (it depends only on
+                # the frozen option qty, today's delta and ΔVX1), so it books even
+                # on a NaN-premium day.  Guarded: no hedge_factor ⇒ untouched
+                # (byte-identical); futures_notional legs never carry a hedge.
+                if (
+                    spec.hedge_factor is not None
+                    and spec.sizing_mode != "futures_notional"
+                    and (
+                        spec.hedge_active is None
+                        or bool(spec.hedge_active[s])
+                    )
+                ):
+                    hd = spec.hedge_delta
+                    hp = spec.hedge_price
+                    seg_p_h = seg_premium[rid]
+                    if hd is not None and hp is not None and np.isfinite(seg_p_h) and seg_p_h != 0.0:
+                        delta_s = float(hd[s])
+                        d_hedge = float(hp[s + 1]) - float(hp[s])
+                        if np.isfinite(delta_s) and np.isfinite(d_hedge):
+                            option_qty_cur = (
+                                spec.sign
+                                * spec.nav_times
+                                * (seg_er[rid] / ratio[s])
+                                / seg_p_h
+                            )
+                            hedge_contrib = (
+                                delta_hedge_qty(
+                                    spec.hedge_factor, option_qty_cur, delta_s
+                                )
+                                * d_hedge
+                            )
+                            contrib += hedge_contrib
             hold_contrib[rid][s] = contrib
             net += contrib
 

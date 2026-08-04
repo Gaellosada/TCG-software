@@ -162,6 +162,43 @@ class InstrumentOptionStream:
     kind: Literal["option_stream"] = "option_stream"
 
 
+@dataclass(frozen=True)
+class DeltaHedgeSpec:
+    """Configurable delta-hedge OVERLAY attachable to a hold-mode option leg
+    (feature F2, SPEC §5.5/§5.6).
+
+    Models a futures HEDGE sized off the option leg's net delta, rebalanced
+    DAILY: ``qty_hedge = -factor·Σ(option_qty·option_delta)`` (a future's
+    per-unit delta is 1).  The hedge's daily P&L (``qty_hedge·ΔF_hedge``) is
+    accrued into the SAME leg equity, so "call + VX1 hedge" is ONE leg whose
+    equity already includes the hedge.
+
+    Engine-agnostic CONFIG (the runtime delta / hedge-price / gate arrays are
+    resolved by the core layer and fed to :class:`tcg.engine.hold_pnl._HoldPnLSpec`).
+    Frozen + primitive-only so it lives in ``tcg.types`` (no deps).
+
+    * ``factor`` — the fraction of the option delta to hedge (SPEC default 1/3).
+    * ``hedge_collection`` — the hedge future's collection (VX1 = ``FUT_VIX``).
+    * ``hedge_roll_strategy`` — the continuous-roll strategy stitching the hedge
+      future (front-month nearest for VX1).
+    * ``gate_collection`` / ``gate_symbol`` — the index whose level gates the
+      hedge (SPEC: VVIX = ``INDEX`` / ``IND_VVIX``).
+    * ``gate_threshold`` / ``gate_op`` — the hedge is ACTIVE on a day only when
+      ``gate_series <op> gate_threshold`` holds (SPEC: ``VVIX > 150``).  The
+      lifecycle EXIT refinements (VIX<MA5 two consecutive days, VX1<VX2) reuse
+      the signals layer's conditions and are layered on top of this gate by the
+      caller; a plain overlay with only this gate is a valid general config.
+    """
+
+    factor: float = 1.0 / 3.0
+    hedge_collection: str = "FUT_VIX"
+    hedge_roll_strategy: str = "front_month"
+    gate_collection: str = "INDEX"
+    gate_symbol: str = "IND_VVIX"
+    gate_threshold: float = 150.0
+    gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+
+
 # A single leg of an :class:`InstrumentBasket`.  Each leg pairs one of
 # the three concrete leaf instrument types (``InstrumentSpot`` /
 # ``InstrumentContinuous`` / ``InstrumentOptionStream``) with a signed

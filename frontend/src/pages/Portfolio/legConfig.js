@@ -50,6 +50,11 @@ export function instrumentToLegConfig(instrument) {
           futures_reference: instrument.futures_reference || 'nearest_on_or_after',
         }
         : {}),
+      // DELTA-HEDGE overlay (F2) — forwarded only when the user enabled it, so a
+      // plain option leg serialises byte-identically (backend default = no hedge).
+      ...(instrument.delta_hedge && instrument.delta_hedge.enabled
+        ? { delta_hedge: instrument.delta_hedge }
+        : {}),
     };
   }
   if (instrument.type === 'continuous') {
@@ -100,6 +105,9 @@ export function legToInitialConfig(leg) {
       // (undefined on a premium-notional leg → the form's default takes over).
       sizing_mode: leg.sizing_mode,
       futures_reference: leg.futures_reference,
+      // Restore the delta-hedge overlay so editing pre-fills its controls
+      // (undefined on an unhedged leg → the checkbox stays off).
+      delta_hedge: leg.delta_hedge,
     };
   }
   if (leg.type === 'continuous') {

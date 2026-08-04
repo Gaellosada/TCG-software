@@ -70,6 +70,7 @@ from tcg.types.market import (
 from tcg.types.multipliers import resolve_multipliers, root_from_collection
 from tcg.types.portfolio import RebalanceFreq
 from tcg.types.signal import (
+    DeltaHedgeSpec,
     InstrumentContinuous,
     InstrumentOptionStream,
     InstrumentSpot,
@@ -611,6 +612,51 @@ class CashRateSpec(BaseModel):
         return self
 
 
+class DeltaHedgeConfig(BaseModel):
+    """Wire model for the delta-hedge OVERLAY on a hold-mode option leg
+    (feature F2, SPEC §5.5/§5.6).
+
+    A futures HEDGE sized off the option leg's net delta, rebalanced DAILY and
+    accrued into the SAME leg equity: ``qty_hedge = -factor·Σ(option_qty·delta)``
+    (future per-unit delta = 1).  Maps to :class:`tcg.types.signal.DeltaHedgeSpec`.
+    Only valid on a ``premium_notional`` hold-mode PREMIUM leg (rejected otherwise).
+
+    The hedge is active on a day only when the GATE holds (default VVIX>150) AND
+    the option is not on a roll bar (SPEC §5.5 hedge-exit (3) "the call rolls").
+    The finer lifecycle exits (VIX<MA5 two consecutive days; VX1<VX2) reuse the
+    signals layer and are NOT applied by this standalone-leg overlay — see the
+    task PROBLEMS.md gap note for §5.5/§5.6 full fidelity.
+    """
+
+    enabled: bool = True
+    # Fraction of the option delta to hedge (SPEC default 1/3).
+    factor: float = 1.0 / 3.0
+    # Hedge future (VX1 = FUT_VIX front month, difference-adjusted continuous).
+    hedge_collection: str = "FUT_VIX"
+    # Gate index (SPEC: VVIX level via the INDEX collection).
+    gate_collection: str = "INDEX"
+    gate_symbol: str = "IND_VVIX"
+    gate_threshold: float = 150.0
+    gate_op: Literal["gt", "ge", "lt", "le"] = "gt"
+
+    @field_validator("factor")
+    @classmethod
+    def _finite_positive_factor(cls, v: float) -> float:
+        if not math.isfinite(v) or v <= 0.0:
+            raise ValueError("delta_hedge factor must be a finite positive number")
+        return v
+
+    def to_spec(self) -> DeltaHedgeSpec:
+        return DeltaHedgeSpec(
+            factor=float(self.factor),
+            hedge_collection=self.hedge_collection,
+            gate_collection=self.gate_collection,
+            gate_symbol=self.gate_symbol,
+            gate_threshold=float(self.gate_threshold),
+            gate_op=self.gate_op,
+        )
+
+
 class LegSpec(BaseModel):
     type: str  # "instrument", "continuous", "signal", or "option_stream"
     collection: str | None = (
@@ -675,6 +721,11 @@ class LegSpec(BaseModel):
     # short rate on cash collateral (SPEC §5.7 / feature F4).  Absent config
     # defaults to a flat 1 %/yr source (see ``validate_cash_rate_has_spec``).
     cash_rate: CashRateSpec | None = None
+    # DELTA-HEDGE overlay (feature F2, SPEC §5.5/§5.6): a VX1 futures hedge sized
+    # off THIS option leg's net delta, rebalanced daily, accrued into the leg
+    # equity.  Valid only on a hold-mode premium_notional option_stream leg;
+    # ignored / rejected otherwise.  None = no hedge (byte-identical).
+    delta_hedge: DeltaHedgeConfig | None = None
 
     @field_validator("nav_times")
     @classmethod
@@ -1223,6 +1274,115 @@ def _is_hold_mode_price_leg(leg: LegSpec) -> bool:
     )
 
 
+def _align_to_axis(
+    axis: npt.NDArray[np.int64],
+    src_dates: npt.NDArray[np.int64],
+    src_values: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """Project ``(src_dates, src_values)`` onto ``axis`` (YYYYMMDD ints).
+
+    Returns a length-``len(axis)`` float array; an axis date with no source
+    observation is ``NaN`` (never silently forward-filled — a missing bar makes
+    the delta-hedge book 0 that step, exactly like a missing premium)."""
+    lut = {int(d): float(v) for d, v in zip(src_dates.tolist(), src_values.tolist())}
+    out = np.full(axis.shape[0], np.nan, dtype=np.float64)
+    for i, d in enumerate(axis.tolist()):
+        v = lut.get(int(d))
+        if v is not None:
+            out[i] = v
+    return out
+
+
+async def _build_delta_hedge_arrays(
+    *,
+    label: str,
+    hedge: DeltaHedgeSpec,
+    instrument: "InstrumentOptionStream",
+    fetcher: object,
+    svc: MarketDataService,
+    dates_arr: npt.NDArray[np.int64],
+    is_roll_mask: npt.NDArray[np.bool_],
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[
+    npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.bool_]
+]:
+    """Resolve the runtime (delta, hedge_price, hedge_active) arrays for a
+    delta-hedge overlay, aligned to the leg's date axis ``dates_arr`` (F2).
+
+    * DELTA — the HELD option contract's per-day delta.  Sourced by resolving the
+      SAME option instrument a SECOND time with ``stream="delta"`` (hold ON), so
+      the held-contract SELECTION is identical and the delta lands on the same
+      axis.  ``delta_stored`` missing on a day ⇒ NaN ⇒ that step books 0.
+    * HEDGE_PRICE — the VX1 front-month continuous (DIFFERENCE-adjusted so daily
+      diffs are the true front-future daily P&L, roll gaps removed).
+    * HEDGE_ACTIVE — gate ``VVIX <op> threshold`` AND NOT an option roll bar
+      (SPEC §5.5 hedge-exit (3) "the call rolls").
+    """
+    # ── DELTA: second hold resolve of the same contract, stream="delta" ──
+    delta_instrument = replace(instrument, stream="delta")
+    try:
+        d_dates, d_vals = await fetcher(delta_instrument, "delta")  # type: ignore[operator]
+    except (SignalDataError, SignalValidationError) as exc:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not resolve the option delta "
+            f"series: {exc}"
+        ) from exc
+    hedge_delta = _align_to_axis(
+        dates_arr,
+        np.asarray(d_dates, dtype=np.int64),
+        np.asarray(d_vals, dtype=np.float64),
+    )
+    if not np.any(np.isfinite(hedge_delta)):
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge got an all-NaN option delta series "
+            f"(no stored delta on the held contract) — the hedge cannot be sized"
+        )
+
+    # ── HEDGE_PRICE: VX1 front-month continuous (difference-adjusted) ──
+    vx_series = await svc.get_continuous(
+        hedge.hedge_collection,
+        ContinuousRollConfig(
+            strategy=RollStrategy.FRONT_MONTH,
+            adjustment=AdjustmentMethod.DIFFERENCE,
+        ),
+        start=start_date,
+        end=end_date,
+    )
+    if vx_series is None or len(vx_series.prices) == 0:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not load the hedge future "
+            f"'{hedge.hedge_collection}' (VX1 continuous is empty)"
+        )
+    hedge_price = _align_to_axis(
+        dates_arr, vx_series.prices.dates, vx_series.prices.close
+    )
+
+    # ── HEDGE_ACTIVE: gate(VVIX) AND not-a-roll-bar ──
+    gate_series = await svc.get_prices(
+        hedge.gate_collection, hedge.gate_symbol, start=start_date, end=end_date
+    )
+    if gate_series is None or len(gate_series) == 0:
+        raise ValidationError(
+            f"Leg '{label}': delta-hedge could not load the gate series "
+            f"'{hedge.gate_collection}/{hedge.gate_symbol}'"
+        )
+    gate_level = _align_to_axis(dates_arr, gate_series.dates, gate_series.close)
+    thr = hedge.gate_threshold
+    with np.errstate(invalid="ignore"):
+        if hedge.gate_op == "gt":
+            gate_on = gate_level > thr
+        elif hedge.gate_op == "ge":
+            gate_on = gate_level >= thr
+        elif hedge.gate_op == "lt":
+            gate_on = gate_level < thr
+        else:  # "le"
+            gate_on = gate_level <= thr
+    gate_on = gate_on & np.isfinite(gate_level)
+    hedge_active = gate_on & (~is_roll_mask)
+    return hedge_delta, hedge_price, hedge_active.astype(np.bool_)
+
+
 async def _evaluate_option_stream_leg(
     label: str,
     leg: LegSpec,
@@ -1434,6 +1594,37 @@ async def _evaluate_option_stream_leg(
             _mult_fn = getattr(fetcher, "fetch_hold_multipliers", None)
             if _mult_fn is not None:
                 mult_fut, mult_opt = await _mult_fn(instrument)
+        # ── Delta-hedge overlay (F2): resolve the runtime hedge arrays and
+        #    attach them to the spec so the VX1 hedge is accrued into THIS leg
+        #    equity.  Guarded: no config / disabled ⇒ the spec is byte-identical
+        #    to today.  Only valid on a premium_notional hold leg. ──
+        _hedge_factor: float | None = None
+        _hedge_delta: "npt.NDArray[np.float64] | None" = None
+        _hedge_price: "npt.NDArray[np.float64] | None" = None
+        _hedge_active: "npt.NDArray[np.bool_] | None" = None
+        if leg.delta_hedge is not None and leg.delta_hedge.enabled:
+            if leg.sizing_mode == "futures_notional":
+                raise ValidationError(
+                    f"Leg '{label}': delta_hedge is only supported on a "
+                    f"premium_notional option leg (the hedge sizes off the "
+                    f"premium-notional option quantity), not futures_notional"
+                )
+            _hspec = leg.delta_hedge.to_spec()
+            _hedge_factor = _hspec.factor
+            _roll_mask_axis = np.asarray(is_roll_f, dtype=np.float64) > 0.5
+            _hedge_delta, _hedge_price, _hedge_active = (
+                await _build_delta_hedge_arrays(
+                    label=label,
+                    hedge=_hspec,
+                    instrument=instrument,
+                    fetcher=fetcher,
+                    svc=svc,
+                    dates_arr=np.asarray(dates_arr, dtype=np.int64),
+                    is_roll_mask=_roll_mask_axis,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
         # DIRECTION is the leg weight SIGN (a portfolio leg is always held, so
         # ``pos_active`` is all True); ``nav_times`` is the premium-notional SIZE.
         # This is exactly the spec signal_exec builds for a hold-mode option
@@ -1450,6 +1641,10 @@ async def _evaluate_option_stream_leg(
             roll_future_ref=roll_fref_arr,
             mult_fut=float(mult_fut),
             mult_opt=float(mult_opt),
+            hedge_factor=_hedge_factor,
+            hedge_delta=_hedge_delta,
+            hedge_price=_hedge_price,
+            hedge_active=_hedge_active,
         )
         equity_ratio, _step_scale, _hold_contrib = _compound_with_hold(
             np.zeros(max(T - 1, 0), dtype=np.float64), [spec]
