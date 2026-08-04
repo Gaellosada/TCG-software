@@ -233,6 +233,19 @@ async def get_series(
     return await svc.get_series(serie_id, start=start_date, end=end_date)
 
 
+@router.get("/objects/{object_id}/facets")
+async def get_object_facets(
+    object_id: int,
+    svc: MarketDataServiceV2 = Depends(get_market_data_v2),
+) -> dict:
+    """Filterable dimensions of one object — feeds the series filter form.
+
+    Declared before the ``/objects/{object_id}`` catch-all so the literal
+    ``facets`` segment is never captured as an id.
+    """
+    return await svc.get_object_facets(object_id)
+
+
 # --- Object detail (catch-all id route: declared LAST) ---
 
 

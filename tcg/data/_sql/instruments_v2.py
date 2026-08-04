@@ -197,6 +197,80 @@ class SqlInstrumentReaderV2:
                 f"v2 SQL error listing series for object {object_id}: {exc}"
             ) from exc
 
+    async def fetch_object_facets(self, object_id: int) -> dict[str, Any]:
+        """Aggregate the filterable dimensions of one object.
+
+        Cheap by design — this is what the filter form is built from, so it must
+        never scan a fact table. Three grouped reads over ``contract`` and
+        ``serie`` only (measured 0.33 s + 0.37 s on object 12, the largest).
+        Objects without contracts (index / rate) yield empty ``expirations`` and
+        ``None`` strike bounds; that is a normal answer, not an error.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""SELECT expiration, COUNT(*) AS contracts
+                            FROM {V2_SCHEMA}.contract
+                            WHERE object_id = %s AND expiration IS NOT NULL
+                            GROUP BY expiration
+                            ORDER BY expiration DESC""",
+                        (object_id,),
+                    )
+                    expirations = [
+                        {
+                            "expiration": r["expiration"].isoformat(),
+                            "contracts": int(r["contracts"]),
+                        }
+                        for r in await cur.fetchall()
+                    ]
+
+                    await cur.execute(
+                        f"""SELECT MIN(strike) AS strike_min,
+                                   MAX(strike) AS strike_max,
+                                   COUNT(*) AS contracts,
+                                   ARRAY_AGG(DISTINCT option_type)
+                                     FILTER (WHERE option_type IS NOT NULL)
+                                     AS option_types
+                            FROM {V2_SCHEMA}.contract
+                            WHERE object_id = %s""",
+                        (object_id,),
+                    )
+                    agg = await cur.fetchone() or {}
+
+                    await cur.execute(
+                        f"""SELECT type, freq, COUNT(*) AS series
+                            FROM {V2_SCHEMA}.serie
+                            WHERE object_id = %s
+                            GROUP BY type, freq
+                            ORDER BY type, freq""",
+                        (object_id,),
+                    )
+                    serie_types = [
+                        {
+                            "type": r["type"],
+                            "freq": r["freq"],
+                            "series": int(r["series"]),
+                        }
+                        for r in await cur.fetchall()
+                    ]
+        except Exception as exc:  # noqa: BLE001
+            raise DataAccessError(
+                f"v2 SQL error reading facets for object {object_id}: {exc}"
+            ) from exc
+
+        return {
+            "expirations": expirations,
+            "strike_min": to_float(agg.get("strike_min")),
+            "strike_max": to_float(agg.get("strike_max")),
+            "option_types": sorted(agg.get("option_types") or []),
+            "serie_types": serie_types,
+            "totals": {
+                "contracts": int(agg.get("contracts") or 0),
+                "series": sum(s["series"] for s in serie_types),
+            },
+        }
+
     async def get_serie(self, serie_id: int) -> dict[str, Any] | None:
         """Return one serie row (incl. ``type`` for fact-table dispatch)."""
         try:

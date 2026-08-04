@@ -53,6 +53,17 @@ class DefaultMarketDataServiceV2:
         series = await self._reader.list_series(object_id)
         return {"object": obj, "contracts": contracts, "series": series}
 
+    async def get_object_facets(self, object_id: int) -> dict:
+        """Return the filterable dimensions of one object (for the filter form).
+
+        Raises ``DataNotFoundError`` if the object does not exist.
+        """
+        obj = await self._reader.get_object(object_id)
+        if obj is None:
+            raise DataNotFoundError(f"Object {object_id} not found in v2")
+        facets = await self._reader.fetch_object_facets(object_id)
+        return {"object_id": object_id, "kind": obj["kind"], **facets}
+
     async def get_series(
         self,
         serie_id: int,

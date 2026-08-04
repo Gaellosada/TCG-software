@@ -432,14 +432,23 @@ class _FakeReaderService:
     """Fake v2 reader for service-level shaping/error tests."""
 
     def __init__(
-        self, *, obj=None, serie=None, facts=None, contracts=None, series=None
+        self,
+        *,
+        obj=None,
+        serie=None,
+        facts=None,
+        contracts=None,
+        series=None,
+        facets=None,
     ):
         self._obj = obj
         self._serie = serie
         self._facts = facts or ("daily", [], {})
         self._contracts = contracts or []
         self._series = series or []
+        self._facets_data = facets
         self.last_freq = None
+        self.last_facets_object_id = None
 
     async def get_object(self, object_id):
         return self._obj
@@ -458,6 +467,10 @@ class _FakeReaderService:
     ):
         self.last_freq = freq
         return self._facts
+
+    async def fetch_object_facets(self, object_id):
+        self.last_facets_object_id = object_id
+        return self._facets_data
 
 
 def _make_service(reader):
@@ -486,6 +499,69 @@ async def test_get_object_detail_missing_object_raises_404():
     svc = _make_service(_FakeReaderService(obj=None))
     with pytest.raises(DataNotFoundError):
         await svc.get_object_detail(999)
+
+
+# --------------------------------------------------------------------------- #
+# Object facets (the filter form's aggregate)
+#
+# The reader is faked out here, so these only pin what the SERVICE adds:
+# existence-checking the object, stamping ``object_id``/``kind``, and splicing
+# the reader's aggregate through untouched. The aggregate's own shaping
+# (isoformat, Decimal -> float, sorted option types, the series total) is pinned
+# against the REAL reader in
+# ``tests/unit/data/sql/test_sql_instruments_v2_facets.py``.
+# --------------------------------------------------------------------------- #
+_EW2_FACETS = {
+    "expirations": [{"expiration": "2026-09-11", "contracts": 146}],
+    "strike_min": 15.0,
+    "strike_max": 10600.0,
+    "option_types": ["call", "put"],
+    "serie_types": [
+        {"type": "bar", "freq": "1m", "series": 96106},
+        {"type": "bbba", "freq": "1m", "series": 96106},
+    ],
+    "totals": {"contracts": 96106, "series": 200672},
+}
+
+_EW2_OBJECT = {
+    "object_id": 12,
+    "kind": "option",
+    "symbol": "OPT_SP_500_EW2",
+    "name": "S&P 500 E-mini EW2 Weekly Options (CME)",
+    "cycle": "weekly",
+    "underlying_object_id": 6,
+}
+
+
+async def test_get_object_facets_returns_object_kind_and_facets():
+    reader = _FakeReaderService(obj=_EW2_OBJECT, facets=_EW2_FACETS)
+    out = await _make_service(reader).get_object_facets(12)
+    assert out["object_id"] == 12
+    assert out["kind"] == "option"
+    assert out["totals"]["series"] == 200672
+    assert out["option_types"] == ["call", "put"]
+    # Every facet key the frontend filter form reads must survive the splice —
+    # a service that cherry-picked a subset would still pass the asserts above.
+    assert set(out) == {"object_id", "kind", *_EW2_FACETS}
+
+
+async def test_get_object_facets_queries_the_requested_object():
+    """The aggregate must be read for the id the caller asked for.
+
+    Guards a plausible confusion between the route's ``object_id`` and something
+    derived from the object row; here the two differ, so passing the wrong one is
+    visible.
+    """
+    reader = _FakeReaderService(obj={**_EW2_OBJECT, "object_id": 999}, facets={})
+    out = await _make_service(reader).get_object_facets(12)
+    assert reader.last_facets_object_id == 12
+    assert out["object_id"] == 12
+
+
+async def test_get_object_facets_unknown_object_raises_not_found():
+    reader = _FakeReaderService(obj=None, facets=_EW2_FACETS)
+    with pytest.raises(DataNotFoundError):
+        await _make_service(reader).get_object_facets(999)
 
 
 async def test_get_series_bar_type_dispatches_bar_fields():

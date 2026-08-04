@@ -207,6 +207,8 @@ class MarketDataServiceV2(Protocol):
 
     async def get_object_detail(self, object_id: int) -> dict: ...
 
+    async def get_object_facets(self, object_id: int) -> dict: ...
+
     async def get_series(
         self,
         serie_id: int,

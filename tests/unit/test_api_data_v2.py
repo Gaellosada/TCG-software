@@ -84,6 +84,18 @@ async def client():
             ],
         }
     )
+    mock.get_object_facets = AsyncMock(
+        return_value={
+            "object_id": 12,
+            "kind": "option",
+            "expirations": [{"expiration": "2026-09-11", "contracts": 146}],
+            "strike_min": 15.0,
+            "strike_max": 10600.0,
+            "option_types": ["call", "put"],
+            "serie_types": [{"type": "bbba", "freq": "1m", "series": 96106}],
+            "totals": {"contracts": 96106, "series": 200672},
+        }
+    )
     mock.get_series = AsyncMock(
         return_value={
             "serie_id": 5,
@@ -127,6 +139,48 @@ async def test_object_detail(client):
     body = resp.json()
     assert body["object"]["symbol"] == "FUT_SP_500"
     assert body["contracts"][0]["multiplier"] == 50.0
+
+
+async def test_facets_route_returns_dimensions(client):
+    res = await client.get("/api/data-v2/objects/12/facets")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["kind"] == "option"
+    assert body["totals"]["series"] == 200672
+    assert body["expirations"][0]["contracts"] == 146
+    # No response_model on this route, deliberately: every facet key the filter
+    # form reads must reach the client, not a silently-filtered subset.
+    assert set(body) == {
+        "object_id",
+        "kind",
+        "expirations",
+        "strike_min",
+        "strike_max",
+        "option_types",
+        "serie_types",
+        "totals",
+    }
+
+
+async def test_facets_route_dispatches_to_the_facets_handler(client):
+    """``/objects/{id}/facets`` must reach the facets handler, not ``/objects/{id}``.
+
+    Asserting only "200 + a body key" would NOT discriminate declaration order:
+    the catch-all compiles to ``objects/(?P<object_id>[^/]+)$``, and ``[^/]+``
+    cannot span the ``/facets`` segment, so the catch-all can never match this
+    path however it is ordered (verified by moving the route below it — the naive
+    assertion stayed green). What a capture WOULD change is which service call the
+    request lands on, so that is what is pinned here: it goes red if the catch-all
+    is ever widened (e.g. to ``{object_id:path}``) and left declared first, and
+    red today if facets were routed through ``get_object_detail``.
+    """
+    svc = client._transport.app.state.market_data_v2  # type: ignore[attr-defined]
+    res = await client.get("/api/data-v2/objects/12/facets")
+    assert res.status_code == 200
+    assert "expirations" in res.json()
+    # Called with a parsed int (not the raw "12"), and the id route never ran.
+    svc.get_object_facets.assert_awaited_once_with(12)
+    svc.get_object_detail.assert_not_awaited()
 
 
 async def test_series_route_not_captured_by_object_id(client):
