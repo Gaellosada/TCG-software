@@ -538,14 +538,26 @@ async def test_get_series_missing_serie_raises_404():
         await svc.get_series(404)
 
 
-async def test_get_series_forwards_freq_and_echoes_grain():
+@pytest.mark.parametrize(
+    ("freq", "grain", "ts"),
+    [
+        ("daily", "daily", [20240102]),
+        ("1m", "intraday", ["2026-06-01T14:31:00Z"]),
+    ],
+)
+async def test_get_series_forwards_freq_and_echoes_grain(freq, grain, ts):
     """The service's two jobs at this seam: pass ``serie.freq`` DOWN to the reader
     (that is what selects the grain) and surface the returned ``grain`` UP in the
-    response.
+    response, whatever it is.
+
+    Both grains are exercised because a service that hardcoded or mis-derived one
+    of them would still satisfy the other, and Task 8 dispatches the chart axis on
+    exactly this string. Echoing is the whole contract here: hardcoding
+    ``"intraday"`` fails the daily case and vice versa.
 
     It deliberately asserts nothing about how a ts is rendered — with the reader
     faked out, any such assertion would only re-read this test's own literals.
-    Grain resolution is covered against the REAL reader in
+    Grain resolution itself is covered against the REAL reader in
     ``tests/unit/data/sql/test_sql_instruments_v2_grain.py``.
     """
     reader = _FakeReaderService(
@@ -554,14 +566,14 @@ async def test_get_series_forwards_freq_and_echoes_grain():
             "object_id": 16,
             "contract_id": 42,
             "type": "value",
-            "freq": "1m",
+            "freq": freq,
             "source": "TEST",
         },
-        facts=("intraday", ["2026-06-01T14:31:00Z"], {"value": [610.5]}),
+        facts=(grain, ts, {"value": [610.5]}),
     )
     out = await _make_service(reader).get_series(1)
-    assert reader.last_freq == "1m"
-    assert out["grain"] == "intraday"
+    assert reader.last_freq == freq
+    assert out["grain"] == grain
 
 
 async def test_get_continuous_options_rejects_non_option():
