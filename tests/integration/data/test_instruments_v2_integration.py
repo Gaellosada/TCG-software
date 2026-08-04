@@ -111,6 +111,39 @@ async def test_futures_continuous_live(svc):
 
 
 @pytest.mark.integration
+async def test_front_closes_are_daily_and_one_per_date(svc):
+    """The moneyness spot must come from daily bars, not minute bars.
+
+    ``FUT_SP_500`` carries both ``bar:daily`` and ``bar:1m`` series. Without an
+    ``s.freq = 'daily'`` filter this query also scans fact_bar's minute rows:
+    over a wide window it times out, and per date it returns thousands of rows
+    whose first entry may be a 00:00 minute bar — which
+    ``_front_close_by_date`` (first row per date wins) would then report as the
+    front close. On 2026-03-10 that is 6771.0 (00:00 minute bar) instead of
+    6797.0 (daily close), and the two share the same ``ts`` so ``ORDER BY
+    f.ts, c.expiration`` cannot even break the tie deterministically.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    fut_id = objs["FUT_SP_500"]["object_id"]
+    rows = await svc._reader.fetch_future_front_closes(
+        fut_id, start=date(2026, 3, 1), end=date(2026, 3, 31)
+    )
+    assert rows, "expected daily front-close rows for FUT_SP_500 in March 2026"
+    # At daily grain there is exactly one row per (date, expiration), so a date
+    # carries as many rows as it has live contracts — single digits for ES.
+    # Minute rows give hundreds to thousands per date. Note it has to be the
+    # *row* count: the set of distinct expirations per date is identical at
+    # either grain, so counting expirations would not discriminate at all.
+    per_date: dict[int, int] = {}
+    for r in rows:
+        per_date[r["ts_int"]] = per_date.get(r["ts_int"], 0) + 1
+    worst = max(per_date.values())
+    assert worst < 20, f"{worst} rows on one date — minute bars leaked in"
+    pairs = [(r["ts_int"], r["expiration_int"]) for r in rows]
+    assert len(set(pairs)) == len(pairs), "duplicate (date, expiration) rows"
+
+
+@pytest.mark.integration
 async def test_options_continuous_strike_live(svc):
     objs = {o["symbol"]: o for o in await svc.list_objects()}
     opt_id = objs["OPT_SP_500_EW3"]["object_id"]

@@ -473,12 +473,15 @@ class SqlInstrumentReaderV2:
         start: date | None = None,
         end: date | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch every future bar row (ts, expiration, close) for spot lookup.
+        """Fetch every DAILY future bar row (ts, expiration, close) for spot lookup.
 
         Feeds the options-continuous *moneyness* spot: the resolver picks, per
-        date, the front future (nearest expiration >= that date) close. Only
-        ``close > 0`` rows are returned (false-zero guard). ``ts`` constant-
-        bounded.
+        date, the front future (nearest expiration >= that date) close. Pinned to
+        ``freq = 'daily'`` — FUT_SP_500 also carries ``bar:1m`` series, and
+        without the pin this scans minute bars (timeout) and makes the per-date
+        front close the 00:00 bar rather than the daily close. Only
+        ``close > 0`` rows are returned (false-zero guard). ``ts``
+        constant-bounded.
         """
         lower, upper = _bounds(start, end)
         try:
@@ -493,6 +496,7 @@ class SqlInstrumentReaderV2:
                               ON f.serie_id = s.serie_id
                             WHERE s.object_id = %s
                               AND s.type = 'bar'
+                              AND s.freq = 'daily'
                               AND c.expiration IS NOT NULL
                               AND f.close > 0
                               AND f.ts >= %s AND f.ts < %s
