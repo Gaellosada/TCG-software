@@ -149,6 +149,121 @@ describe('getObjectSeriesV2', () => {
     await expect(getObjectSeriesV2(12, { skip: 50 })).resolves.toEqual(page);
   });
 
+  // ── Guard 1: unknown filter keys are loud, not silently dropped ──────────
+
+  it('rejects a snake_case filter key instead of silently dropping it', async () => {
+    // Measured behaviour before the guard:
+    //   { option_type: 'call', optionType: 'put' } -> ?option_type=put
+    // i.e. the wire-format key vanished and the caller got a page filtered the
+    // other way with nothing reporting it.
+    const spy = spyFetch();
+    await expect(
+      getObjectSeriesV2(12, { option_type: 'call', optionType: 'put' }),
+    ).rejects.toThrow(TypeError);
+    // The whole point: it throws BEFORE issuing anything.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('names every offending key in the error message', async () => {
+    const spy = spyFetch();
+    await expect(
+      getObjectSeriesV2(12, { serie_type: 'bbba', strikeMim: 6000, freq: '1m' }),
+    ).rejects.toThrow(/'serie_type'.*'strikeMim'|'strikeMim'.*'serie_type'/);
+    // A typo'd key must be named too, not just the snake_case one.
+    await expect(
+      getObjectSeriesV2(12, { strikeMim: 6000 }),
+    ).rejects.toThrow(/strikeMim/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('rejects query options mis-slotted into the filters argument', async () => {
+    // The 3-arg hook shape makes this a plausible slip:
+    //   useObjectSeriesV2(12, { limit: 50, enabled: false })
+    // Before the guard this passed the `filters != null` gate and FETCHED while
+    // the author believed the hook was disabled.
+    const spy = spyFetch();
+    await expect(
+      getObjectSeriesV2(12, { limit: 50, enabled: false }),
+    ).rejects.toThrow(/'enabled'/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('accepts every documented filter key, and signal, as known', async () => {
+    // Guards the guard: an over-zealous allowlist that rejected a legitimate
+    // key would break the whole feature, so assert the full set passes.
+    const spy = spyFetch();
+    await getObjectSeriesV2(12, {
+      expirationMin: '2026-03-01',
+      expirationMax: '2026-03-31',
+      strikeMin: 6000,
+      strikeMax: 7000,
+      optionType: 'put',
+      serieType: 'bbba',
+      freq: '1m',
+      skip: 50,
+      limit: 100,
+      signal: new AbortController().signal,
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Guard 2: a non-finite strike bound never reaches the wire ────────────
+
+  it('rejects a NaN strike bound instead of sending strike_min=NaN', async () => {
+    // FastAPI's `float | None = Query(None)` ACCEPTS the string "NaN" with HTTP
+    // 200 as `nan` (unlike "abc"/""), which then matches nothing. So a strike
+    // input doing Number('1e') would make the panel report "no series" for an
+    // object with hundreds, with no error surfaced anywhere.
+    const spy = spyFetch();
+    await expect(
+      getObjectSeriesV2(12, { strikeMin: Number('1e') }),
+    ).rejects.toThrow(/strikeMin must be a finite number/);
+    await expect(
+      getObjectSeriesV2(12, { strikeMax: NaN }),
+    ).rejects.toThrow(/strikeMax must be a finite number/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('reports the offending value as NaN, not as "null"', async () => {
+    // JSON.stringify(NaN) === 'null', so the obvious message renders the most
+    // misleading text available — "received null" for a value that is NaN.
+    await expect(
+      getObjectSeriesV2(12, { strikeMin: NaN }),
+    ).rejects.toThrow(/received NaN/);
+    await expect(
+      getObjectSeriesV2(12, { strikeMax: Infinity }),
+    ).rejects.toThrow(/received Infinity/);
+    await expect(
+      getObjectSeriesV2(12, { strikeMin: 'abc' }),
+    ).rejects.toThrow(/received 'abc'/);
+  });
+
+  it('rejects a non-numeric string strike bound', async () => {
+    const spy = spyFetch();
+    await expect(
+      getObjectSeriesV2(12, { strikeMin: 'abc' }),
+    ).rejects.toThrow(/strikeMin must be a finite number/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('rejects Infinity as a strike bound', async () => {
+    const spy = spyFetch();
+    await expect(
+      getObjectSeriesV2(12, { strikeMax: Infinity }),
+    ).rejects.toThrow(/strikeMax must be a finite number/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('still sends well-formed numeric and numeric-string strike bounds', async () => {
+    // The finite check must not narrow what already worked.
+    const spy = spyFetch();
+    await getObjectSeriesV2(12, { strikeMin: '6000', strikeMax: 7000.5 });
+    expect(splitUrl(spy.mock.calls[0][0]).params).toEqual({
+      strike_min: '6000',
+      strike_max: '7000.5',
+    });
+  });
+
   it('surfaces an out-of-range limit rejection (HTTP 400) as a FetchError', async () => {
     // The backend caps limit at 500 and this app remaps RequestValidationError
     // to 400 (tcg/core/app.py), so the client must not swallow it.

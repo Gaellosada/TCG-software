@@ -366,6 +366,15 @@ describe('useObjectSeriesV2: filters and paging', () => {
     await act(async () => { await Promise.resolve(); });
     expect(getObjectSeriesV2).toHaveBeenCalledTimes(1);
 
+    // ...and the same filters in a DIFFERENT key order are still one entry.
+    // TanStack's hashKey sorts object keys, so this holds — but only while the
+    // key builder puts the raw object in the key. Serialising it there (e.g.
+    // JSON.stringify(filters)) would make property order significant and split
+    // the cache on a meaningless difference; this is what catches that.
+    rerender({ filters: { limit: 1, skip: 0 } });
+    await act(async () => { await Promise.resolve(); });
+    expect(getObjectSeriesV2).toHaveBeenCalledTimes(1);
+
     // Next page → different key → a real second request with the new page.
     rerender({ filters: { skip: 1, limit: 1 } });
     await waitFor(() => expect(result.current.data).toEqual(PAGE_2));
