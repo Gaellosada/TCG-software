@@ -1562,7 +1562,15 @@ def _get_result_cache() -> DiskResultCache:
 # ``PortfolioRequest`` changes ``model_dump()`` and therefore EVERY key, so all
 # pre-existing durable entries are invalidated. That is deliberate and harmless:
 # the recomputed v1 output is byte-identical to what those entries held.
-COMPUTE_VERSION = "0.1.13"
+#
+# 0.1.13 → 0.1.14: hold-mode option-stream gap-open fix. A ``hold_between_rolls``
+# leg whose maturity roll landed a new segment's OPEN on a globally-missing mark
+# day previously abandoned the WHOLE segment (NaN → frozen equity through the gap,
+# e.g. the COVID-crash freeze of "Short S&P 10 delta put 2M DB v2"). The resolver
+# now opens the segment on the first genuinely-quoted date and re-syncs to the real
+# marks. Any cached curve for a strategy that crossed such a gap is stale (frozen)
+# and MUST be invalidated; gap-free strategies recompute byte-identically.
+COMPUTE_VERSION = "0.1.14"
 
 
 def _strip_use_cache(obj: object) -> object:

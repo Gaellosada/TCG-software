@@ -914,6 +914,7 @@ async def _resolve_hold(
     roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
     held_fetch: "Callable[[list[tuple[str, date, date]]], Awaitable[dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]]] | None" = None,
+    open_probe_fetch: "Callable[[date, date], Awaitable[list[tuple[OptionContractDoc, OptionDailyRow]]]] | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Select-and-hold resolution over the pre-fetched ``chain_index``.
 
@@ -1041,20 +1042,56 @@ async def _resolve_hold(
     # held SYMBOLS are the fetch keys.
     seg_states: list[dict[str, object] | None] = [None] * len(segments)
     for seg_num, seg in enumerate(segments):
-        # Select the held contract on the segment's FIRST date, then freeze it.
-        first_idx, first_date = seg[0]
-        # Restrict selection to THIS segment's resolved expiration: the roll day's
-        # merged chain carries BOTH the OLD and NEW expirations (so the OLD's
-        # roll-day mid is available), but the NEW segment must select a NEW-
-        # expiration contract — never accidentally re-pick an OLD one on a delta
-        # tie.  (Non-roll first dates carry only their own expiration, so this
-        # filter is a no-op there.)
-        seg_exp = expirations.get(first_idx)
-        first_rows = [
-            (c, r)
-            for (c, r) in chain_index.get(first_date, [])
-            if seg_exp is None or c.expiration == seg_exp
-        ]
+        # A segment shares ONE resolved expiration across all its dates (that is
+        # the ``_hold_segments`` discriminator), so read it once off the run.
+        seg_exp = expirations.get(seg[0][0])
+        # OPEN the segment on the first date that actually QUOTES the held
+        # expiration — NOT blindly ``seg[0]``.  When a maturity ROLL lands the
+        # segment's nominal first date on a globally-missing mark day (its chain is
+        # empty), pinning selection to that dead day made selection FAIL and the
+        # WHOLE segment was abandoned (NaN) until the next roll — freezing the leg's
+        # equity through the gap (the COVID-crash freeze).  Instead advance to the
+        # first genuinely-quoted date: forward-fill spans ONLY the truly-missing
+        # leading days, then the leg re-syncs to the real marks.
+        #
+        # ``open_probe_fetch`` (two-phase path only) fetches a candidate date's
+        # chain on demand — Phase 1 pre-fetched ONLY the nominal first date, so a
+        # later fallback date is not yet in ``chain_index``.  The full-chain path
+        # already holds every segment date's chain, so it never probes.  On the
+        # happy path the FIRST date quotes the expiration, so the loop breaks
+        # immediately with ``open_pos == 0`` — byte-identical to the old behaviour
+        # (no probe, same selection date).
+        open_pos: int | None = None
+        first_idx = -1
+        first_date = seg[0][1]
+        first_rows: list[tuple[OptionContractDoc, OptionDailyRow]] = []
+        for _pos, (idx, d) in enumerate(seg):
+            rows = chain_index.get(d)
+            if rows is None and open_probe_fetch is not None and seg_exp is not None:
+                fetched = await open_probe_fetch(seg_exp, d)
+                if fetched:
+                    chain_index[d] = chain_index.get(d, []) + fetched
+                    rows = chain_index[d]
+            # Restrict to THIS segment's expiration: a roll day's merged chain
+            # carries BOTH the OLD and NEW expirations (so the OLD's roll-day mid is
+            # available), but the NEW segment must select a NEW-expiration contract —
+            # never accidentally re-pick an OLD one on a delta tie.
+            candidate = [
+                (c, r)
+                for (c, r) in (rows or [])
+                if seg_exp is None or c.expiration == seg_exp
+            ]
+            if candidate:
+                open_pos, first_idx, first_date, first_rows = _pos, idx, d, candidate
+                break
+        if open_pos is None:
+            # No queryable date in the WHOLE segment quotes the expiration — the run
+            # is genuinely empty.  Mark each date and skip (the pre-fix all-empty
+            # behaviour), resetting OLD-owner tracking in the marking pass.
+            for idx, _d in seg:
+                if error_codes[idx] is None:
+                    error_codes[idx] = "no_chain_for_date"
+            continue
         held, sel_err = await select_contract_on_date(  # type: ignore[misc]
             first_date, first_rows
         )
@@ -1141,6 +1178,11 @@ async def _resolve_hold(
             "seg_open_premium": seg_open_premium,
             "seg_open_fallback": seg_open_fallback,
             "seg_fref_value": seg_fref_value,
+            # Where the segment ACTUALLY opens (the first quotable date): the roll /
+            # sizing point and the held-window ``lo``.  0 on the happy path.
+            "open_pos": open_pos,
+            "open_idx": first_idx,
+            "open_date": first_date,
         }
 
     # ── Phase 2 (two-phase only): identity fetch of the frozen held symbols ──
@@ -1156,13 +1198,23 @@ async def _resolve_hold(
             if state is None:
                 continue
             held_c = state["held"]  # type: ignore[assignment]
-            lo = seg[0][1]
-            # ``hi`` = the NEXT segment's first (roll) date inclusive, else this
-            # segment's own last date.  A superset is harmless (extra rows are
-            # ignored by ``_row_for_contract``); the roll seam MUST be covered.
+            # ``lo`` = where the segment ACTUALLY opens (its first quotable date),
+            # NOT the nominal ``seg[0]`` which may be a dead roll-day gap.
+            lo = state["open_date"]  # type: ignore[assignment]
+            # ``hi`` = the NEXT segment's OPEN (roll) date inclusive, else this
+            # segment's own last date.  Use the next segment's EFFECTIVE open so the
+            # OLD contract's mid on the (possibly deferred) roll seam is fetched; a
+            # superset is harmless (extra rows are ignored by ``_row_for_contract``).
             if seg_num + 1 < len(segments):
-                hi = segments[seg_num + 1][0][1]
+                nxt = seg_states[seg_num + 1]
+                hi = (
+                    nxt["open_date"]  # type: ignore[assignment]
+                    if nxt is not None
+                    else segments[seg_num + 1][0][1]
+                )
             else:
+                hi = seg[-1][1]
+            if hi < lo:  # defensive: never invert the window (would drop rows)
                 hi = seg[-1][1]
             held_windows.append((held_c.contract_id, lo, hi))  # type: ignore[union-attr]
         fetched = await held_fetch(held_windows)
@@ -1171,28 +1223,40 @@ async def _resolve_hold(
 
     # ── Marking pass: own each date's VALUE by exactly one contract's mid ────
     prev_seg_contract: OptionContractDoc | None = None
-    prev_seg_last_idx: int | None = None
     for seg_num, seg in enumerate(segments):
         state = seg_states[seg_num]
         if state is None:
             # Selection failed — dates already carry their diagnostic; the NEXT
-            # segment's first date is a fresh open (no OLD owner to realise).
+            # segment's open is a fresh open (no OLD owner to realise).
             prev_seg_contract = None
-            prev_seg_last_idx = None
             continue
         held = state["held"]  # type: ignore[assignment]
         seg_open_premium = state["seg_open_premium"]  # type: ignore[assignment]
         seg_open_fallback = state["seg_open_fallback"]  # type: ignore[assignment]
         seg_fref_value = state["seg_fref_value"]  # type: ignore[assignment]
+        open_pos = state["open_pos"]  # type: ignore[assignment]
 
         for j, (idx, d) in enumerate(seg):
+            if j < open_pos:
+                # Leading date BEFORE the segment actually opens: a genuinely-
+                # missing mark day the maturity roll landed on.  Leave it a loud
+                # NaN with its diagnostic (never held / never a roll) — this is the
+                # bounded "forward-fill spans only the truly-missing days" edge.
+                if error_codes[idx] is None:
+                    rows = chain_index.get(d, [])
+                    error_codes[idx] = (
+                        "no_chain_for_date" if not rows else _missing_code_for(stream)
+                    )
+                continue
             held_mid_today, held_fallback = await _mid_of(held, d)
-            is_true_roll = (
-                seg_num > 0
-                and prev_seg_contract is not None
-                and prev_seg_last_idx == idx - 1
-            )
-            if j == 0 and is_true_roll:
+            # A roll REALISES the OLD contract whenever a prior segment held one.
+            # (The old strict ``prev_seg_last_idx == idx - 1`` adjacency is dropped:
+            # a deferred open — the roll landed on a missing-mark day and opened on
+            # the next quotable date — must STILL realise the OLD across that short
+            # gap, not silently degrade to a fresh open.  On a gapless roll the
+            # dates are adjacent, so this is unchanged.)
+            is_true_roll = seg_num > 0 and prev_seg_contract is not None
+            if j == open_pos and is_true_roll:
                 # Roll date: this date's VALUE is the OLD contract's mid ON the
                 # roll day, so the step ENDING here is the OLD's own move into the
                 # roll (realise the OLD).  The NEW open premium lives in
@@ -1212,11 +1276,11 @@ async def _resolve_hold(
                         "no_chain_for_date" if not rows else _missing_code_for(stream)
                     )
             else:
-                # Interior date (or the very first open, seg_num==0 j==0): the
-                # value is THIS segment's held contract's mid.
+                # Interior date (or the very first open, seg_num==0 j==open_pos):
+                # the value is THIS segment's held contract's mid.
                 held_value[idx] = held_mid_today
                 value_fallback[idx] = held_fallback
-                if j == 0:
+                if j == open_pos:
                     # Segment open that is NOT a true roll (first segment overall,
                     # or a gap/failed prior segment): still a sizing point.
                     is_roll[idx] = True
@@ -1232,7 +1296,6 @@ async def _resolve_hold(
                     )
 
         prev_seg_contract = held
-        prev_seg_last_idx = seg[-1][0]
 
     for i in range(n):
         values[i] = held_value[i]
@@ -2159,6 +2222,26 @@ async def _resolve_bulk(
                     merged[d] = merged.get(d, []) + rows
             return merged
 
+        # TWO-PHASE only: on-demand full-chain fetch for ONE (expiration, date).
+        # Phase 1 pre-fetched only each segment's NOMINAL first date; when that date
+        # is a missing-mark gap the segment must open on the next quotable date,
+        # whose chain is not yet in ``chain_index``.  This probes it (one cheap
+        # single-expiration bulk query, cycle-injected via ``bulk_reader``).  Only
+        # invoked for a gap-affected segment, so the happy path issues NO extra I/O.
+        # The full-chain hold path already holds every date's chain → passes None.
+        async def _open_probe(
+            exp: date, d: date
+        ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
+            async with _bulk_sem:
+                res = await bulk_reader.query_chain_bulk(
+                    root=collection,
+                    dates=[d],
+                    type=option_type,
+                    expiration_min=exp,
+                    expiration_max=exp,
+                )
+            return res.get(d, [])
+
         return await _resolve_hold(
             dates=dates,
             queryable=queryable,
@@ -2177,6 +2260,7 @@ async def _resolve_bulk(
             roll_info_out=hold_roll_info_out,
             futures_reference_resolver=futures_reference_resolver,
             held_fetch=_fetch_held if _hold_two_phase else None,
+            open_probe_fetch=_open_probe if _hold_two_phase else None,
         )
 
     # ── Phase C: Per-date selection + stream extraction ─────────────
