@@ -281,13 +281,19 @@ class SqlInstrumentReaderV2:
         object_id: int,
         object_cycle: str | None,
     ) -> list[ContractPriceData]:
-        """Fetch every future contract's bar series → ``ContractPriceData`` list.
+        """Fetch every future contract's DAILY bar series → ``ContractPriceData``.
 
         One :class:`ContractPriceData` per contract, sorted ascending by
         expiration (the ``ContinuousSeriesBuilder`` requires that ordering). Only
-        ``bar``-type series are joined (a future's price lives in ``fact_bar``).
-        The whole per-contract history is pulled (the roller trims); ``ts`` is
-        still constant-bounded to the sentinel span so the planner can BRIN-scan.
+        ``bar``-type series are joined (a future's price lives in ``fact_bar``),
+        pinned to ``freq = 'daily'`` for the same reason as
+        :meth:`fetch_future_front_closes`: FUT_SP_500 also carries ``bar:1m``
+        series, and ``PriceSeries.dates`` are ``YYYYMMDD`` ints, so minute rows
+        would both blow the statement timeout (this is called with an unbounded
+        ``ts`` range) and collapse onto duplicate dates inside a contract —
+        corrupt input to the roller, not merely slow input. The whole
+        per-contract history is pulled (the roller trims); ``ts`` is still
+        constant-bounded to the sentinel span so the planner can BRIN-scan.
         ``expiration_cycle`` is stamped from the object's single cycle (v2 has no
         per-contract cycle) so END_OF_MONTH collapse behaves.
         """
@@ -305,6 +311,7 @@ class SqlInstrumentReaderV2:
                               ON f.serie_id = s.serie_id
                             WHERE s.object_id = %s
                               AND s.type = 'bar'
+                              AND s.freq = 'daily'
                               AND c.expiration IS NOT NULL
                               AND f.ts >= %s AND f.ts < %s
                             ORDER BY c.expiration, c.contract_code, f.ts""",

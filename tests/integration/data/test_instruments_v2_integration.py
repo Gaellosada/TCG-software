@@ -144,6 +144,47 @@ async def test_front_closes_are_daily_and_one_per_date(svc):
 
 
 @pytest.mark.integration
+async def test_future_contract_bars_are_daily_with_unique_dates(svc):
+    """The continuous-futures feed must read daily bars only.
+
+    Same root cause as ``test_front_closes_are_daily_and_one_per_date``, one
+    method over: ``FUT_SP_500`` carries both ``bar:daily`` (69 contracts,
+    17 146 rows) and ``bar:1m`` (12 contracts, 980 194 rows) series, and this
+    method is called with an unbounded ``ts`` range. Without an
+    ``s.freq = 'daily'`` filter it scans the whole minute history — 60 s
+    statement timeout — and, because ``PriceSeries.dates`` are ``YYYYMMDD``
+    ints, every surviving minute row collapses onto a duplicate date inside its
+    contract bucket, handing the ``ContinuousSeriesBuilder`` a series with
+    repeated dates. Corrupt input, not just slow input.
+
+    The pin is lossless: measured on the live warehouse, all 12 contracts with
+    ``1m`` series also have a ``daily`` series, no contract has ``1m`` facts
+    without ``daily`` facts, and all 634 distinct ``1m`` dates appear among the
+    5 012 ``daily`` dates — so no contract and no date is dropped.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    fut_id = objs["FUT_SP_500"]["object_id"]
+
+    contracts = await svc._reader.fetch_future_contract_bars(fut_id, "quarterly")
+    assert contracts, "expected contract bars for FUT_SP_500"
+    # Lossless guard: the daily grain covers every contract the type-only
+    # filter saw (69 live at the time of writing); pinning must not shrink the
+    # roller's input set.
+    assert len(contracts) > 50, (
+        f"only {len(contracts)} contracts — the freq pin dropped contracts "
+        "that exist only at another grain"
+    )
+
+    for cpd in contracts:
+        dates = list(cpd.prices.dates)
+        assert len(set(dates)) == len(dates), (
+            f"{cpd.contract_id}: duplicate dates — minute rows collapsed "
+            f"onto YYYYMMDD ints ({len(dates)} rows, "
+            f"{len(set(dates))} distinct)"
+        )
+
+
+@pytest.mark.integration
 async def test_options_continuous_strike_live(svc):
     objs = {o["symbol"]: o for o in await svc.list_objects()}
     opt_id = objs["OPT_SP_500_EW3"]["object_id"]
