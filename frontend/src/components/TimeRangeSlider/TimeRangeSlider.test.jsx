@@ -140,6 +140,10 @@ describe('<TimeRangeSlider> handle positions', () => {
     const bands = screen.getAllByTestId('cadence-band');
     expect(bands).toHaveLength(1);
     expect(bands[0].getAttribute('title')).toMatch(/quarterly/i);
+    // Accessible name so screen-reader/keyboard users get the cadence info even
+    // though the band sits under the range input (title hover can't surface).
+    expect(bands[0].getAttribute('role')).toBe('img');
+    expect(bands[0].getAttribute('aria-label')).toMatch(/quarterly/i);
   });
 
   it('returns null when totalMonths <= 0', () => {

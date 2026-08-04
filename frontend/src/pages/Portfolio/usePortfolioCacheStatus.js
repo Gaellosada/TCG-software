@@ -213,7 +213,11 @@ export default function usePortfolioCacheStatus({
               const built = buildPortfolioComputeBody({
                 legs: rowLegs,
                 rebalance: doc.rebalance || 'none',
-                start: ov.start,
+                // Mirror the ACTIVE probe (line ~137) and the compute sites: seed
+                // from the cadence recommendation so a cadence-cliff option row's
+                // status body keys the SAME entry Compute wrote (else false
+                // "not-cached"). Falls back to raw start when there's no cliff.
+                start: ov.recommendedStart || ov.start,
                 end: ov.end,
                 availableIndicators,
                 resolvePortfolio: rowResolver,

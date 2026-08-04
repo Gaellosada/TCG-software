@@ -140,6 +140,12 @@ export default function TimeRangeSlider({
             className={styles.band}
             data-testid="cadence-band"
             data-cadence={b.cadence}
+            // Accessible name: the band is decorative-but-informative and sits
+            // under the native range input (pointer-events:none), so the `title`
+            // hover-tooltip can't reliably surface — role=img + aria-label give
+            // screen-reader/keyboard users the cadence info regardless.
+            role="img"
+            aria-label={`${b.cadence}-only cadence (~4 rolls/yr) — lower than the current monthly cadence`}
             title={`${b.cadence}-only cadence (~4 rolls/yr) — lower than the current monthly cadence`}
             style={{ left: `${b.left}%`, width: `${b.width}%` }}
           />

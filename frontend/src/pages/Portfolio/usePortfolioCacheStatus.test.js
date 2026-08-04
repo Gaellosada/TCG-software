@@ -35,6 +35,7 @@ vi.mock('../../api/persistence', () => ({ getPortfolio: vi.fn() }));
 
 import { getPortfolioCacheStatus } from '../../api/portfolio';
 import { getPortfolio } from '../../api/persistence';
+import { resolvePortfolioRange } from './resolvePortfolioRange';
 
 const ACTIVE_LEG = { id: 1, label: 'SPX', type: 'instrument', collection: 'INDEX', symbol: 'SPX', weight: 100 };
 
@@ -87,6 +88,33 @@ describe('usePortfolioCacheStatus', () => {
       expect(result.current.activeCached).toBe(true);
       expect(result.current.rowStatusById['row-1']).toBe('not-cached');
     }, { timeout: 2000 });
+  });
+
+  it('seeds a cadence-cliff row probe from recommendedStart, not raw start (cache-key parity)', async () => {
+    // A saved (non-active) row whose overlap has a cadence cliff: Compute keys the
+    // result under recommendedStart, so the status probe must key the SAME start —
+    // else the row shows a false "not-cached" badge.
+    resolvePortfolioRange.mockResolvedValue({
+      ranges: {},
+      overlapRange: { start: '2010-01-01', end: '2020-12-31', recommendedStart: '2016-05-01' },
+    });
+    getPortfolioCacheStatus.mockResolvedValue({ results: [{ cached: true }, { cached: true }] });
+    const row = {
+      id: 'row-cliff', rebalance: 'none',
+      legs: [{ label: 'OPT', type: 'instrument', collection: 'INDEX', symbol: 'X', weight: 100 }],
+    };
+    renderHook((props) => usePortfolioCacheStatus(props), {
+      initialProps: baseProps({ portfolios: [row] }),
+    });
+    await waitFor(() => expect(getPortfolioCacheStatus).toHaveBeenCalled(), { timeout: 2000 });
+    const queries = getPortfolioCacheStatus.mock.calls[0][0];
+    // queries[0] = active (from overlapRange prop); queries[1] = the saved row —
+    // it must key from recommendedStart (2016-05-01), NOT the raw start (2010-01-01).
+    expect(queries[1].start).toBe('2016-05-01');
+    // Restore the module default for subsequent tests.
+    resolvePortfolioRange.mockResolvedValue({
+      ranges: {}, overlapRange: { start: '2020-01-01', end: '2020-12-31' },
+    });
   });
 
   it('re-probes when the active config changes (edit → flips)', async () => {
