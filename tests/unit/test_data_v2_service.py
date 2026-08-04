@@ -538,64 +538,30 @@ async def test_get_series_missing_serie_raises_404():
         await svc.get_series(404)
 
 
-_BBBA_COLS = {
-    "best_bid_value": [610.5, 608.5],
-    "best_bid_volume": [15.0, 15.0],
-    "best_ask_value": [612.0, 610.0],
-    "best_ask_volume": [15.0, 1.0],
-}
+async def test_get_series_forwards_freq_and_echoes_grain():
+    """The service's two jobs at this seam: pass ``serie.freq`` DOWN to the reader
+    (that is what selects the grain) and surface the returned ``grain`` UP in the
+    response.
 
-
-async def test_get_series_daily_returns_int_dates_and_daily_grain():
+    It deliberately asserts nothing about how a ts is rendered — with the reader
+    faked out, any such assertion would only re-read this test's own literals.
+    Grain resolution is covered against the REAL reader in
+    ``tests/unit/data/sql/test_sql_instruments_v2_grain.py``.
+    """
     reader = _FakeReaderService(
         serie={
-            "serie_id": 1, "object_id": 16, "contract_id": 42,
-            "type": "bbba", "freq": "daily", "source": "TEST",
+            "serie_id": 1,
+            "object_id": 16,
+            "contract_id": 42,
+            "type": "value",
+            "freq": "1m",
+            "source": "TEST",
         },
-        facts=("daily", [20260601, 20260602], _BBBA_COLS),
+        facts=("intraday", ["2026-06-01T14:31:00Z"], {"value": [610.5]}),
     )
     out = await _make_service(reader).get_series(1)
-    assert out["grain"] == "daily"
-    assert out["points"]["ts"] == [20260601, 20260602]
-
-
-async def test_get_series_intraday_returns_iso_timestamps():
-    reader = _FakeReaderService(
-        serie={
-            "serie_id": 1, "object_id": 16, "contract_id": 42,
-            "type": "bbba", "freq": "1m", "source": "TEST",
-        },
-        facts=(
-            "intraday",
-            ["2026-06-01T14:31:00Z", "2026-06-01T14:32:00Z"],
-            _BBBA_COLS,
-        ),
-    )
-    out = await _make_service(reader).get_series(1)
-    assert out["grain"] == "intraday"
-    assert out["points"]["ts"] == [
-        "2026-06-01T14:31:00Z",
-        "2026-06-01T14:32:00Z",
-    ]
-    # The regression guard: distinct minutes must stay distinct.
-    assert len(set(out["points"]["ts"])) == 2
-
-
-async def test_get_series_forwards_freq_to_the_reader():
-    """The service must pass serie.freq down — that is what selects the grain."""
-    reader = _FakeReaderService(
-        serie={
-            "serie_id": 1, "object_id": 16, "contract_id": 42,
-            "type": "bbba", "freq": "1m", "source": "TEST",
-        },
-        facts=(
-            "intraday",
-            ["2026-06-01T14:31:00Z"],
-            {k: [v[0]] for k, v in _BBBA_COLS.items()},
-        ),
-    )
-    await _make_service(reader).get_series(1)
     assert reader.last_freq == "1m"
+    assert out["grain"] == "intraday"
 
 
 async def test_get_continuous_options_rejects_non_option():
