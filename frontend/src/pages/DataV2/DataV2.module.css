@@ -119,3 +119,64 @@
   background: var(--accent-subtle);
   color: var(--accent);
 }
+
+/* ---------------------------------------------------------------------------
+   Series filter panel (SeriesFilterPanel). A narrow, always-mounted column
+   beside the result list: changing one dimension must not cost re-entering the
+   others, so it is a static stack of fields rather than a popover.
+   Field controls reuse ``Data/ChartBase.module.css`` ``.select``; only the
+   layout and the two action buttons live here.
+   --------------------------------------------------------------------------- */
+
+.filterPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 220px;
+  flex-shrink: 0;
+  padding: 12px;
+}
+
+.filterHeader {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.filterField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.filterActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.filterButton {
+  flex: 1;
+  padding: 5px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.filterButton:hover {
+  background: var(--bg-hover);
+}
+
+.filterButton:focus-visible {
+  outline: 2px solid var(--border-accent);
+  outline-offset: -2px;
+}
