@@ -914,7 +914,7 @@ async def _resolve_hold(
     roll_info_out: "dict[str, NDArray[np.float64]] | None" = None,
     futures_reference_resolver: "Callable[[date, date], Awaitable[tuple[float, float | None] | None]] | None" = None,
     held_fetch: "Callable[[list[tuple[str, date, date]]], Awaitable[dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]]] | None" = None,
-    open_probe_fetch: "Callable[[date, date], Awaitable[list[tuple[OptionContractDoc, OptionDailyRow]]]] | None" = None,
+    open_probe_fetch: "Callable[[date, Sequence[date]], Awaitable[dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]]] | None" = None,
 ) -> tuple[NDArray[np.float64], list[str | None], list[OptionContractDoc | None]]:
     """Select-and-hold resolution over the pre-fetched ``chain_index``.
 
@@ -1054,24 +1054,57 @@ async def _resolve_hold(
         # first genuinely-quoted date: forward-fill spans ONLY the truly-missing
         # leading days, then the leg re-syncs to the real marks.
         #
-        # ``open_probe_fetch`` (two-phase path only) fetches a candidate date's
-        # chain on demand — Phase 1 pre-fetched ONLY the nominal first date, so a
+        # ``open_probe_fetch`` (two-phase path only) fetches the segment's leading
+        # window on demand — Phase 1 pre-fetched ONLY the nominal first date, so a
         # later fallback date is not yet in ``chain_index``.  The full-chain path
         # already holds every segment date's chain, so it never probes.  On the
         # happy path the FIRST date quotes the expiration, so the loop breaks
         # immediately with ``open_pos == 0`` — byte-identical to the old behaviour
         # (no probe, same selection date).
+        #
+        # RANGED probe (perf): a multi-day leading gap must NOT issue one blocking
+        # single-date ``query_chain_bulk`` per missing day (N serial dwh round-trips
+        # under ``_bulk_sem``, unbounded by gap length).  Instead, the FIRST missing
+        # date triggers ONE bounded ranged probe over the remainder of THIS segment's
+        # window (``[d .. seg[-1]]``, cached dates excluded); the fetched chains are
+        # merged EXACTLY like the per-day loop — only the single first-quoted date is
+        # added to ``chain_index`` (leading gap days return empty from the
+        # expiration-pinned probe, so they added nothing before either) — keeping the
+        # selection date and downstream marks byte-identical.
         open_pos: int | None = None
         first_idx = -1
         first_date = seg[0][1]
         first_rows: list[tuple[OptionContractDoc, OptionDailyRow]] = []
+        probed = False
         for _pos, (idx, d) in enumerate(seg):
             rows = chain_index.get(d)
-            if rows is None and open_probe_fetch is not None and seg_exp is not None:
-                fetched = await open_probe_fetch(seg_exp, d)
-                if fetched:
-                    chain_index[d] = chain_index.get(d, []) + fetched
-                    rows = chain_index[d]
+            if (
+                rows is None
+                and open_probe_fetch is not None
+                and seg_exp is not None
+                and not probed
+            ):
+                probed = True  # at most ONE ranged probe per segment
+                probe_dates = [dd for (_i, dd) in seg[_pos:] if dd not in chain_index]
+                fetched_map = await open_probe_fetch(seg_exp, probe_dates)
+                # Merge the FIRST segment-order date that quotes ``seg_exp`` and stop
+                # — the exact single date the per-day loop merged.  (The probe is
+                # pinned to ``seg_exp``, so any non-empty fetched date IS a quoted
+                # open; a cached date already present short-circuits the same way.)
+                for _i2, dd in seg[_pos:]:
+                    cached = chain_index.get(dd)
+                    if cached is not None:
+                        if any(
+                            seg_exp is None or c.expiration == seg_exp
+                            for (c, _r) in cached
+                        ):
+                            break
+                        continue
+                    frows = fetched_map.get(dd) or []
+                    if frows:
+                        chain_index[dd] = chain_index.get(dd, []) + frows
+                        break
+                rows = chain_index.get(d)
             # Restrict to THIS segment's expiration: a roll day's merged chain
             # carries BOTH the OLD and NEW expirations (so the OLD's roll-day mid is
             # available), but the NEW segment must select a NEW-expiration contract —
@@ -1181,7 +1214,6 @@ async def _resolve_hold(
             # Where the segment ACTUALLY opens (the first quotable date): the roll /
             # sizing point and the held-window ``lo``.  0 on the happy path.
             "open_pos": open_pos,
-            "open_idx": first_idx,
             "open_date": first_date,
         }
 
@@ -2222,25 +2254,29 @@ async def _resolve_bulk(
                     merged[d] = merged.get(d, []) + rows
             return merged
 
-        # TWO-PHASE only: on-demand full-chain fetch for ONE (expiration, date).
-        # Phase 1 pre-fetched only each segment's NOMINAL first date; when that date
-        # is a missing-mark gap the segment must open on the next quotable date,
-        # whose chain is not yet in ``chain_index``.  This probes it (one cheap
-        # single-expiration bulk query, cycle-injected via ``bulk_reader``).  Only
-        # invoked for a gap-affected segment, so the happy path issues NO extra I/O.
-        # The full-chain hold path already holds every date's chain → passes None.
+        # TWO-PHASE only: on-demand RANGED single-expiration fetch of a segment's
+        # leading window.  Phase 1 pre-fetched only each segment's NOMINAL first
+        # date; when that date (and a run after it) is a missing-mark gap, the
+        # segment must open on the next quotable date, whose chain is not yet in
+        # ``chain_index``.  This fetches the WHOLE candidate window in ONE bulk query
+        # (partition-pruned to its min/max date span, cycle-injected via
+        # ``bulk_reader``) — instead of one blocking single-date probe per missing
+        # day.  Only invoked for a gap-affected segment, so the happy path issues NO
+        # extra I/O.  The full-chain hold path already holds every date's chain →
+        # passes None.
         async def _open_probe(
-            exp: date, d: date
-        ) -> list[tuple[OptionContractDoc, OptionDailyRow]]:
+            exp: date, probe_dates: Sequence[date]
+        ) -> dict[date, list[tuple[OptionContractDoc, OptionDailyRow]]]:
+            if not probe_dates:
+                return {}
             async with _bulk_sem:
-                res = await bulk_reader.query_chain_bulk(
+                return await bulk_reader.query_chain_bulk(
                     root=collection,
-                    dates=[d],
+                    dates=list(probe_dates),
                     type=option_type,
                     expiration_min=exp,
                     expiration_max=exp,
                 )
-            return res.get(d, [])
 
         return await _resolve_hold(
             dates=dates,
