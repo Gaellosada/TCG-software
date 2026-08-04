@@ -212,10 +212,12 @@ is the `freq` filter on `fetch_future_front_closes`.
 | `COUNT(*)` worst case (no expiration filter) | 0.58 s |
 
 **Re-measured during implementation (2026-08-04, later the same day): 2–3× the figures above.**
-The filtered 50-row page is 1.04 s and the unfiltered worst case 3.39 s, on an object that grew to
-~96 194 contracts / ~201 027 series mid-execution. Still roughly 20× inside the 60 s
-`statement_timeout`, but the headroom is smaller than the table implies, and **every request pays a
-`COUNT(*)` costing about as much as the page itself**. Treat the table as a floor, not a forecast:
+The filtered 50-row page is 1.04–1.44 s and the unfiltered worst case 3.39–3.51 s, on an object
+that grew to ~96 194 contracts / ~201 027 series mid-execution. Still roughly 50× inside the 60 s
+`statement_timeout` by execution time. The `COUNT(*)` behind `total` costs **about 31 % of the page**
+(medians 0.44 s vs 1.43 s over four trials) — an earlier draft of this note claimed the two were
+roughly equal, which measurement refuted; skipping the count would save ~24 % of a combined round
+trip, not half of it. Treat the table as a floor, not a forecast:
 the warehouse is being backfilled and `serie` has no usable index for `WHERE object_id = %s` (both
 its non-PK indexes are partial), so this cost grows with total warehouse size rather than with the
 object queried. A `serie(object_id)` index is the standing recommendation and needs the schema
