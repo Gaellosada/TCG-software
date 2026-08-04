@@ -3041,6 +3041,142 @@ an applied state, so a shared link lists results without re-pressing Apply."
 
 ---
 
+## Task 13: Pin the continuous-futures bar feed to daily
+
+Added mid-execution. Task 2 fixed the same defect in `fetch_future_front_closes`; the Task 2
+implementer then proved (via `git stash`, so pre-existing rather than caused by this branch) that
+`test_futures_continuous_live` is red for the identical reason in a neighbouring method.
+
+`fetch_future_contract_bars` filters `s.type = 'bar'` with **no** `freq` predicate
+(`tcg/data/_sql/instruments_v2.py:307`), and it is called with unbounded `ts` (`_bounds(None, None)`
+— the roller trims afterwards). Since `FUT_SP_500` gained `bar:1m` series, it scans the entire
+minute history and hits the 60 s `statement_timeout`.
+
+Performance is the lesser problem. The method builds a `ContractPriceData` whose `dates` are
+`YYYYMMDD` ints via `_ts_to_int` (:333), because `PriceSeries` is a daily-grain type. Minute rows
+therefore collapse onto **duplicate date integers** inside each contract bucket, feeding the
+`ContinuousSeriesBuilder` a series with repeated dates — corrupt input, not merely slow input.
+
+**Files:**
+- Modify: `tcg/data/_sql/instruments_v2.py:279-317` (`fetch_future_contract_bars`)
+- Test: `tests/integration/data/test_instruments_v2_integration.py`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks.
+- Produces: no signature change — still returns `list[ContractPriceData]` sorted by expiration.
+
+- [ ] **Step 1: Write the failing integration test**
+
+Add to `tests/integration/data/test_instruments_v2_integration.py`:
+
+```python
+@pytest.mark.integration
+async def test_future_contract_bars_are_daily_with_unique_dates(svc):
+    """The continuous-futures feed must read daily bars only.
+
+    Without an `s.freq = 'daily'` filter this scans FUT_SP_500's whole minute
+    history (statement timeout), and because ContractPriceData.dates are
+    YYYYMMDD ints, minute rows collapse onto duplicate dates inside a contract
+    — corrupt input to the roller, not just slow input.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    fut_id = objs["FUT_SP_500"]["object_id"]
+
+    contracts = await svc._reader.fetch_future_contract_bars(fut_id, "quarterly")
+    assert contracts, "expected contract bars for FUT_SP_500"
+
+    for cpd in contracts:
+        dates = list(cpd.dates)
+        assert len(set(dates)) == len(dates), (
+            f"{cpd.contract_code}: duplicate dates — minute rows collapsed "
+            f"onto YYYYMMDD ints ({len(dates)} rows, "
+            f"{len(set(dates))} distinct)"
+        )
+```
+
+Check the attribute names on `ContractPriceData` in `tcg/types/market.py` before writing the
+assertion — use whatever it actually calls the contract code and the date array.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run:
+
+```bash
+bash ~/.claude/skills/tcg-db/scripts/tunnel.sh
+uv run pytest tests/integration/data/test_instruments_v2_integration.py \
+  -k future_contract_bars_are_daily --run-integration -v
+```
+
+Expected: FAIL — a `DataAccessError` naming `statement timeout`, or the duplicate-date assertion.
+
+- [ ] **Step 3: Add the freq filter**
+
+In `fetch_future_contract_bars`, add one predicate:
+
+```sql
+                            WHERE s.object_id = %s
+                              AND s.type = 'bar'
+                              AND s.freq = 'daily'
+                              AND c.expiration IS NOT NULL
+                              AND f.ts >= %s AND f.ts < %s
+```
+
+And make the docstring state the grain and why:
+
+```python
+        """Fetch every future contract's DAILY bar series → ``ContractPriceData``.
+
+        One :class:`ContractPriceData` per contract, sorted ascending by
+        expiration (the ``ContinuousSeriesBuilder`` requires that ordering).
+        Pinned to ``freq = 'daily'``: FUT_SP_500 also carries ``bar:1m`` series,
+        and ``ContractPriceData.dates`` are ``YYYYMMDD`` ints, so minute rows
+        would both blow the statement timeout and collapse onto duplicate dates
+        inside a contract — corrupt input to the roller. The whole per-contract
+        history is pulled (the roller trims); ``ts`` is still constant-bounded to
+        the sentinel span so the planner can BRIN-scan. ``expiration_cycle`` is
+        stamped from the object's single cycle (v2 has no per-contract cycle) so
+        END_OF_MONTH collapse behaves.
+        """
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `uv run pytest tests/integration/data/test_instruments_v2_integration.py -k future_contract_bars_are_daily --run-integration -v`
+Expected: PASS
+
+- [ ] **Step 5: Prove the test catches a regression**
+
+Remove `AND s.freq = 'daily'` again, re-run the test, confirm it goes red, then restore the line
+and confirm green. Report both results — a test asserted to guard a regression must be shown to.
+
+- [ ] **Step 6: Confirm the previously-red integration test now passes**
+
+Run: `uv run pytest tests/integration/data/test_instruments_v2_integration.py -k futures_continuous_live --run-integration -v`
+Expected: PASS (it was red with a `statement_timeout` before this task).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add tcg/data/_sql/instruments_v2.py tests/integration/data/test_instruments_v2_integration.py
+git commit -m "fix(data-v2): pin the continuous-futures bar feed to daily
+
+fetch_future_contract_bars filtered s.type only, so FUT_SP_500's bar:1m
+series were scanned too: statement timeout, and minute rows collapsing onto
+duplicate YYYYMMDD ints inside each ContractPriceData — corrupt roller input,
+not just slow. Same root cause as the front-close fix in the previous task."
+```
+
+**Out of scope, and deliberately so.** Two other integration tests are red on this branch and stay
+red: `test_options_continuous_strike_live` and `test_options_continuous_moneyness_live`. Their cause
+is **not** a missing `freq` filter — every `value` serie on `OPT_SP_500_EW3` is `daily` (68 568 of
+them), so there is no minute data to exclude. They time out because `fetch_option_settlements`
+bulk-loads a whole year of settlements: the 2024 window measured **1 089 058 rows**. Fixing that
+means reshaping the continuous-options resolver to narrow the chain per date instead of fetching a
+year at once — a different design problem, which the spec placed out of scope. Both were red before
+this branch.
+
+---
+
 ## Verification checklist
 
 Before opening the PR, confirm each of these against the running app:
@@ -3056,3 +3192,7 @@ Before opening the PR, confirm each of these against the running app:
       browser back button restores the previous filter.
 - [ ] Continuous (Options) with `criterion=moneyness` returns 200 (was 502).
 - [ ] `uv run pytest -m "not integration"`, `uv run lint-imports --config .import-linter.cfg`, and `npx vitest run` all pass.
+- [ ] Integration suite: green **except** `test_options_continuous_strike_live` and
+      `test_options_continuous_moneyness_live`, which were red before this branch and stay red —
+      `fetch_option_settlements` bulk-loads 1 089 058 rows for a one-year window. Documented in
+      Task 13; reshaping the continuous-options resolver is separate work.
