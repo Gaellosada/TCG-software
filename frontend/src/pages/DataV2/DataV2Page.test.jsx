@@ -1,7 +1,25 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { renderWithClient } from '../../test/queryWrapper';
+
+/**
+ * The page needs a Router: ``ObjectDetail`` keeps the applied filter and the
+ * page offset in the query string (``useSearchParams``), which throws outside
+ * one. ``src/test/setup.js`` supplies a QueryClient to every render but no
+ * router, and in the real app the route is ``/data-v2`` (``App.jsx``).
+ *
+ * Each test gets its own fresh history entry list, so no filter written by one
+ * test can leak into the next.
+ */
+function renderPage() {
+  return renderWithClient(
+    <MemoryRouter initialEntries={['/data-v2']}>
+      <DataV2Page />
+    </MemoryRouter>,
+  );
+}
 
 afterEach(cleanup);
 
@@ -139,7 +157,7 @@ beforeEach(() => {
 // jest-dom is NOT configured in this project — assert native DOM properties.
 describe('DataV2Page', () => {
   it('groups objects by kind and lists their symbols', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     expect(await screen.findByText('RATE_US_CMT_1M')).toBeDefined();
     expect(screen.getByText('IND_SP_500')).toBeDefined();
     expect(screen.getByText('FUT_SP_500')).toBeDefined();
@@ -151,7 +169,7 @@ describe('DataV2Page', () => {
   });
 
   it('shows the filter panel and fetches nothing until Apply', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     expect(await screen.findByText(/Filters/)).toBeTruthy();
     // Cheap /facets is what the panel is built from.
@@ -170,7 +188,7 @@ describe('DataV2Page', () => {
   });
 
   it('lists series after Apply', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
     expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
@@ -186,7 +204,7 @@ describe('DataV2Page', () => {
   });
 
   it('pages forward without discarding the filter', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     fireEvent.change(await screen.findByLabelText('Series type'), {
       target: { value: 'bbba' },
@@ -204,7 +222,7 @@ describe('DataV2Page', () => {
   });
 
   it('keeps the chart when a filter change excludes the plotted series', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
     fireEvent.click(await screen.findByText('EW2H6 P6260.20260313'));
@@ -236,7 +254,7 @@ describe('DataV2Page', () => {
   });
 
   it('names an object-level serie after its object, in the row and the heading', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('IND_SP_500'));
     // An index object has no contract dimensions to filter on.
     expect(await screen.findByLabelText('Series type')).toBeTruthy();
@@ -259,7 +277,7 @@ describe('DataV2Page', () => {
   });
 
   it('Reset un-applies, rather than leaving a stale list beside a blank panel', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     fireEvent.change(await screen.findByLabelText('Series type'), {
       target: { value: 'bbba' },
@@ -293,7 +311,7 @@ describe('DataV2Page', () => {
   });
 
   it('shows the object total and the filtered total as different things', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
     await screen.findByText('EW2H6 P6260.20260313');
@@ -310,7 +328,7 @@ describe('DataV2Page', () => {
   });
 
   it('does not flag the chart when the new filter still contains it', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
     fireEvent.click(await screen.findByText('EW2H6 P6260.20260313'));
@@ -330,7 +348,7 @@ describe('DataV2Page', () => {
   });
 
   it('greys out the Delta criterion on the options continuous builder', async () => {
-    renderWithClient(<DataV2Page />);
+    renderPage();
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     // Switch to the Continuous (Options) tab.
     fireEvent.click(await screen.findByRole('tab', { name: /Continuous \(Options\)/i }));

@@ -38,6 +38,28 @@ const DEFAULTS = Object.freeze({
 });
 
 /**
+ * Field values for one applied filter set (or the DEFAULTS for "none").
+ *
+ * Only ``expirationMin`` is read: the panel offers a single expiration choice
+ * and emits it as the one-day window [min, max], so min is the round-trip of
+ * what the control can express. The strike bounds arrive as numbers and an
+ * ``<input>``'s value must be a string, hence ``String(...)`` — a raw number
+ * renders as an empty field, i.e. a bound silently dropped from the UI while
+ * still being applied to the results.
+ */
+function seeds(from) {
+  if (from == null) return DEFAULTS;
+  return {
+    expiration: from.expirationMin || '',
+    strikeMin: from.strikeMin != null ? String(from.strikeMin) : '',
+    strikeMax: from.strikeMax != null ? String(from.strikeMax) : '',
+    optionType: from.optionType || DEFAULTS.optionType,
+    serieType: from.serieType || DEFAULTS.serieType,
+    freq: from.freq || DEFAULTS.freq,
+  };
+}
+
+/**
  * Persistent filter panel for an object's series.
  *
  * Two behaviours the design turns on:
@@ -68,21 +90,45 @@ const DEFAULTS = Object.freeze({
  * to do nothing. So Reset notifies, and deliberately does NOT emit ``onApply``:
  * clearing the fields is not the same as applying an empty filter, which would
  * be the unbounded request this whole component exists to prevent.
+ *
+ * ``initialFilters`` (in practice: the filter state read back out of the URL)
+ * is a filter set the parent HAS ALREADY APPLIED. So it seeds the fields *and*
+ * starts the gate open — the recipient of a shared link must not have to press
+ * Apply to see the results the link describes. This does not re-open the
+ * unbounded request the gate exists to stop: that request is the one with NO
+ * filters, and a URL that carries filter keys is by construction bounded. A URL
+ * with no filter keys yields ``null`` here and the gate stays shut.
  */
-function SeriesFilterPanel({ objectId, onApply, onReset }) {
+function SeriesFilterPanel({ objectId, initialFilters = null, onApply, onReset }) {
   const { data: facets, loading, error } = useObjectFacetsV2(objectId);
   const uid = useId();
 
-  const [expiration, setExpiration] = useState(DEFAULTS.expiration);
-  const [strikeMin, setStrikeMin] = useState(DEFAULTS.strikeMin);
-  const [strikeMax, setStrikeMax] = useState(DEFAULTS.strikeMax);
-  const [optionType, setOptionType] = useState(DEFAULTS.optionType);
-  const [serieType, setSerieType] = useState(DEFAULTS.serieType);
-  const [freq, setFreq] = useState(DEFAULTS.freq);
+  const initial = seeds(initialFilters);
+  const [expiration, setExpiration] = useState(initial.expiration);
+  const [strikeMin, setStrikeMin] = useState(initial.strikeMin);
+  const [strikeMax, setStrikeMax] = useState(initial.strikeMax);
+  const [optionType, setOptionType] = useState(initial.optionType);
+  const [serieType, setSerieType] = useState(initial.serieType);
+  const [freq, setFreq] = useState(initial.freq);
 
   // False until the first explicit Apply; gates auto-application. Reset puts it
   // back to false, so the gate is re-armed rather than being a one-time thing.
-  const [applied, setApplied] = useState(false);
+  // A restored filter set starts applied — see ``initialFilters`` above.
+  const [applied, setApplied] = useState(initialFilters != null);
+
+  /*
+   * "The applied state we are currently showing came from the parent, not from
+   * the user" — so the auto-apply effect must record it instead of emitting it.
+   *
+   * Echoing ``initialFilters`` straight back would look to the parent like a
+   * fresh application: its "a new filter starts from page 1" rule then fires,
+   * and a shared link's ``?skip=50`` lands on page 1 — plus a redundant history
+   * entry and refetch. Unlike the general "skip the first effect run" flag this
+   * component deliberately avoids (see ``lastEmitted``), this one is armed only
+   * when a seed happens and is consumed by the effect run that seed causes, so
+   * it can never be left armed to swallow a later change.
+   */
+  const seeded = useRef(initialFilters != null);
 
   /*
    * A new object re-arms the gate and clears the fields.
@@ -97,17 +143,25 @@ function SeriesFilterPanel({ objectId, onApply, onReset }) {
    * object. Adjusting state during render (rather than in an effect) is the
    * documented React pattern here; it re-renders before commit, so the
    * auto-apply effect never observes the stale combination.
+   *
+   * "Clears the fields" means "back to what the parent says is applied", which
+   * with no ``initialFilters`` is the DEFAULTS and the gate shut. If the parent
+   * does hold an applied filter set (a URL-restored one), re-seeding from it is
+   * what keeps panel and results agreeing — clearing to blank there would
+   * reproduce exactly the panel-says-nothing / list-shows-something mismatch
+   * that ``onReset`` exists to prevent.
    */
   const prevObjectId = useRef(objectId);
   if (prevObjectId.current !== objectId) {
     prevObjectId.current = objectId;
-    setExpiration(DEFAULTS.expiration);
-    setStrikeMin(DEFAULTS.strikeMin);
-    setStrikeMax(DEFAULTS.strikeMax);
-    setOptionType(DEFAULTS.optionType);
-    setSerieType(DEFAULTS.serieType);
-    setFreq(DEFAULTS.freq);
-    setApplied(false);
+    setExpiration(initial.expiration);
+    setStrikeMin(initial.strikeMin);
+    setStrikeMax(initial.strikeMax);
+    setOptionType(initial.optionType);
+    setSerieType(initial.serieType);
+    setFreq(initial.freq);
+    setApplied(initialFilters != null);
+    seeded.current = initialFilters != null;
   }
 
   const hasContracts = (facets?.expirations?.length || 0) > 0;
@@ -161,6 +215,11 @@ function SeriesFilterPanel({ objectId, onApply, onReset }) {
 
   useEffect(() => {
     if (!applied) return;                        // gated: nothing fetched yet
+    if (seeded.current) {                        // the parent's own applied set
+      seeded.current = false;
+      lastEmitted.current = filters;             // treat as emitted, don't echo
+      return;
+    }
     if (lastEmitted.current === filters) return; // already emitted this exact set
     emit(filters);
     // ``emit`` only touches refs, so it is intentionally not a dependency.
@@ -180,6 +239,9 @@ function SeriesFilterPanel({ objectId, onApply, onReset }) {
     setSerieType(DEFAULTS.serieType);
     setFreq(DEFAULTS.freq);
     setApplied(false);         // re-gate: no fetch until Apply again
+    // Reset overrides any restored state, including one still awaiting its
+    // seeding effect run: after Reset the panel speaks for itself again.
+    seeded.current = false;
     // Also clear ``lastEmitted``: the next Apply may well re-emit the DEFAULTS
     // filter set, and if that is still the last-emitted identity the auto-apply
     // effect would treat it as "already emitted". (``handleApply`` emits

@@ -1,7 +1,8 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useObjectSeriesV2 } from '../../hooks/marketQueries';
 import SeriesChartV2 from './SeriesChartV2';
-import SeriesFilterPanel from './SeriesFilterPanel';
+import SeriesFilterPanel, { parseStrikeBound } from './SeriesFilterPanel';
 import SeriesResultList from './SeriesResultList';
 import ContinuousFuturesChartV2 from './ContinuousFuturesChartV2';
 import ContinuousOptionsChartV2 from './ContinuousOptionsChartV2';
@@ -11,6 +12,18 @@ import styles from './DataV2.module.css';
 
 /** Rows per page. The backend defaults to 50 and caps at 500. */
 const PAGE_LIMIT = 50;
+
+/**
+ * Query-string marker for "a filter is applied, and it narrows nothing".
+ *
+ * Every other dimension is written to the URL only when it differs from its
+ * default, which keeps a shared link legible — but it leaves one state
+ * unwritable: Apply pressed with every control at its default. That is a real,
+ * bounded query (``limit`` rows of the object's series) and it must survive a
+ * reload and a page change, yet an empty query string already means "not
+ * applied yet". This marker is the difference between the two.
+ */
+const APPLIED_MARKER = 'applied';
 
 /**
  * Heading for the charted series, or ``null`` to mean "the object symbol alone
@@ -53,6 +66,20 @@ function serieTitle(serie) {
  * gate blocked the entire tab. (``/objects/{id}`` has since been slimmed to
  * metadata only — a few hundred bytes — so it is no longer expensive; it is
  * still not mounted here because there is nothing left for it to supply.)
+ *
+ * The filter and the page offset are held in the query string
+ * (``?expiration_min=…&option_type=put&serie_type=bbba&skip=50``) rather than in
+ * component state, so the back button works, a filter state is shareable by
+ * link, and a reload loses nothing. The SELECTED OBJECT is deliberately not in
+ * the URL: it comes from the browser list, which the page loads wholesale in one
+ * cheap call, and nothing in the spec asks for it. One consequence, accepted on
+ * purpose: because the object is not in the URL, a shared link's filter has to
+ * survive the recipient picking the object out of the list — so the filter is
+ * NOT cleared when the object changes. Switching object therefore carries the
+ * current filter over to the new object (the panel re-seeds from it), and a
+ * dimension the new object does not have (a strike bound on an index) is still
+ * applied while its control is hidden. Putting the object in the URL is the
+ * clean fix if that ever bites.
  */
 function ObjectDetail({ object }) {
   const [tab, setTab] = useState('series');
@@ -71,11 +98,96 @@ function ObjectDetail({ object }) {
    */
   const [rememberedRow, setRememberedRow] = useState(null);
 
-  // null until the user applies a filter — this is what gates the first fetch.
-  // ``useObjectSeriesV2`` is disabled while it is null, so no unbounded series
-  // request can be issued. Do not "helpfully" default this to {}.
-  const [filters, setFilters] = useState(null);
-  const [skip, setSkip] = useState(0);
+  /*
+   * The filter state and the page live in the URL, not in component state.
+   * That is what makes the back button work, a filter state shareable by link,
+   * and a reload lossless.
+   *
+   * A URL carrying any filter key is an APPLIED state: the recipient of a link
+   * must not have to press Apply to see what the link describes. That is not a
+   * hole in the gate the panel enforces — the request the gate exists to
+   * prevent is the UNBOUNDED one, and a URL that names filters produces a
+   * bounded one. No filter key → ``null`` → ``useObjectSeriesV2`` is disabled
+   * and nothing is fetched. Do not "helpfully" default this to {}.
+   *
+   * Wire vocabulary (snake_case) in, camelCase out — the client allowlists the
+   * camelCase keys and throws a TypeError on anything else, so this mapping is
+   * the whole translation layer. ``expiration`` is accepted as a synonym for
+   * both bounds because the spec's shareable URL is written that way and the
+   * panel only ever offers one expiration (a one-day window).
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const filters = useMemo(() => {
+    const expiration = searchParams.get('expiration');
+    const expirationMin = searchParams.get('expiration_min') || expiration || '';
+    const expirationMax = searchParams.get('expiration_max') || expiration || '';
+    // A URL is user-editable, so a strike bound can arrive as anything.
+    // ``parseStrikeBound`` drops a non-finite one: ``?strike_min=abc`` would
+    // otherwise reach ``getObjectSeriesV2``, which throws a TypeError on a
+    // non-finite bound (rightly — the backend accepts NaN with HTTP 200 and
+    // silently matches nothing). A bad URL must degrade, not crash the tab.
+    const strikeMin = parseStrikeBound(searchParams.get('strike_min'));
+    const strikeMax = parseStrikeBound(searchParams.get('strike_max'));
+    const optionType = searchParams.get('option_type') || '';
+    const serieType = searchParams.get('serie_type') || '';
+    const freq = searchParams.get('freq') || '';
+
+    /*
+     * Is a filter applied at all? Any *surviving* filter value says yes, and so
+     * does the bare ``applied`` marker, which is how "applied, but narrowing
+     * nothing" is written down: pressing Apply with every control at its
+     * default is a legitimate (and bounded, ``limit``-capped) query, and an
+     * empty query string cannot distinguish it from "not applied yet". A
+     * garbage-only URL (``?strike_min=abc``) survives nothing and so lands on
+     * the gate rather than on an accidental default query.
+     */
+    const present = expirationMin !== '' || expirationMax !== ''
+      || strikeMin !== undefined || strikeMax !== undefined
+      || optionType !== '' || serieType !== '' || freq !== ''
+      || searchParams.has(APPLIED_MARKER);
+    if (!present) return null;
+
+    return {
+      expirationMin: expirationMin || undefined,
+      expirationMax: expirationMax || undefined,
+      strikeMin,
+      strikeMax,
+      // Sentinels are sent explicitly and match the backend defaults.
+      optionType: optionType || 'both',
+      serieType: serieType || 'any',
+      freq: freq || 'any',
+    };
+  }, [searchParams]);
+
+  // Also user-editable: a negative or non-numeric offset would render a "0-0 of
+  // N" range (and NaN is silently dropped by the client, so the page would not
+  // even match the URL that produced it).
+  const skip = useMemo(() => {
+    const raw = Number(searchParams.get('skip'));
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  }, [searchParams]);
+
+  /*
+   * The panel seeds its fields from ``initialFilters`` once per mount, so on its
+   * own it would not follow the URL changing underneath it — after a back
+   * button press the list would show the previous filter's results beside a
+   * panel still displaying the newer one. Remounting on every filter change
+   * instead would interrupt typing in the strike inputs, since the panel causes
+   * those changes itself.
+   *
+   * So: remount the panel only for a URL change this component did NOT write.
+   * ``lastWritten`` is seeded from the first render's query string, so mounting
+   * is not mistaken for an external change.
+   */
+  const lastWritten = useRef(searchParams.toString());
+  const [urlEpoch, setUrlEpoch] = useState(0);
+  useEffect(() => {
+    const current = searchParams.toString();
+    if (current === lastWritten.current) return;
+    lastWritten.current = current;
+    setUrlEpoch((n) => n + 1);
+  }, [searchParams]);
 
   // ``skip``/``limit`` ride along with the filters: they are part of the
   // camelCase key set ``getObjectSeriesV2`` allowlists (anything else is a
@@ -91,25 +203,57 @@ function ObjectDetail({ object }) {
     error: pageError,
   } = useObjectSeriesV2(object.object_id, query);
 
-  // A new filter starts from the first page; changing pages must not reset it.
-  function handleApply(next) {
-    setSkip(0);
-    setFilters(next);
+  /**
+   * Write one filter state + page offset to the query string, which is the
+   * single source of truth for both. Only the dimensions that actually narrow
+   * anything are written, so a shared link reads as what the user chose rather
+   * than as a dump of every default — hence ``APPLIED_MARKER`` for the one case
+   * that would otherwise be indistinguishable from "nothing applied".
+   */
+  function writeParams(next, nextSkip) {
+    const p = new URLSearchParams();
+    if (next) {
+      if (next.expirationMin) p.set('expiration_min', next.expirationMin);
+      if (next.expirationMax) p.set('expiration_max', next.expirationMax);
+      if (next.strikeMin != null) p.set('strike_min', String(next.strikeMin));
+      if (next.strikeMax != null) p.set('strike_max', String(next.strikeMax));
+      if (next.optionType && next.optionType !== 'both') p.set('option_type', next.optionType);
+      if (next.serieType && next.serieType !== 'any') p.set('serie_type', next.serieType);
+      if (next.freq && next.freq !== 'any') p.set('freq', next.freq);
+      // Applied, but narrowing nothing. Written on EVERY such write, not just
+      // on Apply: without it, paging an unnarrowed filter would produce
+      // ``?skip=50`` alone, which reads back as "no filter" and would drop the
+      // user from page 2 straight back to the pre-Apply prompt.
+      if ([...p.keys()].length === 0) p.set(APPLIED_MARKER, '1');
+    }
+    if (nextSkip) p.set('skip', String(nextSkip));
+    // Remember what we wrote, so the panel is not remounted by our own write.
+    lastWritten.current = p.toString();
+    // A push, not a replace: each applied filter is a place the back button
+    // must be able to return to.
+    setSearchParams(p);
   }
+
+  // A new filter starts from the first page; changing pages must not reset it.
+  const handleApply = (next) => writeParams(next, 0);
+  const handlePageChange = (nextSkip) => writeParams(filters, nextSkip);
 
   /*
    * Reset means "start this object over", so it un-applies. Without clearing
-   * ``filters`` the panel would show blank fields beside the page produced by
+   * the filter the panel would show blank fields beside the page produced by
    * the filters just cleared, with no refetch to correct it and nothing on
    * screen admitting the list is stale — Reset would look like a no-op.
+   *
+   * The query string has to be cleared with it, not just the derived state:
+   * with the filter left in the URL the very next reload (or a link copied
+   * afterwards) would resurrect exactly the filter the user just cleared.
    *
    * Unlike a filter CHANGE (which must never cost the user their chart), Reset
    * is an explicit "clear everything", and leaving a chart mounted next to a
    * "set a filter" prompt would be incoherent. So the selection goes too.
    */
   function handleReset() {
-    setSkip(0);
-    setFilters(null);
+    writeParams(null, 0);
     setSelectedSerieId(null);
     setRememberedRow(null);
   }
@@ -191,9 +335,14 @@ function ObjectDetail({ object }) {
         {tab === 'series' && (
           <div className={styles.seriesLayout}>
             {/* Stays mounted: changing one dimension must not cost re-entering
-                the others. */}
+                the others. The key changes with the object and with an
+                EXTERNAL url change (back/forward, an edited address bar) —
+                never with a filter change the panel itself caused, which would
+                remount it mid-typing. See ``urlEpoch``. */}
             <SeriesFilterPanel
+              key={`${object.object_id}:${urlEpoch}`}
               objectId={object.object_id}
+              initialFilters={filters}
               onApply={handleApply}
               onReset={handleReset}
             />
@@ -215,7 +364,7 @@ function ObjectDetail({ object }) {
                   // rate objects have no contracts), instead of "serie {id}".
                   objectSymbol={object.symbol}
                   onSelect={handleSelect}
-                  onPageChange={setSkip}
+                  onPageChange={handlePageChange}
                 />
                 <div className={styles.seriesChartCol}>
                   {selectedSerie ? (

@@ -298,6 +298,109 @@ describe('SeriesFilterPanel', () => {
   });
 
   // ---------------------------------------------------------------------
+  // ``initialFilters`` — a filter state restored from somewhere the user
+  // already applied it (in practice the URL). It arrives pre-filled AND
+  // pre-applied: the recipient of a shared link must not have to press Apply.
+  // ---------------------------------------------------------------------
+
+  it('pre-fills from initialFilters and starts already applied', async () => {
+    mockFacets(OPTION_FACETS);
+    const onApply = vi.fn();
+    render(
+      <SeriesFilterPanel
+        objectId={12}
+        initialFilters={{
+          expirationMin: '2026-03-13',
+          expirationMax: '2026-03-13',
+          optionType: 'put',
+          serieType: 'bbba',
+          freq: '1m',
+        }}
+        onApply={onApply}
+      />,
+    );
+    expect(screen.getByLabelText(/expiration/i).value).toBe('2026-03-13');
+    expect(screen.getByLabelText(/series type/i).value).toBe('bbba');
+    expect(screen.getByLabelText(/frequency/i).value).toBe('1m');
+    expect(screen.getByLabelText(/option type/i).value).toBe('put');
+
+    // Already applied: a change auto-applies with no Apply click first.
+    fireEvent.change(screen.getByLabelText(/option type/i), {
+      target: { value: 'call' },
+    });
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+    expect(onApply.mock.calls[0][0]).toMatchObject({ optionType: 'call' });
+    // …and the emitted set carries the seeded dimensions too, not just the
+    // one that moved: seeding the FIELDS but not the emitted ``filters`` would
+    // silently widen the query the parent re-issues.
+    expect(onApply.mock.calls[0][0]).toMatchObject({
+      expirationMin: '2026-03-13',
+      expirationMax: '2026-03-13',
+      serieType: 'bbba',
+      freq: '1m',
+    });
+  });
+
+  it('seeds numeric strike bounds back into the inputs', () => {
+    mockFacets(OPTION_FACETS);
+    render(
+      <SeriesFilterPanel
+        objectId={12}
+        initialFilters={{ strikeMin: 6000, strikeMax: 7000.5, optionType: 'both', serieType: 'any', freq: 'any' }}
+        onApply={() => {}}
+      />,
+    );
+    // A number input's ``value`` is a string; a raw number would render as ''.
+    expect(screen.getByLabelText(/strike min/i).value).toBe('6000');
+    expect(screen.getByLabelText(/strike max/i).value).toBe('7000.5');
+  });
+
+  it('does not echo initialFilters back to the parent on mount', async () => {
+    mockFacets(OPTION_FACETS);
+    const onApply = vi.fn();
+    render(
+      <SeriesFilterPanel
+        objectId={12}
+        initialFilters={{ serieType: 'bbba', optionType: 'both', freq: 'any' }}
+        onApply={onApply}
+      />,
+    );
+    // The parent HANDED US these filters; it already has them applied. Echoing
+    // them back reads as a fresh application, and the parent's "a new filter
+    // starts from page 1" rule then discards the page a shared link asked for
+    // (``?serie_type=bbba&skip=50`` silently lands on page 1). Wait a tick so a
+    // late effect-driven emit cannot hide behind a synchronous assertion.
+    await waitFor(() => expect(screen.getByLabelText(/series type/i).value).toBe('bbba'));
+    expect(onApply).not.toHaveBeenCalled();
+
+    // …and the panel is nonetheless applied: the very next change emits.
+    fireEvent.change(screen.getByLabelText(/frequency/i), { target: { value: '1m' } });
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+  });
+
+  it('re-arms Reset even when it started from initialFilters', async () => {
+    mockFacets(OPTION_FACETS);
+    const onApply = vi.fn();
+    const onReset = vi.fn();
+    render(
+      <SeriesFilterPanel
+        objectId={12}
+        initialFilters={{ serieType: 'bbba', optionType: 'both', freq: 'any' }}
+        onApply={onApply}
+        onReset={onReset}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /reset/i }));
+    expect(onReset).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText(/series type/i).value).toBe('any');
+    // Re-gated: a restored state is still un-appliable back to nothing.
+    fireEvent.change(screen.getByLabelText(/frequency/i), { target: { value: '1m' } });
+    expect(onApply).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /apply/i }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+  });
+
+  // ---------------------------------------------------------------------
   // Shape of the emitted filter object.
   // ---------------------------------------------------------------------
 
