@@ -704,10 +704,15 @@ async def test_v1_is_unaffected_by_every_v2_precondition(
     an unrelated reason), so this pins the mechanism: the v2 service is never
     consulted, and no v2 wording appears.
     """
-    # The v1 stub is a MagicMock; give it the one async method the option path
+    # The v1 stub is a MagicMock; give it the async methods the option path
     # reaches so the request gets PAST the boundary and fails (if at all) for a
-    # data reason rather than on an un-awaitable mock.
+    # data reason rather than on an un-awaitable mock. The hold-leg freeze fix
+    # (dd8c611) added a data-source-agnostic open-probe on the two-phase hold
+    # path, so the option resolve now also reaches ``query_chain_bulk`` (a real
+    # async method the production reader provides). Empty results keep the leg a
+    # data-reason NaN — the v2 service is still never consulted.
     services["v1"].list_option_expirations_filtered = AsyncMock(return_value=[])
+    services["v1"].options_reader.query_chain_bulk = AsyncMock(return_value={})
 
     body = _body(data_source="v1", start="2020-01-01", end="2020-06-30")
     body["legs"] = {"o": _option_leg(**leg_overrides)}
@@ -872,12 +877,16 @@ async def test_signals_route_routes_each_spot_input_to_its_own_source(
     assert ("INDEX", "V1SYM") not in v2_seen
 
 
-# The pre-feature (checkpoint 02180c7) cache key for a known all-v1 body, captured
-# BEFORE the per-instrument field was added. Per-leaf ``data_source`` must be
-# OMITTED from the dump for a v1/unset leg (the conditional serializer), so this
-# key is UNCHANGED — no COMPUTE_VERSION bump, no cache invalidation for v1.
+# The cache key for a known all-v1 body. Per-leaf ``data_source`` must be OMITTED
+# from the dump for a v1/unset leg (the conditional serializer), so the per-instrument
+# field itself does NOT change the key: the ``body`` half is byte-identical to the
+# pre-feature (checkpoint 02180c7) payload. The hash below DOES differ from the
+# original pre-feature capture only because the ``_cv`` namespace was bumped
+# 0.1.13 -> 0.1.14 by the hold-leg freeze fix (dd8c611), an unrelated compute-version
+# change; forcing ``_cv="0.1.13"`` reproduces the original
+# 54eaeb5509c8e2a1c83120942785b7f7c3194c1404e82f68c7bbea2f8c4e84d8 exactly (proven).
 _PRE_FEATURE_ALL_V1_CACHE_KEY = (
-    "54eaeb5509c8e2a1c83120942785b7f7c3194c1404e82f68c7bbea2f8c4e84d8"
+    "f950317e5d5addf63f07ea0cb6d8188aca0769df12ca0fe52eaa52e06d39bc0e"
 )
 
 
@@ -902,8 +911,10 @@ def _byte_identity_body() -> dict:
 
 def test_all_v1_body_dump_has_no_leg_data_source_and_matches_pre_feature_key():
     """Byte-identity: an all-v1 body's ``model_dump`` carries NO ``data_source``
-    key on any leg (the conditional serializer omits it), so its
-    ``_portfolio_cache_key`` equals the pre-feature hash — no version bump."""
+    key on any leg (the conditional serializer omits it), so the per-instrument
+    field never perturbs the cache key. The pinned hash tracks the current
+    ``COMPUTE_VERSION`` namespace (the body half is byte-identical to pre-feature;
+    only ``_cv`` differs — see ``_PRE_FEATURE_ALL_V1_CACHE_KEY``)."""
     pr = PortfolioRequest(**_byte_identity_body())
     dump = pr.model_dump(mode="json")
     for label, leg in dump["legs"].items():
