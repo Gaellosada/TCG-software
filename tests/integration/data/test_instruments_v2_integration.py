@@ -2,25 +2,37 @@
 
 Gated by ``--run-integration`` (see ``tests/integration/conftest.py``) AND by the
 ``DWH_*`` connection variables being present (``load_dwh_config`` raises
-otherwise -> skip). Reads the 5 live v2 objects (RATE_US_CMT_1M, RATE_US_SOFR_ON,
-IND_SP_500, FUT_SP_500, OPT_SP_500_EW3) READ-ONLY via ``tcg_read``.
+otherwise -> skip). Reads the live v2 objects READ-ONLY: SELECT only, never a
+write and never DDL. The backfill is ongoing (40 objects at the time of writing:
+IND_SP_500, FUT_SP_500, 13 RATE_US_* curves and 25 OPT_SP_500_* roots), so the
+tests below name only the handful they need and assert RELATIONSHIPS rather than
+counts — every absolute number here drifts between runs.
 
 Verifies:
-  * every live object lists with the right kind;
+  * the core live objects list with the right kind;
   * the object-facets aggregate's SQL semantics (the unit tests use a fake
     cursor and never execute a statement);
   * the filtered series page's WHERE / ORDER BY / LIMIT-OFFSET semantics, for
     the same reason — plus that its LEFT JOIN keeps contract-less (index / rate)
     series listable;
   * fact-table dispatch reads the index bar series and a rate value series;
-  * futures continuous on FUT_SP_500 stitches a multi-contract series;
+  * the warehouse's actual ts GRAIN: ``1m`` facts carry a real time-of-day and
+    ``daily`` facts are stored at 00:00Z. Every other grain test in the tree runs
+    against a fake pool, so it pins the mapping and cannot see the data;
+  * futures continuous on FUT_SP_500 stitches a multi-contract series, from
+    daily bars only;
   * options continuous on OPT_SP_500_EW3 selects by strike and by moneyness,
     and rejects delta with a clean ValidationError.
+
+ORDERING MATTERS. ``test_options_continuous_strike_live`` and
+``test_options_continuous_moneyness_live`` sit at the 60 s ``statement_timeout``
+boundary and a timeout there drops the SSM tunnel, so every test declared AFTER
+them skips with a connection error. Keep them last.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -46,8 +58,22 @@ async def svc():
     await pool.close()
 
 
+def _stamps_by_utc_date(ts: list[str]) -> dict[date, list[datetime]]:
+    """Group ISO-8601 ``Z`` stamps by their UTC calendar date.
+
+    The intraday-grain tests need per-DAY resolution, not per-series: a series
+    whose stamps are all 00:00Z on distinct days looks perfectly "distinct"
+    while carrying no time-of-day at all, which is exactly the defect state.
+    """
+    out: dict[date, list[datetime]] = {}
+    for raw in ts:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        out.setdefault(stamp.astimezone(timezone.utc).date(), []).append(stamp)
+    return out
+
+
 @pytest.mark.integration
-async def test_lists_five_live_objects(svc):
+async def test_lists_the_core_live_objects(svc):
     objs = await svc.list_objects()
     by_symbol = {o["symbol"]: o for o in objs}
     for sym in (
@@ -539,6 +565,201 @@ async def test_future_contract_bars_are_daily_with_unique_dates(svc):
             f"onto YYYYMMDD ints ({len(dates)} rows, "
             f"{len(set(dates))} distinct)"
         )
+
+
+@pytest.mark.integration
+async def test_intraday_facts_carry_a_real_time_of_day_live(svc):
+    """The original defect's GROUND TRUTH — only a live read can establish it.
+
+    ``_ts_to_int`` collapsed every stamp to ``YYYYMMDD``, so a ``1m`` series
+    charted on a single abscissa per day. Task 1 fixed the mapping and the unit
+    tests pin it, but they all run against a fake pool feeding hand-written
+    datetimes: they prove the CODE formats a time-of-day when handed one. They
+    cannot prove the warehouse HAS one. If ``fact_bar`` / ``fact_bbba`` actually
+    stored ``1m`` rows at 00:00Z, the ISO mapping would be cosmetic and the chart
+    would still be a single point per day — green unit tests, broken product.
+
+    Distinctness of the ts list does NOT establish this, which is why the brief's
+    prescribed assertion is not used here. Two failure modes it gets wrong:
+
+      * ``limit=1`` on EW2's ``bbba``/``1m`` page selects serie 1159957, which
+        has exactly ONE fact row. ``len(set(ts)) == len(ts)`` on a 1-element list
+        is a tautology — measured live, the prescribed test cannot fail;
+      * a series with one 00:00Z stamp per day over 200 days is fully distinct
+        and carries no time-of-day whatsoever.
+
+    The discriminating form is per-DAY: on the busiest UTC date, the number of
+    distinct times-of-day must equal the number of rows AND exceed one. Under the
+    00:00Z hypothesis (data OR a re-collapsing mapping) that count is exactly 1
+    however many rows the day holds.
+
+    Both minute-grain fact tables are checked because they arrive from different
+    Databento feeds: ``fact_bar`` (ohlcv-1m, dense) and ``fact_bbba``
+    (tbbo-outrights, sparse — deep-OTM option quotes trade rarely).
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+
+    # --- fact_bar, dense: FUT_SP_500's 1m bar series (12 contracts). --------
+    fut_id = objs["FUT_SP_500"]["object_id"]
+    fut_page = await svc.list_object_series(fut_id, serie_type="bar", freq="1m")
+    assert fut_page["items"], "FUT_SP_500 has no bar/1m series — fixture broke"
+    # The EARLIEST already-expired contract: its history is closed, so it cannot
+    # be reshaped by the backfill. Items are ordered by expiration ascending.
+    today = date.today()
+    expired = [
+        i
+        for i in fut_page["items"]
+        if i["expiration"] and date.fromisoformat(i["expiration"]) < today
+    ]
+    assert expired, "no expired 1m bar contract on FUT_SP_500 — fixture broke"
+    chosen = expired[0]
+    # A week ending on the last trading day. Bounded on purpose: this serie holds
+    # ~60 000-125 000 minute rows and an unbounded read is tens of seconds.
+    end = date.fromisoformat(chosen["expiration"])
+    out = await svc.get_series(
+        chosen["serie_id"], start=end - timedelta(days=7), end=end
+    )
+    assert out["grain"] == "intraday", (
+        f"{chosen['contract_code']} is freq=1m but the service called it "
+        f"{out['grain']!r} — the grain mapping regressed"
+    )
+    ts = out["points"]["ts"]
+    assert ts, f"no 1m bars for {chosen['contract_code']} in the week to {end}"
+    # Type first, so a reintroduced YYYYMMDD collapse fails here and not with a
+    # TypeError inside the parser below.
+    assert all(isinstance(t, str) and t.endswith("Z") and "T" in t for t in ts), (
+        f"intraday ts are not ISO-8601 strings: {ts[:3]}"
+    )
+
+    by_day = _stamps_by_utc_date(ts)
+    busiest = max(by_day, key=lambda d: len(by_day[d]))
+    rows = by_day[busiest]
+    tods = {s.time() for s in rows}
+    # ES trades ~23h/day, so a full session is >1000 minute bars. A hundred is a
+    # generous floor that still says "this day is dense enough to discriminate".
+    assert len(rows) > 100, (
+        f"only {len(rows)} 1m bars on {busiest} — too sparse for this leg to "
+        f"discriminate; the fixture's density assumption broke"
+    )
+    assert len(tods) == len(rows), (
+        f"{busiest}: {len(rows)} minute rows collapsed onto {len(tods)} "
+        f"time(s)-of-day ({sorted(tods)[:5]}) — the warehouse is not storing "
+        f"intraday stamps for a freq=1m serie"
+    )
+    # Minute-aligned, not sub-second event times mislabelled as 1m.
+    assert all(s.second == 0 and s.microsecond == 0 for s in rows), (
+        f"{busiest}: non-minute-aligned stamps in a freq=1m serie"
+    )
+
+    # --- fact_bbba, sparse: the option root the drill-down actually charts. --
+    opt_id = objs["OPT_SP_500_EW2"]["object_id"]
+    page = await svc.list_object_series(opt_id, serie_type="bbba", freq="1m", limit=200)
+    assert page["items"], "OPT_SP_500_EW2 has no bbba/1m series — fixture broke"
+    ids = [i["serie_id"] for i in page["items"]]
+    # Pick the densest of the page rather than ``limit=1``: EW2's earliest
+    # expirations are deep-OTM puts and the first few series hold a single quote
+    # each, on which every per-day assertion below would be vacuous. This is a
+    # dimension-free lookup on the fact table's PK prefix (~0.4 s) and it is a
+    # FIXTURE CHOICE, not an oracle — it reads row counts, never a timestamp.
+    async with svc._reader._pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT serie_id, COUNT(*) AS n
+                    FROM {V2_SCHEMA}.fact_bbba
+                    WHERE serie_id = ANY(%s)
+                    GROUP BY serie_id
+                    ORDER BY n DESC, serie_id
+                    LIMIT 1""",
+                (ids,),
+            )
+            top = await cur.fetchone()
+    assert top is not None, "none of EW2's bbba/1m series has any fact row"
+
+    out = await svc.get_series(top["serie_id"])
+    assert out["grain"] == "intraday"
+    bbba_ts = out["points"]["ts"]
+    assert all(isinstance(t, str) and t.endswith("Z") for t in bbba_ts), (
+        f"intraday ts are not ISO-8601 strings: {bbba_ts[:3]}"
+    )
+    by_day = _stamps_by_utc_date(bbba_ts)
+    busiest = max(by_day, key=lambda d: len(by_day[d]))
+    rows = by_day[busiest]
+    tods = {s.time() for s in rows}
+    # Measured 71 quotes on the busiest day of the densest of 200 series, so
+    # ">1" has ample margin. It is nonetheless the hard floor, because ">1" is
+    # precisely what the 00:00Z hypothesis cannot satisfy.
+    assert len(rows) > 1, (
+        f"the densest of {len(ids)} bbba/1m series has {len(rows)} row(s) on its "
+        f"busiest day — this leg cannot discriminate any more"
+    )
+    assert len(tods) == len(rows), (
+        f"{busiest}: {len(rows)} bbba quotes share {len(tods)} time(s)-of-day "
+        f"({sorted(tods)[:5]}) — fact_bbba is not storing intraday stamps"
+    )
+    assert all(s.second == 0 and s.microsecond == 0 for s in rows)
+
+
+@pytest.mark.integration
+async def test_daily_facts_are_stored_at_midnight_and_stay_int_dates_live(svc):
+    """The other half of the grain contract: ``daily`` must NOT be intraday.
+
+    ``_ts_to_int`` is only lossless because the warehouse stores daily facts at
+    exactly 00:00Z, one row per date. That is an ASSUMPTION about the data, and
+    the leg that checks it (the raw ``SELECT ts`` below) is deliberately
+    code-free: no production mutation can turn it red, and none should — its job
+    is to fail when the warehouse changes under us, e.g. if a vendor starts
+    stamping daily settlements at their local close. Were that to happen,
+    ``_ts_to_int`` would start silently shifting dates across the UTC boundary.
+
+    The second leg then pins the mapping against that raw read as an INDEPENDENT
+    oracle: the YYYYMMDD ints the service returns must equal the dates of the raw
+    stamps, recomputed here with ``strftime`` rather than by importing the
+    production helper. Flipping the grain either way (``_DAILY_FREQS`` gaining
+    ``1m`` or losing ``daily``) breaks one of the two legs.
+    """
+    objs = {o["symbol"]: o for o in await svc.list_objects()}
+    ind_id = objs["IND_SP_500"]["object_id"]
+    page = await svc.list_object_series(ind_id, serie_type="bar", freq="daily")
+    assert page["items"], "IND_SP_500 has no bar/daily serie — fixture broke"
+    serie_id = page["items"][0]["serie_id"]
+
+    # One closed year. The serie spans 1927.. and an unbounded read is ~5 s; the
+    # window keeps this test fast and its span is history, so it cannot drift.
+    start, end = date(2024, 1, 1), date(2024, 12, 31)
+
+    # Leg 1 — the data. Bounds replicate ``_bounds``: [start, end + 1 day).
+    async with svc._reader._pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT ts FROM {V2_SCHEMA}.fact_bar
+                    WHERE serie_id = %s AND ts >= %s AND ts < %s
+                    ORDER BY ts""",
+                (serie_id, start, end + timedelta(days=1)),
+            )
+            raw = [r["ts"] for r in await cur.fetchall()]
+    assert len(raw) > 200, f"only {len(raw)} daily index bars in 2024"
+    utc = [
+        t.astimezone(timezone.utc) if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        for t in raw
+    ]
+    offenders = sorted({t.time() for t in utc} - {datetime.min.time()})
+    assert not offenders, (
+        f"daily facts carry a time-of-day ({offenders[:5]}) — _ts_to_int is "
+        f"dropping information and can shift dates across the UTC boundary"
+    )
+    dates = [t.date() for t in utc]
+    assert len(set(dates)) == len(dates), (
+        "two daily fact rows share a date, so their YYYYMMDD ints collide"
+    )
+
+    # Leg 2 — the mapping, against leg 1 as an independent oracle.
+    out = await svc.get_series(serie_id, start=start, end=end)
+    assert out["grain"] == "daily", f"freq=daily mapped to {out['grain']!r}"
+    got = out["points"]["ts"]
+    assert all(isinstance(t, int) for t in got), f"daily ts are not ints: {got[:3]}"
+    assert got == [int(d.strftime("%Y%m%d")) for d in dates], (
+        "the service's YYYYMMDD ints do not reproduce the raw stamps' dates"
+    )
 
 
 @pytest.mark.integration
