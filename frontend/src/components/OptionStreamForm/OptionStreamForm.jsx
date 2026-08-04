@@ -1,6 +1,7 @@
 import { useMemo, useCallback, useId, useEffect, useRef, useState } from 'react';
 import styles from './OptionStreamForm.module.css';
 import ImpliedLeverageReadout, { BAND_COLORS } from './ImpliedLeverageReadout';
+import { isPremiumRuinSizing } from './premiumRuinSizing';
 
 /**
  * Standalone, side-effect-free form for picking every field needed to
@@ -336,6 +337,18 @@ const FUTURES_NOTIONAL_HELP =
   + "quantity is sized off the reference future's dollar notional (F_ref = its "
   + 'price, M_fut = its contract multiplier), not the option premium.';
 
+// Advisory (NON-blocking) note shown when a held long option leg is sized to
+// spend ~the full NAV on premium at every roll (premium-notional, nav_times ~1,
+// full-NAV weight). This is correct P&L, but a long option held to expiry
+// usually decays toward zero, so the equity is expected to bleed down — which
+// users may not intend. Points to Futures notional as the notional-exposure
+// alternative. Factual, no wire-field change.
+const PREMIUM_RUIN_WARNING =
+  'This sizing spends approximately the full NAV on option premium at every '
+  + 'roll. A long option held to expiry usually decays toward zero, so the '
+  + 'equity is expected to bleed down over time (correct P&L, but often '
+  + 'unintended). For notional exposure instead, set Sizing to Futures notional.';
+
 // ── Size (nav_times multiplier) field labels + tooltips, mode-aware ─────────
 // nav_times is a plain FACTOR (default 1 = unlevered), NOT a percentage. The
 // label + tooltip read as a multiplier in both sizing modes.
@@ -447,13 +460,29 @@ function SizeAndLeverage({
           </span>
         </>
       ) : (
-        <ImpliedLeverageReadout
-          streamValue={streamValue}
-          navFraction={navTimes}
-          availableRoots={availableRoots}
-          referenceDate={referenceDate}
-          onBand={setNavBand}
-        />
+        <>
+          {/* Advisory (non-blocking) full-NAV-premium ruin note. SizeAndLeverage
+              only renders in HELD contexts (holdRequired, or hold toggled on),
+              so forcing hold_between_rolls true here is truthful; weight is not
+              known at the form, so the helper treats it as long full-NAV (the
+              add/edit default). */}
+          {isPremiumRuinSizing({ ...streamValue, sizing_mode: sizingMode, hold_between_rolls: true }) && (
+            <span
+              data-testid="premium-ruin-warning"
+              role="note"
+              style={{ fontSize: '0.85em', color: BAND_COLORS.red || undefined }}
+            >
+              {PREMIUM_RUIN_WARNING}
+            </span>
+          )}
+          <ImpliedLeverageReadout
+            streamValue={streamValue}
+            navFraction={navTimes}
+            availableRoots={availableRoots}
+            referenceDate={referenceDate}
+            onBand={setNavBand}
+          />
+        </>
       )}
     </>
   );

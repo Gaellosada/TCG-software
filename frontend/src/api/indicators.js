@@ -7,6 +7,20 @@
 
 import { API_BASE } from './base';
 import { listCollections, listInstruments } from './data';
+import { dataSourceFieldsForRequest } from '../lib/dataSource';
+
+/**
+ * Normalise the per-instrument market-data source on a single series ref for
+ * the wire. The source rides the ref itself (v2 only); a v1/absent ref carries
+ * no ``data_source`` key so the request stays byte-identical to a pre-feature
+ * payload. Any stale source key (either casing) is stripped before re-emitting
+ * via the shared ``dataSourceFieldsForRequest`` so nothing leaks un-encoded.
+ */
+function seriesRefForWire(ref) {
+  if (!ref || typeof ref !== 'object') return ref;
+  const { data_source, dataSource, ...rest } = ref;
+  return { ...rest, ...dataSourceFieldsForRequest(data_source ?? dataSource) };
+}
 
 /**
  * POST an indicator-compute request and return the parsed response.
@@ -35,7 +49,13 @@ export async function computeIndicator(
   { code, params, series, asset_type, compatible_asset_types, start, end },
   { signal, onProgress } = {},
 ) {
-  const body = { code, params, series };
+  // Per-instrument source: normalise each series ref so 'v2' rides that ref and
+  // v1/absent emits nothing (byte-identical). Non-object ``series`` passes
+  // through untouched.
+  const seriesForWire = (series && typeof series === 'object')
+    ? Object.fromEntries(Object.entries(series).map(([label, ref]) => [label, seriesRefForWire(ref)]))
+    : series;
+  const body = { code, params, series: seriesForWire };
   // Only attach when explicitly provided so we don't bait the backend
   // compatibility check on requests that have no registry context.
   if (typeof asset_type === 'string' && asset_type) {

@@ -109,6 +109,14 @@
   cursor: not-allowed;
 }
 
+/* Visible disabled-reason next to a locked control — replaces a hover-only
+   ``title``, which is invisible on touch and unreliable for screen readers. */
+.controlNote {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .kindBadge {
   font-size: 0.65rem;
   font-weight: 600;

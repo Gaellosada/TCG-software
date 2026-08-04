@@ -10,6 +10,7 @@
 // aborts; the status probe treats such a body as un-keyable).
 
 import { buildComputeRequestBody, costFieldsForRequest } from '../Signals/requestBuilder';
+import { dataSourceFieldsForRequest } from '../../lib/dataSource';
 import { persistedDocToLegs } from './persistedDoc';
 import { getChildPortfolioId } from './resolvePortfolioRange';
 
@@ -162,6 +163,12 @@ export function buildPortfolioComputeBody({
           // The parent's roll overlay never touches a portfolio leg, so the
           // child's internal rolls are charged exactly once (no double-charge).
           ...costFields,
+          // A composed leg carries no source of its own — each of the child's
+          // inlined leaves carries its OWN per-instrument ``data_source`` (from
+          // the persisted child spec). So the child sub-body emits no body-level
+          // ``data_source`` (byte-identical to a pre-feature payload) and the
+          // backend binds each leaf to the warehouse its own source names.
+          ...dataSourceFieldsForRequest(leg.dataSource),
         },
       };
     } else if (leg.type === 'signal') {
@@ -186,6 +193,8 @@ export function buildPortfolioComputeBody({
         maturity: leg.maturity,
         selection: leg.selection,
         stream: leg.stream,
+        // Per-instrument source (leg's own → build default → v1); 'v2' only.
+        ...dataSourceFieldsForRequest(leg.dataSource),
       };
       // An option PRICE leg (mid/bs_mid) is hold-ON-only; always send hold for a
       // premium leg (covers legacy legs too). Level streams (iv/greeks) never hold.
@@ -211,6 +220,8 @@ export function buildPortfolioComputeBody({
         collection: leg.collection,
         strategy: leg.strategy || 'front_month',
         adjustment: leg.adjustment || 'none',
+        // Per-instrument source (leg's own → build default → v1); 'v2' only.
+        ...dataSourceFieldsForRequest(leg.dataSource),
       };
       if (leg.cycle) {
         apiLegs[leg.label].cycle = leg.cycle;
@@ -226,6 +237,8 @@ export function buildPortfolioComputeBody({
         type: 'instrument',
         collection: leg.collection,
         symbol: leg.symbol,
+        // Per-instrument source (leg's own → build default → v1); 'v2' only.
+        ...dataSourceFieldsForRequest(leg.dataSource),
       };
     }
   }
@@ -253,6 +266,10 @@ export function buildPortfolioComputeBody({
       // discarded (the parent re-emits them onto the inlined child sub-body via
       // ``costFields`` above), so guard on depth to keep childBuilt.body clean.
       ...(_depth === 0 ? costFields : {}),
+      // NOTE: no top-level ``data_source`` field. Per-instrument, the source
+      // rides each LEAF (and each composed child's body-level default), never a
+      // separate run-level body field. A pure-v1 body is thus byte-identical to
+      // a pre-feature payload.
     },
     missing: [...new Set(missing)],
     missingByLeg,

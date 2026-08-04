@@ -23,13 +23,24 @@ from tcg.core.api._dates import parse_iso_range
 from tcg.core.api._models import (
     OptionStreamLabel,
     OptionStreamRef,
+    _PerInstrumentSourceMixin,
     _validate_nav_times,
 )
 from tcg.core.api._models_options import MaturityRule, RollOffset, SelectionCriterion
 from tcg.core.api._options_materialise import materialise_option_streams
 from tcg.core.api._serializers import nan_safe_floats, sanitize_json_floats
 from tcg.core.cache import DiskResultCache, canonical_hash
-from tcg.core.api.common import get_market_data
+from tcg.core.api.common import (
+    DataSource,
+    effective_data_source,
+    get_market_data,
+    get_market_data_for,
+)
+from tcg.core.api._v2_preconditions import (
+    check_v2_option_coverage_floor,
+    check_v2_preconditions,
+    collect_v2_option_roots,
+)
 from tcg.core.api._persistence_wiring import get_write_repository
 from tcg.core.api.signals import (
     IndicatorSpecIn,
@@ -563,7 +574,12 @@ class SignalLegSpec(BaseModel):
     indicators: list[IndicatorSpecIn] = Field(default_factory=list)
 
 
-class LegSpec(BaseModel):
+class LegSpec(_PerInstrumentSourceMixin):
+    # Per-instrument warehouse selector ``data_source`` (``"v1"``/``"v2"``, or
+    # inherit the run default) comes from ``_PerInstrumentSourceMixin`` and is
+    # OMITTED from the JSON dump when unset/``"v1"`` — so an all-v1 portfolio
+    # body's ``_portfolio_cache_key`` stays byte-identical to before the feature
+    # (no COMPUTE_VERSION bump). ``_strip_use_cache`` must NEVER touch it.
     type: str  # "instrument", "continuous", "signal", or "option_stream"
     collection: str | None = (
         None  # Required for "instrument"/"continuous"/"option_stream"
@@ -726,6 +742,13 @@ class PortfolioRequest(BaseModel):
     # WHETHER to use the cache, not WHICH entry, so a later ``use_cache=True``
     # compute of the same body still hits an entry a prior cached compute wrote.
     use_cache: bool = True
+    # Which warehouse this run reads. "v1" (DEFAULT) = tcg_instruments, the
+    # frozen reference; "v2" = tcg_instruments_v2 through the compat adapter.
+    # UNLIKE ``use_cache`` this is compute-affecting, so it is DELIBERATELY part
+    # of the cache key (``_portfolio_cache_key`` hashes the whole body and
+    # ``_strip_use_cache`` must never learn about it) — two runs differing only
+    # in source are two different results.
+    data_source: DataSource = "v1"
 
 
 # ``LegSpec.portfolio`` is typed ``PortfolioRequest`` (a composed leg inlines a
@@ -847,6 +870,9 @@ async def _evaluate_signal_leg(
     end_date: date | None,
     repo: WriteRepository,
     cost_config: CostConfig | None = None,
+    *,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
+    default_source: DataSource = "v1",
 ) -> _SignalLegEvalResult:
     """Evaluate a signal leg and bubble up everything the portfolio path needs.
 
@@ -904,6 +930,17 @@ async def _evaluate_signal_leg(
             },
         )
 
+    # Per-instrument v1/v2 selection: each of this signal leg's INPUTS carries its
+    # own ``data_source`` and inherits ``default_source`` (the leg's effective
+    # source) when omitted. ``inst_svc_for`` maps a ref source → service; when the
+    # route did not supply ``svc_for`` every input resolves to the single ``svc``
+    # (byte-identical to before).
+    inst_svc_for = None
+    if svc_for is not None:
+        inst_svc_for = lambda own: svc_for(  # noqa: E731
+            effective_data_source(own, default_source)
+        )
+
     # 3. Compute input overlap dates
     try:
         overlap_start, overlap_end = await compute_input_overlap(
@@ -911,12 +948,15 @@ async def _evaluate_signal_leg(
             signal,
             start_date,
             end_date,
+            svc_for=inst_svc_for,
         )
     except SignalDataError as exc:
         raise ValidationError(f"Leg '{label}': signal data error: {exc}") from exc
 
     # 4. Create fetcher and evaluate
-    fetcher = make_signal_fetcher(svc, overlap_start, overlap_end)
+    fetcher = make_signal_fetcher(
+        svc, overlap_start, overlap_end, svc_for=inst_svc_for
+    )
     try:
         # Thread the run's transaction-cost config so the signal leg's INTERNAL
         # entries/exits/rolls fold into its synthetic equity — exactly mirroring
@@ -1517,7 +1557,20 @@ def _get_result_cache() -> DiskResultCache:
 # shared cache entry) instead of the parent's narrowed range. Composed entries
 # cached under the old re-anchor model are numerically different, so this bump
 # invalidates them (they can never be served with ``from_cache: true``).
-COMPUTE_VERSION = "0.1.12"
+#
+# 0.1.12 → 0.1.13: per-run ``data_source`` switch. Adding a defaulted field to
+# ``PortfolioRequest`` changes ``model_dump()`` and therefore EVERY key, so all
+# pre-existing durable entries are invalidated. That is deliberate and harmless:
+# the recomputed v1 output is byte-identical to what those entries held.
+#
+# 0.1.13 → 0.1.14: hold-mode option-stream gap-open fix. A ``hold_between_rolls``
+# leg whose maturity roll landed a new segment's OPEN on a globally-missing mark
+# day previously abandoned the WHOLE segment (NaN → frozen equity through the gap,
+# e.g. the COVID-crash freeze of "Short S&P 10 delta put 2M DB v2"). The resolver
+# now opens the segment on the first genuinely-quoted date and re-syncs to the real
+# marks. Any cached curve for a strategy that crossed such a gap is stale (frozen)
+# and MUST be invalidated; gap-free strategies recompute byte-identically.
+COMPUTE_VERSION = "0.1.14"
 
 
 def _strip_use_cache(obj: object) -> object:
@@ -1560,7 +1613,9 @@ def _portfolio_cache_key(body: PortfolioRequest) -> str:
     return canonical_hash({"_cv": COMPUTE_VERSION, "body": payload})
 
 
-def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest:
+def _child_request(
+    child: PortfolioRequest, use_cache: bool
+) -> PortfolioRequest:
     """Build the compute sub-request for a composed leg's child (fund-of-funds).
 
     The child is computed over its OWN resolved range — ``child.start`` /
@@ -1578,10 +1633,18 @@ def _child_request(child: PortfolioRequest, use_cache: bool) -> PortfolioRequest
     """
     # model_copy preserves EVERY current and future PortfolioRequest field
     # verbatim (so a schema addition can never silently diverge the composed
-    # child key from a standalone compute), overriding ONLY ``use_cache``. That
-    # is the sole intentional override — it propagates the parent's cache
-    # preference (a use_cache=False compute recomputes every child fresh) and is
-    # stripped from the key anyway, so it never breaks unified reuse (SC2).
+    # child key from a standalone compute), overriding ONLY ``use_cache``:
+    #
+    # * ``use_cache`` propagates the parent's cache preference (a
+    #   use_cache=False compute recomputes every child fresh) and is stripped
+    #   from the key anyway, so it never breaks unified reuse (SC2).
+    #
+    # The child's OWN ``data_source`` is KEPT (never forced to the parent's). The
+    # caller (_evaluate_portfolio_leg) binds the service that matches this child
+    # body's data_source via ``svc_for``, so body and reality stay in lock-step
+    # per-child — key-parity holds against a standalone compute of the child ON
+    # ITS OWN SOURCE. This is what lets a composed portfolio mix v1 and v2
+    # children (a special case of per-instrument selection).
     return child.model_copy(update={"use_cache": use_cache})
 
 
@@ -1592,6 +1655,8 @@ async def _evaluate_portfolio_leg(
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
     use_cache: bool,
+    data_source: DataSource,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Evaluate a composed-portfolio leg to a synthetic equity price series.
 
@@ -1651,7 +1716,25 @@ async def _evaluate_portfolio_leg(
     # an already-computed child is served from the SAME on-disk cache entry
     # (unified reuse; the key-parity invariant, SC2). See ``_child_request``.
     child_body = _child_request(child, use_cache)
-    child_result = await compute_portfolio(child_body, svc, classify, repo)
+    # Bind the service that matches THIS child's own data_source (not the
+    # parent's). ``svc_for`` resolves a source→service; it is only supplied by the
+    # top-level route (which holds the ``Request``). When absent (any non-route
+    # caller) we fall back to the parent's ``svc`` — byte-identical to the
+    # previous behaviour. Rebinding the classifier from the child's service too
+    # keeps them from ever drifting (they are identical today, but this is free
+    # correctness).
+    if svc_for is not None:
+        child_svc = svc_for(child_body.data_source)
+        child_classify = child_svc.asset_class_for
+    else:
+        child_svc, child_classify = svc, classify
+    # Recurse into the CACHE WRAPPER, not the route function: the route's only
+    # extra job is binding ``svc`` from ``body.data_source``, which we have just
+    # done per-child. Going through the route would need a ``Request`` this layer
+    # does not have.
+    child_result = await _compute_portfolio_cached(
+        child_body, child_svc, child_classify, repo, svc_for=svc_for
+    )
 
     # Convert the child response back to the engine's YYYYMMDD-int date grid +
     # float64 equity array.  ``portfolio_equity`` was passed through
@@ -1673,11 +1756,60 @@ async def _evaluate_portfolio_leg(
 # ---------------------------------------------------------------------------
 
 
+async def _check_v2_option_legs(
+    body: PortfolioRequest,
+    svc_for: "Callable[[DataSource], MarketDataService]",
+    start_date: date | None,
+) -> None:
+    """Reject a v2 run this warehouse cannot serve, before the engine sees it.
+
+    Both checks exist HERE rather than in the options reader because the reader
+    is called per expiration group and never sees the run as a whole. Neither is
+    an engine change (Sign 3): the engine is handed a request it can serve, or
+    the request never reaches it.
+
+    **Missing cycle filter.** The v2 reader DOES raise on this, but the engine's
+    Phase-B year-chunk resolver catches every per-chunk exception and degrades to
+    the per-expiration path, which then yields an all-NaN stream. The user sees
+    "all option stream values are NaN … no_chain_for_date" — a 400, but one that
+    names neither the cause nor the fix. Checking at the boundary keeps the
+    actionable message (SC8). v1 returns monthlies AND weeklies for an unfiltered
+    leg while v2 can only return weeklies, so serving it would silently compare
+    two different strategies.
+
+    **Start before the v2 floor (spec E7).** Delegated to
+    :func:`check_v2_option_coverage_floor`, which the SIGNALS route calls too —
+    the rationale is written there. It used to be inline here, which left the
+    signals path with no floor check at all.
+
+    Per-instrument: each leg is gated on its OWN effective source, so this checks
+    ONLY the v2 legs. An all-v1 portfolio (no v2 node anywhere) no-ops entirely —
+    the v2 service is never resolved and never consulted (Sign 1) — as does a
+    portfolio with no v2 option legs; the floor check additionally no-ops for an
+    open-ended start.
+    """
+    payload = body.model_dump(mode="json")
+
+    # The PURE preconditions — collection, cycle, stream — for every v2 leg at
+    # every nesting depth (composed children, signal legs, basket legs). Gates
+    # per node on the effective source, inheriting ``body.data_source``.
+    check_v2_preconditions(payload, data_source=body.data_source)
+
+    # Roots come from the same walk as the preconditions rather than from
+    # ``body.legs`` alone, so an option nested inside a signal or basket leg
+    # gets the same floor as a top-level one. Only v2 option roots are returned,
+    # so the v2 service (``svc_for("v2")``) is resolved only when one exists.
+    roots = collect_v2_option_roots(payload, data_source=body.data_source)
+    if roots:
+        await check_v2_option_coverage_floor(roots, svc_for("v2"), start_date)
+
+
 async def _compute_portfolio_uncached(
     body: PortfolioRequest,
     svc: MarketDataService,
     classify: Callable[[str], AssetClass | None],
     repo: WriteRepository,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
 ) -> dict:
     """Compute a weighted portfolio with rebalancing and return full analytics.
 
@@ -1687,6 +1819,20 @@ async def _compute_portfolio_uncached(
     cache only decides whether this body runs. The returned dict is the fully
     sanitized result WITHOUT the ``from_cache``/``computed_ms`` response metadata
     (those are added by the wrapper, never stored)."""
+
+    # Per-instrument v1/v2 selection: ``svc_for`` maps a CONCRETE source to its
+    # service. Only the route supplies it (it holds the ``Request`` that reaches
+    # both services); every other caller passes None, so fall back to a resolver
+    # that returns the single ``svc`` for any source — byte-identical to the
+    # pre-per-instrument single-service behaviour. With the fallback in place the
+    # rest of this function can resolve per leg uniformly.
+    if svc_for is None:
+        svc_for = lambda _ds: svc  # noqa: E731
+
+    # Resolve the service a leg reads from, honouring the ref's own source and
+    # inheriting the body default (the frozen precedence, ``effective_data_source``).
+    def _leg_svc(leg: LegSpec) -> MarketDataService:
+        return svc_for(effective_data_source(leg.data_source, body.data_source))
 
     # ── 1. Validate inputs ──
 
@@ -1749,6 +1895,8 @@ async def _compute_portfolio_uncached(
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 
+    await _check_v2_option_legs(body, svc_for, start_date)
+
     # ── 2. Separate legs by type ──
 
     instrument_legs = {
@@ -1785,10 +1933,56 @@ async def _compute_portfolio_uncached(
     if instrument_legs:
         legs_spec = _parse_legs(body.legs, classify)
 
-        # Fetch full overlapping date range for instrument legs.
-        full_common_dates, full_aligned_series = await svc.get_aligned_prices(
-            legs_spec,
-        )
+        # Per-instrument source split: partition the instrument+continuous legs by
+        # their EFFECTIVE ``data_source`` and issue ONE ``get_aligned_prices`` per
+        # source group, then intersect the returned date grids and merge the
+        # aligned series onto the common grid.  INVARIANT: a single-source
+        # portfolio (every leg on the same warehouse — the all-v1 default) issues
+        # EXACTLY ONE call, on that one service, with the WHOLE ``legs_spec`` — so
+        # its behaviour and performance are byte-identical to before the split.
+        legs_by_source: dict[DataSource, dict[str, object]] = {}
+        for label in instrument_legs:
+            ds = effective_data_source(body.legs[label].data_source, body.data_source)
+            legs_by_source.setdefault(ds, {})[label] = legs_spec[label]
+
+        if len(legs_by_source) == 1:
+            (only_source,) = legs_by_source
+            full_common_dates, full_aligned_series = await svc_for(
+                only_source
+            ).get_aligned_prices(legs_by_source[only_source])
+        else:
+            # Multi-source: fetch each group on its own service, intersect grids.
+            group_results: list[
+                tuple[npt.NDArray[np.int64], dict[str, object]]
+            ] = []
+            for ds, subset in legs_by_source.items():
+                grid, series_map = await svc_for(ds).get_aligned_prices(subset)
+                group_results.append((grid, series_map))
+            full_common_dates = group_results[0][0]
+            for grid, _series_map in group_results[1:]:
+                full_common_dates = np.intersect1d(
+                    full_common_dates, grid, assume_unique=False
+                )
+            if full_common_dates.size == 0:
+                raise ValidationError(
+                    "No overlapping dates across instrument legs from different "
+                    "data sources (v1 and v2 histories often start years apart)"
+                )
+            # Re-index each group's series onto the shared grid. Each group's grid
+            # is sorted-unique (get_aligned_prices contract) and a superset of the
+            # intersection, so ``grid ∈ common`` masks to exactly ``common`` order.
+            full_aligned_series = {}
+            for grid, series_map in group_results:
+                mask = np.isin(grid, full_common_dates, assume_unique=True)
+                for label, series in series_map.items():
+                    full_aligned_series[label] = type(series)(
+                        dates=series.dates[mask],
+                        open=series.open[mask],
+                        high=series.high[mask],
+                        low=series.low[mask],
+                        close=series.close[mask],
+                        volume=series.volume[mask],
+                    )
         instrument_full_dates = full_common_dates
 
         # Apply optional date filter
@@ -1844,11 +2038,13 @@ async def _compute_portfolio_uncached(
         leg_result = await _evaluate_signal_leg(
             label,
             leg,
-            svc,
+            _leg_svc(leg),
             start_date,
             end_date,
             repo,
             cost_config,
+            svc_for=svc_for,
+            default_source=effective_data_source(leg.data_source, body.data_source),
         )
         signal_dates_map[label] = leg_result.index
         signal_closes[label] = leg_result.synthetic
@@ -1904,7 +2100,7 @@ async def _compute_portfolio_uncached(
             label,
             leg,
             body.weights[label],
-            svc,
+            _leg_svc(leg),
             start_date,
             end_date,
         )
@@ -1957,6 +2153,8 @@ async def _compute_portfolio_uncached(
             classify,
             repo,
             body.use_cache,
+            body.data_source,
+            svc_for=svc_for,  # route-supplied source→service resolver (per-instrument)
         )
         portfolio_leg_dates_map[label] = pf_dates
         portfolio_leg_closes[label] = pf_equity
@@ -2129,7 +2327,7 @@ async def _compute_portfolio_uncached(
             if not isinstance(spec, ContinuousLegSpec):
                 continue
             try:
-                cseries = await svc.get_continuous(
+                cseries = await _leg_svc(leg).get_continuous(
                     spec.collection, spec.roll_config, start=start_date, end=end_date
                 )
             except Exception as exc:  # noqa: BLE001 — cost overlay, never fail compute
@@ -2223,7 +2421,7 @@ async def _compute_portfolio_uncached(
         if not isinstance(spec, ContinuousLegSpec):
             continue
         try:
-            cseries = await svc.get_continuous(
+            cseries = await _leg_svc(leg).get_continuous(
                 spec.collection,
                 spec.roll_config,
                 start=start_date,
@@ -2579,11 +2777,51 @@ async def _compute_portfolio_uncached(
 @router.post("/compute")
 async def compute_portfolio(
     body: PortfolioRequest,
+    request: Request,
     svc: MarketDataService = Depends(get_market_data),
     classify: Callable[[str], AssetClass | None] = Depends(get_collection_classifier),
     repo: WriteRepository = Depends(get_write_repository),
 ) -> dict:
+    """Bind the run's data source, then compute (see ``_compute_portfolio_cached``).
+
+    This is the ONLY place a compute learns which warehouse it reads. Everything
+    below takes ``svc`` as a plain argument, so rebinding it here propagates to
+    the engine fetcher, the option-stream wiring and every nested leg without a
+    single further edit.
+
+    ``data_source="v1"`` (the default, and every request that omits the field)
+    keeps the exact object ``Depends(get_market_data)`` resolved, so the default
+    path is bit-for-bit what it was (Sign 1). The classifier is rebound from the
+    SAME service for v2 rather than shared, so the two can never drift even
+    though their ``asset_class_for`` implementations are currently identical.
+    """
+    if body.data_source != "v1":
+        svc = get_market_data_for(request, body.data_source)
+        classify = svc.asset_class_for
+    # Supply a source→service resolver so EACH leg (and each composed child) binds
+    # the warehouse matching its own ``data_source`` — the general per-instrument
+    # rule. Only this route holds the ``Request`` needed to reach both services on
+    # app.state, so the resolver is created here and threaded down; every other
+    # caller passes None and keeps the single-service behaviour.
+    def _svc_for(ds: DataSource) -> MarketDataService:
+        return get_market_data_for(request, ds)
+
+    return await _compute_portfolio_cached(body, svc, classify, repo, svc_for=_svc_for)
+
+
+async def _compute_portfolio_cached(
+    body: PortfolioRequest,
+    svc: MarketDataService,
+    classify: Callable[[str], AssetClass | None],
+    repo: WriteRepository,
+    svc_for: "Callable[[DataSource], MarketDataService] | None" = None,
+) -> dict:
     """Compute a weighted portfolio, served from the on-disk result cache.
+
+    ``svc_for`` (source→service resolver, route-only) is threaded through so each
+    leg — and each composed child — is computed against its own ``data_source``
+    (per-instrument selection). Defaults to None → the parent ``svc`` is used
+    everywhere (byte-identical to before) for every non-route caller.
 
     The result is content-addressed on the request body (children already
     inlined), so:
@@ -2610,7 +2848,7 @@ async def compute_portfolio(
     # Cache opt-out: skip the cache on both ends — never read, never write.
     if not body.use_cache:
         started = time.perf_counter()
-        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        result = await _compute_portfolio_uncached(body, svc, classify, repo, svc_for=svc_for)
         computed_ms = int((time.perf_counter() - started) * 1000)
         return {**result, "from_cache": False, "computed_ms": computed_ms}
 
@@ -2625,7 +2863,7 @@ async def compute_portfolio(
 
     async def _compute() -> dict:
         compute_started = time.perf_counter()
-        result = await _compute_portfolio_uncached(body, svc, classify, repo)
+        result = await _compute_portfolio_uncached(body, svc, classify, repo, svc_for=svc_for)
         meta["computed_ms"] = int((time.perf_counter() - compute_started) * 1000)
         return result
 

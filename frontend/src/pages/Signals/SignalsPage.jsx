@@ -16,7 +16,9 @@ import {
   createSignal, updateSignal, archiveSignal,
   setSignalLocked, describePersistenceError, isLockedError,
 } from '../../api/persistence';
+import { useQueryClient } from '@tanstack/react-query';
 import { useSignalsList, useInvalidatePersistence } from '../../hooks/persistenceQueries';
+import { queryKeys } from '../../queryKeys';
 import { buildComputeRequestBody } from './requestBuilder';
 import { computeRunGate } from './runGate';
 import { countOwnPanelIndicators } from './resultsPlotTraces';
@@ -104,6 +106,7 @@ function SignalsPage() {
   // — exactly as before; the query only supplies fresh server snapshots.
   const signalsQuery = useSignalsList(persistedCategory);
   const invalidate = useInvalidatePersistence();
+  const queryClient = useQueryClient();
 
   // Re-hydrate local state whenever the query lands a new server snapshot.
   // This is the v5-canonical replacement for the old fetchSignals(): same
@@ -484,10 +487,25 @@ function SignalsPage() {
     // After a successful save, set last-hydrated to the just-sent payload
     // so the same content doesn't immediately re-trigger the debounce.
     lastHydratedPayloadRef.current = { id: selectedId, payload: payloadStr };
-    // Note: we intentionally do NOT re-fetch the full signal list after
-    // every autosave — it would cause selection flicker and reset scroll.
-    // The local state is authoritative until a category change or add/delete.
-  }, [selectedId]);
+    // AND patch the signals LIST cache entry for this doc with the just-saved
+    // payload. The hydration effect above re-seeds local ``signals`` state from
+    // ``signalsQuery.data`` via ``hydrateFromPersisted`` whenever that query
+    // data changes (e.g. a remount within the 10s stale window — the user's
+    // "navigate away and back"). Without this patch the list retained the
+    // PRE-EDIT doc, so the re-seed silently reverted the saved change even
+    // though the backend held the new version (the Portfolio-page bug fixed in
+    // da3029f). ``body`` is the RAW persisted-doc shape (SignalOut field names:
+    // name/inputs/rules/settings/description/category), so ``hydrateFromPersisted``
+    // reproduces the edit from the patched entry; ``id``/``locked`` are preserved
+    // from the prior entry. ``setQueryData`` is a PURE cache update (no refetch →
+    // no flicker), so it keeps the no-flicker behaviour noted above.
+    queryClient.setQueryData(
+      queryKeys.persistence.signals.list(body.category || persistedCategory),
+      (prev) => (Array.isArray(prev)
+        ? prev.map((d) => (d.id === selectedId ? { ...d, ...body, id: selectedId } : d))
+        : prev),
+    );
+  }, [selectedId, persistedCategory, queryClient]);
 
   const {
     status: cloudStatus,
@@ -558,7 +576,13 @@ function SignalsPage() {
     // Global execution costs read once here (single localStorage read site) and
     // threaded into the built body so the wire carries slippage_bps/fees_bps.
     const costs = { slippageBps: getSlippageBps(), feesBps: getFeesBps() };
-    const { body, missing } = buildComputeRequestBody(selectedSignal, availableIndicators, costs);
+    // Per-instrument source rides each input's instrument ref (set at add time);
+    // there is no page/run-level default to thread here.
+    const { body, missing } = buildComputeRequestBody(
+      selectedSignal,
+      availableIndicators,
+      costs,
+    );
     if (missing.length > 0) {
       setError({
         error_type: 'validation',

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any
+from typing import Any, Callable, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -45,6 +45,13 @@ from tcg.types.signal import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-instrument warehouse resolver: maps a leaf's OWN ``data_source``
+# (``"v1"`` / ``"v2"`` / ``None`` = inherit) to the matching ``MarketDataService``.
+# The inheritance default is baked into the closure by the caller, so the fetch
+# layer only ever asks "which service for THIS leaf's source" and stays ignorant
+# of the enclosing body's default.
+SvcResolver = Callable[[Optional[str]], MarketDataService]
 
 
 def _hold_cache_key(instrument: InstrumentOptionStream) -> Any:
@@ -71,6 +78,10 @@ def _hold_cache_key(instrument: InstrumentOptionStream) -> Any:
         (int(instrument.roll_offset.value), instrument.roll_offset.unit),
         instrument.sizing_mode,
         instrument.futures_reference,
+        # Per-instrument source: a v1 vs v2 fetch of otherwise-identical axes
+        # yields DIFFERENT roll info, so the two must not share this per-signal
+        # cache slot when one fetcher spans both warehouses.
+        instrument.data_source,
     )
 
 
@@ -88,6 +99,8 @@ def _continuous_cache_key(instrument: InstrumentContinuous) -> Any:
         instrument.cycle or "",
         int(instrument.roll_offset),
         instrument.strategy,
+        # Per-instrument source (see ``_hold_cache_key``): keep v1 and v2 apart.
+        instrument.data_source,
     )
 
 
@@ -119,6 +132,7 @@ def _materialise_leg_instrument(
         return InstrumentSpot(
             collection=instrument_ref.collection,
             instrument_id=instrument_ref.instrument_id,
+            data_source=instrument_ref.data_source,
         )
     if isinstance(instrument_ref, ContinuousInstrumentRef):
         if not instrument_ref.collection:
@@ -132,6 +146,7 @@ def _materialise_leg_instrument(
             cycle=instrument_ref.cycle,
             roll_offset=int(instrument_ref.rollOffset),
             strategy=instrument_ref.strategy,
+            data_source=instrument_ref.data_source,
         )
     if isinstance(instrument_ref, OptionStreamRef):
         if not instrument_ref.collection:
@@ -260,13 +275,20 @@ async def _date_array_for_leaf_instrument(
     start: date | None,
     end: date | None,
     err_prefix: str,
+    svc_for: "SvcResolver | None" = None,
 ) -> npt.NDArray[np.int64]:
     """Fetch the date array for a non-basket leaf instrument.
 
     Shared between the top-level :func:`compute_input_overlap` loop and
     its basket-leg recursion; mirrors exactly the per-type branches
     that already lived inside the loop.
+
+    ``svc_for`` (per-instrument v1/v2 selection): when supplied, the warehouse is
+    resolved from THIS leaf's ``data_source`` (``svc_for(inst.data_source)``);
+    when ``None``, the single ``svc`` is used verbatim — byte-identical to the
+    pre-per-instrument path.
     """
+    svc = svc_for(inst.data_source) if svc_for is not None else svc
     if isinstance(inst, InstrumentSpot):
         try:
             series = await svc.get_prices(
@@ -342,6 +364,7 @@ async def basket_leg_date_intersection(
     start: date | None,
     end: date | None,
     err_prefix: str,
+    svc_for: "SvcResolver | None" = None,
 ) -> npt.NDArray[np.int64]:
     """Intersect a basket's per-leg date arrays into one int-date axis.
 
@@ -359,6 +382,7 @@ async def basket_leg_date_intersection(
             start=start,
             end=end,
             err_prefix=f"{err_prefix} basket leg {leg_index}",
+            svc_for=svc_for,
         )
         if basket_dates is None:
             basket_dates = leg_dates
@@ -421,9 +445,21 @@ def make_signal_fetcher(
     start: date | None,
     end: date | None,
     *,
+    svc_for: "SvcResolver | None" = None,
     diag_sink: list[dict[str, Any]] | None = None,
     use_chain_cache: bool = True,
 ) -> Any:
+    # ``svc_for`` (per-instrument v1/v2 selection): when supplied, EACH instrument
+    # fetch resolves its warehouse from the instrument's own ``data_source``
+    # (``svc_for(instrument.data_source)``) instead of the single closed-over
+    # ``svc``.  ``None`` (the Data-page basket path and any non-source-aware
+    # caller) keeps the single ``svc`` — byte-identical to before.  The option
+    # wiring cache is keyed by the RESOLVED service so a mixed-source signal
+    # builds one wiring per warehouse, not one global slot.
+    def _resolve(instrument: InputInstrument) -> MarketDataService:
+        if svc_for is None:
+            return svc
+        return svc_for(getattr(instrument, "data_source", None))
     # ``diag_sink`` (opt-in): when a list is supplied, every option_stream fetch
     # appends a per-leg coverage record ``{descriptor, dates, error_codes}`` so a
     # caller (the Data-page basket path) can explain WHY points are missing rather
@@ -432,7 +468,7 @@ def make_signal_fetcher(
     # Lazy-init cache for option_stream wiring — built once on first
     # option_stream fetch, then reused for all subsequent option_stream
     # inputs within this signal evaluation.
-    _os_wiring_cache: dict[str, Any] = {}
+    _os_wiring_cache: dict[int, Any] = {}
     # Per-signal cache of hold-mode option roll info, keyed by the instrument
     # identity.  Populated during the normal ``fetch`` of a hold-mode option
     # input (which runs FIRST, via operand resolution) and read by
@@ -478,8 +514,9 @@ def make_signal_fetcher(
         instrument: InputInstrument, field: str
     ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
         if isinstance(instrument, InstrumentSpot):
+            _svc = _resolve(instrument)
             try:
-                series = await svc.get_prices(
+                series = await _svc.get_prices(
                     instrument.collection,
                     instrument.instrument_id,
                     start=start,
@@ -499,6 +536,7 @@ def make_signal_fetcher(
             return series.dates, values
 
         if isinstance(instrument, InstrumentOptionStream):
+            _svc = _resolve(instrument)
             # Lazy imports — keeps the engine/options dependency
             # function-scoped (same pattern as _options_materialise).
             from tcg.core.api._options_wiring import build_stream_resolver_wiring
@@ -517,9 +555,10 @@ def make_signal_fetcher(
             # ranged fetch per distinct future, not per trade date — the Phase-C
             # N+1).  All option legs share this window, so the cache is reused
             # across legs; result-invariant.
-            if "wiring" not in _os_wiring_cache:
-                _os_wiring_cache["wiring"] = build_stream_resolver_wiring(
-                    svc,
+            _wkey = id(_svc)
+            if _wkey not in _os_wiring_cache:
+                _os_wiring_cache[_wkey] = build_stream_resolver_wiring(
+                    _svc,
                     underlying_prefetch_window=(trade_dates[0], trade_dates[-1]),
                     use_chain_cache=use_chain_cache,
                 )
@@ -529,7 +568,7 @@ def make_signal_fetcher(
                 ul_resolver,
                 bulk_reader,
                 root_ul_resolver,
-            ) = _os_wiring_cache["wiring"]
+            ) = _os_wiring_cache[_wkey]
 
             # Shared process-wide dwh-pool gate: a basket with several option
             # legs resolves them in turn HERE, but the Data page fires the
@@ -549,7 +588,7 @@ def make_signal_fetcher(
             # through unchanged.  The SAME expanded value feeds the expiration list
             # AND the chain fetch so the two never disagree.
             _cycle = expand_cycle(instrument.cycle)
-            all_expirations = await svc.list_option_expirations_filtered(
+            all_expirations = await _svc.list_option_expirations_filtered(
                 instrument.collection,
                 option_type=instrument.option_type,
                 cycle=_cycle,
@@ -567,7 +606,7 @@ def make_signal_fetcher(
             )
 
             available_by_date = await fetch_nearest_target_expirations_by_date(
-                svc=svc,
+                svc=_svc,
                 maturity=instrument.maturity,
                 collection=instrument.collection,
                 option_type=instrument.option_type,
@@ -599,7 +638,7 @@ def make_signal_fetcher(
                 )
 
                 futures_ref_resolver = build_futures_reference_resolver(
-                    svc,
+                    _svc,
                     option_collection=instrument.collection,
                     futures_reference=instrument.futures_reference,
                     prefetch_window=(trade_dates[0], trade_dates[-1]),
@@ -773,6 +812,7 @@ def make_signal_fetcher(
             return weighted_dates, weighted_values
 
         # continuous
+        _svc = _resolve(instrument)
         try:
             roll_config = build_roll_config(
                 instrument.adjustment,
@@ -783,7 +823,7 @@ def make_signal_fetcher(
         except ValueError as exc:
             raise SignalValidationError(f"continuous input: {exc}") from exc
         try:
-            cseries = await svc.get_continuous(
+            cseries = await _svc.get_continuous(
                 instrument.collection,
                 roll_config,
                 start=start,

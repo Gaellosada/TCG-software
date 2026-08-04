@@ -55,6 +55,27 @@
   pointer-events: none;
 }
 
+/* Lower-cadence (quarterly / sparse) span — a hatched warning band drawn on
+   the track BELOW the fill/thumbs so the selectable era stays visible. */
+.band {
+  position: absolute;
+  top: 50%;
+  height: 10px;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 0;
+  background-color: rgba(234, 179, 8, 0.18);
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(234, 179, 8, 0.45) 0,
+    rgba(234, 179, 8, 0.45) 2px,
+    transparent 2px,
+    transparent 6px
+  );
+  border: 1px solid rgba(234, 179, 8, 0.35);
+}
+
 .fill {
   position: absolute;
   top: 50%;

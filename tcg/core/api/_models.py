@@ -51,8 +51,10 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    SerializerFunctionWrapHandler,
     Tag,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -62,6 +64,37 @@ from tcg.core.api._models_options import (
     SelectionCriterion,
     reject_contradicting_delta_sign,
 )
+from tcg.core.api.common import DataSource
+
+
+class _PerInstrumentSourceMixin(BaseModel):
+    """Adds a per-instrument ``data_source`` that is OMITTED from the JSON dump
+    whenever it is unset or ``"v1"``.
+
+    Per-instrument v1/v2 selection means every spot / continuous / option-stream
+    ref (and the portfolio ``LegSpec``) carries its own warehouse choice.  The
+    field defaults to ``None`` = "inherit the enclosing body's source" and the
+    frontend attaches it ONLY when ``"v2"`` (the emit-only-when-non-default rule,
+    mirroring costs / the per-run source).
+
+    The wrap serializer reproduces that omission on the backend: a ``None`` or
+    ``"v1"`` value serialises to NOTHING, so an all-v1 / no-``data_source`` body's
+    ``model_dump(mode="json")`` — and therefore the portfolio result-cache key —
+    is BYTE-IDENTICAL to a pre-feature payload (no ``COMPUTE_VERSION`` bump).  A
+    ``"v2"`` value is kept, so a v2 leaf still participates in the cache key and
+    round-trips through persistence.
+    """
+
+    data_source: DataSource | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_default_data_source(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> Any:
+        data = handler(self)
+        if isinstance(data, dict) and data.get("data_source") in (None, "v1"):
+            data.pop("data_source", None)
+        return data
 
 
 def _validate_nav_times(v: float) -> float:
@@ -79,13 +112,13 @@ def _validate_nav_times(v: float) -> float:
     return float(v)
 
 
-class SpotInstrumentRef(BaseModel):
+class SpotInstrumentRef(_PerInstrumentSourceMixin):
     type: Literal["spot"]
     collection: str
     instrument_id: str
 
 
-class ContinuousInstrumentRef(BaseModel):
+class ContinuousInstrumentRef(_PerInstrumentSourceMixin):
     type: Literal["continuous"]
     collection: str
     adjustment: Literal["none", "ratio", "difference"] = "none"
@@ -123,7 +156,7 @@ OptionStreamLabel = Literal[
 ]
 
 
-class OptionStreamRef(BaseModel):
+class OptionStreamRef(_PerInstrumentSourceMixin):
     """Series reference materialising a 1-D float stream off a selected
     option contract on each trade date.
 

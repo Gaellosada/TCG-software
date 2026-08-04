@@ -29,13 +29,18 @@ export function statusForCached(cached) {
 }
 
 // Signature of the data-affecting fields of a persisted doc — changes whenever
-// anything that alters the compute body (legs incl. weight/label, rebalance)
-// changes, so a memoized row body is invalidated exactly then.
+// anything that alters the compute body (legs incl. weight/label, rebalance,
+// and each leg's own per-instrument data source) changes, so a memoized row
+// body is invalidated exactly then. Per-leg ``dataSource`` rides inside
+// ``doc.legs`` so it is captured here automatically.
 function docSignature(doc) {
   try {
-    return JSON.stringify({ legs: doc.legs || [], rebalance: doc.rebalance || 'none' });
+    return JSON.stringify({
+      legs: doc.legs || [],
+      rebalance: doc.rebalance || 'none',
+    });
   } catch {
-    return String(doc && doc.id);
+    return `${doc && doc.id}`;
   }
 }
 
@@ -126,7 +131,10 @@ export default function usePortfolioCacheStatus({
 
       // ── Build the ACTIVE body (if keyable) ──
       const queries = [];       // { tag, body }
-      const effStart = startDate || overlapRange?.start;
+      // Mirror the active editor's window default (usePortfolio): the cache
+      // status must probe the SAME key the compute will use, i.e. seed from the
+      // cadence recommendation, not the raw overlap start.
+      const effStart = startDate || overlapRange?.recommendedStart || overlapRange?.start;
       const effEnd = endDate || overlapRange?.end;
       if (legs.length > 0 && effStart && effEnd) {
         try {
@@ -205,7 +213,11 @@ export default function usePortfolioCacheStatus({
               const built = buildPortfolioComputeBody({
                 legs: rowLegs,
                 rebalance: doc.rebalance || 'none',
-                start: ov.start,
+                // Mirror the ACTIVE probe (line ~137) and the compute sites: seed
+                // from the cadence recommendation so a cadence-cliff option row's
+                // status body keys the SAME entry Compute wrote (else false
+                // "not-cached"). Falls back to raw start when there's no cliff.
+                start: ov.recommendedStart || ov.start,
                 end: ov.end,
                 availableIndicators,
                 resolvePortfolio: rowResolver,

@@ -295,6 +295,11 @@ async def client(options_reader: StubOptionsReader):
     # Default: get_prices returns the SP_500 index close.
     mock_svc.get_prices = AsyncMock(return_value=make_index_close_series())
 
+    # Default: the cheap per-cycle DISTINCT-expiry scan used by cadence
+    # classification returns no expiries; cycle-scoped coverage tests that care
+    # about segmentation override this explicitly.
+    mock_svc.list_option_expirations_filtered = AsyncMock(return_value=[])
+
     app.state.market_data = mock_svc
 
     transport = ASGITransport(app=app)
