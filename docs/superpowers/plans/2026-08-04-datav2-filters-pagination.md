@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- All v2 SQL lives in `tcg/data/_sql/instruments_v2.py`. `import-linter` must keep passing: `tcg.data` must not import `tcg.engine` or `tcg.core`.
+- All v2 SQL lives in `tcg/data/_sql/instruments_v2.py`. `lint-imports` must keep passing (`uv run lint-imports --config .import-linter.cfg` — the bare `import-linter` entry point only prints a banner, and `.import-linter.cfg` is not a filename it discovers by default): `tcg.data` must not import `tcg.engine` or `tcg.core`.
 - Every fact query bounds `ts` with a constant `>= lower AND < upper` range (BRIN/partition pruning). Use the existing `_bounds()` helper.
 - The v2 reader uses the shared read-only `tcg_read` pool (`DwhConnectionPool`); schema is bound per-statement via `V2_SCHEMA`, never a second pool.
 - `limit` default 50, maximum **500** (v1's cap, `tcg/core/api/data.py:222`).
@@ -2531,7 +2531,7 @@ Run:
 
 ```bash
 uv run pytest -m "not integration" -q
-uv run import-linter
+uv run lint-imports --config .import-linter.cfg
 ```
 
 Expected: both pass. Update any router test still asserting `contracts`/`series` on
@@ -2695,7 +2695,7 @@ Run:
 
 ```bash
 uv run pytest -m "not integration" -q
-uv run import-linter
+uv run lint-imports --config .import-linter.cfg
 cd frontend && npx vitest run && cd ..
 ```
 
@@ -3055,4 +3055,4 @@ Before opening the PR, confirm each of these against the running app:
 - [ ] A filter URL opened in a fresh tab reproduces the same list with no Apply click, and the
       browser back button restores the previous filter.
 - [ ] Continuous (Options) with `criterion=moneyness` returns 200 (was 502).
-- [ ] `uv run pytest -m "not integration"`, `uv run import-linter`, and `npx vitest run` all pass.
+- [ ] `uv run pytest -m "not integration"`, `uv run lint-imports --config .import-linter.cfg`, and `npx vitest run` all pass.
