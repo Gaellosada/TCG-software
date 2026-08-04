@@ -21,6 +21,14 @@
 - Filter enum values are whitelisted in Python before reaching SQL; filter *values* are always passed as query parameters, never interpolated.
 - Decimal → float coercion happens at the SQL boundary via the existing `to_float` / `to_float_or`.
 - Never commit `frontend/package-lock.json` changes as part of these tasks.
+- **`@testing-library/jest-dom` is NOT installed** — absent from `frontend/package.json`, absent
+  from `node_modules/@testing-library/` (only `dom`, `react`, `user-event` are there), and
+  `src/test/setup.js` does not extend `expect`. So `toBeInTheDocument`, `toHaveValue`,
+  `toBeDisabled` and friends throw `Invalid Chai property`. Use plain assertions instead:
+  `expect(el).toBeTruthy()` (a `getBy*` query already throws on absence, so this is mostly
+  redundant), `expect(el).toBeNull()` for a `queryBy*` miss, `expect(el.value).toBe(x)`,
+  `expect(el.disabled).toBe(true)`. Do **not** add the dependency — installing it rewrites
+  `package-lock.json`, which this branch must not touch.
 
 ---
 
@@ -1519,27 +1527,27 @@ describe('SeriesFilterPanel', () => {
   it('offers expiration, strike, option type and series controls for an option', () => {
     mockFacets(OPTION_FACETS);
     render(<SeriesFilterPanel objectId={12} onApply={() => {}} />);
-    expect(screen.getByLabelText(/expiration/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/strike min/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/option type/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/series type/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/frequency/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/expiration/i)).toBeTruthy();
+    expect(screen.getByLabelText(/strike min/i)).toBeTruthy();
+    expect(screen.getByLabelText(/option type/i)).toBeTruthy();
+    expect(screen.getByLabelText(/series type/i)).toBeTruthy();
+    expect(screen.getByLabelText(/frequency/i)).toBeTruthy();
   });
 
   it('hides contract dimensions for an object without contracts', () => {
     mockFacets(INDEX_FACETS);
     render(<SeriesFilterPanel objectId={5} onApply={() => {}} />);
-    expect(screen.queryByLabelText(/expiration/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/strike min/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/expiration/i)).toBeNull();
+    expect(screen.queryByLabelText(/strike min/i)).toBeNull();
     // The series-type control always exists — it is the only dimension here.
-    expect(screen.getByLabelText(/series type/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/series type/i)).toBeTruthy();
   });
 
   it('populates the expiration options from facets', () => {
     mockFacets(OPTION_FACETS);
     render(<SeriesFilterPanel objectId={12} onApply={() => {}} />);
-    expect(screen.getByRole('option', { name: /2026-03-13/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /2026-02-13/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /2026-03-13/ })).toBeTruthy();
+    expect(screen.getByRole('option', { name: /2026-02-13/ })).toBeTruthy();
   });
 
   it('does not call onApply before the first Apply click', () => {
@@ -1582,7 +1590,7 @@ describe('SeriesFilterPanel', () => {
     await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole('button', { name: /reset/i }));
-    expect(screen.getByLabelText(/series type/i)).toHaveValue('any');
+    expect(screen.getByLabelText(/series type/i).value).toBe('any');
     const before = onApply.mock.calls.length;
     fireEvent.change(screen.getByLabelText(/series type/i), {
       target: { value: 'bar' },
@@ -1901,8 +1909,8 @@ describe('SeriesResultList', () => {
         loading={false} error={null} selectedSerieId={null}
         onSelect={() => {}} onPageChange={() => {}} />,
     );
-    expect(screen.getByText(/195/)).toBeInTheDocument();
-    expect(screen.getByText('EW2H6 P6260.20260313')).toBeInTheDocument();
+    expect(screen.getByText(/195/)).toBeTruthy();
+    expect(screen.getByText('EW2H6 P6260.20260313')).toBeTruthy();
   });
 
   it('shows an explicit empty state rather than an error', () => {
@@ -1911,7 +1919,7 @@ describe('SeriesResultList', () => {
         loading={false} error={null} selectedSerieId={null}
         onSelect={() => {}} onPageChange={() => {}} />,
     );
-    expect(screen.getByText(/no series match/i)).toBeInTheDocument();
+    expect(screen.getByText(/no series match/i)).toBeTruthy();
   });
 
   it('calls onSelect with the serie id', () => {
@@ -1932,7 +1940,7 @@ describe('SeriesResultList', () => {
         loading={false} error={null} selectedSerieId={null}
         onSelect={() => {}} onPageChange={onPageChange} />,
     );
-    expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /prev/i }).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     expect(onPageChange).toHaveBeenCalledWith(50);
   });
@@ -1943,7 +1951,7 @@ describe('SeriesResultList', () => {
         loading={false} error={null} selectedSerieId={null}
         onSelect={() => {}} onPageChange={() => {}} />,
     );
-    expect(screen.getByRole('button', { name: /next/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /next/i }).disabled).toBe(true);
   });
 });
 ```
@@ -2290,7 +2298,7 @@ fixture defines, object 7):
   it('shows the filter panel and fetches nothing until Apply', async () => {
     renderWithClient(<DataV2Page />);
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
-    expect(await screen.findByText(/Filters/)).toBeInTheDocument();
+    expect(await screen.findByText(/Filters/)).toBeTruthy();
     // The series-list query must not have run yet — this is the gate.
     expect(getObjectSeriesV2).not.toHaveBeenCalled();
   });
@@ -2299,7 +2307,7 @@ fixture defines, object 7):
     renderWithClient(<DataV2Page />);
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
     fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
-    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeInTheDocument();
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
     await waitFor(() => expect(getObjectSeriesV2).toHaveBeenCalled());
   });
 ```
@@ -2764,9 +2772,9 @@ Add to `frontend/src/pages/DataV2/SeriesFilterPanel.test.jsx`:
         onApply={onApply}
       />,
     );
-    expect(screen.getByLabelText(/expiration/i)).toHaveValue('2026-03-13');
-    expect(screen.getByLabelText(/series type/i)).toHaveValue('bbba');
-    expect(screen.getByLabelText(/frequency/i)).toHaveValue('1m');
+    expect(screen.getByLabelText(/expiration/i).value).toBe('2026-03-13');
+    expect(screen.getByLabelText(/series type/i).value).toBe('bbba');
+    expect(screen.getByLabelText(/frequency/i).value).toBe('1m');
 
     // Already applied: a change auto-applies with no Apply click first.
     fireEvent.change(screen.getByLabelText(/option type/i), {
@@ -2902,7 +2910,7 @@ describe('ObjectDetail filter state in the URL', () => {
       </MemoryRouter>,
     );
     // No Apply click: the URL already expresses an applied filter.
-    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeInTheDocument();
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
     await waitFor(() => expect(getObjectSeriesV2).toHaveBeenCalled());
     const [, sent] = getObjectSeriesV2.mock.calls[0];
     expect(sent).toMatchObject({ serieType: 'bbba', freq: '1m', optionType: 'put' });
