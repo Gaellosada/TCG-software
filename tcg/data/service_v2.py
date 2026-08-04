@@ -62,22 +62,24 @@ class DefaultMarketDataServiceV2:
     ) -> dict:
         """Read one serie's facts, fact table dispatched by ``serie.type``.
 
-        Returns ``{serie_id, type, fields, points:{ts, <field>...}}``. Raises
-        ``DataNotFoundError`` if the serie does not exist.
+        Returns ``{serie_id, type, grain, fields, points:{ts, <field>...}}``.
+        ``grain`` is ``"daily"`` or ``"intraday"``, resolved from ``serie.freq``.
+        Raises ``DataNotFoundError`` if the serie does not exist.
         """
         serie = await self._reader.get_serie(serie_id)
         if serie is None:
             raise DataNotFoundError(f"Serie {serie_id} not found in v2")
         serie_type = serie["type"]
-        ts_ints, cols = await self._reader.read_serie_facts(
-            serie_id, serie_type, start=start, end=end
+        grain, ts_values, cols = await self._reader.read_serie_facts(
+            serie_id, serie_type, freq=serie.get("freq"), start=start, end=end
         )
         fields = list(FACT_DISPATCH[serie_type][1])
-        points: dict[str, list] = {"ts": ts_ints}
+        points: dict[str, list] = {"ts": ts_values}
         points.update({f: cols[f] for f in fields})
         return {
             "serie_id": serie_id,
             "type": serie_type,
+            "grain": grain,
             "fields": fields,
             "points": points,
         }

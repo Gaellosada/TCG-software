@@ -61,6 +61,36 @@ def _ts_to_int(ts: datetime) -> int:
     return date_to_int(ts.date())
 
 
+def _ts_to_iso(ts: datetime) -> str:
+    """timestamptz → ISO 8601 in UTC, ``Z``-suffixed.
+
+    Used for intraday series, where the time-of-day IS the data point. A naive
+    ts is assumed UTC (the dwh stores timestamptz; psycopg returns aware
+    datetimes, but be defensive).
+    """
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    return ts.isoformat().replace("+00:00", "Z")
+
+
+#: ``serie.freq`` values that carry no intraday component. Only ``daily`` and
+#: ``1m`` exist in v2 today (761 039 and 244 324 series respectively).
+_DAILY_FREQS = frozenset({"daily"})
+
+
+def grain_for_freq(freq: str | None) -> str:
+    """Return ``"daily"`` (ts → YYYYMMDD int) or ``"intraday"`` (ts → ISO 8601).
+
+    Anything that is not explicitly a daily frequency is treated as intraday.
+    That default is deliberate: emitting a full timestamp loses nothing, while
+    collapsing one to a date destroys information — precisely the defect this
+    fixes. A future ``5m``/``1h`` frequency therefore cannot reintroduce it.
+    """
+    return "daily" if (freq or "").strip().lower() in _DAILY_FREQS else "intraday"
+
+
 def _bounds(start: date | None, end: date | None) -> tuple[date, date]:
     """Return an inclusive [lower, upper_exclusive) pair of date bounds.
 
@@ -193,15 +223,20 @@ class SqlInstrumentReaderV2:
         serie_id: int,
         serie_type: str,
         *,
+        freq: str | None = None,
         start: date | None = None,
         end: date | None = None,
-    ) -> tuple[list[int], dict[str, list[float | None]]]:
+    ) -> tuple[str, list[int] | list[str], dict[str, list[float | None]]]:
         """Read one serie's facts from the fact table its ``type`` dispatches to.
 
-        Returns ``(ts_ints, {field: [values...]})`` with one list per field for
-        the resolved fact table. ``ts`` is bounded with a constant range so the
-        planner prunes / BRIN-scans. Raises ``DataAccessError`` on an unknown
-        ``serie_type`` (should never happen — the CHECK constrains it).
+        Returns ``(grain, ts, {field: [values...]})``. ``grain`` is
+        ``"daily"`` (``ts`` are ``YYYYMMDD`` ints) or ``"intraday"`` (``ts`` are
+        ISO 8601 strings) as decided by :func:`grain_for_freq` from *freq*.
+        Collapsing an intraday ts to a date is what made minute series plot on a
+        single abscissa, so the grain is resolved here, once. ``ts`` is bounded
+        with a constant range so the planner prunes / BRIN-scans. Raises
+        ``DataAccessError`` on an unknown ``serie_type`` (should never happen —
+        the CHECK constrains it).
         """
         dispatch = FACT_DISPATCH.get(serie_type)
         if dispatch is None:
@@ -228,13 +263,15 @@ class SqlInstrumentReaderV2:
                 f"v2 SQL error reading {table} for serie {serie_id}: {exc}"
             ) from exc
 
-        ts_ints: list[int] = []
+        grain = grain_for_freq(freq)
+        to_ts = _ts_to_int if grain == "daily" else _ts_to_iso
+        ts_out: list[Any] = []
         cols: dict[str, list[float | None]] = {f: [] for f in fields}
         for r in rows:
-            ts_ints.append(_ts_to_int(r["ts"]))
+            ts_out.append(to_ts(r["ts"]))
             for f in fields:
                 cols[f].append(to_float(r[f]))
-        return ts_ints, cols
+        return grain, ts_out, cols
 
     # ------------------------------------------------------------------ #
     # Futures continuous feed (for the reused ContinuousSeriesBuilder)

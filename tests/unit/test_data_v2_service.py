@@ -10,7 +10,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import numpy as np
 import pytest
@@ -19,7 +19,13 @@ from tcg.data._options_continuous_v2 import (
     _front_close_by_date,
     resolve_options_continuous_v2,
 )
-from tcg.data._sql.instruments_v2 import FACT_DISPATCH, _bounds, _ts_to_int
+from tcg.data._sql.instruments_v2 import (
+    FACT_DISPATCH,
+    _bounds,
+    _ts_to_int,
+    _ts_to_iso,
+    grain_for_freq,
+)
 from tcg.data.service_v2 import DefaultMarketDataServiceV2
 from tcg.types.errors import ValidationError
 from tcg.types.market import (
@@ -75,6 +81,30 @@ def test_ts_to_int_and_bounds():
     assert lower == date(2024, 1, 1)
     # upper is exclusive = end + 1 day so an inclusive end date is captured.
     assert upper == date(2024, 6, 19)
+
+
+def test_grain_for_freq_daily_is_date_grain():
+    assert grain_for_freq("daily") == "daily"
+
+
+def test_grain_for_freq_minute_is_intraday():
+    assert grain_for_freq("1m") == "intraday"
+
+
+def test_grain_for_freq_unknown_defaults_to_intraday():
+    # Deliberate: emitting a full timestamp is lossless, collapsing one to a
+    # date destroys information. A future '5m'/'1h' must not silently collapse.
+    assert grain_for_freq("5m") == "intraday"
+    assert grain_for_freq(None) == "intraday"
+
+
+def test_ts_to_iso_normalises_to_utc_z():
+    ts = datetime(2026, 3, 12, 14, 31, tzinfo=timezone.utc)
+    assert _ts_to_iso(ts) == "2026-03-12T14:31:00Z"
+
+
+def test_ts_to_iso_treats_naive_as_utc():
+    assert _ts_to_iso(datetime(2026, 3, 12, 14, 31)) == "2026-03-12T14:31:00Z"
 
 
 # --------------------------------------------------------------------------- #
@@ -406,9 +436,10 @@ class _FakeReaderService:
     ):
         self._obj = obj
         self._serie = serie
-        self._facts = facts or ([], {})
+        self._facts = facts or ("daily", [], {})
         self._contracts = contracts or []
         self._series = series or []
+        self.last_freq = None
 
     async def get_object(self, object_id):
         return self._obj
@@ -422,7 +453,10 @@ class _FakeReaderService:
     async def list_series(self, object_id):
         return list(self._series)
 
-    async def read_serie_facts(self, serie_id, serie_type, *, start, end):
+    async def read_serie_facts(
+        self, serie_id, serie_type, *, freq=None, start=None, end=None
+    ):
+        self.last_freq = freq
         return self._facts
 
 
@@ -456,6 +490,7 @@ async def test_get_object_detail_missing_object_raises_404():
 
 async def test_get_series_bar_type_dispatches_bar_fields():
     facts = (
+        "daily",
         [20240102, 20240103],
         {
             "open": [1.0, 2.0],
@@ -479,7 +514,7 @@ async def test_get_series_bar_type_dispatches_bar_fields():
 async def test_get_series_value_type_dispatches_value_field():
     reader = _FakeReaderService(
         serie={"serie_id": 8, "type": "value"},
-        facts=([20240102], {"value": [42.0]}),
+        facts=("daily", [20240102], {"value": [42.0]}),
     )
     svc = _make_service(reader)
     out = await svc.get_series(8)
@@ -490,7 +525,7 @@ async def test_get_series_value_type_dispatches_value_field():
 
 async def test_get_series_empty_stream_ok():
     reader = _FakeReaderService(
-        serie={"serie_id": 8, "type": "value"}, facts=([], {"value": []})
+        serie={"serie_id": 8, "type": "value"}, facts=("daily", [], {"value": []})
     )
     svc = _make_service(reader)
     out = await svc.get_series(8)
@@ -501,6 +536,66 @@ async def test_get_series_missing_serie_raises_404():
     svc = _make_service(_FakeReaderService(serie=None))
     with pytest.raises(DataNotFoundError):
         await svc.get_series(404)
+
+
+_BBBA_COLS = {
+    "best_bid_value": [610.5, 608.5],
+    "best_bid_volume": [15.0, 15.0],
+    "best_ask_value": [612.0, 610.0],
+    "best_ask_volume": [15.0, 1.0],
+}
+
+
+async def test_get_series_daily_returns_int_dates_and_daily_grain():
+    reader = _FakeReaderService(
+        serie={
+            "serie_id": 1, "object_id": 16, "contract_id": 42,
+            "type": "bbba", "freq": "daily", "source": "TEST",
+        },
+        facts=("daily", [20260601, 20260602], _BBBA_COLS),
+    )
+    out = await _make_service(reader).get_series(1)
+    assert out["grain"] == "daily"
+    assert out["points"]["ts"] == [20260601, 20260602]
+
+
+async def test_get_series_intraday_returns_iso_timestamps():
+    reader = _FakeReaderService(
+        serie={
+            "serie_id": 1, "object_id": 16, "contract_id": 42,
+            "type": "bbba", "freq": "1m", "source": "TEST",
+        },
+        facts=(
+            "intraday",
+            ["2026-06-01T14:31:00Z", "2026-06-01T14:32:00Z"],
+            _BBBA_COLS,
+        ),
+    )
+    out = await _make_service(reader).get_series(1)
+    assert out["grain"] == "intraday"
+    assert out["points"]["ts"] == [
+        "2026-06-01T14:31:00Z",
+        "2026-06-01T14:32:00Z",
+    ]
+    # The regression guard: distinct minutes must stay distinct.
+    assert len(set(out["points"]["ts"])) == 2
+
+
+async def test_get_series_forwards_freq_to_the_reader():
+    """The service must pass serie.freq down — that is what selects the grain."""
+    reader = _FakeReaderService(
+        serie={
+            "serie_id": 1, "object_id": 16, "contract_id": 42,
+            "type": "bbba", "freq": "1m", "source": "TEST",
+        },
+        facts=(
+            "intraday",
+            ["2026-06-01T14:31:00Z"],
+            {k: [v[0]] for k, v in _BBBA_COLS.items()},
+        ),
+    )
+    await _make_service(reader).get_series(1)
+    assert reader.last_freq == "1m"
 
 
 async def test_get_continuous_options_rejects_non_option():
