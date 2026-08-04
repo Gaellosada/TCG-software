@@ -7,7 +7,9 @@ Covers:
   error_code="not_yet_due").
 - AtExpiry due, selector returns no_chain_for_date → RollResult(new_contract=None,
   error_code="no_chain_for_date", reason includes "roll_selection_failed").
-- NDaysBeforeExpiry → raises NotImplementedError.
+- NDaysBeforeExpiry: same due/not-due/selector-failure flow as AtExpiry, and
+  (critically) selects the replacement via the IDENTICAL selector.select call
+  AtExpiry makes — only the roll TIMING differs.
 - DeltaCross → raises NotImplementedError.
 
 No Mongo, no Module 1, no Module 3 internals.
@@ -186,22 +188,144 @@ async def test_next_contract_at_expiry_due_selector_returns_no_chain_for_date() 
 
 
 # ---------------------------------------------------------------------------
-# Phase-2-only stubs
+# NDaysBeforeExpiry — same due/not-due/failure flow as AtExpiry, and must
+# select the replacement identically (same selector.select call).
+# EXPIRATION = 2024-04-19 (Fri); n=2 trading days before = 2024-04-17 (Wed).
 # ---------------------------------------------------------------------------
+
+N_DAYS_RULE = NDaysBeforeExpiry(n=2)
+AS_OF_N_DAYS_DUE = date(2024, 4, 17)
+AS_OF_N_DAYS_NOT_YET = date(2024, 4, 16)
 
 
 @pytest.mark.asyncio
-async def test_next_contract_n_days_before_expiry_raises_not_implemented() -> None:
+async def test_next_contract_n_days_before_expiry_due_selector_succeeds() -> None:
+    new_contract = _make_new_contract()
+    selector = AsyncMock()
+    selector.select.return_value = SelectionResult(
+        contract=new_contract,
+        matched_value=-0.09,
+        error_code=None,
+        diagnostic=None,
+    )
+
+    roller = _make_roller(selector)
+    result = await roller.next_contract(
+        held=_make_held(),
+        as_of=AS_OF_N_DAYS_DUE,
+        rule=N_DAYS_RULE,
+        criterion_for_new=CRITERION,
+        maturity_for_new=MATURITY,
+    )
+
+    assert result.new_contract is new_contract
+    assert result.roll_date == AS_OF_N_DAYS_DUE
+    assert result.reason == "rolled_n_days_before_expiry"
+    assert result.error_code is None
+
+    # Same selector.select call AtExpiry would make (only roll TIMING
+    # differs — same criterion/maturity forwarded, same next contract).
+    selector.select.assert_awaited_once_with(
+        root="OPT_SP_500",
+        date=AS_OF_N_DAYS_DUE,
+        type="P",
+        criterion=CRITERION,
+        maturity=MATURITY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_next_contract_n_days_before_expiry_not_yet_due() -> None:
     selector = AsyncMock()
     roller = _make_roller(selector)
-    with pytest.raises(NotImplementedError):
-        await roller.next_contract(
-            held=_make_held(),
-            as_of=AS_OF_DUE,
-            rule=NDaysBeforeExpiry(n=5),
-            criterion_for_new=CRITERION,
-            maturity_for_new=MATURITY,
-        )
+
+    result = await roller.next_contract(
+        held=_make_held(),
+        as_of=AS_OF_N_DAYS_NOT_YET,
+        rule=N_DAYS_RULE,
+        criterion_for_new=CRITERION,
+        maturity_for_new=MATURITY,
+    )
+
+    assert result.new_contract is None
+    assert result.roll_date is None
+    assert result.reason == "not_yet_due"
+    assert result.error_code == "not_yet_due"
+    selector.select.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_next_contract_n_days_before_expiry_due_selector_returns_no_chain_for_date() -> None:
+    selector = AsyncMock()
+    selector.select.return_value = SelectionResult(
+        contract=None,
+        matched_value=None,
+        error_code="no_chain_for_date",
+        diagnostic="No chain rows found for OPT_SP_500 on 2024-04-17",
+    )
+
+    roller = _make_roller(selector)
+    result = await roller.next_contract(
+        held=_make_held(),
+        as_of=AS_OF_N_DAYS_DUE,
+        rule=N_DAYS_RULE,
+        criterion_for_new=CRITERION,
+        maturity_for_new=MATURITY,
+    )
+
+    assert result.new_contract is None
+    assert result.roll_date is None
+    assert result.error_code == "no_chain_for_date"
+    assert "roll_selection_failed" in result.reason
+    assert "no_chain_for_date" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_next_contract_n_days_before_expiry_n0_selects_same_as_at_expiry() -> None:
+    """n=0 must be selection-identical to AtExpiry at the shared boundary."""
+    new_contract = _make_new_contract()
+
+    selector_n0 = AsyncMock()
+    selector_n0.select.return_value = SelectionResult(
+        contract=new_contract, matched_value=-0.09, error_code=None, diagnostic=None
+    )
+    selector_at_expiry = AsyncMock()
+    selector_at_expiry.select.return_value = SelectionResult(
+        contract=new_contract, matched_value=-0.09, error_code=None, diagnostic=None
+    )
+
+    roller_n0 = _make_roller(selector_n0)
+    roller_at_expiry = _make_roller(selector_at_expiry)
+
+    result_n0 = await roller_n0.next_contract(
+        held=_make_held(),
+        as_of=AS_OF_DUE,
+        rule=NDaysBeforeExpiry(n=0),
+        criterion_for_new=CRITERION,
+        maturity_for_new=MATURITY,
+    )
+    result_at_expiry = await roller_at_expiry.next_contract(
+        held=_make_held(),
+        as_of=AS_OF_DUE,
+        rule=AtExpiry(),
+        criterion_for_new=CRITERION,
+        maturity_for_new=MATURITY,
+    )
+
+    assert result_n0.new_contract is result_at_expiry.new_contract
+    assert result_n0.roll_date == result_at_expiry.roll_date
+    assert result_n0.error_code == result_at_expiry.error_code
+    selector_n0.select.assert_awaited_once_with(
+        root="OPT_SP_500", date=AS_OF_DUE, type="P", criterion=CRITERION, maturity=MATURITY
+    )
+    selector_at_expiry.select.assert_awaited_once_with(
+        root="OPT_SP_500", date=AS_OF_DUE, type="P", criterion=CRITERION, maturity=MATURITY
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase-2-only stubs
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
