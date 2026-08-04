@@ -122,7 +122,7 @@ export const queryKeys = {
       /** GET /data-v2/objects — object catalogue (grouped by kind in the FE) */
       objects: () => ['market', 'v2', 'objects'],
 
-      /** GET /data-v2/objects/{id} — object detail (contracts + series) */
+      /** GET /data-v2/objects/{id} — object metadata only (no contracts/series) */
       object: (objectId) => ['market', 'v2', 'object', objectId ?? null],
 
       /** GET /data-v2/objects/{id}/facets — filterable dimensions */

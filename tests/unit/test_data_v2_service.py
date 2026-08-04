@@ -437,7 +437,6 @@ class _FakeReaderService:
         obj=None,
         serie=None,
         facts=None,
-        contracts=None,
         series=None,
         facets=None,
         filtered=None,
@@ -445,16 +444,20 @@ class _FakeReaderService:
         self._obj = obj
         self._serie = serie
         self._facts = facts or ("daily", [], {})
-        self._contracts = contracts or []
         self._series = series or []
         self._facets_data = facets
         self._filtered = filtered if filtered is not None else ([], 0)
         self.last_freq = None
         self.last_facets_object_id = None
         self.filter_calls = []
-        # Which unbounded reads were actually issued. ``get_object_detail`` must
-        # issue neither (see test_get_object_detail_ships_metadata_only).
-        self.contracts_calls = []
+        # Whether the unbounded whole-object series read was actually issued.
+        # ``get_object_detail`` must not issue it — see
+        # ``test_get_object_detail_ships_metadata_only``.
+        #
+        # There is deliberately no ``contracts_calls`` counterpart: the real
+        # reader has no ``list_contracts`` any more, so this fake must not
+        # either. A fake carrying methods the real class lacks lets a test pass
+        # against code that would ``AttributeError`` in production.
         self.series_calls = []
 
     async def get_object(self, object_id):
@@ -462,10 +465,6 @@ class _FakeReaderService:
 
     async def get_serie(self, serie_id):
         return self._serie
-
-    async def list_contracts(self, object_id):
-        self.contracts_calls.append(object_id)
-        return list(self._contracts)
 
     async def list_series(self, object_id):
         self.series_calls.append(object_id)
@@ -508,28 +507,32 @@ _EW2_OBJECT = {
 async def test_get_object_detail_ships_metadata_only():
     """The 38 MB payload is gone: bulk lists moved to the paginated endpoint.
 
-    The fake is deliberately loaded with a contract AND a serie so this cannot
-    pass vacuously — under the old implementation both keys are present and
-    populated.
+    The fake is deliberately loaded with a serie so this cannot pass vacuously —
+    under the old implementation the ``series`` key is present and populated.
 
-    Deviation from the brief, on purpose: it prescribed ``"contracts" not in
-    out`` / ``"series" not in out``, which also hold for an empty dict, a
-    malformed response, or an error payload. The exact-equality form pins what
-    the response DOES contain as well as what it does not. And the two
-    reader-call assertions pin the actual win: the unbounded reads are never
-    ISSUED, not merely dropped from the returned dict (a version that fetched
-    both and then discarded them would satisfy the shape assertions while
-    keeping the whole 36 s cost).
+    ``reader.series_calls == []`` is the load-bearing line, and the only one that
+    discriminates the regression that matters. The brief prescribed ``"contracts"
+    not in out`` / ``"series" not in out``; those hold for an empty dict, a
+    malformed response or an error payload, so the exact-equality form replaced
+    them. But note that even the exact-equality form is blind to the real trap: a
+    version that fetches both lists and then discards them returns precisely
+    ``{"object": obj}`` while still paying the whole 36 s. Only the call counter
+    sees that.
+
+    There is no ``contracts_calls`` counterpart because ``list_contracts`` has
+    been deleted from the reader. That protection is now structural rather than
+    tested: the equivalent regression cannot be written at all — it raises
+    ``AttributeError`` instead of silently costing 36 s — which is strictly
+    stronger than an assertion. An assertion here would read as protection while
+    protecting nothing, so it is gone rather than kept for symmetry.
     """
     reader = _FakeReaderService(
         obj=_EW2_OBJECT,
-        contracts=[{"contract_id": 1, "contract_code": "EW2H6 P6260.20260313"}],
         series=[{"serie_id": 9, "contract_id": 1, "type": "bbba"}],
     )
     out = await _make_service(reader).get_object_detail(12)
     assert out == {"object": _EW2_OBJECT}
     assert out["object"]["object_id"] == 12
-    assert reader.contracts_calls == []
     assert reader.series_calls == []
 
 

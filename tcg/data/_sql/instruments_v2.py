@@ -146,41 +146,18 @@ class SqlInstrumentReaderV2:
                 f"v2 SQL error reading object {object_id}: {exc}"
             ) from exc
 
-    async def list_contracts(self, object_id: int) -> list[dict[str, Any]]:
-        """List an object's contracts, ordered by expiration then strike."""
-        try:
-            async with self._pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        f"""SELECT contract_id, contract_code, expiration, strike,
-                                   option_type, multiplier
-                            FROM {V2_SCHEMA}.contract
-                            WHERE object_id = %s
-                            ORDER BY expiration, strike NULLS FIRST, contract_id""",
-                        (object_id,),
-                    )
-                    out: list[dict[str, Any]] = []
-                    for r in await cur.fetchall():
-                        out.append(
-                            {
-                                "contract_id": r["contract_id"],
-                                "contract_code": r["contract_code"],
-                                "expiration": r["expiration"].isoformat()
-                                if r["expiration"]
-                                else None,
-                                "strike": to_float(r["strike"]),
-                                "option_type": r["option_type"],
-                                "multiplier": to_float(r["multiplier"]),
-                            }
-                        )
-                    return out
-        except Exception as exc:  # noqa: BLE001
-            raise DataAccessError(
-                f"v2 SQL error listing contracts for object {object_id}: {exc}"
-            ) from exc
-
     async def list_series(self, object_id: int) -> list[dict[str, Any]]:
-        """List an object's series (metadata only)."""
+        """List an object's series (metadata only) — every serie, unfiltered.
+
+        No join to ``contract`` at all, which is exactly why this survives with
+        no production caller: it is the independent oracle in
+        ``test_series_page_lists_object_level_series_live``. That test checks
+        ``list_series_filtered``'s LEFT JOIN has not become semantically INNER,
+        a regression that presents as "this object has no data" and that no
+        assertion on an option root can see. An oracle sharing the join under
+        test would collapse with it and stay green, so it has to come from a
+        query shaped like this one. Do not "tidy" this away.
+        """
         try:
             async with self._pool.connection() as conn:
                 async with conn.cursor() as cur:
