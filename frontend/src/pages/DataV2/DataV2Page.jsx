@@ -8,7 +8,8 @@ import styles from '../Data/DataPage.module.css';
  * ``tcg_instruments_v2`` (object → contract → serie → fact_*), served by the
  * ``/api/data-v2`` router. Parallel to the v1 Data page (which stays as-is):
  * the object browser groups objects by ``kind`` instead of by collection
- * category, and drill-down is object → contracts + series → chart.
+ * category, and drill-down is object → filtered page of series → chart. (There
+ * is no contracts step: contract metadata rides along on each series row.)
  *
  * Reuses the v1 DataPage layout CSS (left browser panel + right detail panel)
  * and the shared Chart component for all rendering.
