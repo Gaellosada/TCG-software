@@ -219,7 +219,10 @@ function normaliseBlock(block, section) {
 function normaliseCondition(condition) {
   if (!condition || typeof condition !== 'object') return condition;
   const out = { ...condition };
-  for (const slot of ['lhs', 'rhs', 'operand', 'min', 'max']) {
+  // ``enter``/``exit`` are the hysteresis threshold operands; the spread above
+  // carries every non-operand field (op, direction, consecutive_days, count…)
+  // through verbatim.
+  for (const slot of ['lhs', 'rhs', 'operand', 'min', 'max', 'enter', 'exit']) {
     if (slot in out) {
       out[slot] = normaliseOperand(out[slot]);
     }

@@ -12,6 +12,14 @@ export const CROSS_OPS = Object.freeze(['cross_above', 'cross_below']);
 export const RANGE_OPS = Object.freeze(['in_range']);
 
 /**
+ * Hysteresis operator (SPEC §4.1): the two-threshold "episode completion"
+ * pulse. Takes ``operand`` (the moving series), ``enter`` + ``exit`` threshold
+ * operands, and a ``direction`` ('up'|'down'). Fires when an episode — "hits
+ * ENTER then reaches EXIT" — completes. One entry, its own structural shape.
+ */
+export const HYSTERESIS_OPS = Object.freeze(['hysteresis']);
+
+/**
  * Rolling comparators: take operand + lookback (int).
  *
  * RETIRED FROM AUTHORING (block-temporal-composition v1): rolling is no longer
@@ -34,6 +42,7 @@ export const ALL_OPS = Object.freeze([
   ...BINARY_COMPARE_OPS,
   ...CROSS_OPS,
   ...RANGE_OPS,
+  ...HYSTERESIS_OPS,
 ]);
 
 /**
@@ -66,8 +75,20 @@ export const OP_LABELS = Object.freeze({
   cross_above: 'crosses above',
   cross_below: 'crosses below',
   in_range: 'in range',
+  hysteresis: 'completes episode',
   rolling_gt: 'rolling >',
   rolling_lt: 'rolling <',
+});
+
+/**
+ * Direction labels for the hysteresis condition. The connective word depends
+ * on the episode direction and reads inline in the condition row, e.g.
+ * "DSTAT hits 95% line then descends to 75% line" (up) /
+ * "VVIX hits 10% line then rises to 20% line" (down).
+ */
+export const HYSTERESIS_DIRECTION_LABELS = Object.freeze({
+  up: 'then descends to',
+  down: 'then rises to',
 });
 
 /**
@@ -79,6 +100,7 @@ export const OP_LABELS = Object.freeze({
 export function conditionShape(op) {
   if (BINARY_COMPARE_OPS.includes(op) || CROSS_OPS.includes(op)) return 'binary';
   if (RANGE_OPS.includes(op)) return 'range';
+  if (HYSTERESIS_OPS.includes(op)) return 'hysteresis';
   if (ROLLING_OPS.includes(op)) return 'rolling';
   return 'binary';
 }
@@ -127,6 +149,11 @@ export function defaultCondition(op = 'gt') {
   if (shape === 'range') {
     return { op, operand: null, min: null, max: null };
   }
+  if (shape === 'hysteresis') {
+    // operand + enter/exit threshold operands start unset (iter-2 policy);
+    // ``direction`` is a non-operand structural field with a sane default.
+    return { op, operand: null, enter: null, exit: null, direction: 'up' };
+  }
   if (shape === 'rolling') {
     return { op, operand: null, lookback: 1 };
   }
@@ -145,6 +172,7 @@ export function defaultCondition(op = 'gt') {
 export function operandSlots(op) {
   const shape = conditionShape(op);
   if (shape === 'range') return ['operand', 'min', 'max'];
+  if (shape === 'hysteresis') return ['operand', 'enter', 'exit'];
   if (shape === 'rolling') return ['operand'];
   return ['lhs', 'rhs'];
 }
@@ -234,6 +262,19 @@ export function migrateCondition(current, nextOp) {
     const operand = current.operand || current.lhs || base.operand;
     const lookback = Number.isFinite(current.lookback) ? current.lookback : 1;
     return { op: nextOp, operand, lookback };
+  }
+  if (nextShape === 'hysteresis') {
+    // Carry the moving series from a compatible ``operand``/``lhs`` slot; the
+    // enter/exit thresholds start unset (no fabricated operand, iter-2 policy).
+    const operand = current.operand || current.lhs || base.operand;
+    const direction = current.direction === 'down' ? 'down' : 'up';
+    return {
+      op: nextOp,
+      operand,
+      enter: base.enter,
+      exit: base.exit,
+      direction,
+    };
   }
   return base;
 }

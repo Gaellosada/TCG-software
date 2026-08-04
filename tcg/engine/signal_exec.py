@@ -83,6 +83,7 @@ from tcg.types.signal import (
     Condition,
     ConstantOperand,
     CrossCondition,
+    HysteresisCondition,
     IndicatorOperand,
     InRangeCondition,
     Input,
@@ -393,6 +394,10 @@ def _block_operands(block: Block) -> list[Operand]:
             out.append(cond.max)
         elif isinstance(cond, RollingCondition):
             out.append(cond.operand)
+        elif isinstance(cond, HysteresisCondition):
+            out.append(cond.operand)
+            out.append(cond.enter)
+            out.append(cond.exit)
         else:
             raise SignalValidationError(
                 f"unknown condition type: {type(cond).__name__}"
@@ -619,7 +624,29 @@ def _eval_condition(
         with np.errstate(invalid="ignore"):
             truth = _COMPARE_OPS[cond.op](a, b)
         truth = truth & ~nan_at_t
+        n = int(getattr(cond, "consecutive_days", 1) or 1)
+        if n > 1:
+            # N-consecutive-days (SPEC §5.5): fire only where the comparison
+            # has held for the trailing ``n`` bars (run-length >= n). A NaN bar
+            # is already False above, so a data gap breaks the streak. The
+            # default ``n == 1`` is routed AROUND this call so the historical
+            # single-bar compare stays byte-identical.
+            truth = _consecutive_true(truth.astype(np.bool_, copy=False), n)
         return truth.astype(np.bool_, copy=False), nan_at_t
+
+    if isinstance(cond, HysteresisCondition):
+        # Two-threshold "episode completion" pulse (SPEC §4.1). Scalar arm/fire
+        # state in a sequential per-bar loop (vectorised CANNOT express the
+        # latch). A NaN on any of the three operands holds the arm state and
+        # suppresses a fire on that bar (a data gap is not an episode edge).
+        x = values_by_key[k(cond.operand)]
+        en = values_by_key[k(cond.enter)]
+        ex = values_by_key[k(cond.exit)]
+        nan_at_t = np.isnan(x) | np.isnan(en) | np.isnan(ex)
+        out = _hysteresis_episode(x, en, ex, cond.direction)
+        # A fire bar can never be a NaN bar (the loop skips NaN bars), so
+        # ``out`` and ``nan_at_t`` never both hold at ``t``.
+        return out.astype(np.bool_, copy=False), nan_at_t
 
     if isinstance(cond, CrossCondition):
         a = values_by_key[k(cond.lhs)]
@@ -742,6 +769,80 @@ def _cross_since_reset(
             if seen >= n:
                 out[t] = True
                 seen = 0
+    return out
+
+
+def _consecutive_true(
+    truth: npt.NDArray[np.bool_],
+    n: int,
+) -> npt.NDArray[np.bool_]:
+    """True at bar ``t`` iff ``truth`` held for the trailing ``n`` bars.
+
+    Run-length test (SPEC §5.5 "two consecutive days"): ``out[t]`` is True iff
+    ``truth[t-n+1 .. t]`` are ALL True. Bars before ``t = n-1`` can never have a
+    full trailing window, so they are False. ``n <= 1`` returns ``truth``
+    unchanged (byte-identical to the single-bar comparison). Vectorised O(T)
+    trailing-sum over the boolean run; a False (incl. NaN-masked) bar zeroes the
+    window and so breaks the streak.
+    """
+    n = int(n)
+    T = truth.size
+    if n <= 1 or T == 0:
+        return truth
+    b = truth.astype(np.int64)
+    prefix = np.concatenate(([0], np.cumsum(b)))  # len T+1
+    idx = np.arange(T)
+    lo = idx - n + 1
+    windowsum = prefix[idx + 1] - prefix[np.maximum(lo, 0)]
+    out = (lo >= 0) & (windowsum == n)
+    return out.astype(np.bool_, copy=False)
+
+
+def _hysteresis_episode(
+    operand: npt.NDArray[np.float64],
+    enter: npt.NDArray[np.float64],
+    exit_: npt.NDArray[np.float64],
+    direction: str,
+) -> npt.NDArray[np.bool_]:
+    """Impulse on each COMPLETED two-threshold episode (SPEC §4.1).
+
+    Scalar per-bar state; semantics per bar, in order:
+
+      * ``direction == "up"``:   if (armed AND ``operand < exit``) FIRE + disarm;
+        else if ``operand > enter`` ARM. Models "hits ``enter`` then descends to
+        ``exit``".
+      * ``direction == "down"``: if (armed AND ``operand > exit``) FIRE + disarm;
+        else if ``operand < enter`` ARM. Models "hits ``enter`` then rises to
+        ``exit``".
+
+    A NaN on ANY of the three operands SKIPS the bar: the arm state is held and
+    no fire is emitted (a data gap is not read as an episode edge). After a fire
+    the latch re-arms on the next entry-threshold crossing, so every completed
+    episode emits its own impulse; an episode that never reaches ``exit`` never
+    fires. O(T), O(1) state.
+    """
+    T = operand.size
+    out = np.zeros(T, dtype=np.bool_)
+    up = direction == "up"
+    armed = False
+    for t in range(T):
+        x = operand[t]
+        e = enter[t]
+        xt = exit_[t]
+        if np.isnan(x) or np.isnan(e) or np.isnan(xt):
+            continue
+        if up:
+            if armed and x < xt:
+                out[t] = True
+                armed = False
+            elif x > e:
+                armed = True
+        else:
+            if armed and x > xt:
+                out[t] = True
+                armed = False
+            elif x < e:
+                armed = True
     return out
 
 

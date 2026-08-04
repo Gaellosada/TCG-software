@@ -5,7 +5,9 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import DocView from '../Indicators/DocView';
 import {
   ALL_OPS,
+  BINARY_COMPARE_OPS,
   CROSS_OPS,
+  HYSTERESIS_DIRECTION_LABELS,
   OP_LABELS,
   ROLLING_OP_HELP,
   conditionShape,
@@ -596,9 +598,33 @@ function Condition({
   const crossCount = Number.isInteger(condition.count) && condition.count >= 1 ? condition.count : 1;
   const crossWindow = Number.isInteger(condition.window) && condition.window >= 1 ? condition.window : 1;
   const [crossOpen, setCrossOpen] = useState(crossCount > 1);
+  // consecutive_days rides on the PLAIN comparators only (not cross ops). A
+  // value of 1 (default) keeps the row byte-identical to a pre-feature compare
+  // — the field is dropped from the payload unless the user sets N > 1.
+  const isPlainCompare = BINARY_COMPARE_OPS.includes(condition.op);
+  const consecutiveDays = Number.isInteger(condition.consecutive_days) && condition.consecutive_days >= 1
+    ? condition.consecutive_days
+    : 1;
+  const [consecutiveOpen, setConsecutiveOpen] = useState(consecutiveDays > 1);
 
   function updateOp(nextOp) {
     onChange(migrateCondition(condition, nextOp));
+  }
+
+  function updateConsecutive(raw) {
+    const n = parseInt(raw, 10);
+    const val = Number.isFinite(n) && n >= 1 ? n : 1;
+    if (val <= 1) {
+      // Drop the key so a 1-day comparison stays byte-identical on the wire.
+      const { consecutive_days: _drop, ...rest } = condition;
+      onChange(rest);
+    } else {
+      onChange({ ...condition, consecutive_days: val });
+    }
+  }
+
+  function updateDirection(nextDir) {
+    onChange({ ...condition, direction: nextDir === 'down' ? 'down' : 'up' });
   }
 
   function updateOperand(slot, nextOperand) {
@@ -688,6 +714,41 @@ function Condition({
     )
   ) : null;
 
+  // consecutive-days control for the PLAIN comparators (SPEC §5.5). Collapsed
+  // to a compact "+days" reveal when N === 1 so a normal comparison reads
+  // identically to a pre-feature row; expands to "for [N] consecutive days".
+  const consecutiveControls = isPlainCompare ? (
+    consecutiveDays > 1 || consecutiveOpen ? (
+      <div className={styles.crossCountCell} data-testid={`consecutive-controls-${blockIdx}-${condIdx}`}>
+        <span className={styles.conditionInlineLabel}>for</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          className={styles.crossCountInput}
+          value={consecutiveDays}
+          onChange={(e) => updateConsecutive(e.target.value)}
+          aria-label="Consecutive days"
+          data-testid={`consecutive-days-${blockIdx}-${condIdx}`}
+          readOnly={readOnly}
+        />
+        <span className={styles.conditionInlineLabel}>consecutive days</span>
+      </div>
+    ) : (
+      <button
+        type="button"
+        className={styles.crossExpandBtn}
+        onClick={() => setConsecutiveOpen(true)}
+        title="Require the comparison to hold for N consecutive days"
+        aria-label="Add consecutive-days control"
+        data-testid={`consecutive-expand-${blockIdx}-${condIdx}`}
+        disabled={readOnly}
+      >
+        +days
+      </button>
+    )
+  ) : null;
+
   // The separator chip above this condition. A condition that OPENS a group
   // (isFirstInGroup) has no in-group separator: either it is the block's very
   // first condition, or a THEN connector (rendered by the parent Block between
@@ -746,6 +807,57 @@ function Condition({
               />
             </div>
             {crossControls}
+            {consecutiveControls}
+          </>
+        )}
+        {shape === 'hysteresis' && (
+          // Two-threshold episode-completion (SPEC §4.1). Reads inline as
+          // "<operand> hits <enter> <direction> <exit>", e.g.
+          // "DSTAT hits 95% line then descends to 75% line".
+          <>
+            <div className={styles.conditionOpCell}>{opSelect}</div>
+            <div className={styles.conditionOperandCell}>
+              <OperandSlot
+                operand={condition.operand}
+                onChange={(next) => updateOperand('operand', next)}
+                inputs={inputs}
+                indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} operand`}
+                readOnly={readOnly}
+              />
+            </div>
+            <span className={styles.conditionInlineLabel}>hits</span>
+            <div className={styles.conditionOperandCell}>
+              <OperandSlot
+                operand={condition.enter}
+                onChange={(next) => updateOperand('enter', next)}
+                inputs={inputs}
+                indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} enter`}
+                readOnly={readOnly}
+              />
+            </div>
+            <select
+              className={styles.opSelect}
+              value={condition.direction === 'down' ? 'down' : 'up'}
+              onChange={(e) => updateDirection(e.target.value)}
+              aria-label="Episode direction"
+              data-testid={`hysteresis-direction-${blockIdx}-${condIdx}`}
+              disabled={readOnly}
+            >
+              <option value="up">{HYSTERESIS_DIRECTION_LABELS.up}</option>
+              <option value="down">{HYSTERESIS_DIRECTION_LABELS.down}</option>
+            </select>
+            <div className={styles.conditionOperandCell}>
+              <OperandSlot
+                operand={condition.exit}
+                onChange={(next) => updateOperand('exit', next)}
+                inputs={inputs}
+                indicators={indicators}
+                slotLabel={`cond ${condIdx + 1} exit`}
+                readOnly={readOnly}
+              />
+            </div>
           </>
         )}
         {shape === 'range' && (

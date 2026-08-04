@@ -304,11 +304,21 @@ Operand = IndicatorOperand | InstrumentOperand | ConstantOperand
 
 @dataclass(frozen=True)
 class CompareCondition:
-    """Binary comparison: ``lhs <op> rhs`` for ``gt|lt|ge|le|eq``."""
+    """Binary comparison: ``lhs <op> rhs`` for ``gt|lt|ge|le|eq``.
+
+    ``consecutive_days`` extends the primitive to "the comparison has held
+    for the last ``consecutive_days`` bars" (run-length >= N). The default
+    ``consecutive_days=1`` reproduces today's single-bar comparison
+    BYTE-IDENTICALLY: the engine routes the default to the unchanged compare
+    path and only runs the trailing run-length test when ``consecutive_days
+    > 1``. A NaN bar (either operand missing) is a False bar, so it breaks a
+    streak, matching "VIX < MA5(VIX) for two consecutive days" (SPEC §5.5).
+    """
 
     op: Literal["gt", "lt", "ge", "le", "eq"]
     lhs: Operand
     rhs: Operand
+    consecutive_days: int = 1
 
 
 @dataclass(frozen=True)
@@ -367,7 +377,49 @@ class RollingCondition:
     lookback: int
 
 
-Condition = CompareCondition | CrossCondition | InRangeCondition | RollingCondition
+@dataclass(frozen=True)
+class HysteresisCondition:
+    """Two-threshold regime "episode completion" pulse (SPEC §4.1).
+
+    Fires a SINGLE-BAR pulse on the bar where a two-threshold episode
+    COMPLETES — the general form of the strategies' "hits X% then descends to
+    Y%" (UP) and "hits X% then rises to Y%" (DOWN) rules.
+
+    Semantics (scalar per-bar state — a vectorised evaluation cannot express
+    the arm/fire latch):
+
+      * ``direction="up"``:   ARM when ``operand > enter``; FIRE on the first
+        bar where (armed AND ``operand < exit``), then DISARM.
+      * ``direction="down"``: ARM when ``operand < enter``; FIRE on the first
+        bar where (armed AND ``operand > exit``), then DISARM.
+
+    After a fire the latch disarms and RE-ARMS on the next entry-threshold
+    crossing, so successive episodes each emit their own pulse. Typical usage:
+    ``operand`` is the moving series (e.g. raw ``DSTAT``), ``enter`` the entry
+    percentile line (e.g. ``DSTAT_95``) and ``exit`` the completion line (e.g.
+    ``DSTAT_75``). A NaN on any of the three operands holds the arm state and
+    suppresses a fire on that bar (a data gap is never read as an episode edge).
+
+    NOTE (scope, per SPEC §4.1): only the two-threshold episode latch is
+    implemented — the full UP/NORMAL/DOWN tri-state table is NOT needed by any
+    §5 leg (every usage is a single "hits enter then reaches exit" episode), so
+    it is deliberately left out for simplicity.
+    """
+
+    op: Literal["hysteresis"]
+    operand: Operand
+    enter: Operand
+    exit: Operand
+    direction: Literal["up", "down"]
+
+
+Condition = (
+    CompareCondition
+    | CrossCondition
+    | InRangeCondition
+    | RollingCondition
+    | HysteresisCondition
+)
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +601,7 @@ __all__ = [
     "Condition",
     "ConstantOperand",
     "CrossCondition",
+    "HysteresisCondition",
     "IndicatorOperand",
     "Input",
     "InputInstrument",

@@ -131,6 +131,7 @@ from tcg.types.signal import (
     Condition,
     ConstantOperand,
     CrossCondition,
+    HysteresisCondition,
     IndicatorOperand,
     InRangeCondition,
     Input,
@@ -198,6 +199,19 @@ class _ConditionIn(BaseModel):
     min: _OperandIn | None = None
     max: _OperandIn | None = None
     lookback: int | None = None
+    # Hysteresis "episode completion" (op == "hysteresis"): the entry / exit
+    # threshold operands and the episode direction. ``enter``/``exit`` are
+    # ordinary operands; ``direction`` is validated ("up"|"down") in
+    # ``_parse_condition``. Typed ``Any`` so a bad direction routes through the
+    # uniform HTTP-400 envelope rather than a Pydantic 422.
+    enter: _OperandIn | None = None
+    exit: _OperandIn | None = None
+    direction: Any = None
+    # N-consecutive-days extension for the binary comparators (SPEC §5.5).
+    # Absent / 1 ⇒ today's single-bar comparison, byte-identical. Typed ``Any``
+    # (not ``int``) so ``1.5``/``true``/null reach ``_parse_condition``'s guard
+    # and emit the uniform HTTP-400 envelope instead of a Pydantic coercion.
+    consecutive_days: Any = None
     # cross_count extension (cross_above / cross_below only). Defaults
     # reproduce today's single-bar crossover byte-identically; both must be
     # integers >= 1 when supplied (validated in ``_parse_condition``).
@@ -589,10 +603,40 @@ def _parse_operand(op_in: _OperandIn | None, *, path: str) -> Operand:
 def _parse_condition(c: _ConditionIn, *, path: str) -> Condition:
     op = c.op
     if op in _COMPARE_OPS:
+        # consecutive_days: absent ⇒ 1 (byte-identical single-bar compare).
+        # Explicitly supplied (incl. null) must pass the integer >= 1 guard.
+        cd = 1 if "consecutive_days" not in c.model_fields_set else c.consecutive_days
+        if (
+            cd is None
+            or isinstance(cd, bool)
+            or not isinstance(cd, int)
+            or cd < 1
+        ):
+            raise SignalValidationError(
+                f"{path}: '{op}' consecutive_days must be an integer >= 1 "
+                f"(got {c.consecutive_days!r})"
+            )
         return CompareCondition(
             op=op,  # type: ignore[arg-type]
             lhs=_parse_operand(c.lhs, path=f"{path}.lhs"),
             rhs=_parse_operand(c.rhs, path=f"{path}.rhs"),
+            consecutive_days=cd,
+        )
+    if op == "hysteresis":
+        # Two-threshold episode-completion pulse (SPEC §4.1). Requires the
+        # moving operand, both threshold operands, and a valid direction.
+        direction = c.direction
+        if direction not in ("up", "down"):
+            raise SignalValidationError(
+                f"{path}: 'hysteresis' direction must be 'up' or 'down' "
+                f"(got {c.direction!r})"
+            )
+        return HysteresisCondition(
+            op="hysteresis",
+            operand=_parse_operand(c.operand, path=f"{path}.operand"),
+            enter=_parse_operand(c.enter, path=f"{path}.enter"),
+            exit=_parse_operand(c.exit, path=f"{path}.exit"),
+            direction=direction,  # type: ignore[arg-type]
         )
     if op in _CROSS_OPS:
         # Absent field (not in model_fields_set) → use default 1 (byte-identical
