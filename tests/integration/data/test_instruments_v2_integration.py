@@ -20,6 +20,7 @@ from datetime import date
 import pytest
 
 from tcg.data._sql.connection import DwhConnectionPool, load_dwh_config
+from tcg.data._sql.instruments_v2 import V2_SCHEMA
 from tcg.data.service_v2 import DefaultMarketDataServiceV2
 from tcg.types.errors import ValidationError
 from tcg.types.market import AdjustmentMethod, ContinuousRollConfig, RollStrategy
@@ -160,20 +161,46 @@ async def test_future_contract_bars_are_daily_with_unique_dates(svc):
     The pin is lossless: measured on the live warehouse, all 12 contracts with
     ``1m`` series also have a ``daily`` series, no contract has ``1m`` facts
     without ``daily`` facts, and all 634 distinct ``1m`` dates appear among the
-    5 012 ``daily`` dates — so no contract and no date is dropped.
+    5 012 ``daily`` dates — so no contract and no date is dropped. That
+    losslessness is not assumed here, it is re-derived against the dimension on
+    every run (see below), because the pin's one real failure mode is a
+    contract that exists *only* at another grain.
     """
     objs = {o["symbol"]: o for o in await svc.list_objects()}
     fut_id = objs["FUT_SP_500"]["object_id"]
 
+    # Losslessness, exactly and without a threshold: every contract the
+    # type-only filter would see must also carry a `daily` bar serie. A
+    # threshold ("more than N contracts survived") cannot do this job — the
+    # realistic regression is the minute feed for a newly listed contract going
+    # live before its daily backfill lands, which drops exactly one contract,
+    # and that one is the front contract the roller stitches onto. This is a
+    # dimension-only scan (no fact join), so it costs well under a second.
+    async with svc._reader._pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT c.contract_code,
+                           bool_or(s.freq = 'daily') AS has_daily
+                    FROM {V2_SCHEMA}.serie s
+                    JOIN {V2_SCHEMA}.contract c
+                      ON c.contract_id = s.contract_id
+                    WHERE s.object_id = %s
+                      AND s.type = 'bar'
+                      AND c.expiration IS NOT NULL
+                    GROUP BY c.contract_id, c.contract_code""",
+                (fut_id,),
+            )
+            grain = await cur.fetchall()
+    assert grain, "expected bar-carrying contracts for FUT_SP_500"
+    grain_only = sorted(r["contract_code"] for r in grain if not r["has_daily"])
+    assert not grain_only, (
+        f"{len(grain_only)} of {len(grain)} contracts have bar series but none "
+        f"at freq='daily', so the pin drops them from the roller entirely: "
+        f"{grain_only}"
+    )
+
     contracts = await svc._reader.fetch_future_contract_bars(fut_id, "quarterly")
     assert contracts, "expected contract bars for FUT_SP_500"
-    # Lossless guard: the daily grain covers every contract the type-only
-    # filter saw (69 live at the time of writing); pinning must not shrink the
-    # roller's input set.
-    assert len(contracts) > 50, (
-        f"only {len(contracts)} contracts — the freq pin dropped contracts "
-        "that exist only at another grain"
-    )
 
     for cpd in contracts:
         dates = list(cpd.prices.dates)
