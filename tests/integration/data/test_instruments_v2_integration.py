@@ -579,19 +579,33 @@ async def test_intraday_facts_carry_a_real_time_of_day_live(svc):
     stored ``1m`` rows at 00:00Z, the ISO mapping would be cosmetic and the chart
     would still be a single point per day — green unit tests, broken product.
 
-    Distinctness of the ts list does NOT establish this, which is why the brief's
-    prescribed assertion is not used here. Two failure modes it gets wrong:
+    Distinctness of the ts LIST does not establish it either, which is why the
+    brief's prescribed ``assert len(set(ts)) == len(ts)`` is not used here. Be
+    precise about the scope of that claim — it is the ASSERTION that is vacuous,
+    not the test that contained it:
 
-      * ``limit=1`` on EW2's ``bbba``/``1m`` page selects serie 1159957, which
-        has exactly ONE fact row. ``len(set(ts)) == len(ts)`` on a 1-element list
-        is a tautology — measured live, the prescribed test cannot fail;
-      * a series with one 00:00Z stamp per day over 200 days is fully distinct
-        and carries no time-of-day whatsoever.
+      * ``limit=1`` on EW2's ``bbba``/``1m`` page selects a serie holding exactly
+        ONE fact row (measured: serie 1159957, one row at ``2025-07-31T10:41Z``).
+        ``len(set(ts)) == len(ts)`` on a 1-element list is a tautology, so that
+        assertion cannot fail in any state, defective or fixed;
+      * it is also the wrong SHAPE even on a dense serie: one 00:00Z stamp per day
+        over 200 days is fully distinct while carrying no time-of-day at all. So
+        the brief's test is blind to the 00:00Z hypothesis — verified by forcing
+        ``_ts_to_iso`` to midnight, under which it still passes;
+      * BUT the brief's test also carried a ts-TYPE guard, and that one does have
+        detection power: under the literal original defect (``_ts_to_int`` applied
+        unconditionally) it fails. Its descendant lives on below as the
+        ``isinstance(t, str) and t.endswith("Z")`` assertion — see mutation M5 in
+        the task report. **Do not prune it as redundant with the per-day checks:**
+        it is the assertion that catches the collapse this whole plan fixed, and
+        it has to run BEFORE the parser or the collapse surfaces as a TypeError.
 
-    The discriminating form is per-DAY: on the busiest UTC date, the number of
-    distinct times-of-day must equal the number of rows AND exceed one. Under the
-    00:00Z hypothesis (data OR a re-collapsing mapping) that count is exactly 1
-    however many rows the day holds.
+    What is missing from the brief, and what the per-day checks below add, is
+    detection of the 00:00Z hypothesis: on the busiest UTC date, distinct
+    times-of-day must EQUAL the row count and exceed one. Under that hypothesis
+    the distinct count is exactly 1 however many rows the day holds. ``> 1``
+    is independently guaranteed to bite because both minute fact tables are
+    ``PRIMARY KEY (serie_id, ts)`` — at 00:00Z a date could not hold two rows.
 
     Both minute-grain fact tables are checked because they arrive from different
     Databento feeds: ``fact_bar`` (ohlcv-1m, dense) and ``fact_bbba``
@@ -603,8 +617,14 @@ async def test_intraday_facts_carry_a_real_time_of_day_live(svc):
     fut_id = objs["FUT_SP_500"]["object_id"]
     fut_page = await svc.list_object_series(fut_id, serie_type="bar", freq="1m")
     assert fut_page["items"], "FUT_SP_500 has no bar/1m series — fixture broke"
-    # The EARLIEST already-expired contract: its history is closed, so it cannot
-    # be reshaped by the backfill. Items are ordered by expiration ascending.
+    # The MOST RECENTLY expired contract: its history is closed, so the backfill
+    # cannot reshape it. Items are ordered by expiration ascending, so that is the
+    # last element. Taking the FIRST would be equally closed but not equally
+    # stable: the earliest slot is exactly where a backward extension of Databento
+    # history lands, and a partially loaded new-earliest contract would trip the
+    # density guard below. Measured across all 8 currently-expired 1m contracts,
+    # the busiest final-week day holds 1 374-1 380 rows, so either end clears the
+    # floor today — this picks the end that stays clear.
     today = date.today()
     expired = [
         i
@@ -612,7 +632,7 @@ async def test_intraday_facts_carry_a_real_time_of_day_live(svc):
         if i["expiration"] and date.fromisoformat(i["expiration"]) < today
     ]
     assert expired, "no expired 1m bar contract on FUT_SP_500 — fixture broke"
-    chosen = expired[0]
+    chosen = expired[-1]
     # A week ending on the last trading day. Bounded on purpose: this serie holds
     # ~60 000-125 000 minute rows and an unbounded read is tens of seconds.
     end = date.fromisoformat(chosen["expiration"])
@@ -674,10 +694,27 @@ async def test_intraday_facts_carry_a_real_time_of_day_live(svc):
             )
             top = await cur.fetchone()
     assert top is not None, "none of EW2's bbba/1m series has any fact row"
+    chosen_bbba = {i["serie_id"]: i for i in page["items"]}[top["serie_id"]]
+    assert chosen_bbba["expiration"], f"bbba serie without a contract: {chosen_bbba}"
 
-    out = await svc.get_series(top["serie_id"])
+    # Bounded to the year ending at expiry, for the same reason as the fact_bar
+    # leg plus an operational one: this test is declared immediately before the two
+    # options-continuous tests whose statement timeout drops the SSM tunnel, so a
+    # read that grew past the 60 s timeout here would turn one expected red into a
+    # whole-suite skip. An option's quotes all precede its expiration and EW2 is a
+    # WEEKLY root listed weeks ahead, so a year back holds the entire serie — which
+    # is not assumed but checked against the fixture COUNT below.
+    bbba_end = date.fromisoformat(chosen_bbba["expiration"])
+    out = await svc.get_series(
+        top["serie_id"], start=bbba_end - timedelta(days=365), end=bbba_end
+    )
     assert out["grain"] == "intraday"
     bbba_ts = out["points"]["ts"]
+    assert len(bbba_ts) == top["n"], (
+        f"the window [{bbba_end - timedelta(days=365)}, {bbba_end}] returned "
+        f"{len(bbba_ts)} of serie {top['serie_id']}'s {top['n']} rows — the bound "
+        f"is clipping data, so the density argument below is about a subset"
+    )
     assert all(isinstance(t, str) and t.endswith("Z") for t in bbba_ts), (
         f"intraday ts are not ISO-8601 strings: {bbba_ts[:3]}"
     )
