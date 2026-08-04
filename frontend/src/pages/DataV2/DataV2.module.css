@@ -10,13 +10,8 @@
   overflow: hidden;
 }
 
-.seriesList {
-  width: 260px;
-  flex-shrink: 0;
-  overflow-y: auto;
-  border-right: 1px solid var(--border-primary);
-  padding: 8px 0;
-}
+/* ``.seriesList`` (the old unbounded, unvirtualised series column) is gone with
+   the flat list it styled — the series column is now ``.resultList``. */
 
 .seriesListHeader {
   padding: 6px 12px;
@@ -135,6 +130,10 @@
   min-width: 220px;
   flex-shrink: 0;
   padding: 12px;
+  overflow-y: auto;
+  /* Leftmost of the three series-tab columns, so it owns the divider on its
+     right edge (``.resultList`` owns the next one). */
+  border-right: 1px solid var(--border-primary);
 }
 
 .filterHeader {

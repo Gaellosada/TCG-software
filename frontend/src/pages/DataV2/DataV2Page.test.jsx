@@ -11,6 +11,8 @@ afterEach(cleanup);
 vi.mock('../../api/dataV2', () => ({
   listObjectsV2: vi.fn(),
   getObjectDetailV2: vi.fn(),
+  getObjectFacetsV2: vi.fn(),
+  getObjectSeriesV2: vi.fn(),
   getSeriesV2: vi.fn(),
   getContinuousFuturesV2: vi.fn(),
   getV2FuturesCycles: vi.fn(),
@@ -26,6 +28,9 @@ import DataV2Page from './DataV2Page';
 import {
   listObjectsV2,
   getObjectDetailV2,
+  getObjectFacetsV2,
+  getObjectSeriesV2,
+  getSeriesV2,
   getContinuousOptionsV2,
 } from '../../api/dataV2';
 
@@ -37,17 +42,55 @@ const LIVE_OBJECTS = [
   { object_id: 7, kind: 'option', symbol: 'OPT_SP_500_EW3', name: 'SPX Weekly W3', cycle: 'W3', underlying_object_id: 6 },
 ];
 
+// One filtered page containing the series the tests chart.
+const PAGE_WITH_SERIE = {
+  items: [{
+    serie_id: 1433194, contract_id: 77, type: 'bbba', freq: '1m',
+    source: 'DATABENTO:GLBX.MDP3:bbo-1m',
+    contract_code: 'EW2H6 P6260.20260313',
+    expiration: '2026-03-13', strike: 6260, option_type: 'put',
+  }],
+  total: 195, skip: 0, limit: 50,
+};
+
+// The same object after a filter change that excludes serie 1433194.
+const PAGE_WITHOUT_SERIE = {
+  items: [{
+    serie_id: 1433195, contract_id: 78, type: 'bbba', freq: '1m',
+    source: 'DATABENTO:GLBX.MDP3:bbo-1m',
+    contract_code: 'EW2H6 C6300.20260313',
+    expiration: '2026-03-13', strike: 6300, option_type: 'call',
+  }],
+  total: 12, skip: 0, limit: 50,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(listObjectsV2).mockResolvedValue(LIVE_OBJECTS);
+  // Still mocked (and still exported) so an accidental re-introduction of the
+  // fat /objects/{id} fetch is observable rather than a network error.
   vi.mocked(getObjectDetailV2).mockResolvedValue({
-    object: LIVE_OBJECTS[4],
-    contracts: [
-      { contract_id: 101, contract_code: 'EW3 4500P', expiration: '2024-03-15', strike: 4500, option_type: 'put', multiplier: 50 },
-    ],
-    series: [
-      { serie_id: 201, contract_id: 101, type: 'bar', freq: 'daily', source: 'settle' },
-    ],
+    object: LIVE_OBJECTS[4], contracts: [], series: [],
+  });
+  vi.mocked(getObjectFacetsV2).mockResolvedValue({
+    object_id: 7, kind: 'option',
+    expirations: [{ expiration: '2026-03-13', contracts: 500 }],
+    strike_min: 15, strike_max: 10600,
+    option_types: ['call', 'put'],
+    serie_types: [{ type: 'bbba', freq: '1m' }, { type: 'bar', freq: 'daily' }],
+    totals: { contracts: 96106, series: 200672 },
+  });
+  vi.mocked(getObjectSeriesV2).mockResolvedValue(PAGE_WITH_SERIE);
+  // Enough points for SeriesChartV2 to reach its <Chart> branch (it renders a
+  // "No data" status for an empty payload, which would hide the chart and make
+  // the "chart survives a filter change" assertions vacuous).
+  vi.mocked(getSeriesV2).mockResolvedValue({
+    serie_id: 1433194, type: 'bbba', grain: 'intraday',
+    fields: ['best_bid'],
+    points: {
+      ts: ['2026-03-02T14:31:00Z', '2026-03-02T14:32:00Z'],
+      best_bid: [12.5, 12.75],
+    },
   });
   vi.mocked(getContinuousOptionsV2).mockResolvedValue({
     points: { ts: [], value: [] }, roll_dates: [], contracts: [],
@@ -68,12 +111,99 @@ describe('DataV2Page', () => {
     expect(screen.getByText('Options')).toBeDefined();
   });
 
-  it('drills into an object and shows its series list', async () => {
+  it('shows the filter panel and fetches nothing until Apply', async () => {
     renderWithClient(<DataV2Page />);
     fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
-    // Series item (contract_code) renders from the detail response.
-    expect(await screen.findByText('EW3 4500P')).toBeDefined();
-    expect(getObjectDetailV2).toHaveBeenCalledWith(7, expect.anything());
+    expect(await screen.findByText(/Filters/)).toBeTruthy();
+    // Cheap /facets is what the panel is built from.
+    expect(getObjectFacetsV2).toHaveBeenCalledWith(7, expect.anything());
+    // The series-list query must not have run yet — this is the gate.
+    expect(getObjectSeriesV2).not.toHaveBeenCalled();
+    // Nor may the fat /objects/{id} payload be fetched: it is the 38 MB /
+    // ~38 s request whose "Loading object…" gate froze this tab.
+    expect(getObjectDetailV2).not.toHaveBeenCalled();
+    // The prompt stands in for the result list until a filter exists.
+    expect(screen.getByText(/press Apply to list/i)).toBeTruthy();
+  });
+
+  it('lists series after Apply', async () => {
+    renderWithClient(<DataV2Page />);
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
+    expect(await screen.findByText('EW2H6 P6260.20260313')).toBeTruthy();
+    await waitFor(() => expect(getObjectSeriesV2).toHaveBeenCalled());
+    // Paging travels with the filters, on the keys the client allowlists.
+    const [objectId, args] = vi.mocked(getObjectSeriesV2).mock.calls[0];
+    expect(objectId).toBe(7);
+    expect(args.skip).toBe(0);
+    expect(args.limit).toBe(50);
+    expect(args.serieType).toBe('any');
+    // The filtered total comes from the page, not from the object.
+    expect(screen.getByText(/^195 series/)).toBeTruthy();
+  });
+
+  it('pages forward without discarding the filter', async () => {
+    renderWithClient(<DataV2Page />);
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    fireEvent.change(await screen.findByLabelText('Series type'), {
+      target: { value: 'bbba' },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
+    await screen.findByText('EW2H6 P6260.20260313');
+
+    fireEvent.click(screen.getByRole('button', { name: /Next/ }));
+    await waitFor(() => {
+      const last = vi.mocked(getObjectSeriesV2).mock.calls.at(-1)[1];
+      expect(last.skip).toBe(50);
+      // …and the filter is still the one the user chose.
+      expect(last.serieType).toBe('bbba');
+    });
+  });
+
+  it('keeps the chart when a filter change excludes the plotted series', async () => {
+    renderWithClient(<DataV2Page />);
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
+    fireEvent.click(await screen.findByText('EW2H6 P6260.20260313'));
+
+    // Baseline: the chart is really mounted for THIS serie, un-flagged.
+    const chart = await screen.findByTestId('chart');
+    expect(chart.getAttribute('data-fn')).toBe('OPT_SP_500_EW3-1433194');
+    expect(screen.queryByText(/outside the current filter/i)).toBeNull();
+
+    // Narrow the filter so the plotted serie is no longer in the page.
+    vi.mocked(getObjectSeriesV2).mockResolvedValue(PAGE_WITHOUT_SERIE);
+    fireEvent.change(screen.getByLabelText('Series type'), {
+      target: { value: 'bbba' },
+    });
+
+    // The new page arrived…
+    expect(await screen.findByText('EW2H6 C6300.20260313')).toBeTruthy();
+    expect(screen.queryByText('EW2H6 P6260.20260313')).toBeNull();
+    // …and the chart survived it, flagged rather than erased.
+    expect(await screen.findByText(/outside the current filter/i)).toBeTruthy();
+    expect(screen.getByTestId('chart').getAttribute('data-fn'))
+      .toBe('OPT_SP_500_EW3-1433194');
+  });
+
+  it('does not flag the chart when the new filter still contains it', async () => {
+    renderWithClient(<DataV2Page />);
+    fireEvent.click(await screen.findByText('OPT_SP_500_EW3'));
+    fireEvent.click(await screen.findByRole('button', { name: /apply/i }));
+    fireEvent.click(await screen.findByText('EW2H6 P6260.20260313'));
+    await screen.findByTestId('chart');
+
+    // A filter change whose page still holds the plotted serie: same total
+    // changes, so the list demonstrably re-rendered off a NEW response.
+    vi.mocked(getObjectSeriesV2).mockResolvedValue({ ...PAGE_WITH_SERIE, total: 42 });
+    fireEvent.change(screen.getByLabelText('Series type'), {
+      target: { value: 'bbba' },
+    });
+
+    expect(await screen.findByText(/^42 series/)).toBeTruthy();
+    expect(screen.queryByText(/outside the current filter/i)).toBeNull();
+    expect(screen.getByTestId('chart').getAttribute('data-fn'))
+      .toBe('OPT_SP_500_EW3-1433194');
   });
 
   it('greys out the Delta criterion on the options continuous builder', async () => {
