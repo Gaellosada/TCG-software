@@ -125,6 +125,18 @@ export const queryKeys = {
       /** GET /data-v2/objects/{id} — object detail (contracts + series) */
       object: (objectId) => ['market', 'v2', 'object', objectId ?? null],
 
+      /** GET /data-v2/objects/{id}/facets — filterable dimensions */
+      facets: (objectId) => ['market', 'v2', 'facets', objectId ?? null],
+
+      /**
+       * GET /data-v2/objects/{id}/series?<filters> — one filtered page.
+       * The filter object is part of the key, so changing any dimension is a
+       * distinct cache entry rather than a refetch of the same key.
+       */
+      seriesList: (objectId, filters) => [
+        'market', 'v2', 'seriesList', objectId ?? null, filters ?? null,
+      ],
+
       /** GET /data-v2/series/{id}?start&end — one series, type-dispatched */
       series: (serieId, { start = null, end = null } = {}) => [
         'market', 'v2', 'series', serieId ?? null, start || null, end || null,

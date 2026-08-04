@@ -61,6 +61,69 @@ export async function getObjectDetailV2(objectId, { signal } = {}) {
 }
 
 /**
+ * GET /api/data-v2/objects/{object_id}/facets
+ * → { object_id, kind, expirations:[{expiration, contracts}], strike_min,
+ *     strike_max, option_types:[...], serie_types:[{type, freq, series}],
+ *     totals:{contracts, series} }
+ * Cheap aggregate over the dimension tables — this is what the filter panel
+ * is built from, so it never touches a fact table.
+ */
+export async function getObjectFacetsV2(objectId, { signal } = {}) {
+  return fetchClassified(
+    `/data-v2/objects/${encodeURIComponent(objectId)}/facets`,
+    { signal },
+  );
+}
+
+/**
+ * GET /api/data-v2/objects/{object_id}/series?<filters>&skip&limit
+ * → { items:[{serie_id, contract_id, type, freq, source, contract_code,
+ *     expiration, strike, option_type}], total, skip, limit }
+ * Contract metadata arrives joined, so no contract_id → contract map is needed
+ * client-side. An empty `items` with `total: 0` is a normal answer.
+ *
+ * Domain reminder (v2, NOT v1): ``optionType`` is call|put|both, ``serieType``
+ * is bar|value|greeks|bbba|any, ``freq`` is 1m|daily|any. ``limit`` defaults to
+ * 50 server-side and is capped at 500 — out of range comes back as HTTP 400.
+ *
+ * Omission is meaningful: a filter left unset is NOT sent, so the backend
+ * applies its own default (option_type=both / serie_type=any / freq=any)
+ * rather than receiving an empty string.
+ */
+export async function getObjectSeriesV2(objectId, {
+  expirationMin,
+  expirationMax,
+  strikeMin,
+  strikeMax,
+  optionType,
+  serieType,
+  freq,
+  skip,
+  limit,
+  signal,
+} = {}) {
+  const params = new URLSearchParams();
+  if (expirationMin) params.set('expiration_min', expirationMin);
+  if (expirationMax) params.set('expiration_max', expirationMax);
+  if (strikeMin !== undefined && strikeMin !== null && strikeMin !== '') {
+    params.set('strike_min', String(strikeMin));
+  }
+  if (strikeMax !== undefined && strikeMax !== null && strikeMax !== '') {
+    params.set('strike_max', String(strikeMax));
+  }
+  if (optionType) params.set('option_type', optionType);
+  if (serieType) params.set('serie_type', serieType);
+  if (freq) params.set('freq', freq);
+  if (skip) params.set('skip', String(skip));
+  if (limit) params.set('limit', String(limit));
+  const query = params.toString() ? `?${params}` : '';
+  return fetchClassified(
+    `/data-v2/objects/${encodeURIComponent(objectId)}/series${query}`,
+    { signal },
+  );
+}
+
+/**
  * GET /api/data-v2/series/{serie_id}?start&end
  * → { serie_id, type, fields:[...], points:{ ts:[...], <field>:[...] } }
  * ``type`` dispatches the chartable field set (bar→OHLCV+OI, value→value,
