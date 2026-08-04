@@ -168,7 +168,7 @@ Erasing a user's work because they moved a bound would make the tool tiresome.
 | Object not found | 404 `DataNotFoundError` | Existing hierarchy |
 | `strike_min > strike_max`, `expiration_min > expiration_max` | 400 `ValidationError` | Matches `data_v2.py`'s handling of bad `strategy`/`adjustment` |
 | `serie_type` / `freq` / `option_type` out of domain | 400 `ValidationError` listing valid values | Same |
-| `limit` out of range | 422 via `Query(ge=1, le=500)` | Same as v1 |
+| `limit` out of range | **400** via `Query(ge=1, le=500)` | Same as v1. Not 422 — `tcg/core/app.py:265` remaps `RequestValidationError` to 400 |
 | Object without contracts | 200, empty `expirations`, `null` strike bounds | The form adapts |
 
 Timeout headroom: every measured query is under 0.6 s against a 60 s `statement_timeout`. The
@@ -210,6 +210,16 @@ is the `freq` filter on `fetch_future_front_closes`.
 | Filtered page of 50 (expiration + type + strike + serie type) | 0.49 s |
 | `COUNT(*)` same predicate | 0.53 s |
 | `COUNT(*)` worst case (no expiration filter) | 0.58 s |
+
+**Re-measured during implementation (2026-08-04, later the same day): 2–3× the figures above.**
+The filtered 50-row page is 1.04 s and the unfiltered worst case 3.39 s, on an object that grew to
+~96 194 contracts / ~201 027 series mid-execution. Still roughly 20× inside the 60 s
+`statement_timeout`, but the headroom is smaller than the table implies, and **every request pays a
+`COUNT(*)` costing about as much as the page itself**. Treat the table as a floor, not a forecast:
+the warehouse is being backfilled and `serie` has no usable index for `WHERE object_id = %s` (both
+its non-PK indexes are partial), so this cost grows with total warehouse size rather than with the
+object queried. A `serie(object_id)` index is the standing recommendation and needs the schema
+owner's sign-off.
 
 Data shape backing the design: `fact_bbba` 14.8M rows and `fact_bar` 13.7M rows are both minute
 grain (`DATABENTO:GLBX.MDP3:bbo-1m` / `ohlcv-1m`), covering 2024-07-22 → 2026-07-27;

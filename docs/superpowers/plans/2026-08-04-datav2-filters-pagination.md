@@ -1089,8 +1089,14 @@ async def test_series_list_route_rejects_unknown_serie_type(client):
 
 
 async def test_series_list_route_caps_limit_at_500(client):
-    res = await client.get("/api/data-v2/objects/12/series?limit=5000")
-    assert res.status_code == 422
+    """400, not 422: this app remaps RequestValidationError (tcg/core/app.py:265).
+
+    Also pin the boundary. `limit=5000 -> rejected` alone passes for ANY cap
+    below 5000, so it does not pin the cap at 500 — the 501/500 pair does.
+    """
+    assert (await client.get("/api/data-v2/objects/12/series?limit=5000")).status_code == 400
+    assert (await client.get("/api/data-v2/objects/12/series?limit=501")).status_code == 400
+    assert (await client.get("/api/data-v2/objects/12/series?limit=500")).status_code == 200
 ```
 
 - [ ] **Step 8: Run them to verify they fail**
