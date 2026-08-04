@@ -50,8 +50,9 @@ function serieTitle(serie) {
  * comes joined onto each series row, so the fat endpoint had no remaining
  * reader. Keeping it "just for loading/error" would have re-introduced the
  * whole 38 MB / ~38 s stall this task exists to remove, since its ``loading``
- * gate blocked the entire tab. (``/objects/{id}`` itself is unchanged and still
- * works; a later task slims its payload.)
+ * gate blocked the entire tab. (``/objects/{id}`` has since been slimmed to
+ * metadata only — a few hundred bytes — so it is no longer expensive; it is
+ * still not mounted here because there is nothing left for it to supply.)
  */
 function ObjectDetail({ object }) {
   const [tab, setTab] = useState('series');

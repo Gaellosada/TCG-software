@@ -75,8 +75,12 @@ async def test_object_detail_and_series_dispatch(svc):
     ind_id = objs["IND_SP_500"]["object_id"]
     detail = await svc.get_object_detail(ind_id)
     assert detail["object"]["symbol"] == "IND_SP_500"
+    # Metadata only: the bulk lists left this response (they were 38 MB on the
+    # big option root). Series now come from the paginated endpoint.
+    assert set(detail) == {"object"}
+    page = await svc.list_object_series(ind_id, serie_type="bar", limit=50)
     # index has one non-contract bar series.
-    bar_series = [s for s in detail["series"] if s["type"] == "bar"]
+    bar_series = [s for s in page["items"] if s["type"] == "bar"]
     assert bar_series
     serie_id = bar_series[0]["serie_id"]
     result = await svc.get_series(
@@ -375,15 +379,22 @@ async def test_series_page_lists_object_level_series_live(svc):
     as an error, and no assertion on the big option root can see it (every one of
     object 12's series has a contract).
 
-    ``total == len(detail["series"]) > 0`` is the discriminating form: under an
-    INNER JOIN both the count and the page collapse to 0 while still being
+    ``total == len(expected) > 0`` is the discriminating form: under an INNER
+    JOIN both the count and the page collapse to 0 while still being
     self-consistent, so comparing the page against its own total would stay green.
+
+    The oracle therefore has to come from OUTSIDE ``list_series_filtered``. It
+    used to be ``get_object_detail(oid)["series"]``, but that response is now
+    metadata only, so it reads the reader's ``list_series`` directly instead —
+    a plain ``SELECT ... FROM serie WHERE object_id = %s`` with no join at all,
+    which is exactly the independence this test needs. Reaching through
+    ``svc._reader`` is deliberate: routing the oracle through any service method
+    that also joins ``contract`` would make the comparison circular.
     """
     objs = {o["symbol"]: o for o in await svc.list_objects()}
     for symbol in ("IND_SP_500", "RATE_US_CMT_1M", "RATE_US_SOFR_ON"):
         oid = objs[symbol]["object_id"]
-        detail = await svc.get_object_detail(oid)
-        expected = {s["serie_id"] for s in detail["series"]}
+        expected = {s["serie_id"] for s in await svc._reader.list_series(oid)}
         assert expected, f"{symbol} has no series at all — fixture assumption broke"
 
         page = await svc.list_object_series(oid, limit=500)
@@ -405,8 +416,9 @@ async def test_series_page_lists_object_level_series_live(svc):
 async def test_rate_value_series(svc):
     objs = {o["symbol"]: o for o in await svc.list_objects()}
     rate_id = objs["RATE_US_CMT_1M"]["object_id"]
-    detail = await svc.get_object_detail(rate_id)
-    serie_id = detail["series"][0]["serie_id"]
+    page = await svc.list_object_series(rate_id, limit=50)
+    assert page["items"], "RATE_US_CMT_1M has no series — fixture assumption broke"
+    serie_id = page["items"][0]["serie_id"]
     result = await svc.get_series(serie_id)
     assert result["type"] == "value"
     assert result["fields"] == ["value"]

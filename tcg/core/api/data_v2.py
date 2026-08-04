@@ -340,5 +340,11 @@ async def get_object_detail(
     object_id: int,
     svc: MarketDataServiceV2 = Depends(get_market_data_v2),
 ) -> dict:
-    """Return ``{object, contracts, series}`` for one object."""
+    """Return ``{object}`` for one object — metadata only.
+
+    Contracts and series are deliberately NOT here: they come from
+    ``/objects/{id}/facets`` (aggregated dimensions) and
+    ``/objects/{id}/series`` (filtered + paginated). Shipping them inline was
+    38 239 859 bytes in ~36 s on object 12.
+    """
     return await svc.get_object_detail(object_id)

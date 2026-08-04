@@ -272,7 +272,11 @@ export function useObjectsV2(options = {}) {
   );
 }
 
-/** GET /data-v2/objects/{id} — object detail (contracts + series). */
+/**
+ * GET /data-v2/objects/{id} — object metadata only (no contracts, no series).
+ * Currently has no component caller; retained as the mirror of a live endpoint.
+ * Series come from `useObjectSeriesV2`, dimensions from `useObjectFacetsV2`.
+ */
 export function useObjectDetailV2(objectId, options = {}) {
   return asAsyncResult(
     useQuery({

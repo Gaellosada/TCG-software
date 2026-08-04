@@ -48,9 +48,15 @@ export async function listObjectsV2({ signal } = {}) {
 
 /**
  * GET /api/data-v2/objects/{object_id}
- * → { object, contracts:[{contract_id, contract_code, expiration, strike,
- *     option_type, multiplier}], series:[{serie_id, contract_id, type, freq,
- *     source}] }
+ * → { object: { object_id, kind, symbol, name, cycle, underlying_object_id } }
+ * Metadata only. Contracts and series come from `getObjectFacetsV2`
+ * (aggregated dimensions) and `getObjectSeriesV2` (filtered + paginated) —
+ * shipping them here was a 38 MB / ~36 s response.
+ *
+ * No component calls this today: the browser list already carries every field
+ * the detail header renders, so `ObjectDetail` reads `object` from there rather
+ * than re-fetching it. Kept because this module mirrors the v2 HTTP surface
+ * one-for-one and the endpoint is live and cheap; see `useObjectDetailV2`.
  */
 export async function getObjectDetailV2(objectId, { signal } = {}) {
   const res = await fetchClassified(

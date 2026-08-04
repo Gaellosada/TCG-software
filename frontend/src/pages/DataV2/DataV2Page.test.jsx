@@ -111,10 +111,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(listObjectsV2).mockResolvedValue(LIVE_OBJECTS);
   // Still mocked (and still exported) so an accidental re-introduction of the
-  // fat /objects/{id} fetch is observable rather than a network error.
-  vi.mocked(getObjectDetailV2).mockResolvedValue({
-    object: LIVE_OBJECTS[4], contracts: [], series: [],
-  });
+  // /objects/{id} fetch is observable rather than a network error. The shape
+  // matches the slimmed endpoint: metadata only, no contracts/series.
+  vi.mocked(getObjectDetailV2).mockResolvedValue({ object: LIVE_OBJECTS[4] });
   vi.mocked(getObjectFacetsV2).mockImplementation(
     async (objectId) => (objectId === 5 ? INDEX_FACETS : OPTION_FACETS),
   );
@@ -159,8 +158,12 @@ describe('DataV2Page', () => {
     expect(getObjectFacetsV2).toHaveBeenCalledWith(7, expect.anything());
     // The series-list query must not have run yet — this is the gate.
     expect(getObjectSeriesV2).not.toHaveBeenCalled();
-    // Nor may the fat /objects/{id} payload be fetched: it is the 38 MB /
-    // ~38 s request whose "Loading object…" gate froze this tab.
+    // Nor may /objects/{id} be fetched. That request was the 38 MB / ~36 s
+    // payload whose "Loading object…" gate froze this tab; it now returns
+    // metadata only, but the tab still must not mount it — the browser list
+    // already supplies every field the header renders, and re-adding the query
+    // would put a loading gate back in front of the whole tab. This assertion
+    // is what goes red if `useObjectDetailV2` is ever wired back in.
     expect(getObjectDetailV2).not.toHaveBeenCalled();
     // The prompt stands in for the result list until a filter exists.
     expect(screen.getByText(/press Apply to list/i)).toBeTruthy();

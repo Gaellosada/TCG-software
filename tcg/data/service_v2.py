@@ -42,16 +42,20 @@ class DefaultMarketDataServiceV2:
         return await self._reader.list_objects()
 
     async def get_object_detail(self, object_id: int) -> dict:
-        """Return ``{object, contracts, series}`` for one object.
+        """Return ``{object}`` for one object — metadata only.
+
+        Contracts and series are NOT included: on the large option roots that
+        was 96 106 contracts + 200 672 series in a single 38 239 859-byte
+        response taking ~36 s (measured twice on object 12, byte-identical).
+        Both now come from :meth:`list_object_series` (filtered + paginated)
+        and :meth:`get_object_facets` (aggregated).
 
         Raises ``DataNotFoundError`` if the object does not exist.
         """
         obj = await self._reader.get_object(object_id)
         if obj is None:
             raise DataNotFoundError(f"Object {object_id} not found in v2")
-        contracts = await self._reader.list_contracts(object_id)
-        series = await self._reader.list_series(object_id)
-        return {"object": obj, "contracts": contracts, "series": series}
+        return {"object": obj}
 
     async def get_object_facets(self, object_id: int) -> dict:
         """Return the filterable dimensions of one object (for the filter form).

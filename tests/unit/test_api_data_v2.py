@@ -67,28 +67,19 @@ async def client():
             }
         ]
     )
+    # Metadata only — no ``contracts``/``series``. This mirrors what the service
+    # now returns; the route has no ``response_model``, so whatever the service
+    # hands back is what the client sees.
     mock.get_object_detail = AsyncMock(
         return_value={
-            "object": {"object_id": 6, "kind": "future", "symbol": "FUT_SP_500"},
-            "contracts": [
-                {
-                    "contract_id": 87,
-                    "contract_code": "ESM0.20100618",
-                    "expiration": "2010-06-18",
-                    "strike": None,
-                    "option_type": None,
-                    "multiplier": 50.0,
-                }
-            ],
-            "series": [
-                {
-                    "serie_id": 76,
-                    "contract_id": 71,
-                    "type": "bar",
-                    "freq": "daily",
-                    "source": "DATABENTO",
-                }
-            ],
+            "object": {
+                "object_id": 6,
+                "kind": "future",
+                "symbol": "FUT_SP_500",
+                "name": "S&P 500 E-mini",
+                "cycle": "quarterly",
+                "underlying_object_id": 5,
+            },
         }
     )
     mock.get_object_facets = AsyncMock(
@@ -160,12 +151,29 @@ async def test_list_objects(client):
     assert body[0]["underlying_object_id"] == 5
 
 
-async def test_object_detail(client):
+async def test_object_detail_passes_metadata_through_and_nothing_else(client):
+    """``/objects/{id}`` is metadata only, and the route strips nothing from it.
+
+    Two distinct claims, both needed. ``set(body) == {"object"}`` pins that the
+    bulk lists are gone — asserted as an exact key set rather than
+    ``"contracts" not in body``, which would also pass for an empty or error
+    body. The per-field assertions pin the other direction: the route carries no
+    ``response_model``, so every metadata field the service returns must reach
+    the client (adding one would silently drop ``name`` / ``cycle`` /
+    ``underlying_object_id`` and this goes red).
+    """
     resp = await client.get("/api/data-v2/objects/6")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["object"]["symbol"] == "FUT_SP_500"
-    assert body["contracts"][0]["multiplier"] == 50.0
+    assert set(body) == {"object"}
+    assert body["object"] == {
+        "object_id": 6,
+        "kind": "future",
+        "symbol": "FUT_SP_500",
+        "name": "S&P 500 E-mini",
+        "cycle": "quarterly",
+        "underlying_object_id": 5,
+    }
 
 
 async def test_facets_route_returns_dimensions(client):

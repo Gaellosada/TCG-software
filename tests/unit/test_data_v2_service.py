@@ -452,6 +452,10 @@ class _FakeReaderService:
         self.last_freq = None
         self.last_facets_object_id = None
         self.filter_calls = []
+        # Which unbounded reads were actually issued. ``get_object_detail`` must
+        # issue neither (see test_get_object_detail_ships_metadata_only).
+        self.contracts_calls = []
+        self.series_calls = []
 
     async def get_object(self, object_id):
         return self._obj
@@ -460,9 +464,11 @@ class _FakeReaderService:
         return self._serie
 
     async def list_contracts(self, object_id):
+        self.contracts_calls.append(object_id)
         return list(self._contracts)
 
     async def list_series(self, object_id):
+        self.series_calls.append(object_id)
         return list(self._series)
 
     async def read_serie_facts(
@@ -489,17 +495,42 @@ def _make_service(reader):
     return svc
 
 
-async def test_get_object_detail_shapes_object_contracts_series():
+_EW2_OBJECT = {
+    "object_id": 12,
+    "kind": "option",
+    "symbol": "OPT_SP_500_EW2",
+    "name": "S&P 500 E-mini EW2 Weekly Options (CME)",
+    "cycle": "weekly",
+    "underlying_object_id": 6,
+}
+
+
+async def test_get_object_detail_ships_metadata_only():
+    """The 38 MB payload is gone: bulk lists moved to the paginated endpoint.
+
+    The fake is deliberately loaded with a contract AND a serie so this cannot
+    pass vacuously — under the old implementation both keys are present and
+    populated.
+
+    Deviation from the brief, on purpose: it prescribed ``"contracts" not in
+    out`` / ``"series" not in out``, which also hold for an empty dict, a
+    malformed response, or an error payload. The exact-equality form pins what
+    the response DOES contain as well as what it does not. And the two
+    reader-call assertions pin the actual win: the unbounded reads are never
+    ISSUED, not merely dropped from the returned dict (a version that fetched
+    both and then discarded them would satisfy the shape assertions while
+    keeping the whole 36 s cost).
+    """
     reader = _FakeReaderService(
-        obj={"object_id": 7, "kind": "option", "symbol": "OPT_SP_500"},
-        contracts=[{"contract_id": 1, "contract_code": "X"}],
-        series=[{"serie_id": 9, "type": "value"}],
+        obj=_EW2_OBJECT,
+        contracts=[{"contract_id": 1, "contract_code": "EW2H6 P6260.20260313"}],
+        series=[{"serie_id": 9, "contract_id": 1, "type": "bbba"}],
     )
-    svc = _make_service(reader)
-    detail = await svc.get_object_detail(7)
-    assert detail["object"]["symbol"] == "OPT_SP_500"
-    assert detail["contracts"] == [{"contract_id": 1, "contract_code": "X"}]
-    assert detail["series"] == [{"serie_id": 9, "type": "value"}]
+    out = await _make_service(reader).get_object_detail(12)
+    assert out == {"object": _EW2_OBJECT}
+    assert out["object"]["object_id"] == 12
+    assert reader.contracts_calls == []
+    assert reader.series_calls == []
 
 
 async def test_get_object_detail_missing_object_raises_404():
@@ -528,15 +559,6 @@ _EW2_FACETS = {
         {"type": "bbba", "freq": "1m", "series": 96106},
     ],
     "totals": {"contracts": 96106, "series": 200672},
-}
-
-_EW2_OBJECT = {
-    "object_id": 12,
-    "kind": "option",
-    "symbol": "OPT_SP_500_EW2",
-    "name": "S&P 500 E-mini EW2 Weekly Options (CME)",
-    "cycle": "weekly",
-    "underlying_object_id": 6,
 }
 
 
