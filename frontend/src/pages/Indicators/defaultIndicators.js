@@ -45,12 +45,12 @@
 // silently ignored by ``IndicatorsPage.hydrateDefault`` — no migration
 // step is required when entries are added, removed, or renamed.
 //
-// Library shape (post Wave 2c additions): 11 default entries.
+// Library shape (post DStat additions): 13 default entries.
 //   Trend:        sma, ema
 //   Momentum:     rsi, macd-line, macd-signal, macd-histogram
 //   Volatility:   historical-vol, atm-contract-iv, term-structure-slope
 //   Pattern:      swing-pivots
-//   Statistical:  percentile-filtered-return
+//   Statistical:  percentile-filtered-return, dstat, dstat-percentile
 //
 // See ``docs/indicators.md`` for the full reference and
 // ``docs/design-decisions.md`` for the rationale behind the prune.
@@ -75,6 +75,8 @@ import swingPivots from './defaults/swing-pivots';
 
 // --- Statistical ------------------------------------------------------
 import percentileFilteredReturn from './defaults/percentile-filtered-return';
+import dstat from './defaults/dstat';
+import dstatPercentile from './defaults/dstat-percentile';
 
 export const DEFAULT_INDICATORS = [
   // Trend
@@ -93,4 +95,6 @@ export const DEFAULT_INDICATORS = [
   swingPivots,
   // Statistical
   percentileFilteredReturn,
+  dstat,
+  dstatPercentile,
 ];
