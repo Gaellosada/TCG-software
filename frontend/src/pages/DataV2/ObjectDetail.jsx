@@ -13,16 +13,21 @@ import styles from './DataV2.module.css';
 const PAGE_LIMIT = 50;
 
 /**
- * Heading for the charted series.
+ * Heading for the charted series, or ``null`` to mean "the object symbol alone
+ * says it" (the caller renders `SYMBOL` rather than `SYMBOL · SYMBOL`).
  *
  * ``contract_code`` is null for an object-level serie — index and rate objects
  * have no contracts, so every contract field comes back null — and there the
- * object symbol is the meaningful name (what the old flat list showed). A row
- * we know only by id (see ``outsideFilter``) falls back to that id.
+ * object symbol is the meaningful name, which is what the flat list this page
+ * replaced showed. Only a serie we know by nothing but its id degrades to that
+ * id; ``selectedSerie`` works hard (see ``rememberedRow``) to make that rare.
  */
-function serieTitle(serie, object) {
+function serieTitle(serie) {
   if (serie.contract_code) return serie.contract_code;
-  if (serie.contract_id == null && !serie.outsideFilter) return null; // object-level
+  // ``resolved`` distinguishes "this serie genuinely has no contract" from "we
+  // have no metadata for it". Both have ``contract_id == null``, but only the
+  // first may be named after the object.
+  if (serie.resolved && serie.contract_id == null) return null; // object-level
   return `serie ${serie.serie_id}`;
 }
 
@@ -52,6 +57,19 @@ function ObjectDetail({ object }) {
   const [tab, setTab] = useState('series');
   const [selectedSerieId, setSelectedSerieId] = useState(null);
 
+  /*
+   * The row the user actually clicked, kept beside its id.
+   *
+   * The id alone is enough to FETCH a series but not to NAME one, and the row
+   * leaves the current page as soon as the filter narrows past it. Without this,
+   * a chart that survives a filter change survives anonymously: its heading
+   * degrades from "OPT_SP_500_EW2 · EW2U6 P5500.20260911" to
+   * "OPT_SP_500_EW2 · serie 1653693" and any CSV downloaded in that state is
+   * named by database id. The metadata was on screen when the user picked the
+   * row; there is no reason to throw it away.
+   */
+  const [rememberedRow, setRememberedRow] = useState(null);
+
   // null until the user applies a filter — this is what gates the first fetch.
   // ``useObjectSeriesV2`` is disabled while it is null, so no unbounded series
   // request can be issued. Do not "helpfully" default this to {}.
@@ -79,18 +97,54 @@ function ObjectDetail({ object }) {
   }
 
   /*
-   * Resolve the charted series from the current page, falling back to the bare
-   * id so a chart SURVIVES a filter change that excludes it: the serie_id
-   * remains valid and chartable, and erasing a user's chart because they moved
-   * a filter bound would make the tool tiresome. The fallback is flagged so the
-   * UI can say why the row is no longer in the list.
+   * Reset means "start this object over", so it un-applies. Without clearing
+   * ``filters`` the panel would show blank fields beside the page produced by
+   * the filters just cleared, with no refetch to correct it and nothing on
+   * screen admitting the list is stale — Reset would look like a no-op.
+   *
+   * Unlike a filter CHANGE (which must never cost the user their chart), Reset
+   * is an explicit "clear everything", and leaving a chart mounted next to a
+   * "set a filter" prompt would be incoherent. So the selection goes too.
+   */
+  function handleReset() {
+    setSkip(0);
+    setFilters(null);
+    setSelectedSerieId(null);
+    setRememberedRow(null);
+  }
+
+  // Capture the row while it is still on screen — see ``rememberedRow``.
+  function handleSelect(serieId) {
+    setSelectedSerieId(serieId);
+    setRememberedRow(
+      (page?.items || []).find((s) => s.serie_id === serieId) || null,
+    );
+  }
+
+  /*
+   * Resolve the charted series: from the current page if it is still there,
+   * otherwise from the remembered row, otherwise from the bare id. A chart
+   * SURVIVES a filter change that excludes it — the serie_id stays valid and
+   * chartable, and erasing a user's chart because they moved a filter bound
+   * would make the tool tiresome — and thanks to ``rememberedRow`` it survives
+   * with its name and type intact, not just its id.
+   *
+   * ``outsideFilter`` drives the "no longer in this list" notice; ``resolved``
+   * records whether we have the row's metadata at all (see ``serieTitle``).
    */
   const selectedSerie = useMemo(() => {
     if (selectedSerieId == null) return null;
     const found = (page?.items || []).find((s) => s.serie_id === selectedSerieId);
-    if (found) return { ...found, outsideFilter: false };
-    return { serie_id: selectedSerieId, type: null, outsideFilter: true };
-  }, [page, selectedSerieId]);
+    if (found) return { ...found, outsideFilter: false, resolved: true };
+    const remembered = rememberedRow?.serie_id === selectedSerieId ? rememberedRow : null;
+    return {
+      serie_id: selectedSerieId,
+      type: null,
+      ...remembered,
+      outsideFilter: true,
+      resolved: remembered != null,
+    };
+  }, [page, selectedSerieId, rememberedRow]);
 
   const hasContinuous = object.kind === 'future' || object.kind === 'option';
 
@@ -101,7 +155,7 @@ function ObjectDetail({ object }) {
     return t;
   }, [object.kind]);
 
-  const title = selectedSerie ? serieTitle(selectedSerie, object) : null;
+  const title = selectedSerie ? serieTitle(selectedSerie) : null;
 
   return (
     <div className={pageStyles.optionsWrapper}>
@@ -140,6 +194,7 @@ function ObjectDetail({ object }) {
             <SeriesFilterPanel
               objectId={object.object_id}
               onApply={handleApply}
+              onReset={handleReset}
             />
             {filters == null ? (
               <div className={styles.seriesEmpty}>
@@ -155,7 +210,10 @@ function ObjectDetail({ object }) {
                   loading={pageLoading}
                   error={pageError}
                   selectedSerieId={selectedSerieId}
-                  onSelect={setSelectedSerieId}
+                  // Names an object-level serie after its object (index and
+                  // rate objects have no contracts), instead of "serie {id}".
+                  objectSymbol={object.symbol}
+                  onSelect={handleSelect}
                   onPageChange={setSkip}
                 />
                 <div className={styles.seriesChartCol}>

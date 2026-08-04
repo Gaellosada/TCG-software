@@ -5,9 +5,20 @@ import styles from './DataV2.module.css';
  * Row label. ``contract_code`` is null for an object-level serie (index and
  * rate objects have no contracts — every contract field comes back null), so a
  * label that assumes it exists renders "undefined" for exactly those rows.
+ *
+ * For those rows the object's own symbol is the meaningful name — that is what
+ * the flat list this component replaced showed — so the caller may supply it as
+ * ``objectSymbol``. Without it the row degrades to ``serie {id}``, which is a
+ * bare database id in the UI for exactly the index and rate objects.
+ *
+ * The symbol is used ONLY when ``contract_id`` is null. A *contract* row whose
+ * ``contract_code`` happens to be missing is a data defect, and labelling it
+ * with the object symbol would hide that behind a plausible-looking name.
  */
-function serieLabel(s) {
-  return s.contract_code || `serie ${s.serie_id}`;
+function serieLabel(s, objectSymbol) {
+  if (s.contract_code) return s.contract_code;
+  if (s.contract_id == null && objectSymbol) return objectSymbol;
+  return `serie ${s.serie_id}`;
 }
 
 /** Secondary line: whichever of type / freq the row actually has. */
@@ -41,6 +52,7 @@ function SeriesResultList({
   loading = false,
   error = null,
   selectedSerieId = null,
+  objectSymbol = null,
   onSelect,
   onPageChange,
 }) {
@@ -80,7 +92,7 @@ function SeriesResultList({
           </div>
         ) : (
           items.map((s) => {
-            const label = serieLabel(s);
+            const label = serieLabel(s, objectSymbol);
             const meta = serieMeta(s);
             const selected = s.serie_id === selectedSerieId;
             return (

@@ -190,7 +190,8 @@ describe('SeriesFilterPanel', () => {
     expect(screen.getByLabelText(/strike min/i).value).toBe('');
     expect(screen.getByLabelText(/strike max/i).value).toBe('');
 
-    // Reset itself must not emit — it re-gates, it does not apply "no filter".
+    // Reset itself must not emit onApply — it re-gates, it does not apply
+    // "no filter" (that would be the unbounded request).
     expect(onApply.mock.calls.length).toBe(before);
 
     // …and a change after Reset must stay gated until Apply is pressed again.
@@ -207,6 +208,50 @@ describe('SeriesFilterPanel', () => {
     });
     expect(onApply.mock.calls[before][0].expirationMin).toBeUndefined();
     expect(onApply.mock.calls[before][0].strikeMin).toBeUndefined();
+  });
+
+  it('tells the parent to un-apply on Reset, and only on Reset', async () => {
+    mockFacets(OPTION_FACETS);
+    const onApply = vi.fn();
+    const onReset = vi.fn();
+    render(<SeriesFilterPanel objectId={12} onApply={onApply} onReset={onReset} />);
+
+    // Neither a field change nor Apply is a reset.
+    fireEvent.change(screen.getByLabelText(/series type/i), { target: { value: 'bbba' } });
+    fireEvent.click(screen.getByRole('button', { name: /apply/i }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+    expect(onReset).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/frequency/i), { target: { value: '1m' } });
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+    expect(onReset).not.toHaveBeenCalled();
+
+    // Reset notifies. Without this the parent keeps showing the page produced
+    // by the filters just cleared, with no refetch and nothing saying so.
+    fireEvent.click(screen.getByRole('button', { name: /reset/i }));
+    expect(onReset).toHaveBeenCalledTimes(1);
+    // …and still does not emit onApply.
+    expect(onApply).toHaveBeenCalledTimes(2);
+  });
+
+  it('survives a parent that passes no onReset', () => {
+    mockFacets(OPTION_FACETS);
+    render(<SeriesFilterPanel objectId={12} onApply={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /reset/i }));
+    // The optional callback must not throw for the Continuous-tab-only callers.
+    expect(screen.getByLabelText(/series type/i).value).toBe('any');
+  });
+
+  it('labels the object total as the population being filtered, not the result count', () => {
+    mockFacets(OPTION_FACETS);
+    render(<SeriesFilterPanel objectId={12} onApply={() => {}} />);
+    // This figure is the object's UNFILTERED total and it renders directly
+    // beside the result list's filtered "N series (from-to)". Measured on the
+    // real page: 200 672 next to 1, both reading as "how many matched".
+    // Locale-formatted (this suite runs under fr-FR), hence toLocaleString.
+    const total = (200672).toLocaleString();
+    const header = screen.getByText(/^Filters/);
+    expect(header.textContent).toBe(`Filters · of ${total} series`);
+    expect(header.textContent).not.toBe(`Filters · ${total} series`);
   });
 
   it('does not swallow the next change after a redundant Apply click', async () => {

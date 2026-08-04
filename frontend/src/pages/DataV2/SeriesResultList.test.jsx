@@ -101,11 +101,36 @@ describe('SeriesResultList', () => {
   it('labels an object-level serie without printing undefined', () => {
     renderList({ items: [OBJECT_LEVEL_ITEM], total: 1 });
     // contract_code is null for index / rate series — a label that assumes it
-    // exists renders "undefined".
+    // exists renders "undefined". With no objectSymbol supplied the row falls
+    // back to the id (see the next test for the labelled case).
     expect(screen.getByText('serie 42')).toBeTruthy();
     expect(screen.queryAllByText(/undefined/).length).toBe(0);
     const button = screen.getByText('serie 42').closest('button');
     expect(button.getAttribute('title')).toBe('serie 42 — bar · 1d');
+  });
+
+  it('names an object-level serie after the object when given its symbol', () => {
+    renderList({ items: [OBJECT_LEVEL_ITEM], total: 1, objectSymbol: 'IND_SP_500' });
+    // The flat list this component replaced showed the object symbol here.
+    // "serie 42" is a bare database id in the UI for exactly the index and rate
+    // objects, which are the ones with no contracts.
+    expect(screen.getByText('IND_SP_500')).toBeTruthy();
+    expect(screen.queryByText('serie 42')).toBeNull();
+    const button = screen.getByText('IND_SP_500').closest('button');
+    expect(button.getAttribute('title')).toBe('IND_SP_500 — bar · 1d');
+  });
+
+  it('does not lend the object symbol to a contract row that lost its code', () => {
+    // A CONTRACT row with no contract_code is a data defect. Naming it after
+    // the object would hide that behind a plausible-looking label, and would
+    // print the same name on every such row.
+    renderList({
+      items: [{ ...ITEMS[0], contract_code: null }],
+      total: 1,
+      objectSymbol: 'OPT_SP_500_EW2',
+    });
+    expect(screen.getByText('serie 1433194')).toBeTruthy();
+    expect(screen.queryByText('OPT_SP_500_EW2')).toBeNull();
   });
 
   it('omits a missing meta field rather than printing null', () => {

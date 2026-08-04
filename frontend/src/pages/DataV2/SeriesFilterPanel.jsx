@@ -59,8 +59,17 @@ const DEFAULTS = Object.freeze({
  * ``optionType``, ``serieType``, ``freq``); any other key is a synchronous
  * ``TypeError`` in ``getObjectSeriesV2``. Pagination (``skip``/``limit``) is
  * NOT this component's business — the result list owns it.
+ *
+ * ``onReset`` is REQUIRED for Reset to mean anything. Reset re-arms this
+ * component's own gate, but the parent holds the applied filters and the results
+ * they produced; without being told, it keeps showing the page from the filters
+ * that were just cleared, and no fetch is issued to correct it. The user then
+ * sees a blank panel next to a stale list and nothing saying so — Reset appears
+ * to do nothing. So Reset notifies, and deliberately does NOT emit ``onApply``:
+ * clearing the fields is not the same as applying an empty filter, which would
+ * be the unbounded request this whole component exists to prevent.
  */
-function SeriesFilterPanel({ objectId, onApply }) {
+function SeriesFilterPanel({ objectId, onApply, onReset }) {
   const { data: facets, loading, error } = useObjectFacetsV2(objectId);
   const uid = useId();
 
@@ -128,6 +137,8 @@ function SeriesFilterPanel({ objectId, onApply }) {
 
   const onApplyRef = useRef(onApply);
   onApplyRef.current = onApply;
+  const onResetRef = useRef(onReset);
+  onResetRef.current = onReset;
 
   /*
    * ``lastEmitted`` holds the exact ``filters`` object last handed to onApply.
@@ -169,6 +180,14 @@ function SeriesFilterPanel({ objectId, onApply }) {
     setSerieType(DEFAULTS.serieType);
     setFreq(DEFAULTS.freq);
     setApplied(false);         // re-gate: no fetch until Apply again
+    // Also clear ``lastEmitted``: the next Apply may well re-emit the DEFAULTS
+    // filter set, and if that is still the last-emitted identity the auto-apply
+    // effect would treat it as "already emitted". (``handleApply`` emits
+    // unconditionally, so this is belt-and-braces, not the primary path.)
+    lastEmitted.current = null;
+    // Tell the parent, or the results it is showing stay stale — see the note on
+    // ``onReset`` above.
+    onResetRef.current?.();
   }
 
   if (loading) {
@@ -186,9 +205,15 @@ function SeriesFilterPanel({ objectId, onApply }) {
     <div className={styles.filterPanel}>
       <div className={styles.filterHeader}>
         Filters
+        {/* "of N series" — NOT "N series". This is the object's UNFILTERED
+            total, and it renders directly beside the result list's filtered
+            "N series (from-to)". Without the "of", two unequal counts sit side
+            by side (measured: 200 672 next to 1) both looking like the answer
+            to "how many series matched?". The preposition is what makes this
+            one read as the population being filtered. */}
         {facets?.totals ? (
           <span className={baseStyles.meta}>
-            {` · ${facets.totals.series.toLocaleString()} series`}
+            {` · of ${facets.totals.series.toLocaleString()} series`}
           </span>
         ) : null}
       </div>
