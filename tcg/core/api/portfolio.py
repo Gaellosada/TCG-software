@@ -726,6 +726,14 @@ class PortfolioRequest(BaseModel):
     # WHETHER to use the cache, not WHICH entry, so a later ``use_cache=True``
     # compute of the same body still hits an entry a prior cached compute wrote.
     use_cache: bool = True
+    # Non-normalizing (leveraged) portfolio combine. Default True = OFF =
+    # byte-identical: weights are normalized by Σ|w| so the book is always
+    # exactly 100% gross. When False the raw SIGNED weights are used as notional
+    # multiples of NAV (legacy shared-capital semantics): gross may exceed 100%
+    # and negative weights are shorts, so leverage is preserved through the
+    # combine. It IS part of the cache key (via ``model_dump``) because it
+    # changes the computed equity — unlike ``use_cache``, which is stripped.
+    normalize_weights: bool = True
 
 
 # ``LegSpec.portfolio`` is typed ``PortfolioRequest`` (a composed leg inlines a
@@ -2110,6 +2118,21 @@ async def _compute_portfolio_uncached(
         )
         for label in aligned_closes
     }
+    # Weights actually fed to the combine. ``body.weights`` are PERCENT
+    # allocations (frontend default 100 == 100%; see §10 trade-scaling).
+    #
+    # * NORMALIZED (default): the combine divides by Σ|w|, so the percent scale
+    #   cancels — dividing by 100 here would be a no-op. Keep the percent values
+    #   verbatim → byte-identical to the pre-F1 behaviour.
+    # * NON-NORMALIZING (leveraged): the raw weights ARE the notional multiples
+    #   of NAV, so they must be in FRACTION units — 200% → 2.0×, not 200×.
+    #   Convert percent→fraction (÷100). A hold-option leg keeps its |weight|
+    #   (sign already baked into the synthetic curve); under leverage the
+    #   MAGNITUDE must still scale, which ÷100 preserves.
+    if body.normalize_weights:
+        combine_weights = portfolio_weights
+    else:
+        combine_weights = {k: v / 100.0 for k, v in portfolio_weights.items()}
     # ── Transaction costs (OFF by default → byte-identical). Continuous-futures
     #    rolls are charged a round-trip on the leg's notional fraction at each
     #    interior roll bar, routed into the EQUITY computation here (the display
@@ -2119,7 +2142,19 @@ async def _compute_portfolio_uncached(
     #    rolls) and never touches signal legs → no double-count. ──
     roll_turnover: npt.NDArray[np.float64] | None = None
     if not cost_config.is_zero():
-        abs_total = sum(abs(w) for w in portfolio_weights.values()) or 1.0
+        # Roll-turnover denominator must match how the equity path scales the
+        # weights. In NORMALIZED mode the equity divides every weight by Σ|w|, so
+        # a leg's portfolio share is |w|/Σ|w| and its round-trip roll turns over
+        # that fraction of NAV. In NON-NORMALIZING mode the equity keeps the raw
+        # weights (a 2.0× leg IS 2× NAV of notional), so the denominator must be
+        # 1.0 — a round-trip on that leg turns over 2× NAV, scaling with gross
+        # notional exactly like the daily kernel's establish_turnover (which uses
+        # the raw positions). Using Σ|w| here would silently re-normalize the
+        # cost overlay while the equity path does not — the divergence F1 forbids.
+        if body.normalize_weights:
+            abs_total = sum(abs(w) for w in combine_weights.values()) or 1.0
+        else:
+            abs_total = 1.0
         date_to_idx = {int(d): i for i, d in enumerate(common_dates.tolist())}
         rt = np.zeros(len(common_dates), dtype=np.float64)
         for label, leg in body.legs.items():
@@ -2140,7 +2175,7 @@ async def _compute_portfolio_uncached(
                     exc,
                 )
                 continue
-            frac = abs(portfolio_weights[label]) / abs_total
+            frac = abs(combine_weights[label]) / abs_total
             for d in cseries.roll_dates:
                 idx = date_to_idx.get(int(d))
                 if idx is not None:
@@ -2151,7 +2186,7 @@ async def _compute_portfolio_uncached(
         for label in hold_option_labels:
             if label not in portfolio_weights:
                 continue
-            frac = abs(portfolio_weights[label]) / abs_total
+            frac = abs(combine_weights[label]) / abs_total
             for d in option_roll_dates_interior.get(label, []):
                 idx = date_to_idx.get(int(d))
                 if idx is not None:
@@ -2160,12 +2195,13 @@ async def _compute_portfolio_uncached(
 
     result = compute_weighted_portfolio(
         aligned_closes,
-        portfolio_weights,
+        combine_weights,
         rebalance_freq.value,
         body.return_type,
         common_dates,
         cost_config=cost_config,
         roll_turnover=roll_turnover,
+        normalize_weights=body.normalize_weights,
     )
 
     # ── 8. Compute metrics ──

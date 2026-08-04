@@ -280,6 +280,7 @@ def compute_weighted_portfolio(
     dates: npt.NDArray[np.int64],
     cost_config: CostConfig | None = None,
     roll_turnover: npt.NDArray[np.float64] | None = None,
+    normalize_weights: bool = True,
 ) -> PortfolioComputeResult:
     """Compute a weighted portfolio with rebalancing.
 
@@ -289,8 +290,18 @@ def compute_weighted_portfolio(
         ``{label: close_prices}`` -- all arrays must have the same length,
         aligned to the same date grid.
     weights:
-        ``{label: weight}`` -- normalized by sum of absolute values internally.
-        Negative weights represent short positions.
+        ``{label: weight}`` -- see ``normalize_weights``. Negative weights
+        represent short positions.
+    normalize_weights:
+        When ``True`` (DEFAULT, unchanged behaviour) the weights are divided by
+        their sum of absolute values (``Σ|w|``) so the book is always exactly
+        100% gross — leverage is erased and the portfolio per-bar return is
+        ``Σ (wᵢ/Σ|w|)·rᵢ``. When ``False`` the raw SIGNED weights are used as
+        notional multiples of NAV (legacy shared-capital semantics): gross may
+        exceed 100%, and the portfolio per-bar return is the un-normalized
+        ``Σ wᵢ·rᵢ`` for the daily and buy-and-hold kernels (the periodic kernel
+        resets each leg's notional to ``wᵢ·NAV`` at every boundary). Scaling
+        every weight by ``k`` scales the portfolio excess return by ``k``.
     rebalance_freq:
         One of ``"none"``, ``"daily"``, ``"weekly"``, ``"monthly"``,
         ``"quarterly"``, ``"annually"``.
@@ -337,8 +348,15 @@ def compute_weighted_portfolio(
     if abs_total == 0.0:
         raise ValueError("All weights are zero -- cannot compute portfolio")
 
-    # Normalize weights by sum of |w|
-    norm_weights = {lbl: weights[lbl] / abs_total for lbl in labels}
+    if normalize_weights:
+        # Normalize weights by sum of |w| (book is always exactly 100% gross).
+        norm_weights = {lbl: weights[lbl] / abs_total for lbl in labels}
+    else:
+        # Non-normalizing (leveraged) mode: use the raw SIGNED weights as
+        # notional multiples of NAV. The three rebalance kernels below receive
+        # these directly; the daily kernel's ``acc += w·tail`` then yields the
+        # un-normalized ``Σ wᵢ·rᵢ``. The all-zero guard above still applies.
+        norm_weights = {lbl: weights[lbl] for lbl in labels}
 
     if return_type not in ("normal", "log"):
         raise ValueError(f"return_type must be 'normal' or 'log', got {return_type!r}")
@@ -389,6 +407,7 @@ def compute_weighted_portfolio(
             labels,
             cfg,
             roll_turnover,
+            normalize_weights,
         )
     else:
         # Periodic rebalancing: weekly, monthly, quarterly, annually
@@ -409,18 +428,26 @@ def compute_weighted_portfolio(
             rebalance_freq,
             cfg,
             roll_turnover,
+            normalize_weights,
         )
 
     # ── Raw (buy-and-hold) leg equities for normalized comparison ──
     if rebalance_freq == "none":
         raw_leg_equities = per_leg_equities
     else:
+        # ``raw_leg_equities`` are the per-leg buy-and-hold value curves (seeded
+        # at ``|w|·100``); the leverage base-shift only touches the aggregate
+        # ``portfolio_equity``, never these per-leg curves, so the flag is
+        # threaded purely for signature consistency.
         _, _, raw_leg_equities, _, _, _ = _compute_buy_and_hold(
             per_leg_returns,
             norm_weights,
             return_type,
             n,
             labels,
+            None,
+            None,
+            normalize_weights,
         )
 
     return PortfolioComputeResult(
@@ -534,6 +561,7 @@ def _compute_buy_and_hold(
     labels: list[str],
     cost_config: CostConfig | None = None,
     roll_turnover: npt.NDArray[np.float64] | None = None,
+    normalize_weights: bool = True,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
@@ -547,6 +575,16 @@ def _compute_buy_and_hold(
     Each leg starts at (weight * 100) and grows with its own returns.
     Portfolio equity = sum of all leg equities.
     Portfolio returns are derived from the portfolio equity curve.
+
+    When ``normalize_weights`` is ``False`` the passed weights are raw notional
+    multiples of NAV whose gross ``Σ|w|`` may differ from 1.  Summing the leg
+    value curves then puts the portfolio at a gross-notional base (``Σ|w|·100``)
+    rather than NAV (100), which would silently re-normalize the leverage back
+    out of the derived per-bar return.  The base-shift below re-expresses the
+    aggregate as ``NAV = 100 + total P&L`` (P&L is base-invariant), so the
+    first-bar return becomes the leveraged ``Σ wᵢ·rᵢ`` instead of
+    ``Σ wᵢ·rᵢ / Σ|w|``.  In the default (normalized) mode ``Σ|w| = 1`` so the
+    shift is skipped entirely and the equity is byte-identical.
     """
     initial_total = 100.0
 
@@ -592,6 +630,13 @@ def _compute_buy_and_hold(
     portfolio_equity = np.zeros(n, dtype=np.float64)
     for lbl in labels:
         portfolio_equity += per_leg_equities[lbl]
+
+    if not normalize_weights:
+        # Leverage base-shift: replace the gross-notional base (Σ|w|·100) with
+        # the NAV base (100), keeping the (base-invariant) total P&L. Skipped in
+        # the default path (branch not taken) so the default is byte-identical.
+        gross_base = sum(abs(norm_weights[lbl]) for lbl in labels) * initial_total
+        portfolio_equity = portfolio_equity - gross_base + initial_total
 
     # Derive portfolio returns from equity curve
     portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
@@ -641,6 +686,7 @@ def _compute_periodic_rebalance(
     rebalance_freq: str,
     cost_config: CostConfig | None = None,
     roll_turnover: npt.NDArray[np.float64] | None = None,
+    normalize_weights: bool = True,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
@@ -653,6 +699,15 @@ def _compute_periodic_rebalance(
 
     At each rebalance boundary, total portfolio value is redistributed
     according to target weights.
+
+    When ``normalize_weights`` is ``False`` the weights are raw notional
+    multiples of NAV.  The default redistribution (``leg_value = |w|·total``)
+    conserves value only when ``Σ|w| = 1``; under leverage it would multiply the
+    book by ``Σ|w|`` at every boundary (an exponential blow-up).  The leverage
+    branch below instead tracks NAV = 100 + cumulative P&L and resets each leg's
+    signed notional exposure to ``wᵢ·NAV`` at each boundary, so the first-bar
+    return is the leveraged ``Σ wᵢ·rᵢ`` and rebalancing conserves NAV.  The
+    default (normalized) path is left untouched → byte-identical.
     """
     boundaries = _detect_rebalance_boundaries(dates, rebalance_freq)
 
@@ -665,64 +720,112 @@ def _compute_periodic_rebalance(
         lbl: np.empty(n, dtype=np.float64) for lbl in labels
     }
 
-    # Track current allocation for each leg
-    leg_values: dict[str, float] = {}
-    for lbl in labels:
-        w = norm_weights[lbl]
-        leg_values[lbl] = abs(w) * initial_total
-
-    # Set initial values
-    portfolio_equity[0] = initial_total
-    for lbl in labels:
-        per_leg_equities[lbl][0] = leg_values[lbl]
-
     # Per-bar turnover of the rebalance trade at each boundary (0 on non-boundary
     # bars — the legs just drift). Bar 0 is the initial entry from cash. Recorded
     # for the cost post-process below; ignored when the cost feature is off.
     est_turn = np.zeros(n, dtype=np.float64)
     est_turn[0] = sum(abs(norm_weights[lbl]) for lbl in labels)
 
-    for i in range(1, n):
-        # At a rebalance boundary, redistribute according to target weights
-        if boundaries[i]:
-            total_value = sum(leg_values.values())
-            if total_value > 0.0:
-                # Turnover = Σ |target_weight − drifted_weight| across legs.
-                est_turn[i] = sum(
-                    abs(abs(norm_weights[lbl]) - leg_values[lbl] / total_value)
-                    for lbl in labels
-                )
-            for lbl in labels:
-                w = norm_weights[lbl]
-                leg_values[lbl] = abs(w) * total_value
-
-        # Each leg grows by its own return for this day
+    if normalize_weights:
+        # ── DEFAULT path (byte-identical): value-space redistribution. Legs are
+        #    tracked as positive value magnitudes; shorts use inverted returns. ──
+        # Track current allocation for each leg
+        leg_values: dict[str, float] = {}
         for lbl in labels:
-            r = per_leg_returns[lbl][i]
-            if not np.isfinite(r):
-                # No usable return -- hold value flat. NaN is a gap / different
-                # listing history; inf/-inf comes from a zero-price bar (normal
-                # return ``(p-0)/0`` or log ``ln(p/0)``). Holding flat keeps the
-                # curve finite, matching the daily and buy-and-hold paths so the
-                # SAME inputs don't diverge by rebalance frequency.
-                pass
-            else:
-                w = norm_weights[lbl]
-                if w >= 0:
-                    if return_type == "normal":
-                        leg_values[lbl] *= 1.0 + r
-                    else:  # log
-                        leg_values[lbl] *= np.exp(r)
+            w = norm_weights[lbl]
+            leg_values[lbl] = abs(w) * initial_total
+
+        # Set initial values
+        portfolio_equity[0] = initial_total
+        for lbl in labels:
+            per_leg_equities[lbl][0] = leg_values[lbl]
+
+        for i in range(1, n):
+            # At a rebalance boundary, redistribute according to target weights
+            if boundaries[i]:
+                total_value = sum(leg_values.values())
+                if total_value > 0.0:
+                    # Turnover = Σ |target_weight − drifted_weight| across legs.
+                    est_turn[i] = sum(
+                        abs(abs(norm_weights[lbl]) - leg_values[lbl] / total_value)
+                        for lbl in labels
+                    )
+                for lbl in labels:
+                    w = norm_weights[lbl]
+                    leg_values[lbl] = abs(w) * total_value
+
+            # Each leg grows by its own return for this day
+            for lbl in labels:
+                r = per_leg_returns[lbl][i]
+                if not np.isfinite(r):
+                    # No usable return -- hold value flat. NaN is a gap /
+                    # different listing history; inf/-inf comes from a zero-price
+                    # bar (normal return ``(p-0)/0`` or log ``ln(p/0)``). Holding
+                    # flat keeps the curve finite, matching the daily and
+                    # buy-and-hold paths so the SAME inputs don't diverge by
+                    # rebalance frequency.
+                    pass
                 else:
-                    # Short position: inverted returns
+                    w = norm_weights[lbl]
+                    if w >= 0:
+                        if return_type == "normal":
+                            leg_values[lbl] *= 1.0 + r
+                        else:  # log
+                            leg_values[lbl] *= np.exp(r)
+                    else:
+                        # Short position: inverted returns
+                        if return_type == "normal":
+                            leg_values[lbl] *= 1.0 - r
+                        else:  # log
+                            leg_values[lbl] *= np.exp(-r)
+
+                per_leg_equities[lbl][i] = leg_values[lbl]
+
+            portfolio_equity[i] = sum(leg_values.values())
+    else:
+        # ── LEVERAGE path: track NAV = 100 + cumulative P&L. Each leg holds a
+        #    SIGNED notional exposure ``wᵢ·NAV`` reset at every boundary; between
+        #    boundaries the notional drifts with (1+r) (a short = negative
+        #    notional correctly loses when r>0). Rebalancing conserves NAV
+        #    instead of multiplying the book by Σ|w|. per_leg_equities store the
+        #    exposure MAGNITUDE (|notional|) so per-leg metrics stay finite. ──
+        nav = initial_total
+        notional: dict[str, float] = {lbl: norm_weights[lbl] * nav for lbl in labels}
+        portfolio_equity[0] = nav
+        for lbl in labels:
+            per_leg_equities[lbl][0] = abs(notional[lbl])
+
+        for i in range(1, n):
+            if boundaries[i]:
+                if nav > 0.0:
+                    # Turnover = Σ |target_notional − drifted_notional| / NAV,
+                    # i.e. in NAV units, so it scales with gross leverage
+                    # (consistent with the non-normalized cost overlay).
+                    est_turn[i] = sum(
+                        abs(norm_weights[lbl] - notional[lbl] / nav) for lbl in labels
+                    )
+                notional = {lbl: norm_weights[lbl] * nav for lbl in labels}
+
+            dpnl = 0.0
+            for lbl in labels:
+                r = per_leg_returns[lbl][i]
+                if not np.isfinite(r):
+                    # Hold the notional flat across a non-finite bar (gap /
+                    # zero-price), mirroring the default path.
+                    pass
+                else:
+                    # P&L booked on the START-of-bar notional; then drift it.
                     if return_type == "normal":
-                        leg_values[lbl] *= 1.0 - r
+                        dpnl += notional[lbl] * r
+                        notional[lbl] *= 1.0 + r
                     else:  # log
-                        leg_values[lbl] *= np.exp(-r)
+                        grow = float(np.exp(r))
+                        dpnl += notional[lbl] * (grow - 1.0)
+                        notional[lbl] *= grow
+                per_leg_equities[lbl][i] = abs(notional[lbl])
 
-            per_leg_equities[lbl][i] = leg_values[lbl]
-
-        portfolio_equity[i] = sum(leg_values.values())
+            nav += dpnl
+            portfolio_equity[i] = nav
 
     # Derive portfolio returns from equity curve
     portfolio_returns = _derive_returns_from_equity(portfolio_equity, return_type)
