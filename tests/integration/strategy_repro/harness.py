@@ -905,6 +905,157 @@ async def durable_persist_and_run_portfolio(
     return doc, result
 
 
+# --------------------------------------------------------------------------- #
+# DURABLE persisted-entity SIGNAL upsert + run (the UI-VISIBLE gated-leg path)
+# --------------------------------------------------------------------------- #
+#
+# A SIGNAL-gated leg (e.g. §5.2 ShortPutHVOLout — a short 10Δ put made flat
+# during HVOL-ON episodes) is NOT a plain always-on portfolio leg: its position
+# toggles, so it runs through ``/api/signals/compute`` (Signal spec + referenced
+# indicators), not ``/api/portfolio/compute``.  It therefore persists as a
+# DURABLE, UI-visible ``SignalDoc`` (``POST /api/persistence/signals``), keyed
+# ``Reproduction_<leg>`` under a VISIBLE category — a non-dev opens it on the
+# Signals page and clicks Compute.  Idempotency mirrors the portfolio helper:
+# POST-create; on 409 PUT full-replace.
+#
+# UI-FAITHFUL RUN: the stored doc carries only ``inputs`` + ``rules`` (the
+# indicator CODE is NOT stored — the frontend hydrates it from the default /
+# user indicator registry at compute time, see
+# frontend/src/pages/Signals/requestBuilder.js::buildComputeRequestBody).  So
+# ``durable_persist_and_run_signal`` takes the stored inputs/rules back from the
+# GET, pairs them with the caller-supplied ``indicators`` list (the same shape
+# the UI builds: ``{id, name, code, params, seriesMap}``), and POSTs the pair to
+# ``/api/signals/compute`` — exactly the non-dev "Compute" route.
+
+REPRO_ENTITY_SHORTPUT_HVOLOUT = "Reproduction_ShortPutHVOLout"
+
+
+async def upsert_durable_signal(
+    client,
+    *,
+    signal_id: str,
+    name: str,
+    inputs: Sequence[dict],
+    rules: dict,
+    category: str = REPRO_VISIBLE_CATEGORY,
+    settings: dict | None = None,
+    description: str = "",
+) -> dict:
+    """Idempotently CREATE-or-REPLACE a DURABLE, UI-visible SIGNAL entity and
+    return the GET-round-tripped stored doc.
+
+    POST-create; on 409 (already exists from a prior run) PUT full-replace.  The
+    entity is NOT soft-deleted afterwards — it stays in ``tcg_app_data`` under a
+    visible ``category`` so a non-dev can open + run it from the Signals page.
+    Raises AssertionError on any non-2xx.
+    """
+    assert category != "DELETED", (
+        "durable reproduction entity must use a VISIBLE category, not the "
+        "soft-delete sentinel 'DELETED'"
+    )
+    body = {
+        "id": signal_id,
+        "name": name,
+        "category": category,
+        "inputs": list(inputs),
+        "rules": rules,
+        "settings": settings or {},
+        "description": description,
+    }
+    r = await client.post("/api/persistence/signals", json=body)
+    if r.status_code == 201:
+        pass
+    elif r.status_code == 409:
+        update_body = {k: v for k, v in body.items() if k != "id"}
+        r = await client.put(
+            f"/api/persistence/signals/{signal_id}", json=update_body
+        )
+        assert (
+            r.status_code == 200
+        ), f"durable signal upsert PUT failed: {r.status_code} {r.text}"
+    else:
+        raise AssertionError(
+            f"durable signal upsert POST failed: {r.status_code} {r.text}"
+        )
+
+    r = await client.get(f"/api/persistence/signals/{signal_id}")
+    assert r.status_code == 200, f"durable signal get failed: {r.status_code} {r.text}"
+    doc = r.json()
+    assert doc["id"] == signal_id, doc
+    assert doc["name"] == name, doc
+    assert doc["category"] == category, doc
+    assert doc["category"] != "DELETED", doc
+    return doc
+
+
+async def durable_persist_and_run_signal(
+    client,
+    *,
+    signal_id: str,
+    name: str,
+    inputs: Sequence[dict],
+    rules: dict,
+    indicators: Sequence[dict],
+    category: str = REPRO_VISIBLE_CATEGORY,
+    settings: dict | None = None,
+    description: str = "",
+    start: str | None = None,
+    end: str | None = None,
+    slippage_bps: float = 0.0,
+    fees_bps: float = 0.0,
+    timeout: float | None = None,
+) -> tuple[dict, dict]:
+    """Idempotently upsert a DURABLE SIGNAL entity, GET it back, build the
+    ``/api/signals/compute`` body from the STORED inputs/rules + the supplied
+    indicator specs (the UI-faithful recipe), RUN it, and return
+    ``(stored_doc, compute_json)``.
+
+    Mirrors ``durable_persist_and_run_portfolio`` for signal-gated legs.  The
+    stored doc is durable (visible category, NO soft-delete) so it stays
+    discoverable + runnable on the Signals page.
+    """
+    doc = await upsert_durable_signal(
+        client,
+        signal_id=signal_id,
+        name=name,
+        inputs=inputs,
+        rules=rules,
+        category=category,
+        settings=settings,
+        description=description,
+    )
+    # Build the compute request exactly as the frontend does: the stored
+    # ``inputs``/``rules`` become ``spec.inputs``/``spec.rules`` verbatim
+    # (persisted shape == wire shape — see requestBuilder.js), and the
+    # referenced indicator specs ride alongside.
+    body: dict = {
+        "spec": {
+            "id": doc["id"],
+            "name": doc["name"],
+            "inputs": doc["inputs"],
+            "rules": doc["rules"],
+        },
+        "indicators": list(indicators),
+    }
+    if start is not None:
+        body["start"] = start
+    if end is not None:
+        body["end"] = end
+    if slippage_bps > 0.0:
+        body["slippage_bps"] = slippage_bps
+    if fees_bps > 0.0:
+        body["fees_bps"] = fees_bps
+
+    kwargs = {"json": body}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    r = await client.post("/api/signals/compute", **kwargs)
+    assert r.status_code == 200, f"signals compute failed: {r.status_code} {r.text}"
+    result = r.json()
+    assert "error_type" not in result, f"signals compute errored: {result}"
+    return doc, result
+
+
 __all__ = [
     "MonthlyGrid",
     "ChecksumResult",
@@ -924,7 +1075,10 @@ __all__ = [
     "REPRO_ENTITY_50D_PUT",
     "REPRO_ENTITY_10D_PUT",
     "REPRO_ENTITY_USD_1M_RATE",
+    "REPRO_ENTITY_SHORTPUT_HVOLOUT",
     "REPRO_VISIBLE_CATEGORY",
     "upsert_durable_portfolio",
     "durable_persist_and_run_portfolio",
+    "upsert_durable_signal",
+    "durable_persist_and_run_signal",
 ]
