@@ -18,7 +18,9 @@ from tcg.engine import aggregate_returns
 from tcg.engine.cash_rate import accrue_cash_equity
 
 from strategy_repro.harness import (
+    DEFAULT_BAND,
     DEFAULT_TARGETS_MD,
+    MonthlyGrid,
     check_band,
     compare,
     equity_to_monthly_grid,
@@ -26,6 +28,11 @@ from strategy_repro.harness import (
     parse_target_section,
     saved_legs_to_compute_body,
 )
+
+
+def _maxdd_line(verdict) -> str:
+    """The single ``maxDD ratio ...`` reason line from a BandVerdict."""
+    return next(r for r in verdict.reasons if "maxDD ratio" in r)
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +171,69 @@ def test_compare_perfect_reconstruction_high_corr():
     # Diff grid must be ~0 everywhere.
     max_abs_diff = max(abs(v) for v in cmp.diff_grid.cells.values())
     assert max_abs_diff < 1e-6, max_abs_diff
+
+
+def test_monthly_vs_monthly_maxdd_basis_dbfree():
+    """The monthly-vs-monthly maxDD basis (review nit 1): for a MONTHLY-only
+    target, gating a *daily* repro maxDD against a *monthly* target maxDD is
+    apples-to-oranges and prints a false FAIL; the month-end-vs-month-end ratio
+    is the sound gate.
+
+    Construct a repro DAILY curve whose MONTH-END returns EQUAL the target
+    (so the monthly-vs-monthly maxDD ratio ~ 1.0) but which has a deep
+    INTRA-MONTH trough that recovers by month end (so the DAILY maxDD is far
+    deeper than any month-end drawdown).  Assert the daily basis FAILs the maxDD
+    gate while the monthly basis PASSes it — same Comparison, same band."""
+    rets = [2.0, -10.0, 2.0, -10.0, 2.0, 5.0]  # % per month
+    target = MonthlyGrid(cells={(2010, m): r for m, r in zip(range(1, 7), rets)})
+
+    # Target's own month-end maxDD — the honest GIVEN for a monthly-only target.
+    teq = np.cumprod([1.0 + r / 100.0 for r in rets])
+    given_monthly_maxdd = float((teq / np.maximum.accumulate(teq) - 1.0).min()) * 100.0
+
+    dates: list[int] = []
+    equity: list[float] = []
+    eq = 100.0
+    for m, r in zip(range(1, 7), rets):
+        rr = r / 100.0
+        if m == 2:
+            month_end = eq * (1.0 + rr)
+            trough = eq * 0.60  # -40% INTRA-month, invisible to month-end sampling
+            for day, val in [(3, eq), (10, trough), (17, trough * 1.05), (28, month_end)]:
+                dates.append(2010 * 10000 + m * 100 + day)
+                equity.append(val)
+            eq = month_end
+        else:
+            for day in range(1, 21):
+                dates.append(2010 * 10000 + m * 100 + day)
+                equity.append(eq)
+            eq = eq * (1.0 + rr)
+            dates.append(2010 * 10000 + m * 100 + 28)
+            equity.append(eq)
+
+    cmp = compare(
+        np.array(dates), np.array(equity), target,
+        section="maxdd-basis",
+        given_ann_ret_pct=None,
+        given_maxdd_pct=given_monthly_maxdd,  # monthly-granularity given
+    )
+    # Daily maxDD is the -40% intra-month crash; month-end maxDD is far shallower.
+    assert cmp.repro_maxdd_pct < -35.0, cmp.repro_maxdd_pct
+    assert abs(cmp.repro_maxdd_monthly_pct) < 0.5 * abs(cmp.repro_maxdd_pct)
+    # Repro month-ends EQUAL the target ⇒ monthly-vs-monthly ratio ≈ 1.0.
+    assert cmp.maxdd_ratio_monthly is not None
+    assert 0.90 <= cmp.maxdd_ratio_monthly <= 1.10, cmp.maxdd_ratio_monthly
+    # Daily-basis ratio is inflated (deep daily / shallow monthly-given).
+    assert cmp.maxdd_ratio is not None and cmp.maxdd_ratio > DEFAULT_BAND.maxdd_ratio_hi
+
+    v_daily = check_band(cmp, DEFAULT_BAND, maxdd_basis="daily")
+    v_monthly = check_band(cmp, DEFAULT_BAND, maxdd_basis="monthly")
+    daily_line = _maxdd_line(v_daily)
+    monthly_line = _maxdd_line(v_monthly)
+    print(f"\n[maxdd-basis] daily:   {daily_line}")
+    print(f"[maxdd-basis] monthly: {monthly_line}")
+    assert daily_line.startswith("FAIL") and "(daily)" in daily_line
+    assert monthly_line.startswith("PASS") and "(monthly)" in monthly_line
 
 
 # --------------------------------------------------------------------------- #

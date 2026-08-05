@@ -39,7 +39,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Literal, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -353,6 +353,26 @@ class Comparison:
     repro_grid: MonthlyGrid
     target_grid: MonthlyGrid
     checksum_failures: list[ChecksumResult]
+    # MONTHLY-vs-MONTHLY maxDD (both curves resampled to MONTH-END over the
+    # OVERLAP months, then peak-to-trough).  This is the SOUND drawdown basis for
+    # a leg whose target is a MONTHLY grid only: the default ``maxdd_ratio`` above
+    # divides a *daily* reproduction maxDD by a *monthly-granularity* target maxDD
+    # (apples-to-oranges — it over-reports drawdown and prints misleading FAILs,
+    # review-d1-signal-lag.md nit 1).  ``check_band(..., maxdd_basis="monthly")``
+    # gates on ``maxdd_ratio_monthly`` instead.  Defaulted so pre-existing
+    # constructions stay valid; ``compare()`` always populates them.
+    repro_maxdd_monthly_pct: float = 0.0
+    target_maxdd_monthly_pct: float = 0.0
+    maxdd_ratio_monthly: float | None = None
+
+
+def _series_maxdd_pct(eq: npt.NDArray[np.float64]) -> float:
+    """Worst peak-to-trough drawdown of an equity curve, in PERCENT (<= 0)."""
+    if eq.shape[0] == 0:
+        return 0.0
+    peak = np.maximum.accumulate(eq)
+    dd = eq / peak - 1.0
+    return float(dd.min()) * 100.0
 
 
 def _overlap_months(repro: MonthlyGrid, target: MonthlyGrid) -> list[tuple[int, int]]:
@@ -395,8 +415,21 @@ def compare(
         targ_eq = np.cumprod(1.0 + targ_r)
         with np.errstate(invalid="ignore", divide="ignore"):
             equity_log_corr = _pearson(np.log(repro_eq), np.log(targ_eq))
+        # Monthly-vs-monthly maxDD: both month-end curves over the SAME overlap
+        # months → apples-to-apples drawdown (the sound basis for monthly-only
+        # targets, review nit 1).
+        repro_maxdd_monthly = _series_maxdd_pct(repro_eq)
+        target_maxdd_monthly = _series_maxdd_pct(targ_eq)
     else:
         equity_log_corr = float("nan")
+        repro_maxdd_monthly = 0.0
+        target_maxdd_monthly = 0.0
+    if abs(target_maxdd_monthly) > 1e-9:
+        maxdd_ratio_monthly: float | None = abs(repro_maxdd_monthly) / abs(
+            target_maxdd_monthly
+        )
+    else:
+        maxdd_ratio_monthly = None
 
     # Reproduced headline stats from the daily curve (Sharpe intentionally
     # ignored).  compute_statistics needs YYYYMMDD ints + positive finite equity.
@@ -435,6 +468,9 @@ def compare(
         repro_grid=repro_grid,
         target_grid=target_grid,
         checksum_failures=checksum_failures,
+        repro_maxdd_monthly_pct=repro_maxdd_monthly,
+        target_maxdd_monthly_pct=target_maxdd_monthly,
+        maxdd_ratio_monthly=maxdd_ratio_monthly,
     )
 
 
@@ -495,8 +531,23 @@ class BandVerdict:
     reasons: list[str]  # one line per checked criterion, PASS/FAIL prefixed
 
 
-def check_band(cmp: Comparison, band: ToleranceBand = DEFAULT_BAND) -> BandVerdict:
-    """Evaluate a Comparison against a ToleranceBand (shape-first, Sharpe out)."""
+def check_band(
+    cmp: Comparison,
+    band: ToleranceBand = DEFAULT_BAND,
+    *,
+    maxdd_basis: Literal["daily", "monthly"] = "daily",
+) -> BandVerdict:
+    """Evaluate a Comparison against a ToleranceBand (shape-first, Sharpe out).
+
+    ``maxdd_basis`` selects the drawdown ratio that is GATED:
+      * ``"daily"`` (default) — ``maxdd_ratio`` = |daily-repro-maxDD| /
+        |given-maxDD|.  Correct for §5.1-style legs whose target carries a
+        published DAILY headline maxDD (apples-to-apples).
+      * ``"monthly"`` — ``maxdd_ratio_monthly`` = |month-end-repro-maxDD| /
+        |month-end-target-maxDD| over the overlap months.  The sound basis for a
+        leg whose target is a MONTHLY grid only (§5.2/§5.5-style); avoids the
+        apples-to-oranges daily-vs-monthly FAIL (review nit 1).
+    """
     reasons: list[str] = []
     ok = True
 
@@ -519,10 +570,13 @@ def check_band(cmp: Comparison, band: ToleranceBand = DEFAULT_BAND) -> BandVerdi
             cmp.ann_ret_abs_diff_pp <= band.ann_ret_abs_pp_max,
             f"ann_ret |Δ| {cmp.ann_ret_abs_diff_pp:.2f}pp <= {band.ann_ret_abs_pp_max}pp",
         )
-    if cmp.maxdd_ratio is not None:
+    gated_ratio = (
+        cmp.maxdd_ratio_monthly if maxdd_basis == "monthly" else cmp.maxdd_ratio
+    )
+    if gated_ratio is not None:
         _chk(
-            band.maxdd_ratio_lo <= cmp.maxdd_ratio <= band.maxdd_ratio_hi,
-            f"maxDD ratio {cmp.maxdd_ratio:.2f} in "
+            band.maxdd_ratio_lo <= gated_ratio <= band.maxdd_ratio_hi,
+            f"maxDD ratio ({maxdd_basis}) {gated_ratio:.2f} in "
             f"[{band.maxdd_ratio_lo}, {band.maxdd_ratio_hi}]",
         )
     _chk(
